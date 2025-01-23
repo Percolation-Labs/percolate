@@ -6,7 +6,7 @@ You can now orchestrate powerful agentic systems with multi-modal RAG using any 
 
 
 ```sql
-select * from percolate('Create task to deploy Percolate to the cloud with high-level instructions', 
+select * from percolate('Create task to deploy Percolate to cloud with instructions', 
   'claude-3-5-sonnet-20241022')
 ```
 
@@ -22,7 +22,7 @@ You can use tools implicitly or explicitly when you engage with Percolate.
 
 
 ```sql
-select * from percolate_with_tools('What priority tasks did I created last week? How many did i create in total?', 
+select * from percolate_with_tools('What priority tasks did I created last week? How many did i create?', 
 ARRAY['query_conversations']
 )
 ```
