@@ -1,6 +1,0 @@
----
-icon: hand-wave
----
-
-# README
-
