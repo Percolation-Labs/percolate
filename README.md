@@ -2,11 +2,11 @@
 
 Rather than build application-tier agentic frameworks that connect to language models, tools and databases, Percolate brings language models, tools and agents into the database.
 
-You can now orchestrate powerful agentic systems with multi-modal RAG using any language, and that includes natural language. 
+You can now orchestrate powerful agentic systems with multi-modal RAG using any language, and that includes natural language. You can easily connect any langauge model APIs (Open AI/GPT models will be the default).
 
 
 ```sql
-select * from percolate('Create task to deploy Percolate to the cloud with some high-level instructions', 
+select * from percolate('Create task to deploy Percolate to the cloud with high-level instructions', 
   'claude-3-5-sonnet-20241022')
 ```
 
@@ -16,7 +16,9 @@ select * from percolate('How do I use Percolate studio to interact with my insta
 ```
 
 
-When you interact with language models in Percolate, conversations are naturally logged in your instance for audit, analysis and optimization.
+When you interact with language models in Percolate, conversations are naturally logged in your instance for audit, analysis and optimization. 
+
+You can use tools implicitly or explicitly when you engage with Percolate.
 
 
 ```sql
