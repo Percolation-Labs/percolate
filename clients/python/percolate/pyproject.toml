@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "percolate-db"
+version = "0.1.0"
+description = "A client for working with the percolate database"
+authors = ["mr-saoirse <amartey@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+packages = [{include = "percolate"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+pydantic = "^2.10.5"
+psycopg2-binary = "^2.9.10"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
