@@ -2,9 +2,30 @@
 
 Rather than build application-tier agentic frameworks that connect to language models, tools and databases, Percolate brings language models, tools and agents into the database.
 
-You can now orchestrate powerful agentic systems with multi-modal RAG using any language, and that includes natural language. Try it out using the Docker instructions below to see how it simplifies connecting AI to your data.
+You can now orchestrate powerful agentic systems with multi-modal RAG using any language, and that includes natural language. 
+
+
+```sql
+select * from percolate('Create task to deploy Percolate to the cloud with some high-level instructions', 
+  'claude-3-5-sonnet-20241022')
+```
+
+```sql
+select * from percolate('How do I use Percolate studio to interact with my instance', 
+  'deepseek-chat')
+```
+
 
 When you interact with language models in Percolate, conversations are naturally logged in your instance for audit, analysis and optimization.
+
+
+```sql
+select * from percolate_with_tools('What priority tasks did I created last week? How many did i create in total?', 
+ARRAY['query_conversations']
+)
+```
+
+Try Percolate using the setup instructions below to see how it simplifies connecting AI to your data.
 
 ## Easy to run - runs anywhere!
 
