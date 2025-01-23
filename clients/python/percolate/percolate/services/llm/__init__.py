@@ -16,7 +16,7 @@ def call_api_simple(question:str, tools: typing.List[dict], model:str, system_pr
     """select this from the database or other lookup
     e.g. db.execute('select * from "LanguageModelApi" where name = %s ', ('gpt-4o-mini',))[0]
     """
-    
+    #
     params = db.execute('select * from "LanguageModelApi" where name = %s ', (model,))[0]
     print(params)
     url = params["completions_uri"]
