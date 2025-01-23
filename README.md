@@ -1,22 +1,14 @@
-# Percolate
+# Percolate: Build AI agents directly in Postgres
 
-Percolate is a multi-modal AI database built on PostgresSQL. It uniquely adds agentic AI into the data tier, obviating the need to use application tier agent orchestrators.
+Rather than build application-tier agentic frameworks that connect to language models, tools and databases, Percolate brings language models, tools and agents into the database.
 
-It is now possible to build sophisticated multi-agent, multi-modal and data-rich agentic systems in a way that minimizes effort in the application tier.  This can mean writing no-code applications on top of Percolate or building applications in any programming language on top of Percolate from Python to Zig. It also provides an excellent place to handle most of the hard things about integrating your data with AI.
+You can now orchestrate powerful agentic systems with multi-modal RAG using any language, and that includes natural language. Try it out using the Docker instructions below to see how it simplifies connecting AI to your data.
 
-With Percolate, you can register declarative agents, external functions and external large language models in the database and run agentic workflows entirely via database queries - this includes natural language, cypher and SQL queries. The reason to do this are two fold
-
-1. Because agents can be expressed declaratively as data, this makes it easier to scale to large systems as agents can be managed and shared easily. 
-2. Because everything happens in the data tier, complex multi-modal RAG concerns can be managed outside of the application tier, and in the database
-3. Auditing conversations happens for free in way that makes it easier to trace, learn and optimize
+When you interact with language models in Percolate, conversations are naturally logged in your instance for audit, analysis and optimization.
 
 ## Easy to run - runs anywhere!
 
-You can try the example agents and recipes out of the box or register your own function-calling agents declaratively as pure data. 
-
-You can run Percolate anywhere - build it locally or run it from the Docker image. If you want to put it on your own cloud, we recommend using the Kubernetes installation. Or if you want to try it out without the setup hassle, get access to one of the managed cloud instances.
-
-Everything you do in Percolate is naturally logged in the database for audit, analysis and optimization.
+You can build it locally, run it on Docker or Kind or deploy it to the cloud. To run the cloud you can either using the Kubernetes recipe or connect to a managed instance.
 
 
 ## Getting set up
