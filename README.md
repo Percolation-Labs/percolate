@@ -15,7 +15,6 @@ select * from percolate('How do I use Percolate studio to interact with my insta
   'deepseek-chat')
 ```
 
-
 When you interact with language models in Percolate, conversations are naturally logged in your instance for audit, analysis and optimization. 
 
 You can use tools implicitly or explicitly when you engage with Percolate.
@@ -31,18 +30,22 @@ Try Percolate using the setup instructions below to see how it simplifies connec
 
 ## Easy to run - runs anywhere!
 
-You can build it locally, run it on Docker or Kind or deploy it to the cloud. To run the cloud you can either using the Kubernetes recipe or connect to a managed instance.
+You can build it locally, run it on Docker or Kind or deploy it to the cloud. To run the cloud you can either use the Kubernetes recipe or connect to a managed instance.
 
 
 ## Getting set up
 
-### Adding your own entities i.e. "Agents"
+### Adding APIs and Agents
+
+You can register you own APIs and tools and integrate LLM APIs such as those from OpenAI, Anthropic, Cerebras, Grow, DeepSeek, Google etc. All of these are registered in your Percolate instance along with your declarative agents. This section will show you the basks and you can check out the documentation links for more details
 
 ### Installing To K8s
 
+To install Percolate on your cluster simply run the command below in your cluster. See the documentation for more details.
+
 ### Launching an instance 
 
-
+To connect to your own instance, request a KEY and use the percolate client to connect.
 
 ## On the Roadmap
 
@@ -53,12 +56,16 @@ You can build it locally, run it on Docker or Kind or deploy it to the cloud. To
 
 ## Developers
 
-### Connect and Learn
+The Postgres Extension is built in C and Zig. Instructions to install locally and develop the extension are given below. 
+
+## Connect and Learn
+
+To learn more, checkout the links below.
 
 - Docs
 - Youtube
-- Substack
+- Substack Publication
+- Medium Publication
+- PercolationLabs home
 - Discord
 - Bluesky
-- Medium
-- PercolationLabs home
