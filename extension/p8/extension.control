@@ -1,4 +1,0 @@
-comment = 'A simple Hello World extension written in Zig'
-default_version = '1.0'
-module_pathname = 'hello_world'
-relocatable = true
