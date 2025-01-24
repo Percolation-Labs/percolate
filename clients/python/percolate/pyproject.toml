@@ -11,6 +11,10 @@ packages = [{include = "percolate"}]
 python = "^3.10"
 pydantic = "^2.10.5"
 psycopg2-binary = "^2.9.10"
+tenacity = "^9.0.0"
+loguru = "^0.7.3"
+openai = "^1.60.0"
+docstring-parser = "^0.16"
 
 
 [build-system]
