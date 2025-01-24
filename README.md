@@ -15,7 +15,7 @@ select * from percolate('How do I use Percolate studio to interact with my insta
   'deepseek-chat')
 ```
 
-When you interact with language models in Percolate, conversations are naturally logged in your instance for audit, analysis and optimization. 
+When you interact with language models in Percolate, conversations are naturally logged in your instance for audit, analysis and optimization..
 
 You can use tools implicitly or explicitly when you engage with Percolate.
 
