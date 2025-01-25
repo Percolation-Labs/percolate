@@ -31,6 +31,10 @@ $$ LANGUAGE plpgsql;
 CREATE SCHEMA IF NOT EXISTS p8
 CREATE SCHEMA IF NOT EXISTS p8_embeddings
 
+--MAYBE
+--ALTER DATABASE app SET search_path = ag_catalog, "$user", public;
+
+
 --utils
 CREATE OR REPLACE FUNCTION p8.json_to_uuid(
 	json_data jsonb)
