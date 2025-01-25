@@ -1,0 +1,10 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: percolate
+spec:
+  #the operator needs to use 16 as a postgres version
+  imageName: percolationlabs/postgres-base:16
+  instances: 1
+  storage:
+    size: 10Gi
