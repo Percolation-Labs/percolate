@@ -1,6 +1,6 @@
 # Table of contents
 
-* [Percolate: Build AI agents directly in Postgres](README.md)
+* [Percolate - Putting AI in the data tier](README.md)
 
 ## Getting started
 
