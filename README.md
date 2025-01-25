@@ -22,33 +22,64 @@ When you interact with language models in Percolate, conversations are naturally
 
 You can use tools implicitly or explicitly when you engage with Percolate.
 
-
 ```sql
 select * from percolate_with_tools('What priority tasks did I created last week? How many did i create?', 
-ARRAY['query_conversations']
-)
+                                   ARRAY['query_conversations'] )
 ```
 
-Try Percolate using the setup instructions below to see how it simplifies connecting AI to your data.
+Try Percolate using the setup instructions below to see how it simplifies connecting AI to your data. You can run it locally, in the cloud or connect to a cloud instance. After setting up and trying a few examples, check out the Recipes in the docs to go deeper.
 
-## Easy to run - runs anywhere!
+## Easy set up
 
-You can build it locally, run it on Docker or Kind or deploy it to the cloud. To run the cloud you can either use the Kubernetes recipe or connect to a managed instance.
+The easiest way to get started is simply to launch the docker instance and connect to postgres using your preferred client on port 5438 using `postgres:postgres` to login
 
+```bash
+docker compose up -d
+```
 
-## Getting set up
+The docker compose expects keys to be in your environment for a seamless start for example `OPENAI_API_KEY`. The database is setup to configure some models that expect keys like this.
 
-### Adding APIs and Agents
+There is a python client and API. The API is also exposed via port 8008 on the docker instance. To install the python client locally 
+```bash
+pip install percolate-db
+```
+
+The Python client is optional but its useful to easily ingest data and it also provides a lightweight agentic workflow on top of Pydantic for example to stream results or to handle multi-step reasoning. See the docs to learn more about working with Percolate any Python or other languages.
+
+### Configure
 
 You can register you own APIs and tools and integrate LLM APIs such as those from OpenAI, Anthropic, Cerebras, Grow, DeepSeek, Google etc. All of these are registered in your Percolate instance along with your declarative agents. This section will show you the basks and you can check out the documentation links for more details
 
 ### Installing To K8s
 
-To install Percolate on your cluster simply run the command below in your cluster. See the documentation for more details.
+To install Percolate on your cluster simply apply the manifest below in your cluster. See the documentation for more details. See the docs to learn more.
 
-### Launching an instance 
+```yaml
+#percolate-cluster.yaml
+#kc apply -f percolate-cluster.yaml
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: percolate
+spec:
+  #the operator needs to use 16 as a postgres version
+  imageName: percolationlabs/postgres-base:16
+  instances: 1
+  storage:
+    size: 10Gi
+```
 
-To connect to your own instance, request a KEY and use the percolate client to connect.
+To use this you need the Cloud Native PG Operator on your cluster
+
+```bash
+kubectl apply --server-side -f \
+  https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/main/releases/cnpg-1.24.0.yaml
+
+```
+
+### Launching an instance (Coming soon)
+
+To connect to a dedicated Percolate cloud instance, you will be able request a Percolate API KEY and use the percolate client to setup and connect to a new instance. 
 
 ## On the Roadmap
 

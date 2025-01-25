@@ -12,7 +12,7 @@ from .. import inspection
 from percolate.utils import make_uuid
 import datetime
 from .. import DefaultEmbeddingField
-
+from percolate.utils.names import EmbeddingProviders
 class Function(AbstractEntityModel):
     """Functions are external tools that agents can use. See field comments for context.
     Functions can be searched and used as LLM tools. 
@@ -82,7 +82,15 @@ class ModelField(AbstractEntityModel):
     embedding_provider: typing.Optional[str] = Field(None, description="The embedding could be a multiple in future")
     description: typing.Optional[str] = None
     is_key: bool = Field(default=False, description="Indicate that the field is the primary key - our convention is the id field should be the primary key and be uuid and we use this to join embeddings")
-         
+    
+    @model_validator(mode='before')
+    @classmethod
+    def _f(cls, values):
+        """this is a convenience for 'dont care' cases where you want an embedding but dont know the model name"""
+        if values.get('embedding_provider') == 'default':
+            values['embedding_provider'] = EmbeddingProviders.embedding_text_embedding_ada_002
+        return values
+    
     @classmethod
     def from_field_info(cls, key:str, field_type: FieldInfo, parent_model:BaseModel):
         """five a FieldInfo object map the field"""
