@@ -233,7 +233,7 @@ class SqlModelHelper:
             source_record_id UUID NOT NULL,  -- Foreign key to primary table
             column_name TEXT NOT NULL,  -- Column name for embedded content
             embedding_vector VECTOR NULL,  -- Embedding vector as an array of floats
-            embedding_id UUID,  -- ID for embedding provider
+            embedding_name VARCHAR(50),  -- ID for embedding provider
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, -- Timestamp for tracking
             
             -- Foreign key constraint
@@ -267,7 +267,7 @@ class SqlModelHelper:
         if new_fields:
             script = ""
             for f in new_fields:
-                ptype = SqlModelHelper.python_to_postgres_type(f, field_descriptions.get(f))
+                ptype = SqlModelHelper.python_to_postgres_type(fields[f], field_descriptions.get(f))
                 script += f"ALTER TABLE {self.table_name} ADD COLUMN {f} {ptype}; "
         return script
     
