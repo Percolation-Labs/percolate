@@ -1,7 +1,8 @@
 ---
 description: >-
-  Learn how Percolate simplifies your application tier with a multi-modal
-  agentic AI database
+  Complex application tier Agentic AI frameworks increase cognitive load for
+  both you and language models. Percolate reduces this cognitive load with a
+  natively AI-aware multi-modal database.
 ---
 
 # Percolate - Putting AI in the data tier
