@@ -89,6 +89,8 @@ class ModelField(AbstractEntityModel):
         """this is a convenience for 'dont care' cases where you want an embedding but dont know the model name"""
         if values.get('embedding_provider') == 'default':
             values['embedding_provider'] = EmbeddingProviders.embedding_text_embedding_ada_002
+        if not values.get('id'):
+            values['id'] = make_uuid({'name': values['name'], 'entity_name': values['entity_name']})
         return values
     
     @classmethod
@@ -111,13 +113,7 @@ class ModelField(AbstractEntityModel):
         cls = AbstractModel.Abstracted(cls)
         return [ModelField.from_field_info(key, value,parent_model=cls) for key, value in cls.model_fields.items()]
     
-        
-    @model_validator(mode='before')
-    @classmethod
-    def _f(cls, values):
-        if not values.get('id'):
-            values['id'] = make_uuid({'name': values['name'], 'entity_name': values['entity_name']})
-        return values
+ 
 
 class TokenUsage(AbstractModel):
     """Tracks token usage for language model interactions"""
@@ -130,19 +126,22 @@ class TokenUsage(AbstractModel):
     session_id: typing.Optional[uuid.UUID| str  ] = Field(description="Session id for a conversation")
     
 
-class Dialogue(AbstractModel):
-    """Each atom in an exchange between users, agents, assistants and so on"""
+class Dialogue(TokenUsage):
+    """Each atom in an exchange between users, agents, assistants and so on. 
+    We generate questions with sessions and then that triggers an exchange. 
+    Normally the Dialogue is round trip transaction.
+    """
     id: uuid.UUID| str  
-    model_name: str
     role: str = Field(description="The role of the user/agent in the conversation")
-    content: str = DefaultEmbeddingField(description="The content for this part of the conversation")
-    session_id: typing.Optional[uuid.UUID| str  ] = Field(description="Session id for a conversation")
-    
+    content: str = DefaultEmbeddingField(description="The content for this part of the conversation") #TODO we may not want to automatically generate embeddings for this table
+    status: typing.Optional[str] = Field(description="The status of the session such as REQUEST|RESPONSE|ERROR|TOOL_CALL|STREAM")
+    tool_calls: typing.Optional[dict] = Field(default=None, description="Tool calls are requests from language models to call tools")
+    tool_eval_data: typing.Optional[dict] = Field(default=None, description="The payload may store the eval from the tool especially if it is small data")
 
 class Session(AbstractModel):
     """Tracks groups if session dialogue"""
     id: uuid.UUID| str  
-    description: typing.Optional[str] = Field(None,description='optional description for the session')
+    query: typing.Optional[str] = Field(None,description='the question or context that triggered the session')
 
 class ModelMatrix(AbstractModel):
     """keep useful json blobs for model info"""
