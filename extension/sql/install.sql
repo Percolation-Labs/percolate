@@ -30,3 +30,31 @@ $$ LANGUAGE plpgsql;
 ------Add percolate p8 schema------------
 CREATE SCHEMA IF NOT EXISTS p8
 CREATE SCHEMA IF NOT EXISTS p8_embeddings
+
+--utils
+CREATE OR REPLACE FUNCTION p8.json_to_uuid(
+	json_data jsonb)
+    RETURNS uuid
+    LANGUAGE 'plpgsql'
+    COST 100
+    IMMUTABLE PARALLEL UNSAFE
+AS $BODY$
+DECLARE
+    json_string TEXT;
+    hash TEXT;
+    uuid_result UUID;
+BEGIN
+    -- Serialize the JSON object in a deterministic way - this needs to match how python or other langs would do it
+    json_string := jsonb(json_data)::text;
+    hash := md5(json_string);
+    uuid_result := (
+        SUBSTRING(hash FROM 1 FOR 8) || '-' ||
+        SUBSTRING(hash FROM 9 FOR 4) || '-' ||
+        SUBSTRING(hash FROM 13 FOR 4) || '-' ||
+        SUBSTRING(hash FROM 17 FOR 4) || '-' ||
+        SUBSTRING(hash FROM 21 FOR 12)
+    )::uuid;
+
+    RETURN uuid_result;
+END;
+$BODY$;
