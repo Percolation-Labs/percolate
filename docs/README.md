@@ -9,9 +9,7 @@ description: >-
 
 <figure><img src=".gitbook/assets/image (1).png" alt=""><figcaption></figcaption></figure>
 
-Rather than build application-tier agentic frameworks that connect to language models, tools and databases, **Percolate** brings language models, tools and agents into the database.&#x20;
-
-You can now orchestrate powerful agentic systems with multi-modal RAG using any language, and that includes natural language.&#x20;
+**Percolate** brings language models, tools and agents into the database rather. Learn how to orchestrate powerful agentic systems with multi-modal RAG in any language, including natural language.
 
 {You tube intro here]
 
