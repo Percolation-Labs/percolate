@@ -115,9 +115,11 @@ class PostgresService:
             self.repository(Agent).update_records(self.helper.get_model_agent_record())
         
             """the registration"""
-            self.execute("select * from p8.register_entities(%s)", data=(self.helper.model.get_model_full_name(),))
+            if 'name' in self.helper.model.model_fields:
+                #TODO: we need some way to map a key field for the graph. at the moment a name property is at least implicitly required. We would need this or a business key attribute in the database
+                self.execute("select * from p8.register_entities(%s)", data=(self.helper.model.get_model_full_name(),))
             
-            logger.info(f"Entity registered")
+                logger.info(f"Entity registered")
         else:
             logger.info("Done - register entities was disabled")
         
