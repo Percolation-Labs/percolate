@@ -34,11 +34,21 @@ class LanguageModelApi(AbstractEntityModel):
     """
     
     id: uuid.UUID | str
-    name: str
+    name: str = Field(description="A unique name for the model api e.g cerebras-llama3.1-8b")
+    model: typing.Optional[str] = Field(None, description="The model name defaults to the name as they are often the same. the name can be unique based on a provider qualfier")
     scheme: typing.Optional[str] = Field('openai', description="In practice most LLM APIs use an openai scheme - currently `anthropic` and `google` can differ")
     completions_uri: str = Field(description="The api used for completions in chat and function calling. There may be other uris for other contexts")
     token_env_key: typing.Optional[str] = Field(None, description="Conventions are used to resolve keys from env or other services. Provide an alternative key")
     token: typing.Optional[str] = Field(None, description="It is not recommended to add tokens directly to the data but for convenience you might want to")
+    
+        
+    @model_validator(mode='before')
+    @classmethod
+    def _f(cls, values):
+        if not values.get('model'):
+            values['model'] = values['name']
+        return values
+        
     
 class Agent(AbstractEntityModel):
     """The agent model is a meta data object to persist agent metadata for search etc"""

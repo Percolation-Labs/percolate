@@ -40,3 +40,16 @@ def test_abstract_model_Abstracts():
 def test_models_carry_module_namespace():
     from percolate.models.p8 import Task
     assert Task.get_model_full_name() == 'p8.Task', "The modules in the namespace import from types should be in the p8 namespace"
+    
+    
+def test_construction():
+    from percolate.models.p8 import LanguageModelApi
+    from percolate.utils import make_uuid
+    models = [
+        LanguageModelApi(id = make_uuid('gpt-4o-mini'), name = 'gpt-4o-mini', scheme='openai', completions_uri='https://api.openai.com/v1/chat/completions', token_env_key='OPENAI_API_KEY', token=None),
+        LanguageModelApi(id = make_uuid('cerebras-llama3.1-8b'), name = 'cerebras-llama3.1-8b', model='llama3.1-8b', scheme='openai', completions_uri='https://api.cerebras.ai/v1/chat/completions', token_env_key='CEREBRAS_API_KEY'),
+        LanguageModelApi(id = make_uuid('groq-llama-3.3-70b-versatile'), name = 'groq-llama-3.3-70b-versatile', model='llama-3.3-70b-versatile', scheme='openai', completions_uri='https://api.groq.com/openai/v1/chat/completions', token_env_key='GROQ_API_KEY'),
+        LanguageModelApi(id = make_uuid('claude-3-5-sonnet-20241022'), name = 'claude-3-5-sonnet-20241022', scheme='anthropic', completions_uri='https://api.anthropic.com/v1/messages', token_env_key='ANTHROPIC_API_KEY'),
+        LanguageModelApi(id = make_uuid('gemini-1.5-flash'), name = 'gemini-1.5-flash', scheme='google', completions_uri='https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent', token_env_key='GEMINI_API_KEY'),
+        LanguageModelApi(id = make_uuid('deepseek-chat'), name = 'deepseek-chat', scheme='openai', completions_uri='https://api.deepseek.com/chat/completions', token_env_key='DEEPSEEK_API_KEY'),
+    ]
