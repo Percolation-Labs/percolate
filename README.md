@@ -1,11 +1,11 @@
 
 <img src=".assets/images/PercolateAgentTables.png" width="500"  />
 
-# Percolate: Build AI agents directly in Postgres
+# Percolate: Build your AI directly in Multi-modal Postgres
 
 Rather than build application-tier agentic frameworks that connect to language models, tools and databases, Percolate brings language models, tools and agents into the database.
 
-You can now orchestrate powerful agentic systems with multi-modal RAG using any language, and that includes natural language. You can easily connect any langauge model APIs (Open AI/GPT models will be the default).
+You can now orchestrate powerful agentic systems with multi-modal RAG using any language - that includes natural language. You can easily connect any LLM APIs and integrated your language models, tools and data directly inside the database. 
 
 
 ```sql
@@ -94,12 +94,12 @@ The Postgres Extension is built in C and Zig. Instructions to install locally an
 
 ## Connect and Learn
 
-To learn more, checkout the links below.
+To learn more about Percolate, checkout the links below.
 
-- Docs
-- Youtube
-- Substack Publication
-- Medium Publication
-- PercolationLabs home
+- [Docs](https://percolation-labs.gitbook.io/percolation-labs)
+- [Youtube](https://www.youtube.com/@PercolationLabs)
+- [Substack](https://percolationlabs.substack.com/)
+- [Medium](https://medium.com/percolation-labs)
+- [PercolationLabs](https://percolationlabs.ai/)
 - Discord
 - Bluesky
