@@ -19,7 +19,7 @@ BEGIN
         ELSE param_model
     END;
 
-    -- If the token is not set, fetch it
+    -- If the token is not set, fetch it - we dont have to use the model below to select just any model that uses the same key
     IF param_token IS NULL THEN
         SELECT token
         INTO resolved_token

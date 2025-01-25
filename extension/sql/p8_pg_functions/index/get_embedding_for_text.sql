@@ -12,11 +12,11 @@ DECLARE
     api_token TEXT;
     embedding_response JSONB;
 BEGIN
-    -- Step 1: Retrieve the API token for now im hard foding to open ai token 
+    -- Step 1: Retrieve the API token for now im hard coding to open ai token 
     SELECT "token"
     INTO api_token
     FROM p8."LanguageModelApi"
-    WHERE "name" = 'gpt-4o-mini'; --embedding_model;
+    WHERE "name" = 'gpt-4o-mini'; --embedding_model hint - any model that uses the same key;
 
     IF api_token IS NULL THEN
         RAISE EXCEPTION 'Token not found for the provided name: %', token_name;
