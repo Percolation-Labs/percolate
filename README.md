@@ -1,5 +1,6 @@
 
-![Why_Percolate](.assets/images/PercolateAgentTables.png)
+<img src=".assets/images/PercolateAgentTables.png" width="500"  />
+
 # Percolate: Build AI agents directly in Postgres
 
 Rather than build application-tier agentic frameworks that connect to language models, tools and databases, Percolate brings language models, tools and agents into the database.
