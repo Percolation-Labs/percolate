@@ -182,3 +182,4 @@ class ContentIndex(AbstractModel):
         if not values.get('id'):
             values['id'] = make_uuid({'uri': values['uri'], 'ordinal': values['ordinal']})
         return values
+    
