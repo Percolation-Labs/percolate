@@ -66,6 +66,39 @@ class PostgresService:
         """
         return self.execute(q)
     
+    def model_registration_script(self, primary: bool= True, secondary:bool=True):
+        """for bootstrapping we can generate the model registration script including data
+        normally we need to create all the tables first and then we can add aux stuff
+        """
+        primary_scripts = {
+            'register entity':self.helper.create_script(),  
+        }
+        secondary_scripts = { 
+            'register_embeddings': self.helper.create_embedding_table_script(),
+            'insert_field_data': SqlModelHelper(ModelField).get_data_load_statement(self.helper.get_model_field_models()),
+            'insert_agent_data': SqlModelHelper(Agent).get_data_load_statement(self.helper.get_model_agent_record()),
+            'register_entities' : self.helper.get_register_entities_query()
+        }
+        
+        
+        statement = ''
+        def add_scripts(scripts,s):
+            for k,v in scripts.items():
+                if v:
+                    s += f'\n-- {k} ({self.helper.model.get_model_full_name()})------' 
+                    s += '\n-- ------------------\n' 
+                    s += v
+                    s += '\n-- ------------------\n' 
+            return s
+        if primary:
+            statement = add_scripts(primary_scripts,statement)
+        if secondary:
+            statement = add_scripts(secondary_scripts,statement)
+            
+        return statement
+                
+        
+    
     def register(
         self,
         plan: bool = False,
@@ -101,7 +134,8 @@ class PostgresService:
         """added the embedding but check if there are certainly embedding columns"""
         if self.helper.table_has_embeddings:
             try:
-                self.execute(self.helper.create_embedding_table_script(),verbose_errors=False)
+                script = self.helper.create_embedding_table_script()
+                self.execute(script,verbose_errors=False)
                 logger.debug(f"Created embedding table - {self.helper.model.get_model_embedding_table_name()}")
             except DuplicateTable:
                 logger.warning(f"The embedding-associated table already exists")
@@ -115,9 +149,11 @@ class PostgresService:
             self.repository(Agent).update_records(self.helper.get_model_agent_record())
         
             """the registration"""
-            self.execute("select * from p8.register_entities(%s)", data=(self.helper.model.get_model_full_name(),))
+            if 'name' in self.helper.model.model_fields:
+                #TODO: we need some way to map a key field for the graph. at the moment a name property is at least implicitly required. We would need this or a business key attribute in the database
+                self.execute("select * from p8.register_entities(%s)", data=(self.helper.model.get_model_full_name(),))
             
-            logger.info(f"Entity registered")
+                logger.info(f"Entity registered")
         else:
             logger.info("Done - register entities was disabled")
         

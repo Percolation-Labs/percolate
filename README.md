@@ -1,7 +1,7 @@
 
 <img src=".assets/images/PercolateAgentTables.png" width="500"  />
 
-# Percolate: Build your AI directly in Multi-modal Postgres
+# Percolate: Build your AI directly in multi-modal Postgres
 
 Rather than build application-tier agentic frameworks that connect to language models, tools and databases, Percolate brings language models, tools and agents into the database.
 
@@ -29,7 +29,11 @@ select * from percolate_with_tools('What priority tasks did I created last week?
 
 Try Percolate using the setup instructions below to see how it simplifies connecting AI to your data. You can run it locally, in the cloud or connect to a cloud instance. After setting up and trying a few examples, check out the Recipes in the docs to go deeper.
 
-## Easy set up
+**Please star this repo if you find it interesting ⭐**
+
+Reach out on the various channels at the bottom of the repo to tell us what you think. It would be great to hear from you!
+
+## Easy set up...
 
 The easiest way to get started is simply to launch the docker instance and connect to postgres using your preferred client on port 5438 using `postgres:postgres` to login
 
@@ -39,7 +43,10 @@ docker compose up -d
 
 The docker compose expects keys to be in your environment for a seamless start for example `OPENAI_API_KEY`. The database is setup to configure some models that expect keys like this.
 
+---
+
 There is a python client and API. The API is also exposed via port 8008 on the docker instance. To install the python client locally 
+
 ```bash
 pip install percolate-db
 ```
@@ -84,17 +91,23 @@ To connect to a dedicated Percolate cloud instance, you will be able request a P
 ## On the Roadmap
 
 1. Query optimizers: we built Percolate to allow for multi-modal RAG queries to be intelligently optimized in the data tier. Having put the framework in place, our primary objective is to focus on the query planners
-2. In the new database paradigm, it should be possible to interact with databases using natural language. We are building percolate studio for query composition and data visualization powered with AI.
-3. Any issues or suggestions you add will hopefully make their way into our prioritized roadmap so feel free to suggesting anything!
+2. In the new database paradigm, it should be possible to interact with databases using natural language. We are building _Percolate Studio_ for query composition and data visualization powered with AI.
+3. Any issues or suggestions you add will hopefully make their way into our prioritized roadmap so feel free to suggesting anything related to putting ai in the dAta tIer.
+
 
 
 ## Developers
 
-The Postgres Extension is built in C and Zig. Instructions to install locally and develop the extension are given below. 
+The Postgres Extension is built in C and Zig. Instructions to install locally and develop the extension will be given below
 
 ## Connect and Learn
 
-To learn more about Percolate, checkout the links below.
+To learn more about or stay up to date on Percolate, check out the links below. Subscribe to the channels below and we look forward to hearing from you. 
+
+**❤️Please star this repo if you find it interesting! ❤️**
+
+---
+
 
 - [Docs](https://percolation-labs.gitbook.io/percolation-labs)
 - [Youtube](https://www.youtube.com/@PercolationLabs)

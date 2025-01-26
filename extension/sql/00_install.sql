@@ -1,16 +1,8 @@
 ---------extensions----------------------
-CREATE EXTENSION IF NOT EXISTS HTTP ;
-CREATE EXTENSION  IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS HTTP;
+CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS age;
 
------------------------------------------
------------------------------------------
-
-
-------Add the p8 graph and schema--------
-LOAD  'age';
-SET search_path = ag_catalog, "$user", public;
-SELECT create_graph('percolate');
 -----------------------------------------
 -----------------------------------------
 
@@ -28,8 +20,8 @@ $$ LANGUAGE plpgsql;
 
 
 ------Add percolate p8 schema------------
-CREATE SCHEMA IF NOT EXISTS p8
-CREATE SCHEMA IF NOT EXISTS p8_embeddings
+CREATE SCHEMA IF NOT EXISTS p8;
+CREATE SCHEMA IF NOT EXISTS p8_embeddings;
 
 --MAYBE
 --ALTER DATABASE app SET search_path = ag_catalog, "$user", public;
@@ -62,3 +54,11 @@ BEGIN
     RETURN uuid_result;
 END;
 $BODY$;
+
+
+------Add the p8 graph and schema--------
+LOAD  'age';
+SET search_path = ag_catalog, "$user", public;
+SELECT create_graph('percolate');
+-----------------------------------------
+-----------------------------------------
