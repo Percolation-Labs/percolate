@@ -63,7 +63,7 @@ Here is a reminder of some useful commands when working with Docker containers
 
 
 
-```yaml
+```bash
 docker compose down --volumes
 ```
 
