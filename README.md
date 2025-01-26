@@ -1,5 +1,5 @@
 
-<img src=".assets/images/PercolateAgentTables.png" width="500"  />
+<img src=".assets/images/PercolateAgentTables.png"  />
 
 # Percolate: Build your AI directly in multi-modal Postgres
 
