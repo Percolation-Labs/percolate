@@ -3,8 +3,6 @@ services:
     image: percolationlabs/postgres-base:16
     container_name: percolate
     platform: linux/amd64
-    # env_file:
-    #   - .envrc
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -13,11 +11,11 @@ services:
     ports:
       - "5438:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - percolate_data:/var/lib/postgresql/percolate
+      - ./extension/sql:/docker-entrypoint-initdb.d
     restart: unless-stopped
-
 volumes:
-  postgres_data:
+  percolate_data:
 #if you need to you can export new env vars before up
 #export MY_API_KEY=your-api-key-goes-here
 #docker compose up -d
