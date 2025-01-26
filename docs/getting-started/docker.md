@@ -12,7 +12,7 @@ docker compose up -d
 
 The credentials to connect to Postgres using your preferred client are in the `docker-compose.yaml`
 
-````yaml
+```yaml
 dockercompose
 services:
   postgres:
@@ -32,7 +32,6 @@ services:
 volumes:
   percolate_data:
 ```
-````
 
 You will notice that the port is `5438`and you can connect with `postgres:postgres`
 
