@@ -59,11 +59,5 @@ The volume `percolate_data` is used to mount data.&#x20;
 
 Here is a reminder of some useful commands when working with Docker containers
 
-<table><thead><tr><th width="366">Command</th><th>What it does</th></tr></thead><tbody><tr><td><code>docker volume ls</code></td><td>list volumes in use by postgres/percolate</td></tr><tr><td><code>docker stop &#x3C;container__id></code></td><td>stop the running container e.g. to free a port</td></tr><tr><td><code>docker rm &#x3C;container__id></code></td><td>remove a container e.g. to clean up</td></tr></tbody></table>
-
-
-
-```bash
-docker compose down --volumes
-```
+<table><thead><tr><th width="366">Command</th><th>What it does</th></tr></thead><tbody><tr><td><code>docker volume ls</code></td><td>list volumes in use by postgres/percolate</td></tr><tr><td><code>docker stop &#x3C;container__id></code></td><td>stop the running container e.g. to free a port</td></tr><tr><td><code>docker rm &#x3C;container__id></code></td><td>remove a container e.g. to clean up</td></tr><tr><td><code>docker compose down --volumes</code></td><td>detach volumes in use</td></tr></tbody></table>
 
