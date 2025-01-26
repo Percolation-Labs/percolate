@@ -52,7 +52,16 @@ class PostgresService:
     def repository(self, model: BaseModel) -> "PostgresService":
         """a connection in the context of the abstract model for crud support"""
         return PostgresService(model=model, conn=self.conn)
-    
+
+    def get_entities(self, keys: str | typing.List[str]):
+        """
+        use the get_entities database function to lookup entities
+        """
+        if keys:
+            if not isinstance(keys,list):
+                keys = [keys]
+                """TODO"""            
+            
     def get_model_database_schema(self):
         assert self.model is not None, "The model is empty - you should construct an instance of the postgres service as a repository(Model)"
         q = f"""SELECT 

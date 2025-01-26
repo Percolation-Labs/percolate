@@ -5,7 +5,15 @@ import requests
 import json
 import os
 import typing
+from .CallingContext import CallingContext
+from .LanguageModel import LanguageModel
+from pydantic import BaseModel
 
+class FunctionCall(BaseModel):
+    name: str
+    arguments: str | dict
+    
+    
 def call_api_simple(question:str, tools: typing.List[dict], model:str, system_prompt:str=None):
     """
     ill ignore the system prompt for simplicity here but add it as a reminder to signature

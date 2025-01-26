@@ -25,7 +25,7 @@ select * from p8.nl2sql('what agents do you have', 'p8.Agent', 'deepseek-chat')
 --indexing
 --this adds nodes to the entity graph so we can call get_entities
 --its very important to test this because it uses a watermark method to flush and bad logic can lead to long running queries
-select * from p8.add_nodes('p8.AgentMode') 
+select * from p8.add_nodes('p8.AgentModel') 
 --^the one above does one iteration up to 1664 records tht cypher can deal with
 --the one below iterates until the one above returns 0
 select * from p8.insert_entity_nodes('p8.Agent')
