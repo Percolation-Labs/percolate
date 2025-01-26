@@ -1,19 +1,18 @@
 services:
   postgres:
     image: percolationlabs/postgres-base:16
-    container_name: percolate
+    container_name: percolate_test2
     platform: linux/amd64
-    # env_file:
-    #   - .envrc
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: app
       OPENAI_API_KEY: ${OPENAI_API_KEY}
     ports:
-      - "5438:5432"
+      - "5439:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/percolate_data
+      - ./extension/sql:/docker-entrypoint-initdb.d
     restart: unless-stopped
 
 volumes:

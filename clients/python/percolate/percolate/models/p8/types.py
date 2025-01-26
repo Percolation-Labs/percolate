@@ -81,7 +81,7 @@ class ModelField(AbstractEntityModel):
     field_type: str
     embedding_provider: typing.Optional[str] = Field(None, description="The embedding could be a multiple in future")
     description: typing.Optional[str] = None
-    is_key: bool = Field(default=False, description="Indicate that the field is the primary key - our convention is the id field should be the primary key and be uuid and we use this to join embeddings")
+    is_key: typing.Optional[bool] = Field(default=False, description="Indicate that the field is the primary key - our convention is the id field should be the primary key and be uuid and we use this to join embeddings")
     
     @model_validator(mode='before')
     @classmethod

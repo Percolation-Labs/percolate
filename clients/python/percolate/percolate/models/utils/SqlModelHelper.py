@@ -74,13 +74,13 @@ class SqlModelHelper:
 
         columns_str = ",\n    ".join(columns)
         create_table_script = f"""CREATE TABLE {table_name} (
-            {columns_str}
-        );
+{columns_str}
+);
 
-        CREATE TRIGGER update_updated_at_trigger
-        BEFORE UPDATE ON {table_name}
-        FOR EACH ROW
-        EXECUTE FUNCTION update_updated_at_column();
+CREATE TRIGGER update_updated_at_trigger
+BEFORE UPDATE ON {table_name}
+FOR EACH ROW
+EXECUTE FUNCTION update_updated_at_column();
 
         """
         return create_table_script
@@ -228,21 +228,20 @@ class SqlModelHelper:
         
         """
      
-        Q = f"""CREATE TABLE {cls.model.get_model_embedding_table_name()} (
-            id UUID PRIMARY KEY,  -- Hash-based unique ID - we typically hash the column key and provider and column being indexed
-            source_record_id UUID NOT NULL,  -- Foreign key to primary table
-            column_name TEXT NOT NULL,  -- Column name for embedded content
-            embedding_vector VECTOR NULL,  -- Embedding vector as an array of floats
-            embedding_name VARCHAR(50),  -- ID for embedding provider
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, -- Timestamp for tracking
-            
-            -- Foreign key constraint
-            CONSTRAINT fk_source_table_{cls.model.get_model_full_name().replace('.','_').lower()}
-                FOREIGN KEY (source_record_id) REFERENCES {cls.table_name}
-                ON DELETE CASCADE
-        );
-
-        """
+        Q = f"""CREATE TABLE  IF NOT EXISTS {cls.model.get_model_embedding_table_name()} (
+    id UUID PRIMARY KEY,  -- Hash-based unique ID - we typically hash the column key and provider and column being indexed
+    source_record_id UUID NOT NULL,  -- Foreign key to primary table
+    column_name TEXT NOT NULL,  -- Column name for embedded content
+    embedding_vector VECTOR NULL,  -- Embedding vector as an array of floats
+    embedding_name VARCHAR(50),  -- ID for embedding provider
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, -- Timestamp for tracking
+    
+    -- Foreign key constraint
+    CONSTRAINT fk_source_table_{cls.model.get_model_full_name().replace('.','_').lower()}
+        FOREIGN KEY (source_record_id) REFERENCES {cls.table_name}
+        ON DELETE CASCADE
+);
+"""
         return Q
     
     def try_generate_migration_script(self, field_list: typing.List[dict]) ->str:
@@ -367,3 +366,27 @@ class SqlModelHelper:
             data = {k:dumping_json(v) for k,v in data.items()}
             
             return data
+        
+    def get_data_load_statement(self, records: typing.List[BaseModel]):
+        """Generate the insert statement for the data"""
+        
+        if not isinstance(records,list):
+            records = [records]
+            
+        def sql_repr(s):
+            """WIP"""
+            return repr(s) if s else 'NULL'
+        
+        if len(records):
+            
+            sample = self.serialize_for_db(records[0])
+            cols = f",".join(sample.keys())
+            values = ",\n ".join(  f"({', '.join([sql_repr(v) for _,v in self.serialize_for_db(obj).items() ])})" for obj in records)
+            
+            return f"""INSERT INTO {self.model.get_model_table_name()}({cols}) VALUES\n {values};"""
+        
+    def get_register_entities_query(self):
+        """get the registration script for entities that have names"""
+        
+        if 'name' in self.model.model_fields:
+            return  f"select * from p8.register_entities('{self.model.get_model_full_name()}');"
