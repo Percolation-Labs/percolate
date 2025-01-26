@@ -42,7 +42,7 @@ One useful way to check that the installation scripts ran is to check the waterm
 select * from p8."Session"
 ```
 
-You will know truly know Percolate is ready if you can ask it questions -
+Of course, you will truly know Percolate is ready if you can ask it questions -
 
 {% hint style="info" %}
 You need to have api keys set in the database. In some cases we can load these from the environment. In other cases you may want to add them to the `p8.LanguageModelApi` table. The tokens can be added to make it easier to run queries that require tokens.
