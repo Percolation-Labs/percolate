@@ -33,10 +33,11 @@ class FunctionManager:
         Args:
             agent_model: Any class type with @classmethods that can be passed to the LLM
         """
-        function_keys = list((agent_model.get_model_functions() or {}).keys())
-        for f in cls.repo.get_by_name(function_keys, as_model=True):
+        required = list((agent_model.get_model_functions() or {}).keys())
+        for f in cls.repo.get_by_name(required, as_model=True):
             cls.add_function(f)
-            
+        required = set(required) - set(cls.functions.keys())
+        logger.warning(f"We could not find the function {required}")  
         """we may lookup the anent and do something with the metadata too"""
  
     def add_functions_by_key(cls, function_keys : typing.List[str]|str):
@@ -54,6 +55,8 @@ class FunctionManager:
         if required:
             for f in cls.repo.get_by_name(required, as_model=True):
                 cls.add_function(f)
+        required = set(required) - set(cls.functions.keys())
+        logger.warning(f"We could not find the function {required}")
         
     def plan(cls, questions: str | typing.List[str], use_cache: bool = False):
         """based on one or more questions, we will construct a plan.
