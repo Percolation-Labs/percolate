@@ -13,33 +13,52 @@ from percolate.utils import logger
 import traceback
 
 ANTHROPIC_MAX_TOKENS_IN = 8192
+GENERIC_P8_PROMPT = """\n# General Advice.
+Use whatever functions are available to you and use world knowledge only if prompted 
+or if there is not other way 
+or the user is obviously asking about real world information that is not covered by functions.
+Observe what functions you have to use and check the message history to avoid calling the same functions with the same parameters repeatedly.
+If you find a function name in your search, you can activate it by naming using one of your functions. You should do so without asking the user.
+            """
 class OpenAIResponseScheme(AIResponse):
     @classmethod
-    def parse(cls, response:dict, sid: str)->AIResponse:
+    def parse(cls, response:dict, sid: str,  model_name:str)->AIResponse:
         """
+        
+        example tool call response
+        ```
         'tool_calls': [{'id': 'call_0KPgsQaaso8IXPUpG6ktM1DC',
         'type': 'function',
         'function': {'name': 'get_weather',
             'arguments': '{"city":"Dublin","date":"2023-10-07"}'}}],
-            
+        ```
         """
-        choice = response['choices'][0]
-        tool_calls = choice['message'].get('tool_calls') or []
-        """just take the guts"""
-        tool_calls = [t['function'] for t in tool_calls]
-        return AIResponse(id = str(uuid.uuid1()),
-                model_name=response['model'],
-                tokens_in=response['usage']['prompt_tokens'],
-                tokens_out=response['usage']['completion_tokens'],
-                session_id=sid,
-                role=choice['message']['role'],
-                content=choice['message']['content'] or '',
-                status='RESPONSE' if not tool_calls else "TOOL_CALLS",
-                tool_calls=tool_calls)
-        
+        try:
+            if response.get('error'):
+                logger.warning(f"Error response {response['error'].get('message')}")
+                return AIResponse(id = str(uuid.uuid1()),model_name=model_name, tokens_in=0,tokens_out=0, role='assistant',
+                                  session_id=sid, content=response['error'].get('message'), status = 'ERROR')
+            
+            choice = response['choices'][0]
+            tool_calls = choice['message'].get('tool_calls') or []
+            """just take the guts"""
+            tool_calls = [t['function'] for t in tool_calls]
+            return AIResponse(id = str(uuid.uuid1()),
+                    model_name=response['model'],
+                    tokens_in=response['usage']['prompt_tokens'],
+                    tokens_out=response['usage']['completion_tokens'],
+                    session_id=sid,
+                    role=choice['message']['role'],
+                    content=choice['message']['content'] or '',
+                    status='RESPONSE' if not tool_calls else "TOOL_CALLS",
+                    tool_calls=tool_calls)
+        except Exception:
+            logger.warning(f"unexpected structure in OpenAI scheme message {response=}")
+            raise 
+                    
 class AnthropicAIResponseScheme(AIResponse):
     @classmethod
-    def parse(cls, response:dict, sid: str )->AIResponse:
+    def parse(cls, response:dict, sid: str,  model_name:str )->AIResponse:
         choice = response['content'] 
         def adapt(t):
             return {'function': {'name': t['name'], 'arguments':t['input']}}
@@ -109,8 +128,8 @@ class LanguageModel:
             if self.params.get('scheme') == 'google':
                 return GoogleAIResponseScheme.parse(response, sid=sid, model_name=self.model_name)
             if self.params.get('scheme') == 'anthropic':
-                return AnthropicAIResponseScheme.parse(response,sid=sid)
-            return OpenAIResponseScheme.parse(response,sid=sid)
+                return AnthropicAIResponseScheme.parse(response,sid=sid,model_name=self.model_name)
+            return OpenAIResponseScheme.parse(response,sid=sid, model_name=self.model_name)
         except Exception as ex:
             logger.warning(f"failing to parse {response=} {traceback.format_exc()}")
         
@@ -180,8 +199,10 @@ class LanguageModel:
         data_content = data_content or []
         
         """we may need to adapt this e.g. for the open ai scheme"""
-        tools = functions or []
+        tools = functions or None
         
+        if system_prompt:
+            system_prompt+= GENERIC_P8_PROMPT
         url = params["completions_uri"]
         """use the env first"""
          

@@ -3,6 +3,14 @@ from percolate.models.p8 import Function, PlanModel
 from percolate.models import AbstractModel
 import percolate as p8
 from percolate.utils import logger
+class _RuntimeFunction(Function):
+    """A wrapper for handling library functions"""
+    fn: typing.Callable
+    
+    def __call__(self, **kwargs):
+        """overrides the proxied base call"""
+        return self.fn(**kwargs)
+    
 class FunctionManager:
     def __init__(cls):
         cls._functions= {}
@@ -17,12 +25,13 @@ class FunctionManager:
         
             Args: a callable function or percolate Function type
         """
+        
         if not isinstance(function, Function):
             logger.debug(f"adding function: {function}")
-            function = Function.from_callable(function)
-        cls._functions[function.name] = function
-        logger.debug(f"added function {function.name}")
-    
+            function = _RuntimeFunction.from_callable(function)
+        if function.name not in cls._functions:
+            cls._functions[function.name] = function
+            logger.debug(f"added function {function.name}")
     
     def activate_agent_context(cls, agent_model: AbstractModel):
         """
@@ -37,7 +46,8 @@ class FunctionManager:
         for f in cls.repo.get_by_name(required, as_model=True):
             cls.add_function(f)
         required = set(required) - set(cls.functions.keys())
-        logger.warning(f"We could not find the function {required}")  
+        if len(required):
+            logger.warning(f"We could not find the function {required}")  
         """we may lookup the anent and do something with the metadata too"""
  
     def add_functions_by_key(cls, function_keys : typing.List[str]|str):
@@ -56,7 +66,8 @@ class FunctionManager:
             for f in cls.repo.get_by_name(required, as_model=True):
                 cls.add_function(f)
         required = set(required) - set(cls.functions.keys())
-        logger.warning(f"We could not find the function {required}")
+        if required:
+            logger.warning(f"We could not find the function {required}")
         
     def plan(cls, questions: str | typing.List[str], use_cache: bool = False):
         """based on one or more questions, we will construct a plan.
@@ -73,7 +84,7 @@ class FunctionManager:
         but in python we can just select the data into the planner agent and fetch the plan
         """
         
-        return p8.Agent(PlanModel).run(questions, data=cls.repo.select())
+        return p8.Agent(PlanModel,allow_help=False).run(questions, data=cls.repo.select())
     
     @property
     def functions(cls):

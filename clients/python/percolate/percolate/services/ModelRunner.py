@@ -11,14 +11,10 @@ from percolate.services.llm import CallingContext, FunctionCall, LanguageModel, 
 class ModelRunner:
     """The model runner manages chaining agents and reasoning steps together in the execution loop"""
     
-    def __init__(self, model: BaseModel):
-        """
-        supply a model to use as an agent
-        """
-        self.agent_model = model
-        
-        
-    def __init__(self, model: BaseModel = None, allow_help: bool = True):
+    @property
+    def name(self):
+        return self.agent_model.get_model_full_name()
+    def __init__(self, model: BaseModel = None, allow_help: bool = True, **kwargs):
         """
         A model is passed in or the default is used.
         This supplies the agent context such as prompt and functions.
@@ -26,7 +22,7 @@ class ModelRunner:
         More generally the model can provide a structured response format.
         see TODO: for guidance.
         """
-        
+        self._init_data = kwargs.get('init_data')
         """the agent model is any Pydantic Base model or Abstract model that implements the agent interface"""
         self.agent_model:AbstractModel = AbstractModel.Abstracted(model)
         """a function manager allows for activating functions at runtime and searching and planning over functions"""
@@ -39,9 +35,10 @@ class ModelRunner:
         self.initialize()
         """the messages stack is the most important control element for llm agent sessions"""
         self.messages = MessageStack(None)
+        logger.info(f"******Constructed agent {self.name}******")
         
     def __repr__(self):
-        return f"Runner({(self.agent_model.get_model_full_name())})"
+        return f"Runner({self.name})"
 
     def initialize(self):
         """Register the functions and other metadata from the agent model"""
@@ -86,7 +83,7 @@ class ModelRunner:
         logger.debug(f"get_entities/{keys=}")
 
         """the function manager can load context and we can also adorn entities with extra metadata"""
-        entities = p8.get_entities(keys, register_with_function_manager=True)
+        entities = p8.get_entities(keys )
 
         return entities
 
@@ -105,8 +102,9 @@ class ModelRunner:
                 questions = f"Using information from {context}, {questions}"
 
             """for now strict planning is off"""
-            plan = self._function_manager.plan(questions, strict=False)
-        except:
+            plan = self._function_manager.plan(questions)
+        except Exception as ex:
+            logger.warning(f"Failed to call help {ex}")
             return {"message": "planning pending - i suggest you use world knowledge"}
 
         """describe the plan context e.g. its a plan but you need to request the functions and do the thing -> update message stack"""
@@ -119,7 +117,7 @@ class ModelRunner:
         Args:
             function_call (FunctionCall): the payload send from an LLM to call a function
         """
-        logger.debug(f"{function_call=}")
+        logger.debug(f"({self.name}){function_call=}")
         f = self._function_manager[function_call.name]
         if not f:
             message = f"attempting to load function {function_call.name} which is not activated - please activate it"
@@ -171,7 +169,9 @@ class ModelRunner:
             limit: given that we iterate in the executor, we need to set a max length
             data: we can initialise the data payload as though there are function/data load results
         """
-
+        
+        """sometimes you may want to initialize your agent with a bunch of data"""
+        data = data or self._init_data
         """setup all the bits before running the loop"""
         self._context = context or CallingContext()
         """a generic wrapper around the REST interfaces of any LLM client"""
