@@ -15,8 +15,13 @@ tenacity = "^9.0.0"
 loguru = "^0.7.3"
 openai = "^1.60.0"
 docstring-parser = "^0.16"
+typer = "^0.15.1"
 
 
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+p8 = "percolate.cli:app"
+

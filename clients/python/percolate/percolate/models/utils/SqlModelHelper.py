@@ -57,14 +57,18 @@ class SqlModelHelper:
         table_name = cls.model.get_model_table_name()
         
         columns = []
+        key_set = False
         for field_name, field_type in mapping.items():
             column_definition = f"{field_name} {field_type}"
             if field_name == id_field:
                 column_definition += " PRIMARY KEY "
+                key_set = True
             elif not is_optional(fields[field_name]):
                 column_definition += " NOT NULL"
             columns.append(column_definition)
 
+        if not key_set:
+            raise ValueError("The model input does not specify a key field. Add a name or key field or specify is_key on one of your fields")
         """add system fields"""
         for dcol in ['created_at', 'updated_at', 'deleted_at']:
             if dcol not in mapping.keys():
