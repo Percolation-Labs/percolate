@@ -13,7 +13,9 @@ def object_namespace(o, default:str='public', exclude:typing.List[str]|str=None)
     if not isinstance(exclude,list):
         exclude = [exclude]
     """this convention assumes that types are in a file and the container module is the namespace"""
-    namespace = o.__module__.split(".")[-2]
+    parts = o.__module__.split(".")
+    """convention"""
+    namespace = parts[-2] if len(parts) > 1 else parts[-1]
     if namespace not in exclude:
         return namespace
     return default

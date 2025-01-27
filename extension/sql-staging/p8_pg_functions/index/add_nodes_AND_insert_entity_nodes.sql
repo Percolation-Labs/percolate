@@ -23,7 +23,7 @@ BEGIN
 
     -- Loop through each row in the table - graph assumed to be 'one' here
     FOR row IN
-        EXECUTE format('SELECT uid, key FROM p8.vw_%s_%s WHERE gid IS NULL LIMIT 1660', 
+        EXECUTE format('SELECT uid, key FROM p8."vw_%s_%s" WHERE gid IS NULL LIMIT 1660', 
             schema_name, pure_table_name
         )
     LOOP
@@ -51,7 +51,7 @@ BEGIN
         );
 
         -- Execute the query
-        PERFORM EXECUTE sql;
+        EXECUTE sql;
 
         -- Return the number of rows processed
         RETURN nodes_created_count;

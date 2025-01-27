@@ -119,14 +119,14 @@ class TokenUsage(AbstractModel):
     """Tracks token usage for language model interactions"""
     id: uuid.UUID| str  
     model_name: str
-    tokens: int = Field(description="the number of tokens consumed in total")
-    tokens_in: typing.Optional[int] = Field(description="the number of tokens consumed for input")
-    tokens_out: typing.Optional[int] = Field(description="the number of tokens consumed for output")
-    tokens_other: typing.Optional[int] = Field(description="the number of tokens consumed for functions and other metadata")
+    tokens: typing.Optional[int] = Field(None,description="the number of tokens consumed in total")
+    tokens_in: int = Field(description="the number of tokens consumed for input")
+    tokens_out: int = Field(description="the number of tokens consumed for output")
+    tokens_other: typing.Optional[int] = Field(None, description="the number of tokens consumed for functions and other metadata")
     session_id: typing.Optional[uuid.UUID| str  ] = Field(description="Session id for a conversation")
     
 
-class Dialogue(TokenUsage):
+class AIResponse(TokenUsage):
     """Each atom in an exchange between users, agents, assistants and so on. 
     We generate questions with sessions and then that triggers an exchange. 
     Normally the Dialogue is round trip transaction.
@@ -134,10 +134,10 @@ class Dialogue(TokenUsage):
     id: uuid.UUID| str  
     role: str = Field(description="The role of the user/agent in the conversation")
     content: str = DefaultEmbeddingField(description="The content for this part of the conversation") #TODO we may not want to automatically generate embeddings for this table
-    status: typing.Optional[str] = Field(description="The status of the session such as REQUEST|RESPONSE|ERROR|TOOL_CALL|STREAM")
-    tool_calls: typing.Optional[dict] = Field(default=None, description="Tool calls are requests from language models to call tools")
+    status: typing.Optional[str] = Field(description="The status of the session such as REQUEST|RESPONSE|ERROR|TOOL_CALL|STREAM_RESPONSE")
+    tool_calls: typing.Optional[typing.List[dict]] = Field(default=None, description="Tool calls are requests from language models to call tools")
     tool_eval_data: typing.Optional[dict] = Field(default=None, description="The payload may store the eval from the tool especially if it is small data")
-
+        
 class Session(AbstractModel):
     """Tracks groups if session dialogue"""
     id: uuid.UUID| str  
@@ -182,3 +182,4 @@ class ContentIndex(AbstractModel):
         if not values.get('id'):
             values['id'] = make_uuid({'uri': values['uri'], 'ordinal': values['ordinal']})
         return values
+    

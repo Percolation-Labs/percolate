@@ -1,7 +1,7 @@
 
 <img src=".assets/images/PercolateAgentTables.png"  />
 
-# Percolate: Build your AI directly in multi-modal Postgres
+# Percolate - Build your AI directly in multi-modal Postgres
 
 Rather than build application-tier agentic frameworks that connect to language models, tools and databases, Percolate brings language models, tools and agents into the database.
 
@@ -104,7 +104,7 @@ The Postgres Extension is built in C and Zig. Instructions to install locally an
 
 To learn more about or stay up to date on Percolate, check out the links below. Subscribe to the channels below and we look forward to hearing from you. 
 
-**❤️Please star this repo if you find it interesting! ❤️**
+**❤️  Please star this repo if you find it interesting ❤️**
 
 ---
 
