@@ -13,3 +13,5 @@ sample_models = [
     LanguageModelApi(id = make_uuid('gemini-1.5-flash'), name = 'gemini-1.5-flash', scheme='google', completions_uri='https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent', token_env_key='GEMINI_API_KEY'),
     LanguageModelApi(id = make_uuid('deepseek-chat'), name = 'deepseek-chat', scheme='openai', completions_uri='https://api.deepseek.com/chat/completions', token_env_key='DEEPSEEK_API_KEY'),
 ]
+
+

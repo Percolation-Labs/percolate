@@ -12,6 +12,7 @@ def KeyField():
 
 
 from . import utils
+from .MessageStack import  MessageStack
 from .AbstractModel import AbstractModel
 
 def get_p8_models():
