@@ -96,6 +96,20 @@ agent = p8.Agent(MyFirstAgent)
 agent.run("can you find available pets",limit=2) 
 ```
 
+While you can run agents with only your own system prompt and functions, in Percolate every agent will also have access to all other agents and functions via a global  `help` function which runs s a planner to find resources (agents/functions) and `activate_functions_by_name`  which activates functions that are discovered - activation means its added to the agents function stack.
+
+Every agent can call `get_entities` which is a key -value lookup of all database entities. When entities are retrieved they are typically based on agent models (that have been registered as you registered your agent above) and these have linked functions. In this way, one way to get access ot functions is via entities that are encountered in conversation. Chaining in Percolate is implemented in this way by walking a graph of entity and function references.&#x20;
+
+You can explicitly run the planner agent which is used in help just as you would any other agent
+
+In Jupyter you might look at a plan like this
+
+```python
+from IPython.display import Markdown
+planner = p8.get_planner()
+Markdown(planner("""Tell me about functions relating to hobbies or pets"""))
+```
+
 ### Using the structured response types
 
 The agent is defined with its structured response. In Percolate Agents, Entities (structures) and tables are fairly synonymous. In this case we can automatically fetch data as structured response which can be saved in the database. To illustrate,
