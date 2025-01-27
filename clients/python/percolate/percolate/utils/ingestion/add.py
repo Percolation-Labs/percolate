@@ -29,8 +29,9 @@ def add_api(name:str, uri:str, token:str=None, file:str=None, verbs: str | typin
     
   
     service = OpenApiSpec(uri)
+    logger.info(f"Adding API {uri=}")
     """register the api"""
-    p8.repository(ApiProxy).update_records(ApiProxy(name=name, proxy_uri=service.host_uri))
+    p8.repository(ApiProxy).update_records(ApiProxy(name=name, proxy_uri=service.host_uri,token=token))
     """register the functions"""
     p8.repository(Function).update_records(list(service.iterate_models(verbs=verbs, filter_ops=filter_ops)))
     

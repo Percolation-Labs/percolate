@@ -45,7 +45,7 @@ The docker compose expects keys to be in your environment for a seamless start f
 
 ---
 
-There is a python client and API. The API is also exposed via port 8008 on the docker instance. To install the python client locally 
+There is a python client and API. The API is also exposed via port 5008 on the docker instance. To install the python client locally 
 
 ```bash
 pip install percolate-db

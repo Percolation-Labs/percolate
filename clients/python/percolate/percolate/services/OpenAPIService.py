@@ -3,11 +3,29 @@ import json
 import os
 import requests
 from functools import partial
-from percolate.models.p8 import Function
+from percolate.models.p8 import Function,ApiProxy
 import typing
 from percolate.utils import logger
+from urllib.parse import urlparse
+import percolate as p8
 
 
+class  _ApiTokenCache:
+    def __init__(self):
+        self.cache = {}
+        
+    def get(self, key:str):
+        """
+        simple cached lookup of api tokens
+        """    
+        if key not in self.cache:
+            records = p8.repository(ApiProxy).select(proxy_uri=key)
+            if records:
+                self.cache[key] = records[0]['token']
+        return self.cache[key]
+    
+_ApiTokenCache = _ApiTokenCache()
+    
 def map_openapi_to_function(spec,short_name:str=None):
     """Map an OpenAPI endpoint spec to a function ala open AI
        you can add functions from this to the tool format with for example
@@ -84,7 +102,8 @@ class OpenApiSpec:
                 self.host_uri += self.spec['basePath']
         else:
             """by convention we assume the uri is the path without the json file"""
-            self.host_uri = self._spec_uri_str.rsplit('/', 1)[0]
+            parsed_url = urlparse(self._spec_uri_str)
+            self.host_uri = f"{parsed_url.scheme}://{parsed_url.netloc}"
 
         self.token_key = token_key
         """lookup"""
@@ -130,7 +149,7 @@ class OpenApiSpec:
                                function_spec = fspec,
                                verb=method,
                                endpoint=endpoint,
-                               description=s.get('description'))
+                               description=s.get('description') or s.get('summary') or s.get('title'))
                     
         
     def __repr__(self):
@@ -223,8 +242,8 @@ class OpenApiService:
         self.uri = uri
         self.spec = spec
         """assume token but maybe support mapping from env"""
-        self.token_or_key = token_or_key
-        
+        self.token = token_or_key or _ApiTokenCache.get(uri)
+         
     def invoke(self, function:Function, data:dict=None, p8_return_raw_response:bool=False, p8_full_detail_on_error: bool = False, **kwargs):
         """we can invoke a function which has the endpoint information
         
@@ -252,8 +271,8 @@ class OpenApiService:
             data = json.dumps(data)
 
         headers = { } #"Content-type": "application/json"
-        if self.token_or_key:
-            headers["Authorization"] =  f"Bearer {os.environ.get(self.token_key)}"
+        if self.token:
+            headers["Authorization"] =  f"Bearer {self.token}"
         
         """f is verified - we just need the endpoint. data is optional, kwargs are used properly"""
         response = f(
