@@ -2,7 +2,7 @@ import typing
 from pydantic import BaseModel, Field
 from percolate.utils.env import DEFAULT_MODEL
 
-DEFAULT_MAX_AGENT_LOOPS = 10
+DEFAULT_MAX_AGENT_LOOPS = 5
 DEFAULT_MODEL_TEMPERATURE = 0.0
 
 

@@ -3,7 +3,7 @@ import traceback
 import percolate as p8
 from pydantic import BaseModel
 from percolate.utils import logger
-from percolate.models.p8 import Function, AIResponse
+from percolate.models.p8 import Function 
 from .FunctionManager import FunctionManager
 from percolate.models import AbstractModel, MessageStack
 from percolate.services.llm import CallingContext, FunctionCall, LanguageModel, MessageStackFormatter
@@ -155,9 +155,22 @@ class ModelRunner:
     def functions(self) -> typing.Dict[str, Function]:
         """Provide access to the function manager's functions"""
         return self._function_manager.functions
+    
+    @property
+    def function_descriptions(self) -> typing.List[dict]:
+        """Provide access to the function manager's function specs to send to language models"""
+ 
+        return [f.function_spec for _,f  in self._function_manager.functions.items()]
 
-    def run(self, question: str, context: CallingContext = None, limit: int = None):
-        """Ask a question to kick of the agent loop"""
+    def run(self, question: str, context: CallingContext = None, limit: int = None, data: typing.List[dict] = None):
+        """Ask a question to kick of the agent loop
+        
+        Args:
+            question: a user question
+            context: a context object with information about users, session and usage
+            limit: given that we iterate in the executor, we need to set a max length
+            data: we can initialise the data payload as though there are function/data load results
+        """
 
         """setup all the bits before running the loop"""
         self._context = context or CallingContext()
@@ -165,7 +178,7 @@ class ModelRunner:
         lm_client = LanguageModel.from_context(self._context)
 
         """messages are system prompt etc. agent model's can override how message stack is constructed"""
-        self.messages = self.agent_model.build_message_stack(question=question, functions=self.functions.keys())
+        self.messages = self.agent_model.build_message_stack(question=question, functions=self.functions.keys(), data=data)
 
         """run the agent loop to completion"""
         for _ in range(limit or self._context.max_iterations):
@@ -174,12 +187,12 @@ class ModelRunner:
             response = lm_client(
                 messages=self.messages,
                 context=self._context,
-                functions=list(self.functions.values()),
+                functions=self.function_descriptions,
             )
             if function_calls := response.tool_calls:
                 """call one or more functions and update messages - functions can be updated inside this context"""
                 for func_call in function_calls: #its assumed to be only one for now but we could par do in future
-                    self.invoke(func_call)
+                    self.invoke(FunctionCall(**func_call))
                 continue
             if response is not None:
                 # marks the fact that we have unfinished business

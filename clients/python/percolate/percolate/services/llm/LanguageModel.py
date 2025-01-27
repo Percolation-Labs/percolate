@@ -25,6 +25,8 @@ class OpenAIResponseScheme(AIResponse):
         """
         choice = response['choices'][0]
         tool_calls = choice['message'].get('tool_calls') or []
+        """just take the guts"""
+        tool_calls = [t['function'] for t in tool_calls]
         return AIResponse(id = str(uuid.uuid1()),
                 model_name=response['model'],
                 tokens_in=response['usage']['prompt_tokens'],
@@ -42,6 +44,7 @@ class AnthropicAIResponseScheme(AIResponse):
         def adapt(t):
             return {'function': {'name': t['name'], 'arguments':t['input']}}
         tool_calls = [adapt(t) for t in choice if t['type'] == 'tool_use']
+        tool_calls = [t['function'] for t in tool_calls]
         content = "\n".join([t['text'] for t in choice if t['type'] == 'text']) 
         return AIResponse(id = str(uuid.uuid1()),
                 model_name=response['model'],
@@ -52,6 +55,7 @@ class AnthropicAIResponseScheme(AIResponse):
                 content=content,
                 status='RESPONSE' if not tool_calls else "TOOL_CALLS",
                 tool_calls=tool_calls)
+        
 class GoogleAIResponseScheme(AIResponse):
     @classmethod
     def parse(cls, response:dict, sid: str, model_name:str)->AIResponse:
@@ -60,6 +64,7 @@ class GoogleAIResponseScheme(AIResponse):
         def adapt(t):
             return {'function': {'name': t['name'], 'arguments':t['args']}}
         tool_calls = [adapt(p['functionCall']) for p in choice if p.get('functionCall')]
+        tool_calls = [t['function'] for t in tool_calls]
         return AIResponse(id = str(uuid.uuid1()),
                 model_name=model_name, #does not seem to return it which is fair
                 tokens_in=response['usageMetadata']['promptTokenCount'],
@@ -114,6 +119,7 @@ class LanguageModel:
         response = self._call_raw(messages=messages, functions=functions)
         """for consistency with DB we should audit here and also format the message the same with tool calls etc."""
         response = self.parse(response,context=context)
+        logger.debug(f"Response of type {response.status} with token consumption {response.tokens}")
         #self.db.repository(AIResponse).update_records(response)
         return response
     
@@ -171,7 +177,7 @@ class LanguageModel:
         e.g. db.execute('select * from "LanguageModelApi" where name = %s ', ('gpt-4o-mini',))[0]
         """
         params = self.params
-        data_content = data_content = []
+        data_content = data_content or []
         
         """we may need to adapt this e.g. for the open ai scheme"""
         tools = functions or []
@@ -237,8 +243,8 @@ class LanguageModel:
             if system_prompt:
                 data["system_instruction"] =  {   "parts": {   "text": system_prompt  } }
                     
-        logger.debug(f"request {data=}")
-        
+        #logger.debug(f"request {data=}")
+   
         response =  requests.post(url, headers=headers, data=json.dumps(data))
         
         if response.status_code not in [200,201]:

@@ -4,6 +4,9 @@ import os
 import requests
 from functools import partial
 from percolate.models.p8 import Function
+import typing
+from percolate.utils import logger
+
 
 def map_openapi_to_function(spec,short_name:str=None):
     """Map an OpenAPI endpoint spec to a function ala open AI
@@ -16,19 +19,39 @@ def map_openapi_to_function(spec,short_name:str=None):
     """
     def _map(schema):
         """map the parameters containing schema to a flatter rep"""
-        return {
-            'type' : schema.get('type'),
+        if 'schema' in schema:
+            schema = schema['schema']
+        
+        type = schema.get('type')
+        enums = None
+        """check for array types"""
+        if 'items' in schema:
+            if 'enum' in schema['items']:
+                enums = schema['items']['enum']
+        if 'enum' in schema:
+            enums = schema['enums']
+        d = {
+            'type' : type,
             'description': schema.get('description') or '' #empty descriptions can cause issues
         }
-    return {
-        'name': short_name or (spec.get('operationId') or spec.get('title')),
-        'description': spec.get('description') or spec.get('summary'),
-        'parameters' : {
-            'type': 'object',
-            'properties': {p['name']:_map(p['schema']) for p in (spec.get('parameters') or [])},
-            'required': [p['name'] for p in spec.get('parameters') or [] if p.get('required')]
-        } 
-    }
+        if enums:
+            d['enum'] = enums
+        return d
+        
+    try:
+        r =  {
+            'name': short_name or (spec.get('operationId') or spec.get('title')),
+            'description': spec.get('description') or spec.get('summary'),
+            'parameters' : {
+                'type': 'object',
+                'properties': {p['name']:_map(p) for p in (spec.get('parameters') or [])},
+                'required': [p['name'] for p in spec.get('parameters') or [] if p.get('required')]
+            } 
+        }
+    except:
+        logger.warning(f"Failing to parse {spec=}")
+        raise
+    return r
 
     
 class OpenApiSpec:
@@ -37,9 +60,9 @@ class OpenApiSpec:
     """
     def __init__(self, uri_or_spec: str| dict, token_key:str=None):
         """supply a spec object (dict) or a uri to one"""
-        self._uri_str = ""
+        self._spec_uri_str = ""
         if isinstance(uri_or_spec,str):
-            self._uri_str = uri_or_spec
+            self._spec_uri_str = uri_or_spec
             if uri_or_spec[:4].lower() == 'http':
                 uri_or_spec = requests.get(uri_or_spec)
                 if uri_or_spec.status_code == 200:
@@ -52,13 +75,26 @@ class OpenApiSpec:
                     
         if not isinstance(uri_or_spec,dict):
             raise ValueError("Unable to map input to spec. Ensure spec is a spec object or a uri pointing to one")
-        
+
         self.spec = uri_or_spec
+        """going to assume HTTPS for now TODO: consider this"""
+        if 'host' in self.spec:
+            self.host_uri = f"https://{self.spec['host']}"
+            if 'basePath' in self.spec:
+                self.host_uri += self.spec['basePath']
+        else:
+            """by convention we assume the uri is the path without the json file"""
+            self.host_uri = self._spec_uri_str.rsplit('/', 1)[0]
+
         self.token_key = token_key
         """lookup"""
         self._endpoint_methods = {op_id: (endpoint,method) for op_id, endpoint, method in self}
         self.short_names = self.map_short_names()
         
+    @property
+    def spec_uri(self):
+        return self._spec_uri_str
+    
     def map_short_names(self):
         """in the context we assume a verb and endpoint is unique"""
         d = {}
@@ -67,17 +103,31 @@ class OpenApiSpec:
             d[f"{verb}_{endpoint.lstrip('/').replace('/','_').replace('-','_').replace('{','').replace('}','')}"] = k
         return d
     
-    def iterate_models(self):
-        """yield the function models that can be saved to the database"""
+    def iterate_models(self,verbs: str | typing.List[str]=None, filter_ops: typing.Optional[str]=None):
+        """yield the function models that can be saved to the database
+        
+        Args:
+           verbs: a command separated list or string list of verbs e.g. get,post to filter for ingestion
+           filter_ops: an operation/endpoint filter list to endpoint ids
+        """
+        
+        """treat params"""
+        verbs=verbs.split(',') if isinstance(verbs,str) else verbs
+        filter_ops=verbs.split(',') if isinstance(filter_ops,str) else filter_ops
+        
         ep_to_short_names = {v:k for k,v in self.short_names.items()}
         for endpoint, grp in self.spec['paths'].items():
             for method, s in grp.items():
                 op_id = s.get('operationId')
+                if verbs and method not in verbs:
+                    continue
+                if filter_ops and op_id not in filter_ops:
+                    continue
                 fspec = map_openapi_to_function(s,short_name=ep_to_short_names[op_id])
                 yield Function(name=ep_to_short_names[op_id],
                                key=op_id,
-                               proxy_uri=self._uri_str,
-                               spec = fspec,
+                               proxy_uri=self.host_uri,
+                               function_spec = fspec,
                                verb=method,
                                endpoint=endpoint,
                                description=s.get('description'))
@@ -86,7 +136,7 @@ class OpenApiSpec:
     def __repr__(self):
         """
         """
-        return f"OpenApiSpec({self._uri_str})"
+        return f"OpenApiSpec({self._spec_uri_str})"
     
     def __getitem__(self,key):
         if key not in self._endpoint_methods:
@@ -164,3 +214,81 @@ class OpenApiSpec:
                 request_body = schema
 
         return {"parameters": parameters, "request_body": request_body}
+    
+    
+class OpenApiService:
+    def __init__(self, uri, token_or_key:str=None, spec: OpenApiSpec=None):
+        """a wrapper to invoke functions"""
+        
+        self.uri = uri
+        self.spec = spec
+        """assume token but maybe support mapping from env"""
+        self.token_or_key = token_or_key
+        
+    def invoke(self, function:Function, data:dict=None, p8_return_raw_response:bool=False, p8_full_detail_on_error: bool = False, **kwargs):
+        """we can invoke a function which has the endpoint information
+        
+        Args:
+            function: This is a wrapped model for an endpoint stored in the database
+            data: this is post-like data that can be posted for testing endpoints and we can alternative between data and kwargs
+            p8_return_raw_response: a debugging/testing tool to check raw
+            p8_full_detail_on_error: deciding how to send output to llms WIP
+            kwargs (the function call from a language model should be passed correct in context knowing the function spec
+        """
+        
+        #endpoint, verb = self.openapi.get_endpoint_method(op_id)
+        endpoint = function.endpoint
+        f = getattr(requests, function.verb)
+        """rewrite the url with the kwargs"""
+        endpoint = endpoint.format_map(kwargs)
+        endpoint = f"{self.uri}/{endpoint.lstrip('/')}"
+
+        if data is None: #callers dont necessarily know about data and may pass kwargs
+            data = kwargs
+        if data and not isinstance(data,str):
+            """support for passing pydantic models"""
+            if hasattr(data, 'model_dump'):
+                data = data.model_dump()
+            data = json.dumps(data)
+
+        headers = { } #"Content-type": "application/json"
+        if self.token_or_key:
+            headers["Authorization"] =  f"Bearer {os.environ.get(self.token_key)}"
+        
+        """f is verified - we just need the endpoint. data is optional, kwargs are used properly"""
+        response = f(
+            endpoint,
+            headers=headers,
+            params=kwargs,
+            data=data,
+        )
+
+        try:
+            response.raise_for_status()
+            if p8_return_raw_response:
+                return response
+        
+            """otherwise we try to be clever"""
+            t = response.headers.get('Content-Type') or "text" #text assumed
+            if 'json' in t:
+                return  response.json()
+            if t[:5] == 'image':
+                from PIL import Image
+                from io import BytesIO
+                return Image.open(BytesIO(response.content))
+            content = response.content
+            return content.decode() if isinstance(content,bytes) else content
+                        
+            
+        except Exception as ex:
+            if not p8_full_detail_on_error:
+                """raise so runner can do its thing"""
+                raise Exception(json.dumps(response.json())) 
+            return {
+                "data": response.json(),
+                "type": response.headers.get("Content-Type"),
+                "status": response.status_code,
+                "requested_endpoint": endpoint,
+                "info": self.model_dump(),
+                "exception" : repr(ex)
+            }

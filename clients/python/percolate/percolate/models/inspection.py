@@ -20,6 +20,17 @@ def object_namespace(o, default:str='public', exclude:typing.List[str]|str=None)
         return namespace
     return default
 
+def get_object_id(o)->str:
+    """
+    assume this is some object type or instance
+    """
+    
+    if hasattr(o, 'get_model_full_name'):
+        return o.get_model_full_name()
+    if hasattr(o,'__name__'):
+        return f"{object_namespace(o)}.{o.__name__}"
+    
+    return str(o) 
 
 def get_classes(
     base_filter: type = None,
