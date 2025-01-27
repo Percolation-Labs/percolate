@@ -2,8 +2,9 @@ from .services.PostgresService import PostgresService
 from .models import AbstractModel
 import typing
 from pydantic import BaseModel
+from .services.ModelRunner import ModelRunner
 
-def dump(**kwargs):
+def dump(*args,**kwargs):
     """TODO:"""
     pass
 
@@ -22,3 +23,7 @@ def repository(model:AbstractModel|BaseModel):
         model: a Pydantic base model or AbstractModel
     """
     return PostgresService(model)
+
+def Agent(model:AbstractModel|BaseModel):
+    """get the model runner in the context of the agent for running reasoning chains"""
+    return ModelRunner(model)

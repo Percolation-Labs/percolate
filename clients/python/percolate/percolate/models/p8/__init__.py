@@ -15,6 +15,3 @@ sample_models = [
 ]
 
 
-"""this will be a stack of messages with some useful things"""
-class MessageStack:
-    pass

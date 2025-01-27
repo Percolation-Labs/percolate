@@ -1,13 +1,13 @@
-from pydantic import BaseModel
-import percolate as p8
-from percolate.models import AbstractModel
-from percolate.models.p8 import Function, MessageStack
 import typing
-from percolate.utils import logger
-import json
 import traceback
-from percolate.services.llm import CallingContext, FunctionCall, LanguageModel
+import percolate as p8
+from pydantic import BaseModel
+from percolate.utils import logger
+from percolate.models.p8 import Function, AIResponse
 from .FunctionManager import FunctionManager
+from percolate.models import AbstractModel, MessageStack
+from percolate.services.llm import CallingContext, FunctionCall, LanguageModel, MessageStackFormatter
+
 class ModelRunner:
     """The model runner manages chaining agents and reasoning steps together in the execution loop"""
     
@@ -20,22 +20,31 @@ class ModelRunner:
         
     def __init__(self, model: BaseModel = None, allow_help: bool = True):
         """
-        A model is passed in or the default is used
-        The reason why this is passed in is to supply a minimal set of functions
+        A model is passed in or the default is used.
+        This supplies the agent context such as prompt and functions.
         If the model has no functions simple Q&A can still be exchanged with LLMs.
         More generally the model can provide a structured response format.
+        see TODO: for guidance.
         """
+        
+        """the agent model is any Pydantic Base model or Abstract model that implements the agent interface"""
         self.agent_model:AbstractModel = AbstractModel.Abstracted(model)
+        """a function manager allows for activating functions at runtime and searching and planning over functions"""
         self._function_manager = FunctionManager()
+        """the help option links in to the function manager planner"""
         self._allow_help = allow_help
+        """the repository provides the Percolate database instance"""
         self.repo = p8.repository(self.agent_model)
+        """initialize activates the agent model e.g. functions and prompt for use"""
         self.initialize()
-
+        """the messages stack is the most important control element for llm agent sessions"""
+        self.messages = MessageStack(None)
+        
     def __repr__(self):
         return f"Runner({(self.agent_model.get_model_full_name())})"
 
     def initialize(self):
-        """register the functions and other metadata from the model"""
+        """Register the functions and other metadata from the agent model"""
         self._context = None
         if self._allow_help:
             self._function_manager.add_function(self.help)  # :)
@@ -48,7 +57,7 @@ class ModelRunner:
         """more complex things will happen from here when we traverse what comes back"""
 
     def search(self, questions: typing.List[str]):
-        """run a general search on the model that is being used in the current context as per the system prompt
+        """Run a general search on the model that is being used in the current context as per the system prompt
         If you want to add multiple questions supply a list of strings as an array.
         Args:
             questions: ask one or more questions to search the data store
@@ -57,8 +66,7 @@ class ModelRunner:
         return self.repo.search(questions)
 
     def activate_functions_by_name(self, function_names: typing.List[str], **kwargs):
-        """
-        provide a list of function names to load.
+        """Provide a list of function names to load.
         The names should be fully qualified object_id.function_name
         """
 
@@ -70,7 +78,7 @@ class ModelRunner:
         }
 
     def get_entities(self, keys: typing.Optional[str]):
-        """lookup entity by one or more keys. For example if you encounter entity names or keys in question, data etc you can use
+        """Lookup entity by one or more keys. For example if you encounter entity names or keys in question, data etc you can use
         the entity search to learn more about them
         Args:
             keys: one or more names to use to lookup the entity or entities
@@ -83,7 +91,7 @@ class ModelRunner:
         return entities
 
     def help(self, questions: str | typing.List[str], context: str = None):
-        """if you are stuck ask for help with very detailed questions to help the planner find resources for you.
+        """If you are stuck ask for help with very detailed questions to help the planner find resources for you.
         If you have a hint about what the source or tool to use hint that in each question that you ask.
         For example, you can either just ask a question or you can ask "according to resource X" and then ask the question. This is important context.
 
@@ -115,14 +123,14 @@ class ModelRunner:
         f = self._function_manager[function_call.name]
         if not f:
             message = f"attempting to load function {function_call.name} which is not activated - please activate it"
-            data = MessageStack.format_function_response_error(
+            data = MessageStackFormatter.format_function_response_error(
                 function_call.name, ValueError(message), self._context
             )
         else:
             try:
                 """try call the function - assumes its some sort of json thing that comes back"""
                 data = f(**function_call.arguments) or {}
-                data = MessageStack.format_function_response_data(
+                data = MessageStackFormatter.format_function_response_data(
                     function_call.name, data, self._context
                 )
                 """if there is an error, how you format the message matters - some generic ones are added
@@ -130,12 +138,12 @@ class ModelRunner:
                 """
             except TypeError as tex:  # type errors are usually the agents fault
                 logger.warning(f"Error calling function {tex}")
-                data = MessageStack.format_function_response_type_error(
+                data = MessageStackFormatter.format_function_response_type_error(
                     function_call.name, tex, self._context
                 )
             except Exception as ex:  # general errors are usually our fault
                 logger.warning(f"Error calling function {traceback.format_exc()}")
-                data = MessageStack.format_function_response_error(
+                data = MessageStackFormatter.format_function_response_error(
                     function_call.name, ex, self._context
                 )
 
@@ -145,7 +153,7 @@ class ModelRunner:
 
     @property
     def functions(self) -> typing.Dict[str, Function]:
-        """provide access to the function manager's functions"""
+        """Provide access to the function manager's functions"""
         return self._function_manager.functions
 
     def run(self, question: str, context: CallingContext = None, limit: int = None):
@@ -153,6 +161,7 @@ class ModelRunner:
 
         """setup all the bits before running the loop"""
         self._context = context or CallingContext()
+        """a generic wrapper around the REST interfaces of any LLM client"""
         lm_client = LanguageModel.from_context(self._context)
 
         """messages are system prompt etc. agent model's can override how message stack is constructed"""
@@ -167,9 +176,10 @@ class ModelRunner:
                 context=self._context,
                 functions=list(self.functions.values()),
             )
-            if isinstance(response, FunctionCall):
-                """call one or more functions and update messages"""
-                self.invoke(response)
+            if function_calls := response.tool_calls:
+                """call one or more functions and update messages - functions can be updated inside this context"""
+                for func_call in function_calls: #its assumed to be only one for now but we could par do in future
+                    self.invoke(func_call)
                 continue
             if response is not None:
                 # marks the fact that we have unfinished business
@@ -178,7 +188,7 @@ class ModelRunner:
         """fire telemetry"""
         p8.dump(question, response, self._context)
 
-        return response
+        return response.content
 
     def __call__(
         self, question: str, context: CallingContext = None, limit: int = None

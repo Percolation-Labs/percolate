@@ -10,6 +10,7 @@ import types
 from percolate.utils.env import P8_EMBEDDINGS_SCHEMA
 from .utils import SqlModelHelper
 from pydantic._internal._model_construction import ModelMetaclass
+from .MessageStack import MessageStack
 
 def ensure_model_not_instance(cls_or_instance: typing.Any):
     if not isinstance(cls_or_instance, ModelMetaclass) and isinstance(
@@ -19,7 +20,8 @@ def ensure_model_not_instance(cls_or_instance: typing.Any):
         return cls_or_instance.__class__
     return cls_or_instance
     
-    
+    """this will be a stack of messages with some useful things"""
+
 class AbstractModelMixin:
     """adds declarative metadata scraping from objects"""
     
@@ -93,6 +95,14 @@ class AbstractModelMixin:
                 except Exception as ex:
                     pass
         return cls(**values)
+    
+    @classmethod
+    def build_message_stack(cls, question:str, **kwargs) -> MessageStack | typing.List[dict]:
+        """Generate a message stack using a list of messages.
+        These messages are in the list of content/role generalized LLM messages.
+        This is added here so that BAseModel's can override but by default we just use the MessageStack utility
+        """
+        return MessageStack.build_message_stack(cls, question, **kwargs)
 
     @classmethod
     def to_sql_model_helper(cls):
