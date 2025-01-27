@@ -13,6 +13,8 @@ from percolate.utils import make_uuid
 import datetime
 from .. import DefaultEmbeddingField
 from percolate.utils.names import EmbeddingProviders
+import percolate as p8
+
 class Function(AbstractEntityModel):
     """Functions are external tools that agents can use. See field comments for context.
     Functions can be searched and used as LLM tools. 
@@ -27,6 +29,68 @@ class Function(AbstractEntityModel):
     description: str = DefaultEmbeddingField('', description="A detailed description of the function - may be more comprehensive than the one within the function spec - this is semantically searchable")
     function_spec: dict = Field(description="A function description that is OpenAI and based on the OpenAPI spec")
     proxy_uri: str = Field(description='a reference to an api or library namespace that qualifies the named function')
+    
+    def __call__(self, *args, **kwargs):
+        """
+        Convenience to call any function via its proxy
+        """
+        return p8.get_proxy(self.proxy_uri).invoke(self, **kwargs)
+        
+    @classmethod
+    def from_callable(cls, fn:typing.Callable):
+        def _map(f):
+            """make sure the structure from pydantic is the same as used elsewhere for functions"""
+            d = dict(f)
+            name = d.pop('title')
+            desc = d.pop('description')
+            return {
+                'name': name,
+                'parameters' :d,
+                'description': desc
+            }
+        
+        proxy_uri = fn.__self__ if hasattr(fn, '__self__') else 'lib'
+        if not isinstance(proxy_uri,str):
+            proxy_uri = inspection.get_object_id(proxy_uri)
+            
+        s = _map(AbstractModel.create_model_from_function(fn).model_json_schema())
+        key = s['name'] if not proxy_uri else f"{proxy_uri}.{s['name']}"
+        id_md5_uuid =  uuid.uuid3(uuid.NAMESPACE_DNS, key)   
+        return cls(id=str(id_md5_uuid), 
+                   name = s['name'],
+                   key  = key, 
+                   endpoint=s['name'],
+                   verb='get',
+                   proxy_uri=proxy_uri,
+                   spec=s, 
+                   function_spec=s,
+                   description=s['description'] )
+        
+    @model_validator(mode='before')
+    @classmethod
+    def _f(cls, values):
+        if not values.get('id'):
+            values['id'] = make_uuid({ 'key': values['name'], 'proxy_uri':values['proxy_uri']})
+        return values
+        
+   
+class ApiProxy(AbstractEntityModel):
+    """A list of proxies or APIs that have attached functions or endpoints - links to proxy_uri on the Function""" 
+    id: typing.Optional[uuid.UUID | str] = Field(None, description="Will default to a hash of the uri")
+    name: typing.Optional[str] = Field(None, description="A unique api friendly name")
+    proxy_uri: str = Field(description='a reference to an api or library namespace that qualifies the named function')
+    token: typing.Optional[str] = None
+    
+            
+    @model_validator(mode='before')
+    @classmethod
+    def _f(cls, values):
+        if not values.get('name'):
+            values['name'] = values['proxy_uri']
+        if not values.get('id'):
+            values['id'] = make_uuid(values['proxy_uri'])
+        return values
+        
     
     
 class LanguageModelApi(AbstractEntityModel):
@@ -125,7 +189,12 @@ class TokenUsage(AbstractModel):
     tokens_other: typing.Optional[int] = Field(None, description="the number of tokens consumed for functions and other metadata")
     session_id: typing.Optional[uuid.UUID| str  ] = Field(description="Session id for a conversation")
     
-
+    @model_validator(mode='before')
+    @classmethod
+    def _f(cls, values):
+        if not values.get('tokens'):
+            values['tokens'] = values['tokens_in'] + values['tokens_out']
+        return values
 class AIResponse(TokenUsage):
     """Each atom in an exchange between users, agents, assistants and so on. 
     We generate questions with sessions and then that triggers an exchange. 

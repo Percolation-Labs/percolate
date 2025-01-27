@@ -1,17 +1,27 @@
 import typing
-from percolate.models.p8 import Function
+from percolate.models.p8 import Function, PlanModel
 from percolate.models import AbstractModel
-
+import percolate as p8
+from percolate.utils import logger
 class FunctionManager:
     def __init__(cls):
         cls._functions= {}
+        cls.repo = p8.repository(Function)
+        
+    def __getitem__(cls, key):
+        """unsafely gets the function"""
+        return cls._functions[key]
     
     def add_function(cls, function: typing.Callable | Function):
         """add a function to the stack of functions given to the llm
         
             Args: a callable function or percolate Function type
         """
-        pass
+        if not isinstance(function, Function):
+            logger.debug(f"adding function: {function}")
+            function = Function.from_callable(function)
+        cls._functions[function.name] = function
+        logger.debug(f"added function {function.name}")
     
     
     def activate_agent_context(cls, agent_model: AbstractModel):
@@ -23,10 +33,12 @@ class FunctionManager:
         Args:
             agent_model: Any class type with @classmethods that can be passed to the LLM
         """
-        
-        pass
-    
-    
+        function_keys = list((agent_model.get_model_functions() or {}).keys())
+        for f in cls.repo.get_by_name(function_keys, as_model=True):
+            cls.add_function(f)
+            
+        """we may lookup the anent and do something with the metadata too"""
+ 
     def add_functions_by_key(cls, function_keys : typing.List[str]|str):
         """Add function or functions by key(s) - the function keys are expected to existing in the registry
         
@@ -37,7 +49,11 @@ class FunctionManager:
         if function_keys:
             if not isinstance(function_keys,list):
                 function_keys = [function_keys]
-                """activate here"""        
+        """activate here"""   
+        required = [f for f in function_keys if f not in cls.functions]     
+        if required:
+            for f in cls.repo.get_by_name(required, as_model=True):
+                cls.add_function(f)
         
     def plan(cls, questions: str | typing.List[str], use_cache: bool = False):
         """based on one or more questions, we will construct a plan.
@@ -49,8 +65,12 @@ class FunctionManager:
             use_cache: (default=False) use the in memory cache rather than the database function to make the plan
         """
         
-        pass
-    
+        """TODO
+        in the database we need a Plan model that also can search agents and return a plan
+        but in python we can just select the data into the planner agent and fetch the plan
+        """
+        
+        return p8.Agent(PlanModel).run(questions, data=cls.repo.select())
     
     @property
     def functions(cls):

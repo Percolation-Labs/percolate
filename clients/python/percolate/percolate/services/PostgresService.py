@@ -118,9 +118,7 @@ class PostgresService:
             statement = add_scripts(secondary_scripts,statement)
             
         return statement
-                
-        
-    
+            
     def register(
         self,
         plan: bool = False,
@@ -233,7 +231,7 @@ class PostgresService:
 
     def select(self, fields: typing.List[str] = None, **kwargs):
         """
-        select based on the model
+        select based on the model and use kwargs as quality or in-list template predicates
         """
         assert (
             self.model is not None
@@ -244,10 +242,20 @@ class PostgresService:
             data = tuple(kwargs.values())
         return self.execute(self.helper.select_query(fields, **kwargs), data=data)
 
-    def get_by_id(cls, id: str):
-        """select model by id"""
-        return cls.select(id=id)
+    def get_by_name(cls, name: str, as_model:bool = False):
+        """select model by name"""
+        data =  cls.select(name=name)
+        if data and as_model and cls.model:
+            return [cls.model(**d) for d in data]
+        return data
 
+    def get_by_id(cls, id: str, as_model:bool = False):
+        """select model by id"""
+        data =  cls.select(id=id)
+        if data and as_model and cls.model:
+            return [cls.model(**d) for d in data]
+        return data
+    
     def select_to_model(self, fields: typing.List[str] = None):
         """
         like select except we construct the model objects

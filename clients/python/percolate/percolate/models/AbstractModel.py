@@ -97,12 +97,12 @@ class AbstractModelMixin:
         return cls(**values)
     
     @classmethod
-    def build_message_stack(cls, question:str, **kwargs) -> MessageStack | typing.List[dict]:
+    def build_message_stack(cls, question:str, data: typing.List[dict] = None, **kwargs) -> MessageStack | typing.List[dict]:
         """Generate a message stack using a list of messages.
         These messages are in the list of content/role generalized LLM messages.
         This is added here so that BAseModel's can override but by default we just use the MessageStack utility
         """
-        return MessageStack.build_message_stack(cls, question, **kwargs)
+        return MessageStack.build_message_stack(cls, question, data=data, **kwargs)
 
     @classmethod
     def to_sql_model_helper(cls):
@@ -198,16 +198,17 @@ class AbstractModel(BaseModel, ABC, AbstractModelMixin):
         model = ensure_model_not_instance(model)
          
         for  method in inspection.get_class_and_instance_methods(AbstractModelMixin):
-   
-            if isinstance(method, classmethod):
-                # Rebind the classmethod by wrapping it for SampleModel
-                bound_method = classmethod(method.__func__.__get__(model, model))
-                setattr(model, method.__name__, bound_method)
-               
-            else:
-                # For instance methods, bind them to the SampleModel directly
-                bound_method = types.MethodType(method.__func__, model)
-                setattr(model, method.__name__, bound_method)
+            """only add if we are not replacing"""
+            if not hasattr(model, method.__name__):
+                if isinstance(method, classmethod):
+                    # Rebind the classmethod by wrapping it for SampleModel
+                    bound_method = classmethod(method.__func__.__get__(model, model))
+                    setattr(model, method.__name__, bound_method)
+                
+                else:
+                    # For instance methods, bind them to the SampleModel directly
+                    bound_method = types.MethodType(method.__func__, model)
+                    setattr(model, method.__name__, bound_method)
 
         return model
     
