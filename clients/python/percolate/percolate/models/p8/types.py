@@ -64,7 +64,9 @@ class Function(AbstractEntityModel):
                    proxy_uri=proxy_uri,
                    spec=s, 
                    function_spec=s,
-                   description=s['description'] )
+                   description=s['description'],
+                   #this is ignored by Function but the runtime function can carry it
+                   fn=fn)
         
     @model_validator(mode='before')
     @classmethod
@@ -79,7 +81,7 @@ class ApiProxy(AbstractEntityModel):
     id: typing.Optional[uuid.UUID | str] = Field(None, description="Will default to a hash of the uri")
     name: typing.Optional[str] = Field(None, description="A unique api friendly name")
     proxy_uri: str = Field(description='a reference to an api or library namespace that qualifies the named function')
-    token: typing.Optional[str] = None
+    token: typing.Optional[str] = Field(None, description="the token to save")
     
             
     @model_validator(mode='before')
