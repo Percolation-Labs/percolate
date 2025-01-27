@@ -10,40 +10,65 @@ from percolate.services import PostgresService
 from percolate.models.p8 import AIResponse
 import uuid
 from percolate.utils import logger
+import traceback
 
-# return AIResponse(model_name=self.model_name,
-#                 tokens_in=tokens_in,
-#                 tokens_out=tokens_out,
-#                 session_id=context.session_id,
-#                 content=content,
-#                 status=status,
-#                 tool_calls=tool_calls)
-
+ANTHROPIC_MAX_TOKENS_IN = 8192
 class OpenAIResponseScheme(AIResponse):
     @classmethod
     def parse(cls, response:dict, sid: str)->AIResponse:
         """
+        'tool_calls': [{'id': 'call_0KPgsQaaso8IXPUpG6ktM1DC',
+        'type': 'function',
+        'function': {'name': 'get_weather',
+            'arguments': '{"city":"Dublin","date":"2023-10-07"}'}}],
+            
         """
         choice = response['choices'][0]
-        tool_calls = []
+        tool_calls = choice['message'].get('tool_calls') or []
         return AIResponse(id = str(uuid.uuid1()),
                 model_name=response['model'],
                 tokens_in=response['usage']['prompt_tokens'],
                 tokens_out=response['usage']['completion_tokens'],
                 session_id=sid,
                 role=choice['message']['role'],
-                content=choice['message']['content'],
+                content=choice['message']['content'] or '',
                 status='RESPONSE' if not tool_calls else "TOOL_CALLS",
                 tool_calls=tool_calls)
         
 class AnthropicAIResponseScheme(AIResponse):
     @classmethod
-    def parse(cls, response:dict, sid: str)->AIResponse:
-        return 
-class GoogleResponseScheme(AIResponse):
+    def parse(cls, response:dict, sid: str )->AIResponse:
+        choice = response['content'] 
+        def adapt(t):
+            return {'function': {'name': t['name'], 'arguments':t['input']}}
+        tool_calls = [adapt(t) for t in choice if t['type'] == 'tool_use']
+        content = "\n".join([t['text'] for t in choice if t['type'] == 'text']) 
+        return AIResponse(id = str(uuid.uuid1()),
+                model_name=response['model'],
+                tokens_in=response['usage']['input_tokens'],
+                tokens_out=response['usage']['output_tokens'],
+                session_id=sid,
+                role=response['role'],
+                content=content,
+                status='RESPONSE' if not tool_calls else "TOOL_CALLS",
+                tool_calls=tool_calls)
+class GoogleAIResponseScheme(AIResponse):
     @classmethod
-    def parse(cls, response:dict, sid: str)->AIResponse:
-        return 
+    def parse(cls, response:dict, sid: str, model_name:str)->AIResponse:
+        choice = response['candidates'][0]['content']['parts']
+        content_elements = [p['text'] for p in choice if p.get('text')]
+        def adapt(t):
+            return {'function': {'name': t['name'], 'arguments':t['args']}}
+        tool_calls = [adapt(p['functionCall']) for p in choice if p.get('functionCall')]
+        return AIResponse(id = str(uuid.uuid1()),
+                model_name=model_name, #does not seem to return it which is fair
+                tokens_in=response['usageMetadata']['promptTokenCount'],
+                tokens_out=response['usageMetadata']['candidatesTokenCount'],
+                session_id=sid,
+                role=response['candidates'][0]['content']['role'],
+                content=',\n'.join(content_elements),
+                status='RESPONSE' if not tool_calls else "TOOL_CALLS",
+                tool_calls=tool_calls)
 
 class LanguageModel:
     """the simplest language model wrapper we can make"""
@@ -52,25 +77,37 @@ class LanguageModel:
         self.model_name = model_name
         self.db = PostgresService()
         #TODO we can use a cache for this in future
-        self.params = self.db.execute('select * from p8."LanguageModelApi" where name = %s ', (model_name,))[0]
+        self.params = self.db.execute('select * from p8."LanguageModelApi" where name = %s ', (model_name,))
+        if not self.params:
+            raise Exception(f"The model {model_name} does not exist in the Percolate settings")
+        self.params = self.params[0]
+        if not self.params['token']:
+            """if the token is not stored in the database we use whatever token env key to try and load it from environment"""
+            self.params['token'] = os.environ.get(self.params['token_env_key'])
+            if not self.params['token']:
+                raise Exception(f"There is no token or token key configured for model {self.model_name} - you should add an entry to Percolate for the model using the examples in p8.LanguageModelApi")
+        """we use the env in favour of what is in the store"""
+        self.params['token'] = os.environ.get(self.params['token_env_key']) if self.params.get('token_env_key') else self.params.get('token') 
         
     def parse(self, response, context: CallingContext=None) -> AIResponse:
         """the llm response form openai or other schemes must be parsed into a dialogue.
         this is also done inside the database and here we replicate the interface before dumping and returning to the executor
         """
         try:
-            status = response.status_code
+            if response.status_code not in [200,201]:
+                pass #do something for errors
             """check http codes TODO - if there is an error then we can return an error AIResponse"""
             response = response.json()
             
+            sid = None if not context else context.session_id
             """check the HTTP response first"""
             if self.params.get('scheme') == 'google':
-                return GoogleResponseScheme.parse(response, sid=context.session_id)
+                return GoogleAIResponseScheme.parse(response, sid=sid, model_name=self.model_name)
             if self.params.get('scheme') == 'anthropic':
-                return AnthropicAIResponseScheme.parse(response,sid=context.session_id)
-            return OpenAIResponseScheme.parse(response,sid=context.session_id)
+                return AnthropicAIResponseScheme.parse(response,sid=sid)
+            return OpenAIResponseScheme.parse(response,sid=sid)
         except Exception as ex:
-            logger.warning(f"failing to parse {response=}")
+            logger.warning(f"failing to parse {response=} {traceback.format_exc()}")
         
     def __call__(self, messages: MessageStack, functions: typing.List[dict], context: CallingContext=None ) -> AIResponse:
         """call the language model with the message stack and functions"""
@@ -80,6 +117,15 @@ class LanguageModel:
         #self.db.repository(AIResponse).update_records(response)
         return response
     
+    def ask(self, question:str, functions: typing.List[dict]=None, system_prompt: str=None):
+        """simple check frr question. our interface normally uses MessageStack and this is a more generic way
+        Args:
+            question: any question
+            system_prompt: to test altering model output behaviour
+            functions: optional list of functions in the OpenAPI like scheme
+        """
+        return self.__call__(MessageStack(question,system_prompt=system_prompt), functions=functions)
+        
         
     def _call_raw(self, messages: MessageStack, functions: typing.List[dict]):
          """the raw api call exists for testing - normally for consistency with the database we use a different interface"""
@@ -95,15 +141,22 @@ class LanguageModel:
       
     def _elevate_functions_to_tools(self, functions: typing.List[dict]):
         """slightly different dialect of function wrapper"""
-        return 
+        return [{'type': 'function', 'function': f} for f in functions or []]
           
     def _adapt_tools_for_anthropic(self, functions: typing.List[dict]):
         """slightly different dialect of function wrapper"""
-        return 
+        def _rewrite(d):
+            return {
+                'name' : d['name'],
+                'input_schema': d['parameters'],
+                'description': d['description']
+            }
+ 
+        return [_rewrite(d) for d in functions or []]
     
     def call_api_simple(self, 
                         question:str, 
-                        functions: typing.List[dict], 
+                        functions: typing.List[dict]=None, 
                         system_prompt:str=None, 
                         data_content:typing.List[dict]=None,
                         is_streaming:bool = False,
@@ -113,7 +166,7 @@ class LanguageModel:
         """
         Simple REST wrapper to use with any language model
         """
-        
+        logger.debug(f"invoking model {self.model_name}")
         """select this from the database or other lookup
         e.g. db.execute('select * from "LanguageModelApi" where name = %s ', ('gpt-4o-mini',))[0]
         """
@@ -121,10 +174,14 @@ class LanguageModel:
         data_content = data_content = []
         
         """we may need to adapt this e.g. for the open ai scheme"""
-        tools = functions
+        tools = functions or []
         
         url = params["completions_uri"]
-        token = os.environ.get(params['token_env_key'])
+        """use the env first"""
+         
+        token = params['token']
+        if not token or len(token)==0:
+            raise Exception(f"There is no API KEY in the env or database for model {self.model_name} - check ENV {params.get('token_env_key')}")
         headers = {
             "Content-Type": "application/json",
         }
@@ -132,7 +189,7 @@ class LanguageModel:
             headers["Authorization"] = f"Bearer {token}"
             tools = self._elevate_functions_to_tools(functions)
         if params['scheme'] == 'anthropic':
-            headers["x-api-key"] =   token
+            headers["x-api-key"] = token
             headers["anthropic-version"] = self.params.get('anthropic-version', "2023-06-01")
             tools = self._adapt_tools_for_anthropic(functions)
         if params['scheme'] == 'google':
@@ -145,10 +202,24 @@ class LanguageModel:
                 #add in any data content into the stack for arbitrary models
                 *data_content
             ],
-            "tools": tools  
+            "tools": tools,
+            'temperature': temperature
         }
         if params['scheme'] == 'anthropic':
-            data["max_tokens"] = kwargs.get('max_tokens',-1)
+            data = {
+                "model": params['model'],
+                'temperature': temperature,
+                "messages": [
+                    {"role": "user", "content": question}, 
+                    *data_content
+                ]
+            }
+            if tools:
+                data['tools'] = tools
+            if system_prompt:
+                data['system'] = system_prompt
+            data["max_tokens"] = kwargs.get('max_tokens',ANTHROPIC_MAX_TOKENS_IN)
+             
         if params['scheme'] == 'google':
             data = {
                 "contents": [
@@ -160,9 +231,18 @@ class LanguageModel:
                     #we could disable this for empty tools
                     "function_calling_config": {"mode": "ANY"}
                 },
-                "tools": [{'function_declarations': tools}]
+                "tools": [{'function_declarations': tools}] if tools else None,
+                #'temperature': temperature
             }
+            if system_prompt:
+                data["system_instruction"] =  {   "parts": {   "text": system_prompt  } }
+                    
+        logger.debug(f"request {data=}")
         
-        return requests.post(url, headers=headers, data=json.dumps(data))
+        response =  requests.post(url, headers=headers, data=json.dumps(data))
         
-    
+        if response.status_code not in [200,201]:
+            logger.warning(f"failed to submit {data=} {response.json()}")
+            
+        return response
+        

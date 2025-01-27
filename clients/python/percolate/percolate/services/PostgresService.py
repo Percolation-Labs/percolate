@@ -23,6 +23,7 @@ class PostgresService:
                 """we do this because its easy for user to assume the instance is what we want instead of the type"""
                 self.model = AbstractModel.Abstracted(ensure_model_not_instance(model))
                 self.helper:SqlModelHelper = SqlModelHelper(model) 
+            else: self.model=None
         except:
             logger.warning(traceback.format_exc())
             logger.warning(
