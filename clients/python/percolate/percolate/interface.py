@@ -27,3 +27,10 @@ def repository(model:AbstractModel|BaseModel):
 def Agent(model:AbstractModel|BaseModel):
     """get the model runner in the context of the agent for running reasoning chains"""
     return ModelRunner(model)
+
+def get_language_model_settings():
+    """iterates through language models configured in the database.
+    this is a convenience as you can also select * from p8."LanguageModelApi"
+    """
+    
+    return PostgresService().execute('select * from p8."LanguageModelApi"')
