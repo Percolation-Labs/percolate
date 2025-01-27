@@ -4,13 +4,19 @@
 from .CallingContext import CallingContext
 from .LanguageModel import LanguageModel
 from .MessageStackFormatter import MessageStackFormatter
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 import typing
-
+import json
 class FunctionCall(BaseModel):
     name: str
     arguments: str | dict
     
+    @model_validator(mode='before')
+    @classmethod
+    def _val(cls, values):
+        if isinstance(values['arguments'], str):
+            values['arguments'] = json.loads(values['arguments'])
+        return values
   
       
 def _check_all(question  = "what is the capital of ireland and give me one fun fact too", filter_model_keys:typing.List[str]=None, functions: typing.List[dict]=None):
