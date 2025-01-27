@@ -9,12 +9,17 @@ def dump(*args,**kwargs):
     """TODO:"""
     pass
 
-def get_entities(keys: str | typing.List):
+def get_entities(keys: str | typing.List)->typing.List[dict]:
     """
     get entities from their keys in the database
+    
+    **Args:
+        keys: one or more keys 
     """
 
-    return PostgresService().get_entities(keys)
+    data =  PostgresService().get_entities(keys)
+ 
+    return data
 
 def repository(model:AbstractModel|BaseModel):
     """gets a repository for the model. 
@@ -25,9 +30,9 @@ def repository(model:AbstractModel|BaseModel):
     """
     return PostgresService(model)
 
-def Agent(model:AbstractModel|BaseModel):
+def Agent(model:AbstractModel|BaseModel, **kwargs):
     """get the model runner in the context of the agent for running reasoning chains"""
-    return ModelRunner(model)
+    return ModelRunner(model,**kwargs)
 
 def get_language_model_settings():
     """iterates through language models configured in the database.
@@ -44,7 +49,7 @@ def get_proxy(proxy_uri:str):
     Args:
         proxy_uri: an openapi rest api or a native schema name for the database - currently the `p8` schema is assumed
     """
-    if 'http' or 'https' in proxy_uri:
+    if 'http' in proxy_uri or 'https' in proxy_uri:
         return OpenApiService(proxy_uri)
     if 'p8.' in proxy_uri:
         return PostgresService()
@@ -52,3 +57,12 @@ def get_proxy(proxy_uri:str):
     raise NotImplemented("""We will add a default library proxy for the functions in the library 
                          but typically the should just be added at run time _as_ callables since 
                          we can recover Functions from callables""")
+    
+def get_planner()->typing.Callable:
+    """retrieves a wrapper to the planner agent which takes a question for planning
+    
+    """
+    from percolate.models.p8 import Function,PlanModel
+    from functools import partial
+    a = Agent(PlanModel,allow_help=False, init_data =repository(Function).select())
+    return a

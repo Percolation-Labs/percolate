@@ -1,5 +1,6 @@
 from pydantic import BaseModel
 from percolate.models import AbstractModel
+import json
 import typing
 class MessageStack:
     def __init__(self, question: str, system_prompt:str=None, data: typing.List[dict] = None):
@@ -30,9 +31,9 @@ class MessageStack:
         """
         if data:
             """need to think about the best way to add this"""
-            data = {
+            data = [{
                 "role": "user",
-                "content": data                
-            }
-        return MessageStack(question=question, system_prompt=abstracted_model.get_model_description(),data=data)
+                "content": json.dumps(data,default=str)                
+            }]
+        return MessageStack(question=question, system_prompt=abstracted_model.get_model_description(), data = data)
         

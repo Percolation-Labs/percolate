@@ -54,10 +54,10 @@ class PlanFunctions(AbstractModel):
 
 class PlanModel(AbstractModel):
     """
-    this is a base class for a plan
-    a plan is something that has a question and a schema
-    the plan can be chained into a dependency model
-    plans in a graph should have unique names
+    You are an agent that plans function calling and agent resources for other agents but you do not call functions yourself.
+    Respond to the caller only with the context you ascertain from the data you are given.
+    You should construct a Directed Acyclic Graph (RAG) of one or more functions that can be called.
+    Observe where there are dependencies between functions
     """
 
     id : typing.Optional[uuid.UUID | str ] = Field(None, description="An id for the plan - better to set this but we can add them uniquely to users and sessions to")

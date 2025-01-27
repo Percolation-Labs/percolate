@@ -61,7 +61,13 @@ class PostgresService:
         if keys:
             if not isinstance(keys,list):
                 keys = [keys]
-                """TODO"""            
+                """TODO"""      
+            data = None #TODO
+        if not data:
+            return [{
+                "status": "NO DATA",
+                "message": f"There were no data when we fetched {keys=} Please use another method to answer the question or return to the user with a new suggested plan or summary of what you know so far. If you still have different functions to use please try those before completion." 
+            }]      
     def search(self, question:str):
         """
         If the repository has been activated with a model we use the models search function
