@@ -61,7 +61,19 @@ class PostgresService:
             if not isinstance(keys,list):
                 keys = [keys]
                 """TODO"""            
-            
+    def search(self, question:str):
+        """
+        If the repository has been activated with a model we use the models search function
+        Otherwise we use percolates generic plan and search.
+        Either way, feel free to ask a detailed question and we will seek data.
+        
+        Args:
+            question: detailed natural language question 
+        """
+        
+        pass
+        
+        
     def get_model_database_schema(self):
         assert self.model is not None, "The model is empty - you should construct an instance of the postgres service as a repository(Model)"
         q = f"""SELECT 
