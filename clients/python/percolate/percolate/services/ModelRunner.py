@@ -160,7 +160,16 @@ class ModelRunner:
  
         return [f.function_spec for _,f  in self._function_manager.functions.items()]
 
-    def run(self, question: str, context: CallingContext = None, limit: int = None, data: typing.List[dict] = None):
+    def __call__(
+        self, question: str, context: CallingContext = None, limit: int = None,data: typing.List[dict] = None, language_model:str=None
+    ):
+        """
+        Ask a question to kick of the agent loop
+        """
+        return self.run(question, context, data=data, limit=limit,language_model=language_model)
+
+
+    def run(self, question: str, context: CallingContext = None, limit: int = None, data: typing.List[dict] = None, language_model:str=None):
         """Ask a question to kick of the agent loop
         
         Args:
@@ -173,7 +182,7 @@ class ModelRunner:
         """sometimes you may want to initialize your agent with a bunch of data"""
         data = data or self._init_data
         """setup all the bits before running the loop"""
-        self._context = context or CallingContext()
+        self._context = context or CallingContext(model=language_model)
         """a generic wrapper around the REST interfaces of any LLM client"""
         lm_client = LanguageModel.from_context(self._context)
 
@@ -203,10 +212,3 @@ class ModelRunner:
 
         return response.content
 
-    def __call__(
-        self, question: str, context: CallingContext = None, limit: int = None
-    ):
-        """
-        Ask a question to kick of the agent loop
-        """
-        return self.run(question, context or CallingContext(), limit=limit)
