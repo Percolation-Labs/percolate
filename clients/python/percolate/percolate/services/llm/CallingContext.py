@@ -82,3 +82,14 @@ class CallingContext(ApiCallingContext):
     def is_streaming(cls):
         """the streaming mode is either of these cases"""
         return cls.prefers_streaming or cls.streaming_callback is not None
+
+    @classmethod
+    def with_model(cls, model_name:str):
+        """
+        construct the default model context but with different model
+        """
+        
+        defaults = CallingContext().model_dump()
+        if model_name:
+            defaults['model'] = model_name
+        return CallingContext(**defaults)

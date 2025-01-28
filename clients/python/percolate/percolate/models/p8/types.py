@@ -36,16 +36,51 @@ class Function(AbstractEntityModel):
         """
         return p8.get_proxy(self.proxy_uri).invoke(self, **kwargs)
         
+    
     @classmethod
-    def from_callable(cls, fn:typing.Callable):
+    def from_callable(cls, fn:typing.Callable, remove_untyped:bool=True):
+        def process_properties(properties: dict):
+             
+            untyped = []
+            """google at least wont like some of these but they are redundant anyway"""
+            for key, details in properties.items():
+                for remove_field in ['title', 'default']:
+                    if remove_field in details:
+                        details.pop(remove_field)
+       
+                if 'anyOf' in details:
+                    new_list = [t for t in details['anyOf'] if t['type']!= 'null']
+                   
+                    #temp ignore anything after the first type
+                    if len(new_list) >= 1:
+                        details['type'] = new_list[0]['type']
+                        details.pop('anyOf')
+                    else:
+                        details.pop('anyOf')
+                        details['oneOf'] = new_list
+               
+                if 'properties' in details:
+                    process_properties(details['properties'])
+                
+                """for language models there is no point sending untyped information
+                TODO: handle this better e.g. typed kwargs - specifying additional properties true might be enough but its unclear how to handle them anyway
+                """
+                if not details and remove_untyped:
+                    untyped.append(key)
+                
+
+            
         def _map(f):
             """make sure the structure from pydantic is the same as used elsewhere for functions"""
-            d = dict(f)
-            name = d.pop('title')
-            desc = d.pop('description')
+            p = dict(f)
+            if 'properties' in p:
+                process_properties(p['properties'])
+                   
+            name = p.pop('title')
+            desc = p.pop('description')
             return {
                 'name': name,
-                'parameters' :d,
+                'parameters' :p,
                 'description': desc
             }
         
@@ -208,7 +243,7 @@ class AIResponse(TokenUsage):
     status: typing.Optional[str] = Field(description="The status of the session such as REQUEST|RESPONSE|ERROR|TOOL_CALL|STREAM_RESPONSE")
     tool_calls: typing.Optional[typing.List[dict]] = Field(default=None, description="Tool calls are requests from language models to call tools")
     tool_eval_data: typing.Optional[dict] = Field(default=None, description="The payload may store the eval from the tool especially if it is small data")
-        
+    verbatim: typing.Optional[dict|typing.List[dict]] = Field(default=None, description="the verbatim message from the language model - we dont serialized this", exclude=True)        
 class Session(AbstractModel):
     """Tracks groups if session dialogue"""
     id: uuid.UUID| str  

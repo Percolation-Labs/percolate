@@ -34,27 +34,31 @@ def map_openapi_to_function(spec,short_name:str=None):
        fns = [map_openai_to_function(openpi_spec_json['/weather']['get'])]
        tools = [{'type': 'function', 'function': f} for f in fns]
        ```
+       
+       TODO: create a pydantic model for this but for now im just trying to understand it and see who complains
     """
     def _map(schema):
-        """map the parameters containing schema to a flatter rep"""
+        """
+        Recursively map the parameters containing schema to a flatter representation,
+        retaining only 'type', 'description', and optional 'enum' in nested types.
+        """
         if 'schema' in schema:
             schema = schema['schema']
-        
-        type = schema.get('type')
-        enums = None
-        """check for array types"""
-        if 'items' in schema:
-            if 'enum' in schema['items']:
-                enums = schema['items']['enum']
-        if 'enum' in schema:
-            enums = schema['enums']
-        d = {
-            'type' : type,
-            'description': schema.get('description') or '' #empty descriptions can cause issues
+        mapped_schema = {
+            'type': schema.get('type'),
+            'description': schema.get('description', '')  
         }
-        if enums:
-            d['enum'] = enums
-        return d
+        
+        if 'enum' in schema:
+            mapped_schema['enum'] = schema['enum']
+
+        if schema.get('type') == 'array' and 'items' in schema:
+            mapped_schema['items'] = _map(schema['items'])
+
+        if schema.get('type') == 'object' and 'properties' in schema:
+            mapped_schema['properties'] = {k: _map(v) for k, v in schema['properties'].items()}
+
+        return mapped_schema
         
     try:
         r =  {

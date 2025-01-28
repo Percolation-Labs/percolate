@@ -26,8 +26,7 @@ def add_api(name:str, uri:str, token:str=None, file:str=None, verbs: str | typin
         filter_ops: an operation/endpoint filter list to endpoint ids
     """
     from percolate.services.OpenApiService import OpenApiSpec
-    
-  
+      
     service = OpenApiSpec(uri)
     logger.info(f"Adding API {uri=}")
     """register the api"""
