@@ -100,6 +100,15 @@ To connect to a dedicated Percolate cloud instance, you will be able request a P
 
 The Postgres Extension is built in C and Zig. Instructions to install locally and develop the extension will be given below
 
+
+Jupyter
+
+git attribute removes contents on commit
+```bash
+git config --global filter.strip-notebook-output.clean "jq --indent 1 '.cells[] |= if .outputs then .outputs = [] else . end | .metadata = {}' 2>/dev/null || cat"
+```
+
+
 ## Connect and Learn
 
 To learn more about or stay up to date on Percolate, check out the links below. Subscribe to the channels below and we look forward to hearing from you. 
