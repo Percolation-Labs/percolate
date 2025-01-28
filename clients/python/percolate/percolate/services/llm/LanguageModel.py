@@ -11,6 +11,7 @@ from percolate.models.p8 import AIResponse
 import uuid
 from percolate.utils import logger
 import traceback
+from .MessageStackFormatter import MessageStackFormatter
 
 ANTHROPIC_MAX_TOKENS_IN = 8192
 GENERIC_P8_PROMPT = """\n# General Advice.
@@ -38,22 +39,27 @@ class OpenAIResponseScheme(AIResponse):
                 logger.warning(f"Error response {response['error'].get('message')}")
                 return AIResponse(id = str(uuid.uuid1()),model_name=model_name, tokens_in=0,tokens_out=0, role='assistant',
                                   session_id=sid, content=response['error'].get('message'), status = 'ERROR')
-            
             choice = response['choices'][0]
             tool_calls = choice['message'].get('tool_calls') or []
-            """just take the guts"""
-            tool_calls = [t['function'] for t in tool_calls]
+            
+            def adapt(t):
+                """we want something we can call and also something to construct the message that is needed for the tool call"""
+                f = t['function']
+                return   {'name': f['name'], 'arguments':f['arguments'], 'id': t['id']} 
+            
+            tool_calls = [adapt(t) for t in tool_calls]
             return AIResponse(id = str(uuid.uuid1()),
                     model_name=response['model'],
                     tokens_in=response['usage']['prompt_tokens'],
                     tokens_out=response['usage']['completion_tokens'],
                     session_id=sid,
+                    verbatim=choice['message'],
                     role=choice['message']['role'],
-                    content=choice['message']['content'] or '',
+                    content=choice['message'].get('content') or '',
                     status='RESPONSE' if not tool_calls else "TOOL_CALLS",
                     tool_calls=tool_calls)
-        except Exception:
-            logger.warning(f"unexpected structure in OpenAI scheme message {response=}")
+        except Exception as ex:
+            logger.warning(f"unexpected structure in OpenAI scheme message {response=} - caused the error {ex}")
             raise 
                     
 class AnthropicAIResponseScheme(AIResponse):
@@ -61,9 +67,17 @@ class AnthropicAIResponseScheme(AIResponse):
     def parse(cls, response:dict, sid: str,  model_name:str )->AIResponse:
         choice = response['content'] 
         def adapt(t):
-            return {'function': {'name': t['name'], 'arguments':t['input']}}
-        tool_calls = [adapt(t) for t in choice if t['type'] == 'tool_use']
-        tool_calls = [t['function'] for t in tool_calls]
+            """anthropic map to our interface"""
+            return {'name': t['name'], 'arguments':t['input'], 'id': t['id'], 'scheme': 'anthropic'}
+        verbatim = [t for t in choice if t['type'] == 'tool_use']
+        tool_calls = [adapt(t) for t in verbatim]
+        if verbatim:
+            """when tools are used we need a verbatim message with tool call??"""
+            verbatim = {
+                'role': response['role'],
+                'content': response['content']
+            }
+        
         content = "\n".join([t['text'] for t in choice if t['type'] == 'text']) 
         return AIResponse(id = str(uuid.uuid1()),
                 model_name=response['model'],
@@ -71,17 +85,19 @@ class AnthropicAIResponseScheme(AIResponse):
                 tokens_out=response['usage']['output_tokens'],
                 session_id=sid,
                 role=response['role'],
-                content=content,
+                content=content or '',
+                verbatim=verbatim ,
                 status='RESPONSE' if not tool_calls else "TOOL_CALLS",
                 tool_calls=tool_calls)
         
 class GoogleAIResponseScheme(AIResponse):
     @classmethod
     def parse(cls, response:dict, sid: str, model_name:str)->AIResponse:
-        choice = response['candidates'][0]['content']['parts']
+        message = response['candidates'][0]['content']
+        choice = message['parts']
         content_elements = [p['text'] for p in choice if p.get('text')]
         def adapt(t):
-            return {'function': {'name': t['name'], 'arguments':t['args']}}
+            return {'function': {'name': t['name'], 'arguments':t['args'], 'id': t['name'],'scheme': 'google'}}
         tool_calls = [adapt(p['functionCall']) for p in choice if p.get('functionCall')]
         tool_calls = [t['function'] for t in tool_calls]
         return AIResponse(id = str(uuid.uuid1()),
@@ -89,8 +105,9 @@ class GoogleAIResponseScheme(AIResponse):
                 tokens_in=response['usageMetadata']['promptTokenCount'],
                 tokens_out=response['usageMetadata']['candidatesTokenCount'],
                 session_id=sid,
-                role=response['candidates'][0]['content']['role'],
+                role=message['role'],
                 content=',\n'.join(content_elements),
+                verbatim=message if tool_calls else None,
                 status='RESPONSE' if not tool_calls else "TOOL_CALLS",
                 tool_calls=tool_calls)
 
@@ -165,11 +182,11 @@ class LanguageModel:
     
       
     def _elevate_functions_to_tools(self, functions: typing.List[dict]):
-        """slightly different dialect of function wrapper"""
+        """dialect of function wrapper for openai scheme tools"""
         return [{'type': 'function', 'function': f} for f in functions or []]
           
     def _adapt_tools_for_anthropic(self, functions: typing.List[dict]):
-        """slightly different dialect of function wrapper"""
+        """slightly different dialect of function wrapper - rename parameters to input_schema"""
         def _rewrite(d):
             return {
                 'name' : d['name'],
@@ -238,7 +255,8 @@ class LanguageModel:
                 'temperature': temperature,
                 "messages": [
                     {"role": "user", "content": question}, 
-                    *data_content
+                    #because they use blocks https://docs.anthropic.com/en/docs/build-with-claude/tool-use#example-of-empty-tool-result
+                    *[MessageStackFormatter.adapt_tool_response_for_anthropic(d) for d in data_content if d]
                 ]
             }
             if tools:
@@ -248,28 +266,29 @@ class LanguageModel:
             data["max_tokens"] = kwargs.get('max_tokens',ANTHROPIC_MAX_TOKENS_IN)
              
         if params['scheme'] == 'google':
+            data_content = [MessageStackFormatter.adapt_tool_response_for_google(d) for d in data_content if d]
+            optional_tool_config = { "tool_config": {   "function_calling_config": {"mode": "ANY"}  }  }
             data = {
                 "contents": [
-                    {"role": "user", "parts": {'text': question}},
-                    #add in any data content into the stack for google
-                    *[ {"role": dc['role'], "parts": {'text': dc['content']}} for dc in data_content]
+                    {"role": "user", "parts": [{'text': question}]},
+                    *data_content
                 ],
-                "tool_config": {
-                    #we could disable this for empty tools
-                    "function_calling_config": {"mode": "ANY"}
-                },
                 "tools": [{'function_declarations': tools}] if tools else None,
-                #'temperature': temperature
             }
+            """gemini is stupid if you add a tool to use but it already has the answer
+            "role": "user",  "parts": [{   "functionResponse": { <--- if the message is like this disable tools
+            """
+            if not data_content or 'functionResponse' not in data_content[-1]['parts'][0]:
+                data.update(optional_tool_config)
             if system_prompt:
-                data["system_instruction"] =  {   "parts": {   "text": system_prompt  } }
+                data["system_instruction"] =  { "parts": { "text": system_prompt } }
                     
-        #logger.debug(f"request {data=}")
+        logger.debug(f"request {data=}")
    
         response =  requests.post(url, headers=headers, data=json.dumps(data))
         
         if response.status_code not in [200,201]:
-            logger.warning(f"failed to submit {data=} {response.json()}")
+            logger.warning(f"failed to submit: {response.status_code=}  {response.content}")
             
         return response
         

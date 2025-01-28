@@ -1,16 +1,22 @@
 """although percolate will push the database use case, we can use llms in the app tier"""
 
 
-from .CallingContext import CallingContext
-from .LanguageModel import LanguageModel
-from .MessageStackFormatter import MessageStackFormatter
-from pydantic import BaseModel, model_validator
+
+from pydantic import BaseModel, model_validator, Field
 import typing
 import json
 class FunctionCall(BaseModel):
     name: str
     arguments: str | dict
-    
+    id: str
+    scheme: typing.Optional[str] = Field(None, description="information about the scheme for formatting purposes")
+    def get_tool_role(self):
+        """the role for tool use"""
+        if self.scheme == 'anthropic':
+            return 'user'
+        if self.scheme == 'google':
+            return 'user'
+        return "tool"
     @model_validator(mode='before')
     @classmethod
     def _val(cls, values):
@@ -38,3 +44,8 @@ def _check_all(question  = "what is the capital of ireland and give me one fun f
         llm = LanguageModel(m.name)
         responses[m.name] = llm.call_api_simple(question,functions=functions)
     return responses
+
+
+from .CallingContext import CallingContext
+from .LanguageModel import LanguageModel
+from .MessageStackFormatter import MessageStackFormatter

@@ -122,14 +122,14 @@ class ModelRunner:
         if not f:
             message = f"attempting to load function {function_call.name} which is not activated - please activate it"
             data = MessageStackFormatter.format_function_response_error(
-                function_call.name, ValueError(message), self._context
+                function_call, ValueError(message), self._context
             )
         else:
             try:
                 """try call the function - assumes its some sort of json thing that comes back"""
                 data = f(**function_call.arguments) or {}
                 data = MessageStackFormatter.format_function_response_data(
-                    function_call.name, data, self._context
+                    function_call, data, self._context
                 )
                 """if there is an error, how you format the message matters - some generic ones are added
                 its important to make sure the format coincides with the language model being used in context
@@ -137,12 +137,12 @@ class ModelRunner:
             except TypeError as tex:  # type errors are usually the agents fault
                 logger.warning(f"Error calling function {tex}")
                 data = MessageStackFormatter.format_function_response_type_error(
-                    function_call.name, tex, self._context
+                    function_call, tex, self._context
                 )
             except Exception as ex:  # general errors are usually our fault
                 logger.warning(f"Error calling function {traceback.format_exc()}")
                 data = MessageStackFormatter.format_function_response_error(
-                    function_call.name, ex, self._context
+                    function_call, ex, self._context
                 )
 
         # print(data) # maybe trace here
@@ -182,7 +182,7 @@ class ModelRunner:
         """sometimes you may want to initialize your agent with a bunch of data"""
         data = data or self._init_data
         """setup all the bits before running the loop"""
-        self._context = context or CallingContext(model=language_model)
+        self._context = context or CallingContext.with_model(language_model)
         """a generic wrapper around the REST interfaces of any LLM client"""
         lm_client = LanguageModel.from_context(self._context)
 
@@ -199,6 +199,8 @@ class ModelRunner:
                 functions=self.function_descriptions,
             )
             if function_calls := response.tool_calls:
+                """models need us to add the tool call to the stack - this is not the case for openai function call but for consistency over models we must"""
+                self.messages.add(response.verbatim)
                 """call one or more functions and update messages - functions can be updated inside this context"""
                 for func_call in function_calls: #its assumed to be only one for now but we could par do in future
                     self.invoke(FunctionCall(**func_call))
