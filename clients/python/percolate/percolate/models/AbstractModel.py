@@ -140,13 +140,16 @@ class AbstractModel(BaseModel, ABC, AbstractModelMixin):
         for name, param in signature.parameters.items():
             if name == "self":
                 continue
-            annotation = type_hints.get(name, typing.Any)
+            """things like kwargs that have no type will not be added to the model for the function"""
+            annotation = type_hints.get(name, None)
             default = (
                 param.default if param.default is not inspect.Parameter.empty else ...
             )
             """add the desc from the doc sting args when creating the field"""
             field = Field(default=default, description=parameter_descriptions.get(name))
-            fields[name] = (annotation, field)
+      
+            if annotation:
+                fields[name] = (annotation, field)
 
         """create the function model"""
         name = fn.__name__ if not name else f"{name_prefix}_{fn.__name__}"
