@@ -232,6 +232,29 @@ class TokenUsage(AbstractModel):
         if not values.get('tokens'):
             values['tokens'] = values['tokens_in'] + values['tokens_out']
         return values
+    
+    
+class _OpenAIMessage(BaseModel):
+    role: str
+    content: typing.Optional[str] = Field('', desscription='text content')
+    tool_calls: typing.Optional[typing.List[dict]|dict]
+    tool_call_id: typing.Optional[str] = None
+    
+    @classmethod
+    def from_message(cls, values):
+        """
+        
+        """
+        return _OpenAIMessage(**values, tool_call_id=(values.get('tool_eval_data') or {}).get('id'))
+    
+    @model_validator(mode='before')
+    @classmethod
+    def _val(cls,values):
+        if tool_calls:= values.get('tool_calls'):
+            if isinstance(tool_calls,dict):
+                values['tool_calls'] = [tool_calls]
+        return values
+
 class AIResponse(TokenUsage):
     """Each atom in an exchange between users, agents, assistants and so on. 
     We generate questions with sessions and then that triggers an exchange. 
@@ -241,9 +264,35 @@ class AIResponse(TokenUsage):
     role: str = Field(description="The role of the user/agent in the conversation")
     content: str = DefaultEmbeddingField(description="The content for this part of the conversation") #TODO we may not want to automatically generate embeddings for this table
     status: typing.Optional[str] = Field(description="The status of the session such as REQUEST|RESPONSE|ERROR|TOOL_CALL|STREAM_RESPONSE")
-    tool_calls: typing.Optional[typing.List[dict]] = Field(default=None, description="Tool calls are requests from language models to call tools")
+    tool_calls: typing.Optional[typing.List[dict]|dict] = Field(default=None, description="Tool calls are requests from language models to call tools")
     tool_eval_data: typing.Optional[dict] = Field(default=None, description="The payload may store the eval from the tool especially if it is small data")
-    verbatim: typing.Optional[dict|typing.List[dict]] = Field(default=None, description="the verbatim message from the language model - we dont serialized this", exclude=True)        
+    verbatim: typing.Optional[dict|typing.List[dict]] = Field(default=None, description="the verbatim message from the language model - we dont serialized this", exclude=True)     
+    
+ 
+    def to_open_ai_message(self):
+        """the message structure for the scheme
+        the one thing we need to do is make sure that tool calls reference the id(s)
+        """
+        return _OpenAIMessage.from_message(self.model_dump())
+    
+    @classmethod
+    def from_open_ai_response(cls, response, sid:str)  :
+        """"""
+        choice = response['choices'][0]
+        usage = response['usage']
+        message = choice['message']
+        tool_calls= message.get('tool_calls')
+        return cls(
+            id= str(uuid.uuid1()),
+            role = message['role'],
+            tool_calls = tool_calls,
+            content=message.get('content') or '',
+            tokens_in=usage['prompt_tokens'],
+            tokens_out=usage['completion_tokens'],
+            model_name = response['model'],
+            status='TOLL_CALL' if not tool_calls else 'RESPONSE',
+            session_id=sid
+        )
 class Session(AbstractModel):
     """Tracks groups if session dialogue"""
     id: uuid.UUID| str  

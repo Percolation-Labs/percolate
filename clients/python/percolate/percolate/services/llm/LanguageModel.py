@@ -1,4 +1,6 @@
-"""wrap all language model apis - use REST direct to avoid deps in the library"""
+"""wrap all language model apis - use REST direct to avoid deps in the library
+This is a first fraft - will map this to lean more on the database model 
+"""
 
 import requests
 import json
@@ -291,4 +293,111 @@ class LanguageModel:
             logger.warning(f"failed to submit: {response.status_code=}  {response.content}")
             
         return response
+    
+    
+    
+"""some direct calls"""
+
+def request_openai(messages,functions):
+    """
+
+    """
+    #mm = [_OpenAIMessage.from_message(d) for d in pg.execute(f"""  select * from p8.get_canonical_messages(NULL, '2bc7f694-dd85-11ef-9aff-7606330c2360') """)[0]['messages']]
+    #request_openai(mm)
+    
+    """place all system prompts at the start"""
+    
+    messages = [m if isinstance(m,dict) else m.model_dump() for m in messages]
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
+    }
+
+    data = {
+        "model": "gpt-4o-mini",
+        "messages": messages,
+        "tools":  [{'type': 'function', 'function': f} for f in functions or []]
+    }
+    
+    return requests.post(url, headers=headers, data=json.dumps(data))
+ 
+
+def request_google(messages, functions):
+    """
+    https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/function-calling
+    
+    expected tool call parts [{'functionCall': {'name': 'get_weather', 'args': {'date': '2024-07-27', 'city': 'Paris'}}}]
+    """
+    def last_message_not_function_response(items):
+        if not items:
+            return True
+        msg = items[-1]
+        if 'functionResponse' in msg['parts'][0].keys():
+            return False
+        return True
         
+    system_prompt = [m for m in messages if m['role']=='system']
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={os.environ.get('GEMINI_API_KEY')}"
+    headers = {
+        "Content-Type": "application/json"
+    }
+    
+    """important not to include system prompt - you can get some cryptic messages"""
+    data = {
+        "contents": [m for m in messages if m['role'] !='system']
+    }
+     
+    if system_prompt:
+        data['system_instruction'] = '\n'.join( item['content'][0]['text'] for item in system_prompt )
+    
+    """i have seen gemini call the tool even when it was the data if this mode is set"""
+    if functions and last_message_not_function_response(messages):
+        data.update(
+           { "tool_config": {
+              "function_calling_config": {"mode": "ANY"}
+            },
+            "tools": [{'function_declarations': functions}]}
+        )
+        
+    return requests.post(url, headers=headers, data=json.dumps(data))
+ 
+
+def request_anthropic(messages, function):
+    """
+    wrap the api - adapt tools and assume a message format such as in
+    select * from p8.get_anthropic_messages(...
+    """
+    
+    url = "https://api.anthropic.com/v1/messages"
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key":  os.environ.get('ANTHROPIC_API_KEY'),
+        "anthropic-version": "2023-06-01",
+    }
+    
+    def _adapt_tools_for_anthropic( functions: typing.List[dict]):
+            """slightly different dialect of function wrapper - rename parameters to input_schema"""
+            def _rewrite(d):
+                return {
+                    'name' : d['name'],
+                    'input_schema': d['parameters'],
+                    'description': d['description']
+                } 
+            return [_rewrite(f) for f in functions]
+
+
+    data = {
+        "model": "claude-3-5-sonnet-20241022",
+        "max_tokens": 1024,
+        "messages": [m for m in messages if m['role'] !='system'],
+        "tools": _adapt_tools_for_anthropic(function) if function else None
+    }
+    
+    system_prompt = [m for m in messages if m['role']=='system']
+   
+    if system_prompt:
+        data['system'] = '\n'.join( item['content'][0]['text'] for item in system_prompt )
+    
+    return requests.post(url, headers=headers, data=json.dumps(data))
