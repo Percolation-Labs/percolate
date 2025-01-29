@@ -22,9 +22,18 @@ BEGIN
 	import
 	p8.get_unique_enum_values(table_entity_name);
 	*/
+
+    --default public
+	SELECT 
+        CASE 
+            WHEN table_entity_name NOT LIKE '%.%' THEN 'public.' || table_entity_name 
+            ELSE table_entity_name 
+        END 
+    INTO table_entity_name;
+
     -- Add entity name and description to the markdown
     SELECT '## Agent Name: ' || b.name || E'\n\n' || 
-           '### Description: \n' || COALESCE(b.description, 'No description provided.') || E'\n\n'
+           '### Description: '  || E'\n\n' || COALESCE(b.description, 'No description provided.') || E'\n\n'
     INTO markdown_prompt
     FROM p8."Agent" b
     WHERE b.name = table_entity_name;
