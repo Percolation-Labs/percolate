@@ -48,12 +48,13 @@ class SqlModelHelper:
         field_descriptions = cls.model.model_fields
         mapping =  {k:SqlModelHelper.python_to_postgres_type(v, field_descriptions.get(k)) for k,v in fields.items()}
 
+        id_field = 'id'
         if 'id' not in mapping:
             key_field = cls.model.get_model_key_field()
             assert key_field, "You must supply either an id or a property like name or key on the model or add json_schema_extra with an is_key property on one if your fields"
         
         """this is assumed for now"""
-        id_field = 'id'
+        
         table_name = cls.model.get_model_table_name()
         
         columns = []
@@ -66,6 +67,7 @@ class SqlModelHelper:
             elif not is_optional(fields[field_name]):
                 column_definition += " NOT NULL"
             columns.append(column_definition)
+
 
         if not key_set:
             raise ValueError("The model input does not specify a key field. Add a name or key field or specify is_key on one of your fields")
@@ -327,13 +329,19 @@ EXECUTE FUNCTION update_updated_at_column();
 
             union =  f"UNION({', '.join(sub_types)})" 
             
+            if 'JSON' in union:
+                return "JSON"
             if 'TEXT[]' in union:
                 return 'TEXT[]'
             raise Exception(f"Need to handle disambiguation for union types - {union}")
 
         if origin in {list, typing.List, tuple, typing.Tuple}:
             sub_type = py_type.__args__[0] if py_type.__args__ else typing.Any
-            return f"{SqlModelHelper.python_to_postgres_type(sub_type)}{type_mapping[list]}"
+            pg_type = SqlModelHelper.python_to_postgres_type(sub_type)
+            """decide if we want json arrays or just json"""
+            if pg_type == 'JSON':
+                return pg_type
+            return f"{pg_type}{type_mapping[list]}"
 
         if origin in {dict, typing.Dict}:
             return type_mapping[dict]
@@ -364,10 +372,17 @@ EXECUTE FUNCTION update_updated_at_column();
             else:
                 data = vars(model) 
                 
-            def dumping_json(d):
-                return d if not isinstance(d,dict) else json.dumps(d,default=str)
-                
-            data = {k:dumping_json(v) for k,v in data.items()}
+           
+            def adapt(item):
+                if isinstance(item, uuid.UUID):
+                    return str(item)
+                if isinstance(item, dict):
+                    return json.dumps(item,default=str)
+                if isinstance(item, list) and isinstance(item[0],dict):
+                    return json.dumps(item,default=str)
+                return item
+                 
+            data = {k:adapt(v) for k,v in data.items()}
             
             return data
         

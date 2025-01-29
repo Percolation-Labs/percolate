@@ -8,8 +8,8 @@ app.add_typer(add_app, name="add")
 
 @add_app.command()
 def api(
-    name: str,
-    uri: str,
+    uri: str = typer.Argument(..., help="The API URI"),   
+    name: Optional[str] = typer.Option(None, help="A friendly optional API name - the uri will be as a default name"),
     token: Optional[str] = typer.Option(None, help="Authentication token for the API"),
     file: Optional[str] = typer.Option(None, help="File associated with the API"),
     verbs: Optional[List[str]] = typer.Option(None, help="HTTP verbs allowed (e.g., GET, POST)"),
