@@ -3,7 +3,7 @@
 
 # Percolate - Build your AI directly in multi-modal Postgres
 
-**Note:This codebase is new and under active development. We will tag some stable releases soon** 
+**Note: This codebase is new and under active development. We will tag a stable release soon** 
 
 Rather than build application-tier agentic frameworks that connect to language models, tools and databases, _Percolate_ brings language models, tools and agents into the database.
 
