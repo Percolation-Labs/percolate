@@ -9,6 +9,7 @@ def dump(*args,**kwargs):
     """TODO:"""
     pass
 
+
 def get_entities(keys: str | typing.List)->typing.List[dict]:
     """
     get entities from their keys in the database
@@ -34,6 +35,18 @@ def Agent(model:AbstractModel|BaseModel, **kwargs):
     """get the model runner in the context of the agent for running reasoning chains"""
     return ModelRunner(model,**kwargs)
 
+def run(question: str, agent: str, limit_turns:int=2, **kwargs):
+    """optional entry point to run an agent in the database by name
+    The limit_turns controls how many turns are taken in the database e.g. call a tool and then ask  the agent to interpret 
+    Args:
+        question (str): any question for your agent
+        agent: qualified agent name. Default schema is public and can be omitted
+        limit_turns: limit turns 2 allows for a single too call and interpretation for example
+    """
+    if '.' not in agent:
+        agent = f"public.Agent"
+    return PostgresService().execute(f""" select * from percolate_with_agent('{question}', '{agent}', {limit_turns}); """, )    
+    
 def get_language_model_settings():
     """iterates through language models configured in the database.
     this is a convenience as you can also select * from p8."LanguageModelApi"

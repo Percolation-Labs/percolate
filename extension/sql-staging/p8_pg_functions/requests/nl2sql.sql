@@ -23,6 +23,15 @@ BEGIN
 	imports
 	p8.generate_markdown_prompt
 	*/
+
+    --default public schema
+	SELECT 
+        CASE 
+            WHEN agent_name NOT LIKE '%.%' THEN 'public.' || agent_name 
+            ELSE agent_name 
+        END 
+    INTO agent_name;
+
     -- Generate the schema prompt for the table
     SELECT generate_markdown_prompt INTO table_schema_prompt FROM p8.generate_markdown_prompt(agent_name);
 
