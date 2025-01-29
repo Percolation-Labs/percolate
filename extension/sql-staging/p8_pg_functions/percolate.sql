@@ -50,6 +50,8 @@ $$ LANGUAGE plpgsql;
 -- Wrapper function `percolate_with_agent`
 
 
+
+
 	
 CREATE OR REPLACE FUNCTION public.percolate_with_agent(
     question TEXT,
@@ -68,8 +70,16 @@ BEGIN
 	/*
 
 	An agent that is registered from Python in the examples with external functions can be used;
-	select * from percolate_with_agent('list some pets that were sold', 'p8.MyFirstAgent');
+	select * from percolate_with_agent('list some pets that were sold', 'public.MyFirstAgent');
 	*/
+
+	--default public
+	SELECT 
+        CASE 
+            WHEN agent NOT LIKE '%.%' THEN 'public.' || agent 
+            ELSE agent 
+        END 
+    INTO agent;
 
     -- Generate the system prompt using the `p8.generate_markdown_prompt` function
 	-- 200 is a magic number we use to generate enums TODO: think about how we might want to deal more generally
