@@ -297,7 +297,10 @@ class Session(AbstractModel):
     """Tracks groups if session dialogue"""
     id: uuid.UUID| str  
     query: typing.Optional[str] = Field(None,description='the question or context that triggered the session')
-
+    user_rating: typing.Optional[float] = Field(None, description="We can in future rate sessions to learn what works")
+    agent: str = Field("Percolate always expects an agent but we support passing a system prompt which we treat as anonymous agent")
+    parent_session_id:typing.Optional[uuid.UUID| str] = Field("A session is a thread from a question+prompt to completion. We maw span child sessions")
+    
 class ModelMatrix(AbstractModel):
     """keep useful json blobs for model info"""
     id: uuid.UUID| str  
