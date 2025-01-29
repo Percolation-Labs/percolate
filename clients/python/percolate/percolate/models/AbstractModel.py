@@ -152,7 +152,7 @@ class AbstractModel(BaseModel, ABC, AbstractModelMixin):
                 fields[name] = (annotation, field)
 
         """create the function model"""
-        name = fn.__name__ if not name else f"{name_prefix}_{fn.__name__}"
+        name = fn.__name__ if not name_prefix else f"{name_prefix}_{fn.__name__}"
         return create_model(fn.__name__, __doc__=description, **fields)
 
 

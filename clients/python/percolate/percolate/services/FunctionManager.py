@@ -3,6 +3,9 @@ from percolate.models.p8 import Function, PlanModel
 from percolate.models import AbstractModel
 import percolate as p8
 from percolate.utils import logger
+from percolate.models import inspection
+from pydantic import BaseModel
+
 class _RuntimeFunction(Function):
     """A wrapper for handling library functions"""
     fn: typing.Callable
@@ -48,7 +51,10 @@ class FunctionManager:
         required = set(required) - set(cls.functions.keys())
         if len(required):
             logger.warning(f"We could not find the function {required}")  
-        """we may lookup the anent and do something with the metadata too"""
+        
+        """percolate is designed for external agents but we can support inline functions"""
+        for f in inspection.get_class_and_instance_methods(agent_model, inheriting_from=agent_model):
+            cls.add_function(f)
  
     def add_functions_by_key(cls, function_keys : typing.List[str]|str):
         """Add function or functions by key(s) - the function keys are expected to existing in the registry
