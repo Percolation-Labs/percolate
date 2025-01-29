@@ -1,3 +1,7 @@
+-- FUNCTION: p8.generate_markdown_prompt(text, integer)
+
+-- DROP FUNCTION IF EXISTS p8.generate_markdown_prompt(text, integer);
+
 CREATE OR REPLACE FUNCTION p8.generate_markdown_prompt(
 	table_entity_name text,
 	max_enum_entries integer DEFAULT 200)
@@ -20,7 +24,7 @@ BEGIN
 	*/
     -- Add entity name and description to the markdown
     SELECT '## Agent Name: ' || b.name || E'\n\n' || 
-           '### Description: ' || COALESCE(b.description, 'No description provided.') || E'\n\n'
+           '### Description: \n' || COALESCE(b.description, 'No description provided.') || E'\n\n'
     INTO markdown_prompt
     FROM p8."Agent" b
     WHERE b.name = table_entity_name;
@@ -65,3 +69,5 @@ BEGIN
 END;
 $BODY$;
 
+ALTER FUNCTION p8.generate_markdown_prompt(text, integer)
+    OWNER TO postgres;
