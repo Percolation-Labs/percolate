@@ -3,9 +3,11 @@
 
 # Percolate - Build your AI directly in multi-modal Postgres
 
-Rather than build application-tier agentic frameworks that connect to language models, tools and databases, Percolate brings language models, tools and agents into the database.
+**Note:This codebase is new and under active development. We will tag some stable releases soon** 
 
-You can now orchestrate powerful agentic systems with multi-modal RAG using any language - that includes natural language. You can easily connect any LLM APIs and integrated your language models, tools and data directly inside the database. 
+Rather than build application-tier agentic frameworks that connect to language models, tools and databases, _Percolate_ brings language models, tools and agents into the database.
+
+You can now orchestrate powerful agentic systems with multi-modal RAG using any language - that includes natural language. You can connect any LLM APIs and integrat your language models, tools and data directly inside the database. 
 
 
 ```sql
@@ -19,7 +21,7 @@ select * from percolate('How do I use Percolate studio to interact with my insta
 ```
 
 When you interact with language models in Percolate, conversations are naturally logged in your instance for audit, analysis and optimization.
-We create new `Session` entries with user questions and then track each `AIResponse` which may include tool calls and evaluations. One of the things Percolate is useful is resuming and replaying sessions or getting a better understanding of the payloads that are sent to LLM Apis.
+We create new `Session` entries with user questions and then track each `AIResponse` which may include tool calls and evaluations. One of the things Percolate is useful for is _resuming_ and replaying sessions or getting a better understanding of the payloads that are sent to LLM Apis.
 
 You can use tools implicitly or explicitly when you engage with Percolate.
 
@@ -28,10 +30,9 @@ select * from percolate_with_tools('What priority tasks did I created last week?
                                    ARRAY['query_conversations'] )
 ```
  
- 
 Reach out on the various channels at the bottom of the repo to tell us what you think. It would be great to hear from you!
 
-## Easy set up...
+## Easy set up
 
 The easiest way to get started is simply to launch the docker instance and connect to postgres using your preferred client on port 5438 using `postgres:postgres` to login
 
@@ -49,9 +50,9 @@ You can optionally install a Python client and API. The API is also exposed via 
 pip install percolate-db
 ```
 
-The Python client is optional but its useful to easily ingest data and it also provides a lightweight agentic workflow on top of Pydantic. With this you can stream results or  handle multi-step reasoning. See the docs to learn more about working with Percolate any Python or other languages.
+While the Python client is optional, its useful as a way to ingest data. It also provides a lightweight agentic workflow that relies on simple Pydantic objects. With this you can stream results or handle multi-step reasoning. See the docs to learn more about working with Percolate any Python or other languages.
 
-You can use the Python client to add agents and APIs. For example. Use the cli to add a test api. This assumes you have launched the docker instance or you have connected to another instance of Percolate.
+You can use the Python client to add agents and APIs. Use the cli to add a test api. This assumes you have launched the docker instance or you have connected to another instance of Percolate.
 
 ```bash
 p8 add api https://petstore.swagger.io/v2/swagger.json --verbs get
@@ -140,12 +141,14 @@ To connect to a dedicated Percolate cloud instance, you will be able request a P
 
 ## On the Roadmap
 
-The main reason we created Percolate is to work on a new type of query plan that involves both agents and data. We wanted to push Agentic AI down into the data tier because we think it shows promises. Importantly data are multi-modal and rather than using multiple stores for key-value, relational, graph and vector, we want it all in the same place, first for convenience and then for optimization. Building this Optimizer is not trivial. We also have things to work out regarding database background workers to achieve a great user experience for agentic workflows that use the database during multi-hop reasoning. Another exciting avenue is an SQL coding environment that uses AI and the data and schema stored in Percolate. 
+The main reason we created Percolate is to work on a new type of query plan that involves both agents and data. We wanted to push Agentic AI down into the data tier because we think it shows promises. Importantly data are multi-modal and rather than using multiple stores for key-value, relational, graph and vector, we want it all in the same place, first for convenience and then for optimization. Building this Optimizer is not trivial. 
+
+We also have things to work out regarding database background workers to achieve a great user experience for agentic workflows that use the database during multi-hop reasoning. Another exciting avenue is an SQL coding environment that uses AI and the data and schema stored in Percolate. 
  
 
 In the new database paradigm, it should be possible to interact with databases using natural language. We are building _Percolate Studio_ for query composition and data visualization powered with AI.
 
-Any issues or suggestions you add will hopefully make their way into our prioritized roadmap so feel free to suggesting anything related to putting ai in the dAta tIer.
+Any issues or suggestions you add will hopefully make their way into our prioritized roadmap so feel free to suggest anything related to putting ai in the dAta tIer.
 
 
 ## Developers

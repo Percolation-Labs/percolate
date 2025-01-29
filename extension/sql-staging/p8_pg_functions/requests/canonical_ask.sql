@@ -1,6 +1,6 @@
--- FUNCTION: p8.canonical_ask(json, uuid, json, text, text, character varying)
+-- FUNCTION: p8.canonical_ask(json, uuid, json, text, text, uuid)
 
--- DROP FUNCTION IF EXISTS p8.canonical_ask(json, uuid, json, text, text, character varying);
+-- DROP FUNCTION IF EXISTS p8.canonical_ask(json, uuid, json, text, text, uuid);
 
 CREATE OR REPLACE FUNCTION p8.canonical_ask(
 	message_payload json,
@@ -8,8 +8,8 @@ CREATE OR REPLACE FUNCTION p8.canonical_ask(
 	functions_in json DEFAULT NULL::json,
 	model_name text DEFAULT 'gpt-4o-mini'::text,
 	token_override text DEFAULT NULL::text,
-	user_id character varying DEFAULT NULL::character varying)
-    RETURNS TABLE(message_response text, tool_calls jsonb, tool_call_result jsonb, session_id_out uuid) 
+	user_id uuid DEFAULT NULL::uuid)
+    RETURNS TABLE(message_response text, tool_calls jsonb, tool_call_result jsonb, session_id_out uuid, status TEXT) 
     LANGUAGE 'plpgsql'
     COST 100
     VOLATILE PARALLEL UNSAFE
@@ -30,6 +30,7 @@ DECLARE
     tool_result JSONB;
     tool_error TEXT;
 	status_audit TEXT;
+	finish_reason TEXT;
     tokens_in INTEGER;
     tokens_out INTEGER;
     response_id UUID;
@@ -37,8 +38,8 @@ BEGIN
 	/*
 	
 	this is a lower lever function that allows other functions to build message stack and functions
-	the function names would be convenient but often functions are determien from agents or search
-	so its better to just wrap this in whatever method seaches for functions and builds messages
+	the function names would be convenient but often functions are determine from agents or search
+	so its better to just wrap this in whatever method searches for functions and builds messages
 	*/
     -- Fetch endpoint and API token from LanguageModelApi
     SELECT completions_uri, coalesce(token, token_override), model, scheme
@@ -59,7 +60,7 @@ BEGIN
     END IF;
 
 	-- if someone is feeling lucky they will not add functions to this method 
-	-- we can assume noone wants to call this particula thing wihtout functions as there are others for that but also Percolate is better with tools
+	-- we can assume no one wants to call this particular thing without functions as there are others for that but also Percolate is better with tools
 	--select json_agg(spec) from p8.get_tools_by_description('tools for getting pets that have a sold status');
 	--
 	--we would need to be scheme aware here
@@ -96,8 +97,15 @@ BEGIN
 	-- Handle token usage
 	tokens_in := (api_response->'usage'->>'prompt_tokens')::INTEGER;
 	tokens_out := (api_response->'usage'->>'completion_tokens')::INTEGER;
-
-	status_audit:= 'SUCESS';
+	finish_reason:= (api_response->'choices'->0->'finish_reason')::TEXT;
+	
+	--TODO looking for a finish reason of done
+	
+	status_audit:= 'TOOL_CALL_RESPONSE';
+	IF finish_reason = 'stop' THEN
+		status_audit:= 'COMPLETED';
+	END IF;
+	
     -- Iterate through each tool call
     FOR tool_call IN SELECT * FROM JSONB_ARRAY_ELEMENTS(tool_calls)
     LOOP
@@ -140,7 +148,7 @@ BEGIN
 
     -- Return results
     RETURN QUERY
-    SELECT result_set, tool_calls, tool_result, session_id;
+    SELECT result_set, tool_calls, tool_result, session_id, status_audit;
 
 EXCEPTION
     WHEN OTHERS THEN
@@ -148,5 +156,5 @@ EXCEPTION
 END;
 $BODY$;
 
-ALTER FUNCTION p8.canonical_ask(json, uuid, json, text, text, character varying)
+ALTER FUNCTION p8.canonical_ask(json, uuid, json, text, text, uuid)
     OWNER TO postgres;
