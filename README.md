@@ -7,7 +7,7 @@
 
 Rather than build application-tier agentic frameworks that connect to language models, tools and databases, _Percolate_ brings language models, tools and agents into the database.
 
-You can now orchestrate powerful agentic systems with multi-modal RAG using any language - that includes natural language. You can connect any LLM APIs and integrat your language models, tools and data directly inside the database. 
+You can now orchestrate powerful agentic systems with multi-modal RAG using any language - that includes natural language. You can connect any LLM APIs and integrate your language models, tools and data directly inside the database. 
 
 
 ```sql
