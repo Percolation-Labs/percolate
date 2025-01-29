@@ -1,4 +1,6 @@
-"""wrap all language model apis - use REST direct to avoid deps in the library"""
+"""wrap all language model apis - use REST direct to avoid deps in the library
+This is a first fraft - will map this to lean more on the database model 
+"""
 
 import requests
 import json
