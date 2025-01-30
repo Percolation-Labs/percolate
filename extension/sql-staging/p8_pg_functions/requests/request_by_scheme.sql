@@ -16,7 +16,7 @@ RETURNS TABLE(
     tokens_in INTEGER, 
     tokens_out INTEGER, 
     finish_reason TEXT, 
-    api_error TEXT,
+    api_error TEXT
 ) AS
 $$
 DECLARE
