@@ -16,7 +16,7 @@ RETURNS TABLE(
     tokens_in INTEGER, 
     tokens_out INTEGER, 
     finish_reason TEXT, 
-    api_error TEXT
+    api_error TEXT,
 ) AS
 $$
 DECLARE
@@ -173,22 +173,23 @@ $$ LANGUAGE plpgsql;
 
 --------------------------------------------------------
 drop function if exists p8.request_google;
+-- FUNCTION: p8.request_google(json, json, text, text, text)
+
+-- DROP FUNCTION IF EXISTS p8.request_google(json, json, text, text, text);
+
 CREATE OR REPLACE FUNCTION p8.request_google(
-    message_payload JSON,
-    functions_in JSON DEFAULT NULL,
-    model_name TEXT DEFAULT 'gemini-1.5-flash',
-    endpoint_uri TEXT DEFAULT 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent',
-	 api_token TEXT DEFAULT NULL
-)
-RETURNS TABLE(
-    message_content TEXT, 
-    tool_calls_out JSONB, 
-    tokens_in INTEGER, 
-    tokens_out INTEGER, 
-    finish_reason TEXT, 
-    api_error TEXT
-) AS
-$$
+	message_payload json,
+	functions_in json DEFAULT NULL::json,
+	model_name text DEFAULT 'gemini-1.5-flash'::text,
+	endpoint_uri text DEFAULT 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent'::text,
+	api_token text DEFAULT NULL::text)
+    RETURNS TABLE(message_content text, tool_calls_out jsonb, tokens_in integer, tokens_out integer, finish_reason text, api_error text) 
+    LANGUAGE 'plpgsql'
+    COST 100
+    VOLATILE PARALLEL UNSAFE
+    ROWS 1000
+
+AS $BODY$
 DECLARE
     api_response JSONB;
     system_messages TEXT;
@@ -240,15 +241,15 @@ BEGIN
             json_build_object(
                 'contents', message_payload,
                 'system_instruction',  system_messages,  -- Add concatenated system text
-                'tool_config', json_build_object(
-                    'function_calling_config', json_build_object(
-                        'mode', 
-                        CASE 
-                            WHEN functions_in IS NOT NULL THEN 'ANY' 
-                            ELSE 'NONE' 
-                        END
-                    )
-                ),
+                -- 'tool_config', json_build_object(
+                --     'function_calling_config', json_build_object(
+                --         'mode', 
+                --         CASE 
+                --             WHEN functions_in IS NOT NULL THEN 'ANY' 
+                --             ELSE 'NONE' 
+                --         END
+                --     )
+                -- ),
                 'tools', functions_in,
                 'model', model_name
             )::jsonb
@@ -263,4 +264,7 @@ BEGIN
     SELECT * from p8.google_to_open_ai_response(api_response);
 
 END;
-$$ LANGUAGE plpgsql;
+$BODY$;
+
+ALTER FUNCTION p8.request_google(json, json, text, text, text)
+    OWNER TO postgres;
