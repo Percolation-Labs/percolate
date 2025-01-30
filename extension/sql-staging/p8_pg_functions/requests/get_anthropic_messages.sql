@@ -3,8 +3,8 @@
 -- DROP FUNCTION IF EXISTS p8.get_anthropic_messages(text, text, text);
 
 CREATE OR REPLACE FUNCTION p8.get_anthropic_messages(
-	question text,
-	session_id_in text,
+	session_id_in UUID,
+	question text DEFAULT NULL,
 	agent_or_system_prompt text DEFAULT NULL::text)
     RETURNS TABLE(messages json, last_role text, last_updated_at timestamp without time zone) 
     LANGUAGE 'plpgsql'
@@ -19,7 +19,7 @@ BEGIN
         -- Fetch session data for the specified session_id
         SELECT content, role, tool_calls, tool_eval_data, created_at
         FROM p8."AIResponse" a
-        WHERE a.session_id::text = session_id_in
+        WHERE a.session_id = session_id_in
     ),
     max_session_data AS (
         -- Get the last role and most recent timestamp
@@ -72,7 +72,10 @@ BEGIN
         select json_agg(row_to_json(message_data)) as messages
 		from message_data
 	)
-	select * from jsonrow cross join max_session_data;
+	SELECT * 
+    FROM jsonrow 
+    LEFT JOIN max_session_data ON true;  -- Use LEFT JOIN to ensure rows are returned even if no session data is found
+
 END;
 $BODY$;
 
