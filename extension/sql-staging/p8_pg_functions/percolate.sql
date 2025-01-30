@@ -53,20 +53,37 @@ $$ LANGUAGE plpgsql;
 
 
 --drop function percolate_with_agent
-drop function percolate_with_agent;
+-- FUNCTION: public.percolate_with_agent
+
+-- DROP FUNCTION IF EXISTS public.percolate_with_agent;
+
+-- FUNCTION: public.percolate_with_agent
+
+-- DROP FUNCTION IF EXISTS public.percolate_with_agent;
+
 CREATE OR REPLACE FUNCTION public.percolate_with_agent(
-    question TEXT,
-    agent TEXT,
-    tool_names_in TEXT[] DEFAULT NULL,
-    system_prompt TEXT DEFAULT 'Respond to the users query using tools and functions as required',
-    model_key VARCHAR(100) DEFAULT 'gpt-4o-mini',
-    token_override TEXT DEFAULT NULL,
-    user_id UUID DEFAULT NULL,
-    temperature FLOAT DEFAULT 0.01
+    question text,
+    agent text,
+    tool_names_in text[] DEFAULT NULL::text[],
+    system_prompt text DEFAULT 'Respond to the users query using tools and functions as required'::text,
+    model_key character varying DEFAULT 'gpt-4o-mini'::character varying,
+    token_override text DEFAULT NULL::text,
+    user_id uuid DEFAULT NULL::uuid,
+    temperature double precision DEFAULT 0.01
 )
-RETURNS TABLE(message_response text, tool_calls jsonb, tool_call_result jsonb, session_id_out uuid, status TEXT)  AS $$
+RETURNS TABLE(
+    message_response text,
+    tool_calls jsonb,
+    tool_call_result jsonb,
+    session_id_out uuid,
+    status text
+) 
+LANGUAGE 'plpgsql'
+COST 100
+VOLATILE PARALLEL UNSAFE
+ROWS 1000
+AS $BODY$
 DECLARE
-    generated_system_prompt TEXT;
     tool_names_array TEXT[];
     endpoint_uri TEXT;
     api_token TEXT;
@@ -74,25 +91,47 @@ DECLARE
     selected_scheme TEXT;
     functions JSON;
     message_payload JSON;
-	created_session_id uuid;
+    created_session_id uuid;
+    	recovered_system_prompt TEXT;
 BEGIN
 
-	/*
-	this wraps the inner function for ask (currently this is the canonical one for testing and we generalize for schemes)
-	it takes in an agent and a question which defines the LLM request from the data
-	--if you have follow the python guide this agent will exist or try another agent
-	select * from percolate_with_agent('list some pets that str sold', 'MyFirstAgent'); 
-	--first turn retrieves data from tools and provides a session id which you can resume
-	*/
+    /*
+    This wraps the inner function for ask (currently this is the canonical one for testing and we generalize for schemes)
+    It takes in an agent and a question which defines the LLM request from the data.
+    -- If you have followed the python guide, this agent will exist or try another agent.
+    -- Example usage:
+    -- select * from percolate_with_agent('list some pets that str sold', 'MyFirstAgent');
+    -- First turn retrieves data from tools and provides a session id which you can resume.
+    -- To test with other schemes:
+    -- select * from percolate_with_agent('list some pets that str sold', 'MyFirstAgent', NONE, NONE, 'gemini-1.5-flash'); 
+    -- select * from percolate_with_agent('list some pets that str sold', 'MyFirstAgent', NONE, NONE, 'claude-3-5-sonnet-20241022');
 
-	select create_session from p8.create_session(user_id, question, agent)
-	into created_session_id;
-	
+	-- select * from p8.get_canonical_messages('8d4357de-eb78-8df5-2182-ef4d85969bc5', 'test', 'test');
+	-- select * from p8.get_google_messages('8d4357de-eb78-8df5-2182-ef4d85969bc5', 'test', 'test');
+	-- select * from p8.get_canonical_messages('8d4357de-eb78-8df5-2182-ef4d85969bc5', 'test', 'test');
+    */
+
+   
+    -- Create session and store session ID
+    SELECT create_session FROM p8.create_session(user_id, question, agent)
+    INTO created_session_id;
+
+    -- Ensure session creation was successful
+    IF created_session_id IS NULL THEN
+        RAISE EXCEPTION 'Failed to create session';
+    END IF;
+
+    -- Retrieve API details
     SELECT completions_uri, COALESCE(token, token_override), model, scheme
     INTO endpoint_uri, api_token, selected_model, selected_scheme
     FROM p8."LanguageModelApi"
     WHERE "name" = model_key
     LIMIT 1;
+
+    -- Ensure API details were found
+    IF api_token IS NULL OR selected_model IS NULL OR selected_scheme IS NULL THEN
+        RAISE EXCEPTION 'Missing required API details for request';
+    END IF;
 
     -- Default public schema for agent if not provided
     SELECT CASE 
@@ -100,45 +139,48 @@ BEGIN
         ELSE agent 
     END INTO agent;
 
-    -- Generate system prompt
-    SELECT p8.generate_markdown_prompt(agent, 200)
-    INTO generated_system_prompt;
+    -- Fetch tools for the agent by calling the new function
+    SELECT p8.get_agent_tools(agent, selected_scheme) INTO functions;
+     
+    -- Ensure tools were fetched successfully
+    IF functions IS NULL THEN
+        RAISE EXCEPTION 'No tools found for agent % in scheme %', agent, selected_scheme;
+    END IF;
 
-    -- Fetch tool names associated with the agent
-    SELECT ARRAY(
-        SELECT jsonb_object_keys(a.functions::JSONB)
-        FROM p8."Agent" a
-        WHERE a.name = agent AND a.functions IS NOT NULL
-    ) INTO tool_names_array;
-
-    -- (B) If tool names exist, fetch tool data
-    IF tool_names_array IS NOT NULL THEN
-        SELECT p8.get_tools_by_name(tool_names_array, selected_scheme)
-        INTO functions;
+    -- Recover system prompt using agent name
+    SELECT coalesce(p8.generate_markdown_prompt(agent),system_prompt) INTO recovered_system_prompt;
+    
+    -- Get the messages for the correct scheme
+    IF selected_scheme = 'anthropic' THEN
+        -- Select into message payload from p8.get_anthropic_messages
+        SELECT * INTO message_payload FROM p8.get_anthropic_messages(created_session_id, question, recovered_system_prompt);
+    ELSIF selected_scheme = 'google' THEN
+        -- Select into message payload from p8.get_google_messages
+        SELECT * INTO message_payload FROM p8.get_google_messages(created_session_id, question, recovered_system_prompt);
     ELSE
-        functions := '[]'::JSON;
+        -- Select into message payload from p8.get_canonical_messages
+        SELECT * INTO message_payload FROM p8.get_canonical_messages(created_session_id, question, recovered_system_prompt);
     END IF;
 
-    SELECT jsonb_build_array(
-        jsonb_build_object('role', 'system', 'content', coalesce(generated_system_prompt,system_prompt)),
-        jsonb_build_object('role', 'user', 'content', question)::JSON
-    ) INTO message_payload;
-
-    IF message_payload IS NULL OR model_key IS NULL OR api_token IS NULL THEN
-        RAISE EXCEPTION 'Missing required parameters for canonical_ask';
+    -- Ensure message payload was successfully fetched
+    IF message_payload IS NULL THEN
+        RAISE EXCEPTION 'Failed to retrieve message payload for session %', created_session_id;
     END IF;
 
-    -- Invoke the main function 
+    -- Return the results using p8.ask function
     RETURN QUERY 
-    SELECT * FROM p8.canonical_ask(
-        message_payload,
-        created_session_id,  
-        functions,
-        model_key,
-        token_override,
+    SELECT * FROM p8.ask(
+        message_payload::json, 
+        created_session_id, 
+        functions::json, 
+        model_key, 
+        token_override, 
         user_id
-        --,temperature
     );
-
 END;
-$$ LANGUAGE plpgsql;
+$BODY$;
+
+ALTER FUNCTION public.percolate_with_agent(
+    text, text, text[], text, character varying, text, uuid, double precision
+)
+OWNER TO postgres;
