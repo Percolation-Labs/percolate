@@ -1,8 +1,8 @@
 WITH generated_id AS (
     SELECT p8.json_to_uuid('{}'::JSONB) AS session_id
 )
-INSERT INTO p8."Session" (id, query)
-SELECT session_id, 'Percolate Initialization Run at updated_at date'
+INSERT INTO p8."Session" (id, query, agent)
+SELECT session_id, 'Percolate Initialization Run at updated_at date', 'percolate'
 FROM generated_id
 ON CONFLICT (id)  
 DO UPDATE SET

@@ -21,9 +21,12 @@ class SqlModelHelper:
     def __repr__(self):
         return f"SqlModelHelper({self.model_name})"
     
-    def create_script(cls):
+    def create_script(cls,if_not_exists:bool = False):
         """
 
+        Args:
+            if_not_exists: by default we try and fail to create for schema migration - but initially set this to True to create a clean DB
+            
         (WIP) generate tables for entities -> short term we do a single table with now schema management
         then we will add basic migrations and split out the embeddings + add system fields
         we also need to add the other embedding types - if we do async process we need a metadata server
@@ -38,7 +41,7 @@ class SqlModelHelper:
         - we can check existing columns and use an alter to add new ones if the table exists
 
         """
-        
+       
         def is_optional(field):
             return typing.get_origin(field) is typing.Union and type(
                 None
@@ -68,7 +71,7 @@ class SqlModelHelper:
                 column_definition += " NOT NULL"
             columns.append(column_definition)
 
-
+    
         if not key_set:
             raise ValueError("The model input does not specify a key field. Add a name or key field or specify is_key on one of your fields")
         """add system fields"""
@@ -78,12 +81,13 @@ class SqlModelHelper:
         if 'user_id' not in mapping.keys():
             columns.append("userid UUID")
 
+        if_not_exists_flag = '' if not if_not_exists else " IF NOT EXISTS "
         columns_str = ",\n    ".join(columns)
-        create_table_script = f"""CREATE TABLE {table_name} (
+        create_table_script = f"""CREATE TABLE {if_not_exists_flag} {table_name} (
 {columns_str}
 );
-
-CREATE TRIGGER update_updated_at_trigger
+DROP TRIGGER IF EXISTS update_updated_at_trigger ON {table_name};
+CREATE   TRIGGER update_updated_at_trigger
 BEFORE UPDATE ON {table_name}
 FOR EACH ROW
 EXECUTE FUNCTION update_updated_at_column();
@@ -401,8 +405,10 @@ EXECUTE FUNCTION update_updated_at_column();
             sample = self.serialize_for_db(records[0])
             cols = f",".join(sample.keys())
             values = ",\n ".join(  f"({', '.join([sql_repr(v) for _,v in self.serialize_for_db(obj).items() ])})" for obj in records)
-            
-            return f"""INSERT INTO {self.model.get_model_table_name()}({cols}) VALUES\n {values};"""
+            #TODO it may be that id is not always what we want
+            conflicts =  f",".join([f"{f}=EXCLUDED.{f}" for f in [c for c in sample.keys() if c not in ['id']]])
+            return f"""INSERT INTO {self.model.get_model_table_name()}({cols}) VALUES\n {values}
+        ON CONFLICT (id) DO UPDATE SET {conflicts}   ;"""
         
     def get_register_entities_query(self):
         """get the registration script for entities that have names"""

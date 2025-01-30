@@ -17,14 +17,14 @@ BEGIN
 
     -- If no records match, return an empty JSON array
     IF record_count = 0 THEN
-        RETURN NULL;--'[]'::JSONB;
+        RETURN '[]'::JSONB;
     END IF;
 
     -- Handle the scheme and return the appropriate JSON structure
     IF scheme = 'google' THEN
         RETURN (
             SELECT JSON_AGG(
-                SELECT JSON_BUILD_ARRAY(
+                JSON_BUILD_ARRAY(
                     JSON_BUILD_OBJECT('function_declarations', JSON_AGG(function_spec::JSON))
                 )
             )
@@ -58,6 +58,7 @@ BEGIN
     END IF;
 END;
 $BODY$;
+
 
 ALTER FUNCTION p8.get_tools_by_name(text[], text)
     OWNER TO postgres;
