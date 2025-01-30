@@ -85,10 +85,10 @@ BEGIN
         INTO result_set, tool_calls, tokens_in, tokens_out, finish_reason, api_error;
     END IF;
 
-	RAISE notice '------------';
+
     -- Handle finish reason and status
     status_audit := 'TOOL_CALL_RESPONSE';
-    IF finish_reason = 'stop' THEN
+    IF finish_reason = 'stop' or finish_reason = 'end_turn' THEN
         status_audit := 'COMPLETED';
     END IF;
 
@@ -119,8 +119,10 @@ BEGIN
     END LOOP;
 
     -- Generate a new response UUID using session_id and content ID
-    SELECT p8.json_to_uuid(json_build_object('sid', session_id, 'id', api_response->'id')::JSONB)
+    SELECT p8.json_to_uuid(json_build_object('sid', session_id, 'ts',CURRENT_TIMESTAMP::TEXT)::JSONB)
     INTO response_id;
+
+		RAISE notice 'generated repsonse id % from % and %', response_id,session_id,api_response->>'id';
 
     IF api_error IS NOT NULL THEN
         result_set := api_error;
@@ -139,7 +141,7 @@ BEGIN
 
 EXCEPTION
     WHEN OTHERS THEN
-        RAISE EXCEPTION 'ASK API call failed: % %', SQLERRM, result_set;
+        RAISE EXCEPTION 'ASK API call failed: % % response id %', SQLERRM, result_set, api_response->'id';
 END;
 $BODY$;
 

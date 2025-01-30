@@ -1,3 +1,5 @@
+/*we map all function call args to string for canonical*/
+
 -- FUNCTION: p8.anthropic_to_open_ai_response(jsonb)
 
 -- DROP FUNCTION IF EXISTS p8.anthropic_to_open_ai_response(jsonb);
@@ -56,7 +58,7 @@ BEGIN
                         'type', 'function',
                         'function', json_build_object(
                             'name', el->>'name',
-                            'arguments', (el->>'input')::JSON
+                            'arguments', (el->>'input')::TEXT
                         )
                     )
                 ) AS tool_calls
@@ -162,7 +164,7 @@ BEGIN
                         'type', 'function',
                         'function', json_build_object(
                             'name', function_call->>'name',
-                            'arguments', function_call->'args'
+                            'arguments', (function_call->'args')::TEXT
                         )
                     )
                 )::JSONB
