@@ -59,6 +59,13 @@ $BODY$;
 ------Add the p8 graph and schema--------
 LOAD  'age';
 SET search_path = ag_catalog, "$user", public;
-SELECT create_graph('percolate');
+DO $$ 
+BEGIN
+ IF NOT EXISTS (
+        SELECT 1 FROM pg_namespace WHERE nspname = 'percolate'
+    ) THEN
+        PERFORM create_graph('percolate');
+    END IF;
+END $$;
 -----------------------------------------
 -----------------------------------------
