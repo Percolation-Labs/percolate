@@ -2,7 +2,7 @@
 
 -- FUNCTION: p8.anthropic_to_open_ai_response(jsonb)
 
--- DROP FUNCTION IF EXISTS p8.anthropic_to_open_ai_response(jsonb);
+DROP FUNCTION IF EXISTS p8.anthropic_to_open_ai_response ;
 
 CREATE OR REPLACE FUNCTION p8.anthropic_to_open_ai_response(
 	api_response jsonb)

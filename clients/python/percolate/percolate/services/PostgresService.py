@@ -99,7 +99,7 @@ class PostgresService:
         normally we need to create all the tables first and then we can add aux stuff
         """
         primary_scripts = {
-            'register entity':self.helper.create_script(),  
+            'register entity':self.helper.create_script(if_not_exists=True),  
         }
         secondary_scripts = { 
             'register_embeddings': self.helper.create_embedding_table_script(),
@@ -189,15 +189,27 @@ class PostgresService:
         data: tuple = None,
         as_upsert: bool = False,
         page_size: int = 100,
-        verbose_errors:bool=True
+        verbose_errors:bool=True,
+        timeout_seconds: int = None
     ):
         """run any sql query - this works only for selects and transactional updates without selects
+        
+        Args:
+            query: 
+            data: tuple of args
+            as_upsert: hint to use the upsert mode
+            page_size: for upsert batching
+            verbose_errors:
+            timeout_seconds: keep this off but for testing multi turn you can set it to something but keep in mind we would use background workers for this
         """
         
         if cls.conn is None:
             cls._reopen_connection()
         if not query:
             return
+        
+        if timeout_seconds and isinstance(timeout_seconds,int):
+            query = f"set statement_timeout = '{timeout_seconds}s';{query}"
         try:
             """we can reopen the connection if needed"""
             try:
