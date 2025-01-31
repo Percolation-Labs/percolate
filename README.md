@@ -11,8 +11,7 @@ You can now orchestrate powerful agentic systems with multi-modal RAG using any 
 
 
 ```sql
-select * from percolate('Create task to deploy Percolate to cloud with instructions', 
-  'claude-3-5-sonnet-20241022')
+select * from percolate('What is the capital of ireland?', 'claude-3-5-sonnet-20241022')
 ```
 
 ```sql
