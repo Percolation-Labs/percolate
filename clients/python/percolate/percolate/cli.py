@@ -28,12 +28,23 @@ def env(
 ):
     """Add environment variables via key-value pairs or sync from .env file"""
     if sync:
-        typer.echo(f"Syncing env vars from your environment for loaded models in percolate. See p8.LanguageModelApi table.")
+        typer.echo('---------------------------------------------------------------------------')
+        typer.echo(f"🔄 Syncing env vars from your environment for loaded models in percolate.")
+        typer.echo('---------------------------------------------------------------------------')
         results = sync_model_keys()
+        count = 0
         for key, result in results.items():
+            if result:
+                count += 1
             typer.echo(f"{'✅' if result else '❌'} {key}")
-            
-    
+        if count:
+            typer.echo('-----------------------------------------------------------')
+            typer.echo(f'Added {count} keys - see the p8."LanguageModelApi" table.')
+            typer.echo('-----------------------------------------------------------')
+        else:
+            typer.echo('-----------------------------------------------------------')
+            typer.echo(f'did not find any suitable keys in your environment.')
+            typer.echo('-----------------------------------------------------------')
                 
 @add_app.command()
 def function(
