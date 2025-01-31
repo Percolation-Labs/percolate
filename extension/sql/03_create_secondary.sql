@@ -375,6 +375,82 @@ INSERT INTO p8."Agent"(name,id,category,description,spec,functions) VALUES
 select * from p8.register_entities('p8.PlanModel');
 -- ------------------
 
+-- register_embeddings (p8.Settings)------
+-- ------------------
+CREATE TABLE  IF NOT EXISTS p8_embeddings."p8_Settings_embeddings" (
+    id UUID PRIMARY KEY,  -- Hash-based unique ID - we typically hash the column key and provider and column being indexed
+    source_record_id UUID NOT NULL,  -- Foreign key to primary table
+    column_name TEXT NOT NULL,  -- Column name for embedded content
+    embedding_vector VECTOR NULL,  -- Embedding vector as an array of floats
+    embedding_name VARCHAR(50),  -- ID for embedding provider
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, -- Timestamp for tracking
+    
+    -- Foreign key constraint
+    CONSTRAINT fk_source_table_p8_settings
+        FOREIGN KEY (source_record_id) REFERENCES p8."Settings"
+        ON DELETE CASCADE
+);
+
+-- ------------------
+
+-- insert_field_data (p8.Settings)------
+-- ------------------
+INSERT INTO p8."ModelField"(name,id,entity_name,field_type,embedding_provider,description,is_key) VALUES
+ ('id', '0fb87392-0069-a817-c23a-6635bf8f88cc', 'p8.Settings', 'UUID', NULL, NULL, NULL),
+ ('key', '1fe28f72-8290-516e-7343-b39537707183', 'p8.Settings', 'str', NULL, NULL, NULL),
+ ('value', 'b39ca6ff-a90d-3678-b658-b81e5ecb0801', 'p8.Settings', 'str', NULL, 'Value of the setting', NULL)
+        ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name,entity_name=EXCLUDED.entity_name,field_type=EXCLUDED.field_type,embedding_provider=EXCLUDED.embedding_provider,description=EXCLUDED.description,is_key=EXCLUDED.is_key   ;
+-- ------------------
+
+-- insert_agent_data (p8.Settings)------
+-- ------------------
+INSERT INTO p8."Agent"(name,id,category,description,spec,functions) VALUES
+ ('p8.Settings', '15713970-16d5-5ce6-a5d5-f0c643da7834', NULL, 'settings are key value pairs for percolate admin', '{"description": "settings are key value pairs for percolate admin", "properties": {"id": {"anyOf": [{"format": "uuid", "type": "string"}, {"type": "string"}, {"type": "null"}], "default": "The id is generated as a hash of the required key and ordinal", "title": "Id"}, "key": {"default": "The key for the value to store - id is generated form this", "title": "Key", "type": "string"}, "value": {"description": "Value of the setting", "title": "Value", "type": "string"}}, "required": ["value"], "title": "Settings", "type": "object"}', NULL)
+        ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name,category=EXCLUDED.category,description=EXCLUDED.description,spec=EXCLUDED.spec,functions=EXCLUDED.functions   ;
+-- ------------------
+
+-- register_embeddings (p8.PercolateAgent)------
+-- ------------------
+CREATE TABLE  IF NOT EXISTS p8_embeddings."p8_PercolateAgent_embeddings" (
+    id UUID PRIMARY KEY,  -- Hash-based unique ID - we typically hash the column key and provider and column being indexed
+    source_record_id UUID NOT NULL,  -- Foreign key to primary table
+    column_name TEXT NOT NULL,  -- Column name for embedded content
+    embedding_vector VECTOR NULL,  -- Embedding vector as an array of floats
+    embedding_name VARCHAR(50),  -- ID for embedding provider
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, -- Timestamp for tracking
+    
+    -- Foreign key constraint
+    CONSTRAINT fk_source_table_p8_percolateagent
+        FOREIGN KEY (source_record_id) REFERENCES p8."PercolateAgent"
+        ON DELETE CASCADE
+);
+
+-- ------------------
+
+-- insert_field_data (p8.PercolateAgent)------
+-- ------------------
+INSERT INTO p8."ModelField"(name,id,entity_name,field_type,embedding_provider,description,is_key) VALUES
+ ('id', '0ebafb1a-2786-9ab1-172a-895ccb42998f', 'p8.PercolateAgent', 'UUID', NULL, NULL, NULL),
+ ('name', '30512d9f-f547-34a6-f078-5345e8e09ba5', 'p8.PercolateAgent', 'str', NULL, 'A short content name - non unique - for example a friendly label for a chunked pdf document', NULL),
+ ('category', '76bdaf66-f79e-7594-5b05-cdef07866428', 'p8.PercolateAgent', 'str', NULL, 'A content category', NULL),
+ ('content', 'def5e0a1-4ba2-491e-a91f-9282a41e46e4', 'p8.PercolateAgent', 'str', 'text-embedding-ada-002', 'The chunk of content from the source', NULL),
+ ('ordinal', 'bf43af13-19d5-2fe7-9806-ee6191f6f02c', 'p8.PercolateAgent', 'int', NULL, 'For chunked content we can keep an ordinal', NULL),
+ ('uri', '85667f3d-de55-67ab-47bc-1e056f397466', 'p8.PercolateAgent', 'str', NULL, NULL, NULL)
+        ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name,entity_name=EXCLUDED.entity_name,field_type=EXCLUDED.field_type,embedding_provider=EXCLUDED.embedding_provider,description=EXCLUDED.description,is_key=EXCLUDED.is_key   ;
+-- ------------------
+
+-- insert_agent_data (p8.PercolateAgent)------
+-- ------------------
+INSERT INTO p8."Agent"(name,id,category,description,spec,functions) VALUES
+ ('p8.PercolateAgent', '87236bdd-36bd-5de2-8933-4e437bd69610', NULL, 'The percolate agent is the guy that tells you about Percolate.\n    You can learn about the philosophy of Percolate or ask questions about the docs and codebase.\n    You can lookup entities of different types or plan queries and searches.\n    You can call any registered apis and functions and learn more about how they can be used.\n    ', '{"description": "The percolate agent is the guy that tells you about Percolate.\\nYou can learn about the philosophy of Percolate or ask questions about the docs and codebase.\\nYou can lookup entities of different types or plan queries and searches.\\nYou can call any registered apis and functions and learn more about how they can be used.", "properties": {"id": {"anyOf": [{"format": "uuid", "type": "string"}, {"type": "string"}, {"type": "null"}], "default": "The id is generated as a hash of the required uri and ordinal", "title": "Id"}, "name": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "description": "A short content name - non unique - for example a friendly label for a chunked pdf document", "title": "Name"}, "category": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "description": "A content category", "title": "Category"}, "content": {"description": "The chunk of content from the source", "embedding_provider": "default", "title": "Content", "type": "string"}, "ordinal": {"default": null, "description": "For chunked content we can keep an ordinal", "title": "Ordinal", "type": "integer"}, "uri": {"default": "An external source or content ref e.g. a PDF file on blob storage or public URI", "title": "Uri", "type": "string"}}, "required": ["content"], "title": "PercolateAgent", "type": "object"}', NULL)
+        ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name,category=EXCLUDED.category,description=EXCLUDED.description,spec=EXCLUDED.spec,functions=EXCLUDED.functions   ;
+-- ------------------
+
+-- register_entities (p8.PercolateAgent)------
+-- ------------------
+select * from p8.register_entities('p8.PercolateAgent');
+-- ------------------
+
 
 -- -----------
 -- sample models--

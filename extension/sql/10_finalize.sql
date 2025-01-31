@@ -8,3 +8,17 @@ ON CONFLICT (id)
 DO UPDATE SET
     query = EXCLUDED.query;  
 
+
+WITH db_key AS (
+    SELECT p8.json_to_uuid(json_build_object('ts', CURRENT_TIMESTAMP::TEXT)::JSONB) AS api_key
+),
+settings AS(
+        SELECT api_key, p8.json_to_uuid('{"key": "P8_API_KEY"}'::JSONB) AS setting_id from db_key
+)
+INSERT INTO p8."Settings" (id, key, value)
+SELECT setting_id, 'P8_API_KEY', api_key
+FROM settings 
+ON CONFLICT (id)  
+DO UPDATE SET
+    value = EXCLUDED.value;  
+

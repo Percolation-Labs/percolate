@@ -15,20 +15,24 @@ import traceback
 class PostgresService:
     """the postgres service wrapper for sinking and querying entities/models"""
 
-    def __init__(self, model: BaseModel = None, conn=None):
+    def __init__(self, model: BaseModel = None, conn=None, on_connect_error: str = None):
         try:
-            self.conn = conn or psycopg2.connect(POSTGRES_CONNECTION_STRING)
+            self.conn = None
             self.helper = SqlModelHelper(AbstractModel)  
+            
             if model:
                 """we do this because its easy for user to assume the instance is what we want instead of the type"""
                 self.model = AbstractModel.Abstracted(ensure_model_not_instance(model))
                 self.helper:SqlModelHelper = SqlModelHelper(model) 
             else: self.model=None
+            self.conn = conn or psycopg2.connect(POSTGRES_CONNECTION_STRING)
+
         except:
-            logger.warning(traceback.format_exc())
-            logger.warning(
-                "Could not connect - you will need to check your env and call pg._connect again"
-            )
+            if on_connect_error != 'ignore':
+                logger.warning(traceback.format_exc())
+                logger.warning(
+                    "Could not connect - you will need to check your env and call pg._connect again"
+                )
             
     def __repr__(self):
         return f"PostgresService({self.model.get_model_full_name() if self.model else None}, {POSTGRES_SERVER=}, {POSTGRES_DB=})"
@@ -50,9 +54,9 @@ class PostgresService:
         self.conn = psycopg2.connect(POSTGRES_CONNECTION_STRING)
         return self.conn
 
-    def repository(self, model: BaseModel) -> "PostgresService":
+    def repository(self, model: BaseModel, **kwargs) -> "PostgresService":
         """a connection in the context of the abstract model for crud support"""
-        return PostgresService(model=model, conn=self.conn)
+        return PostgresService(model=model, conn=self.conn, **kwargs)
 
     def get_entities(self, keys: str | typing.List[str]):
         """
@@ -286,7 +290,7 @@ class PostgresService:
         return cls.execute(query, data=data, page_size=page_size, as_upsert=True)
 
     def update_records(
-        self, records: typing.List[BaseModel], batch_size: int = 50
+        self, records: typing.List[BaseModel], batch_size: int = 50, index_entities: bool = False
     ):
         """records are updated using typed object relational mapping."""
 
@@ -318,6 +322,8 @@ class PostgresService:
                 logger.warning(f"Failing to run {query}")
                 raise
 
+            if index_entities:
+                self.index_entities()
             return result
         else:
             logger.warning(f"Nothing to do - records is empty {records}")

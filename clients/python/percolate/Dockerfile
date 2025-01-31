@@ -1,5 +1,5 @@
 #build from the correct context - docker file lives somewhere separate to the code
-FROM python:3.10-slim as requirements-stage
+FROM python:3.10-slim AS requirements-stage
 RUN apt-get update && apt-get install -y curl gpg
 WORKDIR /tmp
 RUN pip install poetry==2.0.0
@@ -15,12 +15,15 @@ COPY --from=requirements-stage /tmp/requirements.txt /code/requirements.txt
 RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt
 #
 COPY ./percolate /code/percolate
-ENV PYTHONPATH "${PYTHONPATH}:/code"
-ENV PATH /usr/bin:$PATH
+ENV PYTHONPATH="${PYTHONPATH}:/code"
+ENV PATH=/usr/bin:$PATH
 ENV PYTHONUNBUFFERED=0
-ARG RES_TAG
-ENV RES_TAG=${RES_TAG}
-RUN echo "set docker image environment: $RES_TAG"
 ############################
-EXPOSE 5000
-CMD ["hypercorn", "--bind", "0.0.0.0:5000",  "percolate.api.main:app"]
+EXPOSE 5008
+CMD ["hypercorn", "--bind", "0.0.0.0:5008",  "percolate.api.main:app"]
+
+
+#add --push if preferred
+#docker buildx create --use
+#docker buildx build --platform linux/amd64,linux/arm64,linux/arm64/v8 -t percolate-api:0.0.4 . 
+#docker tag percolate-api:latest percolationlabs/percolate-api:0.0.4 & docker push percolationlabs/percolate-api:0.0.4

@@ -341,3 +341,24 @@ class ContentIndex(AbstractModel):
             values['id'] = make_uuid({'uri': values['uri'], 'ordinal': values['ordinal']})
         return values
     
+class PercolateAgent(ContentIndex):
+    """The percolate agent is the guy that tells you about Percolate.
+    You can learn about the philosophy of Percolate or ask questions about the docs and codebase.
+    You can lookup entities of different types or plan queries and searches.
+    You can call any registered apis and functions and learn more about how they can be used.
+    """
+    pass
+
+
+class Settings(AbstractModel):
+    """settings are key value pairs for percolate admin"""
+    id: typing.Optional[uuid.UUID| str] = Field("The id is generated as a hash of the required key and ordinal")  
+    key: str = Field(default="The key for the value to store - id is generated form this")
+    value: str = Field(description="Value of the setting")
+    
+    @model_validator(mode='before')
+    @classmethod
+    def _f(cls, values):
+        values['id'] = make_uuid({"key": values['key']})
+        return values
+    
