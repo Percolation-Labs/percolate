@@ -1,6 +1,8 @@
+#!/usr/bin/env python
 import typer
 from typing import List, Optional
 from percolate.utils.ingestion import add
+from percolate.utils.env import sync_model_keys
 app = typer.Typer()
 
 add_app = typer.Typer()
@@ -20,6 +22,19 @@ def api(
     typer.echo(f"URI: {uri}")
     add.add_api(name=name, uri=uri, token=token,file=file, verbs=verbs,filter_ops=filter_ops)
 
+@add_app.command()
+def env(
+    sync: bool = typer.Option(False, "--sync", help="Sync environment variables from .env")
+):
+    """Add environment variables via key-value pairs or sync from .env file"""
+    if sync:
+        typer.echo(f"Syncing env vars from your environment for loaded models in percolate. See p8.LanguageModelApi table.")
+        results = sync_model_keys()
+        for key, result in results.items():
+            typer.echo(f"{'✅' if result else '❌'} {key}")
+            
+    
+                
 @add_app.command()
 def function(
     name: str,

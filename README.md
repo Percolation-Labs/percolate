@@ -40,14 +40,19 @@ The easiest way to get started is simply to launch the docker instance and conne
 docker compose up -d
 ```
 
-The docker compose expects keys to be in your environment for a seamless start for example `OPENAI_API_KEY`. The database is setup to configure some models that expect keys like this.
-
 ---
 
-You can optionally install a Python client and API. The API is also exposed via port 5008 on the docker instance. To install the python client locally 
+You have the option of installing the client or using it from source (recommended). To install the python client locally 
 
 ```bash
 pip install percolate-db
+```
+
+If you dont install the client but want to use the cli from the current build. For example you can you can do the following if your docker instance is up to sync API keys into the local database. (In future we will read them from the env automatically)
+
+```
+cd clients/python/percolate
+python percolate/cli.py add env --sync
 ```
 
 While the Python client is optional, its useful as a way to ingest data. It also provides a lightweight agentic workflow that relies on simple Pydantic objects. With this you can stream results or handle multi-step reasoning. See the docs to learn more about working with Percolate any Python or other languages.
@@ -56,9 +61,11 @@ You can use the Python client to add agents and APIs. Use the cli to add a test 
 
 ```bash
 p8 add api https://petstore.swagger.io/v2/swagger.json --verbs get
+#OR if using the python client as mentioned above
+#python percolate/cli.py add api https://petstore.swagger.io/v2/swagger.json --verbs get
 ```
 
-Create a Python agent (and also register it in the database)
+Create a Python agent (and also register it in the database). 
 
 ```python
 
