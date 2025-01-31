@@ -1,4 +1,23 @@
 services:
+  minio:
+    image: quay.io/minio/minio
+    container_name: minio
+    ports:
+      - "9000:9000"
+      - "9090:9090" # MinIO Console
+    environment:
+      MINIO_ROOT_USER: percolate
+      MINIO_ROOT_PASSWORD: percolate
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9090"
+  percolate-api:
+    image: percolationlabs/percolate-api
+    container_name: percolate-api
+    ports:
+      - "5008:5008"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
   postgres:
     image: percolationlabs/postgres-base:16
     container_name: percolate
@@ -16,6 +35,7 @@ services:
     restart: unless-stopped
 volumes:
   percolate_data:
+  minio_data:
 #if you need to you can export new env vars before up
 #export MY_API_KEY=your-api-key-goes-here
 #docker compose up -d

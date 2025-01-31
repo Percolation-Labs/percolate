@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "percolate-db"
-version = "0.1.05"
+version = "0.1.06"
 description = "A client for working with the [Percolate database](https://github.com/Percolation-Labs/percolate)"
 authors = ["mr-saoirse <amartey@gmail.com>"]
 license = "MIT"
@@ -17,6 +17,10 @@ openai = "^1.60.0"
 docstring-parser = "^0.16"
 typer = "^0.15.1"
 pyyaml = "^6.0.2"
+hypercorn = "^0.17.3"
+requests = "^2.32.3"
+fastapi = "^0.115.8"
+minio = "^7.2.15"
 
 
 [build-system]

@@ -80,7 +80,8 @@ class AbstractModelMixin:
     def get_model_description(cls)->str:
         """the doc string of the object is typically the model system prompt. Config can also be used to set description"""
         c:ConfigDict = cls.model_config 
-        return c.get('description') or cls.__doc__
+        desc =  c.get('description') or cls.__doc__  
+        return desc or cls.get_model_full_name()
     
     @classmethod
     def model_parse(cls, values: dict) -> "AbstractModel":

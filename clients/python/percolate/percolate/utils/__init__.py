@@ -3,6 +3,9 @@ import hashlib
 import uuid
 from . import names
 from loguru import logger
+from importlib import import_module
+from pathlib import Path
+import os
 
 def uuid_str_from_dict(d):
     """
@@ -28,3 +31,17 @@ def batch_collection(collection, batch_size):
     """Yield successive batches of size batch_size from collection. can also be used to chunk string of chars"""
     for i in range(0, len(collection), batch_size):
         yield collection[i : i + batch_size]
+        
+
+
+def get_repo_root():
+    """the root directory of the project by convention"""
+    path = os.environ.get("P8_HOME")
+    if not path:
+        p8 = import_module("percolate")
+        path = Path(p8.__file__).resolve().parent.parent.parent.parent.parent
+        return path
+    
+def split_string_into_chunks(string, chunk_size=20000):
+    """simple chunker"""
+    return [string[i : i + chunk_size] for i in range(0, len(string), chunk_size)]

@@ -11,7 +11,8 @@ You can now orchestrate powerful agentic systems with multi-modal RAG using any 
 
 
 ```sql
-select * from percolate('What is the capital of ireland?', 'claude-3-5-sonnet-20241022')
+select * from percolate('What is the capital of ireland?')
+--select * from percolate('What is the capital of ireland?', 'claude-3-5-sonnet-20241022')
 ```
 
 ```sql
@@ -28,7 +29,7 @@ You can use tools implicitly or explicitly when you engage with Percolate.
 select * from percolate_with_tools('What priority tasks did I created last week? How many did i create?', 
                                    ARRAY['query_conversations'] )
 ```
- 
+
 Reach out on the various channels at the bottom of the repo to tell us what you think. It would be great to hear from you!
 
 ## Easy set up
@@ -107,6 +108,8 @@ Also talk to your agent in the database
 ```sql
 select * from percolate_with_agent('List some pets that are sold', 'MyAgent')
 ```
+
+
 
 Try Percolate using the setup instructions below to see how it simplifies connecting AI to your data. You can run it locally, in the cloud or connect to a cloud instance. After setting up and trying a few examples, check out the recipes in the [Docs](https://percolation-labs.gitbook.io/percolation-labs) to go deeper.
 
