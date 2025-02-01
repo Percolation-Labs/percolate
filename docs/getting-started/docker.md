@@ -1,5 +1,7 @@
 ---
-description: Docker is the easiest way to try out Percolate on your local machine
+description: >-
+  Docker is the easiest way to try out Percolate on your local machine. In the
+  last section it was used for quick setup and here we provide more details
 ---
 
 # Docker
