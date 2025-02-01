@@ -7,6 +7,7 @@ description: Get up and running in 1 minute
 To start trying Percolate, clone the [repo](https://github.com/Percolation-Labs/percolate) and from the root
 
 ```bash
+git clone https://github.com/Percolation-Labs/percolate.git
 docker compose up -d
 ```
 
