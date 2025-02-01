@@ -16,7 +16,7 @@ select * from percolate('What is the capital of ireland?')
 ```
 
 ```sql
-select * from percolate('how can percolate help me with create agentic systems', 
+select * from percolate('how can percolate help me with creating agentic systems', 
   'deepseek-chat')
 ```
 
