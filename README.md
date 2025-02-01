@@ -100,7 +100,7 @@ Also talk to your agent in the database
 select * from percolate_with_agent('List some pets that are sold', 'MyAgent')
 ```
 
-When getting start you may find other cli utils useful - 
+When getting started you may find other cli utils useful - 
 
 ```bash
 cd clients/python/percolate
@@ -147,14 +147,14 @@ To connect to a dedicated Percolate cloud instance, you will be able request a P
 
 ## On the Roadmap
 
-The main reason we created Percolate is to work on a new type of query plan that involves both agents and data. We wanted to push Agentic AI down into the data tier because we think it shows promises. Importantly data are multi-modal and rather than using multiple stores for key-value, relational, graph and vector, we want it all in the same place, first for convenience and then for optimization. Building this Optimizer is not trivial. 
+The main reason we created Percolate is to work on a new type of query plan that involves both agents and data. We wanted to push Agentic AI down into the data tier because we think it is natural to do so. Importantly data are multi-modal and rather than using multiple stores for key-value, relational, graph and vector, we want this all in the same place, first for convenience and then for optimization. Building this optimizer is of course non trivial. 
 
-We also have things to work out regarding database background workers to achieve a great user experience for agentic workflows that use the database during multi-hop reasoning. Another exciting avenue is an SQL coding environment that uses AI and the data and schema stored in Percolate. 
- 
+We have some things to work out regarding database background workers to achieve a great user experience for agentic workflows that use the database during multi-hop reasoning. 
 
+Another exciting avenue is an SQL coding environment that uses AI and the data and schema stored in Percolate. 
 In the new database paradigm, it should be possible to interact with databases using natural language. We are building _Percolate Studio_ for query composition and data visualization powered with AI.
 
-Any issues or suggestions you add will hopefully make their way into our prioritized roadmap so feel free to suggest anything related to putting ai in the dAta tIer.
+Any issues or suggestions you add will hopefully make their way into our prioritized roadmap so feel free to suggest anything related to putting AI in the dAta tIer.
 
 
 ## Developers
