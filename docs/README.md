@@ -5,7 +5,7 @@ description: >-
   natively AI-aware multi-modal database.
 ---
 
-# Percolate - Putting AI in the data tier
+# Percolate - AI in the data tier
 
 <figure><img src=".gitbook/assets/image (1).png" alt=""><figcaption></figcaption></figure>
 
@@ -37,24 +37,14 @@ Select * from percolate('How does Percolate make it easy to add AI to applicatio
 
 ## Learn more
 
-Having connected, you will want to learn more. Try the links below or in the side menu
-
-Configure - Recipes - Deploy&#x20;
-
-<table data-view="cards"><thead><tr><th></th><th></th><th data-hidden></th><th data-hidden></th><th data-hidden></th><th data-hidden data-card-target data-type="content-ref"></th><th data-hidden data-card-cover data-type="files"></th></tr></thead><tbody><tr><td></td><td></td><td></td><td></td><td></td><td><a href="broken-reference">Broken link</a></td><td><a href=".gitbook/assets/image (1).png">image (1).png</a></td></tr><tr><td></td><td></td><td></td><td></td><td></td><td><a href="broken-reference">Broken link</a></td><td><a href=".gitbook/assets/image.png">image.png</a></td></tr><tr><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr></tbody></table>
-
-Learn more cards
-
-Github - Youtube - Medium - Substack - Bluesky&#x20;
+We are slowly building out examples in the docs but you might start with [percolating-python-first.md](recipes/percolating-python-first.md "mention")
 
 ## Connect and Learn
 
-To learn more, checkout the links below.
+To learn more follow us sing the lins below
 
-* Docs
-* Youtube
-* Substack Publication
-* Medium Publication
-* PercolationLabs home
-* Discord
-* Bluesky
+* [Github](https://github.com/Percolation-Labs/percolate)
+* [Medium](https://medium.com/percolation-labs)
+* [Substack](https://percolationlabs.substack.com/)
+* [Bluesky](https://bsky.app/)
+* [Youtube](https://www.youtube.com/@PercolationLabs)

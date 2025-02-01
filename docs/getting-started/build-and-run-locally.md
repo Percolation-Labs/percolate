@@ -7,7 +7,7 @@ description: Get up and run in a 1 minute
 To start trying Percolate, clone the [repo](https://github.com/Percolation-Labs/percolate) and from the root
 
 ```bash
-docker compose up
+docker compose up -d
 ```
 
 You now have a postgres instance on port `5438` hat you can log into with `postgres:postgres`
