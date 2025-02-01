@@ -1,6 +1,6 @@
 # Table of contents
 
-* [Percolate - The AI in the data tier](README.md)
+* [Percolate - AI in the data tier](README.md)
 
 ## Getting started
 
@@ -25,15 +25,14 @@
   * [Relational](going-multimodal/querying/relational.md)
 * [Indexing](going-multimodal/indexing.md)
 
-***
+## Recipes
 
-* [RECIPES](recipes/README.md)
-  * [Percolating Python-first](recipes/percolating-python-first.md)
-  * [Percolating SQL-first](recipes/percolating-sql-first.md)
-  * [Percolate for SREs](recipes/percolate-for-sres.md)
-  * [No-code Percolate](recipes/no-code-percolate.md)
-  * [Founder's DataRoom P8](recipes/founders-dataroom-p8.md)
-  * [Document Drafter P8](recipes/document-drafter-p8.md)
+* [Percolating Python-first](recipes/percolating-python-first.md)
+* [Percolating SQL-first](recipes/percolating-sql-first.md)
+* [Percolate for SREs](recipes/percolate-for-sres.md)
+* [No-code Percolate](recipes/no-code-percolate.md)
+* [Founder's DataRoom P8](recipes/founders-dataroom-p8.md)
+* [Document Drafter P8](recipes/document-drafter-p8.md)
 
 ## Concepts
 
