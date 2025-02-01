@@ -15,20 +15,24 @@ import traceback
 class PostgresService:
     """the postgres service wrapper for sinking and querying entities/models"""
 
-    def __init__(self, model: BaseModel = None, conn=None):
+    def __init__(self, model: BaseModel = None, conn=None, on_connect_error: str = None):
         try:
-            self.conn = conn or psycopg2.connect(POSTGRES_CONNECTION_STRING)
+            self.conn = None
             self.helper = SqlModelHelper(AbstractModel)  
+            
             if model:
                 """we do this because its easy for user to assume the instance is what we want instead of the type"""
                 self.model = AbstractModel.Abstracted(ensure_model_not_instance(model))
                 self.helper:SqlModelHelper = SqlModelHelper(model) 
             else: self.model=None
+            self.conn = conn or psycopg2.connect(POSTGRES_CONNECTION_STRING)
+
         except:
-            logger.warning(traceback.format_exc())
-            logger.warning(
-                "Could not connect - you will need to check your env and call pg._connect again"
-            )
+            if on_connect_error != 'ignore':
+                logger.warning(traceback.format_exc())
+                logger.warning(
+                    "Could not connect - you will need to check your env and call pg._connect again"
+                )
             
     def __repr__(self):
         return f"PostgresService({self.model.get_model_full_name() if self.model else None}, {POSTGRES_SERVER=}, {POSTGRES_DB=})"
@@ -50,9 +54,9 @@ class PostgresService:
         self.conn = psycopg2.connect(POSTGRES_CONNECTION_STRING)
         return self.conn
 
-    def repository(self, model: BaseModel) -> "PostgresService":
+    def repository(self, model: BaseModel, **kwargs) -> "PostgresService":
         """a connection in the context of the abstract model for crud support"""
-        return PostgresService(model=model, conn=self.conn)
+        return PostgresService(model=model, conn=self.conn, **kwargs)
 
     def get_entities(self, keys: str | typing.List[str]):
         """
@@ -68,6 +72,7 @@ class PostgresService:
                 "status": "NO DATA",
                 "message": f"There were no data when we fetched {keys=} Please use another method to answer the question or return to the user with a new suggested plan or summary of what you know so far. If you still have different functions to use please try those before completion." 
             }]      
+            
     def search(self, question:str):
         """
         If the repository has been activated with a model we use the models search function
@@ -78,8 +83,12 @@ class PostgresService:
             question: detailed natural language question 
         """
         
-        pass
+        """in future we should pardo multiple questions"""
+        if isinstance(question,list):
+            question = '\n'.join(question)
         
+        Q = f"""select * from p8.query_entity('{question}', '{self.model.get_model_full_name()}')  """
+        return self.execute(Q)
         
     def get_model_database_schema(self):
         assert self.model is not None, "The model is empty - you should construct an instance of the postgres service as a repository(Model)"
@@ -286,7 +295,7 @@ class PostgresService:
         return cls.execute(query, data=data, page_size=page_size, as_upsert=True)
 
     def update_records(
-        self, records: typing.List[BaseModel], batch_size: int = 50
+        self, records: typing.List[BaseModel], batch_size: int = 50, index_entities: bool = False
     ):
         """records are updated using typed object relational mapping."""
 
@@ -302,7 +311,7 @@ class PostgresService:
         if len(records) > batch_size:
             logger.info(f"Saving  {len(records)} records in batches of {batch_size}")
             for batch in batch_collection(records, batch_size=batch_size):
-                sample = self.update_records(batch, batch_size=batch_size)
+                sample = self.update_records(batch, batch_size=batch_size,index_entities=index_entities)
             return sample
 
         data = [
@@ -318,6 +327,8 @@ class PostgresService:
                 logger.warning(f"Failing to run {query}")
                 raise
 
+            if index_entities:
+                self.index_entities()
             return result
         else:
             logger.warning(f"Nothing to do - records is empty {records}")
@@ -330,11 +341,12 @@ class PostgresService:
         logger.info(f'indexing entity {self.model}')
         r1, r2 = None,None
         try:
-            r1 = self.execute(f""" select * from public.insert_entity_nodes('{self.model.get_model_fullname()}'); """)
+            
+            r1 = self.execute(f""" select * from p8.insert_entity_nodes('{self.model.get_model_full_name()}'); """)
         except Exception as ex:
-            logger.warning(f"Failed to compute nodes {ex}")
+            logger.warning(f"Failed to compute nodes {traceback.format_exc()}")
         try:
-            r2 = self.execute(f""" select * from public.insert_entity_embeddings('{self.model.get_model_fullname()}'); """)
+            r2 = self.execute(f""" select * from p8.insert_entity_embeddings('{self.model.get_model_full_name()}'); """)
         except Exception as ex:
             logger.warning(f"Failed to compute embeddings {ex}")
         d =  {

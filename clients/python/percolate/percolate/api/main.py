@@ -1,95 +1,78 @@
-from fastapi import FastAPI, Query
-from pydantic import BaseModel, Field
-from typing import Optional
+
+from __future__ import annotations
+from fastapi import APIRouter, FastAPI, Response, UploadFile, File, Form
+from http import HTTPStatus
+from fastapi.middleware.cors import CORSMiddleware
+from pathlib import Path
+from fastapi.responses import StreamingResponse
+from starlette.responses import HTMLResponse
+import json
+import traceback
+import typing
+from pydantic import BaseModel
+from .routes import set_routes
+from percolate import __version__
 
 app = FastAPI(
-    title="Weather Service API",
+    title="Percolate",
+    openapi_url=f"/openapi.json",
     description=(
-        "A simple weather service API that provides weather information for a given city. "
-        "It allows you to fetch current temperature, humidity, and weather conditions."
+        """Percolate server can be used to do maintenance tasks on the database and also to test the integration of APIs in general"""
     ),
-    version="1.0.0",
+    version=__version__,
     contact={
-        "name": "Weather API Support",
-        "url": "https://weatherapi.example.com/contact",
-        "email": "support@weatherapi.example.com",
+        "name": "Percolation Labs",
+        "url": "https://github.com/Percolation-Labs/percolate.git",
+        "email": "percolationlabs@gmail.com",
     },
     license_info={
         "name": "MIT",
         "url": "https://opensource.org/licenses/MIT",
     },
 )
+api_router = APIRouter()
 
-# Pydantic model for the weather response
-class WeatherResponse(BaseModel):
-    city: str = Field(..., description="The name of the city for which weather data is provided.")
-    temperature: float = Field(..., description="The current temperature in Celsius.")
-    humidity: int = Field(..., description="The current humidity percentage.")
-    condition: str = Field(..., description="A brief description of the weather condition (e.g., Clear, Rainy).")
+origins = [
+    "http://localhost:5008",
+]
 
-@app.get(
-    "/weather",
-    response_model=WeatherResponse,
-    summary="Get Weather Information",
-    description=(
-        "Fetch the current weather information for a specific city. "
-        "The response includes the temperature, humidity, and weather condition."
-    ),
-    tags=["Weather"],
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
-async def get_weather(
-    city: str = Query(
-        ...,
-        description="The name of the city for which to fetch weather information.",
-        examples=["Paris"],
-    ),
-    units: Optional[str] = Query(
-        "metric",
-        description=(
-            "The unit system for temperature. Options are:\n\n"
-            "- `metric`: Celsius\n"
-            "- `imperial`: Fahrenheit\n"
-        )
-    ),
-) -> WeatherResponse:
-    """
-    Fetch the current weather for a given city.
 
-    - **city**: The name of the city to retrieve weather for.
-    - **units**: The unit system for temperature, either `metric` (Celsius) or `imperial` (Fahrenheit).
-    
-    Returns:
-        A JSON object containing the weather data:
-        - **city**: The name of the city.
-        - **temperature**: The current temperature in the requested unit.
-        - **humidity**: The percentage of humidity.
-        - **condition**: A brief description of the weather condition.
-    """
 
-    # Mock weather data (Replace this with an actual API call to a weather provider)
-    mock_data = {
-        "Paris": {"temperature": 20.5, "humidity": 65, "condition": "Clear"},
-        "New York": {"temperature": 25.3, "humidity": 70, "condition": "Rainy"},
-        "Tokyo": {"temperature": 18.7, "humidity": 60, "condition": "Cloudy"},
-    }
+@app.get("/", include_in_schema=False)
+@app.get("/healthcheck", include_in_schema=False)
+async def healthcheck():
+    return {"status": "ok"}
 
-    weather = mock_data.get(city)
 
-    if not weather:
-        return WeatherResponse(
-            city=city,
-            temperature=0.0,
-            humidity=0,
-            condition="Unknown",
-        )
 
-    temperature = weather["temperature"]
-    if units == "imperial":
-        temperature = temperature * 9 / 5 + 32  # Convert to Fahrenheit
+app.include_router(api_router)
+set_routes(app)
 
-    return WeatherResponse(
-        city=city,
-        temperature=temperature,
-        humidity=weather["humidity"],
-        condition=weather["condition"],
+
+def start():
+    import uvicorn
+
+    uvicorn.run(
+        f"{Path(__file__).stem}:app",
+        host="0.0.0.0",
+        port=5008,
+        log_level="debug",
+        reload=True,
     )
+
+
+if __name__ == "__main__":
+    """
+    You can start the dev with this in the root
+    uvicorn percolate.api.main:app --port 5008 --reload
+    http://127.0.0.1:5008/docs
+    """
+    
+    start()
