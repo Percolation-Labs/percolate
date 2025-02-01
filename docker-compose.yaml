@@ -36,6 +36,3 @@ services:
 volumes:
   percolate_data:
   minio_data:
-#if you need to you can export new env vars before up
-#export MY_API_KEY=your-api-key-goes-here
-#docker compose up -d

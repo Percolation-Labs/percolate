@@ -50,16 +50,7 @@ $$ LANGUAGE plpgsql;
 -- Wrapper function `percolate_with_agent`
 
 
-
-
---drop function percolate_with_agent
--- FUNCTION: public.percolate_with_agent
-
--- DROP FUNCTION IF EXISTS public.percolate_with_agent;
-
--- FUNCTION: public.percolate_with_agent
-
--- DROP FUNCTION IF EXISTS public.percolate_with_agent;
+DROP FUNCTION IF EXISTS public.percolate_with_agent;
 CREATE OR REPLACE FUNCTION public.percolate_with_agent(
     question text,
     agent text,
@@ -129,7 +120,7 @@ BEGIN
 
     -- Ensure API details were found
     IF api_token IS NULL OR selected_model IS NULL OR selected_scheme IS NULL THEN
-        RAISE EXCEPTION format('Missing required API details for request. Model request is %s, scheme=%s',selected_model, selected_scheme);
+        RAISE EXCEPTION 'Missing required API details for request. Model request is %s, scheme=%s',selected_model, selected_scheme;
     END IF;
 
     -- Default public schema for agent if not provided
@@ -178,8 +169,3 @@ BEGIN
     );
 END;
 $BODY$;
-
-ALTER FUNCTION public.percolate_with_agent(
-    text, text, text[], text, character varying, text, uuid, double precision
-)
-OWNER TO postgres;
