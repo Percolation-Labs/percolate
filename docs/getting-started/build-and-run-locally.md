@@ -66,7 +66,7 @@ To understand creating agents see [add-agents.md](../configure/add-agents.md "me
 If you have created an agent using the example with the sample pets store tools
 
 ```sql
-select * from percolate_with_agent('list some pets that str sold', 'MyFirstAgent')
+select * from percolate_with_agent('list some pets that are sold', 'MyFirstAgent')
 ```
 
 &#x20;
