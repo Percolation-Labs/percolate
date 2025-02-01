@@ -1,5 +1,5 @@
 ---
-description: Get up and run in a 1 minute
+description: Get up and running in 1 minute
 ---
 
 # Quick start
