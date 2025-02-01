@@ -75,9 +75,9 @@ class Function(AbstractEntityModel):
             p = dict(f)
             if 'properties' in p:
                 process_properties(p['properties'])
-                   
+    
             name = p.pop('title')
-            desc = p.pop('description')
+            desc = p.pop('description') if 'description' in p else 'NO DESC'
             return {
                 'name': name,
                 'parameters' :p,
@@ -342,12 +342,18 @@ class ContentIndex(AbstractModel):
         return values
     
 class PercolateAgent(ContentIndex):
-    """The percolate agent is the guy that tells you about Percolate.
+    """The percolate agent is the guy that tells you about Percolate which is a multi-modal database for managing AI in the data tier.
     You can learn about the philosophy of Percolate or ask questions about the docs and codebase.
     You can lookup entities of different types or plan queries and searches.
     You can call any registered apis and functions and learn more about how they can be used.
+    Call the search function to get data about Percolate
     """
-    pass
+    @model_validator(mode='before')
+    @classmethod
+    def _f(cls, values):
+        if not values.get('id'):
+            values['id'] = make_uuid({'uri': values['uri'], 'ordinal': values['ordinal']})
+        return values
 
 
 class Settings(AbstractModel):
