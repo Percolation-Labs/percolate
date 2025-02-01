@@ -39,16 +39,20 @@ BEGIN
         RAISE EXCEPTION 'Agent with name "%" not found.', agent_name;
     END IF;
 	
-    IF api_token IS NULL THEN
-        
-    SELECT token into api_token
-	    FROM p8."LanguageModelApi"
-	    WHERE "name" = model_in
-	    LIMIT 1;
+    IF api_token IS NULL THEN    
+        SELECT token into api_token
+            FROM p8."LanguageModelApi"
+            WHERE "name" = model_in
+            LIMIT 1;
     END IF;
+
     -- API call to OpenAI with the necessary headers and payload
     WITH T AS(
-        SELECT 'system' AS "role", 'you will generate a PostgreSQL query for the table metadata provided and respond in json format with the query and confidence - escape characters so that the json can be loaded in postgres ' AS "content" 
+        SELECT 'system' AS "role", 
+		   'you will generate a PostgreSQL query for the provided table metadata that can '
+		|| ' query that table (but replace table with YOUR_TABLE) to answer the users question and respond in json format'
+		|| 'responding with the query and confidence - escape characters so that the json can be loaded in postgres.' 
+		AS "content" 
         UNION
         SELECT 'system' AS "role", table_schema_prompt AS "content" 
         UNION

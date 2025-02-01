@@ -50,23 +50,13 @@ $$ LANGUAGE plpgsql;
 -- Wrapper function `percolate_with_agent`
 
 
-
-
---drop function percolate_with_agent
--- FUNCTION: public.percolate_with_agent
-
--- DROP FUNCTION IF EXISTS public.percolate_with_agent;
-
--- FUNCTION: public.percolate_with_agent
-
--- DROP FUNCTION IF EXISTS public.percolate_with_agent;
-
+DROP FUNCTION IF EXISTS public.percolate_with_agent;
 CREATE OR REPLACE FUNCTION public.percolate_with_agent(
     question text,
     agent text,
+    model_key character varying DEFAULT 'gpt-4o-mini'::character varying,
     tool_names_in text[] DEFAULT NULL::text[],
     system_prompt text DEFAULT 'Respond to the users query using tools and functions as required'::text,
-    model_key character varying DEFAULT 'gpt-4o-mini'::character varying,
     token_override text DEFAULT NULL::text,
     user_id uuid DEFAULT NULL::uuid,
     temperature double precision DEFAULT 0.01
@@ -125,12 +115,12 @@ BEGIN
     SELECT completions_uri, COALESCE(token, token_override), model, scheme
     INTO endpoint_uri, api_token, selected_model, selected_scheme
     FROM p8."LanguageModelApi"
-    WHERE "name" = model_key
+    WHERE "name" = COALESCE(model_key, 'gpt-4o-mini')
     LIMIT 1;
 
     -- Ensure API details were found
     IF api_token IS NULL OR selected_model IS NULL OR selected_scheme IS NULL THEN
-        RAISE EXCEPTION 'Missing required API details for request';
+        RAISE EXCEPTION 'Missing required API details for request. Model request is %s, scheme=%s',selected_model, selected_scheme;
     END IF;
 
     -- Default public schema for agent if not provided
@@ -179,11 +169,6 @@ BEGIN
     );
 END;
 $BODY$;
-
-ALTER FUNCTION public.percolate_with_agent(
-    text, text, text[], text, character varying, text, uuid, double precision
-)
-OWNER TO postgres;
 
 
 ---------
@@ -537,14 +522,14 @@ DECLARE
 BEGIN
     -- Generate session ID from user_id and current timestamp
     session_id := p8.json_to_uuid(
-        json_build_object('timestamp', current_timestamp::text, 'user_id', COALESCE(user_id, ''))::JSONB
+        json_build_object('timestamp', current_timestamp::text, 'user_id', user_id)::JSONB
     );
 
     -- Upsert into p8.Session
-    INSERT INTO p8.Session (id, user_id, query, parent_session_id, agent)
+    INSERT INTO p8."Session" (id, userid, query, parent_session_id, agent)
     VALUES (session_id, user_id, query, parent_session_id, agent)
     ON CONFLICT (id) DO UPDATE
-    SET user_id = EXCLUDED.user_id,
+    SET userid = EXCLUDED.userid,
         query = EXCLUDED.query,
         parent_session_id = EXCLUDED.parent_session_id,
         agent = EXCLUDED.agent;
@@ -2076,16 +2061,20 @@ BEGIN
         RAISE EXCEPTION 'Agent with name "%" not found.', agent_name;
     END IF;
 	
-    IF api_token IS NULL THEN
-        
-    SELECT token into api_token
-	    FROM p8."LanguageModelApi"
-	    WHERE "name" = model_in
-	    LIMIT 1;
+    IF api_token IS NULL THEN    
+        SELECT token into api_token
+            FROM p8."LanguageModelApi"
+            WHERE "name" = model_in
+            LIMIT 1;
     END IF;
+
     -- API call to OpenAI with the necessary headers and payload
     WITH T AS(
-        SELECT 'system' AS "role", 'you will generate a PostgreSQL query for the table metadata provided and respond in json format with the query and confidence - escape characters so that the json can be loaded in postgres ' AS "content" 
+        SELECT 'system' AS "role", 
+		   'you will generate a PostgreSQL query for the provided table metadata that can '
+		|| ' query that table (but replace table with YOUR_TABLE) to answer the users question and respond in json format'
+		|| 'responding with the query and confidence - escape characters so that the json can be loaded in postgres.' 
+		AS "content" 
         UNION
         SELECT 'system' AS "role", table_schema_prompt AS "content" 
         UNION
@@ -2829,6 +2818,67 @@ ALTER FUNCTION p8.register_entities(text, boolean, text)
 
 ---------
 
+ 
+DROP FUNCTION IF EXISTS p8.vector_search_entity;
+
+CREATE OR REPLACE FUNCTION p8.vector_search_entity(
+    question TEXT,
+    entity_name TEXT,
+    distance_threshold NUMERIC DEFAULT 0.75,
+    limit_results INTEGER DEFAULT 5
+)
+RETURNS TABLE(id uuid, vdistance double precision) 
+LANGUAGE 'plpgsql'
+AS $BODY$
+DECLARE
+    embedding_for_text TEXT;
+    schema_name TEXT;
+    table_name TEXT;
+    vector_search_query TEXT;
+BEGIN
+    /*
+	This is a generic model search that resturns ids which can be joined with the original table
+	we dont do it ine one because we want to dedup and take min distance on multiple embeddings 
+	
+	select  * from p8.vector_search_entity('what sql queries do we have for generating uuids from json', 'p8.PercolateAgent')
+	*/
+    -- Format the entity name to include the schema if not already present
+    SELECT CASE 
+        WHEN entity_name NOT LIKE '%.%' THEN 'public.' || entity_name 
+        ELSE entity_name 
+    END INTO entity_name;
+
+    -- Compute the embedding for the question
+    embedding_for_text := p8.get_embedding_for_text(question);
+
+    -- Extract schema and table name from the entity name (assuming format schema.table)
+    schema_name := split_part(entity_name, '.', 1);
+    table_name := split_part(entity_name, '.', 2);
+
+    -- Construct the dynamic query using a CTE to order by vdistance and limit results
+    vector_search_query := FORMAT(
+        'WITH vector_search_results AS (
+            SELECT b.id, MIN(a.embedding_vector <-> %L) AS vdistance
+            FROM p8_embeddings."%s_%s_embeddings" a
+            JOIN %s.%I b ON b.id = a.source_record_id
+            WHERE a.embedding_vector <-> %L <= %L
+            GROUP BY b.id
+        )
+        SELECT id, vdistance
+        FROM vector_search_results
+        ORDER BY vdistance
+        LIMIT %s',
+        embedding_for_text, schema_name, table_name, schema_name, table_name, embedding_for_text, distance_threshold, limit_results
+    );
+
+    -- Execute the query and return the results
+    RETURN QUERY EXECUTE vector_search_query;
+END;
+$BODY$;
+
+
+---------
+
 CREATE OR REPLACE FUNCTION p8.get_entities(
     keys text[]
 )
@@ -3031,128 +3081,81 @@ $BODY$;
 
 ---------
 
--- FUNCTION: p8.generate_markdown_prompt(text, integer)
+-- FUNCTION: public.generate_markdown_prompt(text, integer)
 
--- DROP FUNCTION IF EXISTS p8.generate_markdown_prompt(text, integer);
+-- DROP FUNCTION IF EXISTS public.generate_markdown_prompt(text, integer);
 
-CREATE OR REPLACE FUNCTION public.percolate_with_agent(
-    question text,
-    agent text,
-    tool_names_in text[] DEFAULT NULL::text[],
-    system_prompt text DEFAULT 'Respond to the users query using tools and functions as required'::text,
-    model_key character varying DEFAULT 'gpt-4o-mini'::character varying,
-    token_override text DEFAULT NULL::text,
-    user_id uuid DEFAULT NULL::uuid,
-    temperature double precision DEFAULT 0.01
-)
-RETURNS TABLE(
-    message_response text,
-    tool_calls jsonb,
-    tool_call_result jsonb,
-    session_id_out uuid,
-    status text
-) 
-LANGUAGE 'plpgsql'
-COST 100
-VOLATILE PARALLEL UNSAFE
-ROWS 1000
+CREATE OR REPLACE FUNCTION p8.generate_markdown_prompt(
+	table_entity_name text,
+	max_enum_entries integer DEFAULT 200)
+    RETURNS text
+    LANGUAGE 'plpgsql'
+    COST 100
+    VOLATILE PARALLEL UNSAFE
 AS $BODY$
 DECLARE
-    tool_names_array TEXT[];
-    endpoint_uri TEXT;
-    api_token TEXT;
-    selected_model TEXT;
-    selected_scheme TEXT;
-    functions JSON;
-    message_payload JSON;
-    created_session_id uuid;
-    recovered_system_prompt text;
+    markdown_prompt TEXT;
+    field_info RECORD;
+    field_descriptions TEXT := '';
+    enum_values TEXT := '';
+	column_unique_values JSONB;
 BEGIN
-
-    -- Ensure that question and agent are provided
-    IF question IS NULL OR question = '' THEN
-        RAISE EXCEPTION 'Question cannot be NULL or empty';
-    END IF;
-
-    IF agent IS NULL OR agent = '' THEN
-        RAISE EXCEPTION 'Agent cannot be NULL or empty';
-    END IF;
-
-
-    -- Create session and store session ID
-    SELECT create_session FROM p8.create_session(user_id, question, agent)
-    INTO created_session_id;
-
-    -- Ensure session creation was successful
-    IF created_session_id IS NULL THEN
-        RAISE EXCEPTION 'Failed to create session';
-    END IF;
-
-    -- Retrieve API details
-    SELECT completions_uri, COALESCE(token, token_override), model, scheme
-    INTO endpoint_uri, api_token, selected_model, selected_scheme
-    FROM p8."LanguageModelApi"
-    WHERE "name" = model_key
-    LIMIT 1;
-
-    -- Ensure API details were found
-    IF api_token IS NULL OR selected_model IS NULL OR selected_scheme IS NULL THEN
-        RAISE EXCEPTION 'Missing required API details for request';
-    END IF;
-
-    -- Default public schema for agent if not provided
+/*
+select * from p8.generate_markdown_prompt('p8.Agent')
+*/
     SELECT CASE 
-        WHEN agent NOT LIKE '%.%' THEN 'public.' || agent 
-        ELSE agent 
-    END INTO agent;
+        WHEN table_entity_name NOT LIKE '%.%' THEN 'public.' || table_entity_name 
+        ELSE table_entity_name 
+    END INTO table_entity_name;
 
-    -- Fetch tools for the agent by calling the new function
-    SELECT p8.get_tools_for_agent(agent, selected_scheme) INTO functions;
-    
-    -- Ensure tools were fetched successfully
-    IF functions IS NULL THEN
-        RAISE EXCEPTION 'No tools found for agent % in scheme %', agent, selected_scheme;
+
+    -- Add entity name and description to the markdown
+    SELECT '## Agent Name: ' || b.name || E'\n\n' || 
+           '### Description: ' || E'\n\n' || COALESCE(b.description, 'No description provided.') || E'\n\n'
+    INTO markdown_prompt
+    FROM p8."Agent" b
+    WHERE b.name = table_entity_name;
+
+    -- Add field descriptions in a table format
+    FOR field_info IN
+        SELECT a.name AS field_name, 
+               a.field_type, 
+               COALESCE(a.description, '') AS field_description
+        FROM p8."ModelField" a
+        WHERE a.entity_name = table_entity_name
+    LOOP
+        field_descriptions := field_descriptions || 
+            '| ' || field_info.field_name || ' | ' || field_info.field_type || 
+            ' | ' || field_info.field_description || ' |' || E'\n';
+    END LOOP;
+
+    IF field_descriptions <> '' THEN
+        markdown_prompt := markdown_prompt || 
+            '### Field Descriptions' || E'\n\n' ||
+            '| Field Name | Field Type | Description |' || E'\n' ||
+            '|------------|------------|-------------|' || E'\n' ||
+            field_descriptions || E'\n';
     END IF;
 
-    -- Recover system prompt using agent name
-    SELECT p8.generate_markdown_prompt(agent) INTO recovered_system_prompt;
-    
+    -- Check for enums and add them if they are below the max_enum_entries threshold
+    -- create some sort of enums view from metadata
 
-    -- Get the messages for the correct scheme
-    IF selected_scheme = 'anthropic' THEN
-        -- Select into message payload from p8.get_anthropic_messages
-        SELECT * INTO message_payload FROM p8.get_anthropic_messages(created_session_id, question, recovered_system_prompt);
-    ELSIF selected_scheme = 'google' THEN
-        -- Select into message payload from p8.get_google_messages
-        SELECT * INTO message_payload FROM p8.get_google_messages(created_session_id, question, recovered_system_prompt);
-    ELSE
-        -- Select into message payload from p8.get_canonical_messages
-        SELECT * INTO message_payload FROM p8.get_canonical_messages(created_session_id, question, recovered_system_prompt);
-    END IF;
+	select get_unique_enum_values into column_unique_values from p8.get_unique_enum_values(table_entity_name);
+	-- create an example repository for the table
+	
+    -- Add space for examples and functions
+    markdown_prompt := markdown_prompt || 
+        '### Examples' || E'\n\n' ||
+        'in future we will add examples that match the question via vector search' || E'\n\n'  ||
+		'### The unique distinct same values for some columns ' || E'\n\n' ||
+		column_unique_values || E'\n';
 
-    -- Ensure message payload was successfully fetched
-    IF message_payload IS NULL THEN
-        RAISE EXCEPTION 'Failed to retrieve message payload for session %', created_session_id;
-    END IF;
+		
 
-    -- Return the results using p8.ask function
-    RETURN QUERY 
-    SELECT * FROM p8.ask(
-        message_payload::json, 
-        created_session_id, 
-        functions::json, 
-        model_key, 
-        token_override, 
-        user_id
-    );
-
+    RETURN markdown_prompt;
 END;
 $BODY$;
 
-ALTER FUNCTION public.percolate_with_agent(
-    text, text, text[], text, character varying, text, uuid, double precision
-)
-OWNER TO postgres;
 
 
 ---------
@@ -3185,7 +3188,7 @@ BEGIN
 	    LOOP
 	        -- Prepare dynamic SQL to count distinct values in each column
 	        sql_query := format(
-	            'SELECT jsonb_agg(%I) FROM (SELECT DISTINCT %I FROM %I."%I" ) AS subquery',
+	            'SELECT jsonb_agg(%I) FROM (SELECT DISTINCT %I FROM %I."%s" ) AS subquery',
 	            col.attname, col.attname, schema_name, table_name_only
 	        );
 			--RAISE NOTICE '%', sql_query;
@@ -3204,42 +3207,108 @@ $BODY$;
 
 ---------
 
-CREATE OR REPLACE FUNCTION p8.query_entity(
-	question text,
-	table_name text,
-	min_confidence numeric DEFAULT 0.7)
-    RETURNS TABLE(table_result jsonb) 
-    LANGUAGE 'plpgsql'
-    COST 100
-    VOLATILE PARALLEL UNSAFE
-    ROWS 1000
+ 
 
+DROP FUNCTION IF EXISTS p8.query_entity;
+CREATE OR REPLACE FUNCTION p8.query_entity(
+    question TEXT,
+    table_name TEXT,
+    min_confidence NUMERIC DEFAULT 0.7)
+RETURNS TABLE(
+    query_text TEXT,
+    confidence NUMERIC,
+    relational_result JSONB,
+    vector_result JSONB,
+    error_message TEXT
+) 
+LANGUAGE 'plpgsql'
+COST 100
+VOLATILE PARALLEL UNSAFE
+ROWS 1000
 AS $BODY$
 DECLARE
     query_to_execute TEXT;
     query_confidence NUMERIC;
+    schema_name TEXT;
+    table_without_schema TEXT;
+    full_table_name TEXT;
+    sql_query_result JSONB;
+    sql_error TEXT;
+    vector_search_result JSONB;
+	embedding_for_text VECTOR;
 BEGIN
 
 	/*
-	imports p8.nl2sql
-	*/
-    -- Call the fn_nl2sql function to get the response and confidence
-    SELECT   "query", "confidence" INTO query_to_execute, query_confidence FROM p8.nl2sql(question, table_name);
+	first crude look at merging multipe together
+	we will spend time on this later with a proper fast parallel index
 
-	--RAISE NOTICE 'query: %', query_to_execute;
-    -- Check if the confidence is greater than or equal to the minimum threshold
+	select * from p8.query_entity('what sql queries do we have for generating uuids from json', 'p8.PercolateAgent')
+
+
+	*/
+
+    -- Extract schema and table name
+    schema_name := split_part(table_name, '.', 1);
+    table_without_schema := split_part(table_name, '.', 2);
+    full_table_name := FORMAT('%I."%I"', schema_name, table_without_schema);
+
+    -- Get the embedding for the question
+    SELECT p8.get_embedding_for_text(question) INTO embedding_for_text;
+
+    -- Call the nl2sql function to get the SQL query and confidence
+    SELECT "query", nq.confidence INTO query_to_execute, query_confidence  
+    FROM p8.nl2sql(question, table_name) nq;
+
+    -- Replace 'YOUR_TABLE' in the query with the actual table name
+    query_to_execute := REPLACE(query_to_execute, 'YOUR_TABLE', full_table_name);
+
+    -- Initialize error variables
+    sql_error := NULL;
+    sql_query_result := NULL;
+    vector_search_result := NULL;
+
+    -- Execute the SQL query if confidence is high enough
     IF query_confidence >= min_confidence THEN
-        -- Execute the dynamic SQL query if confidence is high enough
-		query_to_execute := rtrim(query_to_execute, ';');
-		
-         RETURN QUERY EXECUTE 
-            'SELECT jsonb_agg(row_to_json(t)) FROM (' || query_to_execute || ') t';
-    ELSE
-        -- If the confidence is not high enough, return an error or appropriate message
-        RAISE EXCEPTION 'Confidence level too low: %', query_confidence;
+        BEGIN
+            query_to_execute := rtrim(query_to_execute, ';');
+            EXECUTE FORMAT('SELECT jsonb_agg(row_to_json(t)) FROM (%s) t', query_to_execute)
+            INTO sql_query_result;
+        EXCEPTION
+            WHEN OTHERS THEN
+                sql_error := SQLERRM; -- Capture the error message
+                sql_query_result := NULL;
+        END;
     END IF;
+
+    -- Use the vector_search_entity utility function to perform the vector search
+    BEGIN
+        EXECUTE FORMAT(
+            'SELECT jsonb_agg(row_to_json(result)) 
+             FROM (
+                 SELECT b.*, a.vdistance 
+                 FROM p8.vector_search_entity(%L, %L) a
+                 JOIN %s.%I b ON b.id = a.id 
+                 ORDER BY a.vdistance
+             ) result',
+            question, table_name, schema_name, table_without_schema
+        ) INTO vector_search_result;
+    EXCEPTION
+        WHEN OTHERS THEN
+            sql_error := COALESCE(sql_error, '') || '; Vector search error: ' || SQLERRM;
+            vector_search_result := NULL;
+    END;
+
+    -- Return results as separate columns
+    RETURN QUERY 
+    SELECT 
+        query_to_execute AS query_text,
+        query_confidence AS confidence,
+        sql_query_result AS relational_result,
+        vector_search_result AS vector_result,
+        sql_error AS error_message;
 END;
 $BODY$;
+
 
 ---------
 

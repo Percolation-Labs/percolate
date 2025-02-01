@@ -26,7 +26,7 @@ BEGIN
 	    LOOP
 	        -- Prepare dynamic SQL to count distinct values in each column
 	        sql_query := format(
-	            'SELECT jsonb_agg(%I) FROM (SELECT DISTINCT %I FROM %I."%I" ) AS subquery',
+	            'SELECT jsonb_agg(%I) FROM (SELECT DISTINCT %I FROM %I."%s" ) AS subquery',
 	            col.attname, col.attname, schema_name, table_name_only
 	        );
 			--RAISE NOTICE '%', sql_query;

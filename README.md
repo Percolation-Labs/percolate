@@ -3,7 +3,7 @@
 
 # Percolate - Build your AI directly in multi-modal Postgres
 
-**Note: This codebase is new and under active development. We will tag a stable release soon** 
+**Note: This codebase is under active development.** 
 
 Rather than build application-tier agentic frameworks that connect to language models, tools and databases, _Percolate_ brings language models, tools and agents into the database.
 
@@ -16,21 +16,13 @@ select * from percolate('What is the capital of ireland?')
 ```
 
 ```sql
-select * from percolate('How do I use Percolate studio to interact with my instance', 
+select * from percolate('how can percoalte help me with create agentic systems', 
   'deepseek-chat')
 ```
 
 When you interact with language models in Percolate, conversations are naturally logged in your instance for audit, analysis and optimization.
-We create new `Session` entries with user questions and then track each `AIResponse` which may include tool calls and evaluations. One of the things Percolate is useful for is _resuming_ and replaying sessions or getting a better understanding of the payloads that are sent to LLM Apis.
+We create new `Session` entries with user questions and then track each `AIResponse`, which may include tool calls and evaluations. One of the things Percolate is useful for is _resuming_ and replaying sessions or getting a better understanding of the payloads that are sent to LLM Apis.
 
-You can use tools implicitly or explicitly when you engage with Percolate.
-
-```sql
-select * from percolate_with_tools('What priority tasks did I created last week? How many did i create?', 
-                                   ARRAY['query_conversations'] )
-```
-
-Reach out on the various channels at the bottom of the repo to tell us what you think. It would be great to hear from you!
 
 ## Easy set up
 
@@ -48,14 +40,12 @@ You have the option of installing the client or using it from source (recommende
 pip install percolate-db
 ```
 
-If you dont install the client but want to use the cli from the current build. For example you can you can do the following if your docker instance is up to sync API keys into the local database. (In future we will read them from the env automatically)
+If you dont install the client you can use the cli from within the repo. For example the command below will sync env keys for using langauge models into the dockerized postgres instance. 
 
 ```
 cd clients/python/percolate
 python percolate/cli.py add env --sync
 ```
-
-While the Python client is optional, its useful as a way to ingest data. It also provides a lightweight agentic workflow that relies on simple Pydantic objects. With this you can stream results or handle multi-step reasoning. See the docs to learn more about working with Percolate any Python or other languages.
 
 You can use the Python client to add agents and APIs. Use the cli to add a test api. This assumes you have launched the docker instance or you have connected to another instance of Percolate.
 
@@ -65,7 +55,8 @@ p8 add api https://petstore.swagger.io/v2/swagger.json --verbs get
 #python percolate/cli.py add api https://petstore.swagger.io/v2/swagger.json --verbs get
 ```
 
-Create a Python agent (and also register it in the database). 
+Percolate focuses on building agents in the data tier. But you can use Python too. 
+To create a Python agent (and also register it in the database) -
 
 ```python
 
@@ -109,13 +100,19 @@ Also talk to your agent in the database
 select * from percolate_with_agent('List some pets that are sold', 'MyAgent')
 ```
 
+When getting start you may find other cli utils useful - 
 
+```bash
+cd clients/python/percolate
+#index the codebase (uses your open ai key for embeddings - in future we may pull this index down from somewhere)
+python percolate/cli.py index
+#now we can ask questions about what is in readmes, python or sql files in the repo
+python percolate/cli.py ask 'are there SQL functions in Percolate for interacting with models like Claude?'
+#and yaml...
+python percolate/cli.py ask 'how do i connect to Percolate using docker compose'
+```
 
-Try Percolate using the setup instructions below to see how it simplifies connecting AI to your data. You can run it locally, in the cloud or connect to a cloud instance. After setting up and trying a few examples, check out the recipes in the [Docs](https://percolation-labs.gitbook.io/percolation-labs) to go deeper.
-
-### Configure
-
-You can register you own APIs and tools and integrate LLM APIs such as those from OpenAI, Anthropic, Cerebras, Groq, XAI(Grok) DeepSeek, Google etc. All of these are registered in your Percolate instance along with your declarative agents. This section will show you the basics and you can check out the documentation links below for more details.
+At present we don't stream the results but we will add this soon.
 
 ### Installing To K8s
 
