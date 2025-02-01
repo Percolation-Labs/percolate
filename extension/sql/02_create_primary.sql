@@ -212,3 +212,46 @@ EXECUTE FUNCTION update_updated_at_column();
 
         
 -- ------------------
+
+-- register entity (p8.Settings)------
+-- ------------------
+CREATE TABLE  IF NOT EXISTS  p8."Settings" (
+id UUID PRIMARY KEY ,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    userid UUID
+);
+DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."Settings";
+CREATE   TRIGGER update_updated_at_trigger
+BEFORE UPDATE ON p8."Settings"
+FOR EACH ROW
+EXECUTE FUNCTION update_updated_at_column();
+
+        
+-- ------------------
+
+-- register entity (p8.PercolateAgent)------
+-- ------------------
+CREATE TABLE  IF NOT EXISTS  p8."PercolateAgent" (
+id UUID PRIMARY KEY ,
+    name TEXT,
+    category TEXT,
+    content TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    uri TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    userid UUID
+);
+DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."PercolateAgent";
+CREATE   TRIGGER update_updated_at_trigger
+BEFORE UPDATE ON p8."PercolateAgent"
+FOR EACH ROW
+EXECUTE FUNCTION update_updated_at_column();
+
+        
+-- ------------------

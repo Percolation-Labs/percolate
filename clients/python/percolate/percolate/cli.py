@@ -1,8 +1,18 @@
 #!/usr/bin/env python
+
+from percolate.utils import logger
+import sys
+logger.remove()  
+logger.add(sys.stderr, level="INFO")  # Set log level to info for typer since DEBUG is default
+
 import typer
 from typing import List, Optional
 from percolate.utils.ingestion import add
 from percolate.utils.env import sync_model_keys
+import percolate as p8
+from percolate.models.p8 import PercolateAgent
+
+
 app = typer.Typer()
 
 add_app = typer.Typer()
@@ -74,6 +84,37 @@ def agent(
     typer.echo(f"Protocol: {protocol}")
     if config_file:
         typer.echo(f"Config File: {config_file}")
+
+
+# Index command with no arguments
+@app.command()
+def index():
+    """Index the codebase (no arguments)."""
+    from percolate.utils.index import index_codebase
+    index_codebase()
+
+# Ask command with a default question parameter and flags for agent and model
+@app.command()
+def ask( 
+    question: str = typer.Argument("What is the meaning of life?", help="The question to ask"),
+    agent: str = typer.Option(None, help="The agent to use"),
+    model: str = typer.Option(None, help="The model to use")
+):
+    
+    from percolate.utils.env import DEFAULT_MODEL
+    typer.echo(f"Asking percolate...")
+    """temp interface todo: - trusting the database is what we want but will practice with python"""
+    #data  = p8.repository(PercolateAgent).execute(f"""  SELECT * FROM percolate_with_agent('{question}', '{agent or 'p8.PercolateAgent'}', '{model or DEFAULT_MODEL}') """)
+    from percolate.models.p8 import PercolateAgent
+
+    agent = p8.Agent(PercolateAgent)
+    data = agent(question)
+                 
+    if data:
+        #typer.echo(f"Session({data[0]['session_id_out']}): {data[0]['message_response']}")
+        typer.echo(data)
+    else:
+        typer.echo(f"Did not get a response")
 
 if __name__ == "__main__":
     app()

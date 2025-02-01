@@ -10,12 +10,24 @@ POSTGRES_PASSWORD =  "postgres"
 POSTGRES_USER = "postgres"
 POSTGRES_CONNECTION_STRING = f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_SERVER}:{POSTGRES_PORT}/{POSTGRES_DB}"
 #
-
+MINIO_SECRET = os.environ.get('MINIO_SECRET', 'percolate')
+MINIO_SERVER = os.environ.get('MINIO_SERVER', 'localhost:9000')
+MINIO_P8_BUCKET = 'percolate'
+#
 
 GPT_MINI = "gpt-4o-mini"
 DEFAULT_MODEL =   "gpt-4o-2024-08-06"
 
-
+def load_db_key(key = "P*_API_KEY"):
+    """valid database login requests the key for API access"""
+    from percolate.services import PostgresService
+    from percolate.utils import make_uuid
+    pg = PostgresService()
+    data = pg.execute(f'SELECT value from p8."Settings" where id = '%' limit 1', (make_uuid({"key": key}),))
+    if data:
+        return data['value']
+    
+    
 def sync_model_keys() -> dict:
     """look for any keys required and returns which there are and which are loaded in env"""
     from percolate.services import PostgresService

@@ -50,23 +50,13 @@ $$ LANGUAGE plpgsql;
 -- Wrapper function `percolate_with_agent`
 
 
-
-
---drop function percolate_with_agent
--- FUNCTION: public.percolate_with_agent
-
--- DROP FUNCTION IF EXISTS public.percolate_with_agent;
-
--- FUNCTION: public.percolate_with_agent
-
--- DROP FUNCTION IF EXISTS public.percolate_with_agent;
-
+DROP FUNCTION IF EXISTS public.percolate_with_agent;
 CREATE OR REPLACE FUNCTION public.percolate_with_agent(
     question text,
     agent text,
+    model_key character varying DEFAULT 'gpt-4o-mini'::character varying,
     tool_names_in text[] DEFAULT NULL::text[],
     system_prompt text DEFAULT 'Respond to the users query using tools and functions as required'::text,
-    model_key character varying DEFAULT 'gpt-4o-mini'::character varying,
     token_override text DEFAULT NULL::text,
     user_id uuid DEFAULT NULL::uuid,
     temperature double precision DEFAULT 0.01
@@ -125,12 +115,12 @@ BEGIN
     SELECT completions_uri, COALESCE(token, token_override), model, scheme
     INTO endpoint_uri, api_token, selected_model, selected_scheme
     FROM p8."LanguageModelApi"
-    WHERE "name" = model_key
+    WHERE "name" = COALESCE(model_key, 'gpt-4o-mini')
     LIMIT 1;
 
     -- Ensure API details were found
     IF api_token IS NULL OR selected_model IS NULL OR selected_scheme IS NULL THEN
-        RAISE EXCEPTION 'Missing required API details for request';
+        RAISE EXCEPTION 'Missing required API details for request. Model request is %s, scheme=%s',selected_model, selected_scheme;
     END IF;
 
     -- Default public schema for agent if not provided
@@ -179,8 +169,3 @@ BEGIN
     );
 END;
 $BODY$;
-
-ALTER FUNCTION public.percolate_with_agent(
-    text, text, text[], text, character varying, text, uuid, double precision
-)
-OWNER TO postgres;

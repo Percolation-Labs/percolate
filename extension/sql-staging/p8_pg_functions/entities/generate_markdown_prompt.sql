@@ -1,122 +1,75 @@
--- FUNCTION: p8.generate_markdown_prompt(text, integer)
+-- FUNCTION: public.generate_markdown_prompt(text, integer)
 
--- DROP FUNCTION IF EXISTS p8.generate_markdown_prompt(text, integer);
+-- DROP FUNCTION IF EXISTS public.generate_markdown_prompt(text, integer);
 
-CREATE OR REPLACE FUNCTION public.percolate_with_agent(
-    question text,
-    agent text,
-    tool_names_in text[] DEFAULT NULL::text[],
-    system_prompt text DEFAULT 'Respond to the users query using tools and functions as required'::text,
-    model_key character varying DEFAULT 'gpt-4o-mini'::character varying,
-    token_override text DEFAULT NULL::text,
-    user_id uuid DEFAULT NULL::uuid,
-    temperature double precision DEFAULT 0.01
-)
-RETURNS TABLE(
-    message_response text,
-    tool_calls jsonb,
-    tool_call_result jsonb,
-    session_id_out uuid,
-    status text
-) 
-LANGUAGE 'plpgsql'
-COST 100
-VOLATILE PARALLEL UNSAFE
-ROWS 1000
+CREATE OR REPLACE FUNCTION p8.generate_markdown_prompt(
+	table_entity_name text,
+	max_enum_entries integer DEFAULT 200)
+    RETURNS text
+    LANGUAGE 'plpgsql'
+    COST 100
+    VOLATILE PARALLEL UNSAFE
 AS $BODY$
 DECLARE
-    tool_names_array TEXT[];
-    endpoint_uri TEXT;
-    api_token TEXT;
-    selected_model TEXT;
-    selected_scheme TEXT;
-    functions JSON;
-    message_payload JSON;
-    created_session_id uuid;
-    recovered_system_prompt text;
+    markdown_prompt TEXT;
+    field_info RECORD;
+    field_descriptions TEXT := '';
+    enum_values TEXT := '';
+	column_unique_values JSONB;
 BEGIN
-
-    -- Ensure that question and agent are provided
-    IF question IS NULL OR question = '' THEN
-        RAISE EXCEPTION 'Question cannot be NULL or empty';
-    END IF;
-
-    IF agent IS NULL OR agent = '' THEN
-        RAISE EXCEPTION 'Agent cannot be NULL or empty';
-    END IF;
-
-
-    -- Create session and store session ID
-    SELECT create_session FROM p8.create_session(user_id, question, agent)
-    INTO created_session_id;
-
-    -- Ensure session creation was successful
-    IF created_session_id IS NULL THEN
-        RAISE EXCEPTION 'Failed to create session';
-    END IF;
-
-    -- Retrieve API details
-    SELECT completions_uri, COALESCE(token, token_override), model, scheme
-    INTO endpoint_uri, api_token, selected_model, selected_scheme
-    FROM p8."LanguageModelApi"
-    WHERE "name" = model_key
-    LIMIT 1;
-
-    -- Ensure API details were found
-    IF api_token IS NULL OR selected_model IS NULL OR selected_scheme IS NULL THEN
-        RAISE EXCEPTION 'Missing required API details for request';
-    END IF;
-
-    -- Default public schema for agent if not provided
+/*
+select * from p8.generate_markdown_prompt('p8.Agent')
+*/
     SELECT CASE 
-        WHEN agent NOT LIKE '%.%' THEN 'public.' || agent 
-        ELSE agent 
-    END INTO agent;
+        WHEN table_entity_name NOT LIKE '%.%' THEN 'public.' || table_entity_name 
+        ELSE table_entity_name 
+    END INTO table_entity_name;
 
-    -- Fetch tools for the agent by calling the new function
-    SELECT p8.get_tools_for_agent(agent, selected_scheme) INTO functions;
-    
-    -- Ensure tools were fetched successfully
-    IF functions IS NULL THEN
-        RAISE EXCEPTION 'No tools found for agent % in scheme %', agent, selected_scheme;
+
+    -- Add entity name and description to the markdown
+    SELECT '## Agent Name: ' || b.name || E'\n\n' || 
+           '### Description: ' || E'\n\n' || COALESCE(b.description, 'No description provided.') || E'\n\n'
+    INTO markdown_prompt
+    FROM p8."Agent" b
+    WHERE b.name = table_entity_name;
+
+    -- Add field descriptions in a table format
+    FOR field_info IN
+        SELECT a.name AS field_name, 
+               a.field_type, 
+               COALESCE(a.description, '') AS field_description
+        FROM p8."ModelField" a
+        WHERE a.entity_name = table_entity_name
+    LOOP
+        field_descriptions := field_descriptions || 
+            '| ' || field_info.field_name || ' | ' || field_info.field_type || 
+            ' | ' || field_info.field_description || ' |' || E'\n';
+    END LOOP;
+
+    IF field_descriptions <> '' THEN
+        markdown_prompt := markdown_prompt || 
+            '### Field Descriptions' || E'\n\n' ||
+            '| Field Name | Field Type | Description |' || E'\n' ||
+            '|------------|------------|-------------|' || E'\n' ||
+            field_descriptions || E'\n';
     END IF;
 
-    -- Recover system prompt using agent name
-    SELECT p8.generate_markdown_prompt(agent) INTO recovered_system_prompt;
-    
+    -- Check for enums and add them if they are below the max_enum_entries threshold
+    -- create some sort of enums view from metadata
 
-    -- Get the messages for the correct scheme
-    IF selected_scheme = 'anthropic' THEN
-        -- Select into message payload from p8.get_anthropic_messages
-        SELECT * INTO message_payload FROM p8.get_anthropic_messages(created_session_id, question, recovered_system_prompt);
-    ELSIF selected_scheme = 'google' THEN
-        -- Select into message payload from p8.get_google_messages
-        SELECT * INTO message_payload FROM p8.get_google_messages(created_session_id, question, recovered_system_prompt);
-    ELSE
-        -- Select into message payload from p8.get_canonical_messages
-        SELECT * INTO message_payload FROM p8.get_canonical_messages(created_session_id, question, recovered_system_prompt);
-    END IF;
+	select get_unique_enum_values into column_unique_values from p8.get_unique_enum_values(table_entity_name);
+	-- create an example repository for the table
+	
+    -- Add space for examples and functions
+    markdown_prompt := markdown_prompt || 
+        '### Examples' || E'\n\n' ||
+        'in future we will add examples that match the question via vector search' || E'\n\n'  ||
+		'### The unique distinct same values for some columns ' || E'\n\n' ||
+		column_unique_values || E'\n';
 
-    -- Ensure message payload was successfully fetched
-    IF message_payload IS NULL THEN
-        RAISE EXCEPTION 'Failed to retrieve message payload for session %', created_session_id;
-    END IF;
+		
 
-    -- Return the results using p8.ask function
-    RETURN QUERY 
-    SELECT * FROM p8.ask(
-        message_payload::json, 
-        created_session_id, 
-        functions::json, 
-        model_key, 
-        token_override, 
-        user_id
-    );
-
+    RETURN markdown_prompt;
 END;
 $BODY$;
 
-ALTER FUNCTION public.percolate_with_agent(
-    text, text, text[], text, character varying, text, uuid, double precision
-)
-OWNER TO postgres;
