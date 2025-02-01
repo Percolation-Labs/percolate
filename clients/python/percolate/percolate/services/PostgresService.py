@@ -72,6 +72,7 @@ class PostgresService:
                 "status": "NO DATA",
                 "message": f"There were no data when we fetched {keys=} Please use another method to answer the question or return to the user with a new suggested plan or summary of what you know so far. If you still have different functions to use please try those before completion." 
             }]      
+            
     def search(self, question:str):
         """
         If the repository has been activated with a model we use the models search function
@@ -82,8 +83,12 @@ class PostgresService:
             question: detailed natural language question 
         """
         
-        pass
+        """in future we should pardo multiple questions"""
+        if isinstance(question,list):
+            question = '\n'.join(question)
         
+        Q = f"""select * from p8.query_entity('{question}', '{self.model.get_model_full_name()}')  """
+        return self.execute(Q)
         
     def get_model_database_schema(self):
         assert self.model is not None, "The model is empty - you should construct an instance of the postgres service as a repository(Model)"
@@ -306,7 +311,7 @@ class PostgresService:
         if len(records) > batch_size:
             logger.info(f"Saving  {len(records)} records in batches of {batch_size}")
             for batch in batch_collection(records, batch_size=batch_size):
-                sample = self.update_records(batch, batch_size=batch_size)
+                sample = self.update_records(batch, batch_size=batch_size,index_entities=index_entities)
             return sample
 
         data = [
@@ -336,11 +341,12 @@ class PostgresService:
         logger.info(f'indexing entity {self.model}')
         r1, r2 = None,None
         try:
-            r1 = self.execute(f""" select * from public.insert_entity_nodes('{self.model.get_model_fullname()}'); """)
+            
+            r1 = self.execute(f""" select * from p8.insert_entity_nodes('{self.model.get_model_full_name()}'); """)
         except Exception as ex:
-            logger.warning(f"Failed to compute nodes {ex}")
+            logger.warning(f"Failed to compute nodes {traceback.format_exc()}")
         try:
-            r2 = self.execute(f""" select * from public.insert_entity_embeddings('{self.model.get_model_fullname()}'); """)
+            r2 = self.execute(f""" select * from p8.insert_entity_embeddings('{self.model.get_model_full_name()}'); """)
         except Exception as ex:
             logger.warning(f"Failed to compute embeddings {ex}")
         d =  {

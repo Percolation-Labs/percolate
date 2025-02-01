@@ -1,4 +1,10 @@
 #!/usr/bin/env python
+
+from percolate.utils import logger
+import sys
+logger.remove()  
+logger.add(sys.stderr, level="INFO")  # Set log level to info for typer since DEBUG is default
+
 import typer
 from typing import List, Optional
 from percolate.utils.ingestion import add
@@ -97,10 +103,16 @@ def ask(
     
     from percolate.utils.env import DEFAULT_MODEL
     typer.echo(f"Asking percolate...")
-    """temp interface todo:"""
-    data  = p8.repository(PercolateAgent).execute(f"""  SELECT * FROM percolate_with_agent('{question}', '{agent or 'p8.PercolateAgent'}', '{model or DEFAULT_MODEL}') """)
+    """temp interface todo: - trusting the database is what we want but will practice with python"""
+    #data  = p8.repository(PercolateAgent).execute(f"""  SELECT * FROM percolate_with_agent('{question}', '{agent or 'p8.PercolateAgent'}', '{model or DEFAULT_MODEL}') """)
+    from percolate.models.p8 import PercolateAgent
+
+    agent = p8.Agent(PercolateAgent)
+    data = agent(question)
+                 
     if data:
-        typer.echo(f"Session({data[0]['session_id']}): {data[0]['message_response']}")
+        #typer.echo(f"Session({data[0]['session_id_out']}): {data[0]['message_response']}")
+        typer.echo(data)
     else:
         typer.echo(f"Did not get a response")
 
