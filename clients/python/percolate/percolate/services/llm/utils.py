@@ -60,8 +60,7 @@ def stream_openai_response(r, printer=None):
                                     tool_index = tool_call["index"]
                                     
                                     if "function" in tool_call and "arguments" in tool_call["function"]:
-                                        tool_calls[tool_index]['function']['arguments'] += tool_call["function"]["arguments"]
-                                       
+                                        tool_calls[tool_index]['function']['arguments'] += tool_call["function"]["arguments"]              
                 
                 except json.JSONDecodeError:
                     pass  # Handle incomplete JSON chunks
@@ -98,10 +97,7 @@ def stream_anthropic_response(r, printer=None):
             if decoded_line and decoded_line != "[DONE]":
                 try:
                     json_data = json.loads(decoded_line)
-                    event_type = json_data.get("type")
-                    
-                    #print(json_data)
-                    
+                    event_type = json_data.get("type")                    
                     # Handle message start: Initialize structure from the first message
                     if event_type == "message_start":
                         collected_data = dict(json_data['message'])
@@ -136,14 +132,10 @@ def stream_anthropic_response(r, printer=None):
                            'name': 'get_weather',
                            'input': {'city': 'Paris', 'date': '2024-01-16'}}],
                             """
-                            tool_args[index]['partial_json'] += tool_input
+                            if not tool_args[index]['input']:
+                                tool_args[index]['input'] = ''
+                            tool_args[index]['input'] += tool_input
                             
-                            if not observed_tool_call:
-                                observed_tool_call = True
-                                # this is not really needed for anthropic because they declare it in content
-                                # if printer:
-                                #     printer(f"Tool call for {tool_args[index]}")
-
                     # Handle message delta and stop reason at the end
                     elif event_type == "message_delta":
                         output_tokens = json_data.get("usage", {}).get("output_tokens", 0)
@@ -155,11 +147,11 @@ def stream_anthropic_response(r, printer=None):
 
     # Aggregate content and tool calls into the final structure
     collected_data['content'] = [{"type": "text", "text": content_text}, 
-                                *[list(tool_args.values())]]
+                                *list(tool_args.values())]
     # Update usage tokens
     collected_data['usage']['input_tokens'] = input_tokens
     collected_data['usage']['output_tokens'] = output_tokens
-
+    
     return collected_data
 
 
