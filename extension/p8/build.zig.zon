@@ -1,0 +1,23 @@
+.{
+    .name = "p8",
+    .version = "0.1.0",
+    .dependencies = .{
+        .openssl = .{
+            .url = "https://github.com/kassane/openssl-zig/archive/refs/heads/zig-pkg.tar.gz",
+            .hash = "1220162cad408b6f7eeb6b49733e75ebdb684da77d15bc24d04114b8aaaaa4d7ded6", //zig fetch url to get this
+        },
+        .libpq = .{
+            .url = "https://ftp.postgresql.org/pub/source/v16.1/postgresql-16.1.tar.gz",
+            .hash = "12209075a5a9173a360b2d6f6969e2107068e4d73adfc1bb57de0336c489a3fd8863", //zig fetch url to get this
+        },
+        // .pg = .{
+        //     .url = "git+https://github.com/karlseguin/pg.zig?ref=master#0110cfdf387403a5a326115b5184861c4604d711",
+        //     .hash = "12205019ce2bc2e08c76352ea37a14600d412e5e0ecdd7ddd27b4e83a62f37d8ba94",
+        // },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zon",
+        "src",
+    },
+}
