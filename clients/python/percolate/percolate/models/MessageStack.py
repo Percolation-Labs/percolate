@@ -35,5 +35,7 @@ class MessageStack:
                 "role": "user",
                 "content": json.dumps(data,default=str)                
             }]
-        return MessageStack(question=question, system_prompt=abstracted_model.get_model_description(), data = data)
+        generalized_prompt_preamble = kwargs.get('system_prompt_preamble')
+        prompt = f"{generalized_prompt_preamble}\n{abstracted_model.get_model_description()}"
+        return MessageStack(question=question, system_prompt=prompt, data = data)
         

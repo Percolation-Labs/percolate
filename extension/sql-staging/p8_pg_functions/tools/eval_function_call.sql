@@ -2,7 +2,7 @@
 TODO: need to resolve the percolate or other API token 
 */
 
-CREATE OR REPLACE FUNCTION public.eval_function_call(
+CREATE OR REPLACE FUNCTION p8.eval_function_call(
 	function_call jsonb)
     RETURNS jsonb
     LANGUAGE 'plpgsql'
@@ -45,31 +45,14 @@ BEGIN
 	LOAD  'age'; SET search_path = ag_catalog, "$user", public;
 	
     -- Lookup endpoint metadata
-    SELECT endpoint, group_id, verb
+    SELECT endpoint, proxy_uri, verb
     INTO metadata
     FROM p8."Function"
     WHERE "name" = function_name;
 
-	IF metadata.group_id = 'native' THEN
-		RAISE notice 'native query with args % % query %',  function_name, args, jsonb_typeof(args->'query');
-		--the native result is a function call for database functions
-		-- Assume there is one argument 'query' which can be a string or a list of strings
-        IF jsonb_typeof(args->'query') = 'string' THEN
-            query_arg := ARRAY[args->>'query'];
-        ELSIF jsonb_typeof(args->'query') = 'array' THEN
-			query_arg := ARRAY(SELECT jsonb_array_elements_text((args->'query')::JSONB));
-        ELSE
-            RAISE EXCEPTION 'Invalid query argument in eval_function_call: must be a string or an array of strings';
-        END IF;
-
-		RAISE NOTICE '%', format(  'SELECT jsonb_agg(t) FROM %I(%s) as t',   metadata.endpoint, query_arg  );
-		
-        -- Execute the native function and aggregate results as JSON
-        EXECUTE format(
-            'SELECT jsonb_agg(t) FROM %I(%L) as t', --formatted for a text array
-            metadata.endpoint,
-			query_arg
-        )
+	IF metadata.proxy_uri = 'native' THEN
+		RAISE notice 'native query with args % %',  function_name, args;
+        SELECT * FROM p8.eval_native_function(function_name,args::JSONB)
         INTO native_result;
         RETURN native_result;
 	ELSE
@@ -79,7 +62,7 @@ BEGIN
 	    END IF;
 	
 	    -- Construct the URI root and call URI
-	    uri_root := split_part(metadata.group_id, '/', 1) || '//' || split_part(metadata.group_id, '/', 3);
+	    uri_root := split_part(metadata.proxy_uri, '/', 1) || '//' || split_part(metadata.proxy_uri, '/', 3);
 	    call_uri := uri_root || metadata.endpoint;
 	
 	    final_args := args;

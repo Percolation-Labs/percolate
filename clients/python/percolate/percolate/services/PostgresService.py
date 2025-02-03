@@ -5,7 +5,7 @@ from percolate.utils import logger, batch_collection
 import typing
 from percolate.models.p8 import ModelField,Agent
 import psycopg2
-from percolate.utils.env import POSTGRES_CONNECTION_STRING , POSTGRES_DB, POSTGRES_SERVER
+from percolate.utils.env import POSTGRES_CONNECTION_STRING , POSTGRES_DB, POSTGRES_SERVER,DEFAULT_CONNECTION_TIMEOUT
 import psycopg2.extras
 from psycopg2 import sql
 from psycopg2.errors import DuplicateTable
@@ -41,7 +41,7 @@ class PostgresService:
         """util to retry opening closed connections in the service"""
         @retry(wait=wait_fixed(1), stop=stop_after_attempt(4), reraise=True)
         def open_connection_with_retry(conn_string):
-            return psycopg2.connect(conn_string, connect_timeout=6) 
+            return psycopg2.connect(conn_string, connect_timeout=DEFAULT_CONNECTION_TIMEOUT) 
         try:
             if self.conn is None:
                 self.conn = open_connection_with_retry(POSTGRES_CONNECTION_STRING)
@@ -73,6 +73,8 @@ class PostgresService:
                 "message": f"There were no data when we fetched {keys=} Please use another method to answer the question or return to the user with a new suggested plan or summary of what you know so far. If you still have different functions to use please try those before completion." 
             }]      
             
+
+        
     def search(self, question:str):
         """
         If the repository has been activated with a model we use the models search function
@@ -87,21 +89,19 @@ class PostgresService:
         if isinstance(question,list):
             question = '\n'.join(question)
         
-        Q = f"""select * from p8.query_entity('{question}', '{self.model.get_model_full_name()}')  """
-        return self.execute(Q)
+        Q = f"""select * from p8.query_entity(%s,%s) """
+        
+        return self.execute(Q, data=(question,self.model.get_model_full_name() ))
         
     def get_model_database_schema(self):
         assert self.model is not None, "The model is empty - you should construct an instance of the postgres service as a repository(Model)"
         q = f"""SELECT 
             column_name AS field_name,
             data_type AS field_type
-            FROM 
-                information_schema.columns
-            WHERE 
-                table_name = '{self.model.get_model_name()}' -- Replace with your table name
-                AND table_schema = '{self.model.get_model_namespace()}'
+            FROM information_schema.columns
+            WHERE table_name = %s AND table_schema = %s
         """
-        return self.execute(q)
+        return self.execute(q, data=(self.model.get_model_name(),self.model.get_model_namespace()))
     
     def model_registration_script(self, primary: bool= True, secondary:bool=True):
         """for bootstrapping we can generate the model registration script including data
