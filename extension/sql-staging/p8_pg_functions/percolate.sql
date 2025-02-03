@@ -96,6 +96,8 @@ BEGIN
     -- select * from percolate_with_agent('list some pets that str sold', 'MyFirstAgent', NONE, NONE, 'gemini-1.5-flash'); 
     -- select * from percolate_with_agent('list some pets that str sold', 'MyFirstAgent', NONE, NONE, 'claude-3-5-sonnet-20241022');
 
+    select * from percolate_with_agent('how does percolate manage to work with google, openai and anthropic schemes seamlessly in the database - give sql examples', 'p8.PercolateAgent', 
+
 	-- select * from p8.get_canonical_messages('8d4357de-eb78-8df5-2182-ef4d85969bc5', 'test', 'test');
 	-- select * from p8.get_google_messages('8d4357de-eb78-8df5-2182-ef4d85969bc5', 'test', 'test');
 	-- select * from p8.get_canonical_messages('8d4357de-eb78-8df5-2182-ef4d85969bc5', 'test', 'test');
@@ -156,6 +158,8 @@ BEGIN
     IF message_payload IS NULL THEN
         RAISE EXCEPTION 'Failed to retrieve message payload for session %', created_session_id;
     END IF;
+
+    RAISE NOTICE 'Ask request with tools % for agent % using language model %', functions, agent, model_key;
 
     -- Return the results using p8.ask function
     RETURN QUERY 

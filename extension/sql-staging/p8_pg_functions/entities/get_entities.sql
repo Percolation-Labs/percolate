@@ -18,6 +18,8 @@ BEGIN
 	select * from p8.get_entities(ARRAY['p8.Agent']);
 	*/
 
+    LOAD  'age'; SET search_path = ag_catalog, "$user", public;
+	
     -- Load nodes based on keys, returning the associated entity type and key
     WITH nodes AS (
         SELECT id, entity_type FROM p8.get_graph_nodes_by_id(keys)

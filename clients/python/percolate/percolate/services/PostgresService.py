@@ -3,14 +3,15 @@ from percolate.models.AbstractModel import ensure_model_not_instance, AbstractMo
 from percolate.models.utils import SqlModelHelper
 from percolate.utils import logger, batch_collection
 import typing
-from percolate.models.p8 import ModelField,Agent
+from percolate.models.p8 import ModelField,Agent, IndexAudit
 import psycopg2
-from percolate.utils.env import POSTGRES_CONNECTION_STRING , POSTGRES_DB, POSTGRES_SERVER
+from percolate.utils.env import POSTGRES_CONNECTION_STRING , POSTGRES_DB, POSTGRES_SERVER,DEFAULT_CONNECTION_TIMEOUT
 import psycopg2.extras
 from psycopg2 import sql
 from psycopg2.errors import DuplicateTable
 from tenacity import retry, stop_after_attempt, wait_fixed
 import traceback
+import uuid
 
 class PostgresService:
     """the postgres service wrapper for sinking and querying entities/models"""
@@ -41,7 +42,7 @@ class PostgresService:
         """util to retry opening closed connections in the service"""
         @retry(wait=wait_fixed(1), stop=stop_after_attempt(4), reraise=True)
         def open_connection_with_retry(conn_string):
-            return psycopg2.connect(conn_string, connect_timeout=6) 
+            return psycopg2.connect(conn_string, connect_timeout=DEFAULT_CONNECTION_TIMEOUT) 
         try:
             if self.conn is None:
                 self.conn = open_connection_with_retry(POSTGRES_CONNECTION_STRING)
@@ -73,6 +74,8 @@ class PostgresService:
                 "message": f"There were no data when we fetched {keys=} Please use another method to answer the question or return to the user with a new suggested plan or summary of what you know so far. If you still have different functions to use please try those before completion." 
             }]      
             
+
+        
     def search(self, question:str):
         """
         If the repository has been activated with a model we use the models search function
@@ -87,21 +90,19 @@ class PostgresService:
         if isinstance(question,list):
             question = '\n'.join(question)
         
-        Q = f"""select * from p8.query_entity('{question}', '{self.model.get_model_full_name()}')  """
-        return self.execute(Q)
+        Q = f"""select * from p8.query_entity(%s,%s) """
+        
+        return self.execute(Q, data=(question,self.model.get_model_full_name() ))
         
     def get_model_database_schema(self):
         assert self.model is not None, "The model is empty - you should construct an instance of the postgres service as a repository(Model)"
         q = f"""SELECT 
             column_name AS field_name,
             data_type AS field_type
-            FROM 
-                information_schema.columns
-            WHERE 
-                table_name = '{self.model.get_model_name()}' -- Replace with your table name
-                AND table_schema = '{self.model.get_model_namespace()}'
+            FROM information_schema.columns
+            WHERE table_name = %s AND table_schema = %s
         """
-        return self.execute(q)
+        return self.execute(q, data=(self.model.get_model_name(),self.model.get_model_namespace()))
     
     def model_registration_script(self, primary: bool= True, secondary:bool=True):
         """for bootstrapping we can generate the model registration script including data
@@ -333,26 +334,55 @@ class PostgresService:
         else:
             logger.warning(f"Nothing to do - records is empty {records}")
 
-    def index_entities(self):
-        """This is to allow push index but we typically use the DB background workers to do this for us
+    def index_entity_by_name(self, entity_name:str, id:uuid.UUID):
+        """
+        index entities - a session id can be passed in for the audit callback
+        this is very much WIP - it may be this moves into background workers in the database
         """
         
         assert self.model is not None, "The model is null - did you mean to create a repository with the model first?"
-        logger.info(f'indexing entity {self.model}')
+        
         r1, r2 = None,None
+        errors = ""
         try:
             
-            r1 = self.execute(f""" select * from p8.insert_entity_nodes('{self.model.get_model_full_name()}'); """)
+            r1 = self.execute(f""" select * from p8.insert_entity_nodes(%s); """, data=(entity_name,))
         except Exception as ex:
+            errors+= traceback.format_exc()
             logger.warning(f"Failed to compute nodes {traceback.format_exc()}")
         try:
-            r2 = self.execute(f""" select * from p8.insert_entity_embeddings('{self.model.get_model_full_name()}'); """)
+            r2 = self.execute(f""" select * from p8.insert_entity_embeddings(%s); """, data=(entity_name,))
         except Exception as ex:
+            errors+= traceback.format_exc()
             logger.warning(f"Failed to compute embeddings {ex}")
-        d =  {
+            
+        metrics =  {
             'entities added': r1,
             'embeddings added': r2,
         }
         
-        logger.info(d)
-        return d
+        if errors == '':
+            self.repository(IndexAudit).update_records(IndexAudit(id=id,
+                                                                  model_name='percolate',
+                                                                  entity_full_name=entity_name, 
+                                                                  metrics=metrics, 
+                                                                  status="OK", 
+                                                                  message='Index updated without errors'))
+        else:
+            self.repository(IndexAudit).update_records(IndexAudit(id=id,
+                                                                  model_name='percolate',
+                                                                  entity_full_name=entity_name,
+                                                                  metrics=metrics, 
+                                                                  status="ERROR", 
+                                                                  message=errors))
+        
+        logger.info(metrics)
+        return metrics
+    
+    def index_entities(self):
+        """This is to allow push index but we typically use the DB background workers to do this for us
+        """
+        
+        logger.info(f'indexing entity {self.model}')
+        return self.index_entity_by_name(self.model.get_model_full_name())
+        

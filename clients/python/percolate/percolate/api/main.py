@@ -71,8 +71,8 @@ def start():
 if __name__ == "__main__":
     """
     You can start the dev with this in the root
-    uvicorn percolate.api.main:app --port 5008 --reload
-    http://127.0.0.1:5008/docs
+    uvicorn percolate.api.main:app --port 5000 --reload
+    http://127.0.0.1:5000/docs
     """
     
     start()
