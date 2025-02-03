@@ -183,19 +183,45 @@ CREATE OR REPLACE FUNCTION p8.eval_native_function(
 )
 RETURNS JSONB AS $$
 DECLARE
+	declare KEYS text[];
     result JSONB;
 BEGIN
     /*
     working on a way to eval native functions with kwargs and hard coding for now
+
+    this would be used for example if we did this
+    select * from percolate_with_agent('get the description of the entity called p8.PercolateAgent', 'p8.PercolateAgent' ) 
+
+    examples are
+
+    SELECT p8.eval_native_function(
+    'get_entities', 
+    '{"keys": ["p8.Agent", "p8.PercolateAgent"]}'::JSONB
+    );
+
+    SELECT p8.eval_native_function(
+    'activate_functions_by_name', 
+    '{"estimated_length": 20000}'::JSONB
+    );
+
+    SELECT p8.eval_native_function(
+    'search', 
+    '{"question": "i need an agent about agents", "entity_table_name":"p8.Agent"}'::JSONB
+    );  
+
     */
     CASE function_name
+        -- NB the args here need to match how we define the native function interface in python or wherever
         -- If function_name is 'get_entities', call p8.get_entities with the given argument
         WHEN 'get_entities' THEN
-            SELECT p8.get_entities(args->>'question') INTO result;
+            -- Extract the keys array from JSONB and cast it to a PostgreSQL TEXT array
+            keys := ARRAY(SELECT jsonb_array_elements_text(args->'keys')::TEXT);
+        
+            SELECT p8.get_entities(keys) INTO result;
 
         -- If function_name is 'search', call p8.query_entity with the given arguments
         WHEN 'search' THEN
-            SELECT p8.query_entity(args->>'question', args->>'entity_name') INTO result;
+            SELECT p8.query_entity(args->>'question', args->>'entity_table_name') INTO result;
 
         -- If function_name is 'help', call p8.plan with the given argument
         WHEN 'help' THEN
@@ -383,14 +409,14 @@ BEGIN
 	LOAD  'age'; SET search_path = ag_catalog, "$user", public;
 	
     -- Lookup endpoint metadata
-    SELECT endpoint, group_id, verb
+    SELECT endpoint, proxy_uri, verb
     INTO metadata
     FROM p8."Function"
     WHERE "name" = function_name;
 
-	IF metadata.group_id = 'native' THEN
-		RAISE notice 'native query with args % % query %',  function_name, args, jsonb_typeof(args->'query');
-        SELECT * FROM p8.eval_native_function(function_name,args)
+	IF metadata.proxy_uri = 'native' THEN
+		RAISE notice 'native query with args % %',  function_name, args;
+        SELECT * FROM p8.eval_native_function(function_name,args::JSONB)
         INTO native_result;
         RETURN native_result;
 	ELSE
@@ -400,7 +426,7 @@ BEGIN
 	    END IF;
 	
 	    -- Construct the URI root and call URI
-	    uri_root := split_part(metadata.group_id, '/', 1) || '//' || split_part(metadata.group_id, '/', 3);
+	    uri_root := split_part(metadata.proxy_uri, '/', 1) || '//' || split_part(metadata.proxy_uri, '/', 3);
 	    call_uri := uri_root || metadata.endpoint;
 	
 	    final_args := args;
