@@ -23,10 +23,8 @@ BEGIN
     -- Handle the scheme and return the appropriate JSON structure
     IF scheme = 'google' THEN
         RETURN (
-            SELECT JSON_AGG(
-                JSON_BUILD_ARRAY(
-                    JSON_BUILD_OBJECT('function_declarations', JSON_AGG(function_spec::JSON))
-                )
+            SELECT JSON_BUILD_ARRAY(
+                JSON_BUILD_OBJECT('function_declarations', JSON_AGG(function_spec::JSON))
             )
             FROM p8."Function"
             WHERE name = ANY(names)
@@ -59,6 +57,3 @@ BEGIN
 END;
 $BODY$;
 
-
-ALTER FUNCTION p8.get_tools_by_name(text[], text)
-    OWNER TO postgres;

@@ -38,7 +38,7 @@ class Function(AbstractEntityModel):
         
     
     @classmethod
-    def from_callable(cls, fn:typing.Callable, remove_untyped:bool=True):
+    def from_callable(cls, fn:typing.Callable, remove_untyped:bool=True, proxy_uri:str=None):
         def process_properties(properties: dict):
              
             untyped = []
@@ -84,9 +84,11 @@ class Function(AbstractEntityModel):
                 'description': desc
             }
         
-        proxy_uri = fn.__self__ if hasattr(fn, '__self__') else 'lib'
-        if not isinstance(proxy_uri,str):
-            proxy_uri = inspection.get_object_id(proxy_uri)
+        """we can pass this in e.g. for native. Lib is used for lib runtime or APIs for REST"""
+        if not proxy_uri:
+            proxy_uri = fn.__self__ if hasattr(fn, '__self__') else 'lib'
+            if not isinstance(proxy_uri,str):
+                proxy_uri = inspection.get_object_id(proxy_uri)
             
         s = _map(AbstractModel.create_model_from_function(fn).model_json_schema())
         key = s['name'] if not proxy_uri else f"{proxy_uri}.{s['name']}"
@@ -220,18 +222,28 @@ class TokenUsage(AbstractModel):
     """Tracks token usage for language model interactions"""
     id: uuid.UUID| str  
     model_name: str
-    tokens: typing.Optional[int] = Field(None,description="the number of tokens consumed in total")
-    tokens_in: int = Field(description="the number of tokens consumed for input")
-    tokens_out: int = Field(description="the number of tokens consumed for output")
-    tokens_other: typing.Optional[int] = Field(None, description="the number of tokens consumed for functions and other metadata")
-    session_id: typing.Optional[uuid.UUID| str  ] = Field(description="Session id for a conversation")
+    tokens: typing.Optional[int] = Field(0,description="the number of tokens consumed in total")
+    tokens_in: typing.Optional[int] = Field(0, description="the number of tokens consumed for input")
+    tokens_out: typing.Optional[int] = Field(0, description="the number of tokens consumed for output")
+    tokens_other: typing.Optional[int] = Field(0, description="the number of tokens consumed for functions and other metadata")
+    session_id: typing.Optional[uuid.UUID| str  ] = Field(None, description="Session id for a conversation")
     
     @model_validator(mode='before')
     @classmethod
     def _f(cls, values):
         if not values.get('tokens'):
-            values['tokens'] = values['tokens_in'] + values['tokens_out']
+            values['tokens'] = (values.get('tokens_in') or 0) + (values.get('tokens_out') or 0)
         return values
+    
+class IndexAudit(TokenUsage):
+    model_config = {
+        'index_notify': False        
+    }
+    """Track requests to build smart indexes such as graph links or text and image embeddings"""
+    metrics: typing.Optional[dict] = Field(description="metrics for records indexed",default_factory=dict)
+    status: str = Field(description="Status code such as OK|ERROR")
+    message: typing.Optional[str] = Field(description="Any message such as an error")
+    entity_full_name: str
     
     
 class _OpenAIMessage(BaseModel):
@@ -267,7 +279,7 @@ class AIResponse(TokenUsage):
     tool_calls: typing.Optional[typing.List[dict]|dict] = Field(default=None, description="Tool calls are requests from language models to call tools")
     tool_eval_data: typing.Optional[dict] = Field(default=None, description="The payload may store the eval from the tool especially if it is small data")
     verbatim: typing.Optional[dict|typing.List[dict]] = Field(default=None, description="the verbatim message from the language model - we dont serialized this", exclude=True)     
-    
+    function_stack: typing.Optional[typing.List[str]] = Field(None, description='At each stage certain functions are available to the model - useful to see what it has and what it chooses and to reload stack later')
  
     def to_open_ai_message(self):
         """the message structure for the scheme
@@ -303,8 +315,9 @@ class Session(AbstractModel):
     
 class ModelMatrix(AbstractModel):
     """keep useful json blobs for model info"""
+    
     id: uuid.UUID| str  
-    name: str = Field(description="The name of the entity e.g. a model in the types or a user defined model")
+    entity_name: str = Field(description="The name of the entity e.g. a model in the types or a user defined model")
     enums: typing.Optional[dict] = Field(None, description="The enums used in the model - usually a job will build these and they can be used in query prompts")
     example_sql_queries: typing.Optional[dict] = Field(None, description="A mapping of interesting question to SQL queries - usually a job will build these and they can be used in query prompts")
 

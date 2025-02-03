@@ -8,8 +8,19 @@ from .FunctionManager import FunctionManager
 from percolate.models import AbstractModel, MessageStack
 from percolate.services.llm import CallingContext, FunctionCall, LanguageModel, MessageStackFormatter
 
+GENERIC_P8_PROMPT = """\n# General Advice.
+Use whatever functions are available to you and use world knowledge only if prompted 
+or if there is not other way 
+or the user is obviously asking about real world information that is not covered by functions.
+Observe what functions you have to use and check the message history to avoid calling the same functions with the same parameters repeatedly.
+If you find a function name in your search, you can activate it by naming using one of your functions. You should do so without asking the user.
+When generating large output observe the notification that needs to be called first, call it and continue.
+            """
+            
 class ModelRunner:
-    """The model runner manages chaining agents and reasoning steps together in the execution loop"""
+    """The model runner manages chaining agents and reasoning steps together in the execution loop
+    We had functions implementing the p8 model runner interface which is also in db native functions
+    """
     
     @property
     def name(self):
@@ -50,9 +61,20 @@ class ModelRunner:
         """the basic bootstrapping means asking for help, entities(types) or functions"""
         self._function_manager.add_function(self.get_entities)
         self._function_manager.add_function(self.search)
-        self._function_manager.add_function(self.activate_functions_by_name)
+        self._function_manager.add_function(self.search)
+        self._function_manager.add_function(self.announce_generate_large_output)
         """more complex things will happen from here when we traverse what comes back"""
 
+    def announce_generate_large_output(self, estimated_length:int=None):
+        """When you are about to generate a lot of output, please call this function with a rough estimate of the size of the content.
+        You do not need to do this when you are responding with simple structured responses which are typically small or with simple answers.
+        However when generating lots of text we would like to request via streaming or async so we want to know before generating a lot of text.
+        We use to distinguish internal content gathering nodes from final response generation for users.
+        """
+        logger.warning(f"The model is requesting to output: {estimated_length=}")
+        return {'message': 'acknowledged', 'output_size_estimate': estimated_length}
+        
+        
     def search(self, questions: typing.List[str]):
         """Run a general search on the model that is being used in the current context as per the system prompt
         If you want to add multiple questions supply a list of strings as an array.
@@ -186,8 +208,11 @@ class ModelRunner:
         """a generic wrapper around the REST interfaces of any LLM client"""
         lm_client = LanguageModel.from_context(self._context)
 
-        """messages are system prompt etc. agent model's can override how message stack is constructed"""
-        self.messages = self.agent_model.build_message_stack(question=question, functions=self.functions.keys(), data=data)
+        """messages are system prompt etc. agent model's can override how message stack is constructed
+           we add p8 preamble in percolate - in future this could be disabled per model
+        """
+        self.messages = self.agent_model.build_message_stack(question=question, functions=self.functions.keys(), data=data,
+                                                             system_prompt_preamble=GENERIC_P8_PROMPT)
 
         """run the agent loop to completion"""
         for _ in range(limit or self._context.max_iterations):
