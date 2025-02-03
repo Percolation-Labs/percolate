@@ -411,7 +411,7 @@ EXECUTE FUNCTION update_updated_at_column();
         ON CONFLICT (id) DO UPDATE SET {conflicts}   ;"""
         
     def get_register_entities_query(self):
-        """get the registration script for entities that have names"""
+        """get the registration script for entities that have names and add the initial entities for testing to the graph"""
         
         if 'name' in self.model.model_fields:
-            return  f"select * from p8.register_entities('{self.model.get_model_full_name()}');"
+            return  f"""select * from p8.register_entities('{self.model.get_model_full_name()}');"""

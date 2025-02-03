@@ -110,6 +110,8 @@ python percolate/cli.py index
 python percolate/cli.py ask 'are there SQL functions in Percolate for interacting with models like Claude?'
 #and yaml...
 python percolate/cli.py ask 'how do i connect to Percolate using docker compose'
+# python percolate/cli.py ask 'what is our entire process of adding embeddings and flushing those embeddings to make sure entities are indexed fully'
+# python percolate/cli.py ask 'how is minio used in percolate'
 ```
 
 At present we don't stream the results but we will add this soon.

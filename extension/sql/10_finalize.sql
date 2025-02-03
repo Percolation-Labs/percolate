@@ -22,3 +22,7 @@ ON CONFLICT (id)
 DO UPDATE SET
     value = EXCLUDED.value;  
 
+
+
+select * from p8.insert_entity_nodes('p8.Agent');
+select * from p8.insert_entity_nodes('p8.Function');

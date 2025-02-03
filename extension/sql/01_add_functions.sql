@@ -96,6 +96,8 @@ BEGIN
     -- select * from percolate_with_agent('list some pets that str sold', 'MyFirstAgent', NONE, NONE, 'gemini-1.5-flash'); 
     -- select * from percolate_with_agent('list some pets that str sold', 'MyFirstAgent', NONE, NONE, 'claude-3-5-sonnet-20241022');
 
+    select * from percolate_with_agent('how does percolate manage to work with google, openai and anthropic schemes seamlessly in the database - give sql examples', 'p8.PercolateAgent', 
+
 	-- select * from p8.get_canonical_messages('8d4357de-eb78-8df5-2182-ef4d85969bc5', 'test', 'test');
 	-- select * from p8.get_google_messages('8d4357de-eb78-8df5-2182-ef4d85969bc5', 'test', 'test');
 	-- select * from p8.get_canonical_messages('8d4357de-eb78-8df5-2182-ef4d85969bc5', 'test', 'test');
@@ -157,6 +159,8 @@ BEGIN
         RAISE EXCEPTION 'Failed to retrieve message payload for session %', created_session_id;
     END IF;
 
+    RAISE NOTICE 'Ask request with tools % for agent % using language model %', functions, agent, model_key;
+
     -- Return the results using p8.ask function
     RETURN QUERY 
     SELECT * FROM p8.ask(
@@ -170,6 +174,49 @@ BEGIN
 END;
 $BODY$;
 
+
+---------
+
+CREATE OR REPLACE FUNCTION p8.eval_native_function(
+    function_name TEXT,
+    args JSONB
+)
+RETURNS JSONB AS $$
+DECLARE
+    result JSONB;
+BEGIN
+    /*
+    working on a way to eval native functions with kwargs and hard coding for now
+    */
+    CASE function_name
+        -- If function_name is 'get_entities', call p8.get_entities with the given argument
+        WHEN 'get_entities' THEN
+            SELECT p8.get_entities(args->>'question') INTO result;
+
+        -- If function_name is 'search', call p8.query_entity with the given arguments
+        WHEN 'search' THEN
+            SELECT p8.query_entity(args->>'question', args->>'entity_name') INTO result;
+
+        -- If function_name is 'help', call p8.plan with the given argument
+        WHEN 'help' THEN
+            SELECT p8.plan(args->>'question') INTO result;
+
+        -- If function_name is 'activate_functions_by_name', return a message and estimated_length
+        WHEN 'activate_functions_by_name' THEN
+            RETURN jsonb_build_object(
+                'message', 'acknowledged',
+                'estimated_length', args->>'estimated_length'
+            );
+
+        -- Default case for an unknown function_name
+        ELSE
+            RAISE EXCEPTION 'Function name "%" is unknown for args: %', function_name, args;
+    END CASE;
+
+    -- Return the result of the function called
+    RETURN result;
+END;
+$$ LANGUAGE plpgsql;
 
 ---------
 
@@ -251,10 +298,8 @@ BEGIN
     -- Handle the scheme and return the appropriate JSON structure
     IF scheme = 'google' THEN
         RETURN (
-            SELECT JSON_AGG(
-                JSON_BUILD_ARRAY(
-                    JSON_BUILD_OBJECT('function_declarations', JSON_AGG(function_spec::JSON))
-                )
+            SELECT JSON_BUILD_ARRAY(
+                JSON_BUILD_OBJECT('function_declarations', JSON_AGG(function_spec::JSON))
             )
             FROM p8."Function"
             WHERE name = ANY(names)
@@ -288,9 +333,6 @@ END;
 $BODY$;
 
 
-ALTER FUNCTION p8.get_tools_by_name(text[], text)
-    OWNER TO postgres;
-
 
 ---------
 
@@ -298,7 +340,7 @@ ALTER FUNCTION p8.get_tools_by_name(text[], text)
 TODO: need to resolve the percolate or other API token 
 */
 
-CREATE OR REPLACE FUNCTION public.eval_function_call(
+CREATE OR REPLACE FUNCTION p8.eval_function_call(
 	function_call jsonb)
     RETURNS jsonb
     LANGUAGE 'plpgsql'
@@ -348,24 +390,7 @@ BEGIN
 
 	IF metadata.group_id = 'native' THEN
 		RAISE notice 'native query with args % % query %',  function_name, args, jsonb_typeof(args->'query');
-		--the native result is a function call for database functions
-		-- Assume there is one argument 'query' which can be a string or a list of strings
-        IF jsonb_typeof(args->'query') = 'string' THEN
-            query_arg := ARRAY[args->>'query'];
-        ELSIF jsonb_typeof(args->'query') = 'array' THEN
-			query_arg := ARRAY(SELECT jsonb_array_elements_text((args->'query')::JSONB));
-        ELSE
-            RAISE EXCEPTION 'Invalid query argument in eval_function_call: must be a string or an array of strings';
-        END IF;
-
-		RAISE NOTICE '%', format(  'SELECT jsonb_agg(t) FROM %I(%s) as t',   metadata.endpoint, query_arg  );
-		
-        -- Execute the native function and aggregate results as JSON
-        EXECUTE format(
-            'SELECT jsonb_agg(t) FROM %I(%L) as t', --formatted for a text array
-            metadata.endpoint,
-			query_arg
-        )
+        SELECT * FROM p8.eval_native_function(function_name,args)
         INTO native_result;
         RETURN native_result;
 	ELSE
@@ -2352,10 +2377,7 @@ END;
 $BODY$;
 
 
-
--- FUNCTION: public.insert_entity_nodes(text)
-
--- DROP FUNCTION IF EXISTS public.insert_entity_nodes(text);
+ 
 
 CREATE OR REPLACE FUNCTION p8.insert_entity_nodes(
 	entity_table text)
@@ -2662,16 +2684,25 @@ $BODY$;
 
 ---------
 
+DROP FUNCTION IF EXISTS p8.get_agent_tools;
 CREATE OR REPLACE FUNCTION p8.get_agent_tools(
     recovered_agent TEXT,
     selected_scheme TEXT DEFAULT  'openai',
-    add_percolate_tools BOOLEAN DEFAULT FALSE
+    add_percolate_tools BOOLEAN DEFAULT TRUE
 )
 RETURNS JSONB AS $$
 DECLARE
     tool_names_array TEXT[];
     functions JSONB;
 BEGIN
+
+/*
+select * from p8.get_agent_tools('p8.Agent', NULL, FALSE)
+select * from p8.get_agent_tools('p8.Agent', NULL, TRUE)
+select * from p8.get_agent_tools('p8.Agent', 'google')
+
+
+*/
     -- Get tool names from Agent functions
     SELECT ARRAY(
         SELECT jsonb_object_keys(a.functions::JSONB)
@@ -2679,21 +2710,23 @@ BEGIN
         WHERE a.name = recovered_agent AND a.functions IS NOT NULL
     ) INTO tool_names_array;
 
+     -- Add percolate tools if the parameter is true
+    IF add_percolate_tools THEN
+        -- Augment the tool_names_array with the percolate tools
+        tool_names_array := tool_names_array || ARRAY[
+            'help', 
+            'get_entities', 
+            'search', 
+            'announce_generate_large_output'
+        ];
+    END IF;
+    
     -- Fetch tool data if tool names exist
     IF tool_names_array IS NOT NULL THEN
-        SELECT p8.get_tools_by_name(tool_names_array, selected_scheme)
+        SELECT p8.get_tools_by_name(tool_names_array, COALESCE(selected_scheme,'openai'))
         INTO functions;
     ELSE
         functions := '[]'::JSONB;
-    END IF;
-
-    -- Add percolate tools if the parameter is true
-    IF add_percolate_tools THEN
-        -- Assuming there's a function to add percolate tools, like:
-        -- SELECT p8.get_tools_by_name(ARRAY['percolate_tool'], selected_scheme) INTO percolate_tools;
-        -- functions := functions || percolate_tools;
-        -- Example assuming the percolate tools are added as an array of JSONB objects:
-        functions := functions || '[{"tool_name": "percolate_tool", "details": "added percolate tool"}]'::JSONB;
     END IF;
 
     -- Return the final tools data
@@ -2899,6 +2932,8 @@ BEGIN
 	select * from p8.get_entities(ARRAY['p8.Agent']);
 	*/
 
+    LOAD  'age'; SET search_path = ag_catalog, "$user", public;
+	
     -- Load nodes based on keys, returning the associated entity type and key
     WITH nodes AS (
         SELECT id, entity_type FROM p8.get_graph_nodes_by_id(keys)

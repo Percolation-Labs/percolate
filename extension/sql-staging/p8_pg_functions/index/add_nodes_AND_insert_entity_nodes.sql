@@ -64,10 +64,7 @@ END;
 $BODY$;
 
 
-
--- FUNCTION: public.insert_entity_nodes(text)
-
--- DROP FUNCTION IF EXISTS public.insert_entity_nodes(text);
+ 
 
 CREATE OR REPLACE FUNCTION p8.insert_entity_nodes(
 	entity_table text)

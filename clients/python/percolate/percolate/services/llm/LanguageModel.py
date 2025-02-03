@@ -16,13 +16,7 @@ import traceback
 from .MessageStackFormatter import MessageStackFormatter
 
 ANTHROPIC_MAX_TOKENS_IN = 8192
-GENERIC_P8_PROMPT = """\n# General Advice.
-Use whatever functions are available to you and use world knowledge only if prompted 
-or if there is not other way 
-or the user is obviously asking about real world information that is not covered by functions.
-Observe what functions you have to use and check the message history to avoid calling the same functions with the same parameters repeatedly.
-If you find a function name in your search, you can activate it by naming using one of your functions. You should do so without asking the user.
-            """
+
 class OpenAIResponseScheme(AIResponse):
     @classmethod
     def parse(cls, response:dict, sid: str,  model_name:str)->AIResponse:
@@ -219,9 +213,7 @@ class LanguageModel:
         
         """we may need to adapt this e.g. for the open ai scheme"""
         tools = functions or None
-        
-        if system_prompt:
-            system_prompt+= GENERIC_P8_PROMPT
+      
         url = params["completions_uri"]
         """use the env first"""
          

@@ -38,7 +38,7 @@ class Function(AbstractEntityModel):
         
     
     @classmethod
-    def from_callable(cls, fn:typing.Callable, remove_untyped:bool=True):
+    def from_callable(cls, fn:typing.Callable, remove_untyped:bool=True, proxy_uri:str=None):
         def process_properties(properties: dict):
              
             untyped = []
@@ -84,9 +84,11 @@ class Function(AbstractEntityModel):
                 'description': desc
             }
         
-        proxy_uri = fn.__self__ if hasattr(fn, '__self__') else 'lib'
-        if not isinstance(proxy_uri,str):
-            proxy_uri = inspection.get_object_id(proxy_uri)
+        """we can pass this in e.g. for native. Lib is used for lib runtime or APIs for REST"""
+        if not proxy_uri:
+            proxy_uri = fn.__self__ if hasattr(fn, '__self__') else 'lib'
+            if not isinstance(proxy_uri,str):
+                proxy_uri = inspection.get_object_id(proxy_uri)
             
         s = _map(AbstractModel.create_model_from_function(fn).model_json_schema())
         key = s['name'] if not proxy_uri else f"{proxy_uri}.{s['name']}"
@@ -267,7 +269,7 @@ class AIResponse(TokenUsage):
     tool_calls: typing.Optional[typing.List[dict]|dict] = Field(default=None, description="Tool calls are requests from language models to call tools")
     tool_eval_data: typing.Optional[dict] = Field(default=None, description="The payload may store the eval from the tool especially if it is small data")
     verbatim: typing.Optional[dict|typing.List[dict]] = Field(default=None, description="the verbatim message from the language model - we dont serialized this", exclude=True)     
-    
+    function_stack: typing.Optional[typing.List[str]] = Field(None, description='At each stage certain functions are available to the model - useful to see what it has and what it chooses and to reload stack later')
  
     def to_open_ai_message(self):
         """the message structure for the scheme
