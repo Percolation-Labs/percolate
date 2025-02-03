@@ -259,7 +259,7 @@ class LanguageModel:
             headers["anthropic-version"] = self.params.get('anthropic-version', "2023-06-01")
             tools = self._adapt_tools_for_anthropic(functions)
         if params['scheme'] == 'google':
-            url = f"{url}?alt=sse&key={token}" if not is_streaming else f"{url.replace('generateContent','streamGenerateContent')}?key={token}"
+            url = f"{url}?key={token}" if not is_streaming else f"{url.replace('generateContent','streamGenerateContent')}?alt=sse&key={token}"
         data = {
             "model": params['model'],
             "messages": [
@@ -296,7 +296,7 @@ class LanguageModel:
              
         if params['scheme'] == 'google':
             data_content = [MessageStackFormatter.adapt_tool_response_for_google(d) for d in data_content if d]
-            optional_tool_config = { "tool_config": {   "function_calling_config": {"mode": "ANY"}  }  }
+            optional_tool_config ={}#{ "tool_config": {   "function_calling_config": {"mode": "ANY"}  }  } #this seems to confuse the googs
             data = {
                 "contents": [
                     {"role": "user", "parts": [{'text': question}]},
