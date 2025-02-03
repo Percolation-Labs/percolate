@@ -21,7 +21,7 @@ ANTHROPIC_MAX_TOKENS_IN = 8192
 
 class OpenAIResponseScheme(AIResponse):
     @classmethod
-    def parse(cls, response:dict, sid: str,  model_name:str, streaming_callback:typing.Callable=False)->AIResponse:
+    def parse(cls, response:requests.models.Response, sid: str,  model_name:str, streaming_callback:typing.Callable=False)->AIResponse:
         """
         parse the response into our canonical format - if streaming callback send to print
         
@@ -33,22 +33,27 @@ class OpenAIResponseScheme(AIResponse):
             'arguments': '{"city":"Dublin","date":"2023-10-07"}'}}],
         ```
         """
-        try:
-            if streaming_callback:
-                response = stream_openai_response(response,printer=streaming_callback)
-            if response.get('error'):
-                logger.warning(f"Error response {response['error'].get('message')}")
-                return AIResponse(id = str(uuid.uuid1()),model_name=model_name, tokens_in=0,tokens_out=0, role='assistant',
-                                  session_id=sid, content=response['error'].get('message'), status = 'ERROR')
-            choice = response['choices'][0]
-            tool_calls = choice['message'].get('tool_calls') or []
-            
-            def adapt(t):
+        def adapt(t):
                 """we want something we can call and also something to construct the message that is needed for the tool call"""
                 f = t['function']
                 return   {'name': f['name'], 'arguments':f['arguments'], 'id': t['id']} 
             
+        try:
+            if streaming_callback:
+                logger.debug(f"Streaming response")
+                response = stream_openai_response(response,printer=streaming_callback)
+            else:
+                response = response.json()
+            
+           
+            if response.get('error'):
+                logger.warning(f"Error response {response['error'].get('message')}")
+                return AIResponse(id = str(uuid.uuid1()),model_name=model_name, tokens_in=0,tokens_out=0, role='assistant',
+                                session_id=sid, content=response['error'].get('message'), status = 'ERROR')
+            choice = response['choices'][0]
+            tool_calls = choice['message'].get('tool_calls') or []
             tool_calls = [adapt(t) for t in tool_calls]
+            
             return AIResponse(id = str(uuid.uuid1()),
                     model_name=response['model'],
                     tokens_in=response['usage']['prompt_tokens'],
@@ -65,10 +70,12 @@ class OpenAIResponseScheme(AIResponse):
                     
 class AnthropicAIResponseScheme(AIResponse):
     @classmethod
-    def parse(cls, response:dict, sid: str,  model_name:str, streaming_callback:typing.Callable=False )->AIResponse:
+    def parse(cls, response:requests.models.Response, sid: str,  model_name:str, streaming_callback:typing.Callable=False )->AIResponse:
         """parse the response into our canonical format - if streaming callback send to print"""
         if streaming_callback:
             response = stream_anthropic_response(response,printer=streaming_callback)
+        else:
+            response = response.json()
         choice = response['content'] 
         def adapt(t):
             """anthropic map to our interface"""
@@ -96,11 +103,12 @@ class AnthropicAIResponseScheme(AIResponse):
         
 class GoogleAIResponseScheme(AIResponse):
     @classmethod
-    def parse(cls, response:dict, sid: str, model_name:str, streaming_callback:typing.Callable=False)->AIResponse:
+    def parse(cls, response:requests.models.Response, sid: str, model_name:str, streaming_callback:typing.Callable=False)->AIResponse:
         """parse the response into our canonical format - if streaming callback send to print"""
         if streaming_callback:
             response = stream_google_response(response,printer=streaming_callback)
-            
+        else:
+            response= response.json()
         message = response['candidates'][0]['content']
         choice = message['parts']
         content_elements = [p['text'] for p in choice if p.get('text')]
@@ -138,18 +146,17 @@ class LanguageModel:
         """we use the env in favour of what is in the store"""
         self.params['token'] = os.environ.get(self.params['token_env_key']) if self.params.get('token_env_key') else self.params.get('token') 
         
-    def parse(self, response, context: CallingContext=None) -> AIResponse:
+    def parse(self, response: requests.models.Response, context: CallingContext=None) -> AIResponse:
         """the llm response form openai or other schemes must be parsed into a dialogue.
         this is also done inside the database and here we replicate the interface before dumping and returning to the executor
         """
         streaming_callback = context.streaming_callback if context and context.streaming_callback else None
-                    
+
         try:
             if response.status_code not in [200,201]:
+                logger.warning(f"There was an error requesting - {response.content}")
                 pass #do something for errors
-            """check http codes TODO - if there is an error then we can return an error AIResponse"""
-            response = response.json()
-            
+ 
             sid = None if not context else context.session_id
             """check the HTTP response first"""
             if self.params.get('scheme') == 'google':
@@ -160,32 +167,39 @@ class LanguageModel:
         except Exception as ex:
             logger.warning(f"failing to parse {response=} {traceback.format_exc()}")
         
-    def __call__(self, messages: MessageStack, functions: typing.List[dict], context: CallingContext=None ) -> AIResponse:
+    def __call__(self, messages: MessageStack, functions: typing.List[dict], context: CallingContext=None ,debug_response:bool=False ) -> AIResponse:
         """call the language model with the message stack and functions"""
             
-        response = self._call_raw(messages=messages, functions=functions)
+        response = self._call_raw(messages=messages, functions=functions,context=context)
+        
+        logger.debug(f"{response=}")
+        if debug_response:
+            return response
+        
         """for consistency with DB we should audit here and also format the message the same with tool calls etc."""
         response = self.parse(response,context=context)
-        logger.debug(f"Response of type {response.status} with token consumption {response.tokens}")
-        #self.db.repository(AIResponse).update_records(response)
         return response
     
-    def ask(self, question:str, functions: typing.List[dict]=None, system_prompt: str=None):
+    def ask(self, question:str, functions: typing.List[dict]=None, system_prompt: str=None,context: CallingContext=None, **kwargs):
         """simple check frr question. our interface normally uses MessageStack and this is a more generic way
+        
+        If you want to stream create a context 
         Args:
             question: any question
             system_prompt: to test altering model output behaviour
             functions: optional list of functions in the OpenAPI like scheme
         """
-        return self.__call__(MessageStack(question,system_prompt=system_prompt), functions=functions)
+        return self.__call__(MessageStack(question,system_prompt=system_prompt), functions=functions, context=context, **kwargs)
         
         
-    def _call_raw(self, messages: MessageStack, functions: typing.List[dict]):
+    def _call_raw(self, messages: MessageStack, functions: typing.List[dict], context: CallingContext=None):
          """the raw api call exists for testing - normally for consistency with the database we use a different interface"""
+   
          return self.call_api_simple(messages.question, 
                                     functions=functions,
                                     system_prompt=messages.system_prompt, 
-                                    data_content=messages.data)
+                                    data_content=messages.data,
+                                    is_streaming=(context and context.is_streaming))
 
     @classmethod 
     def from_context(cls, context: CallingContext) -> "LanguageModel":
@@ -245,7 +259,7 @@ class LanguageModel:
             headers["anthropic-version"] = self.params.get('anthropic-version', "2023-06-01")
             tools = self._adapt_tools_for_anthropic(functions)
         if params['scheme'] == 'google':
-            url = f"{url}?alt=sse&key={token}" if not is_streaming else f"{url.replace('generateContent','streamGenerateContent')}?key={token}"
+            url = f"{url}?key={token}" if not is_streaming else f"{url.replace('generateContent','streamGenerateContent')}?alt=sse&key={token}"
         data = {
             "model": params['model'],
             "messages": [
@@ -282,7 +296,7 @@ class LanguageModel:
              
         if params['scheme'] == 'google':
             data_content = [MessageStackFormatter.adapt_tool_response_for_google(d) for d in data_content if d]
-            optional_tool_config = { "tool_config": {   "function_calling_config": {"mode": "ANY"}  }  }
+            optional_tool_config ={}#{ "tool_config": {   "function_calling_config": {"mode": "ANY"}  }  } #this seems to confuse the googs
             data = {
                 "contents": [
                     {"role": "user", "parts": [{'text': question}]},

@@ -31,7 +31,7 @@ def repository(model:AbstractModel|BaseModel):
     """
     return PostgresService(model)
 
-def Agent(model:AbstractModel|BaseModel, **kwargs):
+def Agent(model:AbstractModel|BaseModel, **kwargs)->ModelRunner:
     """get the model runner in the context of the agent for running reasoning chains"""
     return ModelRunner(model,**kwargs)
 
