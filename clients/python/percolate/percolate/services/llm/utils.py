@@ -52,8 +52,8 @@ def stream_openai_response(r, printer=None):
                              
                             if not observed_tool_call:
                                 observed_tool_call = True
-                                if printer:
-                                    printer(f'invoking {delta["tool_calls"]}')
+                                # if printer:
+                                #     printer(f'invoking {delta["tool_calls"]}')
                             for tool_call in delta["tool_calls"]:
                                 if "index" in tool_call:
                                     """for each tool call, we will index into the initial and aggregate args"""
@@ -68,7 +68,8 @@ def stream_openai_response(r, printer=None):
     collected_data['choices'][0]['message'] = delta
     collected_data['choices'][0]['message']['tool_calls'] = tool_calls
     collected_data['usage'] = json_data['usage']
- 
+    if printer:
+        printer('\n')
     return collected_data
 
 def stream_anthropic_response(r, printer=None):
