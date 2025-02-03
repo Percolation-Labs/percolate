@@ -1,4 +1,0 @@
-comment = 'A simple hello world extension in Zig'
-default_version = '1.0'
-module_pathname = '$libdir/p8'
-relocatable = false
