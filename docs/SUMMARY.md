@@ -5,7 +5,8 @@
 ## Getting started
 
 * [Quick start](getting-started/build-and-run-locally.md)
-* [Docker](getting-started/docker.md)
+* [Docker](getting-started/docker/README.md)
+  * [Services](getting-started/docker/services.md)
 * [Kubernetes](getting-started/kubernetes.md)
 * [Managed Cloud](getting-started/managed-cloud.md)
 
