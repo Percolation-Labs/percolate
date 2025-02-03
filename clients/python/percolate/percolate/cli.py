@@ -103,16 +103,30 @@ def ask(
     
     from percolate.utils.env import DEFAULT_MODEL
     typer.echo(f"Asking percolate...")
-    """temp interface todo: - trusting the database is what we want but will practice with python"""
+    """temp interface todo: - trusting the database is what we want but will practice with python
+    
+    example after indexing 
+    python percolate/cli.py ask 'are there SQL functions in Percolate for interacting with models like Claude?'
+    """
     #data  = p8.repository(PercolateAgent).execute(f"""  SELECT * FROM percolate_with_agent('{question}', '{agent or 'p8.PercolateAgent'}', '{model or DEFAULT_MODEL}') """)
     from percolate.models.p8 import PercolateAgent
-
+    from percolate.services.llm import CallingContext
+    
+    def printer(text):
+        """streaming output"""
+        print(text, end="", flush=True)  
+        if text == None:
+            print('')
+            
+    
+    c = CallingContext(streaming_callback=printer)
     agent = p8.Agent(PercolateAgent)
-    data = agent(question)
-                 
+    data = agent(question,context=c)
+    typer.echo('')        
     if data:
+        pass
         #typer.echo(f"Session({data[0]['session_id_out']}): {data[0]['message_response']}")
-        typer.echo(data)
+        #typer.echo(data)
     else:
         typer.echo(f"Did not get a response")
 
