@@ -21,6 +21,7 @@ hypercorn = "^0.17.3"
 requests = "^2.32.3"
 fastapi = "^0.115.8"
 minio = "^7.2.15"
+python-multipart = "^0.0.20"
 
 
 [build-system]

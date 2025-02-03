@@ -37,7 +37,7 @@ def bootstrap(root='../../../../extension/'):
     root = root.rstrip('/')
     
     """build a list of models we want to init with"""
-    models = [ Project, Agent, ModelField, LanguageModelApi, Function, Session, AIResponse, ApiProxy, PlanModel, Settings, PercolateAgent]
+    models = [ Project, Agent, ModelField, LanguageModelApi, Function, Session, AIResponse, ApiProxy, PlanModel, Settings, PercolateAgent, IndexAudit]
         
     """compile the functions into one file"""
     with open(f'{root}/sql/01_add_functions.sql', 'w') as f:
@@ -71,3 +71,4 @@ def bootstrap(root='../../../../extension/'):
         f.write('\n\n-- -----------\n')
         f.write('-- native functions--\n\n')
         f.write(script)
+        

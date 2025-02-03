@@ -25,5 +25,6 @@ CMD ["hypercorn", "--bind", "0.0.0.0:5008",  "percolate.api.main:app"]
 
 #add --push if preferred
 #docker buildx create --use
-#docker buildx build --platform linux/amd64,linux/arm64,linux/arm64/v8 -t percolate-api:0.0.4 . 
-#docker tag percolate-api:latest percolationlabs/percolate-api:0.0.4 & docker push percolationlabs/percolate-api:0.0.4
+#docker buildx build --platform linux/amd64,linux/arm64 -t percolationlabs/percolate-api:latest --push .
+#docker pull percolationlabs/percolate-api:latest
+#docker run -p 5009:5008 percolate-api:latest

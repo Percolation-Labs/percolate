@@ -3,7 +3,7 @@ from percolate.models.AbstractModel import ensure_model_not_instance, AbstractMo
 from percolate.models.utils import SqlModelHelper
 from percolate.utils import logger, batch_collection
 import typing
-from percolate.models.p8 import ModelField,Agent
+from percolate.models.p8 import ModelField,Agent, IndexAudit
 import psycopg2
 from percolate.utils.env import POSTGRES_CONNECTION_STRING , POSTGRES_DB, POSTGRES_SERVER,DEFAULT_CONNECTION_TIMEOUT
 import psycopg2.extras
@@ -11,6 +11,7 @@ from psycopg2 import sql
 from psycopg2.errors import DuplicateTable
 from tenacity import retry, stop_after_attempt, wait_fixed
 import traceback
+import uuid
 
 class PostgresService:
     """the postgres service wrapper for sinking and querying entities/models"""
@@ -333,26 +334,55 @@ class PostgresService:
         else:
             logger.warning(f"Nothing to do - records is empty {records}")
 
-    def index_entities(self):
-        """This is to allow push index but we typically use the DB background workers to do this for us
+    def index_entity_by_name(self, entity_name:str, id:uuid.UUID):
+        """
+        index entities - a session id can be passed in for the audit callback
+        this is very much WIP - it may be this moves into background workers in the database
         """
         
         assert self.model is not None, "The model is null - did you mean to create a repository with the model first?"
-        logger.info(f'indexing entity {self.model}')
+        
         r1, r2 = None,None
+        errors = ""
         try:
             
-            r1 = self.execute(f""" select * from p8.insert_entity_nodes('{self.model.get_model_full_name()}'); """)
+            r1 = self.execute(f""" select * from p8.insert_entity_nodes(%s); """, data=(entity_name,))
         except Exception as ex:
+            errors+= traceback.format_exc()
             logger.warning(f"Failed to compute nodes {traceback.format_exc()}")
         try:
-            r2 = self.execute(f""" select * from p8.insert_entity_embeddings('{self.model.get_model_full_name()}'); """)
+            r2 = self.execute(f""" select * from p8.insert_entity_embeddings(%s); """, data=(entity_name,))
         except Exception as ex:
+            errors+= traceback.format_exc()
             logger.warning(f"Failed to compute embeddings {ex}")
-        d =  {
+            
+        metrics =  {
             'entities added': r1,
             'embeddings added': r2,
         }
         
-        logger.info(d)
-        return d
+        if errors == '':
+            self.repository(IndexAudit).update_records(IndexAudit(id=id,
+                                                                  model_name='percolate',
+                                                                  entity_full_name=entity_name, 
+                                                                  metrics=metrics, 
+                                                                  status="OK", 
+                                                                  message='Index updated without errors'))
+        else:
+            self.repository(IndexAudit).update_records(IndexAudit(id=id,
+                                                                  model_name='percolate',
+                                                                  entity_full_name=entity_name,
+                                                                  metrics=metrics, 
+                                                                  status="ERROR", 
+                                                                  message=errors))
+        
+        logger.info(metrics)
+        return metrics
+    
+    def index_entities(self):
+        """This is to allow push index but we typically use the DB background workers to do this for us
+        """
+        
+        logger.info(f'indexing entity {self.model}')
+        return self.index_entity_by_name(self.model.get_model_full_name())
+        

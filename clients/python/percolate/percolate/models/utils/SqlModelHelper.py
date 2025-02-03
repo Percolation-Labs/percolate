@@ -21,6 +21,26 @@ class SqlModelHelper:
     def __repr__(self):
         return f"SqlModelHelper({self.model_name})"
     
+    @property
+    def should_model_notify_index_update(self):
+        """
+        this is for most models that have either a name or an embedding
+        """
+        fields = self.model.model_fields
+        """example of disable or force enable in special cases"""
+        index_notify = self.model.model_config.get('index_notify')
+        if index_notify is not None:
+            return index_notify
+        """always in this case for graph entity by convention unless disabled"""
+        if 'name' in fields:
+            return True
+        """and always if there are embeddings"""
+        for k,v in fields.items():
+            if (v.json_schema_extra or{}).get('embedding_provider'):
+                return True
+        """otherwise skip it"""
+        return False
+        
     def create_script(cls,if_not_exists:bool = False):
         """
 
@@ -93,6 +113,14 @@ FOR EACH ROW
 EXECUTE FUNCTION update_updated_at_column();
 
         """
+    
+        #in some case we will attach the notify by calling this function attach_notify_trigger_to_table(schema_name TEXT, table_name TEXT)
+              
+        if cls.should_model_notify_index_update:
+            create_table_script += f"""
+SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls.model.get_model_name()}');
+            """
+        
         return create_table_script
 
     def upsert_query(
