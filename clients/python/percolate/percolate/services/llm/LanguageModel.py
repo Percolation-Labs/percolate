@@ -1,5 +1,5 @@
 """wrap all language model apis - use REST direct to avoid deps in the library
-This is a first fraft - will map this to lean more on the database model 
+This is a first draft - will map this to lean more on the database model 
 """
 
 import requests
@@ -14,13 +14,16 @@ import uuid
 from percolate.utils import logger
 import traceback
 from .MessageStackFormatter import MessageStackFormatter
+from .utils import *
+
 
 ANTHROPIC_MAX_TOKENS_IN = 8192
 
 class OpenAIResponseScheme(AIResponse):
     @classmethod
-    def parse(cls, response:dict, sid: str,  model_name:str)->AIResponse:
+    def parse(cls, response:dict, sid: str,  model_name:str, streaming_callback:typing.Callable=False)->AIResponse:
         """
+        parse the response into our canonical format - if streaming callback send to print
         
         example tool call response
         ```
@@ -31,6 +34,8 @@ class OpenAIResponseScheme(AIResponse):
         ```
         """
         try:
+            if streaming_callback:
+                response = stream_openai_response(response,printer=streaming_callback)
             if response.get('error'):
                 logger.warning(f"Error response {response['error'].get('message')}")
                 return AIResponse(id = str(uuid.uuid1()),model_name=model_name, tokens_in=0,tokens_out=0, role='assistant',
@@ -60,7 +65,10 @@ class OpenAIResponseScheme(AIResponse):
                     
 class AnthropicAIResponseScheme(AIResponse):
     @classmethod
-    def parse(cls, response:dict, sid: str,  model_name:str )->AIResponse:
+    def parse(cls, response:dict, sid: str,  model_name:str, streaming_callback:typing.Callable=False )->AIResponse:
+        """parse the response into our canonical format - if streaming callback send to print"""
+        if streaming_callback:
+            response = stream_anthropic_response(response,printer=streaming_callback)
         choice = response['content'] 
         def adapt(t):
             """anthropic map to our interface"""
@@ -88,7 +96,11 @@ class AnthropicAIResponseScheme(AIResponse):
         
 class GoogleAIResponseScheme(AIResponse):
     @classmethod
-    def parse(cls, response:dict, sid: str, model_name:str)->AIResponse:
+    def parse(cls, response:dict, sid: str, model_name:str, streaming_callback:typing.Callable=False)->AIResponse:
+        """parse the response into our canonical format - if streaming callback send to print"""
+        if streaming_callback:
+            response = stream_google_response(response,printer=streaming_callback)
+            
         message = response['candidates'][0]['content']
         choice = message['parts']
         content_elements = [p['text'] for p in choice if p.get('text')]
@@ -130,12 +142,8 @@ class LanguageModel:
         """the llm response form openai or other schemes must be parsed into a dialogue.
         this is also done inside the database and here we replicate the interface before dumping and returning to the executor
         """
-        
-                
-        #if the context has a streaming callback i.e. printer, we should switch to a streaming request and reconstruct the payload
-        #response = requests.post(API_URL, headers=headers, json=data, stream=True)
-        #the payload may sadly be different so we need to manage this cleanly 
-        
+        streaming_callback = context.streaming_callback if context and context.streaming_callback else None
+                    
         try:
             if response.status_code not in [200,201]:
                 pass #do something for errors
@@ -145,10 +153,10 @@ class LanguageModel:
             sid = None if not context else context.session_id
             """check the HTTP response first"""
             if self.params.get('scheme') == 'google':
-                return GoogleAIResponseScheme.parse(response, sid=sid, model_name=self.model_name)
+                return GoogleAIResponseScheme.parse(response, sid=sid, model_name=self.model_name,streaming_callback=streaming_callback)
             if self.params.get('scheme') == 'anthropic':
-                return AnthropicAIResponseScheme.parse(response,sid=sid,model_name=self.model_name)
-            return OpenAIResponseScheme.parse(response,sid=sid, model_name=self.model_name)
+                return AnthropicAIResponseScheme.parse(response,sid=sid,model_name=self.model_name,streaming_callback=streaming_callback)
+            return OpenAIResponseScheme.parse(response,sid=sid, model_name=self.model_name,streaming_callback=streaming_callback)
         except Exception as ex:
             logger.warning(f"failing to parse {response=} {traceback.format_exc()}")
         
@@ -206,7 +214,6 @@ class LanguageModel:
                         data_content:typing.List[dict]=None,
                         is_streaming:bool = False,
                         temperature: float = 0.01,
-                        streaming_callback : typing.Callable = None,
                         **kwargs):
         """
         Simple REST wrapper to use with any language model
@@ -238,7 +245,7 @@ class LanguageModel:
             headers["anthropic-version"] = self.params.get('anthropic-version', "2023-06-01")
             tools = self._adapt_tools_for_anthropic(functions)
         if params['scheme'] == 'google':
-            url = f"{url}?key={token}"
+            url = f"{url}?alt=sse&key={token}" if not is_streaming else f"{url.replace('generateContent','streamGenerateContent')}?key={token}"
         data = {
             "model": params['model'],
             "messages": [
@@ -250,6 +257,10 @@ class LanguageModel:
             "tools": tools,
             'temperature': temperature
         }
+        if is_streaming:
+            data['stream'] = True
+            data["stream_options"] = {"include_usage": True}
+            
         if params['scheme'] == 'anthropic':
             data = {
                 "model": params['model'],
@@ -264,6 +275,9 @@ class LanguageModel:
                 data['tools'] = tools
             if system_prompt:
                 data['system'] = system_prompt
+            if is_streaming:
+                data['stream'] = True
+                
             data["max_tokens"] = kwargs.get('max_tokens',ANTHROPIC_MAX_TOKENS_IN)
              
         if params['scheme'] == 'google':
@@ -286,7 +300,7 @@ class LanguageModel:
                     
         logger.debug(f"request {data=}")
    
-        response =  requests.post(url, headers=headers, data=json.dumps(data))
+        response =  requests.post(url, headers=headers, data=json.dumps(data),stream=is_streaming)
         
         if response.status_code not in [200,201]:
             logger.warning(f"failed to submit: {response.status_code=}  {response.content}")
@@ -295,90 +309,3 @@ class LanguageModel:
     
     
     
-"""some direct calls"""
-def request_openai(messages,functions):
-    """
-
-    """
-    #mm = [_OpenAIMessage.from_message(d) for d in pg.execute(f"""  select * from p8.get_canonical_messages(NULL, '2bc7f694-dd85-11ef-9aff-7606330c2360') """)[0]['messages']]
-    #request_openai(mm)
-    
-    """place all system prompts at the start"""
-    
-    messages = [m if isinstance(m,dict) else m.model_dump() for m in messages]
-    url = "https://api.openai.com/v1/chat/completions"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
-    }
-
-    data = {
-        "model": "gpt-4o-mini",
-        "messages": messages,
-        "tools": functions
-    }
-    
-    return requests.post(url, headers=headers, data=json.dumps(data))
- 
- 
-def request_anthropic(messages, functions):
-    url = "https://api.anthropic.com/v1/messages"
-    headers = {
-        "Content-Type": "application/json",
-        "x-api-key":  os.environ.get('ANTHROPIC_API_KEY'),
-        "anthropic-version": "2023-06-01",
-    }
-    
-    data = {
-        "model": "claude-3-5-sonnet-20241022",
-        "max_tokens": 1024,
-        "messages": [m for m in messages if m['role'] !='system'],
-        "tools": functions
-    }
-    
-    system_prompt = [m for m in messages if m['role']=='system']
-   
-    if system_prompt:
-        data['system'] = '\n'.join( item['content'][0]['text'] for item in system_prompt )
-    
-    return requests.post(url, headers=headers, data=json.dumps(data))
-
-def request_google(messages, functions):
-    """
-    https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/function-calling
-    
-    expected tool call parts [{'functionCall': {'name': 'get_weather', 'args': {'date': '2024-07-27', 'city': 'Paris'}}}]
-        
-    #get the functions and messages in the correct scheme. the second param in get_tools_by_name takes the scheme
-    goo_mm =  [d for d in pg.execute(f" select * from p8.get_google_messages('619857d3-434f-fa51-7c88-6518204974c9') ")[0]['messages']]  
-    fns =  [d for d in pg.execute(f" select * from p8.get_tools_by_name(ARRAY['get_pet_findByStatus'],'google') ")[0]['get_tools_by_name']]  
-    request_google(goo_mm,fns).json()
-    """        
-    
-    system_prompt = [m for m in messages if m['role']=='system']
-    
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={os.environ.get('GEMINI_API_KEY')}"
-    headers = {
-        "Content-Type": "application/json"
-    }
-    
-    """important not to include system prompt - you can get some cryptic messages"""
-    data = {
-        "contents": [m for m in messages if m['role'] !='system']
-    }
-     
-    if system_prompt:
-        data['system_instruction'] = {'parts': {'text': '\n'.join( item['parts'][0]['text'] for item in system_prompt )}}
-    
-    """i have seen gemini call the tool even when it was the data if this mode is set"""
-    if functions:
-        data.update(
-        #    { "tool_config": {
-        #       "function_calling_config": {"mode": "ANY"}
-        #     },
-            {"tools": functions}
-        )
-    
-    return requests.post(url, headers=headers, data=json.dumps(data))
-

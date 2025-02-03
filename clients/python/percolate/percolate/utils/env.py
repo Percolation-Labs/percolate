@@ -4,7 +4,7 @@ P8_SCHEMA = 'p8'
 P8_EMBEDDINGS_SCHEMA = 'p8_embeddings'
 #
 POSTGRES_DB = "app"
-POSTGRES_SERVER = "localhost"
+POSTGRES_SERVER = os.environ.get('P8_PG_HOST', 'localhost')
 POSTGRES_PORT = os.environ.get('P8_PG_PORT', 5438)
 POSTGRES_PASSWORD =  "postgres"
 POSTGRES_USER = "postgres"
@@ -19,14 +19,14 @@ MINIO_P8_BUCKET = 'percolate'
 GPT_MINI = "gpt-4o-mini"
 DEFAULT_MODEL =   "gpt-4o-2024-08-06"
 
-def load_db_key(key = "P*_API_KEY"):
+def load_db_key(key = "P8_API_KEY"):
     """valid database login requests the key for API access"""
     from percolate.services import PostgresService
     from percolate.utils import make_uuid
     pg = PostgresService()
-    data = pg.execute(f'SELECT value from p8."Settings" where id = '%' limit 1', (make_uuid({"key": key}),))
+    data = pg.execute(f'SELECT value from p8."Settings" where id = %s limit 1', (str(make_uuid({"key": key})),))
     if data:
-        return data['value']
+        return data[0]['value']
     
     
 def sync_model_keys() -> dict:

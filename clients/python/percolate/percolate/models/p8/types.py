@@ -222,18 +222,28 @@ class TokenUsage(AbstractModel):
     """Tracks token usage for language model interactions"""
     id: uuid.UUID| str  
     model_name: str
-    tokens: typing.Optional[int] = Field(None,description="the number of tokens consumed in total")
-    tokens_in: int = Field(description="the number of tokens consumed for input")
-    tokens_out: int = Field(description="the number of tokens consumed for output")
-    tokens_other: typing.Optional[int] = Field(None, description="the number of tokens consumed for functions and other metadata")
-    session_id: typing.Optional[uuid.UUID| str  ] = Field(description="Session id for a conversation")
+    tokens: typing.Optional[int] = Field(0,description="the number of tokens consumed in total")
+    tokens_in: typing.Optional[int] = Field(0, description="the number of tokens consumed for input")
+    tokens_out: typing.Optional[int] = Field(0, description="the number of tokens consumed for output")
+    tokens_other: typing.Optional[int] = Field(0, description="the number of tokens consumed for functions and other metadata")
+    session_id: typing.Optional[uuid.UUID| str  ] = Field(None, description="Session id for a conversation")
     
     @model_validator(mode='before')
     @classmethod
     def _f(cls, values):
         if not values.get('tokens'):
-            values['tokens'] = values['tokens_in'] + values['tokens_out']
+            values['tokens'] = (values.get('tokens_in') or 0) + (values.get('tokens_out') or 0)
         return values
+    
+class IndexAudit(TokenUsage):
+    model_config = {
+        'index_notify': False        
+    }
+    """Track requests to build smart indexes such as graph links or text and image embeddings"""
+    metrics: typing.Optional[dict] = Field(description="metrics for records indexed",default_factory=dict)
+    status: str = Field(description="Status code such as OK|ERROR")
+    message: typing.Optional[str] = Field(description="Any message such as an error")
+    entity_full_name: str
     
     
 class _OpenAIMessage(BaseModel):
@@ -305,8 +315,9 @@ class Session(AbstractModel):
     
 class ModelMatrix(AbstractModel):
     """keep useful json blobs for model info"""
+    
     id: uuid.UUID| str  
-    name: str = Field(description="The name of the entity e.g. a model in the types or a user defined model")
+    entity_name: str = Field(description="The name of the entity e.g. a model in the types or a user defined model")
     enums: typing.Optional[dict] = Field(None, description="The enums used in the model - usually a job will build these and they can be used in query prompts")
     example_sql_queries: typing.Optional[dict] = Field(None, description="A mapping of interesting question to SQL queries - usually a job will build these and they can be used in query prompts")
 

@@ -34,9 +34,7 @@ def add_api(name:str, uri:str, token:str=None, file:str=None, verbs: str | typin
     """register the functions"""
     repo = p8.repository(Function)
     repo.update_records(list(service.iterate_models(verbs=verbs, filter_ops=filter_ops)))
-    repo.index_entities()
-    
-    """TODO add the index"""
+    #repo.index_entities() this is automated now on a trigger
     
     logger.debug(f"Added api {uri=}")
     
