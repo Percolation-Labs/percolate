@@ -15,6 +15,85 @@ BEGIN
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
+
+
+-- Create the trigger function to register inserts e.g. to build indexes
+CREATE OR REPLACE FUNCTION notify_entity_updates()
+RETURNS TRIGGER AS
+$$
+DECLARE
+    api_token_in TEXT;
+    proxy_uri_in TEXT;
+    full_name TEXT;
+    response JSON;
+BEGIN
+    -- Construct the full name of the table
+    full_name := TG_TABLE_SCHEMA || '.' || TG_TABLE_NAME;
+
+    -- Fetch API details from the p8."ApiProxy" table - this will be running on local host in docker contexts
+    SELECT token, proxy_uri 
+    INTO api_token_in, proxy_uri_in
+    FROM p8."ApiProxy"
+    WHERE name = 'percolate'
+    LIMIT 1;
+
+    -- If no API details are found, do nothing
+    IF api_token_in IS NULL OR proxy_uri_in IS NULL THEN
+        RAISE NOTICE 'API details not found, skipping request';
+        RETURN NEW;
+    END IF;
+
+    BEGIN
+        -- Make the POST request
+        SELECT content INTO response
+        FROM public.http(
+            ( 'POST', 
+            proxy_uri_in || '/admin/index/',
+            ARRAY[http_header('Authorization', 'Bearer ' || api_token_in)],
+            'application/json',
+            json_build_object('entity_full_name', full_name)::jsonb
+            )::http_request
+        );
+     EXCEPTION 
+        WHEN OTHERS THEN
+            --todo log errors in the session
+            RAISE NOTICE 'Error executing HTTP request: %', SQLERRM;
+            response := NULL;
+    END;
+    -- Log the response
+    RAISE NOTICE 'API Response: %', response;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+---
+CREATE OR REPLACE FUNCTION attach_notify_trigger_to_table(schema_name TEXT, table_name TEXT) RETURNS VOID AS
+$$
+DECLARE
+    trigger_name TEXT;
+BEGIN
+    -- Construct a unique trigger name
+    trigger_name := 'notify_entity_updates' || table_name;
+
+    -- Drop the trigger if it exists
+    EXECUTE format(
+        'DROP TRIGGER IF EXISTS %I ON %I.%I;',
+        trigger_name, schema_name, table_name
+    );
+    
+    -- Execute dynamic SQL to create the trigger
+    EXECUTE format(
+        'CREATE TRIGGER %I
+        AFTER UPDATE ON %I.%I
+        FOR EACH STATEMENT
+        EXECUTE FUNCTION notify_entity_updates();',
+        trigger_name, schema_name, table_name
+    );
+
+    RAISE NOTICE 'Trigger % created on %.%', trigger_name, schema_name, table_name;
+END;
+$$ LANGUAGE plpgsql;
 -----------------------------------------
 -----------------------------------------
 

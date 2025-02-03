@@ -42,7 +42,7 @@ pip install percolate-db
 
 If you dont install the client you can use the cli from within the repo. For example the command below will sync env keys for using langauge models into the dockerized postgres instance. 
 
-```
+```bash
 cd clients/python/percolate
 python percolate/cli.py add env --sync
 ```
