@@ -18,6 +18,8 @@ FOR EACH ROW
 EXECUTE FUNCTION update_updated_at_column();
 
         
+SELECT attach_notify_trigger_to_table('p8', 'Project');
+            
 -- ------------------
 
 -- register entity (p8.Agent)------
@@ -41,6 +43,8 @@ FOR EACH ROW
 EXECUTE FUNCTION update_updated_at_column();
 
         
+SELECT attach_notify_trigger_to_table('p8', 'Agent');
+            
 -- ------------------
 
 -- register entity (p8.ModelField)------
@@ -65,6 +69,8 @@ FOR EACH ROW
 EXECUTE FUNCTION update_updated_at_column();
 
         
+SELECT attach_notify_trigger_to_table('p8', 'ModelField');
+            
 -- ------------------
 
 -- register entity (p8.LanguageModelApi)------
@@ -89,6 +95,8 @@ FOR EACH ROW
 EXECUTE FUNCTION update_updated_at_column();
 
         
+SELECT attach_notify_trigger_to_table('p8', 'LanguageModelApi');
+            
 -- ------------------
 
 -- register entity (p8.Function)------
@@ -114,6 +122,8 @@ FOR EACH ROW
 EXECUTE FUNCTION update_updated_at_column();
 
         
+SELECT attach_notify_trigger_to_table('p8', 'Function');
+            
 -- ------------------
 
 -- register entity (p8.Session)------
@@ -144,8 +154,8 @@ CREATE TABLE  IF NOT EXISTS  p8."AIResponse" (
 id UUID PRIMARY KEY ,
     model_name TEXT NOT NULL,
     tokens INTEGER,
-    tokens_in INTEGER NOT NULL,
-    tokens_out INTEGER NOT NULL,
+    tokens_in INTEGER,
+    tokens_out INTEGER,
     tokens_other INTEGER,
     session_id UUID,
     role TEXT NOT NULL,
@@ -167,6 +177,8 @@ FOR EACH ROW
 EXECUTE FUNCTION update_updated_at_column();
 
         
+SELECT attach_notify_trigger_to_table('p8', 'AIResponse');
+            
 -- ------------------
 
 -- register entity (p8.ApiProxy)------
@@ -188,6 +200,8 @@ FOR EACH ROW
 EXECUTE FUNCTION update_updated_at_column();
 
         
+SELECT attach_notify_trigger_to_table('p8', 'ApiProxy');
+            
 -- ------------------
 
 -- register entity (p8.PlanModel)------
@@ -212,6 +226,8 @@ FOR EACH ROW
 EXECUTE FUNCTION update_updated_at_column();
 
         
+SELECT attach_notify_trigger_to_table('p8', 'PlanModel');
+            
 -- ------------------
 
 -- register entity (p8.Settings)------
@@ -251,6 +267,36 @@ id UUID PRIMARY KEY ,
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."PercolateAgent";
 CREATE   TRIGGER update_updated_at_trigger
 BEFORE UPDATE ON p8."PercolateAgent"
+FOR EACH ROW
+EXECUTE FUNCTION update_updated_at_column();
+
+        
+SELECT attach_notify_trigger_to_table('p8', 'PercolateAgent');
+            
+-- ------------------
+
+-- register entity (p8.IndexAudit)------
+-- ------------------
+CREATE TABLE  IF NOT EXISTS  p8."IndexAudit" (
+id UUID PRIMARY KEY ,
+    model_name TEXT NOT NULL,
+    tokens INTEGER,
+    tokens_in INTEGER,
+    tokens_out INTEGER,
+    tokens_other INTEGER,
+    session_id UUID,
+    metrics JSON,
+    status TEXT NOT NULL,
+    message TEXT,
+    entity_full_name TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    userid UUID
+);
+DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."IndexAudit";
+CREATE   TRIGGER update_updated_at_trigger
+BEFORE UPDATE ON p8."IndexAudit"
 FOR EACH ROW
 EXECUTE FUNCTION update_updated_at_column();
 

@@ -288,7 +288,7 @@ INSERT INTO p8."ModelField"(name,id,entity_name,field_type,embedding_provider,de
 -- insert_agent_data (p8.AIResponse)------
 -- ------------------
 INSERT INTO p8."Agent"(name,id,category,description,spec,functions) VALUES
- ('p8.AIResponse', '51b3aa20-195b-5ef3-82d1-df5ca8019146', NULL, 'Each atom in an exchange between users, agents, assistants and so on. \n    We generate questions with sessions and then that triggers an exchange. \n    Normally the Dialogue is round trip transaction.\n    ', '{"description": "Each atom in an exchange between users, agents, assistants and so on. \\nWe generate questions with sessions and then that triggers an exchange. \\nNormally the Dialogue is round trip transaction.", "properties": {"id": {"anyOf": [{"format": "uuid", "type": "string"}, {"type": "string"}], "title": "Id"}, "model_name": {"title": "Model Name", "type": "string"}, "tokens": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null, "description": "the number of tokens consumed in total", "title": "Tokens"}, "tokens_in": {"description": "the number of tokens consumed for input", "title": "Tokens In", "type": "integer"}, "tokens_out": {"description": "the number of tokens consumed for output", "title": "Tokens Out", "type": "integer"}, "tokens_other": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null, "description": "the number of tokens consumed for functions and other metadata", "title": "Tokens Other"}, "session_id": {"anyOf": [{"format": "uuid", "type": "string"}, {"type": "string"}, {"type": "null"}], "description": "Session id for a conversation", "title": "Session Id"}, "role": {"description": "The role of the user/agent in the conversation", "title": "Role", "type": "string"}, "content": {"description": "The content for this part of the conversation", "embedding_provider": "default", "title": "Content", "type": "string"}, "status": {"anyOf": [{"type": "string"}, {"type": "null"}], "description": "The status of the session such as REQUEST|RESPONSE|ERROR|TOOL_CALL|STREAM_RESPONSE", "title": "Status"}, "tool_calls": {"anyOf": [{"items": {"type": "object"}, "type": "array"}, {"type": "object"}, {"type": "null"}], "default": null, "description": "Tool calls are requests from language models to call tools", "title": "Tool Calls"}, "tool_eval_data": {"anyOf": [{"type": "object"}, {"type": "null"}], "default": null, "description": "The payload may store the eval from the tool especially if it is small data", "title": "Tool Eval Data"}, "verbatim": {"anyOf": [{"items": {"type": "object"}, "type": "array"}, {"type": "object"}, {"type": "null"}], "default": null, "description": "the verbatim message from the language model - we dont serialized this", "title": "Verbatim"}, "function_stack": {"anyOf": [{"items": {"type": "string"}, "type": "array"}, {"type": "null"}], "default": null, "description": "At each stage certain functions are available to the model - useful to see what it has and what it chooses and to reload stack later", "title": "Function Stack"}}, "required": ["id", "model_name", "tokens_in", "tokens_out", "session_id", "role", "content", "status"], "title": "AIResponse", "type": "object"}', NULL)
+ ('p8.AIResponse', '51b3aa20-195b-5ef3-82d1-df5ca8019146', NULL, 'Each atom in an exchange between users, agents, assistants and so on. \n    We generate questions with sessions and then that triggers an exchange. \n    Normally the Dialogue is round trip transaction.\n    ', '{"description": "Each atom in an exchange between users, agents, assistants and so on. \\nWe generate questions with sessions and then that triggers an exchange. \\nNormally the Dialogue is round trip transaction.", "properties": {"id": {"anyOf": [{"format": "uuid", "type": "string"}, {"type": "string"}], "title": "Id"}, "model_name": {"title": "Model Name", "type": "string"}, "tokens": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": 0, "description": "the number of tokens consumed in total", "title": "Tokens"}, "tokens_in": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": 0, "description": "the number of tokens consumed for input", "title": "Tokens In"}, "tokens_out": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": 0, "description": "the number of tokens consumed for output", "title": "Tokens Out"}, "tokens_other": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": 0, "description": "the number of tokens consumed for functions and other metadata", "title": "Tokens Other"}, "session_id": {"anyOf": [{"format": "uuid", "type": "string"}, {"type": "string"}, {"type": "null"}], "default": null, "description": "Session id for a conversation", "title": "Session Id"}, "role": {"description": "The role of the user/agent in the conversation", "title": "Role", "type": "string"}, "content": {"description": "The content for this part of the conversation", "embedding_provider": "default", "title": "Content", "type": "string"}, "status": {"anyOf": [{"type": "string"}, {"type": "null"}], "description": "The status of the session such as REQUEST|RESPONSE|ERROR|TOOL_CALL|STREAM_RESPONSE", "title": "Status"}, "tool_calls": {"anyOf": [{"items": {"type": "object"}, "type": "array"}, {"type": "object"}, {"type": "null"}], "default": null, "description": "Tool calls are requests from language models to call tools", "title": "Tool Calls"}, "tool_eval_data": {"anyOf": [{"type": "object"}, {"type": "null"}], "default": null, "description": "The payload may store the eval from the tool especially if it is small data", "title": "Tool Eval Data"}, "verbatim": {"anyOf": [{"items": {"type": "object"}, "type": "array"}, {"type": "object"}, {"type": "null"}], "default": null, "description": "the verbatim message from the language model - we dont serialized this", "title": "Verbatim"}, "function_stack": {"anyOf": [{"items": {"type": "string"}, "type": "array"}, {"type": "null"}], "default": null, "description": "At each stage certain functions are available to the model - useful to see what it has and what it chooses and to reload stack later", "title": "Function Stack"}}, "required": ["id", "model_name", "role", "content", "status"], "title": "AIResponse", "type": "object"}', NULL)
         ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name,category=EXCLUDED.category,description=EXCLUDED.description,spec=EXCLUDED.spec,functions=EXCLUDED.functions   ;
 -- ------------------
 
@@ -450,6 +450,48 @@ INSERT INTO p8."Agent"(name,id,category,description,spec,functions) VALUES
 -- register_entities (p8.PercolateAgent)------
 -- ------------------
 select * from p8.register_entities('p8.PercolateAgent');
+-- ------------------
+
+-- register_embeddings (p8.IndexAudit)------
+-- ------------------
+CREATE TABLE  IF NOT EXISTS p8_embeddings."p8_IndexAudit_embeddings" (
+    id UUID PRIMARY KEY,  -- Hash-based unique ID - we typically hash the column key and provider and column being indexed
+    source_record_id UUID NOT NULL,  -- Foreign key to primary table
+    column_name TEXT NOT NULL,  -- Column name for embedded content
+    embedding_vector VECTOR NULL,  -- Embedding vector as an array of floats
+    embedding_name VARCHAR(50),  -- ID for embedding provider
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, -- Timestamp for tracking
+    
+    -- Foreign key constraint
+    CONSTRAINT fk_source_table_p8_indexaudit
+        FOREIGN KEY (source_record_id) REFERENCES p8."IndexAudit"
+        ON DELETE CASCADE
+);
+
+-- ------------------
+
+-- insert_field_data (p8.IndexAudit)------
+-- ------------------
+INSERT INTO p8."ModelField"(name,id,entity_name,field_type,embedding_provider,description,is_key) VALUES
+ ('id', '8c15a299-76fd-632c-8575-a56f526609ec', 'p8.IndexAudit', 'uuid.UUID | str', NULL, NULL, NULL),
+ ('model_name', '64543448-82b9-cded-b09e-90a2abb5af43', 'p8.IndexAudit', 'str', NULL, NULL, NULL),
+ ('tokens', 'a973c585-5838-b56f-51ba-3dff1fc54cd7', 'p8.IndexAudit', 'int', NULL, 'the number of tokens consumed in total', NULL),
+ ('tokens_in', 'efbf4ad1-7003-71d8-52cf-269f2ece27fa', 'p8.IndexAudit', 'int', NULL, 'the number of tokens consumed for input', NULL),
+ ('tokens_out', '63fc340b-e797-fe4a-c7b3-ff3a20e7d2d2', 'p8.IndexAudit', 'int', NULL, 'the number of tokens consumed for output', NULL),
+ ('tokens_other', '8fe965f6-f95f-d5ed-a369-ad62d6612197', 'p8.IndexAudit', 'int', NULL, 'the number of tokens consumed for functions and other metadata', NULL),
+ ('session_id', 'e1d39dd8-33ac-9171-fc97-c20984e66dec', 'p8.IndexAudit', 'UUID', NULL, 'Session id for a conversation', NULL),
+ ('metrics', '1ecd69ca-ba02-798a-2893-233679c6e77f', 'p8.IndexAudit', 'dict', NULL, 'metrics for records indexed', NULL),
+ ('status', 'c51fb8af-3ada-8ed1-7b32-dcb0087e68ba', 'p8.IndexAudit', 'str', NULL, 'Status code such as OK|ERROR', NULL),
+ ('message', 'e36d7fcd-5d80-667b-a446-07cc0afc46bb', 'p8.IndexAudit', 'str', NULL, 'Any message such as an error', NULL),
+ ('entity_full_name', '3a3f3596-e43f-a865-e86b-81fc91d38aa1', 'p8.IndexAudit', 'str', NULL, NULL, NULL)
+        ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name,entity_name=EXCLUDED.entity_name,field_type=EXCLUDED.field_type,embedding_provider=EXCLUDED.embedding_provider,description=EXCLUDED.description,is_key=EXCLUDED.is_key   ;
+-- ------------------
+
+-- insert_agent_data (p8.IndexAudit)------
+-- ------------------
+INSERT INTO p8."Agent"(name,id,category,description,spec,functions) VALUES
+ ('p8.IndexAudit', '244fd1ca-a425-5c5b-9606-178c4df7026d', NULL, 'p8.IndexAudit', '{"properties": {"id": {"anyOf": [{"format": "uuid", "type": "string"}, {"type": "string"}], "title": "Id"}, "model_name": {"title": "Model Name", "type": "string"}, "tokens": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": 0, "description": "the number of tokens consumed in total", "title": "Tokens"}, "tokens_in": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": 0, "description": "the number of tokens consumed for input", "title": "Tokens In"}, "tokens_out": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": 0, "description": "the number of tokens consumed for output", "title": "Tokens Out"}, "tokens_other": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": 0, "description": "the number of tokens consumed for functions and other metadata", "title": "Tokens Other"}, "session_id": {"anyOf": [{"format": "uuid", "type": "string"}, {"type": "string"}, {"type": "null"}], "default": null, "description": "Session id for a conversation", "title": "Session Id"}, "metrics": {"anyOf": [{"type": "object"}, {"type": "null"}], "description": "metrics for records indexed", "title": "Metrics"}, "status": {"description": "Status code such as OK|ERROR", "title": "Status", "type": "string"}, "message": {"anyOf": [{"type": "string"}, {"type": "null"}], "description": "Any message such as an error", "title": "Message"}, "entity_full_name": {"title": "Entity Full Name", "type": "string"}}, "required": ["id", "model_name", "status", "message", "entity_full_name"], "title": "IndexAudit", "type": "object"}', NULL)
+        ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name,category=EXCLUDED.category,description=EXCLUDED.description,spec=EXCLUDED.spec,functions=EXCLUDED.functions   ;
 -- ------------------
 
 

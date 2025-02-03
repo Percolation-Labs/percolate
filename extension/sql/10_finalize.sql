@@ -22,7 +22,21 @@ ON CONFLICT (id)
 DO UPDATE SET
     value = EXCLUDED.value;  
 
+--register the api with the key in session - we use the api for admin tasks on the DB
 
+INSERT INTO p8."ApiProxy" (id, name, proxy_uri, token)
+SELECT 
+    p8.json_to_uuid(jsonb_build_object('proxy_uri', 'http://percolate-api:5008')::JSONB) AS session_id,
+    'percolate',
+    'http://percolate-api:5008', --K8s and Docker will likely both use these sorts of hosts TBD
+    value AS token
+FROM p8."Settings"
+WHERE key = 'P8_API_KEY'
+ON CONFLICT (id)  
+DO UPDATE SET
+    token = EXCLUDED.token;
+----------
 
-select * from p8.insert_entity_nodes('p8.Agent');
-select * from p8.insert_entity_nodes('p8.Function');
+-- we want to do this but its done in trigger
+-- select * from p8.insert_entity_nodes('p8.Agent');
+-- select * from p8.insert_entity_nodes('p8.Function');
