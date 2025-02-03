@@ -27,11 +27,12 @@ BEGIN
 
     SELECT p8.eval_native_function(
     'search', 
-    '{"question": "i need an agent about agents", "entity_name":"p8.Agent"}'::JSONB
+    '{"question": "i need an agent about agents", "entity_table_name":"p8.Agent"}'::JSONB
     );  
 
     */
     CASE function_name
+        -- NB the args here need to match how we define the native function interface in python or wherever
         -- If function_name is 'get_entities', call p8.get_entities with the given argument
         WHEN 'get_entities' THEN
             -- Extract the keys array from JSONB and cast it to a PostgreSQL TEXT array
@@ -41,7 +42,7 @@ BEGIN
 
         -- If function_name is 'search', call p8.query_entity with the given arguments
         WHEN 'search' THEN
-            SELECT p8.query_entity(args->>'question', args->>'entity_name') INTO result;
+            SELECT p8.query_entity(args->>'question', args->>'entity_table_name') INTO result;
 
         -- If function_name is 'help', call p8.plan with the given argument
         WHEN 'help' THEN

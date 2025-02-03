@@ -130,6 +130,12 @@ class LanguageModel:
         """the llm response form openai or other schemes must be parsed into a dialogue.
         this is also done inside the database and here we replicate the interface before dumping and returning to the executor
         """
+        
+                
+        #if the context has a streaming callback i.e. printer, we should switch to a streaming request and reconstruct the payload
+        #response = requests.post(API_URL, headers=headers, json=data, stream=True)
+        #the payload may sadly be different so we need to manage this cleanly 
+        
         try:
             if response.status_code not in [200,201]:
                 pass #do something for errors
@@ -148,6 +154,7 @@ class LanguageModel:
         
     def __call__(self, messages: MessageStack, functions: typing.List[dict], context: CallingContext=None ) -> AIResponse:
         """call the language model with the message stack and functions"""
+            
         response = self._call_raw(messages=messages, functions=functions)
         """for consistency with DB we should audit here and also format the message the same with tool calls etc."""
         response = self.parse(response,context=context)
@@ -322,18 +329,6 @@ def request_anthropic(messages, functions):
         "anthropic-version": "2023-06-01",
     }
     
-    #read them from the database in the right scheme    
-    # def _adapt_tools_for_anthropic( functions: typing.List[dict]):
-    #         """slightly different dialect of function wrapper - rename parameters to input_schema"""
-    #         def _rewrite(d):
-    #             return {
-    #                 'name' : d['name'],
-    #                 'input_schema': d['parameters'],
-    #                 'description': d['description']
-    #             } 
-    #         return [_rewrite(f) for f in functions]
-
-
     data = {
         "model": "claude-3-5-sonnet-20241022",
         "max_tokens": 1024,
@@ -386,3 +381,4 @@ def request_google(messages, functions):
         )
     
     return requests.post(url, headers=headers, data=json.dumps(data))
+
