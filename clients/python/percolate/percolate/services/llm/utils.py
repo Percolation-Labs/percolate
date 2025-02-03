@@ -9,55 +9,68 @@ import os
 def stream_openai_response(r, printer=None):
     """stream the response into the expected structure but expose a printer"""
     collected_data = {
-        'content': '',
         'tool_calls': []
     }
+    collected_content = ''
     observed_tool_call = False
     tool_args = {}  # {tool_id: aggregated_args}
-    
+    tool_calls = None
+    current_role = None
     for line in r.iter_lines():
         if line:
+            #print(line)
+            # print('')
             decoded_line = line.decode("utf-8").replace("data: ", "").strip() 
             if decoded_line and decoded_line != "[DONE]":
                 try:
                     json_data = json.loads(decoded_line)
-                    
                     if "choices" in json_data and json_data["choices"]:
+                        #the last chunk wil not have a choice and will have usage tokens but otherwise keep the structure
+                        collected_data = json_data
                         delta = json_data["choices"][0]["delta"]
+                        if delta.get('role'):
+                            current_role = delta['role']
+                        delta['role'] = current_role
                         
                         # Check if there's content and aggregate it
                         if "content" in delta and delta["content"]:
-                            collected_data['content'] += delta["content"]
+                            new_content = delta["content"]
+                            collected_content = collected_content + new_content
+                            """trace it the for the bottom"""
+                            delta['content'] = collected_content
+                            """we aggregate the content"""
                             if printer:
-                                printer(delta["content"])
-                        
+                                printer(new_content)
+                        else:
+                            delta['content'] = collected_content
+                            
                         # Check if there are tool calls and aggregate the arguments
                         if "tool_calls" in delta:
+                            if tool_calls is None:
+                                """first message init"""
+                                tool_calls = delta['tool_calls']
+                             
                             if not observed_tool_call:
                                 observed_tool_call = True
-                                if printer:
-                                    printer(delta["tool_calls"])
+                                # if printer:
+                                #     printer(f'invoking {delta["tool_calls"]}')
                             for tool_call in delta["tool_calls"]:
                                 if "index" in tool_call:
+                                    """for each tool call, we will index into the initial and aggregate args"""
                                     tool_index = tool_call["index"]
-                                    # Initialize tool call if not already in the dictionary
-                                    if tool_index not in tool_args:
-                                        tool_args[tool_index] = ""
+                                    
                                     if "function" in tool_call and "arguments" in tool_call["function"]:
-                                        tool_args[tool_index] += tool_call["function"]["arguments"]
+                                        tool_calls[tool_index]['function']['arguments'] += tool_call["function"]["arguments"]              
                 
                 except json.JSONDecodeError:
                     pass  # Handle incomplete JSON chunks
     
-    # Once the stream finishes, populate the tool_calls list with aggregated arguments
-    for tool_index, args in tool_args.items():
-        collected_data['tool_calls'].append({
-            'index': tool_index,
-            'arguments': args
-        })
-    
-    json_data.update(collected_data)
-    return json_data
+    collected_data['choices'][0]['message'] = delta
+    collected_data['choices'][0]['message']['tool_calls'] = tool_calls
+    collected_data['usage'] = json_data['usage']
+    if printer:
+        printer('\n')
+    return collected_data
 
 def stream_anthropic_response(r, printer=None):
     """stream the response into the anthropic structure we expect but expose a printer
@@ -85,10 +98,7 @@ def stream_anthropic_response(r, printer=None):
             if decoded_line and decoded_line != "[DONE]":
                 try:
                     json_data = json.loads(decoded_line)
-                    event_type = json_data.get("type")
-                    
-                    #print(json_data)
-                    
+                    event_type = json_data.get("type")                    
                     # Handle message start: Initialize structure from the first message
                     if event_type == "message_start":
                         collected_data = dict(json_data['message'])
@@ -123,14 +133,10 @@ def stream_anthropic_response(r, printer=None):
                            'name': 'get_weather',
                            'input': {'city': 'Paris', 'date': '2024-01-16'}}],
                             """
-                            tool_args[index]['partial_json'] += tool_input
+                            if not tool_args[index]['input']:
+                                tool_args[index]['input'] = ''
+                            tool_args[index]['input'] += tool_input
                             
-                            if not observed_tool_call:
-                                observed_tool_call = True
-                                # this is not really needed for anthropic because they declare it in content
-                                # if printer:
-                                #     printer(f"Tool call for {tool_args[index]}")
-
                     # Handle message delta and stop reason at the end
                     elif event_type == "message_delta":
                         output_tokens = json_data.get("usage", {}).get("output_tokens", 0)
@@ -142,11 +148,11 @@ def stream_anthropic_response(r, printer=None):
 
     # Aggregate content and tool calls into the final structure
     collected_data['content'] = [{"type": "text", "text": content_text}, 
-                                *[list(tool_args.values())]]
+                                *list(tool_args.values())]
     # Update usage tokens
     collected_data['usage']['input_tokens'] = input_tokens
     collected_data['usage']['output_tokens'] = output_tokens
-
+    
     return collected_data
 
 
