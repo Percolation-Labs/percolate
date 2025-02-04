@@ -25,6 +25,8 @@ services:
       - "5008:5008"
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
+      P8_PG_HOST: percolate #docker service that has postgres on it
+      P8_PG_PORT: 5432 #this is what we do b default - we will change it on k8s
   postgres:
     image: percolationlabs/postgres-base:16
     container_name: percolate
@@ -33,7 +35,6 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: app
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
     ports:
       - "5438:5432"
     volumes:
@@ -43,6 +44,8 @@ services:
 volumes:
   percolate_data:
   minio_data:
+#good to check the api logs so we can see if the api and percolate db are on speaking terms
+#docker logs   percolate-api
 ```
 
 Minio is added to allow for S3 like blob storage for uploading and indexing content.
