@@ -61,7 +61,7 @@ class ModelRunner:
         """the basic bootstrapping means asking for help, entities(types) or functions"""
         self._function_manager.add_function(self.get_entities)
         self._function_manager.add_function(self.search)
-        self._function_manager.add_function(self.search)
+        self._function_manager.add_function(self.activate_functions_by_name)
         self._function_manager.add_function(self.announce_generate_large_output)
         """more complex things will happen from here when we traverse what comes back"""
 

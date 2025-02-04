@@ -37,6 +37,14 @@ DO UPDATE SET
     token = EXCLUDED.token;
 ----------
 
+-- we dont want to rely too heavily on this but certainly for testing we should set this
+-- this allows language models to be called and are given a time to generate
+-- if generation is too long we should be switching to the client streaming
+INSERT INTO p8."Settings" (id, key, value)
+SELECT  p8.json_to_uuid('{"key": "CURLOPT_TIMEOUT"}'::JSONB), 'CURLOPT_TIMEOUT', '5000'
+ON CONFLICT (id)  
+DO UPDATE SET
+    value = EXCLUDED.value;  
 
 ---
 --- the general percolate agent preamble - inserted on top of all agents unless disabled
