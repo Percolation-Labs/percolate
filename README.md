@@ -120,8 +120,6 @@ python percolate/cli.py ask 'how do i connect to Percolate using docker compose'
 # python percolate/cli.py ask 'how is minio used in percolate'
 ```
 
-At present we don't stream the results but we will add this soon.
-
 ### Installing To K8s
 
 To install Percolate to your K8s cluster simply apply the manifest below to your cluster. See the documentation for more details.
@@ -174,6 +172,24 @@ Note on Jupyter
 git attribute removes contents on commit
 ```bash
 git config --global filter.strip-notebook-output.clean "jq --indent 1 '.cells[] |= if .outputs then .outputs = [] else . end | .metadata = {}' 2>/dev/null || cat"
+```
+
+### Docker
+
+Building the api locally
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 -t percolationlabs/percolate-api:latest --push .
+#pull latest if needed for platform
+docker pull percolationlabs/percolate-api:latest
+#update docker compose service if needed 
+docker compose up -d --no-deps --build percolate-api
+```
+
+You may in some cases want to update your /etc/hosts to resolve the server address so that your python client matches what is running in the docker for api uris.
+
+```bash
+127.0.0.1 percolate-api
 ```
 
 
