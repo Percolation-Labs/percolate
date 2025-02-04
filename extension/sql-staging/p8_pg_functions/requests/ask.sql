@@ -35,6 +35,7 @@ DECLARE
     tokens_in INTEGER;
     tokens_out INTEGER;
     response_id UUID;
+	ack_http_timeout BOOLEAN;
 BEGIN
 	/*
 	take in a message payload etc and call the correct request for each scheme
@@ -76,6 +77,11 @@ BEGIN
     -- Make the API request based on scheme
     --we return RETURNS TABLE(message_response text, tool_calls jsonb, tool_call_result jsonb, session_id_out uuid, status TEXT)
     --RETURNS TABLE(content TEXT,tool_calls_out JSON,tokens_in INTEGER,tokens_out INTEGER,finish_reason TEXT,api_error JSONB) AS
+
+    --TODO we will read this from a setting in future
+    select http_set_curlopt('CURLOPT_TIMEOUT','5000') into ack_http_timeout;
+    RAISE NOTICE 'THE HTTP TIMEOUT IS HARDCODED TO 5000ms';
+   
     IF selected_scheme = 'google' THEN
         SELECT * FROM p8.request_google(message_payload,  functions_in, selected_model, endpoint_uri, api_token)
         INTO result_set, tool_calls, tokens_in, tokens_out, finish_reason, api_error;
@@ -129,7 +135,7 @@ BEGIN
     SELECT p8.json_to_uuid(json_build_object('sid', session_id, 'ts',CURRENT_TIMESTAMP::TEXT)::JSONB)
     INTO response_id;
 
-		--RAISE notice 'generated response id % from % and %', response_id,session_id,api_response->>'id';
+	RAISE notice 'generated response id % from % and %', response_id,session_id,api_response->>'id';
 
     IF api_error IS NOT NULL THEN
         result_set := api_error;
