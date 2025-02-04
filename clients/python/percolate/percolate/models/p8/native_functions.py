@@ -38,7 +38,7 @@ def help(questions:typing.List[str]):
 
 
 def announce_generate_large_output(self, estimated_length:int=None):
-    """When you are about to generate a lot of output, please call this function with a rough estimate of the size of the content.
+    """When you are about to generate a lot of output (for example over 2500 tokens or something that will take more that 4 seconds to generate), please call this function with a rough estimate of the size of the content.
     You do not need to do this when you are responding with simple structured responses which are typically small or with simple answers.
     However when generating lots of text we would like to request via streaming or async so we want to know before generating a lot of text.
     We use to distinguish internal content gathering nodes from final response generation for users.
