@@ -228,7 +228,7 @@ BEGIN
             SELECT p8.plan(args->>'question') INTO result;
 
         -- If function_name is 'activate_functions_by_name', return a message and estimated_length
-        WHEN 'activate_functions_by_name' THEN
+        WHEN 'announce_generate_large_output' THEN
             RETURN jsonb_build_object(
                 'message', 'acknowledged',
                 'estimated_length', args->>'estimated_length'
@@ -2554,7 +2554,7 @@ BEGIN
     WHERE "name" = 'gpt-4o-mini'; --embedding_model hint - any model that uses the same key;
 
     IF api_token IS NULL THEN
-        RAISE EXCEPTION 'Token not found for the provided name: %', token_name;
+        RAISE EXCEPTION 'Token not found for the provided model or open ai default: %', api_token;
     END IF;
 
     -- Step 2: Make the HTTP request to OpenAI API

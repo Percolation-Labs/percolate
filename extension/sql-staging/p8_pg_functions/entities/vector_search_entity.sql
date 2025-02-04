@@ -5,7 +5,7 @@ CREATE OR REPLACE FUNCTION p8.vector_search_entity(
     question TEXT,
     entity_name TEXT,
     distance_threshold NUMERIC DEFAULT 0.75,
-    limit_results INTEGER DEFAULT 5
+    limit_results INTEGER DEFAULT 3 --TODO think about this, this is very low
 )
 RETURNS TABLE(id uuid, vdistance double precision) 
 LANGUAGE 'plpgsql'

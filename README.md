@@ -40,7 +40,7 @@ You have the option of installing the client or using it from source (recommende
 pip install percolate-db
 ```
 
-If you dont install the client you can use the cli from within the repo. For example the command below will sync env keys for using langauge models into the dockerized postgres instance. 
+If you dont install the client you can use the cli from within the repo. For example the command below will sync env keys for using language models into the dockerized postgres instance. 
 
 ```bash
 cd clients/python/percolate
@@ -55,8 +55,14 @@ p8 add api https://petstore.swagger.io/v2/swagger.json --verbs get
 #python percolate/cli.py add api https://petstore.swagger.io/v2/swagger.json --verbs get
 ```
 
-Percolate focuses on building agents in the data tier. But you can use Python too. 
-To create a Python agent (and also register it in the database) -
+If you register APIs the functions can be found either by search or registering them as functions on agents. Sometimes a hybrid search like this might work on the functions
+
+```sql
+select * from p8.query_entity('I am looking for a function to get pets that have a sold status', 'p8.Function')
+```
+
+Percolate focuses on building agents in the data tier. But you can use Python too.  To create a Python agent (and also register it in the database).
+Below you will see an example of adding an agent that uses the get pet by status function that we just registered.
 
 ```python
 
@@ -185,5 +191,4 @@ To learn more about or stay up to date on Percolate, check out the links below. 
 - [Substack](https://percolationlabs.substack.com/)
 - [Medium](https://medium.com/percolation-labs)
 - [PercolationLabs](https://percolationlabs.ai/)
-- Discord
-- Bluesky
+- [Bluesky](https://bsky.app/profile/percolationlabs.bsky.social)

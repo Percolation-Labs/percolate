@@ -16,6 +16,7 @@ DECLARE
     field_descriptions TEXT := '';
     enum_values TEXT := '';
 	column_unique_values JSONB;
+    p8_system_prompt TEXT := '';
 BEGIN
 /*
 select * from p8.generate_markdown_prompt('p8.Agent')
@@ -25,9 +26,13 @@ select * from p8.generate_markdown_prompt('p8.Agent')
         ELSE table_entity_name 
     END INTO table_entity_name;
 
+    SELECT value 
+    into p8_system_prompt from p8."Settings" where key = 'P8_SYS_PROMPT' limit 1;
+
 
     -- Add entity name and description to the markdown
-    SELECT '## Agent Name: ' || b.name || E'\n\n' || 
+    SELECT COALESCE(p8_system_prompt,'') || E'\n\n' || 
+           '## Agent Name: ' || b.name || E'\n\n' || 
            '### Description: ' || E'\n\n' || COALESCE(b.description, 'No description provided.') || E'\n\n'
     INTO markdown_prompt
     FROM p8."Agent" b
