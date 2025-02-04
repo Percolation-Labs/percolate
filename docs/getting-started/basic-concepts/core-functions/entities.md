@@ -4,7 +4,7 @@ description: Understanding entities
 
 # Entities
 
-Entities and agents are synonymous in Percolate. When you create tables they are registered as entities (in the graph). This allows looking up an entity by key. For example, suppose you have some entity called `Task` which is defined in Percolate or any other object you register
+Entities and agents are synonymous in Percolate. When you create entities we create tables to store structured data for those agents and they are also registered as entities (in the graph). This allows looking up an entity by key/name. For example, suppose you have some entity called `Task` which is defined in Percolate (or any other object you register)
 
 ```python
 from percolate.models.p8 import Task 
@@ -12,7 +12,7 @@ p8.repository(Task).register()
 ```
 
 {% hint style="info" %}
-In Percolate entities are just Pydantic objects that are registered using a repository. These are stored as tables based on their schema and they are also indexed as graph nodes and vector embeddings if their fields require vector embeddings
+In Percolate entities are just JSON Schema or Pydantic objects that are registered using an API or python client repository. These are stored as tables based on their schema and they are also indexed as graph nodes and vector embeddings (if their fields require vector embeddings).
 {% endhint %}
 
 If I then create a task
@@ -22,7 +22,7 @@ repo = p8.repository(Task)
 task = Task(name='T1234', 
     description="A task for creating a youtube video explaining how percolate works", 
     project_name='percolate')
-repor.update_records(task)
+repo.update_records(task)
 ```
 
 Entities can have functions defined. For example the Task object is shon below
@@ -62,19 +62,23 @@ This means when we look up entities by key in the database either using the data
    'instruction': 'you can request to activate new functions by name to use them as tools'}}}
 ```
 
-By doing this, we can ask any agent about the comments on task `T1234` and it will be able to not only retrieve the entity but call any functions it exposes
+By doing this, we can ask any agent about the comments on task `T1234` and it will be able to not only retrieve the entity but call any functions it exposes.&#x20;
+
+{% hint style="info" %}
+In Percolate, every agent is given core functions which include a function to activate functions by name. This allows functions to be added dynamically to the function stack passed to the language model
+{% endhint %}
 
 ```python
 from percolate.models.p8 import PercolateAgent
 agent = p8.Agent(PercolateAgent)
-agent("What comments are associate with T1234")
+agent("What comments are associated with T1234")
 #some of the logs
 #(p8.PercolateAgent)function_call=FunctionCall(name='get_entities', arguments={'keys': 'T1234'}, id='call_wPVvPqIUL4j2v8PEr3AtREY1', scheme=None)
 #(p8.PercolateAgent)function_call=FunctionCall(name='activate_functions_by_name', arguments={'function_names': ['get_tasks_task_name_comments']}, id='call_dAxa5llhvAFsl9GzEX8fgpVT', scheme=None)
 #(p8.PercolateAgent)function_call=FunctionCall(name='get_tasks_task_name_comments', arguments={'task_name': 'T1234'}, id='call_6TWdv7KnInEMMNbovPFSb6AQ', scheme=None)
 ```
 
-This is a useful general purpose pattern to find out information in a few hops for any entity. By grouping functions onto entities, you can create small world structures where entities act as hubs to expose functions.&#x20;
+This is a useful general-purpose pattern to find out information in a few hops for any entity. By grouping functions onto entities, you can create small-world structures where entities act as hubs to expose functions.&#x20;
 
 ### Indexing
 
