@@ -312,7 +312,7 @@ class LanguageModel:
             if system_prompt:
                 data["system_instruction"] =  { "parts": { "text": system_prompt } }
                     
-        logger.debug(f"request {data=}")
+        logger.trace(f"request {data=}")
    
         response =  requests.post(url, headers=headers, data=json.dumps(data),stream=is_streaming)
         
