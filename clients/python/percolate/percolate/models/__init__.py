@@ -24,7 +24,7 @@ def get_p8_models():
 
 from .p8 import * 
 
-def bootstrap(root='../../../../extension/'):
+def bootstrap(apply:bool = False, root='../../../../extension/'):
     """util to generate the sql that we use to setup percolate"""
 
     from percolate.models.p8 import sample_models
@@ -35,7 +35,7 @@ def bootstrap(root='../../../../extension/'):
     import glob
  
     root = root.rstrip('/')
-    
+    print('********Building queries*******')
     """build a list of models we want to init with"""
     models = [ Project, Agent, ModelField, LanguageModelApi, Function, Session, AIResponse, ApiProxy, PlanModel, Settings, PercolateAgent, IndexAudit]
         
@@ -72,3 +72,38 @@ def bootstrap(root='../../../../extension/'):
         f.write('-- native functions--\n\n')
         f.write(script)
         
+    if apply:
+        _test_apply(root=root)
+        
+def _test_apply(root='../../../../extension/'):
+    """
+    these are utility test methods - but we will add them to an automated deployment test script later
+    """
+    
+    from percolate.services import PostgresService
+    pg = PostgresService()
+
+    print('*****applying sql schema...******')
+    print()
+    root = root.rstrip('/')
+   
+    with open(f"{root}/sql/00_install.sql") as f:
+        sql = f.read()
+        pg.execute(sql)
+        
+    with open(f"{root}/sql/01_add_functions.sql") as f:
+        sql = f.read()
+        pg.execute(sql)
+
+    with open(f"{root}/sql/02_create_primary.sql") as f:
+        sql = f.read()
+        pg.execute(sql)
+    with open(f"{root}/sql/03_create_secondary.sql") as f:
+        sql = f.read()
+        pg.execute(sql)
+        
+    with open(f"{root}/sql/10_finalize.sql") as f:
+        sql = f.read()
+        pg.execute(sql)
+        
+    print('********done*******')
