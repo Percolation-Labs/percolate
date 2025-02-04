@@ -36,7 +36,9 @@ BEGIN
     SELECT generate_markdown_prompt INTO table_schema_prompt FROM p8.generate_markdown_prompt(agent_name);
 
 	IF table_schema_prompt IS NULL THEN
-        RAISE EXCEPTION 'Agent with name "%" not found.', agent_name;
+        --RAISE EXCEPTION 'Agent with name "%" not found.', agent_name;
+        --we default to this for robustness TODO: think about how this could cause confusion
+        table_schema_prompt:= 'p8.PercolateAgent';
     END IF;
 	
     IF api_token IS NULL THEN    
