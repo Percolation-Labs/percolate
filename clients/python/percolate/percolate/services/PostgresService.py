@@ -66,13 +66,15 @@ class PostgresService:
         if keys:
             if not isinstance(keys,list):
                 keys = [keys]
-                """TODO"""      
-            data = None #TODO
+                
+        data = self.execute(f"""SELECT * FROM p8.get_entities(%s)""", data=(keys,))     if keys else None  
+            
         if not data:
             return [{
                 "status": "NO DATA",
                 "message": f"There were no data when we fetched {keys=} Please use another method to answer the question or return to the user with a new suggested plan or summary of what you know so far. If you still have different functions to use please try those before completion." 
             }]      
+        return  data[0]
             
 
         
@@ -334,7 +336,7 @@ class PostgresService:
         else:
             logger.warning(f"Nothing to do - records is empty {records}")
 
-    def index_entity_by_name(self, entity_name:str, id:uuid.UUID):
+    def index_entity_by_name(self, entity_name:str, id:uuid.UUID=None):
         """
         index entities - a session id can be passed in for the audit callback
         this is very much WIP - it may be this moves into background workers in the database
@@ -360,6 +362,9 @@ class PostgresService:
             'entities added': r1,
             'embeddings added': r2,
         }
+        
+        if not id:
+            id = uuid.uuid1()
         
         if errors == '':
             self.repository(IndexAudit).update_records(IndexAudit(id=id,

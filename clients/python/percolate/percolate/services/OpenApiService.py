@@ -80,8 +80,10 @@ class OpenApiSpec:
     """
     The spec object parses endpoints into function descriptions
     """
-    def __init__(self, uri_or_spec: str| dict, token_key:str=None):
-        """supply a spec object (dict) or a uri to one"""
+    def __init__(self, uri_or_spec: str| dict, token_key:str=None, alt_host: str=None):
+        """supply a spec object (dict) or a uri to one
+        The alt hose can be used if you are mapping the json from one place but invoke the server on another e.g. docker or kubernetes
+        """
         self._spec_uri_str = ""
         if isinstance(uri_or_spec,str):
             self._spec_uri_str = uri_or_spec
@@ -101,13 +103,13 @@ class OpenApiSpec:
         self.spec = uri_or_spec
         """going to assume HTTPS for now TODO: consider this"""
         if 'host' in self.spec:
-            self.host_uri = f"https://{self.spec['host']}"
+            self.host_uri = alt_host or f"https://{self.spec['host']}"
             if 'basePath' in self.spec:
                 self.host_uri += self.spec['basePath']
         else:
             """by convention we assume the uri is the path without the json file"""
             parsed_url = urlparse(self._spec_uri_str)
-            self.host_uri = f"{parsed_url.scheme}://{parsed_url.netloc}"
+            self.host_uri = alt_host or  f"{parsed_url.scheme}://{parsed_url.netloc}"
 
         self.token_key = token_key
         """lookup"""

@@ -163,6 +163,15 @@ class Agent(AbstractEntityModel):
     spec: dict = Field(description="The model json schema")
     functions: typing.Optional[dict] = Field(description="The function that agent can call",default_factory=dict)
     
+    @model_validator(mode='before')
+    @classmethod
+    def _f(cls, values):
+        """we take these from the class and save them"""
+        if not values.get('functions') and hasattr(cls, 'get_model_functions'):
+            values['functions'] = cls.get_model_functions()
+        return values
+    
+    
     def from_abstract_model(cls: BaseModel):
         """Given any pydantic model that behaves like an AbstractModel, get the meta object i.e. Agent"""
         cls:AbstractModel = AbstractModel.Abstracted(cls)
@@ -330,9 +339,20 @@ class Project(AbstractEntityModel):
  
 class Task(Project):
     """Tasks are sub projects. A project can describe a larger objective and be broken down into tasks"""
-    id: uuid.UUID| str  
+    id: typing.Optional[uuid.UUID| str] = Field(None,description= 'id generated for the name and project - these must be unique or they are overwritten')
     project_name: typing.Optional[str] = Field(None, description="The related project name of relevant")
- 
+    @model_validator(mode='before')
+    @classmethod
+    def _f(cls, values):
+        if not values.get('id'):
+            values['id'] = make_uuid({'name': values['name'], 'project_name': values['project_name']})
+        return values
+    
+    @classmethod
+    def get_model_functions(cls):
+        """fetch task external functions"""
+        return {'get_tasks_task_name_comments': 'get comments associated with this task, supplying the task name' }
+    
 class User(AbstractEntityModel):
     """save user info"""
     id: uuid.UUID| str  
