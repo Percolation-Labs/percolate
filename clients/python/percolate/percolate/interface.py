@@ -4,7 +4,7 @@ import typing
 from pydantic import BaseModel
 from .services.ModelRunner import ModelRunner
 from .services import OpenApiService
-
+from .models.p8.db_types import AskResponse
 def dump(*args,**kwargs):
     """TODO:"""
     pass
@@ -35,17 +35,25 @@ def Agent(model:AbstractModel|BaseModel, **kwargs)->ModelRunner:
     """get the model runner in the context of the agent for running reasoning chains"""
     return ModelRunner(model,**kwargs)
 
-def run(question: str, agent: str, limit_turns:int=2, **kwargs):
+def run(question: str, agent: str=None, limit_turns:int=2, **kwargs):
     """optional entry point to run an agent in the database by name
     The limit_turns controls how many turns are taken in the database e.g. call a tool and then ask  the agent to interpret 
     Args:
         question (str): any question for your agent
-        agent: qualified agent name. Default schema is public and can be omitted
+        agent: qualified agent name. Default schema is public and can be omitted - defaults to p8.PercolateAgent
         limit_turns: limit turns 2 allows for a single too call and interpretation for example
     """
-    if '.' not in agent:
-        agent = f"public.Agent"
-    return PostgresService().execute(f""" select * from percolate_with_agent('{question}', '{agent}', {limit_turns}); """, )    
+    if not agent:
+        agent = f"p8.PercolateAgent"
+    elif '.' not in agent:
+        agent = f"public.{agent}"
+        
+    response =  PostgresService().execute(f""" select * from percolate_with_agent(%s, %s); """, data=(question, agent) )    
+    if response:
+        print(response)
+        return AskResponse(**response[0])
+    else:
+        raise Exception("Percolate gave no response")
     
 def get_language_model_settings():
     """iterates through language models configured in the database.

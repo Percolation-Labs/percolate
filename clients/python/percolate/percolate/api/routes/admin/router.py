@@ -38,12 +38,19 @@ class AddAgentRequest(BaseModel):
     spec: dict = Field(description="The Json spec of your agents structured response e.g. from a Pydantic model")
     description: str = Field(description="Your agent description - acts as a system prompt")
     
+    
 @router.post("/add/agent")
 async def add_api( request:AddAgentRequest,  user: dict = Depends(get_current_token)):
     """add agents to Percolate. Agents require a Json Schema for any structured response you want to use, a system prompt and a dict/mapping of external registered functions.
     Functions can be registered via the add APIs endpoint.
     """
     return Response(content=json.dumps({'status':'ok'}))
+
+@router.get("/slow-endpoint")
+async def slow_response():
+    import time
+    time.sleep(10)  # Simulate a delay
+    return {"message": "This response was delayed by 10 seconds"}
 
 
 
