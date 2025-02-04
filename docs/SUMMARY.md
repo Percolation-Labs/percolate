@@ -9,6 +9,11 @@
   * [Services](getting-started/docker/services.md)
 * [Kubernetes](getting-started/kubernetes.md)
 * [Managed Cloud](getting-started/managed-cloud.md)
+* [Basic concepts](getting-started/basic-concepts/README.md)
+  * [Database components](getting-started/basic-concepts/database-components.md)
+  * [Core functions](getting-started/basic-concepts/core-functions/README.md)
+    * [Entities](getting-started/basic-concepts/core-functions/entities.md)
+  * [Admin Api](getting-started/basic-concepts/admin-api.md)
 
 ## Configure
 
