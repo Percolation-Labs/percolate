@@ -4,11 +4,47 @@ import typing
 from pydantic import BaseModel
 from .services.ModelRunner import ModelRunner
 from .services import OpenApiService
+from .models.p8.db_types import AskResponse
+import json
 
 def dump(*args,**kwargs):
     """TODO:"""
     pass
 
+def describe_agent(agent: AbstractModel | str, include_native_tools:bool=False):
+    """
+    Provides a description of the agent model as it would be passed to an LLM
+    """
+    
+    if isinstance(agent,str):
+        prompt = PostgresService().execute(f""" select * from p8.generate_markdown_prompt(%s) """, data=(agent,))
+        prompt = prompt[0]['generate_markdown_prompt'] if prompt else None
+        functions = PostgresService().execute(f""" select * from p8.get_agent_tools(%s,NULL,%s) """, data=(agent,include_native_tools))
+        if functions:
+            functions = functions[0]['get_agent_tools']
+            #form canonical format
+            functions = [f['function'] for f in functions]
+            #to dict
+            functions = {f['name']: f['description'] for f in functions}
+        else:
+            functions = {}
+    else:
+        agent = AbstractModel.Abstracted(agent)
+        prompt =  agent.get_model_description()
+        functions = agent.get_model_functions()
+ 
+    function_desc = ""
+    for k,v in (functions or {}).items():
+        function_desc+=f""" - **{k}**: {v}\n"""
+
+    prompt += f"""
+    
+## Functions
+{function_desc}
+    """
+    
+    return prompt
+    
 
 def get_entities(keys: str | typing.List)->typing.List[dict]:
     """
@@ -35,17 +71,42 @@ def Agent(model:AbstractModel|BaseModel, **kwargs)->ModelRunner:
     """get the model runner in the context of the agent for running reasoning chains"""
     return ModelRunner(model,**kwargs)
 
-def run(question: str, agent: str, limit_turns:int=2, **kwargs):
+def resume(session: AskResponse|str) ->AskResponse:
+    """
+    pass in a session id or ask response object to resume the session
+    Resume session continues any non completed session
+    """
+    
+    if isinstance(session,AskResponse):
+        session = session.session_id
+    
+    response =  PostgresService().execute(f""" select * from p8.resume_session(%s); """, data=(session,) )    
+    if response:
+        print(response)
+        return AskResponse(**response[0])
+    else:
+        raise Exception("Percolate gave no response")
+    
+    
+def run(question: str, agent: str=None, limit_turns:int=2, **kwargs):
     """optional entry point to run an agent in the database by name
     The limit_turns controls how many turns are taken in the database e.g. call a tool and then ask  the agent to interpret 
     Args:
         question (str): any question for your agent
-        agent: qualified agent name. Default schema is public and can be omitted
+        agent: qualified agent name. Default schema is public and can be omitted - defaults to p8.PercolateAgent
         limit_turns: limit turns 2 allows for a single too call and interpretation for example
     """
-    if '.' not in agent:
-        agent = f"public.Agent"
-    return PostgresService().execute(f""" select * from percolate_with_agent('{question}', '{agent}', {limit_turns}); """, )    
+    if not agent:
+        agent = f"p8.PercolateAgent"
+    elif '.' not in agent:
+        agent = f"public.{agent}"
+        
+    response =  PostgresService().execute(f""" select * from percolate_with_agent(%s, %s); """, data=(question, agent) )    
+    if response:
+        print(response)
+        return AskResponse(**response[0])
+    else:
+        raise Exception("Percolate gave no response")
     
 def get_language_model_settings():
     """iterates through language models configured in the database.
