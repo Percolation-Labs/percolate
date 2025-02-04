@@ -64,17 +64,20 @@ BEGIN
     END IF;
 
     -- Determine functions if none provided
-    IF functions_in IS NULL THEN
-        SELECT json_agg(spec)
-        INTO functions_in
-        FROM p8.get_tools_by_description(message_payload::TEXT);
-    END IF;
-
+    -- this would need to be scheme based
+    -- IF functions_in IS NULL THEN
+    --     SELECT json_agg(spec)
+    --     INTO functions_in
+	-- 	--we truncate here
+    --     FROM p8.get_tools_by_description(LEFT(message_payload::TEXT, 1000));
+    -- END IF;
+ 
+	
     -- Make the API request based on scheme
     --we return RETURNS TABLE(message_response text, tool_calls jsonb, tool_call_result jsonb, session_id_out uuid, status TEXT)
     --RETURNS TABLE(content TEXT,tool_calls_out JSON,tokens_in INTEGER,tokens_out INTEGER,finish_reason TEXT,api_error JSONB) AS
     IF selected_scheme = 'google' THEN
-        SELECT * FROM p8.request_google(message_payload, functions_in, selected_model, endpoint_uri, api_token)
+        SELECT * FROM p8.request_google(message_payload,  functions_in, selected_model, endpoint_uri, api_token)
         INTO result_set, tool_calls, tokens_in, tokens_out, finish_reason, api_error;
     ELSIF selected_scheme = 'anthropic' THEN
         SELECT * FROM p8.request_anthropic(message_payload, functions_in, selected_model, endpoint_uri, api_token)
@@ -86,11 +89,15 @@ BEGIN
     END IF;
 
 
+    --TODO: i think i need to check how the response is cast from json
     -- Handle finish reason and status
     status_audit := 'TOOL_CALL_RESPONSE';
-    IF finish_reason = 'stop' or finish_reason = 'end_turn' THEN
+    IF finish_reason ilike '%stop%' or finish_reason ilike '%end_turn%' THEN 
         status_audit := 'COMPLETED';
     END IF;
+
+	RAISE NOTICE 'LLM Gave finish reason and tool calls %, % - we set status %', finish_reason, tool_calls, status_audit;
+	
 
     -- Iterate through each tool call
     FOR tool_call IN SELECT * FROM JSONB_ARRAY_ELEMENTS(tool_calls)
@@ -122,7 +129,7 @@ BEGIN
     SELECT p8.json_to_uuid(json_build_object('sid', session_id, 'ts',CURRENT_TIMESTAMP::TEXT)::JSONB)
     INTO response_id;
 
-		RAISE notice 'generated repsonse id % from % and %', response_id,session_id,api_response->>'id';
+		--RAISE notice 'generated response id % from % and %', response_id,session_id,api_response->>'id';
 
     IF api_error IS NOT NULL THEN
         result_set := api_error;
@@ -131,9 +138,21 @@ BEGIN
 
     -- Insert into p8.AIResponse table
     INSERT INTO p8."AIResponse" 
-    (id, model_name, content, tokens_in, tokens_out, session_id, role, status, tool_calls, tool_eval_data)
+        (id, model_name, content, tokens_in, tokens_out, session_id, role, status, tool_calls, tool_eval_data)
     VALUES 
-    (response_id, selected_model, coalesce(result_set,''), coalesce(tokens_in,0), coalesce(tokens_out,0), session_id, 'assistant', status_audit, tool_calls, tool_results);
+        (response_id, selected_model, COALESCE(result_set, ''), COALESCE(tokens_in, 0), COALESCE(tokens_out, 0), 
+        session_id, 'assistant', status_audit, tool_calls, tool_results)
+    ON CONFLICT (id) DO UPDATE SET
+        model_name    = EXCLUDED.model_name, 
+        content       = EXCLUDED.content,
+        tokens_in     = EXCLUDED.tokens_in,
+        tokens_out    = EXCLUDED.tokens_out,
+        session_id    = EXCLUDED.session_id,
+        role          = EXCLUDED.role,
+        status        = EXCLUDED.status,
+        tool_calls    = EXCLUDED.tool_calls,
+        tool_eval_data = EXCLUDED.tool_eval_data;
+
 
     -- Return results
     RETURN QUERY

@@ -57,13 +57,16 @@ BEGIN
             json_build_object(
                 'model', model_name,
                 'messages', message_payload,
-                'tools', functions_in -- functions have been mapped for the scheme
+                'tools', CASE 
+                        WHEN functions_in IS NULL OR functions_in::TEXT = '[]' THEN NULL
+                        ELSE functions_in 
+                     END-- functions have been mapped for the scheme
             )::jsonb
 		   )::http_request
         );
 
     -- Log the API response for debugging
-    RAISE NOTICE 'API Response: %', api_response;
+    RAISE NOTICE 'API Response: % from functions', api_response, functions_in;
 
     -- Extract tool calls from the response
     tool_calls := (api_response->'choices'->0->'message'->>'tool_calls')::JSONB;
@@ -73,7 +76,7 @@ BEGIN
     -- Handle token usage
     tokens_in := (api_response->'usage'->>'prompt_tokens')::INTEGER;
     tokens_out := (api_response->'usage'->>'completion_tokens')::INTEGER;
-    finish_reason := (api_response->'choices'->0->'finish_reason')::TEXT;
+    finish_reason := (api_response->'choices'->0->>'finish_reason')::TEXT;
 	
 RAISE NOTICE 'WE HAVE % %', result_set, finish_reason;
 

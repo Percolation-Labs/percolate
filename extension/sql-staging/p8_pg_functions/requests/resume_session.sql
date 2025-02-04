@@ -1,13 +1,11 @@
 -- FUNCTION: p8.resume_session(uuid, text)
 
 -- DROP FUNCTION IF EXISTS p8.resume_session(uuid, text);
--- select * from p8.get_agent_tools('public.MyFirstAgent', 'openai', FALSE)
 
 CREATE OR REPLACE FUNCTION p8.resume_session(
 	session_id uuid,
 	token_override text DEFAULT NULL::text)
-	--TODO we could override some hings like scheme too
-    RETURNS TABLE(message_response text, tool_calls jsonb, tool_call_result jsonb, session_id_out uuid, status_out text) 
+    RETURNS TABLE(message_response text, tool_calls jsonb, tool_call_result jsonb, session_id_out uuid, status text) 
     LANGUAGE 'plpgsql'
     COST 100
     VOLATILE PARALLEL UNSAFE
@@ -115,7 +113,6 @@ BEGIN
             SELECT 'Error: ' || SQLERRM, NULL::jsonb, NULL::jsonb, session_id, last_session_status;
         RETURN;
     END;
-
 
 	
     -- 5. Return the results using p8.ask function
