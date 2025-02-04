@@ -15,7 +15,6 @@ docker compose up -d
 The credentials to connect to Postgres using your preferred client are in the `docker-compose.yaml`
 
 ```yaml
-dockercompose
 services:
   postgres:
     image: percolationlabs/postgres-base:16
