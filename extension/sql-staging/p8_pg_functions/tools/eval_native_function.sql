@@ -1,8 +1,15 @@
+-- FUNCTION: p8.eval_native_function(text, jsonb)
+
+-- DROP FUNCTION IF EXISTS p8.eval_native_function(text, jsonb);
+
 CREATE OR REPLACE FUNCTION p8.eval_native_function(
-    function_name TEXT,
-    args JSONB
-)
-RETURNS JSONB AS $$
+	function_name text,
+	args jsonb)
+    RETURNS jsonb
+    LANGUAGE 'plpgsql'
+    COST 100
+    VOLATILE PARALLEL UNSAFE
+AS $BODY$
 DECLARE
 	declare KEYS text[];
     result JSONB;
@@ -29,6 +36,7 @@ BEGIN
     'search', 
     '{"question": "i need an agent about agents", "entity_table_name":"p8.Agent"}'::JSONB
     );  
+	--basically does select * from p8.query_entity('i need an agent about agents', 'p8.Agent')
 
     */
     CASE function_name
@@ -42,14 +50,22 @@ BEGIN
 
         -- If function_name is 'search', call p8.query_entity with the given arguments
         WHEN 'search' THEN
-            SELECT p8.query_entity(args->>'question', args->>'entity_table_name') INTO result;
+            SELECT jsonb_agg(row) 
+			INTO result
+			FROM (
+			    SELECT p8.query_entity(args->>'question', args->>'entity_table_name')
+			) AS row;
 
         -- If function_name is 'help', call p8.plan with the given argument
         WHEN 'help' THEN
-            SELECT p8.plan(args->>'question') INTO result;
+            SELECT jsonb_agg(row) 
+			INTO result
+			FROM (
+			     SELECT public.plan(COALESCE(args->>'questions',args->>'question'))
+			) AS row;
 
         -- If function_name is 'activate_functions_by_name', return a message and estimated_length
-        WHEN 'activate_functions_by_name' THEN
+        WHEN 'announce_generate_large_output' THEN
             RETURN jsonb_build_object(
                 'message', 'acknowledged',
                 'estimated_length', args->>'estimated_length'
@@ -63,4 +79,7 @@ BEGIN
     -- Return the result of the function called
     RETURN result;
 END;
-$$ LANGUAGE plpgsql;
+$BODY$;
+
+ALTER FUNCTION p8.eval_native_function(text, jsonb)
+    OWNER TO postgres;

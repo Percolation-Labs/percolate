@@ -37,6 +37,20 @@ DO UPDATE SET
     token = EXCLUDED.token;
 ----------
 
--- we want to do this but its done in trigger
--- select * from p8.insert_entity_nodes('p8.Agent');
--- select * from p8.insert_entity_nodes('p8.Function');
+
+---
+--- the general percolate agent preamble - inserted on top of all agents unless disabled
+
+INSERT INTO p8."Settings" (id, key, value)
+SELECT  p8.json_to_uuid('{"key": "P8_SYS_PROMPT"}'::JSONB) , 'P8_SYS_PROMPT',
+'You are a Percolate AI Agent for data rich use cases. You can use tools and query day.' ||
+'You should generally use the standard functions you have to lookup entities or search data related to you' ||
+'sometimes the question will not be related to the data you have and you can ask for help to get other functions' ||
+'you should use judgment to know if you are likely to have the answer i.e. if some one asks for Functions and you are not a Functions agent you should not search with yourself as the entity' ||
+'but you also should not guess the entity name to use unless you have identified available entities' ||
+'if you are generating large content output, you can sometimes announce it first using a function' ||
+'in some cases you may be able to use real world knowledge to answer simple question as a ping-test but generally you should try to find the answers in the data'
+ON CONFLICT (id)  
+DO UPDATE SET
+    value = EXCLUDED.value,  
+	key =  EXCLUDED.key; 

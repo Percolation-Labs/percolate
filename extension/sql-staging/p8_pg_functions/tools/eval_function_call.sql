@@ -24,6 +24,12 @@ DECLARE
     api_token TEXT;
 	query_arg TEXT[];
     native_result JSONB;
+	--
+	v_state   TEXT;
+    v_msg     TEXT;
+    v_detail  TEXT;
+    v_hint    TEXT;
+    v_context TEXT;
 BEGIN
     -- This is a variant of fn_construct_api_call but higher level - 
 	-- we can refactor this into multilple modules but for now we will check for native calls inline
@@ -125,7 +131,20 @@ BEGIN
 	    RETURN api_response;
 	END IF;
 
-EXCEPTION WHEN OTHERS THEN
-    RAISE EXCEPTION 'Function execution failed: %', SQLERRM;
+EXCEPTION WHEN OTHERS THEN 
+    GET STACKED DIAGNOSTICS
+        v_state   = RETURNED_SQLSTATE,
+        v_msg     = MESSAGE_TEXT,
+        v_detail  = PG_EXCEPTION_DETAIL,
+        v_hint    = PG_EXCEPTION_HINT,
+        v_context = PG_EXCEPTION_CONTEXT;
+
+    RAISE EXCEPTION E'Got exception:
+        state  : %
+        message: %
+        detail : %
+        hint   : %
+        context: %', 
+        v_state, v_msg, v_detail, v_hint, v_context;
 END;
 $BODY$;
