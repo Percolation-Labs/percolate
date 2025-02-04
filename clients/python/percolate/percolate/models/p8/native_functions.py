@@ -28,8 +28,7 @@ def search(question:str, entity_table_name:str):
 
 def help(questions:typing.List[str]):
     """
-    Help us a planning utility. When you ask a question because you need help or tools to call
-    this function will search and return a list of resources or information for you
+    Help is a planning utility. This function will search and return a list of resources or information for you based on the question you ask.
     
     Args:
         questions: ask one or more questions to receive information and a plan of action
@@ -38,10 +37,10 @@ def help(questions:typing.List[str]):
 
 
 def announce_generate_large_output(self, estimated_length:int=None):
-    """When you are about to generate a lot of output, please call this function with a rough estimate of the size of the content.
+    """When you are about to generate a lot of output (for example over 2500 tokens or something that will take more that 4 seconds to generate), please call this function with a rough estimate of the size of the content.
     You do not need to do this when you are responding with simple structured responses which are typically small or with simple answers.
     However when generating lots of text we would like to request via streaming or async so we want to know before generating a lot of text.
-    We use to distinguish internal content gathering nodes from final response generation for users.
+    We use this strategy to distinguish internal content gathering nodes from final response generation for users.
     """
 
     pass
