@@ -34,3 +34,13 @@ FROM public.http(
  -- check embeddings are added and that there is an index audit for PercolateAgent
  
 """
+
+
+import pytest
+
+@pytest.mark.slow
+def test_scripts_bootstrap():
+	from percolate.models import bootstrap
+
+	"""this generates the script that we use for setup of percolate (WIP)"""
+	bootstrap(root='../../../extension/', apply=True)
