@@ -1,7 +1,4 @@
--- FUNCTION: p8.get_google_messages(UUID, text, text)
-
--- DROP FUNCTION IF EXISTS p8.get_google_messages(UUID, text, text);
-
+DROP FUNCTION IF EXISTS p8.get_google_messages;
 CREATE OR REPLACE FUNCTION p8.get_google_messages(
     session_id_in UUID,
     question TEXT DEFAULT NULL,
@@ -23,32 +20,30 @@ BEGIN
     /*
     https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/function-calling
 
-	  select messages from p8.get_google_messages('619857d3-434f-fa51-7c88-6518204974c9');
+    select messages from p8.get_google_messages('619857d3-434f-fa51-7c88-6518204974c9');
 
-		call parts should be 
+    call parts should be 
 
-		{
-			"functionCall": {
-				"name": "get_current_weather",
-				"args": {
-					"location": "San Francisco"
-				}
-			}
-		}
-			
-		response parts should be
+    {
+        "functionCall": {
+            "name": "get_current_weather",
+            "args": {
+                "location": "San Francisco"
+            }
+        }
+    }
+    
+    response parts should be
 
-	 
-		{
-			"functionResponse": {
-				"name": "get_current_weather",
-				"response": {
-					"temperature": 30.5,
-					"unit": "C"
-				}
-			}
-		}
-		
+    {
+        "functionResponse": {
+            "name": "get_current_weather",
+            "response": {
+                "temperature": 30.5,
+                "unit": "C"
+            }
+        }
+    }
     */
 
     -- 1. Get session details from p8."Session"
@@ -121,7 +116,7 @@ BEGIN
                         'name', el->>'id',
                         'response', json_build_object(
                             'name', el->>'id',
-							--experiment with json or text
+                            -- experiment with json or text
                             'content', (el->'data')::TEXT
                         )
                     )

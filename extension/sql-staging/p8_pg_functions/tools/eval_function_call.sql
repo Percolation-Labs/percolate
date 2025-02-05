@@ -3,7 +3,8 @@ TODO: need to resolve the percolate or other API token
 */
 
 CREATE OR REPLACE FUNCTION p8.eval_function_call(
-	function_call jsonb)
+	function_call jsonb,
+    response_id UUID DEFAULT NULL )
     RETURNS jsonb
     LANGUAGE 'plpgsql'
     COST 100
@@ -31,6 +32,13 @@ DECLARE
     v_hint    TEXT;
     v_context TEXT;
 BEGIN
+
+	/*
+	--if you added the pet store example functions
+	 select * from p8.eval_function_call('{"function": {"name": "get_pet_findByStatus", "arguments": "{\"status\":[\"sold\"]}"}}'::JSONB)
+	 
+	*/
+
     -- This is a variant of fn_construct_api_call but higher level - 
 	-- we can refactor this into multilple modules but for now we will check for native calls inline
     IF function_call IS NULL OR NOT function_call ? 'function' THEN
@@ -57,8 +65,8 @@ BEGIN
     WHERE "name" = function_name;
 
 	IF metadata.proxy_uri = 'native' THEN
-		RAISE notice 'native query with args % %',  function_name, args;
-        SELECT * FROM p8.eval_native_function(function_name,args::JSONB)
+		RAISE notice 'native query with args % % and response id %',  function_name, args,response_id;
+        SELECT * FROM p8.eval_native_function(function_name,args::JSONB,response_id)
         INTO native_result;
         RETURN native_result;
 	ELSE
@@ -68,36 +76,21 @@ BEGIN
 	    END IF;
 	
 	    -- Construct the URI root and call URI
-	    uri_root := split_part(metadata.proxy_uri, '/', 1) || '//' || split_part(metadata.proxy_uri, '/', 3);
+	    uri_root :=  metadata.proxy_uri;
 	    call_uri := uri_root || metadata.endpoint;
-	
 	    final_args := args;
-	
-	    -- Iterate over matches for placeholders in the URI
-	    FOR matches IN SELECT regexp_matches(call_uri, '\{(\w+)\}', 'g') LOOP
-	        kwarg := matches[1];
-	        IF final_args ? kwarg THEN
-	            -- Replace placeholder with argument value and remove from final_args
-	            call_uri := regexp_replace(call_uri, '\{' || kwarg || '\}', final_args->>kwarg);
-	            final_args := jsonb_strip_nulls(final_args - kwarg);
-	        ELSE
-	            RAISE EXCEPTION 'Missing required URI parameter: %', kwarg;
-	        END IF;
-	    END LOOP;
 	
 	    -- Ensure API token is available
 	    
-		api_token := '';--(SELECT api_token FROM public."ApiConfig" LIMIT 1); 
-	    IF api_token IS NULL THEN
-	        RAISE EXCEPTION 'API token is not configured';
-	    END IF;
+		api_token := (SELECT api_token FROM p8."ApiProxy" LIMIT 1); 
 	
 	    -- Make the HTTP call
 		RAISE NOTICE 'Invoke % with %', call_uri, final_args;
 		BEGIN
 		    IF UPPER(metadata.verb) = 'GET' THEN
 		        -- For GET requests, append query parameters to the URL
-		        call_uri := call_uri || '?' || public.urlencode(final_args);
+		        call_uri := call_uri || '?' || p8.encode_url_query(final_args);
+				RAISE NOTICE 'encoded %', call_uri;
 		        SELECT content
 		        INTO api_response
 		        FROM http(
@@ -126,6 +119,8 @@ BEGIN
 		EXCEPTION WHEN OTHERS THEN
 		    RAISE EXCEPTION 'HTTP request failed: %', SQLERRM;
 		END;
+
+		RAISE NOTICE 'tool response api %', api_response;
 	
 	    -- Return the API response
 	    RETURN api_response;

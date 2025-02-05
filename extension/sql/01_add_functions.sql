@@ -1,3 +1,102 @@
+CREATE OR REPLACE FUNCTION public.plan(
+    question text,
+    model_key character varying DEFAULT 'gpt-4o-mini'::character varying,
+    token_override text DEFAULT NULL::text,
+    user_id uuid DEFAULT NULL::uuid
+)
+RETURNS TABLE(
+    message_response text,
+    tool_calls jsonb,
+    tool_call_result jsonb,
+    session_id_out uuid,
+    status text
+) 
+LANGUAGE 'plpgsql'
+COST 100
+VOLATILE PARALLEL UNSAFE
+ROWS 1000
+AS $BODY$
+DECLARE
+    endpoint_uri TEXT;
+    api_token TEXT;
+    selected_model TEXT;
+    selected_scheme TEXT;
+    functions JSON;
+    message_payload JSON;
+    created_session_id uuid;
+    recovered_system_prompt TEXT;
+    additional_message JSON;
+BEGIN
+
+    IF question IS NULL THEN
+        RAISE EXCEPTION 'No question provided to the plan function - check parameters names are propagated';
+    END IF;
+
+    -- Create session and store session ID
+    SELECT create_session FROM p8.create_session(user_id, question, 'p8.PlanModel')
+    INTO created_session_id;
+
+    -- Ensure session creation was successful
+    IF created_session_id IS NULL THEN
+        RAISE EXCEPTION 'Failed to create session';
+    END IF;
+
+    -- Retrieve API details
+    SELECT completions_uri, COALESCE(token, token_override), model, scheme
+    INTO endpoint_uri, api_token, selected_model, selected_scheme
+    FROM p8."LanguageModelApi"
+    WHERE "name" = COALESCE(model_key, 'gpt-4o-mini')
+    LIMIT 1;
+
+    -- Ensure API details were found
+    IF api_token IS NULL OR selected_model IS NULL OR selected_scheme IS NULL THEN
+        RAISE EXCEPTION 'Missing required API details for request. Model request is %s, scheme=%s', selected_model, selected_scheme;
+    END IF;
+
+    -- Recover system prompt
+    SELECT coalesce(p8.generate_markdown_prompt('p8.PlanModel'), 'Respond to the users query using tools and functions as required')
+    INTO recovered_system_prompt;
+
+    -- Get the initial message payload
+    SELECT * INTO message_payload FROM p8.get_canonical_messages(created_session_id, question, recovered_system_prompt);
+
+    -- Ensure message payload was successfully fetched
+    IF message_payload IS NULL THEN
+        RAISE EXCEPTION 'Failed to retrieve message payload for session %', created_session_id;
+    END IF;
+
+    -- Retrieve functions and format as an additional user message
+	SELECT json_build_object(
+	    'role', 'user',
+	    'content', json_agg(json_build_object('name', f.name, 'desc', f.description))::TEXT
+	)
+	INTO additional_message
+	FROM p8."Function" f;
+
+
+    -- Append the additional message correctly (handling array case)
+    IF additional_message IS NOT NULL THEN
+        message_payload = (message_payload::JSONB || jsonb_build_array(additional_message))::JSON;
+    END IF;
+
+    RAISE NOTICE 'Ask request for agent % using language model - % - messages %', 'p8.PlanModel', model_key, message_payload;
+
+    -- Call p8.ask with tools set to NULL (can be updated later)
+    RETURN QUERY 
+    SELECT * FROM p8.ask(
+        message_payload::json, 
+        created_session_id, 
+        NULL,  -- Tools can be fetched, but we pass NULL for now
+        model_key, 
+        token_override, 
+        user_id
+    );
+END;
+$BODY$;
+
+
+---------
+
 -- DROP function percolate; 
 -- DROP FUNCTION percolate_with_tools;
 -- DROP FUNCTION percolate_with_agent;
@@ -177,11 +276,17 @@ $BODY$;
 
 ---------
 
+DROP FUNCTION IF EXISTS p8.eval_native_function;
 CREATE OR REPLACE FUNCTION p8.eval_native_function(
-    function_name TEXT,
-    args JSONB
-)
-RETURNS JSONB AS $$
+	function_name text,
+	args jsonb,
+    response_id UUID DEFAULT NULL
+    )
+    RETURNS jsonb
+    LANGUAGE 'plpgsql'
+    COST 100
+    VOLATILE PARALLEL UNSAFE
+AS $BODY$
 DECLARE
 	declare KEYS text[];
     result JSONB;
@@ -208,9 +313,25 @@ BEGIN
     'search', 
     '{"question": "i need an agent about agents", "entity_table_name":"p8.Agent"}'::JSONB
     );  
+	--basically does select * from p8.query_entity('i need an agent about agents', 'p8.Agent')
 
+     SELECT p8.eval_native_function(
+        'activate_functions_by_name', 
+        '{"function_names": ["p8.Agent", "p8.PercolateAgent"]}'::JSONB,
+        '42e80e20-6b9e-02f4-8af7-76d4f1ef049f'::UUID
+        );  
+        
+  
     */
     CASE function_name
+        WHEN 'activate_functions_by_name' THEN
+            keys := ARRAY(SELECT jsonb_array_elements_text(args->'function_names')::TEXT);
+           
+			-- Call activate_functions_by_name and convert the TEXT[] into a JSON array
+            SELECT jsonb_agg(value) 
+            INTO result
+            FROM unnest(p8.activate_functions_by_name(keys, response_id)) AS value;
+
         -- NB the args here need to match how we define the native function interface in python or wherever
         -- If function_name is 'get_entities', call p8.get_entities with the given argument
         WHEN 'get_entities' THEN
@@ -221,11 +342,19 @@ BEGIN
 
         -- If function_name is 'search', call p8.query_entity with the given arguments
         WHEN 'search' THEN
-            SELECT p8.query_entity(args->>'question', args->>'entity_table_name') INTO result;
+            SELECT jsonb_agg(row) 
+			INTO result
+			FROM (
+			    SELECT p8.query_entity(args->>'question', args->>'entity_table_name')
+			) AS row;
 
         -- If function_name is 'help', call p8.plan with the given argument
         WHEN 'help' THEN
-            SELECT p8.plan(args->>'question') INTO result;
+            SELECT jsonb_agg(row) 
+			INTO result
+			FROM (
+			     SELECT public.plan(COALESCE(args->>'questions',args->>'question'))
+			) AS row;
 
         -- If function_name is 'activate_functions_by_name', return a message and estimated_length
         WHEN 'announce_generate_large_output' THEN
@@ -242,7 +371,9 @@ BEGIN
     -- Return the result of the function called
     RETURN result;
 END;
-$$ LANGUAGE plpgsql;
+$BODY$;
+
+ 
 
 ---------
 
@@ -367,7 +498,8 @@ TODO: need to resolve the percolate or other API token
 */
 
 CREATE OR REPLACE FUNCTION p8.eval_function_call(
-	function_call jsonb)
+	function_call jsonb,
+    response_id UUID DEFAULT NULL )
     RETURNS jsonb
     LANGUAGE 'plpgsql'
     COST 100
@@ -388,6 +520,12 @@ DECLARE
     api_token TEXT;
 	query_arg TEXT[];
     native_result JSONB;
+	--
+	v_state   TEXT;
+    v_msg     TEXT;
+    v_detail  TEXT;
+    v_hint    TEXT;
+    v_context TEXT;
 BEGIN
     -- This is a variant of fn_construct_api_call but higher level - 
 	-- we can refactor this into multilple modules but for now we will check for native calls inline
@@ -416,7 +554,7 @@ BEGIN
 
 	IF metadata.proxy_uri = 'native' THEN
 		RAISE notice 'native query with args % %',  function_name, args;
-        SELECT * FROM p8.eval_native_function(function_name,args::JSONB)
+        SELECT * FROM p8.eval_native_function(function_name,args::JSONB,response_id)
         INTO native_result;
         RETURN native_result;
 	ELSE
@@ -489,10 +627,62 @@ BEGIN
 	    RETURN api_response;
 	END IF;
 
-EXCEPTION WHEN OTHERS THEN
-    RAISE EXCEPTION 'Function execution failed: %', SQLERRM;
+EXCEPTION WHEN OTHERS THEN 
+    GET STACKED DIAGNOSTICS
+        v_state   = RETURNED_SQLSTATE,
+        v_msg     = MESSAGE_TEXT,
+        v_detail  = PG_EXCEPTION_DETAIL,
+        v_hint    = PG_EXCEPTION_HINT,
+        v_context = PG_EXCEPTION_CONTEXT;
+
+    RAISE EXCEPTION E'Got exception:
+        state  : %
+        message: %
+        detail : %
+        hint   : %
+        context: %', 
+        v_state, v_msg, v_detail, v_hint, v_context;
 END;
 $BODY$;
+
+
+---------
+
+DROP FUNCTION IF EXISTS p8.activate_functions_by_name;
+CREATE OR REPLACE FUNCTION p8.activate_functions_by_name(
+    names TEXT[], 
+    response_id UUID
+) RETURNS TEXT[] AS $$
+DECLARE
+    updated_functions TEXT[];
+BEGIN
+    /*
+    Merges the list of activated functions in the dialogue and returns the updated function stack.
+
+    Example usage:
+	SELECT * FROM p8.activate_functions_by_name(ARRAY[ 'Test', 'Other'], '42e80e20-6b9e-02f4-8af7-76d4f1ef049f'::UUID);
+    SELECT * FROM p8.activate_functions_by_name(ARRAY[ 'New'], '42e80e20-6b9e-02f4-8af7-76d4f1ef049f'::UUID);
+    */
+
+    INSERT INTO p8."AIResponse" (id, model_name, content, role, function_stack)
+    VALUES (
+        response_id, 
+        'percolate', 
+        '', 
+        '', 
+        names
+    )
+    ON CONFLICT (id) DO UPDATE 
+    SET 
+        model_name = EXCLUDED.model_name,
+        content = EXCLUDED.content,
+        role = EXCLUDED.role,
+        function_stack = ARRAY(SELECT DISTINCT unnest(p8."AIResponse".function_stack || EXCLUDED.function_stack))
+    RETURNING function_stack INTO updated_functions;
+
+    RETURN updated_functions;
+END;
+$$ LANGUAGE plpgsql;
 
 
 ---------
@@ -930,13 +1120,16 @@ BEGIN
             json_build_object(
                 'model', model_name,
                 'messages', message_payload,
-                'tools', functions_in -- functions have been mapped for the scheme
+                'tools', CASE 
+                        WHEN functions_in IS NULL OR functions_in::TEXT = '[]' THEN NULL
+                        ELSE functions_in 
+                     END-- functions have been mapped for the scheme
             )::jsonb
 		   )::http_request
         );
 
     -- Log the API response for debugging
-    RAISE NOTICE 'API Response: %', api_response;
+    RAISE NOTICE 'API Response: % from functions', api_response, functions_in;
 
     -- Extract tool calls from the response
     tool_calls := (api_response->'choices'->0->'message'->>'tool_calls')::JSONB;
@@ -946,7 +1139,7 @@ BEGIN
     -- Handle token usage
     tokens_in := (api_response->'usage'->>'prompt_tokens')::INTEGER;
     tokens_out := (api_response->'usage'->>'completion_tokens')::INTEGER;
-    finish_reason := (api_response->'choices'->0->'finish_reason')::TEXT;
+    finish_reason := (api_response->'choices'->0->>'finish_reason')::TEXT;
 	
 RAISE NOTICE 'WE HAVE % %', result_set, finish_reason;
 
@@ -1148,13 +1341,11 @@ ALTER FUNCTION p8.request_google(json, json, text, text, text)
 -- FUNCTION: p8.resume_session(uuid, text)
 
 -- DROP FUNCTION IF EXISTS p8.resume_session(uuid, text);
--- select * from p8.get_agent_tools('public.MyFirstAgent', 'openai', FALSE)
 
 CREATE OR REPLACE FUNCTION p8.resume_session(
 	session_id uuid,
 	token_override text DEFAULT NULL::text)
-	--TODO we could override some hings like scheme too
-    RETURNS TABLE(message_response text, tool_calls jsonb, tool_call_result jsonb, session_id_out uuid, status_out text) 
+    RETURNS TABLE(message_response text, tool_calls jsonb, tool_call_result jsonb, session_id_out uuid, status text) 
     LANGUAGE 'plpgsql'
     COST 100
     VOLATILE PARALLEL UNSAFE
@@ -1263,7 +1454,6 @@ BEGIN
         RETURN;
     END;
 
-
 	
     -- 5. Return the results using p8.ask function
     RETURN QUERY 
@@ -1322,6 +1512,7 @@ DECLARE
     tokens_in INTEGER;
     tokens_out INTEGER;
     response_id UUID;
+	ack_http_timeout BOOLEAN;
 BEGIN
 	/*
 	take in a message payload etc and call the correct request for each scheme
@@ -1351,17 +1542,25 @@ BEGIN
     END IF;
 
     -- Determine functions if none provided
-    IF functions_in IS NULL THEN
-        SELECT json_agg(spec)
-        INTO functions_in
-        FROM p8.get_tools_by_description(message_payload::TEXT);
-    END IF;
-
+    -- this would need to be scheme based
+    -- IF functions_in IS NULL THEN
+    --     SELECT json_agg(spec)
+    --     INTO functions_in
+	-- 	--we truncate here
+    --     FROM p8.get_tools_by_description(LEFT(message_payload::TEXT, 1000));
+    -- END IF;
+ 
+	
     -- Make the API request based on scheme
     --we return RETURNS TABLE(message_response text, tool_calls jsonb, tool_call_result jsonb, session_id_out uuid, status TEXT)
     --RETURNS TABLE(content TEXT,tool_calls_out JSON,tokens_in INTEGER,tokens_out INTEGER,finish_reason TEXT,api_error JSONB) AS
+
+    --TODO we will read this from a setting in future
+    select http_set_curlopt('CURLOPT_TIMEOUT','5000') into ack_http_timeout;
+    RAISE NOTICE 'THE HTTP TIMEOUT IS HARDCODED TO 5000ms';
+   
     IF selected_scheme = 'google' THEN
-        SELECT * FROM p8.request_google(message_payload, functions_in, selected_model, endpoint_uri, api_token)
+        SELECT * FROM p8.request_google(message_payload,  functions_in, selected_model, endpoint_uri, api_token)
         INTO result_set, tool_calls, tokens_in, tokens_out, finish_reason, api_error;
     ELSIF selected_scheme = 'anthropic' THEN
         SELECT * FROM p8.request_anthropic(message_payload, functions_in, selected_model, endpoint_uri, api_token)
@@ -1373,19 +1572,26 @@ BEGIN
     END IF;
 
 
+    --TODO: i think i need to check how the response is cast from json
     -- Handle finish reason and status
     status_audit := 'TOOL_CALL_RESPONSE';
-    IF finish_reason = 'stop' or finish_reason = 'end_turn' THEN
+    IF finish_reason ilike '%stop%' or finish_reason ilike '%end_turn%' THEN 
         status_audit := 'COMPLETED';
     END IF;
 
+    -- Generate a new response UUID using session_id and content ID
+    SELECT p8.json_to_uuid(json_build_object('sid', session_id, 'ts',CURRENT_TIMESTAMP::TEXT)::JSONB)
+    INTO response_id;
+    
+	--RAISE NOTICE 'LLM Gave finish reason and tool calls %, % - we set status %', finish_reason, tool_calls, status_audit;
+	
     -- Iterate through each tool call
     FOR tool_call IN SELECT * FROM JSONB_ARRAY_ELEMENTS(tool_calls)
     LOOP
         BEGIN
             RAISE NOTICE 'calling %', tool_call;
-            -- Attempt to call the function
-            tool_result := json_build_object('id', tool_call->>'id', 'data', p8.eval_function_call(tool_call)); -- This will be saved in tool_eval_data
+            -- Attempt to call the function - the response id is added for context
+            tool_result := json_build_object('id', tool_call->>'id', 'data', p8.eval_function_call(tool_call,response_id)); -- This will be saved in tool_eval_data
             tool_error := NULL; -- No error
             -- Aggregate tool_result into tool_results array
             tool_results := tool_results || tool_result;
@@ -1405,11 +1611,7 @@ BEGIN
         END IF;
     END LOOP;
 
-    -- Generate a new response UUID using session_id and content ID
-    SELECT p8.json_to_uuid(json_build_object('sid', session_id, 'ts',CURRENT_TIMESTAMP::TEXT)::JSONB)
-    INTO response_id;
-
-		RAISE notice 'generated repsonse id % from % and %', response_id,session_id,api_response->>'id';
+--	RAISE notice 'generated response id % from % and %', response_id,session_id,api_response->>'id';
 
     IF api_error IS NOT NULL THEN
         result_set := api_error;
@@ -1418,9 +1620,21 @@ BEGIN
 
     -- Insert into p8.AIResponse table
     INSERT INTO p8."AIResponse" 
-    (id, model_name, content, tokens_in, tokens_out, session_id, role, status, tool_calls, tool_eval_data)
+        (id, model_name, content, tokens_in, tokens_out, session_id, role, status, tool_calls, tool_eval_data)
     VALUES 
-    (response_id, selected_model, coalesce(result_set,''), coalesce(tokens_in,0), coalesce(tokens_out,0), session_id, 'assistant', status_audit, tool_calls, tool_results);
+        (response_id, selected_model, COALESCE(result_set, ''), COALESCE(tokens_in, 0), COALESCE(tokens_out, 0), 
+        session_id, 'assistant', status_audit, tool_calls, tool_results)
+    ON CONFLICT (id) DO UPDATE SET
+        model_name    = EXCLUDED.model_name, 
+        content       = EXCLUDED.content,
+        tokens_in     = EXCLUDED.tokens_in,
+        tokens_out    = EXCLUDED.tokens_out,
+        session_id    = EXCLUDED.session_id,
+        role          = EXCLUDED.role,
+        status        = EXCLUDED.status,
+        tool_calls    = EXCLUDED.tool_calls,
+        tool_eval_data = EXCLUDED.tool_eval_data;
+
 
     -- Return results
     RETURN QUERY
@@ -1622,163 +1836,6 @@ END;
 $BODY$;
 
 ALTER FUNCTION p8.ask_with_prompt_and_tools(text, text[], text, character varying, text, double precision)
-    OWNER TO postgres;
-
-
----------
-
--- FUNCTION: p8.eval_function_call(jsonb)
-
--- DROP FUNCTION IF EXISTS p8.eval_function_call(jsonb);
-
-CREATE OR REPLACE FUNCTION p8.eval_function_call(
-	function_call jsonb)
-    RETURNS jsonb
-    LANGUAGE 'plpgsql'
-    COST 100
-    VOLATILE PARALLEL UNSAFE
-AS $BODY$
-DECLARE
-    -- Variables to hold extracted data
-    function_name TEXT;
-    args JSONB;
-    metadata RECORD;
-    uri_root TEXT;
-    call_uri TEXT;
-    params JSONB;
-    kwarg TEXT;
-    matches TEXT[];
-    final_args JSONB;
-    api_response JSONB;
-    api_token TEXT;
-	query_arg TEXT[];
-    native_result JSONB;
-BEGIN
-    -- This is a variant of fn_construct_api_call but higher level - 
-	-- we can refactor this into multilple modules but for now we will check for native calls inline
-    IF function_call IS NULL OR NOT function_call ? 'function' THEN
-        RAISE EXCEPTION 'Invalid input: function_call must contain a "function" key';
-    END IF;
-
-    function_name := function_call->'function'->>'name';
-    IF function_name IS NULL THEN
-        RAISE EXCEPTION 'Invalid input: "function" must have a "name"';
-    END IF;
-
-    args := (function_call->'function'->>'arguments')::JSON;
-    IF args IS NULL THEN
-        args := '{}';
-    END IF;
-
-	--temp savefty
-	--LOAD  'age'; SET search_path = ag_catalog, "$user", public;
-	
-    -- Lookup endpoint metadata
-    SELECT endpoint, proxy_uri, verb
-    INTO metadata
-    FROM p8."Function"
-    WHERE "name" = function_name;
-
-	IF metadata.proxy_uri = 'native' THEN
-		RAISE notice 'native query with args % % query %',  function_name, args, jsonb_typeof(args->'query');
-		--the native result is a function call for database functions
-		-- Assume there is one argument 'query' which can be a string or a list of strings
-        IF jsonb_typeof(args->'query') = 'string' THEN
-            query_arg := ARRAY[args->>'query'];
-        ELSIF jsonb_typeof(args->'query') = 'array' THEN
-			query_arg := ARRAY(SELECT jsonb_array_elements_text((args->'query')::JSONB));
-        ELSE
-            RAISE EXCEPTION 'Invalid query argument in eval_function_call: must be a string or an array of strings';
-        END IF;
-
-		RAISE NOTICE '%', format(  'SELECT jsonb_agg(t) FROM %I(%s) as t',   metadata.endpoint, query_arg  );
-		
-        -- Execute the native function and aggregate results as JSON
-        EXECUTE format(
-            'SELECT jsonb_agg(t) FROM %I(%L) as t', --formatted for a text array
-            metadata.endpoint,
-			query_arg
-        )
-        INTO native_result;
-        RETURN native_result;
-	ELSE
-	    -- If no matching endpoint is found, raise an exception
-	    IF NOT FOUND THEN
-	        RAISE EXCEPTION 'No metadata found for function %', function_name;
-	    END IF;
-
-		RAISE NOTICE 'ENDPOINT METADATA %', metadata ;
-	    -- Construct the URI root and call URI
-	    uri_root := metadata.proxy_uri;--split_part(metadata.proxy_uri, '/', 1) || '//' || split_part(metadata.proxy_uri, '/', 3);
-	    call_uri := uri_root || metadata.endpoint;
-	    final_args := args;
-	    -- Iterate over matches for placeholders in the URI
-	    FOR matches IN SELECT regexp_matches(call_uri, '\{(\w+)\}', 'g') LOOP
-	        kwarg := matches[1];
-	        IF final_args ? kwarg THEN
-	            -- Replace placeholder with argument value and remove from final_args
-	            call_uri := regexp_replace(call_uri, '\{' || kwarg || '\}', final_args->>kwarg);
-	            final_args := jsonb_strip_nulls(final_args - kwarg);
-	        ELSE
-	            RAISE EXCEPTION 'Missing required URI parameter: %', kwarg;
-	        END IF;
-	    END LOOP;
-	
-
-	    IF api_token IS NULL THEN
-			api_token:= 'dummy';
-			--	        RAISE EXCEPTION 'API token is not configured';
-	    END IF;
-	
-	    -- Make the HTTP call
-		RAISE NOTICE 'Invoke % with % AND encoded %', call_uri, final_args, public.encode_url_query(final_args);
-		BEGIN
-		    IF UPPER(metadata.verb) = 'GET' THEN
-		        -- For GET requests, append query parameters to the URL
-				/*
-				select * from public.urlencode('{"status": ["sold"]}'::JSON) from https://petstore.swagger.io/v2/pet/findByStatus with 
-				*/
-		        call_uri := call_uri || '?' || public.encode_url_query(final_args);
-				RAISE NOTICE 'Invoke encoded %', call_uri;
-		        SELECT content
-		        INTO api_response
-		        FROM http(
-		            (
-		                'GET', 
-		                call_uri, 
-		                ARRAY[http_header('Authorization', 'Bearer ' || api_token)], -- Add Bearer token
-		                'application/json', 
-		                NULL -- No body for GET requests
-		            )::http_request
-		        );
-		    ELSE
-		        -- For POST requests, include the body
-		        SELECT content
-		        INTO api_response
-		        FROM http(
-		            (
-		                UPPER(metadata.verb), 
-		                call_uri, 
-		                ARRAY[http_header('Authorization', 'Bearer ' || api_token)], -- Add Bearer token
-		                'application/json', 
-		                final_args -- Pass the body for POST or other verbs
-		            )::http_request
-		        );
-		    END IF;
-		EXCEPTION WHEN OTHERS THEN
-		    RAISE EXCEPTION 'HTTP request failed: %', SQLERRM;
-		END;
-	
-	    -- Return the API response
-	    RETURN api_response;
-	END IF;
-
-EXCEPTION WHEN OTHERS THEN
-    RAISE EXCEPTION 'Function execution failed: %', SQLERRM;
-END;
-$BODY$;
-
-ALTER FUNCTION p8.eval_function_call(jsonb)
     OWNER TO postgres;
 
 
@@ -2109,7 +2166,9 @@ BEGIN
     SELECT generate_markdown_prompt INTO table_schema_prompt FROM p8.generate_markdown_prompt(agent_name);
 
 	IF table_schema_prompt IS NULL THEN
-        RAISE EXCEPTION 'Agent with name "%" not found.', agent_name;
+        --RAISE EXCEPTION 'Agent with name "%" not found.', agent_name;
+        --we default to this for robustness TODO: think about how this could cause confusion
+        table_schema_prompt:= 'p8.PercolateAgent';
     END IF;
 	
     IF api_token IS NULL THEN    
@@ -2739,11 +2798,14 @@ select * from p8.get_agent_tools('p8.Agent', 'google')
      -- Add percolate tools if the parameter is true
     IF add_percolate_tools THEN
         -- Augment the tool_names_array with the percolate tools
+        -- These are the standard percolate tools that are added unless the entity deactivates them
+        -- TODO add this to a settings
         tool_names_array := tool_names_array || ARRAY[
             'help', 
             'get_entities', 
             'search', 
-            'announce_generate_large_output'
+            'announce_generate_large_output',
+            'activate_function_by_name'
         ];
     END IF;
     
@@ -2764,34 +2826,48 @@ $$ LANGUAGE plpgsql;
 
 ---------
 
-CREATE OR REPLACE FUNCTION  p8.get_records_by_keys(
-	table_name text,
-	key_list text[],
-	key_column text DEFAULT 'id'::text)
-    RETURNS jsonb
-    LANGUAGE 'plpgsql'
-    COST 100
-    VOLATILE PARALLEL UNSAFE
+DROP FUNCTION IF EXISTS p8.get_records_by_keys;
+CREATE OR REPLACE FUNCTION p8.get_records_by_keys(
+    table_name TEXT,
+    key_list TEXT[],
+    key_column TEXT DEFAULT 'id'::TEXT,
+    include_entity_metadata BOOLEAN DEFAULT TRUE
+)
+RETURNS JSONB
+LANGUAGE 'plpgsql'
+COST 100
+VOLATILE PARALLEL UNSAFE
 AS $BODY$
 DECLARE
     result JSONB;            -- The JSON result to be returned
+    metadata JSONB;          -- The metadata JSON result
     query TEXT;              -- Dynamic query to execute
-	schema_name VARCHAR;
-	pure_table_name VARCHAR;
+    schema_name VARCHAR;
+    pure_table_name VARCHAR;
 BEGIN
-
-	schema_name := lower(split_part(table_name, '.', 1));
+    schema_name := lower(split_part(table_name, '.', 1));
     pure_table_name := split_part(table_name, '.', 2);
 
     -- Construct the dynamic query to select records from the specified table
     query := format('SELECT jsonb_agg(to_jsonb(t)) FROM %I."%s" t WHERE t.%I::TEXT = ANY($1)', schema_name, pure_table_name, key_column);
 
-	raise notice '%', query;
     -- Execute the dynamic query with the provided key_list as parameter
     EXECUTE query USING key_list INTO result;
-
-    -- Return the resulting JSONB list
-    RETURN result;
+    
+    -- Fetch metadata if include_entity_metadata is TRUE
+    IF include_entity_metadata THEN
+        SELECT jsonb_build_object('description', a.description, 'functions', a.functions)
+        INTO metadata
+        FROM p8."Agent" a
+        WHERE a.name = table_name;
+    ELSE
+        metadata := NULL;
+    END IF;
+    
+    -- Return JSONB object containing both data and metadata
+    RETURN jsonb_build_object('data', result,
+								'metadata', metadata, 
+								'instruction', 'you can request to activate new functions by name to use them as tools');
 END;
 $BODY$;
 
@@ -2884,7 +2960,7 @@ CREATE OR REPLACE FUNCTION p8.vector_search_entity(
     question TEXT,
     entity_name TEXT,
     distance_threshold NUMERIC DEFAULT 0.75,
-    limit_results INTEGER DEFAULT 5
+    limit_results INTEGER DEFAULT 3 --TODO think about this, this is very low
 )
 RETURNS TABLE(id uuid, vdistance double precision) 
 LANGUAGE 'plpgsql'
@@ -3160,6 +3236,7 @@ DECLARE
     field_descriptions TEXT := '';
     enum_values TEXT := '';
 	column_unique_values JSONB;
+    p8_system_prompt TEXT := '';
 BEGIN
 /*
 select * from p8.generate_markdown_prompt('p8.Agent')
@@ -3169,9 +3246,13 @@ select * from p8.generate_markdown_prompt('p8.Agent')
         ELSE table_entity_name 
     END INTO table_entity_name;
 
+    SELECT value 
+    into p8_system_prompt from p8."Settings" where key = 'P8_SYS_PROMPT' limit 1;
+
 
     -- Add entity name and description to the markdown
-    SELECT '## Agent Name: ' || b.name || E'\n\n' || 
+    SELECT COALESCE(p8_system_prompt,'') || E'\n\n' || 
+           '## Agent Name: ' || b.name || E'\n\n' || 
            '### Description: ' || E'\n\n' || COALESCE(b.description, 'No description provided.') || E'\n\n'
     INTO markdown_prompt
     FROM p8."Agent" b

@@ -53,7 +53,7 @@ $$ LANGUAGE plpgsql;
 DROP FUNCTION IF EXISTS public.percolate_with_agent;
 CREATE OR REPLACE FUNCTION public.percolate_with_agent(
     question text,
-    agent text,
+    agent text DEFAULT 'p8.PercolateAgent',
     model_key character varying DEFAULT 'gpt-4o-mini'::character varying,
     tool_names_in text[] DEFAULT NULL::text[],
     system_prompt text DEFAULT 'Respond to the users query using tools and functions as required'::text,
@@ -79,7 +79,7 @@ DECLARE
     api_token TEXT;
     selected_model TEXT;
     selected_scheme TEXT;
-    functions JSON;
+    function_names TEXT[];
     message_payload JSON;
     created_session_id uuid;
     	recovered_system_prompt TEXT;
@@ -131,16 +131,16 @@ BEGIN
         ELSE agent 
     END INTO agent;
 
-    -- Fetch tools for the agent by calling the new function
-    SELECT p8.get_agent_tools(agent, selected_scheme) INTO functions;
-     
+    -- Fetch tools for the agent by calling the new function (we could add extra tool_names_in)
+    SELECT p8.get_agent_tool_names(agent, selected_scheme, TRUE) INTO function_names;
+             
     -- Ensure tools were fetched successfully
-    IF functions IS NULL THEN
+    IF function_names IS NULL THEN
         RAISE EXCEPTION 'No tools found for agent % in scheme %', agent, selected_scheme;
     END IF;
 
     -- Recover system prompt using agent name
-    SELECT coalesce(p8.generate_markdown_prompt(agent),system_prompt) INTO recovered_system_prompt;
+    SELECT coalesce(p8.generate_markdown_prompt(agent), system_prompt) INTO recovered_system_prompt;
     
     -- Get the messages for the correct scheme
     IF selected_scheme = 'anthropic' THEN
@@ -159,14 +159,14 @@ BEGIN
         RAISE EXCEPTION 'Failed to retrieve message payload for session %', created_session_id;
     END IF;
 
-    RAISE NOTICE 'Ask request with tools % for agent % using language model %', functions, agent, model_key;
+    --RAISE NOTICE 'Ask request with tools % for agent % using language model %', function_names, agent, model_key;
 
     -- Return the results using p8.ask function
     RETURN QUERY 
     SELECT * FROM p8.ask(
         message_payload::json, 
         created_session_id, 
-        functions::json, 
+        function_names, 
         model_key, 
         token_override, 
         user_id
