@@ -66,7 +66,7 @@ BEGIN
         );
 
     -- Log the API response for debugging
-    RAISE NOTICE 'API Response: % from functions', api_response, functions_in;
+    RAISE NOTICE 'API Response: % from functions %', api_response, functions_in;
 
     -- Extract tool calls from the response
     tool_calls := (api_response->'choices'->0->'message'->>'tool_calls')::JSONB;
