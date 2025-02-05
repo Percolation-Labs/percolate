@@ -13,7 +13,7 @@ Percolate is a relational-vector-graph/key-value database for building agentic s
 
 - Get setup in a few minutes by launching the Percolate instance on docker. 
 - Use the cli from source to initialize data within your local instance (see notes below).
-- Use Percolate without your preferred postgres client without any other programming language. 
+- Use Percolate with your preferred postgres client without any other programming language. 
 
 
 ```sql
