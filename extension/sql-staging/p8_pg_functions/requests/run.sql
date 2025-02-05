@@ -1,8 +1,9 @@
+DROP FUNCTION IF EXISTS run;
 CREATE OR REPLACE FUNCTION run(
     question text,
     agent text DEFAULT 'p8.PercolateAgent',
     model text DEFAULT 'gpt-4o-mini',
-    limit_iterations int DEFAULT 1
+    limit_iterations int DEFAULT 2
 ) RETURNS TABLE (
     message_response text,
     tool_calls jsonb,
@@ -13,7 +14,7 @@ CREATE OR REPLACE FUNCTION run(
 DECLARE
     session_id_captured uuid;
     current_row record;  -- To capture the row from resume_session
-    iterations int := 0;
+    iterations int := 1;
 BEGIN
     /*
     this function is just for test/poc
@@ -21,6 +22,13 @@ BEGIN
     this would be implemented in practice with a bounder against the API.
     The client would then consume from an API that ways for the result
     Nonetheless, for testing purposes its good to test that the session does resolve as we resume to a limit
+
+    Here is an example if you have registered the tool example for swagger/pets
+
+    select * from run('please activate function get_pet_findByStatus and find two pets that are sold')
+
+    this requires multiple turns - first it realizes it needs the function so activates, then it runs the function (keep in mind we eval tool calls in each turn)
+    then it finally generates the answer
     */
 
     -- First, call percolate_with_agent function
