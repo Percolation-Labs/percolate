@@ -61,7 +61,7 @@ BEGIN
             response := NULL;
     END;
     -- Log the response
-    RAISE NOTICE 'API Response: %', response;
+    RAISE NOTICE 'Error applying index at /admin/index - %', response;
 
     RETURN NEW;
 END;

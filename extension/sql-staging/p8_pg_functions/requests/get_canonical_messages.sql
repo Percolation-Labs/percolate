@@ -1,7 +1,7 @@
 CREATE OR REPLACE FUNCTION p8.get_canonical_messages(
-    session_id_in UUID,  -- Normal usage: use the question and prompt from the session
-    question TEXT DEFAULT NULL,  -- This can override the question
-    override_system_prompt TEXT DEFAULT NULL  -- This can override the system prompt or match an agent
+    session_id_in UUID,  
+    question TEXT DEFAULT NULL,  
+    override_system_prompt TEXT DEFAULT NULL  
 ) 
 RETURNS TABLE(messages JSON, last_role TEXT, last_updated_at TIMESTAMP WITHOUT TIME ZONE) 
 LANGUAGE plpgsql
@@ -26,7 +26,6 @@ BEGIN
 
     -- Check if session exists
     IF recovered_session_id IS NULL THEN
-        -- Return null values for the session-related fields if session does not exist
         RETURN QUERY 
         SELECT NULL::JSON, NULL::TEXT, NULL::TIMESTAMP;
         RETURN;
@@ -48,7 +47,6 @@ BEGIN
         SELECT content, role, tool_calls, tool_eval_data, created_at
         FROM p8."AIResponse" a
         WHERE a.session_id = session_id_in
-        ORDER BY created_at ASC
     ),
     max_session_data AS (
         -- Get the last role and most recent timestamp
@@ -57,42 +55,54 @@ BEGIN
         ORDER BY created_at DESC
         LIMIT 1
     ),
-    message_data AS (
-        -- Construct system, user, and session messages
-        SELECT 'system' AS role, 
+    extracted_messages AS (
+        -- Extract all messages in a structured way while keeping order
+        SELECT NULL::TIMESTAMP as created_at, 'system' AS role, 
                COALESCE(override_system_prompt, generated_system_prompt) AS content, 
-               NULL::JSON AS tool_calls, 
-               NULL::TEXT AS tool_call_id
+               NULL::TEXT AS tool_call_id,
+			   NULL::JSON as tool_calls,
+			   0 as rank
         UNION ALL
-        SELECT 'user' AS role, 
+        SELECT NULL::TIMESTAMP as created_at, 'user' AS role, 
                COALESCE(question, recovered_question) AS content, 
-               NULL::JSON AS tool_calls, 
-               NULL::TEXT AS tool_call_id
+               NULL::TEXT AS tool_call_id,
+			    NULL::JSON as tool_calls,
+			   1 as rank
         UNION ALL
-        -- Generate one row for assistant tool call summary
-        SELECT 'assistant' AS role,
-               'tools called...' AS content,
-               tool_calls,
-               NULL AS tool_call_id
-        FROM session_data 
-        WHERE tool_calls IS NOT NULL
-        UNION ALL
-        -- Generate multiple rows from tool_eval_data JSON array with a tool call id on each
-        SELECT 'tool' AS role,
-               el->>'data' AS content,
-               NULL AS tool_calls,
-               el->>'id' AS tool_call_id
+        SELECT created_at, 'assistant' AS role, 
+               'Calling ' || (el->>'function')::TEXT AS content,
+               el->>'id' AS tool_call_id,
+			   tool_calls,
+			   2 as rank
         FROM session_data, 
-             LATERAL jsonb_array_elements(tool_eval_data::JSONB) el  -- Properly extracting JSON array elements
+             LATERAL jsonb_array_elements(tool_calls::JSONB) el
+        WHERE tool_calls IS NOT NULL
+         UNION ALL
+        -- Extract tool responses
+        SELECT created_at, 'tool' AS role,
+               'Responded ' || (el->>'data')::TEXT AS content,
+               el->>'id' AS tool_call_id,
+			   NULL::JSON as tool_calls,
+			   2 as rank
+        FROM session_data, 
+             LATERAL jsonb_array_elements(tool_eval_data::JSONB) el
         WHERE tool_eval_data IS NOT NULL
     ),
+    ordered_messages AS (
+        -- Order all extracted messages by created_at
+        SELECT role, content, tool_calls, tool_call_id
+        FROM extracted_messages
+        ORDER BY rank, created_at ASC
+    ),
     jsonrow AS (
-        SELECT json_agg(row_to_json(message_data)) AS messages
-        FROM message_data
+        -- Convert ordered messages into JSON
+        SELECT json_agg(row_to_json(ordered_messages)) AS messages
+        FROM ordered_messages
     )
+    -- Return JSON messages with metadata
     SELECT * 
     FROM jsonrow 
-    LEFT JOIN max_session_data ON true;  -- Use LEFT JOIN to ensure rows are returned even if no session data is found
+    LEFT JOIN max_session_data ON true;
 
 END;
 $BODY$;
