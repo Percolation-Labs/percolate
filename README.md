@@ -192,6 +192,10 @@ You may in some cases want to update your /etc/hosts to resolve the server addre
 127.0.0.1 percolate-api
 ```
 
+## Tests
+
+WIP - run tests in the python directory with `pytest .` - at the moment there is a test application of the schema on a test database that assumes the docker instance is running.
+
 
 ## Connect and Learn
 
