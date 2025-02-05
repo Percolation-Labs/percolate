@@ -1,0 +1,21 @@
+project:
+  name: default
+  database: app
+  options:
+    index-docs: true
+    sync-env: true
+  apis:
+    - name: pets
+      openapi-uri: https://petstore.swagger.io/v2/swagger.json
+      #token_env:
+      verbs:
+      - get
+      #use this if you want to add a domain mapping e.g. take the openapi.json form one place but host elsewhere or resolve the uri differently
+      alt_host: 
+  agents:
+  models:
+  # - name:
+  #   model-name:
+  #   token-env:
+  #   endpoint-uri:
+
