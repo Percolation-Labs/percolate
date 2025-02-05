@@ -1,10 +1,9 @@
--- FUNCTION: p8.eval_native_function(text, jsonb)
-
--- DROP FUNCTION IF EXISTS p8.eval_native_function(text, jsonb);
-
+DROP FUNCTION IF EXISTS p8.eval_native_function;
 CREATE OR REPLACE FUNCTION p8.eval_native_function(
 	function_name text,
-	args jsonb)
+	args jsonb,
+    response_id UUID DEFAULT NULL
+    )
     RETURNS jsonb
     LANGUAGE 'plpgsql'
     COST 100
@@ -38,8 +37,23 @@ BEGIN
     );  
 	--basically does select * from p8.query_entity('i need an agent about agents', 'p8.Agent')
 
+     SELECT p8.eval_native_function(
+        'activate_functions_by_name', 
+        '{"function_names": ["p8.Agent", "p8.PercolateAgent"]}'::JSONB,
+        '42e80e20-6b9e-02f4-8af7-76d4f1ef049f'::UUID
+        );  
+        
+  
     */
     CASE function_name
+        WHEN 'activate_functions_by_name' THEN
+            keys := ARRAY(SELECT jsonb_array_elements_text(args->'function_names')::TEXT);
+           
+			-- Call activate_functions_by_name and convert the TEXT[] into a JSON array
+            SELECT jsonb_agg(value) 
+            INTO result
+            FROM unnest(p8.activate_functions_by_name(keys, response_id)) AS value;
+
         -- NB the args here need to match how we define the native function interface in python or wherever
         -- If function_name is 'get_entities', call p8.get_entities with the given argument
         WHEN 'get_entities' THEN
@@ -81,5 +95,4 @@ BEGIN
 END;
 $BODY$;
 
-ALTER FUNCTION p8.eval_native_function(text, jsonb)
-    OWNER TO postgres;
+ 

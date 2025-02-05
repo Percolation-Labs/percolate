@@ -1,11 +1,11 @@
 -- FUNCTION: p8.ask(json, uuid, json, text, text, uuid)
 
--- DROP FUNCTION IF EXISTS p8.ask(json, uuid, json, text, text, uuid);
+DROP FUNCTION IF EXISTS p8.ask;
 
 CREATE OR REPLACE FUNCTION p8.ask(
 	message_payload json,
 	session_id uuid DEFAULT NULL::uuid,
-	functions_in json DEFAULT NULL::json,
+	functions_names TEXT[] DEFAULT NULL::TEXT[],
 	model_name text DEFAULT 'gpt-4o-mini'::text,
 	token_override text DEFAULT NULL::text,
 	user_id uuid DEFAULT NULL::uuid)
@@ -36,6 +36,7 @@ DECLARE
     tokens_out INTEGER;
     response_id UUID;
 	ack_http_timeout BOOLEAN;
+    functions_in JSON;
 BEGIN
 	/*
 	take in a message payload etc and call the correct request for each scheme
@@ -64,16 +65,14 @@ BEGIN
         INTO session_id;
     END IF;
 
-    -- Determine functions if none provided
-    -- this would need to be scheme based
-    -- IF functions_in IS NULL THEN
-    --     SELECT json_agg(spec)
-    --     INTO functions_in
-	-- 	--we truncate here
-    --     FROM p8.get_tools_by_description(LEFT(message_payload::TEXT, 1000));
-    -- END IF;
- 
-	
+    -- Generate a new response UUID using session_id and content ID
+    SELECT p8.json_to_uuid(json_build_object('sid', session_id, 'ts',CURRENT_TIMESTAMP::TEXT)::JSONB)
+    INTO response_id;
+
+    --get the functions requested for the agent and including merging in from the session
+    functions_in = p8.get_session_functions(session_id, functions_names, selected_scheme);
+
+    RAISE NOTICE 'scheme %: we have functions % ', selected_scheme, functions_names;
     -- Make the API request based on scheme
     --we return RETURNS TABLE(message_response text, tool_calls jsonb, tool_call_result jsonb, session_id_out uuid, status TEXT)
     --RETURNS TABLE(content TEXT,tool_calls_out JSON,tokens_in INTEGER,tokens_out INTEGER,finish_reason TEXT,api_error JSONB) AS
@@ -102,16 +101,17 @@ BEGIN
         status_audit := 'COMPLETED';
     END IF;
 
-	RAISE NOTICE 'LLM Gave finish reason and tool calls %, % - we set status %', finish_reason, tool_calls, status_audit;
-	
 
+    
+	--RAISE NOTICE 'LLM Gave finish reason and tool calls %, % - we set status %', finish_reason, tool_calls, status_audit;
+	
     -- Iterate through each tool call
     FOR tool_call IN SELECT * FROM JSONB_ARRAY_ELEMENTS(tool_calls)
     LOOP
         BEGIN
             RAISE NOTICE 'calling %', tool_call;
-            -- Attempt to call the function
-            tool_result := json_build_object('id', tool_call->>'id', 'data', p8.eval_function_call(tool_call)); -- This will be saved in tool_eval_data
+            -- Attempt to call the function - the response id is added for context
+            tool_result := json_build_object('id', tool_call->>'id', 'data', p8.eval_function_call(tool_call,response_id)); -- This will be saved in tool_eval_data
             tool_error := NULL; -- No error
             -- Aggregate tool_result into tool_results array
             tool_results := tool_results || tool_result;
@@ -131,11 +131,7 @@ BEGIN
         END IF;
     END LOOP;
 
-    -- Generate a new response UUID using session_id and content ID
-    SELECT p8.json_to_uuid(json_build_object('sid', session_id, 'ts',CURRENT_TIMESTAMP::TEXT)::JSONB)
-    INTO response_id;
-
-	RAISE notice 'generated response id % from % and %', response_id,session_id,api_response->>'id';
+--	RAISE notice 'generated response id % from % and %', response_id,session_id,api_response->>'id';
 
     IF api_error IS NOT NULL THEN
         result_set := api_error;
@@ -144,10 +140,10 @@ BEGIN
 
     -- Insert into p8.AIResponse table
     INSERT INTO p8."AIResponse" 
-        (id, model_name, content, tokens_in, tokens_out, session_id, role, status, tool_calls, tool_eval_data)
+        (id, model_name, content, tokens_in, tokens_out, session_id, role, status, tool_calls, tool_eval_data,function_stack)
     VALUES 
         (response_id, selected_model, COALESCE(result_set, ''), COALESCE(tokens_in, 0), COALESCE(tokens_out, 0), 
-        session_id, 'assistant', status_audit, tool_calls, tool_results)
+        session_id, 'assistant', status_audit, tool_calls, tool_results,functions_names)
     ON CONFLICT (id) DO UPDATE SET
         model_name    = EXCLUDED.model_name, 
         content       = EXCLUDED.content,
@@ -157,7 +153,8 @@ BEGIN
         role          = EXCLUDED.role,
         status        = EXCLUDED.status,
         tool_calls    = EXCLUDED.tool_calls,
-        tool_eval_data = EXCLUDED.tool_eval_data;
+        tool_eval_data = EXCLUDED.tool_eval_data,
+		 function_stack = ARRAY(SELECT DISTINCT unnest(p8."AIResponse".function_stack || EXCLUDED.function_stack));
 
 
     -- Return results
@@ -169,6 +166,4 @@ EXCEPTION
         RAISE EXCEPTION 'ASK API call failed: % % response id %', SQLERRM, result_set, api_response->'id';
 END;
 $BODY$;
-
-ALTER FUNCTION p8.ask(json, uuid, json, text, text, uuid)
-    OWNER TO postgres;
+ 

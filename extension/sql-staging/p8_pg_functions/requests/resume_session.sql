@@ -20,7 +20,7 @@ DECLARE
     selected_scheme text;
     model_key text;
     last_session_status text;
-    functions jsonb;
+    functions text[];
     message_payload json;
     tool_eval_data_recovered jsonb;
 BEGIN
@@ -98,7 +98,7 @@ BEGIN
     -- 4. Handle tool evaluation data recovery (using get_agent_tools function)
     BEGIN
         -- Call the get_agent_tools function to fetch tools for the agent
-        SELECT p8.get_agent_tools(recovered_agent, selected_scheme, FALSE) INTO functions;
+        SELECT p8.get_agent_tool_names(recovered_agent, selected_scheme, TRUE) INTO functions;
         
         -- If functions is NULL, log error and return
         IF functions IS NULL THEN
@@ -121,7 +121,7 @@ BEGIN
     FROM p8.ask(
         message_payload::json, 
         recovered_session_id, 
-        functions::json, 
+        functions, 
         model_key, 
         token_override, 
         user_id

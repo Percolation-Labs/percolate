@@ -1,3 +1,4 @@
+
 DROP FUNCTION IF EXISTS p8.get_agent_tools;
 CREATE OR REPLACE FUNCTION p8.get_agent_tools(
     recovered_agent TEXT,
@@ -15,25 +16,10 @@ select * from p8.get_agent_tools('p8.Agent', NULL, FALSE)
 select * from p8.get_agent_tools('p8.Agent', NULL, TRUE)
 select * from p8.get_agent_tools('p8.Agent', 'google')
 
-
 */
-    -- Get tool names from Agent functions
-    SELECT ARRAY(
-        SELECT jsonb_object_keys(a.functions::JSONB)
-        FROM p8."Agent" a
-        WHERE a.name = recovered_agent AND a.functions IS NOT NULL
-    ) INTO tool_names_array;
 
-     -- Add percolate tools if the parameter is true
-    IF add_percolate_tools THEN
-        -- Augment the tool_names_array with the percolate tools
-        tool_names_array := tool_names_array || ARRAY[
-            'help', 
-            'get_entities', 
-            'search', 
-            'announce_generate_large_output'
-        ];
-    END IF;
+    SELECT p8.get_agent_tool_names(recovered_agent,selected_scheme,add_percolate_tools) into tool_names_array;
+
     
     -- Fetch tool data if tool names exist
     IF tool_names_array IS NOT NULL THEN
