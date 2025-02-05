@@ -152,7 +152,7 @@ $$ LANGUAGE plpgsql;
 DROP FUNCTION IF EXISTS public.percolate_with_agent;
 CREATE OR REPLACE FUNCTION public.percolate_with_agent(
     question text,
-    agent text,
+    agent text DEFAULT 'p8.PercolateAgent',
     model_key character varying DEFAULT 'gpt-4o-mini'::character varying,
     tool_names_in text[] DEFAULT NULL::text[],
     system_prompt text DEFAULT 'Respond to the users query using tools and functions as required'::text,
@@ -178,7 +178,7 @@ DECLARE
     api_token TEXT;
     selected_model TEXT;
     selected_scheme TEXT;
-    functions JSON;
+    function_names TEXT[];
     message_payload JSON;
     created_session_id uuid;
     	recovered_system_prompt TEXT;
@@ -230,16 +230,16 @@ BEGIN
         ELSE agent 
     END INTO agent;
 
-    -- Fetch tools for the agent by calling the new function
-    SELECT p8.get_agent_tools(agent, selected_scheme) INTO functions;
-     
+    -- Fetch tools for the agent by calling the new function (we could add extra tool_names_in)
+    SELECT p8.get_agent_tool_names(agent, selected_scheme, TRUE) INTO function_names;
+             
     -- Ensure tools were fetched successfully
-    IF functions IS NULL THEN
+    IF function_names IS NULL THEN
         RAISE EXCEPTION 'No tools found for agent % in scheme %', agent, selected_scheme;
     END IF;
 
     -- Recover system prompt using agent name
-    SELECT coalesce(p8.generate_markdown_prompt(agent),system_prompt) INTO recovered_system_prompt;
+    SELECT coalesce(p8.generate_markdown_prompt(agent), system_prompt) INTO recovered_system_prompt;
     
     -- Get the messages for the correct scheme
     IF selected_scheme = 'anthropic' THEN
@@ -258,14 +258,14 @@ BEGIN
         RAISE EXCEPTION 'Failed to retrieve message payload for session %', created_session_id;
     END IF;
 
-    RAISE NOTICE 'Ask request with tools % for agent % using language model %', functions, agent, model_key;
+    --RAISE NOTICE 'Ask request with tools % for agent % using language model %', function_names, agent, model_key;
 
     -- Return the results using p8.ask function
     RETURN QUERY 
     SELECT * FROM p8.ask(
         message_payload::json, 
         created_session_id, 
-        functions::json, 
+        function_names, 
         model_key, 
         token_override, 
         user_id
@@ -430,6 +430,61 @@ OWNER TO postgres;
 
 ---------
 
+
+DROP FUNCTION IF EXISTS p8.get_session_functions;
+CREATE OR REPLACE FUNCTION p8.get_session_functions(
+	session_id_in uuid,
+	functions_names text[],
+	selected_scheme text DEFAULT 'openai'::text)
+    RETURNS jsonb
+    LANGUAGE 'plpgsql'
+    COST 100
+    VOLATILE PARALLEL UNSAFE
+AS $BODY$
+DECLARE
+    existing_functions TEXT[];
+    merged_functions TEXT[];
+    result JSONB;
+BEGIN
+    /*
+    Retrieves the function stack from p8.AIResponse, merges it with additional function names,
+    and returns the corresponding tool information.
+    
+    Example Usage:
+    
+    SELECT p8.get_session_functions(
+        '42e80e20-6b9e-02f4-8af7-76d4f1ef049f'::UUID, 
+        ARRAY['get_entities'], 
+        'openai'
+    );
+    */
+
+    -- Fetch the existing function stack from the last session message but we need to think about this
+    SELECT COALESCE(function_stack, ARRAY[]::TEXT[])
+    INTO existing_functions
+    FROM p8."AIResponse"
+    WHERE session_id = session_id_in
+	order by created_at DESC
+	LIMIT 1 ;
+
+    -- Merge existing functions with new ones, removing duplicates
+    merged_functions := ARRAY(
+        SELECT DISTINCT unnest(existing_functions || functions_names)
+    );
+
+	RAISE NOTICE 'Session functions for response % are % after merging existing % ', session_id_in, merged_functions, existing_functions;
+	
+    -- Get tool information for the merged function names
+    SELECT p8.get_tools_by_name(merged_functions, selected_scheme) INTO result;
+
+    RETURN result;
+END;
+$BODY$;
+
+
+
+---------
+
 CREATE OR REPLACE FUNCTION p8.get_tools_by_name(
     names text[],
     scheme text DEFAULT 'openai'::text
@@ -527,6 +582,13 @@ DECLARE
     v_hint    TEXT;
     v_context TEXT;
 BEGIN
+
+	/*
+	--if you added the pet store example functions
+	 select * from p8.eval_function_call('{"function": {"name": "get_pet_findByStatus", "arguments": "{\"status\":[\"sold\"]}"}}'::JSONB)
+	 
+	*/
+
     -- This is a variant of fn_construct_api_call but higher level - 
 	-- we can refactor this into multilple modules but for now we will check for native calls inline
     IF function_call IS NULL OR NOT function_call ? 'function' THEN
@@ -553,7 +615,7 @@ BEGIN
     WHERE "name" = function_name;
 
 	IF metadata.proxy_uri = 'native' THEN
-		RAISE notice 'native query with args % %',  function_name, args;
+		RAISE notice 'native query with args % % and response id %',  function_name, args,response_id;
         SELECT * FROM p8.eval_native_function(function_name,args::JSONB,response_id)
         INTO native_result;
         RETURN native_result;
@@ -564,36 +626,21 @@ BEGIN
 	    END IF;
 	
 	    -- Construct the URI root and call URI
-	    uri_root := split_part(metadata.proxy_uri, '/', 1) || '//' || split_part(metadata.proxy_uri, '/', 3);
+	    uri_root :=  metadata.proxy_uri;
 	    call_uri := uri_root || metadata.endpoint;
-	
 	    final_args := args;
-	
-	    -- Iterate over matches for placeholders in the URI
-	    FOR matches IN SELECT regexp_matches(call_uri, '\{(\w+)\}', 'g') LOOP
-	        kwarg := matches[1];
-	        IF final_args ? kwarg THEN
-	            -- Replace placeholder with argument value and remove from final_args
-	            call_uri := regexp_replace(call_uri, '\{' || kwarg || '\}', final_args->>kwarg);
-	            final_args := jsonb_strip_nulls(final_args - kwarg);
-	        ELSE
-	            RAISE EXCEPTION 'Missing required URI parameter: %', kwarg;
-	        END IF;
-	    END LOOP;
 	
 	    -- Ensure API token is available
 	    
-		api_token := '';--(SELECT api_token FROM public."ApiConfig" LIMIT 1); 
-	    IF api_token IS NULL THEN
-	        RAISE EXCEPTION 'API token is not configured';
-	    END IF;
+		api_token := (SELECT api_token FROM p8."ApiProxy" LIMIT 1); 
 	
 	    -- Make the HTTP call
 		RAISE NOTICE 'Invoke % with %', call_uri, final_args;
 		BEGIN
 		    IF UPPER(metadata.verb) = 'GET' THEN
 		        -- For GET requests, append query parameters to the URL
-		        call_uri := call_uri || '?' || public.urlencode(final_args);
+		        call_uri := call_uri || '?' || p8.encode_url_query(final_args);
+				RAISE NOTICE 'encoded %', call_uri;
 		        SELECT content
 		        INTO api_response
 		        FROM http(
@@ -622,6 +669,8 @@ BEGIN
 		EXCEPTION WHEN OTHERS THEN
 		    RAISE EXCEPTION 'HTTP request failed: %', SQLERRM;
 		END;
+
+		RAISE NOTICE 'tool response api %', api_response;
 	
 	    -- Return the API response
 	    RETURN api_response;
@@ -782,10 +831,7 @@ $$ LANGUAGE plpgsql;
 
 ---------
 
--- FUNCTION: p8.get_google_messages(UUID, text, text)
-
--- DROP FUNCTION IF EXISTS p8.get_google_messages(UUID, text, text);
-
+DROP FUNCTION IF EXISTS p8.get_google_messages;
 CREATE OR REPLACE FUNCTION p8.get_google_messages(
     session_id_in UUID,
     question TEXT DEFAULT NULL,
@@ -807,32 +853,30 @@ BEGIN
     /*
     https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/function-calling
 
-	  select messages from p8.get_google_messages('619857d3-434f-fa51-7c88-6518204974c9');
+    select messages from p8.get_google_messages('619857d3-434f-fa51-7c88-6518204974c9');
 
-		call parts should be 
+    call parts should be 
 
-		{
-			"functionCall": {
-				"name": "get_current_weather",
-				"args": {
-					"location": "San Francisco"
-				}
-			}
-		}
-			
-		response parts should be
+    {
+        "functionCall": {
+            "name": "get_current_weather",
+            "args": {
+                "location": "San Francisco"
+            }
+        }
+    }
+    
+    response parts should be
 
-	 
-		{
-			"functionResponse": {
-				"name": "get_current_weather",
-				"response": {
-					"temperature": 30.5,
-					"unit": "C"
-				}
-			}
-		}
-		
+    {
+        "functionResponse": {
+            "name": "get_current_weather",
+            "response": {
+                "temperature": 30.5,
+                "unit": "C"
+            }
+        }
+    }
     */
 
     -- 1. Get session details from p8."Session"
@@ -905,7 +949,7 @@ BEGIN
                         'name', el->>'id',
                         'response', json_build_object(
                             'name', el->>'id',
-							--experiment with json or text
+                            -- experiment with json or text
                             'content', (el->'data')::TEXT
                         )
                     )
@@ -931,20 +975,85 @@ OWNER TO postgres;
 
 ---------
 
--- FUNCTION: p8.get_anthropic_messages(uuid, text, text)
+DROP FUNCTION IF EXISTS run;
+CREATE OR REPLACE FUNCTION run(
+    question text,
+    agent text DEFAULT 'p8.PercolateAgent',
+    model text DEFAULT 'gpt-4o-mini',
+    limit_iterations int DEFAULT 2
+) RETURNS TABLE (
+    message_response text,
+    tool_calls jsonb,
+    tool_call_result jsonb,
+    session_id_out uuid,
+    status text
+) AS $$
+DECLARE
+    session_id_captured uuid;
+    current_row record;  -- To capture the row from resume_session
+    iterations int := 1;
+BEGIN
+    /*
+    this function is just for test/poc
+    just because we can do this does not mean we should as it presents long running queries
+    this would be implemented in practice with a bounder against the API.
+    The client would then consume from an API that ways for the result
+    Nonetheless, for testing purposes its good to test that the session does resolve as we resume to a limit
 
--- DROP FUNCTION IF EXISTS p8.get_anthropic_messages(uuid, text, text);
+    Here is an example if you have registered the tool example for swagger/pets
+
+    select * from run('please activate function get_pet_findByStatus and find two pets that are sold')
+
+    this requires multiple turns - first it realizes it needs the function so activates, then it runs the function (keep in mind we eval tool calls in each turn)
+    then it finally generates the answer
+    */
+
+    -- First, call percolate_with_agent function
+    SELECT p.session_id_out INTO session_id_captured
+    FROM percolate_with_agent(question, agent, model) p;
+    
+    -- Get the function_stack (just an example)
+    SELECT function_stack INTO message_response
+    FROM p8."AIResponse" r
+    WHERE r.session_id = session_id_captured;
+
+    -- Loop to iterate until limit_iterations or status = 'COMPLETED'
+    LOOP
+		RAISE NOTICE 'resuming session iteration %', iterations;
+        -- Call resume_session to resume the session and get the row
+        SELECT * INTO current_row
+        FROM p8.resume_session(session_id_captured);
+        
+        -- Check if the status is 'COMPLETED' or iteration limit reached
+        IF current_row.status = 'COMPLETED' OR iterations >= limit_iterations THEN
+            EXIT;
+        END IF;
+        
+        iterations := iterations + 1;
+    END LOOP;
+    
+    -- Return the final row from resume_session
+    RETURN QUERY
+    SELECT current_row.message_response,
+           current_row.tool_calls,
+           current_row.tool_call_result,
+           current_row.session_id_out,
+           current_row.status;
+END;
+$$ LANGUAGE plpgsql;
+
+
+---------
 
 CREATE OR REPLACE FUNCTION p8.get_anthropic_messages(
-	session_id_in uuid,
-	question text DEFAULT NULL::text,
-	agent_or_system_prompt text DEFAULT NULL::text)
+    session_id_in uuid,
+    question text DEFAULT NULL::text,
+    agent_or_system_prompt text DEFAULT NULL::text)
     RETURNS TABLE(messages json, last_role text, last_updated_at timestamp without time zone) 
     LANGUAGE 'plpgsql'
     COST 100
     VOLATILE PARALLEL UNSAFE
     ROWS 1000
-
 AS $BODY$
 DECLARE
     recovered_session_id UUID;
@@ -953,27 +1062,6 @@ DECLARE
     recovered_question TEXT;
     generated_system_prompt TEXT;
 BEGIN
-	/*
-	returns something that can be safely posted to an anthtropic endpoint with multiple tool calls
-	currently we add the system prompt for canon but we could add a flag to omit it.
-	in our clients we tend to just filter out the system message
-
-	tool use result blocls are 
-
-	{
-	  "role": "user",
-	  "content": [
-	    {
-	      "type": "tool_result",
-	      "tool_use_id": "toolu_01A09q90qw90lq917835lq9",
-	      "content": "15 degrees"
-	    }
-	  ]
-	}
-	
-	select messages from p8.get_anthropic_messages('583060b2-70c6-478c-a483-2292870a980a');
-	
-	*/
     -- 1. Get session details from p8."Session"
     SELECT s.id, s.userid, s.agent, s.query 
     INTO recovered_session_id, user_id, recovered_agent, recovered_question
@@ -1005,21 +1093,26 @@ BEGIN
     ),
     max_session_data AS (
         -- Get the last role and most recent timestamp
-        SELECT role AS last_role, created_at AS last_message_at
+        SELECT role AS last_role, created_at AS last_updated_at
         FROM session_data
         ORDER BY created_at DESC
         LIMIT 1
     ),
-    message_data AS (
-        -- Combine system, user, and session data
-        SELECT 'system' AS role, 
-               json_build_array(json_build_object('type', 'text','text', COALESCE(agent_or_system_prompt, generated_system_prompt)))  AS content
+    extracted_messages AS (
+        -- Extract all messages, interleaving tool calls and user/assistant content while preserving the data structure
+        SELECT NULL::TIMESTAMP as created_at, 'system' AS role, 
+               json_build_array(
+                   jsonb_build_object('type', 'text', 'text', COALESCE(agent_or_system_prompt, generated_system_prompt))
+               ) AS content,
+               0 AS rank
         UNION ALL
-        SELECT 'user' AS role, 
-			json_build_array(json_build_object('type', 'text','text', COALESCE(question, recovered_question)))  AS content
+        SELECT NULL::TIMESTAMP as created_at, 'user' AS role, 
+               json_build_array(
+                   jsonb_build_object('type', 'text', 'text', COALESCE(question, recovered_question))
+               ) AS content,
+               1 AS rank
         UNION ALL
-     	--tool use
-        SELECT 'assistant' AS role,
+        SELECT created_at, 'assistant' AS role,
                jsonb_build_array(
                    jsonb_build_object(
                        'name', el->'function'->>'name',
@@ -1027,31 +1120,40 @@ BEGIN
                        'input', (el->'function'->>'arguments')::JSON,
                        'type', 'tool_use'
                    )
-               )::JSON AS content
+               )::JSON AS content,
+               2 AS rank
         FROM session_data, 
              LATERAL jsonb_array_elements(tool_calls::JSONB) el
+        WHERE tool_calls IS NOT NULL
         UNION ALL
-        -- Generate multiple rows from tool_eval_data JSON array with a tool call id on each
-		--check out our canonical schema which has tool results with id and dat
-        SELECT 'user' AS role,
+        SELECT created_at, 'user' AS role,
                jsonb_build_array(
                    jsonb_build_object(
                        'type', 'tool_result',
                        'tool_use_id', el->>'id',
                        'content', el->>'data'
                    )
-               )::JSON AS content
+               )::JSON AS content,
+               2 AS rank
         FROM session_data, 
              LATERAL jsonb_array_elements(tool_eval_data::JSONB) el
+        WHERE tool_eval_data IS NOT NULL
+    ),
+    ordered_messages AS (
+        -- Order the extracted messages by rank (to maintain the interleaving order) and created_at timestamp
+        SELECT role, content
+        FROM extracted_messages
+        ORDER BY rank, created_at ASC
     ),
     jsonrow AS (
-        SELECT json_agg(row_to_json(message_data)) AS messages
-        FROM message_data
+        -- Convert ordered messages into JSON
+        SELECT json_agg(row_to_json(ordered_messages)) AS messages
+        FROM ordered_messages
     )
-    SELECT jsonrow.messages, max_session_data.last_role, max_session_data.last_message_at
+    -- Return the ordered JSON messages along with metadata
+    SELECT jsonrow.messages, max_session_data.last_role, max_session_data.last_updated_at
     FROM jsonrow 
     LEFT JOIN max_session_data ON true; -- Ensures at least one row is returned
-
 END;
 $BODY$;
 
@@ -1129,7 +1231,7 @@ BEGIN
         );
 
     -- Log the API response for debugging
-    RAISE NOTICE 'API Response: % from functions', api_response, functions_in;
+    RAISE NOTICE 'API Response: % from functions %', api_response, functions_in;
 
     -- Extract tool calls from the response
     tool_calls := (api_response->'choices'->0->'message'->>'tool_calls')::JSONB;
@@ -1360,7 +1462,7 @@ DECLARE
     selected_scheme text;
     model_key text;
     last_session_status text;
-    functions jsonb;
+    functions text[];
     message_payload json;
     tool_eval_data_recovered jsonb;
 BEGIN
@@ -1438,7 +1540,7 @@ BEGIN
     -- 4. Handle tool evaluation data recovery (using get_agent_tools function)
     BEGIN
         -- Call the get_agent_tools function to fetch tools for the agent
-        SELECT p8.get_agent_tools(recovered_agent, selected_scheme, FALSE) INTO functions;
+        SELECT p8.get_agent_tool_names(recovered_agent, selected_scheme, TRUE) INTO functions;
         
         -- If functions is NULL, log error and return
         IF functions IS NULL THEN
@@ -1461,7 +1563,7 @@ BEGIN
     FROM p8.ask(
         message_payload::json, 
         recovered_session_id, 
-        functions::json, 
+        functions, 
         model_key, 
         token_override, 
         user_id
@@ -1477,12 +1579,12 @@ ALTER FUNCTION p8.resume_session(uuid, text)
 
 -- FUNCTION: p8.ask(json, uuid, json, text, text, uuid)
 
--- DROP FUNCTION IF EXISTS p8.ask(json, uuid, json, text, text, uuid);
+DROP FUNCTION IF EXISTS p8.ask;
 
 CREATE OR REPLACE FUNCTION p8.ask(
 	message_payload json,
 	session_id uuid DEFAULT NULL::uuid,
-	functions_in json DEFAULT NULL::json,
+	functions_names TEXT[] DEFAULT NULL::TEXT[],
 	model_name text DEFAULT 'gpt-4o-mini'::text,
 	token_override text DEFAULT NULL::text,
 	user_id uuid DEFAULT NULL::uuid)
@@ -1513,6 +1615,7 @@ DECLARE
     tokens_out INTEGER;
     response_id UUID;
 	ack_http_timeout BOOLEAN;
+    functions_in JSON;
 BEGIN
 	/*
 	take in a message payload etc and call the correct request for each scheme
@@ -1541,16 +1644,14 @@ BEGIN
         INTO session_id;
     END IF;
 
-    -- Determine functions if none provided
-    -- this would need to be scheme based
-    -- IF functions_in IS NULL THEN
-    --     SELECT json_agg(spec)
-    --     INTO functions_in
-	-- 	--we truncate here
-    --     FROM p8.get_tools_by_description(LEFT(message_payload::TEXT, 1000));
-    -- END IF;
- 
-	
+    -- Generate a new response UUID using session_id and content ID
+    SELECT p8.json_to_uuid(json_build_object('sid', session_id, 'ts',CURRENT_TIMESTAMP::TEXT)::JSONB)
+    INTO response_id;
+
+    --get the functions requested for the agent and including merging in from the session
+    functions_in = p8.get_session_functions(session_id, functions_names, selected_scheme);
+
+    RAISE NOTICE 'scheme %: we have functions % ', selected_scheme, functions_names;
     -- Make the API request based on scheme
     --we return RETURNS TABLE(message_response text, tool_calls jsonb, tool_call_result jsonb, session_id_out uuid, status TEXT)
     --RETURNS TABLE(content TEXT,tool_calls_out JSON,tokens_in INTEGER,tokens_out INTEGER,finish_reason TEXT,api_error JSONB) AS
@@ -1579,9 +1680,7 @@ BEGIN
         status_audit := 'COMPLETED';
     END IF;
 
-    -- Generate a new response UUID using session_id and content ID
-    SELECT p8.json_to_uuid(json_build_object('sid', session_id, 'ts',CURRENT_TIMESTAMP::TEXT)::JSONB)
-    INTO response_id;
+
     
 	--RAISE NOTICE 'LLM Gave finish reason and tool calls %, % - we set status %', finish_reason, tool_calls, status_audit;
 	
@@ -1620,10 +1719,10 @@ BEGIN
 
     -- Insert into p8.AIResponse table
     INSERT INTO p8."AIResponse" 
-        (id, model_name, content, tokens_in, tokens_out, session_id, role, status, tool_calls, tool_eval_data)
+        (id, model_name, content, tokens_in, tokens_out, session_id, role, status, tool_calls, tool_eval_data,function_stack)
     VALUES 
         (response_id, selected_model, COALESCE(result_set, ''), COALESCE(tokens_in, 0), COALESCE(tokens_out, 0), 
-        session_id, 'assistant', status_audit, tool_calls, tool_results)
+        session_id, 'assistant', status_audit, tool_calls, tool_results,functions_names)
     ON CONFLICT (id) DO UPDATE SET
         model_name    = EXCLUDED.model_name, 
         content       = EXCLUDED.content,
@@ -1633,7 +1732,8 @@ BEGIN
         role          = EXCLUDED.role,
         status        = EXCLUDED.status,
         tool_calls    = EXCLUDED.tool_calls,
-        tool_eval_data = EXCLUDED.tool_eval_data;
+        tool_eval_data = EXCLUDED.tool_eval_data,
+		 function_stack = ARRAY(SELECT DISTINCT unnest(p8."AIResponse".function_stack || EXCLUDED.function_stack));
 
 
     -- Return results
@@ -1645,10 +1745,7 @@ EXCEPTION
         RAISE EXCEPTION 'ASK API call failed: % % response id %', SQLERRM, result_set, api_response->'id';
 END;
 $BODY$;
-
-ALTER FUNCTION p8.ask(json, uuid, json, text, text, uuid)
-    OWNER TO postgres;
-
+ 
 
 ---------
 
@@ -2027,9 +2124,9 @@ ALTER FUNCTION p8.google_to_open_ai_response(jsonb)
 ---------
 
 CREATE OR REPLACE FUNCTION p8.get_canonical_messages(
-    session_id_in UUID,  -- Normal usage: use the question and prompt from the session
-    question TEXT DEFAULT NULL,  -- This can override the question
-    override_system_prompt TEXT DEFAULT NULL  -- This can override the system prompt or match an agent
+    session_id_in UUID,  
+    question TEXT DEFAULT NULL,  
+    override_system_prompt TEXT DEFAULT NULL  
 ) 
 RETURNS TABLE(messages JSON, last_role TEXT, last_updated_at TIMESTAMP WITHOUT TIME ZONE) 
 LANGUAGE plpgsql
@@ -2054,7 +2151,6 @@ BEGIN
 
     -- Check if session exists
     IF recovered_session_id IS NULL THEN
-        -- Return null values for the session-related fields if session does not exist
         RETURN QUERY 
         SELECT NULL::JSON, NULL::TEXT, NULL::TIMESTAMP;
         RETURN;
@@ -2076,7 +2172,6 @@ BEGIN
         SELECT content, role, tool_calls, tool_eval_data, created_at
         FROM p8."AIResponse" a
         WHERE a.session_id = session_id_in
-        ORDER BY created_at ASC
     ),
     max_session_data AS (
         -- Get the last role and most recent timestamp
@@ -2085,42 +2180,54 @@ BEGIN
         ORDER BY created_at DESC
         LIMIT 1
     ),
-    message_data AS (
-        -- Construct system, user, and session messages
-        SELECT 'system' AS role, 
+    extracted_messages AS (
+        -- Extract all messages in a structured way while keeping order
+        SELECT NULL::TIMESTAMP as created_at, 'system' AS role, 
                COALESCE(override_system_prompt, generated_system_prompt) AS content, 
-               NULL::JSON AS tool_calls, 
-               NULL::TEXT AS tool_call_id
+               NULL::TEXT AS tool_call_id,
+			   NULL::JSON as tool_calls,
+			   0 as rank
         UNION ALL
-        SELECT 'user' AS role, 
+        SELECT NULL::TIMESTAMP as created_at, 'user' AS role, 
                COALESCE(question, recovered_question) AS content, 
-               NULL::JSON AS tool_calls, 
-               NULL::TEXT AS tool_call_id
+               NULL::TEXT AS tool_call_id,
+			    NULL::JSON as tool_calls,
+			   1 as rank
         UNION ALL
-        -- Generate one row for assistant tool call summary
-        SELECT 'assistant' AS role,
-               'tools called...' AS content,
-               tool_calls,
-               NULL AS tool_call_id
-        FROM session_data 
-        WHERE tool_calls IS NOT NULL
-        UNION ALL
-        -- Generate multiple rows from tool_eval_data JSON array with a tool call id on each
-        SELECT 'tool' AS role,
-               el->>'data' AS content,
-               NULL AS tool_calls,
-               el->>'id' AS tool_call_id
+        SELECT created_at, 'assistant' AS role, 
+               'Calling ' || (el->>'function')::TEXT AS content,
+               el->>'id' AS tool_call_id,
+			   tool_calls,
+			   2 as rank
         FROM session_data, 
-             LATERAL jsonb_array_elements(tool_eval_data::JSONB) el  -- Properly extracting JSON array elements
+             LATERAL jsonb_array_elements(tool_calls::JSONB) el
+        WHERE tool_calls IS NOT NULL
+         UNION ALL
+        -- Extract tool responses
+        SELECT created_at, 'tool' AS role,
+               'Responded ' || (el->>'data')::TEXT AS content,
+               el->>'id' AS tool_call_id,
+			   NULL::JSON as tool_calls,
+			   2 as rank
+        FROM session_data, 
+             LATERAL jsonb_array_elements(tool_eval_data::JSONB) el
         WHERE tool_eval_data IS NOT NULL
     ),
+    ordered_messages AS (
+        -- Order all extracted messages by created_at
+        SELECT role, content, tool_calls, tool_call_id
+        FROM extracted_messages
+        ORDER BY rank, created_at ASC
+    ),
     jsonrow AS (
-        SELECT json_agg(row_to_json(message_data)) AS messages
-        FROM message_data
+        -- Convert ordered messages into JSON
+        SELECT json_agg(row_to_json(ordered_messages)) AS messages
+        FROM ordered_messages
     )
+    -- Return JSON messages with metadata
     SELECT * 
     FROM jsonrow 
-    LEFT JOIN max_session_data ON true;  -- Use LEFT JOIN to ensure rows are returned even if no session data is found
+    LEFT JOIN max_session_data ON true;
 
 END;
 $BODY$;
@@ -2769,6 +2876,7 @@ $BODY$;
 
 ---------
 
+
 DROP FUNCTION IF EXISTS p8.get_agent_tools;
 CREATE OR REPLACE FUNCTION p8.get_agent_tools(
     recovered_agent TEXT,
@@ -2786,28 +2894,10 @@ select * from p8.get_agent_tools('p8.Agent', NULL, FALSE)
 select * from p8.get_agent_tools('p8.Agent', NULL, TRUE)
 select * from p8.get_agent_tools('p8.Agent', 'google')
 
-
 */
-    -- Get tool names from Agent functions
-    SELECT ARRAY(
-        SELECT jsonb_object_keys(a.functions::JSONB)
-        FROM p8."Agent" a
-        WHERE a.name = recovered_agent AND a.functions IS NOT NULL
-    ) INTO tool_names_array;
 
-     -- Add percolate tools if the parameter is true
-    IF add_percolate_tools THEN
-        -- Augment the tool_names_array with the percolate tools
-        -- These are the standard percolate tools that are added unless the entity deactivates them
-        -- TODO add this to a settings
-        tool_names_array := tool_names_array || ARRAY[
-            'help', 
-            'get_entities', 
-            'search', 
-            'announce_generate_large_output',
-            'activate_function_by_name'
-        ];
-    END IF;
+    SELECT p8.get_agent_tool_names(recovered_agent,selected_scheme,add_percolate_tools) into tool_names_array;
+
     
     -- Fetch tool data if tool names exist
     IF tool_names_array IS NOT NULL THEN
@@ -3494,6 +3584,53 @@ BEGIN
     RETURN result;
 END;
 $BODY$;
+
+---------
+
+
+DROP FUNCTION IF EXISTS p8.get_agent_tool_names;
+CREATE OR REPLACE FUNCTION p8.get_agent_tool_names(
+    recovered_agent TEXT,
+    selected_scheme TEXT DEFAULT  'openai',
+    add_percolate_tools BOOLEAN DEFAULT TRUE
+)
+RETURNS TEXT[] AS $$
+DECLARE
+    tool_names_array TEXT[];
+    functions JSONB;
+BEGIN
+
+/*
+select * from p8.get_agent_tool_names('p8.Agent', NULL, FALSE)
+select * from p8.get_agent_tool_names('p8.Agent', NULL, TRUE)
+select * from p8.get_agent_tool_names('p8.Agent', 'google')
+
+*/
+    -- Get tool names from Agent functions
+    SELECT ARRAY(
+        SELECT jsonb_object_keys(a.functions::JSONB)
+        FROM p8."Agent" a
+        WHERE a.name = recovered_agent AND a.functions IS NOT NULL
+    ) INTO tool_names_array;
+
+     -- Add percolate tools if the parameter is true
+    IF add_percolate_tools THEN
+        -- Augment the tool_names_array with the percolate tools
+        -- These are the standard percolate tools that are added unless the entity deactivates them
+        tool_names_array := tool_names_array || ARRAY[
+            'help', 
+            'get_entities', 
+            'search', 
+            'announce_generate_large_output',
+            'activate_functions_by_name'
+        ];
+    END IF;
+    
+    RETURN tool_names_array;
+END;
+$$ LANGUAGE plpgsql;
+
+
 
 ---------
 
