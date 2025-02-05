@@ -1,5 +1,18 @@
 import os
+from pathlib import Path
+from importlib import import_module
 
+def get_repo_root():
+    """the root directory of the project by convention"""
+    path = os.environ.get("P8_HOME")
+    if not path:
+        p8 = import_module("percolate")
+        path = str(Path(p8.__file__).resolve().parent.parent.parent.parent.parent)
+        return path
+    return path
+    
+P8_HOME = os.environ.get('P8_HOME', get_repo_root())
+STUDIO_HOME = f"{P8_HOME}/studio"
 P8_SCHEMA = 'p8'
 P8_EMBEDDINGS_SCHEMA = 'p8_embeddings'
 #
@@ -16,8 +29,6 @@ MINIO_SECRET = os.environ.get('MINIO_SECRET', 'percolate')
 MINIO_SERVER = os.environ.get('MINIO_SERVER', 'localhost:9000')
 MINIO_P8_BUCKET = 'percolate'
 #
-
-
 
 GPT_MINI = "gpt-4o-mini"
 DEFAULT_MODEL =   "gpt-4o-2024-08-06"
