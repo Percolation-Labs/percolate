@@ -32,7 +32,7 @@ We create new `Session` entries with user questions and then track each `AIRespo
 ***Outside the database, use your preferred language***
 
 Percolate focuses on building agents in the data tier. But you can use Python too. To create a Python agent (and also register it in the database) follow the example below.
-Below you will see an example of adding an agent that uses the `get_pet_findByStatus` function - (we show to register functions and apis below) -
+Below you will see an example of adding an agent that uses the `get_pet_findByStatus` function - (we show how to register functions and apis below) -
 
 ```python
 import percolate as p8
@@ -76,11 +76,14 @@ You have the option of installing the client or using it from source (recommende
 pip install percolate-db
 ```
 
-If you dont install the client you can use the cli from within the repo. You can use the poetry requirements to determine the requirements you need.
+You can also run the client directly from the python project directory `clients/python/percolate`
+- _You can use the poetry project to install or generate requirements_
 
-You can use the cli to apply data to your test database. This assumes you have launched the docker instance or you have connected to another instance of Percolate.
+Use the cli to apply data to your test database. 
+- _This assumes you have launched the docker instance or you have connected to another instance of Percolate._
 
-For example the command below will apply settings in the default 'project' under `/studio/projects/default`. You can also version control your projects and re-apply them later. 
+The command below will apply settings from a default 'project' under `/studio/projects/default`. 
+- _Projects in percolate manage configurations of data such as models, agents and apis. You can also version control your projects and re-apply them later._ 
 
 ```bash
 cd clients/python/percolate
@@ -89,7 +92,7 @@ python percolate/cli.py init
 #python percolate/cli.py add env --sync # just syncs envs
 ```
 
-You can use the Python client to add agents and APIs at a later time but projects are the easiest way to manage these tasks. If you do want to use the cli to add a test api you can - 
+Use the cli to add apis at any time - supply an optional bearer `token`
 
 ```bash
 python percolate/cli.py add api https://petstore.swagger.io/v2/swagger.json --verbs get
@@ -97,14 +100,13 @@ python percolate/cli.py add api https://petstore.swagger.io/v2/swagger.json --ve
 #p8 add api https://petstore.swagger.io/v2/swagger.json --verbs get
 ```
 
-If you register APIs, the functions can be found either by search or registering them as 'external functions' on agents. We say an example of registering an external function in the Python agent example above Functions become searchable once you add them via APIs -
+API functions can be attached by name to entities (as shown in the example above) pr searched once registered as below. This can be used by planning agents to find ad activate functions during reasoning chains.
 
 ```sql
 select * from p8.query_entity('I am looking for a function to get pets that have a sold status', 'p8.Function')
 ```
 
-
-Ask questions using whatever model(s) you have API keys for
+Ask questions using whatever model(s) you have API keys for -
 
 ```python
 p8.Agent(MyFirstAgent).run("List some pets that are sold") #this is using the api we registered above
@@ -113,13 +115,13 @@ p8.Agent(MyFirstAgent).run("List some pets that are sold") #this is using the ap
 #p8.Agent(MyFirstAgent).run("List some pets that are sold", 'gemini-1.5-flash')
 ```
 
-Also talk to your agent in the database
+Talk to your agent via the database -
 
 ```sql
 select * from percolate_with_agent('List some pets that are sold', 'MyAgent')
 ```
 
-When getting started you may find other cli utils useful - 
+When getting started you may find other cli utils useful too: 
 
 ```bash
 cd clients/python/percolate
@@ -135,7 +137,7 @@ python percolate/cli.py ask 'how do i connect to Percolate using docker compose'
 
 ### Installing To K8s
 
-To install Percolate to your K8s cluster simply apply the manifest below to your cluster. See the documentation for more details.
+To install Percolate to your K8s cluster apply the manifest below to your cluster. See the documentation for more details.
 
 ```yaml
 #percolate-cluster.yaml
