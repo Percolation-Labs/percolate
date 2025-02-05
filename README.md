@@ -4,16 +4,16 @@
 # Percolate - Build your AI directly in multi-modal Postgres
 ---
 
-Keep in touch - [Developer Docs](https://percolation-labs.gitbook.io/percolation-labs) - [Youtube](https://www.youtube.com/@PercolationLabs) - [Substack](https://ercolationlabs.substack.com/) - [Medium](https://medium.com/percolation-labs) - [PercolationLabs](https://percolationlabs.ai/) - [Bluesky](https://sky.app/profile/percolationlabs.bsky.social)
+Keep in touch - [Substack](https://ercolationlabs.substack.com/) - [Medium](https://medium.com/percolation-labs) - [Bluesky](https://sky.app/profile/percolationlabs.bsky.social) - [Developer Docs](https://percolation-labs.gitbook.io/percolation-labs) - [Youtube](https://www.youtube.com/@PercolationLabs) - [PercolationLabs](https://percolationlabs.ai/)
 
 ---
 **Note: This codebase is under active development.** 
 
-Percolate is a relational-vector-graph/key-value database for building agentic systems. It provides a foundation for you to manage tools, models and agents in one place and build applications that scale in complexity. Percolate pushes agentic AI down into Postgres which simplifies the application tier. Currently we have implemented the Python client but we will add more clients soon. 
+Percolate is a relational-vector-graph/key-value database for building agentic systems. It provides a foundation for you to manage tools, models and agents in one place and build applications that scale in complexity. Percolate pushes agentic AI down into Postgres which simplifies the application tier. Currently we have implemented the Python client but we will add more clients soon!
 
 - Get setup in a few minutes by launching the Percolate instance on docker. 
 - Use the cli from source to initialize data within your local instance (see notes below).
-- Use Percolate without your preferred postgres client without any other programming language. 
+- Use Percolate with your preferred postgres client without any other programming language. 
 
 
 ```sql
