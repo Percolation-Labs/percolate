@@ -23,49 +23,12 @@ select * from percolate('how can percolate help me with creating agentic systems
 When you interact with language models in Percolate, conversations are naturally logged in your instance for audit, analysis and optimization.
 We create new `Session` entries with user questions and then track each `AIResponse`, which may include tool calls and evaluations. One of the things Percolate is useful for is _resuming_ and replaying sessions or getting a better understanding of the payloads that are sent to LLM Apis.
 
+## Outside the database, use your preferred language
 
-## Easy set up
-
-The easiest way to get started is simply to launch the docker instance and connect to postgres using your preferred client on port 5438 using `postgres:postgres` to login
-
-```bash
-docker compose up -d
-```
-
----
-
-You have the option of installing the client or using it from source (recommended). To install the python client locally 
-
-```bash
-pip install percolate-db
-```
-
-If you dont install the client you can use the cli from within the repo. For example the command below will sync env keys for using language models into the dockerized postgres instance. 
-
-```bash
-cd clients/python/percolate
-python percolate/cli.py add env --sync
-```
-
-You can use the Python client to add agents and APIs. Use the cli to add a test api. This assumes you have launched the docker instance or you have connected to another instance of Percolate.
-
-```bash
-p8 add api https://petstore.swagger.io/v2/swagger.json --verbs get
-#OR if using the python client as mentioned above
-#python percolate/cli.py add api https://petstore.swagger.io/v2/swagger.json --verbs get
-```
-
-If you register APIs the functions can be found either by search or registering them as functions on agents. Sometimes a hybrid search like this might work on the functions
-
-```sql
-select * from p8.query_entity('I am looking for a function to get pets that have a sold status', 'p8.Function')
-```
-
-Percolate focuses on building agents in the data tier. But you can use Python too.  To create a Python agent (and also register it in the database).
-Below you will see an example of adding an agent that uses the get pet by status function that we just registered.
+Percolate focuses on building agents in the data tier. But you can use Python too. To create a Python agent (and also register it in the database) follow the example below.
+Below you will see an example of adding an agent that uses the `get_pet_findByStatus` function - (we show to register functions and apis below) -
 
 ```python
-
 import percolate as p8
 from pydantic import BaseModel,Field
 import typing
@@ -90,6 +53,50 @@ class MyFirstAgent(BaseModel):
 #you do not not need to register the agent to use the Python examples.
 p8.repository(MyFirstAgent).register()
 ```
+
+## Easy set up
+
+The easiest way to get started is simply to launch the docker instance and connect to postgres using your preferred client on port 5438 using `postgres:postgres` to login
+
+```bash
+docker compose up -d
+```
+
+---
+
+You have the option of installing the client or using it from source (recommended). To install the python client locally 
+
+```bash
+pip install percolate-db
+```
+
+If you dont install the client you can use the cli from within the repo. You can use the poetry requirements to determine the requirements you need.
+
+You can use the cli to apply data to your test database. This assumes you have launched the docker instance or you have connected to another instance of Percolate.
+
+For example the command below will apply settings in the default 'project' under `/studio/projects/default`. You can also version control your projects and re-apply them later. 
+
+```bash
+cd clients/python/percolate
+#the default project syncs env, indexes docs in codebase and adds the test api(s) as illustrated in the next step
+python percolate/cli.py init
+#python percolate/cli.py add env --sync # just syncs envs
+```
+
+You can use the Python client to add agents and APIs at a later time but projects are the easiest way to manage these tasks. If you do want to use the cli to add a test api you can - 
+
+```bash
+python percolate/cli.py add api https://petstore.swagger.io/v2/swagger.json --verbs get
+#of if using percolate-db installation,
+#p8 add api https://petstore.swagger.io/v2/swagger.json --verbs get
+```
+
+If you register APIs, the functions can be found either by search or registering them as 'external functions' on agents. We say an example of registering an external function in the Python agent example above Functions become searchable once you add them via APIs -
+
+```sql
+select * from p8.query_entity('I am looking for a function to get pets that have a sold status', 'p8.Function')
+```
+
 
 Ask questions using whatever model(s) you have API keys for
 

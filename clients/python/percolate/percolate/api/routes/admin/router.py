@@ -11,6 +11,7 @@ from percolate.services import PostgresService
 from percolate.models.p8 import IndexAudit
 from percolate.utils import logger
 import traceback
+from percolate.utils.studio import Project, apply_project
 
 @router.post("/env/sync")
 async def sync_env(user: dict = Depends(get_current_token)):
@@ -45,6 +46,17 @@ async def add_api( request:AddAgentRequest,  user: dict = Depends(get_current_to
     Functions can be registered via the add APIs endpoint.
     """
     return Response(content=json.dumps({'status':'ok'}))
+
+@router.post("/add/project")
+async def add_project( project: Project,  user: dict = Depends(get_current_token)):
+    """Post the project yaml/json file to apply the settings. This can be used to add apis, agents and models. 
+    
+    - If you have set environment keys in your API we will sync these to your database if the `sync-env` flag is set in the project options
+    - If you want to index the Percolation documentation set the flag `index-docs`
+    """
+    results = apply_project(project)
+    return Response(content=json.dumps(results))
+
 
 @router.get("/slow-endpoint")
 async def slow_response():

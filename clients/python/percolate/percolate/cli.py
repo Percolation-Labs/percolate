@@ -93,6 +93,17 @@ def index():
     from percolate.utils.index import index_codebase
     index_codebase()
 
+@app.command()
+def init(
+    name: str = typer.Argument("default", help="The name of the project to apply"),
+):
+    from percolate.utils.studio import apply_project
+    typer.echo(f"I'll apply project [{name}] to the database")
+    status = apply_project(name)
+    
+    
+
+
 # Ask command with a default question parameter and flags for agent and model
 @app.command()
 def ask( 
