@@ -257,7 +257,7 @@ class IndexAudit(TokenUsage):
     
 class _OpenAIMessage(BaseModel):
     role: str
-    content: typing.Optional[str] = Field('', desscription='text content')
+    content: typing.Optional[str] = Field('', description='text content')
     tool_calls: typing.Optional[typing.List[dict]|dict]
     tool_call_id: typing.Optional[str] = None
     
