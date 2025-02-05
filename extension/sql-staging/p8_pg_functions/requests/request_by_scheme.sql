@@ -66,7 +66,7 @@ BEGIN
         );
 
     -- Log the API response for debugging
-    RAISE NOTICE 'API Response: % from functions %', api_response, functions_in;
+    --RAISE NOTICE 'API Response: % from functions %', api_response, functions_in;
 
     -- Extract tool calls from the response
     tool_calls := (api_response->'choices'->0->'message'->>'tool_calls')::JSONB;
@@ -78,7 +78,7 @@ BEGIN
     tokens_out := (api_response->'usage'->>'completion_tokens')::INTEGER;
     finish_reason := (api_response->'choices'->0->>'finish_reason')::TEXT;
 	
-RAISE NOTICE 'WE HAVE % %', result_set, finish_reason;
+    --RAISE NOTICE 'WE HAVE % %', result_set, finish_reason;
 
     -- Return the results
     RETURN QUERY
