@@ -36,19 +36,36 @@ def help(questions:typing.List[str]):
     pass
 
 
-def announce_generate_large_output(self, estimated_length:int=None):
+def announce_generate_large_output(estimated_length:int=None):
     """When you are about to generate a lot of output (for example over 2500 tokens or something that will take more that 4 seconds to generate), please call this function with a rough estimate of the size of the content.
     You do not need to do this when you are responding with simple structured responses which are typically small or with simple answers.
     However when generating lots of text we would like to request via streaming or async so we want to know before generating a lot of text.
     We use this strategy to distinguish internal content gathering nodes from final response generation for users.
+    
+    Args:
+        estimated_length: estimated length in tokens of the generated content
     """
 
     pass
 
+def activate_functions_by_name(function_names: typing.List[str]):
+    """Use this function to request a function that you do not have access to and it will be added to the function stack
+    
+    Args:
+        function_names: a list of one or more functions to add
+    """
+
+    pass
 
     
 def get_native_functions():
-    """get the native functions so they can be saved as models to the database"""
+    """get the native functions so they can be saved as models to the database
+    The p8.get_agent_tools will add these by default to all agents
+    """
     from percolate.models.p8 import Function
-    fns = [get_entities,search,help,announce_generate_large_output]
+    fns = [get_entities,
+           search,
+           help,
+           announce_generate_large_output, 
+           activate_functions_by_name]
     return [Function.from_callable(f, proxy_uri='native') for f in fns]
