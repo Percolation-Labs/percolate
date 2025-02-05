@@ -16,17 +16,17 @@ import uuid
 class PostgresService:
     """the postgres service wrapper for sinking and querying entities/models"""
 
-    def __init__(self, model: BaseModel = None, conn=None, on_connect_error: str = None):
+    def __init__(self, model: BaseModel = None, connection_string=None, on_connect_error: str = None):
         try:
+            self._connection_string = connection_string or POSTGRES_CONNECTION_STRING
             self.conn = None
             self.helper = SqlModelHelper(AbstractModel)  
-            
             if model:
                 """we do this because its easy for user to assume the instance is what we want instead of the type"""
                 self.model = AbstractModel.Abstracted(ensure_model_not_instance(model))
                 self.helper:SqlModelHelper = SqlModelHelper(model) 
             else: self.model=None
-            self.conn = conn or psycopg2.connect(POSTGRES_CONNECTION_STRING)
+            self.conn = psycopg2.connect(self._connection_string)
 
         except:
             if on_connect_error != 'ignore':
@@ -35,6 +35,30 @@ class PostgresService:
                     "Could not connect - you will need to check your env and call pg._connect again"
                 )
             
+    def _create_db(self,name:str):
+        """this util is to create a test database primarily"""
+        
+        self.conn.autocommit = True   
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(f"""SELECT 1 FROM pg_database WHERE datname = '{name}';""")
+            exists = cursor.fetchone()
+
+            if not exists:
+                logger.info(f"Creating database: {name}")
+                cursor.execute(f"CREATE DATABASE {name};")
+            else:
+                logger.debug(f"Database {name} already exists.")
+
+            cursor.close()
+            self.conn.close()
+        except Exception as ex:
+            logger.debug(ex)
+            raise
+        finally:
+            pass
+        
+            
     def __repr__(self):
         return f"PostgresService({self.model.get_model_full_name() if self.model else None}, {POSTGRES_SERVER=}, {POSTGRES_DB=})"
             
@@ -42,22 +66,22 @@ class PostgresService:
         """util to retry opening closed connections in the service"""
         @retry(wait=wait_fixed(1), stop=stop_after_attempt(4), reraise=True)
         def open_connection_with_retry(conn_string):
-            return psycopg2.connect(conn_string, connect_timeout=DEFAULT_CONNECTION_TIMEOUT) 
+            return psycopg2.connect(conn_string, connect_timeout=5) 
         try:
             if self.conn is None:
-                self.conn = open_connection_with_retry(POSTGRES_CONNECTION_STRING)
+                self.conn = open_connection_with_retry(self._connection_string)
             self.conn.poll()
         except psycopg2.InterfaceError as error:
             self.conn = None #until we can open it, lets not trust it
-            self.conn = open_connection_with_retry(POSTGRES_CONNECTION_STRING)
+            self.conn = open_connection_with_retry(self._connection_string)
 
     def _connect(self):
-        self.conn = psycopg2.connect(POSTGRES_CONNECTION_STRING)
+        self.conn = psycopg2.connect(self._connection_string)
         return self.conn
 
     def repository(self, model: BaseModel, **kwargs) -> "PostgresService":
         """a connection in the context of the abstract model for crud support"""
-        return PostgresService(model=model, conn=self.conn, **kwargs)
+        return PostgresService(model=model, connection_string=self._connection_string, **kwargs)
 
     def get_entities(self, keys: str | typing.List[str]):
         """

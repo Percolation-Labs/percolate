@@ -255,12 +255,19 @@ from percolate.services.llm.LanguageModel import OpenAIResponseScheme, Anthropic
 
 #TODO: fill in tests
 
+class _ResponseStub:
+  def __init__(self, data):
+      self.data = data
+  def json(self):
+    return self.data
+  
 def test_parses_response_openai():
-    r = OpenAIResponseScheme.parse(expected_out_examples_no_tools['gpt-4o-mini'],sid=None)
+   
+    r = OpenAIResponseScheme.parse(_ResponseStub(expected_out_examples_no_tools['gpt-4o-mini']),sid=None, model_name='gpt-4o-mini')
     assert r.tokens == 84 and r.content == 'The capital of Ireland is Dublin. \n\nOne fun fact about Dublin is that it is home to the famous Guinness Storehouse, where the iconic stout beer is brewed. The Storehouse features an exhibition on the history of Guinness, and visitors can enjoy a pint with a panoramic view of the city from the Gravity Bar!'
 
 def test_parses_response_anthropic():
-    AnthropicAIResponseScheme.parse(expected_out_examples_no_tools['claude-3-5-sonnet-20241022'],sid=None)    
+    AnthropicAIResponseScheme.parse(_ResponseStub(expected_out_examples_no_tools['claude-3-5-sonnet-20241022']),sid=None, model_name='claude-3-5-sonnet-20241022')    
 
 def test_parses_response_google():
-    GoogleAIResponseScheme.parse(expected_out_examples_no_tools['gemini-1.5-flash'],sid=None, model_name='gemini-1.5-flash')
+    GoogleAIResponseScheme.parse(_ResponseStub(expected_out_examples_no_tools['gemini-1.5-flash']),sid=None, model_name='gemini-1.5-flash')

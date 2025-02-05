@@ -24,16 +24,24 @@ def get_p8_models():
 
 from .p8 import * 
 
-def bootstrap(apply:bool = False, root='../../../../extension/'):
+def bootstrap(apply:bool = False, apply_to_test_database: bool= True, root='../../../../extension/'):
     """util to generate the sql that we use to setup percolate"""
 
     from percolate.models.p8 import sample_models
     from percolate.models.utils import SqlModelHelper
     from percolate.services import PostgresService
+    from percolate.utils.env import TESTDB_CONNECTION_STRING
     from percolate.models.p8.native_functions import get_native_functions
-    pg = PostgresService(on_connect_error='ignore')
     import glob
- 
+    
+    pg = PostgresService(on_connect_error='ignore')
+    
+    if apply_to_test_database:
+        print('Using test database and will create it if it does not exist')
+        apply = True
+        pg._create_db('test')
+        pg = PostgresService(connection_string=TESTDB_CONNECTION_STRING)
+        
     root = root.rstrip('/')
     print('********Building queries*******')
     """build a list of models we want to init with"""
@@ -73,15 +81,16 @@ def bootstrap(apply:bool = False, root='../../../../extension/'):
         f.write(script)
         
     if apply:
-        _test_apply(root=root)
+        _test_apply(root=root, pg=pg)
         
-def _test_apply(root='../../../../extension/'):
+def _test_apply(root='../../../../extension/', pg = None):
     """
     these are utility test methods - but we will add them to an automated deployment test script later
+    passing the database in e.g. in test mode - we will clean this up later
     """
     
     from percolate.services import PostgresService
-    pg = PostgresService()
+    pg = pg or PostgresService()
 
     print('*****applying sql schema...******')
     print()

@@ -23,6 +23,10 @@ fastapi = "^0.115.8"
 minio = "^7.2.15"
 python-multipart = "^0.0.20"
 
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')"
+]
 
 [build-system]
 requires = ["poetry-core"]
