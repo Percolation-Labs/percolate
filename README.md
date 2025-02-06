@@ -12,7 +12,7 @@ _Percolate_ is a relational-vector-graph/key-value database for building agentic
 
 Percolate pushes agentic workflows into the data tier, leading to a simpler application tier.  
 
-- Get setup in a few minutes by launching the Percolate instance on docker. 
+- Get set up in a few minutes by launching the Percolate instance on docker. 
 - Use the cli from source to initialize data within your local instance (see notes below).
 - Use Percolate with your preferred Postgres client, without any other programming language. 
 
@@ -118,9 +118,9 @@ API functions can be attached by name to entities (as shown in the example above
 select * from p8.query_entity('I am looking for a function to get pets that have a sold status', 'p8.Function')
 ```
 
-Because the function is evaluated you can run an entire pipeline from the database.
+Because the function can be evaluated from the database, you can run an entire tool calling pipeline from the database.
 
-- in practice we do not do this synchrously and this is just used to ilustrate. If the models are not overloaded this can take about 5 seconds but if models are overloaded it could take up to 25 seconds
+- in practice we do not do this synchronously and this is just used to illustrate. If the models are not overloaded this can take about 5 seconds but if models are overloaded it could take up to 25 seconds
 
 ```sql
 --this runs multiple turns to find a function, activate it, call the API that was registered above and then interpret the results
