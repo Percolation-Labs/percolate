@@ -7,13 +7,14 @@
 Keep in touch - [Substack](https://ercolationlabs.substack.com/) - [Medium](https://medium.com/percolation-labs) - [Bluesky](https://sky.app/profile/percolationlabs.bsky.social) - [Developer Docs](https://percolation-labs.gitbook.io/percolation-labs) - [Youtube](https://www.youtube.com/@PercolationLabs) - [PercolationLabs](https://percolationlabs.ai/)
 
 ---
-**Note: This codebase is under active development.** 
 
-Percolate is a relational-vector-graph/key-value database for building agentic systems. It provides a foundation for you to manage tools, models and agents in one place and build applications that scale in complexity. Percolate pushes agentic AI down into Postgres which simplifies the application tier. Currently we have implemented the Python client but we will add more clients soon!
+_Percolate_ is a relational-vector-graph/key-value database for building agentic systems. It provides a foundation for you to manage tools, models and agents in one place and build applications that scale in complexity. 
+
+Percolate pushes agentic workflows into the data tier, leading to a simpler application tier.  
 
 - Get setup in a few minutes by launching the Percolate instance on docker. 
 - Use the cli from source to initialize data within your local instance (see notes below).
-- Use Percolate with your preferred postgres client without any other programming language. 
+- Use Percolate with your preferred Postgres client, without any other programming language. 
 
 
 ```sql
@@ -26,12 +27,12 @@ select * from percolate('how can percolate help me with creating agentic systems
   'deepseek-chat')
 ```
 
-When you interact with language models in Percolate, conversations are naturally logged in your instance for audit, analysis and optimization.
-We create new `Session` entries with user questions and then track each `AIResponse`, which may include tool calls and evaluations. One of the things Percolate is useful for is _resuming_ and replaying sessions or getting a better understanding of the payloads that are sent to LLM Apis.
+When you interact with language models in Percolate, conversations are logged in your instance for audit, analysis and optimization.
+We create new `Session` records with user questions and track each `AIResponse`, which may include tool calls and evaluations. One of the ways Percolate is useful is for _resuming_ and replaying sessions or getting a better understanding of the payloads that are sent to LLM Apis.
 
-***Outside the database, use your preferred language***
+**Outside the database, use your preferred language**
 
-Percolate focuses on building agents in the data tier. But you can use Python too. To create a Python agent (and also register it in the database) follow the example below.
+Percolate focuses on building agents from the data tier. But you can use Python too. To create a Python agent (and also register it in the database) follow the example below.
 Below you will see an example of adding an agent that uses the `get_pet_findByStatus` function - (we show how to register functions and apis below) -
 
 ```python
@@ -45,7 +46,7 @@ class MyFirstAgent(BaseModel):
     #because it has no config it will save to the public database schema
     
     name: str = Field(description="Task name")
-    #the default embedding field just settings json_schema_extra.embedding_provider so you can do that yourself
+    #the default embedding field is just settings json_schema_extra.embedding_provider, so you can do that yourself
     description:str = DefaultEmbeddingField(description="Task description")
     
     @classmethod
@@ -70,7 +71,7 @@ docker compose up -d
 
 ---
 
-You have the option of installing the client or using it from source (recommended). To install the python client locally 
+You have the option of installing the client or using it from source (recommended). To install the python client 
 
 ```bash
 pip install percolate-db
