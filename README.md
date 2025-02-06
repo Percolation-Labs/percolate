@@ -4,7 +4,7 @@
 # Percolate - Build your AI directly in multi-modal Postgres
 ---
 
-Keep in touch - [Substack](https://ercolationlabs.substack.com/) - [Medium](https://medium.com/percolation-labs) - [Bluesky](https://sky.app/profile/percolationlabs.bsky.social) - [Developer Docs](https://percolation-labs.gitbook.io/percolation-labs) - [Youtube](https://www.youtube.com/@PercolationLabs) - [PercolationLabs](https://percolationlabs.ai/)
+Keep in touch - [Substack](https://ercolationlabs.substack.com/) - [Medium](https://medium.com/percolation-labs) - [Bluesky](https://sky.app/profile/percolationlabs.bsky.social) - [Developer Docs](https://percolation-labs.gitbook.io/percolation-labs) - [Youtube](https://www.youtube.com/@PercolationLabs) - [Percolation Labs](https://percolationlabs.ai/)
 
 ---
 
@@ -107,7 +107,16 @@ API functions can be attached by name to entities (as shown in the example above
 select * from p8.query_entity('I am looking for a function to get pets that have a sold status', 'p8.Function')
 ```
 
-Ask questions using whatever model(s) you have API keys for -
+Because the function is evaluated you can run an entire pipeline from the database.
+- in practice we do not do this synchrously and this is just used to ilustrate. If the models are not overloaded this can take about 5 seconds but if models are overloaded it could take up to 25 seconds
+
+```sql
+--this runs multiple turns to find a function, activate it, call the API that was registered above and then interpret the results
+-- we use the run function which has an iteration limit that defaults to 3 turns
+select * from run('please activate function get_pet_findByStatus and find two pets that are sold')
+```
+
+Back in Python, ask questions of your agent using whatever model(s) you have API keys for - gpt-4o is the default model -
 
 ```python
 p8.Agent(MyFirstAgent).run("List some pets that are sold") #this is using the api we registered above
@@ -116,11 +125,12 @@ p8.Agent(MyFirstAgent).run("List some pets that are sold") #this is using the ap
 #p8.Agent(MyFirstAgent).run("List some pets that are sold", 'gemini-1.5-flash')
 ```
 
-Talk to your agent via the database -
+Or talk to your agent via the database -
 
 ```sql
 select * from percolate_with_agent('List some pets that are sold', 'MyAgent')
 ```
+---
 
 When getting started you may find other cli utils useful too: 
 
@@ -181,14 +191,6 @@ Any issues or suggestions you add will hopefully make their way into our priorit
 
 ## Developers
 
-The Postgres Extension is being built in C and Zig. Instructions to install locally and develop the extension will be given below
-
-Note on Jupyter
-
-git attribute removes contents on commit
-```bash
-git config --global filter.strip-notebook-output.clean "jq --indent 1 '.cells[] |= if .outputs then .outputs = [] else . end | .metadata = {}' 2>/dev/null || cat"
-```
 
 ### Docker
 
@@ -208,11 +210,6 @@ You may in some cases want to update your /etc/hosts to resolve the server addre
 127.0.0.1 percolate-api
 ```
 
-## Tests
-
-WIP - run tests in the python directory with `pytest .` - at the moment there is a test application of the schema on a test database that assumes the docker instance is running.
-
-
 ## Connect and Learn
 
 To learn more about or stay up to date on Percolate, check out the links below. Subscribe to the channels below and we look forward to hearing from you. 
@@ -221,10 +218,9 @@ To learn more about or stay up to date on Percolate, check out the links below. 
 
 ---
 
-
 - [Docs](https://percolation-labs.gitbook.io/percolation-labs)
-- [Youtube](https://www.youtube.com/@PercolationLabs)
-- [Substack](https://percolationlabs.substack.com/)
 - [Medium](https://medium.com/percolation-labs)
-- [PercolationLabs](https://percolationlabs.ai/)
+- [Substack](https://percolationlabs.substack.com/)
+- [Youtube](https://www.youtube.com/@PercolationLabs)
 - [Bluesky](https://bsky.app/profile/percolationlabs.bsky.social)
+- [Percolation Labs](https://percolationlabs.ai/)
