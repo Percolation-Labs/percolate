@@ -18,14 +18,23 @@ Percolate pushes agentic workflows into the data tier, leading to a simpler appl
 
 
 ```sql
+-- quick ping/test
 select * from percolate('What is the capital of ireland?')
 --select * from percolate('What is the capital of ireland?', 'claude-3-5-sonnet-20241022')
 ```
 
 ```sql
+-- in my testing deep seek may be slow at times, especially with large content (via their api at least)
 select * from percolate('how can percolate help me with creating agentic systems', 
   'deepseek-chat')
+--cerebras model (lower context window but good for quick questions)
+select * from percolate('briefly describe percolate', 
+  'cerebras-llama3.1-8b')
+--
+select * from percolate('briefly describe percolate', 
+  'gemini-1.5-flash')
 ```
+
 
 When you interact with language models in Percolate, conversations are logged in your instance for audit, analysis and optimization.
 We create new `Session` records with user questions and track each `AIResponse`, which may include tool calls and evaluations. One of the ways Percolate is useful is for _resuming_ and replaying sessions or getting a better understanding of the payloads that are sent to LLM Apis.

@@ -1,9 +1,9 @@
     DROP FUNCTION IF EXISTS run;
 CREATE OR REPLACE FUNCTION run(
-    question text,
-    agent text DEFAULT 'p8.PercolateAgent',
-    model text DEFAULT 'gpt-4o-mini',
-    limit_iterations int DEFAULT 3
+    question text,                          --ask a hard question 
+    limit_iterations int DEFAULT 3,         -- the number of turns allowed 
+    model text DEFAULT 'gpt-4o-mini',       -- the model to use - gpt models are faster for this sort of thing usually
+    agent text DEFAULT 'p8.PercolateAgent'  -- you can use any agent, by default the Percolation agent is a general purpose agent that will ask for help if needed
 ) RETURNS TABLE (
     message_response text,
     tool_calls jsonb,
