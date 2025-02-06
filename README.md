@@ -21,6 +21,8 @@ Percolate pushes agentic workflows into the data tier, leading to a simpler appl
 -- quick ping/test
 select * from percolate('What is the capital of ireland?')
 --select * from percolate('What is the capital of ireland?', 'claude-3-5-sonnet-20241022')
+--select * from percolate('what is percolate', 'gemini-2.0-flash')
+--select * from percolate('what is percolate', 'gemini-2.0-flash-thinking-exp-01-21')
 ```
 
 ```sql
