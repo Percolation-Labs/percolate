@@ -19,8 +19,8 @@ P8_EMBEDDINGS_SCHEMA = 'p8_embeddings'
 POSTGRES_DB = "app"
 POSTGRES_SERVER = os.environ.get('P8_PG_HOST', 'localhost')
 POSTGRES_PORT = os.environ.get('P8_PG_PORT', 5438)
-POSTGRES_PASSWORD =  "postgres"
-POSTGRES_USER = "postgres"
+POSTGRES_PASSWORD = os.environ.get('P8_PG_PASSWORD', 'postgres') 
+POSTGRES_USER = os.environ.get('P8_PG_USER', 'postgres') 
 POSTGRES_CONNECTION_STRING = f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_SERVER}:{POSTGRES_PORT}/{POSTGRES_DB}"
 TESTDB_CONNECTION_STRING =  f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_SERVER}:{POSTGRES_PORT}/test"
 DEFAULT_CONNECTION_TIMEOUT = 30
@@ -43,10 +43,10 @@ def load_db_key(key = "P8_API_KEY"):
         return data[0]['value']
     
     
-def sync_model_keys() -> dict:
+def sync_model_keys(connection_string:str=None) -> dict:
     """look for any keys required and returns which there are and which are loaded in env"""
     from percolate.services import PostgresService
-    pg = PostgresService()
+    pg = PostgresService(connection_string=connection_string)
     rows = pg.execute(f"""select distinct token_env_key from p8."LanguageModelApi" """)
     
     d = {}
