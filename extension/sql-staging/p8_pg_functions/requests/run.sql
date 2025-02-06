@@ -1,9 +1,9 @@
-DROP FUNCTION IF EXISTS run;
+    DROP FUNCTION IF EXISTS run;
 CREATE OR REPLACE FUNCTION run(
     question text,
     agent text DEFAULT 'p8.PercolateAgent',
     model text DEFAULT 'gpt-4o-mini',
-    limit_iterations int DEFAULT 2
+    limit_iterations int DEFAULT 3
 ) RETURNS TABLE (
     message_response text,
     tool_calls jsonb,
@@ -14,7 +14,7 @@ CREATE OR REPLACE FUNCTION run(
 DECLARE
     session_id_captured uuid;
     current_row record;  -- To capture the row from resume_session
-    iterations int := 1;
+    iterations int := 1; -- default to 
 BEGIN
     /*
     this function is just for test/poc
@@ -42,13 +42,13 @@ BEGIN
 
     -- Loop to iterate until limit_iterations or status = 'COMPLETED'
     LOOP
-		RAISE NOTICE 'resuming session iteration %', iterations;
+		RAISE NOTICE '***resuming session, iteration %***', iterations+1;
         -- Call resume_session to resume the session and get the row
         SELECT * INTO current_row
         FROM p8.resume_session(session_id_captured);
         
         -- Check if the status is 'COMPLETED' or iteration limit reached
-        IF current_row.status = 'COMPLETED' OR iterations >= limit_iterations THEN
+        IF current_row.status = 'COMPLETED' OR iterations >= (limit_iterations-1) THEN
             EXIT;
         END IF;
         
