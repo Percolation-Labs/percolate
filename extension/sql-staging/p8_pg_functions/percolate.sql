@@ -1,6 +1,5 @@
--- DROP function percolate; 
--- DROP FUNCTION percolate_with_tools;
--- DROP FUNCTION percolate_with_agent;
+DROP FUNCTION percolate_with_tools;
+DROP FUNCTION percolate;
 
 CREATE OR REPLACE FUNCTION public.percolate(
     text TEXT,
@@ -10,17 +9,16 @@ CREATE OR REPLACE FUNCTION public.percolate(
     token_override TEXT DEFAULT NULL,
     temperature FLOAT DEFAULT 0.01
 )
-RETURNS TABLE(message_response TEXT, tool_calls JSONB, tool_call_result JSONB) AS $$
+RETURNS TABLE(
+    message_response text,
+    tool_calls jsonb,
+    tool_call_result jsonb,
+    session_id_out uuid,
+    status text
+)  AS $$
 BEGIN
     RETURN QUERY 
-    SELECT * FROM p8.ask_with_prompt_and_tools(
-        text, 
-        tool_names_in, 
-        system_prompt, 
-        model, 
-        token_override, 
-        temperature
-    );
+    SELECT * FROM percolate_with_agent(text,'p8.PercolateAgent');
 END;
 $$ LANGUAGE plpgsql;
 
@@ -33,17 +31,16 @@ CREATE OR REPLACE FUNCTION public.percolate_with_tools(
     token_override TEXT DEFAULT NULL,
     temperature FLOAT DEFAULT 0.01
 )
-RETURNS TABLE(message_response TEXT, tool_calls JSONB, tool_call_result JSONB) AS $$
+RETURNS TABLE(
+    message_response text,
+    tool_calls jsonb,
+    tool_call_result jsonb,
+    session_id_out uuid,
+    status text
+)  AS $$
 BEGIN
     RETURN QUERY 
-    SELECT * FROM p8.ask_with_prompt_and_tools(
-        question, 
-        tool_names_in, 
-        system_prompt, 
-        model_key, 
-        token_override, 
-        temperature
-    );
+    SELECT * FROM percolate_with_agent(text,'p8.PercolateAgent');
 END;
 $$ LANGUAGE plpgsql;
 

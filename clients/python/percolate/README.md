@@ -33,3 +33,17 @@ docker rm -f p8c
 ```
 
 
+
+## Tests
+
+WIP - run tests in the python directory with `pytest .` - at the moment there is a test application of the schema on a test database that assumes the docker instance is running.
+
+## Note on Jupyter
+
+There are a number of notebooks used for illustration and/or testing
+
+git attribute removes contents on commit to avoid checking in output cells.
+
+```bash
+git config --global filter.strip-notebook-output.clean "jq --indent 1 '.cells[] |= if .outputs then .outputs = [] else . end | .metadata = {}' 2>/dev/null || cat"
+```
