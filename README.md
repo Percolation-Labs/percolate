@@ -112,13 +112,14 @@ python percolate/cli.py add api https://petstore.swagger.io/v2/swagger.json --ve
 #p8 add api https://petstore.swagger.io/v2/swagger.json --verbs get
 ```
 
-API functions can be attached by name to entities (as shown in the example above) pr searched once registered as below. This can be used by planning agents to find ad activate functions during reasoning chains.
+API functions can be attached by name to entities (as shown in the example above) or searched once registered as below. This can be used by planning agents to find nd activate functions during reasoning chains.
 
 ```sql
 select * from p8.query_entity('I am looking for a function to get pets that have a sold status', 'p8.Function')
 ```
 
 Because the function is evaluated you can run an entire pipeline from the database.
+
 - in practice we do not do this synchrously and this is just used to ilustrate. If the models are not overloaded this can take about 5 seconds but if models are overloaded it could take up to 25 seconds
 
 ```sql
