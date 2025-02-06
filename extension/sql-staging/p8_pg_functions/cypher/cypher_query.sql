@@ -2,7 +2,7 @@
 drop function if exists public.cypher_query;
 CREATE OR REPLACE FUNCTION public.cypher_query(
     cypher_query TEXT,
-    return_columns TEXT DEFAULT 'result agtype',
+    return_columns TEXT DEFAULT 'result agtype', -- may just take names if they are all agtypes
     graph_name TEXT DEFAULT 'percolate'   
 )
 RETURNS TABLE(result JSONB)  -- Adapt dynamically based on return_columns

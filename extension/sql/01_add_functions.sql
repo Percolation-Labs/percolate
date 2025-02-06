@@ -97,9 +97,8 @@ $BODY$;
 
 ---------
 
--- DROP function percolate; 
--- DROP FUNCTION percolate_with_tools;
--- DROP FUNCTION percolate_with_agent;
+DROP FUNCTION percolate_with_tools;
+DROP FUNCTION percolate;
 
 CREATE OR REPLACE FUNCTION public.percolate(
     text TEXT,
@@ -109,17 +108,16 @@ CREATE OR REPLACE FUNCTION public.percolate(
     token_override TEXT DEFAULT NULL,
     temperature FLOAT DEFAULT 0.01
 )
-RETURNS TABLE(message_response TEXT, tool_calls JSONB, tool_call_result JSONB) AS $$
+RETURNS TABLE(
+    message_response text,
+    tool_calls jsonb,
+    tool_call_result jsonb,
+    session_id_out uuid,
+    status text
+)  AS $$
 BEGIN
     RETURN QUERY 
-    SELECT * FROM p8.ask_with_prompt_and_tools(
-        text, 
-        tool_names_in, 
-        system_prompt, 
-        model, 
-        token_override, 
-        temperature
-    );
+    SELECT * FROM percolate_with_agent(text,'p8.PercolateAgent');
 END;
 $$ LANGUAGE plpgsql;
 
@@ -132,17 +130,16 @@ CREATE OR REPLACE FUNCTION public.percolate_with_tools(
     token_override TEXT DEFAULT NULL,
     temperature FLOAT DEFAULT 0.01
 )
-RETURNS TABLE(message_response TEXT, tool_calls JSONB, tool_call_result JSONB) AS $$
+RETURNS TABLE(
+    message_response text,
+    tool_calls jsonb,
+    tool_call_result jsonb,
+    session_id_out uuid,
+    status text
+)  AS $$
 BEGIN
     RETURN QUERY 
-    SELECT * FROM p8.ask_with_prompt_and_tools(
-        question, 
-        tool_names_in, 
-        system_prompt, 
-        model_key, 
-        token_override, 
-        temperature
-    );
+    SELECT * FROM percolate_with_agent(text,'p8.PercolateAgent');
 END;
 $$ LANGUAGE plpgsql;
 
@@ -831,6 +828,45 @@ $$ LANGUAGE plpgsql;
 
 ---------
 
+
+drop function if exists public.cypher_query;
+CREATE OR REPLACE FUNCTION public.cypher_query(
+    cypher_query TEXT,
+    return_columns TEXT DEFAULT 'result agtype', -- may just take names if they are all agtypes
+    graph_name TEXT DEFAULT 'percolate'   
+)
+RETURNS TABLE(result JSONB)  -- Adapt dynamically based on return_columns
+LANGUAGE 'plpgsql'
+COST 100
+VOLATILE PARALLEL UNSAFE
+AS $BODY$
+DECLARE
+    sql_query TEXT;
+BEGIN
+	/*
+	run a cypher query against the graph
+	you need to name your select columns for multiple results
+		 
+ 	select * from public.cypher_query('MATCH (v) RETURN v');
+	*/
+
+    LOAD 'age';
+    SET search_path = ag_catalog, "$user", public;
+
+    -- Use the dynamic graph_name in the query
+    sql_query := 'WITH cypher_result AS (
+                    SELECT * FROM cypher(''' || graph_name || ''', $$' || cypher_query || '$$) 
+                    AS (' || return_columns || ')
+                  )
+                  SELECT to_jsonb(cypher_result) FROM cypher_result;';
+
+    RETURN QUERY EXECUTE sql_query;
+END;
+$BODY$;
+
+
+---------
+
 DROP FUNCTION IF EXISTS p8.get_google_messages;
 CREATE OR REPLACE FUNCTION p8.get_google_messages(
     session_id_in UUID,
@@ -975,12 +1011,12 @@ OWNER TO postgres;
 
 ---------
 
-DROP FUNCTION IF EXISTS run;
+    DROP FUNCTION IF EXISTS run;
 CREATE OR REPLACE FUNCTION run(
-    question text,
-    agent text DEFAULT 'p8.PercolateAgent',
-    model text DEFAULT 'gpt-4o-mini',
-    limit_iterations int DEFAULT 2
+    question text,                          --ask a hard question 
+    limit_iterations int DEFAULT 3,         -- the number of turns allowed 
+    model text DEFAULT 'gpt-4o-mini',       -- the model to use - gpt models are faster for this sort of thing usually
+    agent text DEFAULT 'p8.PercolateAgent'  -- you can use any agent, by default the Percolation agent is a general purpose agent that will ask for help if needed
 ) RETURNS TABLE (
     message_response text,
     tool_calls jsonb,
@@ -991,7 +1027,7 @@ CREATE OR REPLACE FUNCTION run(
 DECLARE
     session_id_captured uuid;
     current_row record;  -- To capture the row from resume_session
-    iterations int := 1;
+    iterations int := 1; -- default to 
 BEGIN
     /*
     this function is just for test/poc
@@ -1019,13 +1055,13 @@ BEGIN
 
     -- Loop to iterate until limit_iterations or status = 'COMPLETED'
     LOOP
-		RAISE NOTICE 'resuming session iteration %', iterations;
+		RAISE NOTICE '***resuming session, iteration %***', iterations+1;
         -- Call resume_session to resume the session and get the row
         SELECT * INTO current_row
         FROM p8.resume_session(session_id_captured);
         
         -- Check if the status is 'COMPLETED' or iteration limit reached
-        IF current_row.status = 'COMPLETED' OR iterations >= limit_iterations THEN
+        IF current_row.status = 'COMPLETED' OR iterations >= (limit_iterations-1) THEN
             EXIT;
         END IF;
         

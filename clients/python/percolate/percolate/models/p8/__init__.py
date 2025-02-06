@@ -11,8 +11,11 @@ sample_models = [
     LanguageModelApi(id = make_uuid('groq-llama-3.3-70b-versatile'), name = 'groq-llama-3.3-70b-versatile', model='llama-3.3-70b-versatile', scheme='openai', completions_uri='https://api.groq.com/openai/v1/chat/completions', token_env_key='GROQ_API_KEY'),
     LanguageModelApi(id = make_uuid('claude-3-5-sonnet-20241022'), name = 'claude-3-5-sonnet-20241022', scheme='anthropic', completions_uri='https://api.anthropic.com/v1/messages', token_env_key='ANTHROPIC_API_KEY'),
     LanguageModelApi(id = make_uuid('gemini-1.5-flash'), name = 'gemini-1.5-flash', scheme='google', completions_uri='https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent', token_env_key='GEMINI_API_KEY'),
+    LanguageModelApi(id = make_uuid('gemini-2.0-flash'), name = 'gemini-2.0-flash', scheme='google', completions_uri='https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent', token_env_key='GEMINI_API_KEY'),
+    LanguageModelApi(id = make_uuid('gemini-2.0-flash-thinking-exp-01-21'), name = 'gemini-2.0-flash-thinking-exp-01-21', scheme='google', completions_uri='https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-thinking-exp-01-21:generateContent', token_env_key='GEMINI_API_KEY'),
+    LanguageModelApi(id = make_uuid('gemini-2.0-pro-exp-02-05'), name = 'gemini-2.0-pro-exp-02-05', scheme='google', completions_uri='https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-pro-exp-02-05:generateContent', token_env_key='GEMINI_API_KEY'),
     LanguageModelApi(id = make_uuid('deepseek-chat'), name = 'deepseek-chat', scheme='openai', completions_uri='https://api.deepseek.com/chat/completions', token_env_key='DEEPSEEK_API_KEY'),
-    LanguageModelApi(id = make_uuid('grok-2-latest'), name = 'grok-2-latest', scheme='openai', completions_uri='https://api.x.ai/v1/chat/completions', token_env_key='XAI_API_KEY'),
+    LanguageModelApi(id = make_uuid('grok-2-latest'), name = 'grok-2-latest', scheme='openai', completions_uri='https://api.x.ai/v1/chat/completions', token_env_key='XAI_API_KEY'),    
 ]
 
  
