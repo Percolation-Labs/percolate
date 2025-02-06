@@ -505,6 +505,9 @@ INSERT INTO p8."LanguageModelApi"(name,id,model,scheme,completions_uri,token_env
  ('groq-llama-3.3-70b-versatile', 'de029bd1-5adb-527d-b78b-55f925ee4c78', 'llama-3.3-70b-versatile', 'openai', 'https://api.groq.com/openai/v1/chat/completions', 'GROQ_API_KEY', NULL),
  ('claude-3-5-sonnet-20241022', 'a05613b7-2577-5fd2-ac19-436afcecc89e', 'claude-3-5-sonnet-20241022', 'anthropic', 'https://api.anthropic.com/v1/messages', 'ANTHROPIC_API_KEY', NULL),
  ('gemini-1.5-flash', '51e3267b-895c-5276-b674-09911e5d6819', 'gemini-1.5-flash', 'google', 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent', 'GEMINI_API_KEY', NULL),
+ ('gemini-2.0-flash', '659f43ef-25db-5f16-a2bc-bd00109eefd4', 'gemini-2.0-flash', 'google', 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent', 'GEMINI_API_KEY', NULL),
+ ('gemini-2.0-flash-thinking-exp-01-21', '6e86d4f4-65b7-574b-8c21-6414be60e72e', 'gemini-2.0-flash-thinking-exp-01-21', 'google', 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-thinking-exp-01-21:generateContent', 'GEMINI_API_KEY', NULL),
+ ('gemini-2.0-pro-exp-02-05', '080ba4f8-306d-5741-9900-4c3c58372855', 'gemini-2.0-pro-exp-02-05', 'google', 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-pro-exp-02-05:generateContent', 'GEMINI_API_KEY', NULL),
  ('deepseek-chat', '8f7b068f-82cc-5633-8a05-4ec10a57525c', 'deepseek-chat', 'openai', 'https://api.deepseek.com/chat/completions', 'DEEPSEEK_API_KEY', NULL),
  ('grok-2-latest', '3b300af1-0995-563b-ae3e-b8288f5aded9', 'grok-2-latest', 'openai', 'https://api.x.ai/v1/chat/completions', 'XAI_API_KEY', NULL)
         ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name,model=EXCLUDED.model,scheme=EXCLUDED.scheme,completions_uri=EXCLUDED.completions_uri,token_env_key=EXCLUDED.token_env_key,token=EXCLUDED.token   ;

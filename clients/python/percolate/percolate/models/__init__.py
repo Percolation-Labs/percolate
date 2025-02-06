@@ -24,7 +24,7 @@ def get_p8_models():
 
 from .p8 import * 
 
-def bootstrap(apply:bool = False, apply_to_test_database: bool= True, root='../../../../extension/'):
+def bootstrap(apply:bool = False, apply_to_test_database: bool= True, root='../../../../extension/', alt_connection:str=None):
     """util to generate the sql that we use to setup percolate"""
 
     from percolate.models.p8 import sample_models
@@ -36,11 +36,14 @@ def bootstrap(apply:bool = False, apply_to_test_database: bool= True, root='../.
     
     pg = PostgresService(on_connect_error='ignore')
     
-    if apply_to_test_database:
+    if alt_connection:
+        pg = PostgresService(connection_string=alt_connection)
+    elif apply_to_test_database:
         print('Using test database and will create it if it does not exist')
         apply = True
         pg._create_db('test')
         pg = PostgresService(connection_string=TESTDB_CONNECTION_STRING)
+    
         
     root = root.rstrip('/')
     print('********Building queries*******')

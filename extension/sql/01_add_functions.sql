@@ -97,8 +97,8 @@ $BODY$;
 
 ---------
 
-DROP FUNCTION percolate_with_tools;
-DROP FUNCTION percolate;
+DROP FUNCTION IF EXISTS percolate_with_tools;
+DROP FUNCTION IF EXISTS percolate;
 
 CREATE OR REPLACE FUNCTION public.percolate(
     text TEXT,
