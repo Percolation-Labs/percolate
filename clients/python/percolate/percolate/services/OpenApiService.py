@@ -125,6 +125,7 @@ class OpenApiSpec:
         d = {}
         for k,v in self._endpoint_methods.items():
             endpoint, verb = v
+            """we just flatten and remove leading / - it may be that we dont want to keep the trailing / that becomes _ as its just weird - but not sure rules of uniqueness """
             d[f"{verb}_{endpoint.lstrip('/').replace('/','_').replace('-','_').replace('{','').replace('}','')}"] = k
         return d
     
