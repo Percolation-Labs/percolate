@@ -322,6 +322,19 @@ class Session(AbstractModel):
     agent: str = Field("Percolate always expects an agent but we support passing a system prompt which we treat as anonymous agent")
     parent_session_id:typing.Optional[uuid.UUID| str] = Field("A session is a thread from a question+prompt to completion. We maw span child sessions")
     
+    thread_id: typing.Optional[str] = Field(None,description='An id for a thread which can contain a number of sessions')
+    channel_id: typing.Optional[str] = Field(None,description='The channel through which the user came. It could be a messaging platform channel or a system division')
+    channel_type: typing.Optional[str] = Field(None,description='The channel type')
+    metadata: typing.Optional[dict] = Field(default_factory=dict, description="Arbitrary metadata")
+    session_completed_at: typing.Optional[datetime.datetime] = Field(default=None,description="An audit timestamp to write back the completion of the session - its optional as it should manage the last timestamp on the AI Response's for the session")
+    
+class SessionEvaluation(AbstractModel):
+    """Tracks groups if session dialogue"""
+    id: uuid.UUID| str  
+    rating: float = Field(None,description="A rating from 0 to 1 - binary thumb-up/thumbs-down are 0 or 1")
+    comments: typing.Optional[str] = Field(None, description="Additional feedback comments from the user")
+    session_id: uuid.UUID| str  
+    
 class ModelMatrix(AbstractModel):
     """keep useful json blobs for model info"""
     
