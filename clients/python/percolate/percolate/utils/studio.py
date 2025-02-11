@@ -79,12 +79,11 @@ def apply_project(project:Project|str):
     from percolate.utils.ingestion import add
     from percolate.utils.index import index_codebase
     from percolate.utils.env import sync_model_keys
- 
+    
     if isinstance(project,str):
         project = open_project(project)
     opts = project.options or {}
     if opts.get('sync-env'):
-        
         sync_data = sync_model_keys()
         logger.info(f"im syncing env keys if they are set for language model providers - will add to your database - {sync_data}")
     if opts.get('index-docs'):

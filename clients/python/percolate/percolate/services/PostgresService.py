@@ -322,7 +322,7 @@ class PostgresService:
         return cls.execute(query, data=data, page_size=page_size, as_upsert=True)
 
     def update_records(
-        self, records: typing.List[BaseModel], batch_size: int = 50, index_entities: bool = False
+        self, records: typing.List[BaseModel], batch_size: int = 1000, index_entities: bool = False
     ):
         """records are updated using typed object relational mapping."""
 

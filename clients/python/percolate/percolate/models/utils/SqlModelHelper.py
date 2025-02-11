@@ -87,11 +87,12 @@ class SqlModelHelper:
             if field_name == id_field:
                 column_definition += " PRIMARY KEY "
                 key_set = True
+            if field_name in ['name','key']:
+                key_set = True
             elif not is_optional(fields[field_name]):
                 column_definition += " NOT NULL"
             columns.append(column_definition)
 
-    
         if not key_set:
             raise ValueError("The model input does not specify a key field. Add a name or key field or specify is_key on one of your fields")
         """add system fields"""
@@ -365,6 +366,9 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
                 return "JSON"
             if 'TEXT[]' in union:
                 return 'TEXT[]'
+            if 'TIMESTAMP' in union:
+                return 'TIMESTAMP'
+            
             raise Exception(f"Need to handle disambiguation for union types - {union}")
 
         if origin in {list, typing.List, tuple, typing.Tuple}:
@@ -410,7 +414,7 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
                     return str(item)
                 if isinstance(item, dict):
                     return json.dumps(item,default=str)
-                if isinstance(item, list) and isinstance(item[0],dict):
+                if isinstance(item, list) and len(item) and isinstance(item[0],dict):
                     return json.dumps(item,default=str)
                 return item
                  
