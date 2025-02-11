@@ -326,7 +326,7 @@ class Session(AbstractModel):
     channel_id: typing.Optional[str] = Field(None,description='The channel through which the user came. It could be a messaging platform channel or a system division')
     channel_type: typing.Optional[str] = Field(None,description='The channel type')
     metadata: typing.Optional[dict] = Field(default_factory=dict, description="Arbitrary metadata")
-    session_completed_at: typing.Optional[datetime.datetime] = Field(default=None,description="An audit timestamp to write back the completion of the session - its optional as it should manage the last timestamp on the AI Response's for the session")
+    session_completed_at: typing.Optional[datetime.datetime] = Field(default=None,description="An audit timestamp to write back the completion of the session - its optional as it should manage the last timestamp on the AI Responses for the session")
     
 class SessionEvaluation(AbstractModel):
     """Tracks groups if session dialogue"""
