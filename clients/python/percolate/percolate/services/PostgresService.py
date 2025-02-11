@@ -78,7 +78,17 @@ class PostgresService:
     def _connect(self):
         self.conn = psycopg2.connect(self._connection_string)
         return self.conn
-
+    
+    def check_entity_exists(self):
+        """sanity check for tets"""
+  
+        assert self.model, "trying to check exists when model is null is not allowed"
+        Q = """SELECT EXISTS (    SELECT FROM information_schema.tables    WHERE table_schema = %s AND table_name = %s   )"""
+        result = self.execute(Q,data=(self.model.get_model_name(), self.model.get_model_namespace()))
+        if result:
+            return result[0]
+        return False
+    
     def repository(self, model: BaseModel, **kwargs) -> "PostgresService":
         """a connection in the context of the abstract model for crud support"""
         return PostgresService(model=model, connection_string=self._connection_string, **kwargs)
