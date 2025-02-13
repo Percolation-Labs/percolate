@@ -4,7 +4,7 @@ description: Percolate is a data-native agentic orchestrator in a multimodal dat
 
 # Percolate - AI in the data tier
 
-<figure><img src=".gitbook/assets/image (1) (1).png" alt=""><figcaption></figcaption></figure>
+<figure><img src=".gitbook/assets/image (1) (1) (1).png" alt=""><figcaption></figcaption></figure>
 
 **Percolate** brings language models, tools and agents into the database. You can orchestrate powerful agentic systems with multi-modal RAG in any language, including natural language.
 
@@ -12,13 +12,13 @@ description: Percolate is a data-native agentic orchestrator in a multimodal dat
 
 ## Try it now
 
-To run it locally, clone the [repo](https://github.com/Percolation-Labs/percolate) and from inside the repo,
+To run it locally, clone the [repo](https://github.com/Percolation-Labs/percolate)&#x20;
 
 ```bash
 git clone https://github.com/Percolation-Labs/percolate.git
 ```
 
-Launch the docker container so you can connect with your preferred database client
+From the repo, launch the docker container so you can connect with your preferred database client. This assumes you have installed Docker e.g. [Docker Desktop](https://www.docker.com/get-started/).
 
 ```bash
 docker compose up -d #The connection details are in the docker-compose file
