@@ -2,7 +2,7 @@
 -- register entity (p8.Project)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."Project" (
-name TEXT NOT NULL,
+name TEXT,
     id UUID PRIMARY KEY ,
     description TEXT NOT NULL,
     target_date TIMESTAMP,
@@ -25,7 +25,7 @@ SELECT attach_notify_trigger_to_table('p8', 'Project');
 -- register entity (p8.Agent)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."Agent" (
-name TEXT NOT NULL,
+name TEXT,
     id UUID PRIMARY KEY ,
     category TEXT,
     description TEXT NOT NULL,
@@ -50,7 +50,7 @@ SELECT attach_notify_trigger_to_table('p8', 'Agent');
 -- register entity (p8.ModelField)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."ModelField" (
-name TEXT NOT NULL,
+name TEXT,
     id UUID PRIMARY KEY ,
     entity_name TEXT NOT NULL,
     field_type TEXT NOT NULL,
@@ -76,7 +76,7 @@ SELECT attach_notify_trigger_to_table('p8', 'ModelField');
 -- register entity (p8.LanguageModelApi)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."LanguageModelApi" (
-name TEXT NOT NULL,
+name TEXT,
     id UUID PRIMARY KEY ,
     model TEXT,
     scheme TEXT,
@@ -102,7 +102,7 @@ SELECT attach_notify_trigger_to_table('p8', 'LanguageModelApi');
 -- register entity (p8.Function)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."Function" (
-name TEXT NOT NULL,
+name TEXT,
     id UUID PRIMARY KEY ,
     key TEXT,
     verb TEXT,
@@ -134,6 +134,11 @@ id UUID PRIMARY KEY ,
     user_rating REAL,
     agent TEXT NOT NULL,
     parent_session_id UUID,
+    thread_id TEXT,
+    channel_id TEXT,
+    channel_type TEXT,
+    metadata JSON,
+    session_completed_at TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -234,7 +239,7 @@ SELECT attach_notify_trigger_to_table('p8', 'PlanModel');
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."Settings" (
 id UUID PRIMARY KEY ,
-    key TEXT NOT NULL,
+    key TEXT,
     value TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

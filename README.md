@@ -64,8 +64,7 @@ class MyFirstAgent(BaseModel):
     def get_model_functions(cls):
         """i return a list of functions by key stored in the database"""
         return {
-            'get_pet_findByStatus': "a function i used to look up pets based on their status",
-            'p8_About' : 'a "native" database function that gives me general information about percolate'
+            'get_pet_findByStatus': "a function i use to look up pets based on their status"
         }
 #register creates tables to save data of this type and search for agents
 #you do not not need to register the agent to use the Python examples.

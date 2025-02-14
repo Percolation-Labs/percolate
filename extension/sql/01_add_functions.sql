@@ -629,7 +629,8 @@ BEGIN
 	
 	    -- Ensure API token is available
 	    
-		api_token := (SELECT api_token FROM p8."ApiProxy" LIMIT 1); 
+		api_token := (SELECT token FROM p8."ApiProxy" a where a.proxy_uri=metadata.proxy_uri LIMIT 1); 
+		
 	
 	    -- Make the HTTP call
 		RAISE NOTICE 'Invoke % with %', call_uri, final_args;
@@ -751,7 +752,9 @@ DECLARE
     formatted_value TEXT;
 BEGIN
 /*
-for example  select public.encode_url_query('{"status": ["sold", "available"]}') -> status=sold,available
+for example  select p8.encode_url_query('{"status": ["sold", "available"]}') -> status=sold,available
+
+select p8.encode_url_query('{"body_code": "KT-2011", "body_version": 1}')
 */
     -- Iterate through each key-value pair in the JSONB object
     FOR key, value IN SELECT * FROM jsonb_each(json_input)
@@ -764,7 +767,7 @@ for example  select public.encode_url_query('{"status": ["sold", "available"]}')
             ), ',');
         ELSE
             -- Convert other types to text
-            formatted_value := value::TEXT;
+            formatted_value := trim(both '"' from value::TEXT);
         END IF;
 
         -- Append the key-value pair to the query parts
