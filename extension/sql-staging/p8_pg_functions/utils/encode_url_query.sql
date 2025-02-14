@@ -16,7 +16,9 @@ DECLARE
     formatted_value TEXT;
 BEGIN
 /*
-for example  select public.encode_url_query('{"status": ["sold", "available"]}') -> status=sold,available
+for example  select p8.encode_url_query('{"status": ["sold", "available"]}') -> status=sold,available
+
+select p8.encode_url_query('{"body_code": "KT-2011", "body_version": 1}')
 */
     -- Iterate through each key-value pair in the JSONB object
     FOR key, value IN SELECT * FROM jsonb_each(json_input)
@@ -29,7 +31,7 @@ for example  select public.encode_url_query('{"status": ["sold", "available"]}')
             ), ',');
         ELSE
             -- Convert other types to text
-            formatted_value := value::TEXT;
+            formatted_value := trim(both '"' from value::TEXT);
         END IF;
 
         -- Append the key-value pair to the query parts

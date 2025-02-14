@@ -61,7 +61,7 @@ BEGIN
             response := NULL;
     END;
     -- Log the response
-    RAISE NOTICE 'Error applying index at /admin/index - %', response;
+    RAISE NOTICE 'applying for % index at % - %',  full_name, proxy_uri_in || '/admin/index/', response;
 
     RETURN NEW;
 END;

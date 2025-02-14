@@ -6,6 +6,7 @@ import uuid
 import datetime
 import types
 import json
+from percolate.utils import make_uuid
 class SqlModelHelper:
     def __init__(cls, model: BaseModel):
         cls.model:AbstractModel = AbstractModel.Abstracted(model)
@@ -71,23 +72,25 @@ class SqlModelHelper:
         field_descriptions = cls.model.model_fields
         mapping =  {k:SqlModelHelper.python_to_postgres_type(v, field_descriptions.get(k)) for k,v in fields.items()}
 
-        id_field = 'id'
-        if 'id' not in mapping:
-            key_field = cls.model.get_model_key_field()
-            assert key_field, "You must supply either an id or a property like name or key on the model or add json_schema_extra with an is_key property on one if your fields"
+ 
+        key_field = cls.model.get_model_key_field()
+        assert key_field or 'id' in mapping, f"For model {cls.model}, You must supply either an id or a property like name or key on the model or add json_schema_extra with an is_key property on one if your fields"
         
         """this is assumed for now"""
         
         table_name = cls.model.get_model_table_name()
         
         columns = []
+        """Percolate controls the id as a function of a business key or name"""
+        if 'id' not in mapping:
+            columns.append(f"ID UUID PRIMARY KEY")
+            
         key_set = False
         for field_name, field_type in mapping.items():
             column_definition = f"{field_name} {field_type}"
-            if field_name == id_field:
+            if field_name == 'id':
                 column_definition += " PRIMARY KEY "
-                key_set = True
-            if field_name in ['name','key']:
+            if field_name in ['name','key', 'id']:
                 key_set = True
             elif not is_optional(fields[field_name]):
                 column_definition += " NOT NULL"
@@ -408,8 +411,11 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
             else:
                 data = vars(model) 
                 
-           
             def adapt(item):
+                """we could implement SQL a little better - but needs more work"""
+                if isinstance(item, str):
+                    """i dont love this TODO"""
+                    return item.replace("'", "''")
                 if isinstance(item, uuid.UUID):
                     return str(item)
                 if isinstance(item, dict):
@@ -419,7 +425,13 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
                 return item
                  
             data = {k:adapt(v) for k,v in data.items()}
-            
+            if 'id' not in data:
+                business_key = model.get_model_key_field()
+                """if there is no id we always hash the business key on the model and use it
+                we will recommend that an ID and name are provided for models that want to save data. This is a unique id and a user friendly name pairing
+                """
+                data['id'] = make_uuid(data[business_key])
+                            
             return data
         
     def get_data_load_statement(self, records: typing.List[BaseModel]):
@@ -429,8 +441,8 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
             records = [records]
             
         def sql_repr(s):
-            """WIP"""
-            return repr(s) if s else 'NULL'
+            """WIP - use SQL properly"""
+            return repr(s if not isinstance(s,str) else s.replace("'","''"))  if s else 'NULL'
         
         if len(records):
             
