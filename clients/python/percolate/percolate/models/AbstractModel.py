@@ -46,15 +46,21 @@ class AbstractModelMixin:
         Best practice is for the model to provide its own id and not rely on key inference
         """
         s = cls.model_json_schema(by_alias=False)
+        
+        if 'properties' not in s and '$defs' in s:
+            """for nested complex types get the schema"""
+            if cls.get_model_name() in s['$defs']:
+                s = s['$defs'][cls.get_model_name()]
+        
         key_props = [k for k, v in s["properties"].items() if v.get("is_key") or v.get('primary_key')]
         if len(key_props):
             return key_props[0]
         """convention is to look for a key or name"""
         f = cls.model_fields
-        if 'key' in f:
-            return 'key'
         if 'name' in f:
             return 'name'
+        if 'key' in f:
+            return 'key'
             
     @classmethod
     def get_model_functions(cls) ->dict:
