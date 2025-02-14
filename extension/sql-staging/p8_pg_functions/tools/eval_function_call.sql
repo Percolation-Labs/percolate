@@ -82,7 +82,8 @@ BEGIN
 	
 	    -- Ensure API token is available
 	    
-		api_token := (SELECT api_token FROM p8."ApiProxy" LIMIT 1); 
+		api_token := (SELECT token FROM p8."ApiProxy" a where a.proxy_uri=metadata.proxy_uri LIMIT 1); 
+		
 	
 	    -- Make the HTTP call
 		RAISE NOTICE 'Invoke % with %', call_uri, final_args;

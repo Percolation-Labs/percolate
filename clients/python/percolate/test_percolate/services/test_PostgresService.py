@@ -3,12 +3,12 @@ import pytest
 import percolate as p8
 from pydantic import BaseModel,Field
 from percolate.models import DefaultEmbeddingField
+import uuid
 
 class MyFirstAgent(BaseModel):
     """You are an agent that provides the information you are asked and a second random fact"""
     #if it has no model config or python module it would save to the public database schema
     model_config = {'namespace':'public'}
-    
     name: str = Field(description="Task name")
     #the default embedding field is just settings json_schema_extra.embedding_provider, so you can do that yourself
     description:str = DefaultEmbeddingField(description="Task description")
