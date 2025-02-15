@@ -36,8 +36,7 @@ class MyFirstAgent(BaseModel):
         """i return a list of functions by key stored in the database"""
         return {
             'get_pet_findByStatus': "a function i used to look up petes based on their status",
-            'p8_About' : 'a "native" database function that gives me general information about percolate'
-        }
+       }
 
 ```
 
