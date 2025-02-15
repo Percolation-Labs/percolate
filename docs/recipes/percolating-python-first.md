@@ -15,6 +15,10 @@ But... maybe you just _need_ to write some Python code. Well, lets use Percolate
 pip install percolate-db
 ```
 
+{% hint style="info" %}
+At this time percolate is undergoing active development and for most cases, cloning the repo and using the python client via Poetry is recommended over installing the percolate-db client.
+{% endhint %}
+
 The percolate client relies on `percolate`as a tools and agents registry. It also uses Percolate to audit conversations. And of course, it uses it just as a database. This allows you to keep your application tier as thin as possible but you can still write Agents in Python and you can still interact with all the same Language Model APIs via Python. To get started, create your first agent as a Pydantic object
 
 ```python
