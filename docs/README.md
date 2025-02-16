@@ -4,7 +4,7 @@ description: Percolate is a data-native agentic orchestrator in a multimodal dat
 
 # Percolate - AI in the data tier
 
-<figure><img src=".gitbook/assets/image (1) (1) (1).png" alt=""><figcaption></figcaption></figure>
+<figure><img src=".gitbook/assets/image (1) (1) (1) (1).png" alt=""><figcaption></figcaption></figure>
 
 **Percolate** brings language models, tools and agents into the database. You can orchestrate powerful agentic systems with multi-modal RAG in any language, including natural language.
 
