@@ -81,14 +81,8 @@ docker compose up -d
 
 ---
 
-You have the option of installing the client or using it from source (recommended). To install the python client 
-
-```bash
-pip install percolate-db
-```
-
-You can also run the client directly from the python project directory `clients/python/percolate`
-- _You can use the poetry project to install or generate requirements_
+You can run the client directly from the python project directory `clients/python/percolate`
+- _You can use the poetry project _
 
 Use the cli to apply data to your test database. 
 - _This assumes you have launched the docker instance or you have connected to another instance of Percolate._
@@ -99,8 +93,8 @@ The command below will apply settings from a default 'project' under `/studio/pr
 ```bash
 cd clients/python/percolate
 #the default project syncs env, indexes docs in codebase and adds the test api(s) as illustrated in the next step
-python percolate/cli.py init
-#python percolate/cli.py add env --sync # just syncs envs
+poetry install #the first time for deps
+poetry run p8 init #this will run the init script
 ```
 
 Use the cli to add apis at any time - supply an optional bearer `token`
