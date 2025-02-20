@@ -1,6 +1,14 @@
+#by default this will but everything in the p8 namespace and create that namespace
+#if not put here, then we need to configure P8_PG_HOST for the app
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: p8
+---
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
+  namespace: p8
   name: percolate
 spec:
   #the operator needs to use 16 as a postgres version
@@ -8,17 +16,20 @@ spec:
   instances: 1
   storage:
     size: 10Gi
+#make sure to set a strorage class in your cloud
+#for example in hetnzer kubectl apply -f https://raw.githubusercontent.com/hetznercloud/csi-driver/master/deploy/kubernetes/hcloud-csi.yml
+
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  namespace: p8
   name: percolate-api
-  #namespace: percolate
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: percolate-api
+      app: "percolate-api"
   template:
     metadata:
       labels:
@@ -30,15 +41,20 @@ spec:
           ports:
             - containerPort: 5008
           env:
-            # do do from secret
-            # - name: P8_PG_PASSWORD
-            #   value: "??"
+            env:
+            #load the secret from the percolate cluster
+            - name: P8_PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  #this is the name of the pg database and the secret corresponding
+                  name: percolate-app
+                  key: password
             - name: P8_PG_PORT
               value: "5432"
             - name: P8_PG_USER
               value: "app"
             - name: P8_PG_HOST
-              value: "percolate-one-rw.percolate.svc.cluster.local"
+              value: "percolate-rw.p8.svc.cluster.local"
           # envFrom:
           #   - configMapRef:
           #       name: percolate-env
@@ -54,7 +70,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: percolate-api
-  #namespace: percolate
+  namespace: p8
 spec:
   selector:
     app: percolate-api
