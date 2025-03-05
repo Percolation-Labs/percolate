@@ -12,6 +12,7 @@ import typing
 from pydantic import BaseModel
 from .routes import set_routes
 from percolate import __version__
+from percolate.home import setup_home
 
 app = FastAPI(
     title="Percolate",
@@ -44,12 +45,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Setup the home module (landing page)
+setup_home(app)
 
-@app.get("/", include_in_schema=False)
 @app.get("/healthcheck", include_in_schema=False)
 async def healthcheck():
     return {"status": "ok"}
-
 
 
 app.include_router(api_router)

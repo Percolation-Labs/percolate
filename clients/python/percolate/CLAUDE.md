@@ -25,3 +25,14 @@
 - Core models in percolate/models/
 - Services in percolate/services/
 - Utilities in percolate/utils/
+- Home page in percolate/home/
+
+## About Percolate
+Percolate is an agentic AI system built on a multimodal database architecture. It focuses on:
+
+- **Agentic Memory**: Creating persistent, context-aware knowledge representations that agents can access and update
+- **Multimodal Data Handling**: Supporting diverse data types (text, structured data, images) in a unified system
+- **Personalization**: Adapting to individual users by learning from interactions and query patterns
+- **Knowledge Systems**: Building sophisticated information systems with semantic understanding and reasoning capabilities
+
+The platform is designed to enable the development of intelligent, adaptive, and personalized AI systems that improve over time through interaction.

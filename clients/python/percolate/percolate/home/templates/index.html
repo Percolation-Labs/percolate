@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Percolate - Agentic AI in a Multimodal Database</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+    <header>
+        <div class="container header-content">
+            <div class="logo">
+                <img src="{{ url_for('static', path='/percolate-logo.svg') }}" alt="Percolate Logo">
+                <h1>Percolate</h1>
+            </div>
+            <nav>
+                <ul>
+                    <li><a href="#features">Features</a></li>
+                    <li><a href="#how-it-works">How It Works</a></li>
+                    <li><a href="#contact">Contact</a></li>
+                    <li><a href="/docs">API Docs</a></li>
+                </ul>
+            </nav>
+        </div>
+    </header>
+
+    <section class="hero">
+        <div class="container">
+            <h2>Agentic AI in a Multimodal Database</h2>
+            <p>
+                Percolate is a groundbreaking platform that combines the power of agentic AI with a multimodal database, 
+                focusing on memory and personalization for building sophisticated knowledge systems.
+            </p>
+            <a href="#features" class="cta-button">Explore Features</a>
+        </div>
+    </section>
+
+    <section id="features" class="features">
+        <div class="container">
+            <h2>Core Features</h2>
+            <div class="features-grid">
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <img src="{{ url_for('static', path='/icons/brain.svg') }}" alt="AI Icon">
+                    </div>
+                    <h3>Agentic Intelligence</h3>
+                    <p>
+                        Autonomous AI agents that learn, reason, and act based on stored knowledge and user interaction patterns.
+                        These agents improve over time, adapting to your specific needs and workflows.
+                    </p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <img src="{{ url_for('static', path='/icons/database.svg') }}" alt="Database Icon">
+                    </div>
+                    <h3>Multimodal Database</h3>
+                    <p>
+                        Store and process diverse data types including text, structured data, images, and more in a unified 
+                        system that maintains semantic relationships and enables complex queries across modalities.
+                    </p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <img src="{{ url_for('static', path='/icons/person.svg') }}" alt="Person Icon">
+                    </div>
+                    <h3>Personalized Knowledge</h3>
+                    <p>
+                        Create personalized knowledge systems that adapt to individual users, learning from interactions 
+                        and evolving to provide increasingly relevant information and insights.
+                    </p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section id="how-it-works" class="how-it-works">
+        <div class="container">
+            <h2>How Percolate Works</h2>
+            <div class="steps">
+                <div class="step">
+                    <div class="step-number">1</div>
+                    <h3>Ingest Knowledge</h3>
+                    <p>
+                        Import your data from various sources. Percolate automatically processes and structures the information 
+                        for optimal retrieval and reasoning.
+                    </p>
+                </div>
+                <div class="step">
+                    <div class="step-number">2</div>
+                    <h3>Configure Agents</h3>
+                    <p>
+                        Set up AI agents with specific roles and access to different knowledge domains, defining how they 
+                        interact with users and other systems.
+                    </p>
+                </div>
+                <div class="step">
+                    <div class="step-number">3</div>
+                    <h3>Learn & Adapt</h3>
+                    <p>
+                        As users interact with the system, Percolate learns from these interactions, continuously improving 
+                        its knowledge representation and reasoning capabilities.
+                    </p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section id="contact" class="contact">
+        <div class="container">
+            <h2>Get Started with Percolate</h2>
+            <p>
+                Ready to experience the future of knowledge systems? Reach out to learn more about how 
+                Percolate can transform your information management and AI capabilities.
+            </p>
+            <div class="contact-methods">
+                <div class="contact-method">
+                    <h3>GitHub</h3>
+                    <p>
+                        Explore our open-source repositories and documentation to start building with Percolate.
+                    </p>
+                    <a href="https://github.com/Percolation-Labs/percolate" class="contact-link">Visit GitHub</a>
+                </div>
+                <div class="contact-method">
+                    <h3>Documentation</h3>
+                    <p>
+                        Comprehensive guides and API documentation to help you integrate Percolate into your projects.
+                    </p>
+                    <a href="/docs" class="contact-link">View Docs</a>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <footer>
+        <div class="container footer-content">
+            <div class="footer-logo">
+                <img src="{{ url_for('static', path='/percolate-logo.svg') }}" alt="Percolate Logo">
+            </div>
+            <div class="footer-nav">
+                <ul>
+                    <li><a href="#features">Features</a></li>
+                    <li><a href="#how-it-works">How It Works</a></li>
+                    <li><a href="#contact">Contact</a></li>
+                    <li><a href="/docs">API Docs</a></li>
+                </ul>
+            </div>
+            <p class="copyright">© 2025 Percolation Labs. All rights reserved.</p>
+        </div>
+    </footer>
+</body>
+</html>
