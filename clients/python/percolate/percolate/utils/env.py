@@ -51,6 +51,7 @@ def sync_model_keys(connection_string:str=None) -> dict:
     
     d = {}
     for row in rows:
+        # 
         k = row['token_env_key'] 
         if token:= os.environ.get(k):
             d[k] = True
