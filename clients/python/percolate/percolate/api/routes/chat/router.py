@@ -44,20 +44,279 @@ class CompletionsResponse(BaseModel):
     choices: typing.List[CompletionsChoice]
     usage: CompletionsUsage
 
-async def stream_generator(content, delay=0.05, model="gpt-4", req_id=None):
-    """Generate a streaming response with artificial chunks for testing
+async def convert_anthropic_to_openai_streaming(response, model_name):
+    """
+    Convert Anthropic streaming response to OpenAI format for streaming
     
     Args:
-        content: The content to stream
-        delay: Delay between chunks to simulate network latency
-        model: Model name to include in the response
-        req_id: Request ID to use across all chunks (creates one if not provided)
+        response: The streaming response from Anthropic
+        model_name: The model name to use in the response
     """
-    # Use a consistent ID across all chunks
-    request_id = req_id or str(uuid.uuid4())
+    import time
+    
+    request_id = str(uuid.uuid4())
+    timestamp = int(time.time())
+    content_text = ""
+    
+    # Initial message with role
+    data = {
+        "id": request_id,
+        "object": "chat.completion.chunk",
+        "created": timestamp,
+        "model": model_name,
+        "choices": [
+            {
+                "index": 0,
+                "delta": {
+                    "role": "assistant"
+                },
+                "finish_reason": None
+            }
+        ]
+    }
+    yield f"data: {json.dumps(data)}\n\n"
+    
+    # Process the Anthropic response
+    event_type = None
+    content_block_type = None
+    
+    for line in response.iter_lines():
+        if not line:
+            continue
+            
+        decoded_line = line.decode("utf-8")
+        
+        # Handle event type lines
+        if decoded_line.startswith('event:'):
+            event_type = decoded_line.replace("event: ", "").strip()
+            continue
+        else:
+            # Remove the "data: " prefix
+            decoded_line = decoded_line.replace("data: ", "").strip()
+        
+        if decoded_line and decoded_line != "[DONE]":
+            try:
+                json_data = json.loads(decoded_line)
+                event_type = json_data.get("type")
+                
+                # Handle different event types from Anthropic stream
+                if event_type == "content_block_delta":
+                    content_type = json_data["delta"].get("type")
+                    if content_type == "text_delta":
+                        text = json_data["delta"].get("text", "")
+                        if text:
+                            # Send this text chunk in OpenAI format
+                            data = {
+                                "id": request_id,
+                                "object": "chat.completion.chunk",
+                                "created": timestamp,
+                                "model": model_name,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {
+                                            "content": text
+                                        },
+                                        "finish_reason": None
+                                    }
+                                ]
+                            }
+                            yield f"data: {json.dumps(data)}\n\n"
+                            await asyncio.sleep(0.01)  # Small delay to ensure client receives chunks
+                
+                # Detect when the message is complete
+                elif event_type == "message_delta" and json_data.get("stop_reason"):
+                    # Final message with finish reason
+                    data = {
+                        "id": request_id,
+                        "object": "chat.completion.chunk",
+                        "created": timestamp,
+                        "model": model_name,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {},
+                                "finish_reason": "stop"
+                            }
+                        ]
+                    }
+                    yield f"data: {json.dumps(data)}\n\n"
+                
+            except json.JSONDecodeError:
+                pass  # Handle incomplete JSON chunks
+    
+    # Final [DONE] message
+    yield "data: [DONE]\n\n"
+
+def convert_anthropic_to_openai_response(response, model_name):
+    """
+    Convert a complete Anthropic response to OpenAI format
+    
+    Args:
+        response: The complete response from Anthropic API
+        model_name: The model name to use in the response
+    """
+    anthropic_data = response.json()
+    
+    # Extract text content from Anthropic response
+    text_content = ""
+    for block in anthropic_data.get("content", []):
+        if block.get("type") == "text":
+            text_content += block.get("text", "")
+    
+    # Build OpenAI format response
+    return {
+        "id": str(uuid.uuid4()),
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model_name,
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": text_content
+                },
+                "finish_reason": "stop"
+            }
+        ],
+        "usage": {
+            "prompt_tokens": anthropic_data.get("usage", {}).get("input_tokens", 0),
+            "completion_tokens": anthropic_data.get("usage", {}).get("output_tokens", 0),
+            "total_tokens": (
+                anthropic_data.get("usage", {}).get("input_tokens", 0) + 
+                anthropic_data.get("usage", {}).get("output_tokens", 0)
+            )
+        }
+    }
+
+async def call_anthropic_api(messages, stream=False, max_tokens=1000, temperature=0.7):
+    """
+    Call the Anthropic API directly 
+    
+    Args:
+        messages: The messages to send to Anthropic
+        stream: Whether to stream the response
+        max_tokens: Maximum tokens to generate
+        temperature: Temperature for response generation
+    """
+    import requests
+    import os
+    
+    # Format messages for Anthropic
+    anthropic_messages = []
+    system_content = None
+    
+    for msg in messages:
+        if msg["role"] == "system":
+            system_content = msg["content"]
+        else:
+            anthropic_messages.append({
+                "role": msg["role"],
+                "content": msg["content"]
+            })
+    
+    # Prepare the request
+    url = "https://api.anthropic.com/v1/messages"
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": os.environ.get("ANTHROPIC_API_KEY"),
+        "anthropic-version": "2023-06-01"
+    }
+    
+    data = {
+        "model": "claude-3-haiku-20240307",  # Using a reliable Claude model
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "messages": anthropic_messages,
+        "stream": stream
+    }
+    
+    if system_content:
+        data["system"] = system_content
+    
+    # Make the API call
+    return requests.post(url, headers=headers, json=data, stream=stream)
+
+@router.post("/completions")
+async def chat_completions(request: CompletionsRequest, user: dict = Depends(get_current_token)):
+    """
+    OpenAI-compatible chat completions endpoint that can produce streaming or non-streaming responses.
+    This endpoint calls the Anthropic API and transforms the response to OpenAI format.
+    
+    - Supports both streaming and non-streaming responses
+    - Compatible with OpenAI client libraries
+    - Demonstrates converting from Anthropic API format to OpenAI format
+    
+    Example usage:
+    ```
+    curl -X POST http://localhost:5000/chat/completions \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer YOUR_TOKEN" \
+      -d '{
+        "model": "claude-model",
+        "messages": [{"role": "user", "content": "Tell me a joke about programming"}],
+        "stream": true,
+        "temperature": 0.7
+      }'
+    ```
+    """
+    try:
+        # Check for ANTHROPIC_API_KEY
+        import os
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            # Fall back to simulated response if no API key is available
+            simulated_response = f"This is a simulated response because no ANTHROPIC_API_KEY was found in environment variables."
+            logger.warning("No ANTHROPIC_API_KEY found, using simulated response")
+            
+            if request.stream:
+                # Simulate streaming
+                return StreamingResponse(
+                    _simulated_stream_generator(simulated_response, model=request.model), 
+                    media_type="text/event-stream"
+                )
+            else:
+                # Simulate standard response
+                return _build_simulated_response(simulated_response, request)
+        
+        # Call Anthropic API
+        response = await call_anthropic_api(
+            messages=request.messages,
+            stream=request.stream,
+            max_tokens=request.max_tokens or 1000,
+            temperature=request.temperature
+        )
+        
+        # Check for API error
+        if response.status_code != 200:
+            error_msg = f"Anthropic API error: {response.status_code} - {response.text}"
+            logger.error(error_msg)
+            raise HTTPException(status_code=response.status_code, detail=error_msg)
+        
+        # Process response based on streaming or non-streaming
+        if request.stream:
+            # Return a streaming response in OpenAI format, converted from Anthropic format
+            return StreamingResponse(
+                convert_anthropic_to_openai_streaming(response, request.model), 
+                media_type="text/event-stream"
+            )
+        else:
+            # Return a non-streaming response in OpenAI format
+            openai_format = convert_anthropic_to_openai_response(response, request.model)
+            return CompletionsResponse(**openai_format)
+            
+    except Exception as e:
+        logger.error(f"Error in chat completions: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Error processing completions request: {str(e)}")
+
+async def _simulated_stream_generator(content, model="gpt-4", delay=0.05):
+    """Generate a simulated streaming response for testing"""
+    request_id = str(uuid.uuid4())
     timestamp = int(time.time())
     
-    # Initial response data with the role
+    # Initial message with role
     data = {
         "id": request_id,
         "object": "chat.completion.chunk",
@@ -80,8 +339,8 @@ async def stream_generator(content, delay=0.05, model="gpt-4", req_id=None):
     chunk_size = 2  # Words per chunk
     chunks = [' '.join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
     
-    for i, chunk in enumerate(chunks):
-        await asyncio.sleep(delay)  # Simulate network delay
+    for chunk in chunks:
+        await asyncio.sleep(delay)
         data = {
             "id": request_id,
             "object": "chat.completion.chunk",
@@ -99,7 +358,7 @@ async def stream_generator(content, delay=0.05, model="gpt-4", req_id=None):
         }
         yield f"data: {json.dumps(data)}\n\n"
     
-    # Final done message
+    # Final message
     await asyncio.sleep(delay)
     data = {
         "id": request_id,
@@ -117,84 +376,27 @@ async def stream_generator(content, delay=0.05, model="gpt-4", req_id=None):
     yield f"data: {json.dumps(data)}\n\n"
     yield "data: [DONE]\n\n"
 
-async def stream_custom_with_callback(callback, content, model="gpt-4"):
-    """
-    This is a placeholder for a future implementation where we would use a callback 
-    to stream responses directly from the LLM service through our endpoint.
+def _build_simulated_response(content, request):
+    """Build a simulated non-streaming response"""
+    token_count = len(content.split())
+    prompt_tokens = len(" ".join(m.get("content", "") for m in request.messages).split())
     
-    In the future, this would be used to adapt the streaming format from various LLM providers
-    to the OpenAI format. Currently, it's just a placeholder function.
-    """
-    # In a real implementation, this would be used as the callback for streaming responses
-    # and would convert the response to the OpenAI format
-    pass
-
-@router.post("/completions")
-async def chat_completions(request: CompletionsRequest, user: dict = Depends(get_current_token)):
-    """
-    OpenAI-compatible chat completions endpoint that can produce streaming or non-streaming responses.
-    This endpoint proxies to other LLM services and returns responses in OpenAI format.
-    
-    - Supports both streaming and non-streaming responses
-    - Compatible with OpenAI client libraries
-    - Can be extended to support Anthropic and Google formats in the future
-    """
-    try:
-        # In a production implementation, we would use LanguageModel to handle the actual API call
-        # For now, we'll simulate responses for both streaming and non-streaming cases
-        
-        # Convert the request messages to a format percolate understands
-        # Extract system prompt if present
-        system_prompt = next((m.get("content", "") for m in request.messages if m.get("role") == "system"), None)
-        
-        # Get the last user message
-        last_message = next((m for m in reversed(request.messages) if m.get("role") == "user"), None)
-        last_content = last_message.get("content", "") if last_message else ""
-        
-        # For demo purposes, generate a response. In production this would use the real model:
-        # message_stack = MessageStack(last_content, system_prompt=system_prompt)
-        # context = CallingContext(prefers_streaming=request.stream, model=request.model, temperature=request.temperature)
-        # if request.stream:
-        #     context.streaming_callback = custom_streaming_callback
-        # model = LanguageModel(request.model)
-        # response = model(message_stack, functions=request.tools, context=context)
-        
-        # For testing purposes, generate a simulated response
-        response_content = f"This is a simulated response to: {last_content}"
-        
-        if request.stream:
-            # Return a streaming response in OpenAI format
-            return StreamingResponse(
-                stream_generator(
-                    content=response_content,
-                    model=request.model,
-                    delay=0.05  # Configurable delay for testing
-                ), 
-                media_type="text/event-stream"
+    return CompletionsResponse(
+        id=str(uuid.uuid4()),
+        created=int(time.time()),
+        model=request.model,
+        choices=[
+            CompletionsChoice(
+                message={
+                    "role": "assistant",
+                    "content": content
+                },
+                finish_reason="stop"
             )
-        else:
-            # Return a non-streaming response in OpenAI format
-            return CompletionsResponse(
-                id=str(uuid.uuid4()),
-                created=int(time.time()),
-                model=request.model,
-                choices=[
-                    CompletionsChoice(
-                        message={
-                            "role": "assistant",
-                            "content": response_content
-                        },
-                        finish_reason="stop"
-                    )
-                ],
-                usage=CompletionsUsage(
-                    prompt_tokens=len(" ".join(m.get("content", "") for m in request.messages).split()),
-                    completion_tokens=len(response_content.split()),
-                    total_tokens=len(" ".join(m.get("content", "") for m in request.messages).split()) + 
-                                len(response_content.split())
-                )
-            )
-    except Exception as e:
-        logger.error(f"Error in chat completions: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Error processing completions request: {str(e)}")
+        ],
+        usage=CompletionsUsage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=token_count,
+            total_tokens=prompt_tokens + token_count
+        )
+    )
