@@ -201,7 +201,7 @@ async def call_anthropic_api(messages, stream=False, max_tokens=1000, temperatur
         temperature: Temperature for response generation
     """
     import requests
-    import os
+    from percolate.utils.env import ANTHROPIC_API_KEY, CLAUDE_MODEL
     
     # Format messages for Anthropic
     anthropic_messages = []
@@ -220,12 +220,12 @@ async def call_anthropic_api(messages, stream=False, max_tokens=1000, temperatur
     url = "https://api.anthropic.com/v1/messages"
     headers = {
         "Content-Type": "application/json",
-        "x-api-key": os.environ.get("ANTHROPIC_API_KEY"),
+        "x-api-key": ANTHROPIC_API_KEY,
         "anthropic-version": "2023-06-01"
     }
     
     data = {
-        "model": "claude-3-haiku-20240307",  # Using a reliable Claude model
+        "model": CLAUDE_MODEL,  # Using the model defined in env.py
         "max_tokens": max_tokens,
         "temperature": temperature,
         "messages": anthropic_messages,
@@ -263,9 +263,8 @@ async def chat_completions(request: CompletionsRequest, user: dict = Depends(get
     """
     try:
         # Check for ANTHROPIC_API_KEY
-        import os
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key:
+        from percolate.utils.env import ANTHROPIC_API_KEY
+        if not ANTHROPIC_API_KEY:
             # Fall back to simulated response if no API key is available
             simulated_response = f"This is a simulated response because no ANTHROPIC_API_KEY was found in environment variables."
             logger.warning("No ANTHROPIC_API_KEY found, using simulated response")
