@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from percolate.models.p8 import Task
-from percolate.api.auth import get_current_token
+from percolate.api.routes.auth import get_current_token
 import uuid
 from fastapi import   Depends, File, UploadFile
 from percolate.services import MinioService

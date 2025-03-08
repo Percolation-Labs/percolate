@@ -3,6 +3,8 @@ from typing import Annotated, List
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from percolate.utils.env import load_db_key
 
+from .router import router
+
 bearer = HTTPBearer()
 async def get_current_token(
     credentials: HTTPAuthorizationCredentials = Depends(bearer),

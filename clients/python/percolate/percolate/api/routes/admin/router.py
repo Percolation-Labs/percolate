@@ -2,8 +2,8 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from fastapi import   Depends, Response 
 import json
-router = APIRouter()
-from percolate.api.auth import get_current_token
+
+from percolate.api.routes.auth import get_current_token
 from pydantic import BaseModel, Field
 import typing
 import uuid
@@ -12,6 +12,8 @@ from percolate.models.p8 import IndexAudit
 from percolate.utils import logger
 import traceback
 from percolate.utils.studio import Project, apply_project
+
+router = APIRouter()
 
 @router.post("/env/sync")
 async def sync_env(user: dict = Depends(get_current_token)):
@@ -28,7 +30,7 @@ class AddApiRequest(BaseModel):
     endpoint_filter: typing.Optional[typing.List[str]] = Field(description="A list of endpoints to filter by when adding endpoints")
     
 @router.post("/add/api")
-async def add_api( request:AddApiRequest,  user: dict = Depends(get_current_token)):
+async def add_api( add_request:AddApiRequest,  user: dict = Depends(get_current_token)):
     """add apis to Percolate
     """
     return Response(content=json.dumps({'status':'ok'}))
@@ -41,7 +43,7 @@ class AddAgentRequest(BaseModel):
     
     
 @router.post("/add/agent")
-async def add_api( request:AddAgentRequest,  user: dict = Depends(get_current_token)):
+async def add_agent( add_request:AddAgentRequest,  user: dict = Depends(get_current_token)):
     """add agents to Percolate. Agents require a Json Schema for any structured response you want to use, a system prompt and a dict/mapping of external registered functions.
     Functions can be registered via the add APIs endpoint.
     """
@@ -58,8 +60,9 @@ async def add_project( project: Project,  user: dict = Depends(get_current_token
     return Response(content=json.dumps(results))
 
 
-@router.get("/slow-endpoint")
+@router.get("/slow-endpoint",include_in_schema=False)
 async def slow_response():
+    """a test utility"""
     import time
     time.sleep(10)  # Simulate a delay
     return {"message": "This response was delayed by 10 seconds"}

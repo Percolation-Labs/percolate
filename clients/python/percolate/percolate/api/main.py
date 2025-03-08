@@ -4,12 +4,6 @@ from fastapi import APIRouter, FastAPI, Response, UploadFile, File, Form
 from http import HTTPStatus
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
-from fastapi.responses import StreamingResponse
-from starlette.responses import HTMLResponse
-import json
-import traceback
-import typing
-from pydantic import BaseModel
 from .routes import set_routes
 from percolate import __version__
 
@@ -29,6 +23,8 @@ app = FastAPI(
         "name": "MIT",
         "url": "https://opensource.org/licenses/MIT",
     },
+    docs_url="/swagger",
+    redoc_url=f"/docs",
 )
 api_router = APIRouter()
 

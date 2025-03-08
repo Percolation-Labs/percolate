@@ -1,7 +1,7 @@
  
 from fastapi import APIRouter, HTTPException, Query, Path, Response
 from percolate.models.p8 import Task
-from percolate.api.auth import get_current_token
+from percolate.api.routes.auth import get_current_token
 import uuid
 from fastapi import   Depends
 import typing
