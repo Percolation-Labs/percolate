@@ -28,7 +28,8 @@ DEFAULT_CONNECTION_TIMEOUT = 30
 MINIO_SECRET = os.environ.get('MINIO_SECRET', 'percolate')
 MINIO_SERVER = os.environ.get('MINIO_SERVER', 'localhost:9000')
 MINIO_P8_BUCKET = 'percolate'
-#
+#   
+TAVILY_API_KEY = os.environ.get('TAVILY_API_KEY')
 
 GPT_MINI = "gpt-4o-mini"
 DEFAULT_MODEL =   "gpt-4o-2024-08-06"

@@ -4,7 +4,8 @@ CREATE OR REPLACE FUNCTION p8.run_web_search(
     topic TEXT DEFAULT 'general', -- news|finance and other things
     max_results INT DEFAULT 7,
     include_images BOOLEAN DEFAULT FALSE,
-    fetch_content BOOLEAN DEFAULT FALSE -- Whether to fetch full page content
+    fetch_content BOOLEAN DEFAULT FALSE, -- Whether to fetch full page content
+    optional_token TEXT DEFAULT NULL -- Allow token to be optionally passed in
 ) RETURNS TABLE (
     title TEXT,
     url TEXT,
@@ -20,17 +21,31 @@ DECLARE
     response_json JSONB;
     result JSONB;
 BEGIN
-    /*we should generalize this for working with brave or tavily but for now just the latter
-    the token needs to be set to match the search endpoint for the provider
-    we can normally insert these search results into ingested resources based on context - we can read the search results in full if needed
+    /* We should generalize this for working with Brave or Tavily but for now just the latter.
+       The token needs to be set to match the search endpoint for the provider.
+       We can normally insert these search results into ingested resources based on context - we can read the search results in full if needed.
+
+
+	   select * from p8.run_web_search('philosophy of mind')
+
+	   	select * from p8.run_web_search('philosophy of mind','https://api.tavily.com/search', 'general', 3, TRUE,TRUE)
+
+		select * from http_get('https://en.wikipedia.org/wiki/Philosophy_of_mind')
     */
 
-    -- Retrieve API token from ApiProxy
-    SELECT token INTO api_token 
-    FROM p8."ApiProxy" 
-    WHERE proxy_uri = api_endpoint 
-    LIMIT 1;
+	
+    -- Determine API token: Use optional_token if provided, otherwise fetch from ApiProxy
+    IF optional_token IS NOT NULL THEN
+        api_token := optional_token;
+    ELSE
+        SELECT token INTO api_token 
+        FROM p8."ApiProxy" 
+        WHERE proxy_uri = api_endpoint 
+        LIMIT 1;
+    END IF;
 
+
+    -- Raise exception if no token is available
     IF api_token IS NULL THEN
         RAISE EXCEPTION 'API token not found for %', api_endpoint;
     END IF;
@@ -44,19 +59,19 @@ BEGIN
     );
 
     -- Make the HTTP POST request
-    SELECT content INTO api_response
+    SELECT a.content INTO api_response
     FROM http(
         (
             'POST', 
             call_uri, 
             ARRAY[
-                http_header('Authorization', 'Bearer ' || api_token),
-                http_header('Content-Type', 'application/json')
+                http_header('Authorization', 'Bearer ' || api_token)--,
+                --http_header('Content-Type', 'application/json')
             ], 
             'application/json', 
             response_json
         )::http_request
-    );
+    ) as a;
 
     -- Convert the response to JSONB
     response_json := api_response::JSONB;
@@ -79,23 +94,15 @@ BEGIN
         images := COALESCE(
             ARRAY(
                 SELECT jsonb_array_elements_text(result->'images')
-            ),
+            )::TEXT[],
             ARRAY[]::TEXT[]
         );
 
-        -- Fetch full page content if flag is set - we often will want to do this later and selectively but this is good for testing purposes
-        -- it may also be useful if we only select the top 1-3 pages and then fetching the content may be ok - remember that when we embed we chunk anyway
+		--RAISE NOTICE '%', url;
+		
+        -- Fetch full page content if flag is set
         IF fetch_content THEN
-            SELECT content INTO content
-            FROM http(
-                (
-                    'GET', 
-                    url, 
-                    ARRAY[], 
-                    NULL, 
-                    NULL
-                )::http_request
-            );
+            SELECT a.content into content FROM http_get(url) a;
         ELSE
             content := NULL;
         END IF;
