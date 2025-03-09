@@ -4,6 +4,7 @@ from mcp.server.fastmcp import FastMCP
 import requests
 import typing
 from pydantic import BaseModel
+import datetime
 
 mcp = FastMCP("percolate")
 
@@ -30,29 +31,20 @@ class SearchResult(BaseModel):
     content:str
     summary:str
 
+class Task(BaseModel):
+    name:str
+    description:str
+    labels: typing.List[str] = []
+    due_date:datetime.datetime = None
+    
+def run_auth_flow():
+    """triggers an auth flow for user X to log in and those are the emails we fetch with the given provider
+    """
+    pass
 
 @mcp.tool()
 def ask_percolate(query:str) -> str:
     """ask anything of the percolate agent"""
-    return "TEST"
-
-@mcp.tool()
-def web_search(query:str) -> typing.List[SearchResult]:
-    """query the web with a search query and receive a list of summarized results"""
-    return [SearchResult(url='http://whatever', content="test", summary="test")]
-
- 
-@mcp.tool()
-def fetch_recent_email(limit:int=5,filter_domain:str=None) -> typing.List[SearchResult]:
-    """fetch recent emails for the user limited by parameter default to 5. Optionally filter emails from a domain
-    """
-    return [SearchResult(url='http://whatever', content="test", summary="test")]
-
-@mcp.tool()
-def add_resource(uri:str, comment:str=None) -> str:
-    """add a resource such as website or file with an optional comment.
-    this can be used to make extra content available to the session and you can ask questions about the content too
-    """
     return "TEST"
 
 @mcp.tool()
@@ -63,7 +55,67 @@ def get_entities(keys: typing.List[str]) -> str:
     """
     return "TEST"
 
+@mcp.tool()
+def web_search(query:str) -> typing.List[SearchResult]:
+    """query the web with a search query and receive a list of summarized results"""
+    
+    url = f"{PERCOLATE_HOST}/x/web/search"
+    
+    response = requests.post(url, data={
+        'query': query
+    })
+    
+    """checks TODO"""
+    
+    return [SearchResult(**d) for d in response.json()]
+
+ 
+@mcp.tool()
+def fetch_recent_email(limit:int=5,filter_domain:str=None) -> typing.List[SearchResult]:
+    """fetch recent emails for the user limited by parameter default to 5. Optionally filter emails from a domain
+    """
+    
+    run_auth_flow()
+    
+    url = f"{PERCOLATE_HOST}/x/mail/fetch"
+    
+    """todo query pass through - we are just testing for now"""
+    response = requests.post(url, data={ })
+    
+    """checks TODO - error handling"""
+    
+    return [d for d in response.json()]
+    
+ 
+
+#we could also run integrations e.g. sync box files and that sort of thing here - list supported integrations and then use some watermark based sync - really percolate should already have tasks for this
+#draft email/send email in future but as we are in research agent mode this is a nice to have - other things like calendar could be done
+
+@mcp.tool()
+def ingest_resource(uri:str, comment:str=None, return_content:bool=False) -> str:
+    """add a resource such as website or file with an optional comment.
+    This can be used to make extra content available to the session and you can ask questions about the content too.
+    By returning the content you can also read e.g. the content on a website or inside a file.
+    """
+    return uri
 
 
-#set/update task - we will load an existing task when doing this so there is no get as such
-#set/get web content
+@mcp.tool()
+def search_existing_tasks(description: str, limit:int=10) -> typing.List[Task]:
+    """lookup existing tasks that match a description. You should do this before creating a new similar tasks and apply description merging
+    """
+    return "TEST"
+
+@mcp.tool()
+def update_task(task:Task) -> Task:
+    """upsert a task by name and merged content
+    """
+    return task
+ 
+@mcp.tool()
+def add_content(uri:str) :
+    """upload content which can be a website or file
+    """
+    pass
+ 
+
