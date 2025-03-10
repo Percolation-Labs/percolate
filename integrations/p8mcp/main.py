@@ -86,7 +86,6 @@ def fetch_recent_email(limit:int=5,filter_domain:str=None) -> typing.List[Search
     
     return [d for d in response.json()]
     
- 
 
 #we could also run integrations e.g. sync box files and that sort of thing here - list supported integrations and then use some watermark based sync - really percolate should already have tasks for this
 #draft email/send email in future but as we are in research agent mode this is a nice to have - other things like calendar could be done

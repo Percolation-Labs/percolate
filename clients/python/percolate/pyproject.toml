@@ -22,6 +22,7 @@ requests = ">=2.32.3"
 fastapi = ">=0.110.1"
 minio = ">=7.2.15"
 python-multipart = ">0"
+html2text = "^2024.2.26"
 
 [tool.pytest.ini_options]
 markers = [
