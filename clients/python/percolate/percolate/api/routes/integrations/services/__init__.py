@@ -1,7 +1,8 @@
 from pydantic import BaseModel,model_validator
 import typing
 import html2text
-        
+from percolate.utils import make_uuid
+
 class EmailMessage(BaseModel):
     """You are an email and newsletter agent. If asked about emails or newsletters you can run a search to answer the users question.
     
@@ -29,7 +30,7 @@ class EmailMessage(BaseModel):
                 values['description'] = values.get('content')
         """set the id if its not set"""
         if not values.get('id') and values.get('sender') and values.get('date'):
-            values['id'] = sha_hash({
+            values['id'] = make_uuid({
                 'sender': values['sender'],
                 'date':values['date']
             })
@@ -47,4 +48,4 @@ class EmailMessage(BaseModel):
     
  
 
-from .GmailService import GmailService
+from .GoogleService import GmailService

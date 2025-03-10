@@ -371,14 +371,17 @@ class User(AbstractEntityModel):
     id: uuid.UUID| str  
     name: str
     
-class ContentIndex(AbstractModel):
-    """Generic parsed content from files etc. added to the system"""
+class Resources(AbstractModel):
+    """Generic parsed content from files, sites etc. added to the system"""
     id: typing.Optional[uuid.UUID| str] = Field("The id is generated as a hash of the required uri and ordinal")  
-    name: typing.Optional[str] = Field(None, description="A short content name - non unique - for example a friendly label for a chunked pdf document")
+    name: typing.Optional[str] = Field(None, description="A short content name - non unique - for example a friendly label for a chunked pdf document or web page title")
     category: typing.Optional[str] = Field(None, description="A content category")
     content: str = DefaultEmbeddingField(description="The chunk of content from the source")
+    summary: typing.Optional[str] = Field(None,description="An optional summary")
     ordinal: int = Field(None, description="For chunked content we can keep an ordinal")
     uri: str = Field("An external source or content ref e.g. a PDF file on blob storage or public URI")
+    metadata: typing.Optional[dict] = {} #for emails it could be sender and receiver info and date
+    graph_paths: typing.Optional[typing.List[str]] = Field(None, default="Track all paths extracted by an agent as used to build the KG")
     
     @model_validator(mode='before')
     @classmethod
@@ -386,8 +389,33 @@ class ContentIndex(AbstractModel):
         if not values.get('id'):
             values['id'] = make_uuid({'uri': values['uri'], 'ordinal': values['ordinal']})
         return values
+
+class TaskResources(AbstractModel):
+    """A link between tasks and resources since resources can be shared between tasks"""
+    id: typing.Optional[uuid.UUID| str] = Field("unique id for rel" )  
+    resource_id: typing.Optional[uuid.UUID| str] = Field("The resource id" )  
+    session_id:  typing.Optional[uuid.UUID| str] = Field("The session id is typically a task or research iteration but can be any session id to group resources" )  
     
-class PercolateAgent(ContentIndex):
+class ResearchIteration(AbstractModel):
+    """A research iteration is a plan to deal with a task"""
+    id: typing.Optional[uuid.UUID| str] = Field("unique id for rel" )  
+    iteration: int
+    conceptual_diagram: typing.Optional[str] = Field(None, description="The mermaid diagram for the plan")
+    question_set: typing.List[dict] = Field(description="a set of questions and their ids from the conceptual diagram")
+    task_id: typing.Optional[uuid.UUID| str] = Field("Research are linked to tasks which are at minimum a question" )  
+    
+class BlockDocument(AbstractModel):
+    """Generic parsed content from files, sites etc. added to the system"""
+    id: typing.Optional[uuid.UUID| str] = Field("The id is generated as a hash of the required uri and ordinal")  
+    name: typing.Optional[str] = Field(None, description="A short content name - non unique - for example a friendly label for a chunked pdf document or web page title")
+    category: typing.Optional[str] = Field(None, description="A content category")
+    summary: str = DefaultEmbeddingField(description="The chunk of content from the source")
+    #conceptual blocks show document structure; inter block links, citations, entities referenced
+    content_blocks:typing.List[dict] = Field(description="The content blocks in json format")
+    conceptual_diagram: typing.Optional[str] = Field(None, description="The mermaid diagram for the plan or renewed for the document")
+    metadata: typing.Optional[dict] = {} #metadata for a document
+    
+class PercolateAgent(Resources):
     """The percolate agent is the guy that tells you about Percolate which is a multi-modal database for managing AI in the data tier.
     You can learn about the philosophy of Percolate or ask questions about the docs and codebase.
     You can lookup entities of different types or plan queries and searches.
