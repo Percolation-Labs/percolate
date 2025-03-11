@@ -4,14 +4,10 @@ from fastapi import APIRouter, FastAPI, Response, UploadFile, File, Form
 from http import HTTPStatus
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
-from fastapi.responses import StreamingResponse
-from starlette.responses import HTMLResponse
-import json
-import traceback
-import typing
-from pydantic import BaseModel
 from .routes import set_routes
 from percolate import __version__
+from starlette.middleware.sessions import SessionMiddleware
+from uuid import uuid1
 
 app = FastAPI(
     title="Percolate",
@@ -29,7 +25,15 @@ app = FastAPI(
         "name": "MIT",
         "url": "https://opensource.org/licenses/MIT",
     },
+    docs_url="/swagger",
+    redoc_url=f"/docs",
 )
+
+
+k = str(uuid1())
+print(k)
+app.add_middleware(SessionMiddleware, secret_key=k)
+
 api_router = APIRouter()
 
 origins = [
@@ -49,8 +53,6 @@ app.add_middleware(
 @app.get("/healthcheck", include_in_schema=False)
 async def healthcheck():
     return {"status": "ok"}
-
-
 
 app.include_router(api_router)
 set_routes(app)

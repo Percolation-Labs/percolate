@@ -48,7 +48,8 @@ def bootstrap(apply:bool = False, apply_to_test_database: bool= True, root='../.
     root = root.rstrip('/')
     print('********Building queries*******')
     """build a list of models we want to init with"""
-    models = [ Project, Agent, ModelField, LanguageModelApi, Function, Session, AIResponse, ApiProxy, PlanModel, Settings, PercolateAgent, IndexAudit]
+    models = [ Project, Agent, ModelField, LanguageModelApi, Function, Session, AIResponse, ApiProxy, PlanModel,
+               Settings, PercolateAgent, IndexAudit, Task, TaskResources, ResearchIteration]
         
     """compile the functions into one file"""
     with open(f'{root}/sql/01_add_functions.sql', 'w') as f:

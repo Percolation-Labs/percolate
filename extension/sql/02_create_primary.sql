@@ -262,8 +262,11 @@ id UUID PRIMARY KEY ,
     name TEXT,
     category TEXT,
     content TEXT NOT NULL,
+    summary TEXT,
     ordinal INTEGER NOT NULL,
     uri TEXT NOT NULL,
+    metadata JSON,
+    graph_paths TEXT[],
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -302,6 +305,72 @@ id UUID PRIMARY KEY ,
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."IndexAudit";
 CREATE   TRIGGER update_updated_at_trigger
 BEFORE UPDATE ON p8."IndexAudit"
+FOR EACH ROW
+EXECUTE FUNCTION update_updated_at_column();
+
+        
+-- ------------------
+
+-- register entity (p8.Task)------
+-- ------------------
+CREATE TABLE  IF NOT EXISTS  p8."Task" (
+name TEXT,
+    id UUID PRIMARY KEY ,
+    description TEXT NOT NULL,
+    target_date TIMESTAMP,
+    project_name TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    userid UUID
+);
+DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."Task";
+CREATE   TRIGGER update_updated_at_trigger
+BEFORE UPDATE ON p8."Task"
+FOR EACH ROW
+EXECUTE FUNCTION update_updated_at_column();
+
+        
+SELECT attach_notify_trigger_to_table('p8', 'Task');
+            
+-- ------------------
+
+-- register entity (p8.TaskResources)------
+-- ------------------
+CREATE TABLE  IF NOT EXISTS  p8."TaskResources" (
+id UUID PRIMARY KEY ,
+    resource_id UUID,
+    session_id UUID,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    userid UUID
+);
+DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."TaskResources";
+CREATE   TRIGGER update_updated_at_trigger
+BEFORE UPDATE ON p8."TaskResources"
+FOR EACH ROW
+EXECUTE FUNCTION update_updated_at_column();
+
+        
+-- ------------------
+
+-- register entity (p8.ResearchIteration)------
+-- ------------------
+CREATE TABLE  IF NOT EXISTS  p8."ResearchIteration" (
+id UUID PRIMARY KEY ,
+    iteration INTEGER NOT NULL,
+    conceptual_diagram TEXT,
+    question_set JSON NOT NULL,
+    task_id UUID,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    userid UUID
+);
+DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."ResearchIteration";
+CREATE   TRIGGER update_updated_at_trigger
+BEFORE UPDATE ON p8."ResearchIteration"
 FOR EACH ROW
 EXECUTE FUNCTION update_updated_at_column();
 
