@@ -7,9 +7,10 @@ from .chat import router as chat_router
 from .entities import router as entity_router
 from .tools import router as tool_router
 from .integrations import router as x_router
-
+from .auth import router as auth_router
 
 def set_routes(app: FastAPI):
+    app.include_router(auth_router, prefix=f"/auth", tags=["Auth"])
     app.include_router(admin_router, prefix=f"/admin", tags=["Admin"])
     app.include_router(task_router, prefix=f"/tasks", tags=["Tasks"])
     app.include_router(entity_router, prefix=f"/entities", tags=["Entities"])

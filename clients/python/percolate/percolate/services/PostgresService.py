@@ -12,6 +12,7 @@ from psycopg2.errors import DuplicateTable
 from tenacity import retry, stop_after_attempt, wait_fixed
 import traceback
 import uuid
+import json
 
 class PostgresService:
     """the postgres service wrapper for sinking and querying entities/models"""
@@ -228,6 +229,21 @@ class PostgresService:
                 logger.info(f"Entity registered")
         else:
             logger.info("Done - register entities was disabled")
+        
+    def eval_function_call(self, name:str, arguments:dict):
+        """call the function which can be rest or native via the database"""
+        args = {"function":{
+            'name': name,
+            'arguments': arguments
+        }}
+        return self.execute(f""" select * from p8.eval_function_call(%s) """, data=(json.dumps(args),))
+        
+    def get_tools_metadata(self, names:typing.List[str], scheme:str='openai'):
+        """list tool metadata in the scheme by tool names"""
+        data  = self.execute(f""" select * from p8.get_tools_by_name(%s,%s) """, data=(names, scheme))
+        if data:
+            return data[0]['get_tools_by_name']
+        return []
         
     def execute(
         cls,

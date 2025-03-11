@@ -6,6 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 from .routes import set_routes
 from percolate import __version__
+from starlette.middleware.sessions import SessionMiddleware
+from uuid import uuid1
 
 app = FastAPI(
     title="Percolate",
@@ -26,6 +28,12 @@ app = FastAPI(
     docs_url="/swagger",
     redoc_url=f"/docs",
 )
+
+
+k = str(uuid1())
+print(k)
+app.add_middleware(SessionMiddleware, secret_key=k)
+
 api_router = APIRouter()
 
 origins = [
@@ -45,8 +53,6 @@ app.add_middleware(
 @app.get("/healthcheck", include_in_schema=False)
 async def healthcheck():
     return {"status": "ok"}
-
-
 
 app.include_router(api_router)
 set_routes(app)
