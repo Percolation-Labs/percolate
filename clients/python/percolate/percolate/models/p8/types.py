@@ -354,11 +354,12 @@ class Task(Project):
     """Tasks are sub projects. A project can describe a larger objective and be broken down into tasks"""
     id: typing.Optional[uuid.UUID| str] = Field(None,description= 'id generated for the name and project - these must be unique or they are overwritten')
     project_name: typing.Optional[str] = Field(None, description="The related project name of relevant")
+    
     @model_validator(mode='before')
     @classmethod
-    def _f(cls, values):
-        if not values.get('id'):
-            values['id'] = make_uuid({'name': values['name'], 'project_name': values['project_name']})
+    def _f(cls, values): 
+        if isinstance(values,dict) and not values.get('id'):
+            values['id'] = make_uuid({'name': values['name'], 'project_name': values.get('project_name') or ''})
         return values
     
     @classmethod
@@ -381,7 +382,7 @@ class Resources(AbstractModel):
     ordinal: int = Field(None, description="For chunked content we can keep an ordinal")
     uri: str = Field("An external source or content ref e.g. a PDF file on blob storage or public URI")
     metadata: typing.Optional[dict] = {} #for emails it could be sender and receiver info and date
-    graph_paths: typing.Optional[typing.List[str]] = Field(None, default="Track all paths extracted by an agent as used to build the KG")
+    graph_paths: typing.Optional[typing.List[str]] = Field(None, description="Track all paths extracted by an agent as used to build the KG")
     
     @model_validator(mode='before')
     @classmethod

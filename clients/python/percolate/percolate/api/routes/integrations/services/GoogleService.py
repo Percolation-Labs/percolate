@@ -1,4 +1,4 @@
-from . import EmailMessage
+from percolate.api.routes.integrations.services import EmailMessage
 import json
 import time
 import httpx
@@ -8,7 +8,7 @@ import html2text
 import base64
 import os
 
-TOKEN_PATH = Path(f"{Path.home()}/.percolate/oauth/token.json")  # Path to the saved token for percolate auth flows locally
+TOKEN_PATH = Path.home() / '.percolate' / 'auth' / 'token'
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 
 async def refresh_token(refresh_token: str) -> dict:
@@ -55,6 +55,7 @@ async def check_token():
                 raise
         else:
             raise Exception('expired token')
+    return token
 
         
 def extract_email_body(payload):
@@ -76,9 +77,10 @@ def extract_email_body(payload):
 def extract_email_date(headers):
     """Extracts the email date from headers and converts it to a readable format."""
     for header in headers:
+        
         if header["name"] == "Date":
             try:
-                email_date = datetime.datetime.strptime(header["value"], "%a, %d %b %Y %H:%M:%S %z")
+                email_date = datetime.strptime(header["value"], "%a, %d %b %Y %H:%M:%S %z")
                 return email_date.strftime("%Y-%m-%d %H:%M:%S %Z")
             except ValueError:
                 pass  # In case the date format varies
@@ -91,20 +93,24 @@ class GmailService:
         self.token = token
 
 
-    async def fetch_latest_emails(self, limit: int = 5, filter_domain: str = None, since_ts: int = None, unread_only:bool=False):
+    async def fetch_latest_emails(self, limit: int = 5, fetch_limit: int = 100, domain_filter: str = None, since_ts: int = None, since_iso_date:str=None, unread_only:bool=False, **kwargs):
         """Fetch latest emails from Gmail.
         
         Args:
-            limit: how many emails to fetch
+            limit: how many emails to fetch after filtering  (client limit)
+            fetch_limit: how many emails to fetch before filtering - this is a batching hint and not a fetch size
             filter_domain sender -e.g. we often fetch emails such as substack emails
             since_ts: unix timestamp since date
         """
         
+        if since_iso_date and not since_ts:
+            since_ts = int(datetime.fromisoformat(since_iso_date).timestamp())        
+            
         self.token = await check_token()
         headers = {
             "Authorization": f"Bearer {self.token['access_token']}",
         }
-        params = { "labelIds": "INBOX", "q":'', "maxResults": limit }
+        params = { "labelIds": "INBOX", "q":'', "maxResults": fetch_limit, 'orderBy': 'date' }
         if unread_only:
             params["q"] += "is:unread",
         if since_ts:
@@ -131,23 +137,36 @@ class GmailService:
                         continue
 
                     msg = msg_response.json()
+                    
                     email_info = {
                         "snippet": msg["snippet"],
                         "id": msg["id"],
                         "from": next(header["value"] for header in msg["payload"]["headers"] if header["name"] == "From"),
                         "subject": next(header["value"] for header in msg["payload"]["headers"] if header["name"] == "Subject"),
-                        "date": extract_email_date(headers),
+                        "date": extract_email_date(msg["payload"]["headers"]),
                         "content": extract_email_body(msg["payload"]),
                     }
+                    
+                    #print(email_info['from'])
 
                     #client filter - not sure if their is a server filter that does what we want
-                    if filter_domain:
-                        if filter_domain in email_info["from"]:
+                    if domain_filter:
+                        if domain_filter in email_info["from"]:
                             email_data.append(email_info)
                     else:
                         email_data.append(email_info)
+                    
+                    if len(email_data) == limit:
+                        break
 
             return email_data
 
         except Exception as e:
             raise
+        
+if __name__=="__main__":
+    import asyncio
+    
+    gs = GmailService()
+    data = asyncio.run(gs.fetch_latest_emails(limit = 5, since_ts="2025-03-01", filter_domain='substack.com'))
+    print(data)
