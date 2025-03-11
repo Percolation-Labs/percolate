@@ -1,7 +1,0 @@
-README.md
-main.py
-pyproject.toml
-p8mcp.egg-info/PKG-INFO
-p8mcp.egg-info/SOURCES.txt
-p8mcp.egg-info/dependency_links.txt
-p8mcp.egg-info/top_level.txt
