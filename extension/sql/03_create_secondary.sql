@@ -437,18 +437,21 @@ CREATE TABLE  IF NOT EXISTS p8_embeddings."p8_PercolateAgent_embeddings" (
 -- ------------------
 INSERT INTO p8."ModelField"(name,id,entity_name,field_type,embedding_provider,description,is_key) VALUES
  ('id', '0ebafb1a-2786-9ab1-172a-895ccb42998f', 'p8.PercolateAgent', 'UUID', NULL, NULL, NULL),
- ('name', '30512d9f-f547-34a6-f078-5345e8e09ba5', 'p8.PercolateAgent', 'str', NULL, 'A short content name - non unique - for example a friendly label for a chunked pdf document', NULL),
+ ('name', '30512d9f-f547-34a6-f078-5345e8e09ba5', 'p8.PercolateAgent', 'str', NULL, 'A short content name - non unique - for example a friendly label for a chunked pdf document or web page title', NULL),
  ('category', '76bdaf66-f79e-7594-5b05-cdef07866428', 'p8.PercolateAgent', 'str', NULL, 'A content category', NULL),
  ('content', 'def5e0a1-4ba2-491e-a91f-9282a41e46e4', 'p8.PercolateAgent', 'str', 'text-embedding-ada-002', 'The chunk of content from the source', NULL),
+ ('summary', '5ec58fc6-908f-b0ef-eb09-59052ba149a0', 'p8.PercolateAgent', 'str', NULL, 'An optional summary', NULL),
  ('ordinal', 'bf43af13-19d5-2fe7-9806-ee6191f6f02c', 'p8.PercolateAgent', 'int', NULL, 'For chunked content we can keep an ordinal', NULL),
- ('uri', '85667f3d-de55-67ab-47bc-1e056f397466', 'p8.PercolateAgent', 'str', NULL, NULL, NULL)
+ ('uri', '85667f3d-de55-67ab-47bc-1e056f397466', 'p8.PercolateAgent', 'str', NULL, NULL, NULL),
+ ('metadata', '771a5a28-65de-0ba9-34a4-258fd041c3a6', 'p8.PercolateAgent', 'dict', NULL, NULL, NULL),
+ ('graph_paths', '0efd55d6-ba88-c002-0013-0f3a54f7aa2d', 'p8.PercolateAgent', 'str', NULL, 'Track all paths extracted by an agent as used to build the KG', NULL)
         ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name,entity_name=EXCLUDED.entity_name,field_type=EXCLUDED.field_type,embedding_provider=EXCLUDED.embedding_provider,description=EXCLUDED.description,is_key=EXCLUDED.is_key   ;
 -- ------------------
 
 -- insert_agent_data (p8.PercolateAgent)------
 -- ------------------
 INSERT INTO p8."Agent"(name,id,category,description,spec,functions) VALUES
- ('p8.PercolateAgent', '87236bdd-36bd-5de2-8933-4e437bd69610', NULL, 'The percolate agent is the guy that tells you about Percolate which is a multi-modal database for managing AI in the data tier.\n    You can learn about the philosophy of Percolate or ask questions about the docs and codebase.\n    You can lookup entities of different types or plan queries and searches.\n    You can call any registered apis and functions and learn more about how they can be used.\n    Call the search function to get data about Percolate\n    ', '{"description": "The percolate agent is the guy that tells you about Percolate which is a multi-modal database for managing AI in the data tier.\\nYou can learn about the philosophy of Percolate or ask questions about the docs and codebase.\\nYou can lookup entities of different types or plan queries and searches.\\nYou can call any registered apis and functions and learn more about how they can be used.\\nCall the search function to get data about Percolate", "properties": {"id": {"anyOf": [{"format": "uuid", "type": "string"}, {"type": "string"}, {"type": "null"}], "default": "The id is generated as a hash of the required uri and ordinal", "title": "Id"}, "name": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "description": "A short content name - non unique - for example a friendly label for a chunked pdf document", "title": "Name"}, "category": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "description": "A content category", "title": "Category"}, "content": {"description": "The chunk of content from the source", "embedding_provider": "default", "title": "Content", "type": "string"}, "ordinal": {"default": null, "description": "For chunked content we can keep an ordinal", "title": "Ordinal", "type": "integer"}, "uri": {"default": "An external source or content ref e.g. a PDF file on blob storage or public URI", "title": "Uri", "type": "string"}}, "required": ["content"], "title": "PercolateAgent", "type": "object"}', NULL)
+ ('p8.PercolateAgent', '87236bdd-36bd-5de2-8933-4e437bd69610', NULL, 'The percolate agent is the guy that tells you about Percolate which is a multi-modal database for managing AI in the data tier.\n    You can learn about the philosophy of Percolate or ask questions about the docs and codebase.\n    You can lookup entities of different types or plan queries and searches.\n    You can call any registered apis and functions and learn more about how they can be used.\n    Call the search function to get data about Percolate\n    ', '{"description": "The percolate agent is the guy that tells you about Percolate which is a multi-modal database for managing AI in the data tier.\\nYou can learn about the philosophy of Percolate or ask questions about the docs and codebase.\\nYou can lookup entities of different types or plan queries and searches.\\nYou can call any registered apis and functions and learn more about how they can be used.\\nCall the search function to get data about Percolate", "properties": {"id": {"anyOf": [{"format": "uuid", "type": "string"}, {"type": "string"}, {"type": "null"}], "default": "The id is generated as a hash of the required uri and ordinal", "title": "Id"}, "name": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "description": "A short content name - non unique - for example a friendly label for a chunked pdf document or web page title", "title": "Name"}, "category": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "description": "A content category", "title": "Category"}, "content": {"description": "The chunk of content from the source", "embedding_provider": "default", "title": "Content", "type": "string"}, "summary": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "description": "An optional summary", "title": "Summary"}, "ordinal": {"default": null, "description": "For chunked content we can keep an ordinal", "title": "Ordinal", "type": "integer"}, "uri": {"default": "An external source or content ref e.g. a PDF file on blob storage or public URI", "title": "Uri", "type": "string"}, "metadata": {"anyOf": [{"type": "object"}, {"type": "null"}], "default": {}, "title": "Metadata"}, "graph_paths": {"anyOf": [{"items": {"type": "string"}, "type": "array"}, {"type": "null"}], "default": null, "description": "Track all paths extracted by an agent as used to build the KG", "title": "Graph Paths"}}, "required": ["content"], "title": "PercolateAgent", "type": "object"}', NULL)
         ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name,category=EXCLUDED.category,description=EXCLUDED.description,spec=EXCLUDED.spec,functions=EXCLUDED.functions   ;
 -- ------------------
 
@@ -496,6 +499,117 @@ INSERT INTO p8."ModelField"(name,id,entity_name,field_type,embedding_provider,de
 -- ------------------
 INSERT INTO p8."Agent"(name,id,category,description,spec,functions) VALUES
  ('p8.IndexAudit', '244fd1ca-a425-5c5b-9606-178c4df7026d', NULL, 'p8.IndexAudit', '{"properties": {"id": {"anyOf": [{"format": "uuid", "type": "string"}, {"type": "string"}], "title": "Id"}, "model_name": {"title": "Model Name", "type": "string"}, "tokens": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": 0, "description": "the number of tokens consumed in total", "title": "Tokens"}, "tokens_in": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": 0, "description": "the number of tokens consumed for input", "title": "Tokens In"}, "tokens_out": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": 0, "description": "the number of tokens consumed for output", "title": "Tokens Out"}, "tokens_other": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": 0, "description": "the number of tokens consumed for functions and other metadata", "title": "Tokens Other"}, "session_id": {"anyOf": [{"format": "uuid", "type": "string"}, {"type": "string"}, {"type": "null"}], "default": null, "description": "Session id for a conversation", "title": "Session Id"}, "metrics": {"anyOf": [{"type": "object"}, {"type": "null"}], "description": "metrics for records indexed", "title": "Metrics"}, "status": {"description": "Status code such as OK|ERROR", "title": "Status", "type": "string"}, "message": {"anyOf": [{"type": "string"}, {"type": "null"}], "description": "Any message such as an error", "title": "Message"}, "entity_full_name": {"title": "Entity Full Name", "type": "string"}}, "required": ["id", "model_name", "status", "message", "entity_full_name"], "title": "IndexAudit", "type": "object"}', NULL)
+        ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name,category=EXCLUDED.category,description=EXCLUDED.description,spec=EXCLUDED.spec,functions=EXCLUDED.functions   ;
+-- ------------------
+
+-- register_embeddings (p8.Task)------
+-- ------------------
+CREATE TABLE  IF NOT EXISTS p8_embeddings."p8_Task_embeddings" (
+    id UUID PRIMARY KEY,  -- Hash-based unique ID - we typically hash the column key and provider and column being indexed
+    source_record_id UUID NOT NULL,  -- Foreign key to primary table
+    column_name TEXT NOT NULL,  -- Column name for embedded content
+    embedding_vector VECTOR NULL,  -- Embedding vector as an array of floats
+    embedding_name VARCHAR(50),  -- ID for embedding provider
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, -- Timestamp for tracking
+    
+    -- Foreign key constraint
+    CONSTRAINT fk_source_table_p8_task
+        FOREIGN KEY (source_record_id) REFERENCES p8."Task"
+        ON DELETE CASCADE
+);
+
+-- ------------------
+
+-- insert_field_data (p8.Task)------
+-- ------------------
+INSERT INTO p8."ModelField"(name,id,entity_name,field_type,embedding_provider,description,is_key) VALUES
+ ('name', '13588c48-c765-a64f-bbd9-944bf4cf86fb', 'p8.Task', 'str', NULL, 'The name of the entity e.g. a model in the types or a user defined model', NULL),
+ ('id', '143b8113-d349-3133-0d8c-718b216a50f8', 'p8.Task', 'UUID', NULL, 'id generated for the name and project - these must be unique or they are overwritten', NULL),
+ ('description', '2e386ca4-95ca-4139-d7ed-ad71d9a3768d', 'p8.Task', 'str', 'text-embedding-ada-002', 'The content for this part of the conversation', NULL),
+ ('target_date', 'cd8f0166-52df-cc84-70cf-a2aa323cd1be', 'p8.Task', 'datetime', NULL, 'Optional target date', NULL),
+ ('project_name', 'bfb6c6e9-6fd2-5140-db91-58ad3e7d800c', 'p8.Task', 'str', NULL, 'The related project name of relevant', NULL)
+        ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name,entity_name=EXCLUDED.entity_name,field_type=EXCLUDED.field_type,embedding_provider=EXCLUDED.embedding_provider,description=EXCLUDED.description,is_key=EXCLUDED.is_key   ;
+-- ------------------
+
+-- insert_agent_data (p8.Task)------
+-- ------------------
+INSERT INTO p8."Agent"(name,id,category,description,spec,functions) VALUES
+ ('p8.Task', 'bee70821-5685-5312-b53a-87a12abb0260', NULL, 'Tasks are sub projects. A project can describe a larger objective and be broken down into tasks', '{"description": "Tasks are sub projects. A project can describe a larger objective and be broken down into tasks", "properties": {"name": {"description": "The name of the entity e.g. a model in the types or a user defined model", "title": "Name", "type": "string"}, "id": {"anyOf": [{"format": "uuid", "type": "string"}, {"type": "string"}, {"type": "null"}], "default": null, "description": "id generated for the name and project - these must be unique or they are overwritten", "title": "Id"}, "description": {"description": "The content for this part of the conversation", "embedding_provider": "default", "title": "Description", "type": "string"}, "target_date": {"anyOf": [{"format": "date-time", "type": "string"}, {"type": "null"}], "default": null, "description": "Optional target date", "title": "Target Date"}, "project_name": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "description": "The related project name of relevant", "title": "Project Name"}}, "required": ["name", "description"], "title": "Task", "type": "object"}', '{"get_tasks_task_name_comments": "get comments associated with this task, supplying the task name"}')
+        ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name,category=EXCLUDED.category,description=EXCLUDED.description,spec=EXCLUDED.spec,functions=EXCLUDED.functions   ;
+-- ------------------
+
+-- register_entities (p8.Task)------
+-- ------------------
+select * from p8.register_entities('p8.Task');
+-- ------------------
+
+-- register_embeddings (p8.TaskResources)------
+-- ------------------
+CREATE TABLE  IF NOT EXISTS p8_embeddings."p8_TaskResources_embeddings" (
+    id UUID PRIMARY KEY,  -- Hash-based unique ID - we typically hash the column key and provider and column being indexed
+    source_record_id UUID NOT NULL,  -- Foreign key to primary table
+    column_name TEXT NOT NULL,  -- Column name for embedded content
+    embedding_vector VECTOR NULL,  -- Embedding vector as an array of floats
+    embedding_name VARCHAR(50),  -- ID for embedding provider
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, -- Timestamp for tracking
+    
+    -- Foreign key constraint
+    CONSTRAINT fk_source_table_p8_taskresources
+        FOREIGN KEY (source_record_id) REFERENCES p8."TaskResources"
+        ON DELETE CASCADE
+);
+
+-- ------------------
+
+-- insert_field_data (p8.TaskResources)------
+-- ------------------
+INSERT INTO p8."ModelField"(name,id,entity_name,field_type,embedding_provider,description,is_key) VALUES
+ ('id', 'dc8d5978-927c-652b-7837-4cee69428b83', 'p8.TaskResources', 'UUID', NULL, NULL, NULL),
+ ('resource_id', '2a2ec07c-84c2-2a05-4fd5-9b4a3886540e', 'p8.TaskResources', 'UUID', NULL, NULL, NULL),
+ ('session_id', '88c0bf07-4c3a-438c-4778-716de371de0b', 'p8.TaskResources', 'UUID', NULL, NULL, NULL)
+        ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name,entity_name=EXCLUDED.entity_name,field_type=EXCLUDED.field_type,embedding_provider=EXCLUDED.embedding_provider,description=EXCLUDED.description,is_key=EXCLUDED.is_key   ;
+-- ------------------
+
+-- insert_agent_data (p8.TaskResources)------
+-- ------------------
+INSERT INTO p8."Agent"(name,id,category,description,spec,functions) VALUES
+ ('p8.TaskResources', '08e43647-3fb3-555f-adb7-ce64bad1a473', NULL, 'A link between tasks and resources since resources can be shared between tasks', '{"description": "A link between tasks and resources since resources can be shared between tasks", "properties": {"id": {"anyOf": [{"format": "uuid", "type": "string"}, {"type": "string"}, {"type": "null"}], "default": "unique id for rel", "title": "Id"}, "resource_id": {"anyOf": [{"format": "uuid", "type": "string"}, {"type": "string"}, {"type": "null"}], "default": "The resource id", "title": "Resource Id"}, "session_id": {"anyOf": [{"format": "uuid", "type": "string"}, {"type": "string"}, {"type": "null"}], "default": "The session id is typically a task or research iteration but can be any session id to group resources", "title": "Session Id"}}, "title": "TaskResources", "type": "object"}', NULL)
+        ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name,category=EXCLUDED.category,description=EXCLUDED.description,spec=EXCLUDED.spec,functions=EXCLUDED.functions   ;
+-- ------------------
+
+-- register_embeddings (p8.ResearchIteration)------
+-- ------------------
+CREATE TABLE  IF NOT EXISTS p8_embeddings."p8_ResearchIteration_embeddings" (
+    id UUID PRIMARY KEY,  -- Hash-based unique ID - we typically hash the column key and provider and column being indexed
+    source_record_id UUID NOT NULL,  -- Foreign key to primary table
+    column_name TEXT NOT NULL,  -- Column name for embedded content
+    embedding_vector VECTOR NULL,  -- Embedding vector as an array of floats
+    embedding_name VARCHAR(50),  -- ID for embedding provider
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, -- Timestamp for tracking
+    
+    -- Foreign key constraint
+    CONSTRAINT fk_source_table_p8_researchiteration
+        FOREIGN KEY (source_record_id) REFERENCES p8."ResearchIteration"
+        ON DELETE CASCADE
+);
+
+-- ------------------
+
+-- insert_field_data (p8.ResearchIteration)------
+-- ------------------
+INSERT INTO p8."ModelField"(name,id,entity_name,field_type,embedding_provider,description,is_key) VALUES
+ ('id', '4f4a91fc-85e9-2de4-66e5-1a81b9b96723', 'p8.ResearchIteration', 'UUID', NULL, NULL, NULL),
+ ('iteration', '532ee61f-1fe8-27b9-0059-2d3f81287448', 'p8.ResearchIteration', 'int', NULL, NULL, NULL),
+ ('conceptual_diagram', 'f0de36c3-ebc8-c87f-4989-6d9c3670232e', 'p8.ResearchIteration', 'str', NULL, 'The mermaid diagram for the plan', NULL),
+ ('question_set', '8dec436c-0d29-f361-e3dc-38a96c845ff1', 'p8.ResearchIteration', 'dict', NULL, 'a set of questions and their ids from the conceptual diagram', NULL),
+ ('task_id', '49d300f3-dfbb-0774-9488-6e28e03b0e07', 'p8.ResearchIteration', 'UUID', NULL, NULL, NULL)
+        ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name,entity_name=EXCLUDED.entity_name,field_type=EXCLUDED.field_type,embedding_provider=EXCLUDED.embedding_provider,description=EXCLUDED.description,is_key=EXCLUDED.is_key   ;
+-- ------------------
+
+-- insert_agent_data (p8.ResearchIteration)------
+-- ------------------
+INSERT INTO p8."Agent"(name,id,category,description,spec,functions) VALUES
+ ('p8.ResearchIteration', '3166721c-bc69-5413-8355-d6655488e9bc', NULL, 'A research iteration is a plan to deal with a task', '{"description": "A research iteration is a plan to deal with a task", "properties": {"id": {"anyOf": [{"format": "uuid", "type": "string"}, {"type": "string"}, {"type": "null"}], "default": "unique id for rel", "title": "Id"}, "iteration": {"title": "Iteration", "type": "integer"}, "conceptual_diagram": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "description": "The mermaid diagram for the plan", "title": "Conceptual Diagram"}, "question_set": {"description": "a set of questions and their ids from the conceptual diagram", "items": {"type": "object"}, "title": "Question Set", "type": "array"}, "task_id": {"anyOf": [{"format": "uuid", "type": "string"}, {"type": "string"}, {"type": "null"}], "default": "Research are linked to tasks which are at minimum a question", "title": "Task Id"}}, "required": ["iteration", "question_set"], "title": "ResearchIteration", "type": "object"}', NULL)
         ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name,category=EXCLUDED.category,description=EXCLUDED.description,spec=EXCLUDED.spec,functions=EXCLUDED.functions   ;
 -- ------------------
 

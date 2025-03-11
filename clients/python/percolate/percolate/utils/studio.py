@@ -1,11 +1,11 @@
 import yaml
 from glob import glob
-from percolate.utils.env import STUDIO_HOME
+from percolate.utils.env import STUDIO_HOME, TAVILY_API_KEY
 from pydantic import BaseModel,Field,model_validator
 import typing
 import os 
-from percolate.utils import logger
-
+from percolate.utils import logger,make_uuid
+import percolate as p8
 class ProjectAgents(BaseModel):
     name: str
     description: str
@@ -79,6 +79,7 @@ def apply_project(project:Project|str):
     from percolate.utils.ingestion import add
     from percolate.utils.index import index_codebase
     from percolate.utils.env import sync_model_keys
+    from percolate.models.p8 import ApiProxy
     
     if isinstance(project,str):
         project = open_project(project)
@@ -97,6 +98,12 @@ def apply_project(project:Project|str):
                     verbs=api.verbs, 
                     filter_ops=api.filter_ops,
                     alt_host=api.alt_host)
+    #if configured
+    if TAVILY_API_KEY:
+        logger.info(f"Adding the tavily search api using the key in the environment")
+        uri = 'https://api.tavily.com/search'
+        p = ApiProxy(id=make_uuid({'proxy_uri':uri}),proxy_uri=uri, token=TAVILY_API_KEY)
+        p8.repository(ApiProxy).update_records(p)
         
     """TODO"""
     return {'status':'ok'}
