@@ -1788,13 +1788,15 @@ $BODY$;
 
 ---------
 
+DROP FUNCTION IF EXISTS p8.run_web_search;
+
 CREATE OR REPLACE FUNCTION p8.run_web_search(
     query TEXT,
+    max_results INT DEFAULT 5,
+    fetch_content BOOLEAN DEFAULT FALSE, -- Whether to fetch full page content
+    include_images BOOLEAN DEFAULT FALSE,
     api_endpoint TEXT DEFAULT 'https://api.tavily.com/search',
     topic TEXT DEFAULT 'general', -- news|finance and other things
-    max_results INT DEFAULT 7,
-    include_images BOOLEAN DEFAULT FALSE,
-    fetch_content BOOLEAN DEFAULT FALSE, -- Whether to fetch full page content
     optional_token TEXT DEFAULT NULL -- Allow token to be optionally passed in
 ) RETURNS TABLE (
     title TEXT,
@@ -1891,8 +1893,14 @@ BEGIN
 		--RAISE NOTICE '%', url;
 		
         -- Fetch full page content if flag is set
+         -- Fetch full page content with error handling
         IF fetch_content THEN
-            SELECT a.content into content FROM http_get(url) a;
+            BEGIN
+                SELECT a.content INTO content FROM http_get(url) a;
+            EXCEPTION WHEN OTHERS THEN
+                content := NULL;
+                RAISE NOTICE 'Failed to fetch content for URL: %', url;
+            END;
         ELSE
             content := NULL;
         END IF;
@@ -2279,6 +2287,61 @@ ALTER FUNCTION p8.google_to_open_ai_response(jsonb)
 
 ---------
 
+DROP FUNCTION IF EXISTS p8.insert_web_search_results;
+
+CREATE OR REPLACE FUNCTION p8.insert_web_search_results(
+    query TEXT,
+    session_id UUID DEFAULT p8.json_to_uuid(jsonb_build_object('proxy_uri', 'http://percolate-api:5008')::JSONB),
+    api_endpoint TEXT DEFAULT 'https://api.tavily.com/search',
+    search_limit INT DEFAULT 5
+) RETURNS VOID AS $$
+DECLARE
+    result RECORD;
+    resource_id UUID;
+    task_resource_id UUID;
+BEGIN
+    -- Example usage:
+    -- SELECT p8.insert_web_search_results('latest tech news');
+    
+    -- Loop through search results
+    FOR result IN 
+        SELECT * FROM p8.run_web_search(query, search_limit, TRUE)
+    LOOP
+        -- Generate deterministic resource ID
+        SELECT p8.json_to_uuid(jsonb_build_object('uri', result.url)::JSONB) INTO resource_id;
+        
+        -- Upsert into Resources table
+        INSERT INTO p8."Resources" (id, name, category, content, summary, ordinal, uri, metadata, graph_paths)
+        VALUES (
+            resource_id,
+            result.title,
+            'web', -- Default category
+            result.content,
+            result.summary,
+            0,
+            result.url,
+            jsonb_build_object('score', result.score, 'images', result.images),
+            NULL
+        )
+        ON CONFLICT (id) DO UPDATE SET
+            name = EXCLUDED.name,
+            content = EXCLUDED.content,
+            summary = EXCLUDED.summary,
+            metadata = EXCLUDED.metadata;
+        
+        -- Generate deterministic TaskResource ID
+        SELECT p8.json_to_uuid(jsonb_build_object('session_id', session_id, 'resource_id', resource_id)::JSONB) INTO task_resource_id;
+        
+        -- Insert into TaskResource table (ignore conflicts)
+        INSERT INTO p8."TaskResource" (id, resource_id, session_id)
+        VALUES (task_resource_id, resource_id, session_id)
+        ON CONFLICT DO NOTHING;
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
+---------
+
 CREATE OR REPLACE FUNCTION p8.get_canonical_messages(
     session_id_in UUID,  
     question TEXT DEFAULT NULL,  
@@ -2446,7 +2509,7 @@ BEGIN
         SELECT 'system' AS "role", 
 		   'you will generate a PostgreSQL query for the provided table metadata that can '
 		|| ' query that table (but replace table with YOUR_TABLE) to answer the users question and respond in json format'
-		|| 'responding with the query and confidence - escape characters so that the json can be loaded in postgres.' 
+		|| 'responding with the query and confidence as a number from 0 to 1 - escape characters so that the json can be loaded in postgres.' 
 		AS "content" 
         UNION
         SELECT 'system' AS "role", table_schema_prompt AS "content" 
@@ -2574,7 +2637,7 @@ CREATE OR REPLACE FUNCTION p8.generate_and_fetch_embeddings(
 	param_column text,
 	param_embedding_model text DEFAULT 'default'::text,
 	param_token text DEFAULT NULL::text,
-	param_limit_fetch integer DEFAULT 1000)
+	param_limit_fetch integer DEFAULT 200)
     RETURNS TABLE(id uuid, source_id uuid, embedding_id text, column_name text, embedding vector) 
     LANGUAGE 'plpgsql'
     COST 100
@@ -2591,7 +2654,7 @@ BEGIN
 
 	example
 
-	select * from p8.generate_and_fetch_embeddings('p8.AgentModel', 'description')
+	select * from p8.generate_and_fetch_embeddings('p8.Resources', 'content')
 	*/
 
     -- Set the model to 'text-embedding-ada-002' if it's 'default'
@@ -2855,40 +2918,62 @@ ALTER FUNCTION p8.insert_generated_embeddings(text, text, text, text)
 
 ---------
 
+DROP FUNCTION IF EXISTS p8.get_embedding_for_text;
+
 CREATE OR REPLACE FUNCTION p8.get_embedding_for_text(
 	description_text text,
 	embedding_model text DEFAULT 'text-embedding-ada-002'::text)
-    RETURNS TABLE(embedding vector) 
-    LANGUAGE 'plpgsql'
-    COST 100
-    VOLATILE PARALLEL UNSAFE
-    ROWS 1000
+RETURNS TABLE(embedding vector) 
+LANGUAGE 'plpgsql'
+COST 100
+VOLATILE PARALLEL UNSAFE
+ROWS 1000
 
 AS $BODY$
 DECLARE
     api_token TEXT;
     embedding_response JSONB;
+    request_url TEXT;
+    use_ollama BOOLEAN;
 BEGIN
-    -- Step 1: Retrieve the API token for now im hard coding to open ai token 
-    SELECT "token"
-    INTO api_token
-    FROM p8."LanguageModelApi"
-    WHERE "name" = 'gpt-4o-mini'; --embedding_model hint - any model that uses the same key;
+    /*
+        for now we have a crude way of assuming ollama for open source models
+        if running locally it would look like this but the url we use is the dockerized service so localhost becomes ollama
+        curl http://localhost:11434/api/embed -d '{
+            "model": "bge-m3",
+            "input": "Hello World"
+            }'
+    */
 
-    IF api_token IS NULL THEN
-        RAISE EXCEPTION 'Token not found for the provided model or open ai default: %', api_token;
+    -- Step 1: Check if the model is in the list of hardcoded Ollama models
+    use_ollama := embedding_model IN ('bge-m3');
+
+    IF use_ollama THEN
+        request_url := 'http://ollama:11434/api/embed';
+        api_token := ''; -- No API token required for Ollama
+    ELSE
+        -- Retrieve API token for OpenAI models
+        SELECT "token"
+        INTO api_token
+        FROM p8."LanguageModelApi"
+        WHERE "name" = 'gpt-4o-mini'; -- embedding_model hint
+
+        IF api_token IS NULL THEN
+            RAISE EXCEPTION 'Token not found for the provided model or OpenAI default: %', api_token;
+        END IF;
+
+        request_url := 'https://api.openai.com/v1/embeddings';
     END IF;
 
-    -- Step 2: Make the HTTP request to OpenAI API
+    -- Step 2: Make the HTTP request
     SELECT content::JSONB
     INTO embedding_response
     FROM public.http(
         (
             'POST',
-            'https://api.openai.com/v1/embeddings',
+            request_url,
             ARRAY[
                 public.http_header('Authorization', 'Bearer ' || api_token)
-                --,http_header('Content-Type', 'application/json')
             ],
             'application/json',
             jsonb_build_object(
@@ -2911,12 +2996,13 @@ $BODY$;
 
 -- FUNCTION: p8.generate_requests_for_embeddings(text, text, text)
 
--- DROP FUNCTION IF EXISTS p8.generate_requests_for_embeddings(text, text, text);
+DROP FUNCTION IF EXISTS p8.generate_requests_for_embeddings;
 
 CREATE OR REPLACE FUNCTION p8.generate_requests_for_embeddings(
 	param_table text,
 	param_description_col text,
-	param_embedding_model text)
+	param_embedding_model text,
+  	max_length integer DEFAULT 30000) -- WARNING that we truncate the string for e.g. the ada model so batches dont fail but we should have an upstream chunking strategy
     RETURNS TABLE(eid uuid, source_id uuid, description text, bid uuid, column_name text, embedding_id text, idx bigint) 
     LANGUAGE 'plpgsql'
     COST 100
@@ -2931,7 +3017,9 @@ DECLARE
 BEGIN
 /*
 if there are records in the table for this embedding e.g. the table like p8.Agents has unfilled records 
-select * from p8.
+
+		select * from p8.generate_requests_for_embeddings('p8.Resources', 'content', 'text-embedding-ada-002')
+
 */
     -- Sanitize the table name
     sanitized_table := REPLACE(PARAM_TABLE, '.', '_');
@@ -2944,7 +3032,7 @@ select * from p8.
         SELECT 
             b.id AS eid, 
             a.id AS source_id, 
-            COALESCE(a.%I, '')::TEXT AS description, -- Dynamically replace the description column
+            LEFT(COALESCE(a.%I, ''), %s)::TEXT AS description, -- Truncate description to max_length - NOTE its important that we chunk upstream!!!! but this stops a blow up downstream           
             p8.json_to_uuid(json_build_object(
                 'embedding_id', %L,
                 'column_name', %L,
@@ -2961,6 +3049,7 @@ select * from p8.
  
         $sql$,
         PARAM_DESCRIPTION_COL,         -- %I for the description column
+        max_length,                    -- %s for max string length truncation
         PARAM_EMBEDDING_MODEL,         -- %L for the embedding model
         PARAM_DESCRIPTION_COL,         -- %L for the column name
         PARAM_DESCRIPTION_COL,         -- %L for the column name again
@@ -2973,11 +3062,9 @@ select * from p8.
 END;
 $BODY$;
 
-ALTER FUNCTION p8.generate_requests_for_embeddings(text, text, text)
-    OWNER TO postgres;
-
-
 ---------
+
+DROP FUNCTION IF EXISTS p8.fetch_openai_embeddings;
 
 CREATE OR REPLACE FUNCTION p8.fetch_openai_embeddings(
     param_array_data jsonb,
@@ -3027,6 +3114,112 @@ BEGIN
             )
         )::http_request)
     ) subquery;
+END;
+$BODY$;
+
+---------
+
+DROP FUNCTION IF EXISTS p8.fetch_embeddings;
+
+CREATE OR REPLACE FUNCTION p8.fetch_embeddings(
+    param_array_data jsonb,
+    param_token text DEFAULT NULL,
+    param_model text DEFAULT 'default')
+    RETURNS TABLE(embedding vector) 
+    LANGUAGE 'plpgsql'
+    COST 100
+    VOLATILE PARALLEL UNSAFE
+    ROWS 1000
+AS $BODY$
+DECLARE
+    resolved_model text;
+    resolved_token text;
+    response jsonb;
+    status_code int;
+    request_url text;
+    use_ollama BOOLEAN;
+BEGIN
+/*
+-- Example calls 
+   1 OLLAMA case for a dockerized ollama:
+	-- for small hardware making the request directly is slow so we can set a timeout
+   select http_set_curlopt('CURLOPT_TIMEOUT','20000') into ack_http_timeout;
+   SELECT * FROM p8.fetch_embeddings(
+    '["Hello world", "How are you?"]'::jsonb,
+    NULL,
+    'bge-m3'
+);
+
+SELECT * FROM p8.fetch_embeddings(
+    '["Hello world", "How are you?"]'::jsonb,
+    NULL,
+    'text-embedding-ada-002'
+);
+*/
+    -- Set the model to 'text-embedding-ada-002' if it's 'default'
+    resolved_model := CASE 
+        WHEN param_model = 'default' THEN 'text-embedding-ada-002'
+        ELSE param_model
+    END;
+
+    -- Check if the model should use Ollama
+    use_ollama := resolved_model IN ('bge-m3');
+
+    IF use_ollama THEN
+        request_url := 'http://ollama:11434/api/embed';
+        resolved_token := ''; -- No API token required for Ollama
+    ELSE
+        -- If the token is not set, fetch it
+        IF param_token IS NULL THEN
+            SELECT token INTO resolved_token
+            FROM p8."LanguageModelApi"
+            WHERE "name" = 'gpt-4o-mini';
+        ELSE
+            resolved_token := param_token;
+        END IF;
+
+        request_url := 'https://api.openai.com/v1/embeddings';
+    END IF;
+
+    BEGIN
+        -- Execute HTTP request
+        SELECT content::jsonb INTO response
+        FROM http( (
+            'POST', 
+            request_url, 
+            ARRAY[http_header('Authorization', 'Bearer ' || resolved_token)],
+            'application/json',
+            jsonb_build_object(
+                'input', param_array_data,
+                'model', resolved_model,
+                'encoding_format', 'float'
+            )
+        )::http_request);
+    EXCEPTION WHEN OTHERS THEN
+        RAISE EXCEPTION 'HTTP request failed: %', SQLERRM;
+    END;
+
+    IF response IS NULL THEN
+        RAISE EXCEPTION 'API response is null, request might have failed';
+    END IF;
+
+    status_code := response->>'status';
+
+    IF status_code >= 400 THEN
+        RAISE EXCEPTION 'API request failed with status: %, response: %', status_code, response;
+    END IF;
+
+    -- Return embeddings if no errors
+	IF use_ollama THEN
+		RETURN QUERY
+		--not sure in general yet what the interfaces are but at least embeddings is plural for ollama
+	    SELECT VECTOR(item::TEXT) AS embedding
+	    FROM jsonb_array_elements(response->'embeddings') AS item;
+	ELSE
+	    RETURN QUERY
+	    SELECT VECTOR((item->'embedding')::TEXT) AS embedding
+	    FROM jsonb_array_elements(response->'data') AS item;
+	END IF;
 END;
 $BODY$;
 
