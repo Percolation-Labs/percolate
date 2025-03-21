@@ -65,6 +65,3 @@ if there are records in the table for this embedding e.g. the table like p8.Agen
     );
 END;
 $BODY$;
-
-ALTER FUNCTION p8.generate_requests_for_embeddings(text, text, text)
-    OWNER TO postgres;

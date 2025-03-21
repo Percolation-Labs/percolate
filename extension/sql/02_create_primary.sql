@@ -360,6 +360,7 @@ EXECUTE FUNCTION update_updated_at_column();
 CREATE TABLE  IF NOT EXISTS  p8."ResearchIteration" (
 id UUID PRIMARY KEY ,
     iteration INTEGER NOT NULL,
+    content TEXT,
     conceptual_diagram TEXT,
     question_set JSON NOT NULL,
     task_id UUID,
@@ -375,4 +376,34 @@ FOR EACH ROW
 EXECUTE FUNCTION update_updated_at_column();
 
         
+SELECT attach_notify_trigger_to_table('p8', 'ResearchIteration');
+            
+-- ------------------
+
+-- register entity (p8.Resources)------
+-- ------------------
+CREATE TABLE  IF NOT EXISTS  p8."Resources" (
+id UUID PRIMARY KEY ,
+    name TEXT,
+    category TEXT,
+    content TEXT NOT NULL,
+    summary TEXT,
+    ordinal INTEGER NOT NULL,
+    uri TEXT NOT NULL,
+    metadata JSON,
+    graph_paths TEXT[],
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    userid UUID
+);
+DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."Resources";
+CREATE   TRIGGER update_updated_at_trigger
+BEFORE UPDATE ON p8."Resources"
+FOR EACH ROW
+EXECUTE FUNCTION update_updated_at_column();
+
+        
+SELECT attach_notify_trigger_to_table('p8', 'Resources');
+            
 -- ------------------
