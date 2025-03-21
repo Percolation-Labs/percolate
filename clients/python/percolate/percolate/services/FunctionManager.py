@@ -18,6 +18,7 @@ class FunctionManager:
     def __init__(cls):
         cls._functions= {}
         cls.repo = p8.repository(Function)
+        cls.planner = None
         
     def __getitem__(cls, key):
         """unsafely gets the function"""
@@ -74,6 +75,9 @@ class FunctionManager:
         required = set(required) - set(cls.functions.keys())
         if required:
             logger.warning(f"We could not find the function {required}")
+            
+        """still required"""
+        return required
         
     def plan(cls, questions: str | typing.List[str], use_cache: bool = False):
         """based on one or more questions, we will construct a plan.
@@ -89,8 +93,11 @@ class FunctionManager:
         in the database we need a Plan model that also can search agents and return a plan
         but in python we can just select the data into the planner agent and fetch the plan
         """
+        if not cls.planner:
+            """lazy load once"""
+            cls.planner = p8.Agent(PlanModel,allow_help=False)
         
-        return p8.Agent(PlanModel,allow_help=False).run(questions, data=cls.repo.select())
+        return cls.planner.run(questions, data=cls.repo.select())
     
     @property
     def functions(cls):

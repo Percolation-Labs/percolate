@@ -1,10 +1,12 @@
+DROP FUNCTION IF EXISTS p8.run_web_search;
+
 CREATE OR REPLACE FUNCTION p8.run_web_search(
     query TEXT,
+    max_results INT DEFAULT 5,
+    fetch_content BOOLEAN DEFAULT FALSE, -- Whether to fetch full page content
+    include_images BOOLEAN DEFAULT FALSE,
     api_endpoint TEXT DEFAULT 'https://api.tavily.com/search',
     topic TEXT DEFAULT 'general', -- news|finance and other things
-    max_results INT DEFAULT 7,
-    include_images BOOLEAN DEFAULT FALSE,
-    fetch_content BOOLEAN DEFAULT FALSE, -- Whether to fetch full page content
     optional_token TEXT DEFAULT NULL -- Allow token to be optionally passed in
 ) RETURNS TABLE (
     title TEXT,
@@ -101,8 +103,14 @@ BEGIN
 		--RAISE NOTICE '%', url;
 		
         -- Fetch full page content if flag is set
+         -- Fetch full page content with error handling
         IF fetch_content THEN
-            SELECT a.content into content FROM http_get(url) a;
+            BEGIN
+                SELECT a.content INTO content FROM http_get(url) a;
+            EXCEPTION WHEN OTHERS THEN
+                content := NULL;
+                RAISE NOTICE 'Failed to fetch content for URL: %', url;
+            END;
         ELSE
             content := NULL;
         END IF;

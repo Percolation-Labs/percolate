@@ -53,7 +53,7 @@ BEGIN
         SELECT 'system' AS "role", 
 		   'you will generate a PostgreSQL query for the provided table metadata that can '
 		|| ' query that table (but replace table with YOUR_TABLE) to answer the users question and respond in json format'
-		|| 'responding with the query and confidence - escape characters so that the json can be loaded in postgres.' 
+		|| 'responding with the query and confidence as a number from 0 to 1 - escape characters so that the json can be loaded in postgres.' 
 		AS "content" 
         UNION
         SELECT 'system' AS "role", table_schema_prompt AS "content" 

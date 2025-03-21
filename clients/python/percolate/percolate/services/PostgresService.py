@@ -13,7 +13,7 @@ from tenacity import retry, stop_after_attempt, wait_fixed
 import traceback
 import uuid
 import json
-
+from percolate.models.p8 import   Function
 class PostgresService:
     """the postgres service wrapper for sinking and querying entities/models"""
 
@@ -176,6 +176,7 @@ class PostgresService:
         self,
         plan: bool = False,
         register_entities: bool = True,
+        make_discoverable: bool=False,
         allow_create_schema: bool = False
     ):
         """register the entity in percolate
@@ -213,6 +214,9 @@ class PostgresService:
             except DuplicateTable:
                 logger.warning(f"The embedding-associated table already exists")
 
+        if make_discoverable:
+            """discoverable entities are agents that can be run as functions"""
+            self.repository(Function).update_records(Function.from_entity(self.model))
 
         if register_entities:
             logger.debug("Updating model fields")

@@ -1,4 +1,13 @@
 services:
+  ollama:
+    #e.g. pull the embedding model after startup
+    #docker compose exec ollama ollama pull bge-m3
+    image: ollama/ollama
+    container_name: ollama-service
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
   minio:
     image: quay.io/minio/minio
     container_name: minio
@@ -37,5 +46,6 @@ services:
 volumes:
   percolate_data:
   minio_data:
+  ollama_data:
 #good to check the api logs so we can see if the api and percolate db are on speaking terms
 #docker logs   percolate-api

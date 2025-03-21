@@ -7,7 +7,7 @@ CREATE OR REPLACE FUNCTION p8.generate_and_fetch_embeddings(
 	param_column text,
 	param_embedding_model text DEFAULT 'default'::text,
 	param_token text DEFAULT NULL::text,
-	param_limit_fetch integer DEFAULT 1000)
+	param_limit_fetch integer DEFAULT 200)
     RETURNS TABLE(id uuid, source_id uuid, embedding_id text, column_name text, embedding vector) 
     LANGUAGE 'plpgsql'
     COST 100
@@ -24,7 +24,7 @@ BEGIN
 
 	example
 
-	select * from p8.generate_and_fetch_embeddings('p8.AgentModel', 'description')
+	select * from p8.generate_and_fetch_embeddings('p8.Resources', 'content')
 	*/
 
     -- Set the model to 'text-embedding-ada-002' if it's 'default'

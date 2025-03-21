@@ -61,15 +61,28 @@ def map_openapi_to_function(spec,short_name:str=None):
         return mapped_schema
         
     try:
-        r =  {
+        parameters = {p['name']: _map(p) for p in (spec.get('parameters') or [])}
+        required_params = [p['name'] for p in spec.get('parameters') or [] if p.get('required')]
+
+        
+        request_body = spec.get('request_body', {}).get('properties', {})#.get('application/json', {}).get('schema')
+        # Handle request body if present
+        if request_body:
+            body_schema = request_body
+            parameters['request_body'] =  request_body
+            if 'required' in body_schema:
+                required_params.extend(body_schema['required'])
+
+        r = {
             'name': short_name or (spec.get('operationId') or spec.get('title')),
             'description': spec.get('description') or spec.get('summary'),
-            'parameters' : {
+            'parameters': {
                 'type': 'object',
-                'properties': {p['name']:_map(p) for p in (spec.get('parameters') or [])},
-                'required': [p['name'] for p in spec.get('parameters') or [] if p.get('required')]
-            } 
+                'properties': parameters,
+                'required': required_params
+            }
         }
+  
     except:
         logger.warning(f"Failing to parse {spec=}")
         raise
@@ -142,13 +155,18 @@ class OpenApiSpec:
         filter_ops=verbs.split(',') if isinstance(filter_ops,str) else filter_ops
         
         ep_to_short_names = {v:k for k,v in self.short_names.items()}
+        #spec = self.get_expanded_schema()
+        """we can use self.spec['paths'] which is not expanded"""
         for endpoint, grp in self.spec['paths'].items():
             for method, s in grp.items():
                 op_id = s.get('operationId')
+                
                 if verbs and method not in verbs:
                     continue
                 if filter_ops and op_id not in filter_ops:
                     continue
+                """when generating we need to expand the endpoint schema"""
+                s = self.get_expanded_schema_for_endpoint(endpoint,method)
                 fspec = map_openapi_to_function(s,short_name=ep_to_short_names[op_id])
                 yield Function(name=ep_to_short_names[op_id],
                                key=op_id,
@@ -207,6 +225,10 @@ class OpenApiSpec:
 
     def get_expanded_schema(self):
         """expand the lot map to operation id"""
+        
+        def _pack(endpoint,method,expanded):
+            return {'endpoint':endpoint,'methods': {method: expanded}}
+        
         return {operation_id: self.get_expanded_schema_for_endpoint(endpoint, method)   
                 for operation_id, endpoint, method in self}
             
@@ -239,7 +261,10 @@ class OpenApiSpec:
                     schema = self.resolve_ref(schema["$ref"])
                 request_body = schema
 
-        return {"parameters": parameters, "request_body": request_body}
+        method_spec['parameters'] = parameters
+        method_spec['request_body'] = request_body
+        
+        return method_spec
     
     
 class OpenApiService:
@@ -251,7 +276,7 @@ class OpenApiService:
         """assume token but maybe support mapping from env"""
         self.token = token_or_key or _ApiTokenCache.get(uri)
          
-    def invoke(self, function:Function, data:dict=None, p8_return_raw_response:bool=False, p8_full_detail_on_error: bool = False, **kwargs):
+    def invoke(self, function:Function, request_body:dict=None, p8_return_raw_response:bool=False, p8_full_detail_on_error: bool = False,  **kwargs):
         """we can invoke a function which has the endpoint information
         
         Args:
@@ -269,13 +294,14 @@ class OpenApiService:
         endpoint = endpoint.format_map(kwargs)
         endpoint = f"{self.uri}/{endpoint.lstrip('/')}"
 
-        if data is None: #callers dont necessarily know about data and may pass kwargs
-            data = kwargs
-        if data and not isinstance(data,str):
-            """support for passing pydantic models"""
-            if hasattr(data, 'model_dump'):
-                data = data.model_dump()
-            data = json.dumps(data)
+        
+        # if data is None: #callers dont necessarily know about data and may pass kwargs
+        #     data = kwargs
+        # if data and not isinstance(data,str):
+        #     """support for passing pydantic models"""
+        #     if hasattr(data, 'model_dump'):
+        #         data = data.model_dump()
+        #     data = json.dumps(data)
 
         headers = { } #"Content-type": "application/json"
         if self.token:
@@ -286,7 +312,7 @@ class OpenApiService:
             endpoint,
             headers=headers,
             params=kwargs,
-            data=data,
+            json=request_body,
         )
 
         try:
