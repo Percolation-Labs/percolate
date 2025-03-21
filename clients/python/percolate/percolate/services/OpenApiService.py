@@ -65,7 +65,7 @@ def map_openapi_to_function(spec,short_name:str=None):
         required_params = [p['name'] for p in spec.get('parameters') or [] if p.get('required')]
 
         
-        request_body = spec.get('request_body', {}).get('properties', {})#.get('application/json', {}).get('schema')
+        request_body = (spec.get('request_body') or {}).get('properties', {})#.get('application/json', {}).get('schema')
         # Handle request body if present
         if request_body:
             body_schema = request_body
