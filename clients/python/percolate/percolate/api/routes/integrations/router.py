@@ -55,7 +55,11 @@ async def fetch_web_resource(web_request: WebFetch):
     """
     fetches any file type, typically used for fetching html pages and optionally converting to markdown
     """
-    data = requests.get(web_request.url).content.decode()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36"
+    }
+       
+    data = requests.get(web_request.url, headers=headers).content.decode()
     if web_request.html_as_markdown:
          return html2text.html2text(data)
     return data

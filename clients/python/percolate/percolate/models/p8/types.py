@@ -36,9 +36,54 @@ class Function(AbstractEntityModel):
         """
         return p8.get_proxy(self.proxy_uri).invoke(self, **kwargs)
         
-    
     @classmethod
-    def from_callable(cls, fn:typing.Callable, remove_untyped:bool=True, proxy_uri:str=None):
+    def from_entity(cls, model:BaseException):
+        """The function produces a callable agent stub that can be searched.
+           In the database we use a native generic function handler and in python we load the agent from the name to call the agent.
+           Agents are discoverable in this way and we can transfer context to other agents.
+        """
+        M:AbstractModel = AbstractModel.Abstracted(model)
+    
+        description = f"""
+        ## Agent: {M.get_model_full_name()}
+        ## Description
+        ```
+        {M.get_model_description()}
+        ```
+        ## Functions
+        ```json
+        {M.get_model_functions()}
+        ```
+        """
+        
+        """this must be the same interface as the Agent interface i.e. we relay to the agent.run(question='')"""
+        def run(question:str):
+            """
+            send any query or request to the agent to execute the agent
+            
+            Args:
+                question: a request to the agent
+            """
+            pass
+        
+        key = f"{M.get_model_full_name()}.run".replace('.','_')
+        
+        """the alias is important because we need to qualify functions used by agents and the proxy above is just a signature hint"""
+        spec = cls.from_callable(run,alias=key).function_spec
+        """names should not have '.'"""
+        
+        """for the name we qualify with run agent so its clear what we are doing"""
+        return Function(name=key, 
+                        key=key,
+                        description=description,
+                        function_spec=spec,
+                        verb='get',
+                        proxy_uri=f'p8agent/{M.get_model_full_name()}', #handler can use this - a p8_agent/agent.name - see interface proxy manager
+                        endpoint='run')
+        
+    @classmethod
+    def from_callable(cls, fn:typing.Callable, remove_untyped:bool=True, proxy_uri:str=None,alias:str=None):
+        """construct function from callable - supply an alias if the function is not full qualified or if we need extra context"""
         def process_properties(properties: dict):
              
             untyped = []
@@ -79,7 +124,7 @@ class Function(AbstractEntityModel):
             name = p.pop('title')
             desc = p.pop('description') if 'description' in p else 'NO DESC'
             return {
-                'name': name,
+                'name': alias or name,
                 'parameters' :p,
                 'description': desc
             }
@@ -337,7 +382,6 @@ class SessionEvaluation(AbstractModel):
     
 class ModelMatrix(AbstractModel):
     """keep useful json blobs for model info"""
-    
     id: uuid.UUID| str  
     entity_name: str = Field(description="The name of the entity e.g. a model in the types or a user defined model")
     enums: typing.Optional[dict] = Field(None, description="The enums used in the model - usually a job will build these and they can be used in query prompts")
@@ -351,9 +395,13 @@ class Project(AbstractEntityModel):
     target_date: typing.Optional[datetime.datetime] = Field(None, description="Optional target date")
  
 class Task(Project):
-    """Tasks are sub projects. A project can describe a larger objective and be broken down into tasks"""
+    """Tasks are sub projects. A project can describe a larger objective and be broken down into tasks.
+If if you need to do research or you are asked to search or create a research iteration/plan for world knowledge searches you MUST ask the _ResearchIteration agent_ to help perform the research on your behalf (you can request this agent with the help i.e. ask for an agent by name). 
+You should be clear when relaying the users request. If the user asks to construct a plan, you should ask the agent to construct a plan. If the user asks to search, you should ask the research agent to execute  a web search.
+If the user asks to look for existing plans, you should ask the research agent to search research plans.
+    """
     id: typing.Optional[uuid.UUID| str] = Field(None,description= 'id generated for the name and project - these must be unique or they are overwritten')
-    project_name: typing.Optional[str] = Field(None, description="The related project name of relevant")
+    project_name: typing.Optional[str] = Field(None, description="The related project name if relevant")
     
     @model_validator(mode='before')
     @classmethod
@@ -379,7 +427,7 @@ class Resources(AbstractModel):
     category: typing.Optional[str] = Field(None, description="A content category")
     content: str = DefaultEmbeddingField(description="The chunk of content from the source")
     summary: typing.Optional[str] = Field(None,description="An optional summary")
-    ordinal: int = Field(None, description="For chunked content we can keep an ordinal")
+    ordinal: int = Field(0, description="For chunked content we can keep an ordinal")
     uri: str = Field("An external source or content ref e.g. a PDF file on blob storage or public URI")
     metadata: typing.Optional[dict] = {} #for emails it could be sender and receiver info and date
     graph_paths: typing.Optional[typing.List[str]] = Field(None, description="Track all paths extracted by an agent as used to build the KG")
@@ -397,14 +445,81 @@ class TaskResources(AbstractModel):
     resource_id: typing.Optional[uuid.UUID| str] = Field("The resource id" )  
     session_id:  typing.Optional[uuid.UUID| str] = Field("The session id is typically a task or research iteration but can be any session id to group resources" )  
     
-class ResearchIteration(AbstractModel):
-    """A research iteration is a plan to deal with a task"""
-    id: typing.Optional[uuid.UUID| str] = Field("unique id for rel" )  
-    iteration: int
-    conceptual_diagram: typing.Optional[str] = Field(None, description="The mermaid diagram for the plan")
-    question_set: typing.List[dict] = Field(description="a set of questions and their ids from the conceptual diagram")
-    task_id: typing.Optional[uuid.UUID| str] = Field("Research are linked to tasks which are at minimum a question" )  
+class _QuestionSet(BaseModel):
+    query:str = Field(description="The question/query to search")
+    concept_keys: typing.Optional[typing.List[str]] = Field(default_factory=list, description="A list of codes related to the concept diagram matching questions to the research structure")
     
+class ResearchIteration(AbstractModel):
+    """
+    Your job is to use functions to execute research tasks. You do not search for answers directly, you post a research tasks to generate data.
+    A research iteration is a plan to deal with a task.     
+    If you are asked for a plan you should first use your json structure to create a plan and give it to the user.
+
+    1. if you are asked to information on general topics, you should execute the post_tasks_research_execute
+    2. if you are asked about other research iterations only then can you use the _search_ method which is designed to search research plans as opposed to actually search for general information.
+    
+    You can generate conceptual diagrams using mermaid diagrams to provide an overview of the research plan.
+    When you generate a conceptual plan you should link question sets to plans for example each question should have labels that link to part of the conceptual diagram using the mermaid diagram format to describe your plan.
+    """
+    id: typing.Optional[uuid.UUID| str] = Field(None, description="unique id for rel" )  
+    iteration: int
+    content: typing.Optional[str] = DefaultEmbeddingField(None,description="An optional summary of the results discovered")
+    conceptual_diagram: typing.Optional[str] = Field(None, description="The mermaid diagram for the plan - typically generated in advanced of doing a search")
+    question_set: typing.List[_QuestionSet] = Field(description="a set of questions and their ids from the conceptual diagram")
+    task_id: typing.Optional[uuid.UUID| str] = Field(default=None,description="Research are linked to tasks which are at minimum a question" )  
+    
+    @classmethod
+    def get_model_functions(cls):
+        """override model functions to provide my available behaviours/tools"""
+        return {
+            'post_tasks_research_execute': "post the ResearchIteration object to the endpoint to execute a research plan."
+        }
+        
+    """we add some functions for illustration and testing but the database should be used for core functions"""
+    # @classmethod
+    # def perform_web_search(cls,query:str,limit:int=3)->typing.List[dict]:
+    #     """performs a tavily web search - supply a query and receive a set of summaries and urls
+        
+    #     Args:
+    #         query: the long form web query to search using the search api
+    #         limit: how many search results to fetch
+    #     """
+        
+    #     from percolate.utils.env import TAVILY_API_KEY
+    #     import requests
+        
+    #     if not TAVILY_API_KEY:
+    #         raise Exception(f"The TAVILY_API_KEY key is not set so we have no way to search")
+        
+    #     headers = { "Authorization": f"Bearer {TAVILY_API_KEY}"  }
+        
+    #     r  = requests.post("https://api.tavily.com/search", headers=headers, json={'query':query,'limit':limit})
+    #     if not r.status_code in [200,201]:
+    #         raise Exception(f"Error calling function - {r.content}")
+    #     return r.json()
+    
+
+    
+    @classmethod
+    def fetch_web_content(cls,url:str, summarization_context:str=None):
+        """provide a uri and fetch the web content - some pages not be accessible and you should typically report the error and try another resource
+        
+        Args:
+            url: the web page to fetch - content will be converted to markdown
+            summarization_context: it is recommended to pass a summarization context to reduce propagated tokens - the page will be summarized once in context
+        """
+        import html2text
+        import requests
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36"
+        }
+        
+        data = requests.get(url, headers=headers).content.decode()
+        data = html2text.html2text(data)
+        if summarization_context:
+            data = p8.summarize(data,summarization_context)
+        return data
+        
 class BlockDocument(AbstractModel):
     """Generic parsed content from files, sites etc. added to the system"""
     id: typing.Optional[uuid.UUID| str] = Field("The id is generated as a hash of the required uri and ordinal")  
@@ -433,7 +548,7 @@ class PercolateAgent(Resources):
 
 class Settings(AbstractModel):
     """settings are key value pairs for percolate admin"""
-    id: typing.Optional[uuid.UUID| str] = Field("The id is generated as a hash of the required key and ordinal")  
+    id: typing.Optional[uuid.UUID| str] = Field("The id is generated as a hash of the required key and ordinal. The id must be in a UUID format or can be left blank")  
     key: str = Field(default="The key for the value to store - id is generated form this")
     value: str = Field(description="Value of the setting")
     

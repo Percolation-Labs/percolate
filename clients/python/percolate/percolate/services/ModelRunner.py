@@ -13,8 +13,9 @@ Use whatever functions are available to you and use world knowledge only if prom
 or if there is not other way 
 or the user is obviously asking about real world information that is not covered by functions.
 Observe what functions you have to use and check the message history to avoid calling the same functions with the same parameters repeatedly.
-If you find a function name in your search, you can activate it by naming using one of your functions. You should do so without asking the user.
+If you find a function name in your search, you can activate it by with the provided tool to activate_function_by_name assuming you have the correct function name. You should do so without asking the user.
 When generating large output observe the notification that needs to be called first, call it and continue.
+Of you call a function that is running another agent, you should always pass the full context from the user in the question. Do not shorten or ask simpler questions which loses the users context.
             """
             
 class ModelRunner:
@@ -62,7 +63,7 @@ class ModelRunner:
         self._function_manager.add_function(self.get_entities)
         self._function_manager.add_function(self.search)
         self._function_manager.add_function(self.activate_functions_by_name)
-        self._function_manager.add_function(self.announce_generate_large_output)
+        #self._function_manager.add_function(self.announce_generate_large_output)
         """more complex things will happen from here when we traverse what comes back"""
 
     def announce_generate_large_output(self, estimated_length:int=None):
@@ -90,10 +91,12 @@ class ModelRunner:
         """
 
         logger.debug(f"activating function {function_names}")
-        _ = self._function_manager.add_functions_by_key(function_names)
+        missing = self._function_manager.add_functions_by_key(function_names)
+        available = set(function_names) - set(missing)
+        missing_message = f"" if not missing else f" But the functions {missing} could not be loaded"
         """todo check status"""
         return {
-            "status": f"Re: the functions {function_names}, now ready for use. please go ahead and invoke."
+            "status": f"Re: the functions {list(available)} are now ready for use. please go ahead and invoke using the full function name. for example for a function called p8_agent_run do not just call run but call p8_agent_run"+missing_message
         }
 
     def get_entities(self, keys: typing.Optional[str]):
@@ -110,8 +113,9 @@ class ModelRunner:
         return entities
 
     def help(self, questions: str | typing.List[str], context: str = None):
-        """If you are stuck ask for help with very detailed questions to help the planner find resources for you.
-        If you have a hint about what the source or tool to use hint that in each question that you ask.
+        """If you are stuck ask for help with very detailed questions to help the planner find resources for you. You should execute whatever plan you are given.
+        If you know the names of the functions you are looking for you should provide this hint.
+        If you have a hint about what the source or tool to use hint that in each question that you ask - you should see ' i need functions or tools to...' do something and ask for a plan that involves tool use.
         For example, you can either just ask a question or you can ask "according to resource X" and then ask the question. This is important context.
 
         Args:
@@ -121,7 +125,7 @@ class ModelRunner:
 
         try:
             if context:
-                questions = f"Using information from {context}, {questions}"
+                questions = f"Using context: {context}, {questions}"
 
             """for now strict planning is off"""
             plan = self._function_manager.plan(questions)
@@ -131,15 +135,18 @@ class ModelRunner:
 
         """describe the plan context e.g. its a plan but you need to request the functions and do the thing -> update message stack"""
 
-        return plan
-
+        return {
+            'message': "please execute this plan for the user. any functions that are mentioned can be activated using the `activate_functions_by_name` by tool",
+            'plan': plan
+        }
+        
     def invoke(self, function_call: FunctionCall):
         """Invoke function(s) and parse results into messages
 
         Args:
             function_call (FunctionCall): the payload send from an LLM to call a function
         """
-        logger.debug(f"({self.name}){function_call=}")
+        logger.info(f"({self.name}){function_call=}")
         f = self._function_manager[function_call.name]
         if not f:
             message = f"attempting to load function {function_call.name} which is not activated - please activate it"
@@ -157,7 +164,7 @@ class ModelRunner:
                 its important to make sure the format coincides with the language model being used in context
                 """
             except TypeError as tex:  # type errors are usually the agents fault
-                logger.warning(f"Error calling function {tex}")
+                logger.warning(f"Error calling function {traceback.format_exc()}")
                 data = MessageStackFormatter.format_function_response_type_error(
                     function_call, tex, self._context
                 )

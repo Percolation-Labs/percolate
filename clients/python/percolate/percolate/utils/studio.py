@@ -6,6 +6,10 @@ import typing
 import os 
 from percolate.utils import logger,make_uuid
 import percolate as p8
+from percolate.models.p8 import Task, ResearchIteration, Function
+from percolate.services.OpenApiService import OpenApiSpec
+       
+
 class ProjectAgents(BaseModel):
     name: str
     description: str
@@ -28,6 +32,20 @@ class ProjectApis(BaseModel):
             values['token'] = os.environ.get(values.get('token_env'))
         return values
     
+def add_percolate_endpoints(filter_ops: typing.List[str], uri:str=None,alt_host:str=None):
+    """
+    
+    """
+    
+    """the dev server or the docker one
+    to test these its easiest to stop the docker service and start dev server on 5008
+    """
+    uri = uri or f"http://percolate-api:5008/openapi.json"
+    
+    logger.info(f"Adding percolate endpoints {filter_ops}")
+    service = OpenApiSpec(uri,alt_host=alt_host)
+    repo = p8.repository(Function)
+    repo.update_records(list(service.iterate_models(filter_ops=filter_ops)))
     
 class ProjectModels(BaseModel):
     name: str
@@ -104,6 +122,20 @@ def apply_project(project:Project|str):
         uri = 'https://api.tavily.com/search'
         p = ApiProxy(id=make_uuid({'proxy_uri':uri}),proxy_uri=uri, token=TAVILY_API_KEY)
         p8.repository(ApiProxy).update_records(p)
+        
+    #we can maybe add the Task and ResearchIteration as agent functions
+    #any agent can be added as a function which makes it recruitable but we are not doing it by default for now
+
+    p8.repository(Function).update_records(
+        [
+            Function.from_entity(Task),
+            Function.from_entity(ResearchIteration),
+        ]
+    )
+    
+    """add some endpoints as functions to percolate api"""
+    add_percolate_endpoints(['create_task_tasks__post', 
+                             'execute_research_iteration_tasks_research_execute_post'])
         
     """TODO"""
     return {'status':'ok'}

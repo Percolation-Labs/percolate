@@ -1,17 +1,18 @@
 CREATE OR REPLACE FUNCTION p8.fetch_openai_embeddings(
     param_array_data jsonb,
-	param_token text DEFAULT NULL,
+    param_token text DEFAULT NULL,
     param_model text DEFAULT 'default')
     RETURNS TABLE(embedding vector) 
     LANGUAGE 'plpgsql'
     COST 100
     VOLATILE PARALLEL UNSAFE
     ROWS 1000
-
 AS $BODY$
 DECLARE
     resolved_model text;
     resolved_token text;
+    response jsonb;
+    status_code int;
 BEGIN
     -- Set the model to 'text-embedding-ada-002' if it's 'default'
     resolved_model := CASE 
@@ -19,32 +20,40 @@ BEGIN
         ELSE param_model
     END;
 
-    -- If the token is not set, fetch it - we dont have to use the model below to select just any model that uses the same key
+    -- If the token is not set, fetch it
     IF param_token IS NULL THEN
-        SELECT token
-        INTO resolved_token
+        SELECT token INTO resolved_token
         FROM p8."LanguageModelApi"
         WHERE "name" = 'gpt-4o-mini';
     ELSE
         resolved_token := param_token;
     END IF;
 
-    -- Execute HTTP request to fetch embeddings and return the parsed embeddings as pgvector
+    -- Execute HTTP request
+    SELECT content::jsonb INTO response
+    FROM http( (
+        'POST', 
+        'https://api.openai.com/v1/embeddings', 
+        ARRAY[http_header('Authorization', 'Bearer ' || resolved_token)],
+        'application/json',
+        jsonb_build_object(
+            'input', param_array_data,
+            'model', resolved_model,
+            'encoding_format', 'float'
+        )
+    )::http_request);
+
+    -- Extract HTTP status code
+    status_code := (response->>'status')::int;
+    
+    -- Raise an exception if there is an error status
+    IF status_code >= 400 THEN
+        RAISE EXCEPTION 'OpenAI API request failed with status: %, response: %', status_code, response;
+    END IF;
+
+    -- Return embeddings if no errors
     RETURN QUERY
     SELECT VECTOR((item->'embedding')::TEXT) AS embedding
-    FROM (
-        SELECT jsonb_array_elements(content::JSONB->'data') AS item
-        FROM http((
-            'POST', 
-            'https://api.openai.com/v1/embeddings', 
-            ARRAY[http_header('Authorization', 'Bearer ' || resolved_token)],
-            'application/json',
-            jsonb_build_object(
-                'input', param_array_data,
-                'model', resolved_model,
-                'encoding_format', 'float'
-            )
-        )::http_request)
-    ) subquery;
+    FROM jsonb_array_elements(response->'data') AS item;
 END;
 $BODY$;

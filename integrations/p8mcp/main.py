@@ -1,11 +1,13 @@
 
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Context
 import requests
 import typing
 from pydantic import BaseModel
 import datetime
 from mcp import types
+import httpx
+
 
 mcp = FastMCP("percolate")
 
@@ -71,15 +73,19 @@ def web_search(query:str) -> typing.List[dict]:
     return [d for d in response.json()]
 
 @mcp.tool()
-def fetch_web_resource(url:str)->str:
-    """if you are provided with a web search result or url you can fetch the content"""
+async def fetch_web_resource(url: str, ctx: Context) -> str:
+    """If you are provided with a web search result or URL, you can fetch the content."""
+    ctx.info(f"Fetching {url}, please wait...")
+    await ctx.report_progress(0, 1)
     
+ 
+    
+    async with httpx.AsyncClient() as client:
+        response = await client.post(f"{PERCOLATE_HOST}/x/web/fetch", json={'url': url})
+    
+    return response.content  
 
-    response = requests.post(f"{PERCOLATE_HOST}/x/web/fetch", json={  'url': url   })
-    
-    """checks TODO"""
-    
-    return response.content
+ 
  
 @mcp.tool()
 def fetch_recent_email(limit:int=5,domain_filter:str=None) -> typing.List[dict]:

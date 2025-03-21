@@ -1,12 +1,13 @@
  
-from fastapi import APIRouter, HTTPException, Query, Path, Response
-from percolate.models.p8 import Task
+from fastapi import APIRouter, HTTPException, Query, Path, Response,BackgroundTasks
+from percolate.models.p8 import Task,ResearchIteration
 import percolate as p8
 from percolate.api.routes.auth import get_current_token
 import uuid
 from fastapi import   Depends
 import typing
 from pydantic import BaseModel
+from percolate.utils import logger
 
 router = APIRouter()
 
@@ -51,6 +52,51 @@ async def get_task_comments_by_name(task_name: str = Path(..., description="The 
 async def get_task_by_name(task_name: str = Path(..., description="The unique name of the task"))->Task:
     """Retrieve a task by name"""
     return {}
+
+@router.post("/research", response_model=ResearchIteration)
+async def create_research_iteration(task: ResearchIteration)->ResearchIteration:
+    """create a research plan - conceptual diagram and question set"""
+    results =  p8.repository(ResearchIteration).update_records(task)
+    if results:
+        return results[0]
+    raise Exception("this should not happened but we will be adding error stuff")
+
+def exec_research_tasks(task):
+    repo = p8.repository(ResearchIteration)
+    """this can be parallel in future but now our free tier is one request per second anyway"""
+    for q in task.question_set:
+        """this guy does a lot
+        - first we do the web search and fetch the content optionally 
+        - we insert the results into task/resources
+        - we build the index - a smart index can also fetch content when the first step does not
+        - the index is a Percolate special that adds vector and graph index for parsed content
+        """
+        repo.execute(f"SELECT * FROM p8.insert_web_search_results(%s,%s)", data=(q.query,task.task_id))
+        
+    return {}
+            
+@router.post("/research/execute", response_model=ResearchIteration)
+async def execute_research_iteration(task: ResearchIteration)->ResearchIteration:
+    """execute a research plan - perform each search in the question set - this can take time so should be done as background tasks"""
+    
+    logger.debug(task)
+    
+    result = exec_research_tasks(task)
+    
+    """handle errors and/or update the task response"""
+    return task
+
+@router.post("/research/queue", response_model=ResearchIteration)
+async def queue_research_iteration(task: ResearchIteration, background_tasks: BackgroundTasks)->ResearchIteration:
+    """execute a research plan - perform each search in the question set - this can take time so should be done as background tasks"""
+    
+    result = background_tasks(exec_research_tasks,task)
+    
+    """handle errors and/or update the task response to say we have changed its status to queue"""
+    
+    return task
+        
+    
 
 
 

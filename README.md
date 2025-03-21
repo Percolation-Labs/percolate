@@ -196,6 +196,17 @@ Any issues or suggestions you add will hopefully make their way into our priorit
 
 ## Developers
 
+### Percolate API
+(WIP)
+We can map dev api to the same target as what the docker compose uses to test new endpoints. There are many ways to do this but its easiest to replace the service at the target.
+Stop the docker service and launch the local development instance of the API.
+```bash
+docker compose stop percolate-api
+uvicorn percolate.api.main:app --port 5008 --reload 
+```
+
+Now we are running the dev server on the same location that the database etc expects e.g. if you look in the p8.ApiProxy in percolate you will see we have percolate at `percolate-api:5008`.
+You must therefore add percolate-api mapped to localhost in your hosts files!
 
 ### Docker
 
