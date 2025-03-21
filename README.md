@@ -201,6 +201,7 @@ Any issues or suggestions you add will hopefully make their way into our priorit
 We can map dev api to the same target as what the docker compose uses to test new endpoints. There are many ways to do this but its easiest to replace the service at the target.
 Stop the docker service and launch the local development instance of the API.
 ```bash
+#ollama is included by default and it takes a moment to fetch the first time but you can comment out this service if you like
 docker compose stop percolate-api
 uvicorn percolate.api.main:app --port 5008 --reload 
 ```
