@@ -75,6 +75,8 @@ p8.repository(MyFirstAgent).register()
 
 The easiest way to get started is simply to launch the docker instance and connect to postgres using your preferred client on port 5438 using `postgres:postgres` to login
 
+- **Note** that ollama is added to the docker image by default to play with open source embeddings and it takes a minute to fetch the first time. But you can comment this out if you are not interested in this 
+
 ```bash
 docker compose up -d
 ```
