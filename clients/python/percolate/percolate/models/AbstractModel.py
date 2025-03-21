@@ -83,11 +83,17 @@ class AbstractModelMixin:
         return f'{P8_EMBEDDINGS_SCHEMA}."{cls.get_model_namespace()}_{cls.get_model_name()}_embeddings"'
     
     @classmethod
-    def get_model_description(cls)->str:
+    def get_model_description(cls,use_full_description:bool=True)->str:
         """the doc string of the object is typically the model system prompt. Config can also be used to set description"""
         c:ConfigDict = cls.model_config 
         desc =  c.get('description') or cls.__doc__  
-        return desc or cls.get_model_full_name()
+        desc =  desc or cls.get_model_full_name()
+        
+        if use_full_description:
+            schema = cls.model_json_schema()
+            desc = f"""# Agent - {cls.get_model_full_name()}\n{desc}\n# Schema\n\n```{schema}``` \n\n# Functions\n ```\n{cls.get_model_functions()}```
+            """
+        return desc
     
     @classmethod
     def model_parse(cls, values: dict) -> "AbstractModel":
@@ -107,7 +113,7 @@ class AbstractModelMixin:
     def build_message_stack(cls, question:str, data: typing.List[dict] = None, **kwargs) -> MessageStack | typing.List[dict]:
         """Generate a message stack using a list of messages.
         These messages are in the list of content/role generalized LLM messages.
-        This is added here so that BAseModel's can override but by default we just use the MessageStack utility
+        This is added here so that BaseModel's can override but by default we just use the MessageStack utility
         """
         return MessageStack.build_message_stack(cls, question, data=data, **kwargs)
 
@@ -139,7 +145,7 @@ class AbstractModel(BaseModel, ABC, AbstractModelMixin):
         p = docstring_parser.parse(fn.__doc__)
         description = s_combine(p.short_description, p.long_description)
         parameter_descriptions = {p.arg_name: p.description for p in p.params}
-
+        
         """make fields from typing and docstring"""
         signature = inspect.signature(fn)
         type_hints = typing.get_type_hints(fn)

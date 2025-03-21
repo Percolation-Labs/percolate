@@ -2,7 +2,7 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from fastapi import   Depends, Response 
 import json
-
+from percolate.services import MinioService
 from percolate.api.routes.auth import get_current_token
 from pydantic import BaseModel, Field
 import typing
@@ -12,6 +12,7 @@ from percolate.models.p8 import IndexAudit
 from percolate.utils import logger
 import traceback
 from percolate.utils.studio import Project, apply_project
+from fastapi import   Depends, File, UploadFile
 
 router = APIRouter()
 
@@ -107,3 +108,18 @@ async def get_index(id: uuid.UUID) -> IndexAudit:
         return records[0]
     """TODO error not found"""
     return {}
+
+
+@router.post("/content/upload/")
+async def upload_file(file: UploadFile = File(...),folder:str='default', task_id:str=None, add_resource:bool=True):
+    """uploads a file to a folder and stores it as a file resource which is indexed.
+    task ids are optional to associate files with tasks. Resources are added as database records for content indexing
+    """
+    try:
+        # Read file and upload to MinIO
+        content = await file.read()
+        MinioService().add_file(f"{folder}/{file.filename}",content, file.content_type)
+    
+        return {"filename": f"{folder}/{file.filename}", "message": "Uploaded successfully"}
+    except Exception as e:
+        return {"error": str(e)}

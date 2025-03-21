@@ -192,6 +192,7 @@ def stream_google_response(r, printer=None):
     return json_data
 
 
+
 """some direct calls"""
 def request_openai(messages,functions):
     """

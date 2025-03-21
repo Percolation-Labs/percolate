@@ -6,6 +6,7 @@ from .services.ModelRunner import ModelRunner
 from .services import OpenApiService
 from .models.p8.db_types import AskResponse
 import json
+from percolate.models.inspection import load_model
 
 def dump(*args,**kwargs):
     """TODO:"""
@@ -44,6 +45,30 @@ def describe_agent(agent: AbstractModel | str, include_native_tools:bool=False):
     """
     
     return prompt
+
+def summarize(data:str,context:str):
+    """summarize data based on context"""
+    from percolate.services.llm.LanguageModel import request_openai, MessageStack
+    from percolate.utils import logger
+    
+    logger.debug('Summarizing data...')    
+    
+    Q = f"""please summarize the data below based on this context
+    
+    ## Context
+    ```
+    {context}
+    ```
+    
+    ## Data
+    ```
+    {data}
+    ```
+    """
+    
+
+    stack = MessageStack(Q, "be efficient - keep only what is useful in context")
+    return request_openai(stack,None)
     
 
 def get_entities(keys: str | typing.List)->typing.List[dict]:
@@ -123,14 +148,31 @@ def get_proxy(proxy_uri:str):
     Args:
         proxy_uri: an openapi rest api or a native schema name for the database - currently the `p8` schema is assumed
     """
+    if "p8agent/" in proxy_uri:
+        """we create a p8 agent proxy to the entity name - the proxy in the database is p8agent/agent.name - see Function.from_entity"""
+        entity_name = proxy_uri.split('/')[-1]
+        class _agent_proxy:
+            def __init__(self, entity_name):
+                self.agent = Agent(load_model(entity_name))
+                
+            def invoke(self, fn, **kwargs):
+                print(f"**TESTING - calling proxy agent with {kwargs}")
+                """provide a proxy that takes the function but hard code as run for now anyway"""
+                data  = self.agent.run(**kwargs)
+                print(f"**TESTING - got data {data}")
+                return data
+                
+        """here we are percolating by loading the context fully for that agent - we could do a context transfer in future too"""
+        return _agent_proxy(entity_name=entity_name)
+    
     if 'http' in proxy_uri or 'https' in proxy_uri:
         return OpenApiService(proxy_uri)
     if 'p8.' in proxy_uri:
         return PostgresService()
     
-    raise NotImplemented("""We will add a default library proxy for the functions in the library 
+    raise NotImplementedError(f"""We will add a default library proxy for the functions in the library 
                          but typically the should just be added at run time _as_ callables since 
-                         we can recover Functions from callables""")
+                         we can recover Functions from callables - {proxy_uri}""")
     
 def get_planner()->typing.Callable:
     """retrieves a wrapper to the planner agent which takes a question for planning

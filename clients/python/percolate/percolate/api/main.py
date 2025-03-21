@@ -31,7 +31,7 @@ app = FastAPI(
 
 
 k = str(uuid1())
-print(k)
+
 app.add_middleware(SessionMiddleware, secret_key=k)
 
 api_router = APIRouter()
@@ -73,8 +73,14 @@ def start():
 if __name__ == "__main__":
     """
     You can start the dev with this in the root
-    uvicorn percolate.api.main:app --port 5000 --reload
-    http://127.0.0.1:5000/docs
+    if running the docker image we keep the same port and stop the service in docker - this makes it easier to test in dev
+    for example: 
+    1. docker compose stop percolate-api
+    2. uvicorn percolate.api.main:app --port 5008 --reload 
+    Now we are running the dev server on the same location that the database etc expects
+    Also add percolate-api mapped to localhost in your hosts files
+    
+    http://127.0.0.1:5008/docs or /swagger
     """
     
     start()
