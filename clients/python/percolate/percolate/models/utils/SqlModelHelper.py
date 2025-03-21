@@ -436,23 +436,56 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
         
     def get_data_load_statement(self, records: typing.List[BaseModel]):
         """Generate the insert statement for the data"""
-        
-        if not isinstance(records,list):
+
+        if not isinstance(records, list):
             records = [records]
-            
-        def sql_repr(s):
-            """WIP - use SQL properly"""
-            return repr(s if not isinstance(s,str) else s.replace("'","''"))  if s else 'NULL'
+
+        def sql_repr(value):
+            """Properly escape SQL values"""
+            if value is None:
+                return 'NULL'
+            if isinstance(value, str):
+                return f"""'{value.replace("'", "''")}'"""
+            return str(value)
+
+        if not records:
+            return ""
+
+        sample = self.serialize_for_db(records[0])
+        cols = ", ".join(sample.keys())
+        values = ",\n ".join(
+            f"({', '.join([sql_repr(v) for v in self.serialize_for_db(obj).values()])})"
+            for obj in records
+        )
+
+        conflict_cols = [c for c in sample.keys() if c != "id"]
+        conflicts = ", ".join(f"{col} = EXCLUDED.{col}" for col in conflict_cols)
+
+        table_name = self.model.get_model_table_name()
+
+        return f"""INSERT INTO {table_name} ({cols}) VALUES
+    {values}
+    ON CONFLICT (id) DO UPDATE SET {conflicts};"""        
+    
+    # def get_data_load_statement(self, records: typing.List[BaseModel]):
+    #     """Generate the insert statement for the data"""
         
-        if len(records):
+    #     if not isinstance(records,list):
+    #         records = [records]
             
-            sample = self.serialize_for_db(records[0])
-            cols = f",".join(sample.keys())
-            values = ",\n ".join(  f"({', '.join([sql_repr(v) for _,v in self.serialize_for_db(obj).items() ])})" for obj in records)
-            #TODO it may be that id is not always what we want
-            conflicts =  f",".join([f"{f}=EXCLUDED.{f}" for f in [c for c in sample.keys() if c not in ['id']]])
-            return f"""INSERT INTO {self.model.get_model_table_name()}({cols}) VALUES\n {values}
-        ON CONFLICT (id) DO UPDATE SET {conflicts}   ;"""
+    #     def sql_repr(s):
+    #         """WIP - use SQL properly"""
+    #         return repr(s if not isinstance(s,str) else s.replace("'","''"))  if s else 'NULL'
+        
+    #     if len(records):
+            
+    #         sample = self.serialize_for_db(records[0])
+    #         cols = f",".join(sample.keys())
+    #         values = ",\n ".join(  f"({', '.join([sql_repr(v) for _,v in self.serialize_for_db(obj).items() ])})" for obj in records)
+    #         #TODO it may be that id is not always what we want
+    #         conflicts =  f",".join([f"{f}=EXCLUDED.{f}" for f in [c for c in sample.keys() if c not in ['id']]])
+    #         return f"""INSERT INTO {self.model.get_model_table_name()}({cols}) VALUES\n {values}
+    #     ON CONFLICT (id) DO UPDATE SET {conflicts}   ;"""
         
     def get_register_entities_query(self):
         """get the registration script for entities that have names and add the initial entities for testing to the graph"""
