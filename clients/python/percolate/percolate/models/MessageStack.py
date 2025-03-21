@@ -2,12 +2,17 @@ from pydantic import BaseModel
 from percolate.models import AbstractModel
 import json
 import typing
+
 class MessageStack:
     def __init__(self, question: str, system_prompt:str=None, data: typing.List[dict] = None):
         
         self.question = question
         self.system_prompt = system_prompt
         self.data = data or []
+        
+    def __iter__(self):
+        for d in  self.data:
+            yield d
 
     def add(self, data: dict|typing.List[dict], **kwargs):
         """add messages to the stack such as function responses typically"""
@@ -20,7 +25,7 @@ class MessageStack:
         self.data += data
     
     @classmethod
-    def build_message_stack(cls, abstracted_model: AbstractModel, question:str,data: typing.List[dict] = None, **kwargs) ->"MessageStack":
+    def build_message_stack(cls, abstracted_model: AbstractModel, question:str,data: typing.List[dict] = None, use_full_description:bool=True, **kwargs) ->"MessageStack":
         """
         we build a message stack from the model prompt and question
         
@@ -36,6 +41,6 @@ class MessageStack:
                 "content": json.dumps(data,default=str)                
             }]
         generalized_prompt_preamble = kwargs.get('system_prompt_preamble')
-        prompt = f"{generalized_prompt_preamble}\n{abstracted_model.get_model_description()}"
+        prompt = f"{generalized_prompt_preamble}\n{abstracted_model.get_model_description(use_full_description)}"
         return MessageStack(question=question, system_prompt=prompt, data = data)
         

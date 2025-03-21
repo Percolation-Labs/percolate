@@ -143,3 +143,5 @@ def ask(
 
 if __name__ == "__main__":
     app()
+
+#TODO: add diff and file based migration to database from staging sql
