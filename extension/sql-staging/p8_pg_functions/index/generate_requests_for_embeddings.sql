@@ -65,3 +65,52 @@ if there are records in the table for this embedding e.g. the table like p8.Agen
     );
 END;
 $BODY$;
+
+
+/*
+we may want to chunk but im not sure where i want to do it
+we can left the text column large or created a joined chunk column and embed that 
+if we leave the text large, we can create N chunk embeddings all pointing to the same large text
+the difficult is we need to do a clean up
+It may be that we generate the ID using a chunk and then we need some sort of vacuum for the provider length and checking the text content length
+for example if the user edited the field, we would have to rebuild the chunks and the embeddings
+in general a cte for chunking uses recursion like this
+
+---
+-- Define the parameter for the maximum chunk length
+DECLARE @ChunkLength INT = 9;
+
+WITH ChunkCTE AS (
+    -- Anchor: Get the first chunk from each row
+    SELECT
+        id,
+        -- Include any additional columns you want to retain
+        OtherColumn,
+        CAST(SUBSTRING(text, 1, @ChunkLength) AS VARCHAR(MAX)) AS ChunkText,
+        1 AS ChunkRank,
+        SUBSTRING(text, @ChunkLength + 1, LEN(text)) AS RemainingText
+    FROM MyTable
+
+    UNION ALL
+
+    -- Recursive part: Process the remaining text
+    SELECT
+        id,
+        OtherColumn,
+        CAST(SUBSTRING(RemainingText, 1, @ChunkLength) AS VARCHAR(MAX)),
+        ChunkRank + 1,
+        SUBSTRING(RemainingText, @ChunkLength + 1, LEN(RemainingText))
+    FROM ChunkCTE
+    WHERE LEN(RemainingText) > 0  -- Continue as long as there’s text left to process
+)
+SELECT
+    id,
+    OtherColumn,
+    ChunkRank,
+    ChunkText
+FROM ChunkCTE
+ORDER BY id, ChunkRank
+OPTION (MAXRECURSION 0);  -- Allows unlimited recursion if needed
+
+
+*/
