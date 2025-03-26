@@ -1,4 +1,4 @@
-CREATE OR REPLACE FUNCTION p8.get_graph_nodes_by_id(
+CREATE OR REPLACE FUNCTION p8.get_graph_nodes_by_key(
     keys text[]
 )
 RETURNS TABLE(id text, entity_type text) -- Returning both id and entity_type

@@ -88,6 +88,8 @@ SELECT * FROM p8.fetch_embeddings(
         RAISE EXCEPTION 'API request failed with status: %, response: %', status_code, response;
     END IF;
 
+    RAISE NOTICE '$s', response;
+
     -- Return embeddings if no errors
 	IF use_ollama THEN
 		RETURN QUERY
