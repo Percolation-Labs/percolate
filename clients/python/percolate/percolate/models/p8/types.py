@@ -387,6 +387,12 @@ class ModelMatrix(AbstractModel):
     enums: typing.Optional[dict] = Field(None, description="The enums used in the model - usually a job will build these and they can be used in query prompts")
     example_sql_queries: typing.Optional[dict] = Field(None, description="A mapping of interesting question to SQL queries - usually a job will build these and they can be used in query prompts")
 
+class Category(AbstractEntityModel):
+    """A category is just a general topic node that can be linked to other nodes and can have an evolving description or summary"""
+    id: uuid.UUID| str  
+    name: str = Field(description="The name of the category node")
+    description: str = DefaultEmbeddingField(description="The content description for the category")
+    
 class Project(AbstractEntityModel):
     """A project is a broadly defined goal with related resources (uses the graph)"""
     id: uuid.UUID| str  
