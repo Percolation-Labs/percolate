@@ -7,10 +7,22 @@ from .services import OpenApiService
 from .models.p8.db_types import AskResponse
 import json
 from percolate.models.inspection import load_model
+import percolate as p8
+from percolate.models.p8 import Session,AIResponse
+from percolate.utils import logger
+import traceback
 
-def dump(*args,**kwargs):
-    """TODO:"""
-    pass
+def dump(question:str, data: typing.List[dict], response:AIResponse, context, **kwargs):
+    """we dump the session using the session id from the AI response and we dump the final response"""
+    try:
+        p8.repository(Session).update_records(Session.from_question_and_context(id=response.session_id, 
+                                                                                question=question,
+                                                                                context=context, 
+                                                                                agent=kwargs.get('agent')))
+        """we could dump data but lets not for now"""
+        p8.repository(AIResponse).update_records(response)
+    except:
+        logger.warning(f"Failed to dump session  -  {traceback.format_exc()}")
 
 def describe_agent(agent: AbstractModel | str, include_native_tools:bool=False):
     """

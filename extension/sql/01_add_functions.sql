@@ -831,6 +831,115 @@ $$ LANGUAGE plpgsql;
 
 ---------
 
+DROP FUNCTION IF EXISTS get_node_property_names;
+CREATE OR REPLACE FUNCTION p8.get_node_property_names(path_nodes json)
+RETURNS text[] AS $$
+DECLARE
+    result text[];
+BEGIN
+	/*
+	
+	SELECT p8.get_node_property_names(
+    '[{"id": 3659174697238668, "label": "public__Chapter", "properties": {"name": "page47_moby"}}, 
+      {"id": 4222124650660157, "label": "Category", "properties": {"name": "Chance"}}, 
+      {"id": 4222124650660039, "label": "Category", "properties": {"name": "Philosophy"}}, 
+      {"id": 3659174697238783, "label": "public__Chapter", "properties": {"name": "page114_moby"}}]'
+	);
+	*/
+    -- Extract the 'name' properties from the JSON array and store them in the result array
+    SELECT array_agg((node->'properties'->>'name')::text)
+    INTO result
+    FROM json_array_elements(path_nodes) AS node;
+
+    -- Return the result array of names
+    RETURN result;
+END;
+$$ LANGUAGE plpgsql;
+
+---------
+
+
+DROP FUNCTION IF EXISTS p8.get_paths;
+
+CREATE OR REPLACE FUNCTION p8.get_paths(
+	names text[],
+	max_length integer DEFAULT 3,
+	max_paths integer DEFAULT 10
+	)
+    RETURNS TABLE(path_length integer, origin_node text, target_node text, target_node_id bigint, path_node_labels text[]) 
+    LANGUAGE 'plpgsql'
+    COST 100
+    VOLATILE PARALLEL UNSAFE
+    ROWS 1000
+
+AS $BODY$
+DECLARE
+    cypher_query text;
+    sql text;
+BEGIN
+
+	/*
+
+    This is used as the basis of getting nodes related by paths as this can be used by graphwalkers
+
+	Example usage:
+	select * from p8.get_paths(ARRAY['page47_moby'])
+	*/
+    -- Format the Cypher query string with the input names
+
+		LOAD 'age';SET search_path = ag_catalog, "$user", public;
+
+
+    cypher_query := format(
+        'MATCH p = (a:public__Chapter)-[:ref*1..%s]-(b:public__Chapter)
+         WHERE a.name IN [%s]
+         RETURN 
+		 		length(p) AS path_length, 
+                a.name AS origin_node, 
+                b.name AS target_node, 
+				id(b) as target_node_id,
+                nodes(p) AS path_nodes',
+				max_length,
+            array_to_string(array(
+            SELECT quote_literal(name)
+            FROM unnest(names) AS name
+        ), ', ')  -- Comma-separated quoted strings
+    );
+
+    -- Format the SQL statement for Cypher execution
+    sql := format(
+        '
+		 WITH data as(
+		 SELECT
+		 path_length,
+		 origin_node::TEXT,
+		 target_node::TEXT,
+		 target_node_id,
+		 path_nodes::JSON
+		   FROM cypher(''percolate'', $$ %s $$) AS (path_length int, origin_node agtype, target_node agtype, target_node_id BIGINT, path_nodes agtype)
+		)
+		-- Use the helper function get_node_property_names to extract the "name" field from the path_nodes JSON
+		select 
+            path_length,
+            origin_node,
+            target_node,
+			target_node_id,
+            p8.get_node_property_names(path_nodes) AS path_node_labels
+		from data limit %L;
+		',
+        cypher_query, max_paths
+    );
+
+    -- Execute the dynamic SQL and return the result
+    RETURN QUERY EXECUTE sql;
+END;
+$BODY$;
+
+
+
+
+---------
+
 
 drop function if exists public.cypher_query;
 CREATE OR REPLACE FUNCTION public.cypher_query(
@@ -867,6 +976,50 @@ BEGIN
 END;
 $BODY$;
 
+
+---------
+
+
+
+DROP FUNCTION IF EXISTS p8.get_connected_entities;
+CREATE OR REPLACE FUNCTION p8.get_connected_entities(category_name TEXT)
+RETURNS TABLE (category_hub TEXT, target_entity TEXT) AS $BODY$
+DECLARE
+    cypher_query text;
+BEGIN
+	/*
+
+	get connected entities is for sourcing nodes connected to some theme via category nodes
+	For now it can be directed connected or connected by one intermediate category hub
+    This could be used to create concept summaries back into the X category but summarising connected entities 
+	
+	--use a target node 
+	SELECT * FROM p8.get_connected_entities('Physical Endurance');
+	*/
+	LOAD 'age'; SET search_path = ag_catalog, "$user", public;
+	
+ 	cypher_query := format(
+        'WITH gdata AS (
+            SELECT * FROM cypher(''percolate'', $$
+                MATCH (c:Category {name: %L})-[*1]-(m:Category)-[*1]-(n:public__Chapter)
+                RETURN m AS middle_node, n AS target_node
+            $$) AS (hub agtype, target_node agtype)
+            UNION
+            SELECT * FROM cypher(''percolate'', $$
+                MATCH (c:Category {name: %L})-[*1..2]-(n:public__Chapter)
+                RETURN null::agtype AS middle_node, n AS target_node
+            $$) AS (hub agtype, target_node agtype)
+        )
+        SELECT 
+            (hub::json)->''properties''->>''name'' AS category_hub,
+            (target_node::json)->''properties''->>''name'' AS target_entity
+        FROM gdata',
+        category_name, category_name
+    );
+    
+    RETURN QUERY EXECUTE cypher_query;
+END;
+$BODY$ LANGUAGE plpgsql;
 
 ---------
 
@@ -2552,6 +2705,74 @@ ALTER FUNCTION p8.nl2sql(text, character varying, character varying, character v
 
 ---------
 
+
+DROP FUNCTION IF EXISTS p8.deep_search;
+
+CREATE OR REPLACE FUNCTION p8.deep_search(
+    query_text TEXT,
+    table_entity_name TEXT,
+    content_column TEXT DEFAULT 'content'
+)
+RETURNS TABLE (
+    id UUID,
+    vector_distance DOUBLE PRECISION,
+    entity_name TEXT,
+    content TEXT,
+    related_paths JSONB
+)
+LANGUAGE 'plpgsql'
+COST 100
+VOLATILE PARALLEL UNSAFE
+AS $BODY$
+DECLARE
+    schema_name TEXT;
+    table_name TEXT;
+    dynamic_query TEXT;
+BEGIN
+
+	/*
+	select * rom p8.deep_search('tell me about harpoons', 'public.Chapter')	
+	*/
+
+    -- Load necessary extensions and set search path
+    LOAD 'age';
+    SET search_path = ag_catalog, "$user", public;
+
+    schema_name := split_part(table_entity_name, '.', 1);
+    table_name := split_part(table_entity_name, '.', 2);
+
+    -- Perform vector search and gather the entity IDs, distances, and content
+    RETURN QUERY EXECUTE format(
+        'WITH vector_results AS (
+            SELECT v.id, v.vdistance, c.name AS entity_name, c.%I AS content
+            FROM %I.%I c
+            JOIN p8.vector_search_entity($1, $2) v
+            ON c.id = v.id
+        ),
+        path_data AS (
+            SELECT 
+                origin_node AS entity_name,
+                jsonb_agg(
+                    jsonb_build_object(
+                        ''path_node_labels'', path_node_labels
+                    )
+                ) AS related_paths
+            FROM vector_results
+            CROSS JOIN LATERAL p8.get_paths(ARRAY[vector_results.entity_name], 3)
+            GROUP BY origin_node
+        )
+        SELECT vr.id, vr.vdistance, vr.entity_name, vr.content, COALESCE(pd.related_paths, ''[]''::jsonb)
+        FROM vector_results vr
+        LEFT JOIN path_data pd ON vr.entity_name = pd.entity_name;',
+        content_column, schema_name, table_name
+    ) USING query_text, table_entity_name;
+END;
+$BODY$;
+
+
+
+---------
+
 -- FUNCTION: p8.insert_entity_embeddings(text, text)
 
 -- DROP FUNCTION IF EXISTS p8.insert_entity_embeddings(text, text);
@@ -2689,7 +2910,7 @@ BEGIN
             SELECT 
                 embedding,
                 ROW_NUMBER() OVER () AS idx
-            FROM p8.fetch_openai_embeddings(
+            FROM p8.fetch_embeddings(
 				(SELECT aggregated_data FROM payload),
                 %L,            
                 %L
@@ -2718,6 +2939,118 @@ $BODY$;
 
 ALTER FUNCTION p8.generate_and_fetch_embeddings(text, text, text, text, integer)
     OWNER TO postgres;
+
+
+---------
+
+DROP FUNCTION IF EXISTS p8.add_weighted_edges;
+
+CREATE OR REPLACE FUNCTION p8.add_weighted_edges(
+    node_data jsonb,  -- JSON array containing multiple nodes with their respective edges
+    table_name text DEFAULT NULL,
+    edge_name text DEFAULT 'semref'
+)
+RETURNS void
+LANGUAGE 'plpgsql'
+COST 100
+VOLATILE PARALLEL UNSAFE
+AS $BODY$
+DECLARE
+    node_name text;
+    edge jsonb;
+    neighbor_name text;
+    edge_weight float;
+    cypher_query text;
+    sql text;
+    schema_name text;
+    pure_table_name text;
+    formatted_node_name text;
+BEGIN
+    /*
+    Adds weighted edges for nodes provided in the `node_data` JSON array.
+    This is used to build KKN edges. Note that semantic search finds a neighborhood anyway
+    but this can be used if we want to probe sparsely and then fill in the detail.
+    A worker processes can add KNN or balltree neighborhoods.
+    
+    The input `node_data` should contain a JSON array where each item represents a node with a "name" and an "edges" array.
+    Each node's "edges" array should be a list of objects, each containing a "name" for the neighbor node and a "weight" for the edge.
+
+    Example input format:
+    SELECT p8.add_weighted_edges(
+    '[
+        {
+            "name": "page127_moby",
+            "edges": [
+                {"name": "page126_moby", "weight": 0.5},
+                {"name": "page128_moby", "weight": 0.8}
+            ]
+        }
+    ]'::jsonb,
+    'public.Chapter'
+    );
+
+    This function will loop through each node in the array and for each node, loop through its "edges" array
+    to add a relationship between the node and the neighboring nodes.
+
+	--retrieve related nodes
+	SELECT * FROM cypher('percolate', $$ 
+	MATCH (a{name:'page127_moby'})-[r:semref]->(b)
+	RETURN a.name AS node1, b.name AS node2, r.weight AS edge_weight
+	$$) AS (node1 text, node2 text, edge_weight float);
+
+    */
+
+    LOAD 'age';
+    SET search_path = ag_catalog, "$user", public;
+
+    -- Loop through each node in the "node_data" JSON array
+    FOR node_data IN SELECT * FROM jsonb_array_elements(node_data)
+    LOOP
+        -- Extract the node name from the current node JSON object
+        node_name := node_data->>'name';
+
+        -- If table_name is provided, split it into schema and table format
+        IF table_name IS NOT NULL THEN
+            schema_name := lower(split_part(table_name, '.', 1));
+            pure_table_name := split_part(table_name, '.', 2);
+            formatted_node_name := schema_name || '__' || pure_table_name;
+        ELSE
+            formatted_node_name := node_name; -- Default to node_name if no table_name is provided
+        END IF;
+
+        -- Loop through each neighbor in the "edges" array of the current node
+        FOR edge IN SELECT * FROM jsonb_array_elements(node_data->'edges')
+        LOOP
+            -- Extract the neighbor's name and weight
+            neighbor_name := edge->>'name';
+            edge_weight := (edge->>'weight')::float;
+
+            -- Construct the Cypher query to add the weighted edge
+            cypher_query := format(
+                'MERGE (a:%s {name: ''%s''})
+                 MERGE (b:%s {name: ''%s''})
+                 MERGE (a)-[r:%I {weight: %s}]->(b)',
+                formatted_node_name, node_name, formatted_node_name, neighbor_name, edge_name, edge_weight
+            );
+	
+            -- Format SQL statement for Cypher execution
+            sql := format(
+                'SELECT * FROM cypher(''percolate'', $$ %s $$) AS (v agtype);',
+                cypher_query
+            );
+
+            BEGIN
+                -- Execute the Cypher query to create the edge
+                EXECUTE sql;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    -- Handle errors if any
+                    RAISE NOTICE 'Error while adding edge between % and %: %', node_name, neighbor_name, SQLERRM;
+            END;
+        END LOOP;
+    END LOOP;
+END;
+$BODY$;
 
 
 ---------
@@ -2854,6 +3187,10 @@ example
 select * from p8.insert_generated_embeddings('p8.Agent', 'description')
 returns non 0 if it needed to insert somethign
 caller e.g. p8.insert_entity_embeddings('p8.Agent') can flush all required embeddings
+
+
+select * from p8.insert_generated_embeddings('p8.Chapter', 'content')
+
 */
     -- Resolve the model name, defaulting to 'text-embedding-ada-002' if 'default' is provided
     resolved_model := CASE 
@@ -2914,6 +3251,180 @@ $BODY$;
 
 ALTER FUNCTION p8.insert_generated_embeddings(text, text, text, text)
     OWNER TO postgres;
+
+
+---------
+
+DROP FUNCTION IF EXISTS p8.get_connected_nodes;
+CREATE OR REPLACE FUNCTION p8.get_connected_nodes(
+    node_type TEXT,
+    source_node_name TEXT,
+	target_type TEXT DEFAULT NULL,
+    max_length INT DEFAULT 3
+) RETURNS TABLE(node_id TEXT, node_label TEXT, node_name TEXT, path_length INT)
+AS $BODY$
+DECLARE
+    cypher_query TEXT;
+    sql TEXT;
+	schema_name TEXT;
+    pure_table_name TEXT;
+BEGIN
+
+	/*
+		select * from p8.get_connected_nodes('public.Chapter', 'page62_moby')
+
+		select * from p8.get_connected_nodes('public.Chapter', 'page62_moby', 'public.Chapter')
+
+	*/
+	
+	LOAD  'age'; SET search_path = ag_catalog, "$user", public;
+
+	schema_name := lower(split_part(node_type, '.', 1));
+    pure_table_name := split_part(node_type, '.', 2);
+	--formatted as we do for graph nodes 
+	node_type := schema_name || '__' || pure_table_name;
+
+	if target_type IS NOT NULL THEN
+		schema_name := lower(split_part(target_type, '.', 1));
+	    pure_table_name := split_part(target_type, '.', 2);
+		--formatted as we do for graph nodes 
+		target_type := schema_name || '__' || pure_table_name;
+
+	END IF;
+    -- Construct Cypher query dynamically
+    cypher_query := format(
+        'MATCH path = (start:%s {name: ''%s''})-[:ref*1..%s]-(ch%s%s)
+         RETURN ch, length(path) AS path_length',
+        node_type, source_node_name, max_length,
+        CASE WHEN target_type IS NULL THEN '' ELSE ':' END, 
+        COALESCE(target_type, '')
+    );
+
+    -- Debug output
+    RAISE NOTICE '%', cypher_query;
+
+    -- Format SQL statement
+    sql := format(
+        'SELECT 
+            (ch::json)->>''id'' AS node_id, 
+            (ch::json)->>''label'' AS node_label, 
+            ((ch::json)->''properties''->>''name'') AS node_name,
+            path_length 
+        FROM cypher(''percolate'', $$ %s $$) AS (ch agtype, path_length int);',
+        cypher_query
+    );
+
+    -- Execute the SQL and return the result
+    RETURN QUERY EXECUTE sql;
+END;
+$BODY$ LANGUAGE plpgsql;
+
+
+---------
+
+DROP FUNCTION IF EXISTS p8.create_graph_from_paths;
+
+CREATE OR REPLACE FUNCTION p8.create_graph_from_paths(
+	paths_json jsonb,
+	path_source_node_type text DEFAULT 'public.Chapter'::text,
+	graph_path_relation text DEFAULT 'ref'::text,
+	graph_category_node text DEFAULT 'Category'::text)
+    RETURNS TABLE (path TEXT, status TEXT, error_message TEXT)
+    LANGUAGE 'plpgsql'
+    COST 100
+    VOLATILE PARALLEL UNSAFE
+AS $BODY$
+DECLARE
+    path text;
+    path_elements text[];
+    task_name text;
+    category1_name text;
+    category2_name text;
+    cypher_query text;
+    schema_name TEXT;
+    pure_table_name TEXT;
+    graph_path_node TEXT;
+    sql text;
+    results jsonb := '[]'::jsonb;  -- Initialize an empty JSON array to store results
+BEGIN
+    /*
+
+    You can create a typed path along typed nodes from any source node
+    The source node should follow the node conventions for table names and they key should be the first part of the path
+    
+    Example usage:
+    SELECT p8.create_graph_from_paths('["page62_moby/B/C", "page47_moby/B/C", "TX/B/D"]'::jsonb);
+    SELECT p8.create_graph_from_paths('["page62_moby/B/C"]'::jsonb);
+    
+    If these have been added, you can connect page 47 to page 62 via node Category:C
+    
+    Sample Cypher Queries:
+    SELECT * FROM cypher('percolate', $$ MATCH path = (a:P8_Task {name: 'TX'})-[:ref]->(b:Category)-[:ref]->(c:Category) RETURN path $$) AS (path agtype);
+    SELECT * FROM cypher('percolate', $$ MATCH path = (start:public__Chapter {name: 'page62_moby'})-[:ref*1..3]-(ch:public__Chapter) RETURN ch, length(path) AS path_length $$) AS (ch agtype, path_length int);
+    
+    */
+    
+    -- Load AGE extension and set search path
+    LOAD 'age';
+    SET search_path = ag_catalog, "$user", public;
+
+    -- Extract the schema and table names for the source node
+    schema_name := lower(split_part(path_source_node_type, '.', 1));
+    pure_table_name := split_part(path_source_node_type, '.', 2);
+    graph_path_node := schema_name || '__' || pure_table_name;
+
+    -- Iterate over each path in the JSON array and process
+    FOR path IN SELECT jsonb_array_elements_text(paths_json)
+    LOOP
+        -- Split the path into its components
+        path_elements := string_to_array(path, '/');
+        
+        -- Ensure path has exactly three elements (Task -> Category1 -> Category2)
+        IF array_length(path_elements, 1) = 3 THEN
+            task_name := path_elements[1];
+            category1_name := path_elements[2];
+            category2_name := path_elements[3];
+
+            -- Construct the Cypher query with dynamic parameters
+            cypher_query := format(
+                'MERGE (a:%s {name: ''%s''})
+                 MERGE (b:%s {name: ''%s''})
+                 MERGE (c:%s {name: ''%s''})
+                 MERGE (a)-[:%I]->(b)
+                 MERGE (b)-[:%I]->(c)',
+                graph_path_node, REPLACE(task_name, '''', ''), graph_category_node, category1_name, graph_category_node, category2_name,
+                graph_path_relation, graph_path_relation
+            );
+
+            -- Format the SQL statement for Cypher execution
+            sql := format(
+                'SELECT * FROM cypher(''percolate'', $$ %s $$) AS (v agtype);',
+                cypher_query
+            );
+
+            BEGIN
+                -- Execute the Cypher query
+                EXECUTE sql;
+
+                -- Accumulate success result in the JSON array
+                results := results || jsonb_build_object('path', path, 'status', 'success', 'error_message', NULL);
+            EXCEPTION
+                WHEN OTHERS THEN
+                    -- Accumulate failure result with error message in the JSON array
+                    results := results || jsonb_build_object('path', path, 'status', 'failure', 'error_message', SQLERRM);
+            END;
+        ELSE
+            -- If path format is invalid (not exactly 3 elements), accumulate failure result
+            results := results || jsonb_build_object('path', path, 'status', 'failure', 'error_message', 'Invalid path format');
+        END IF;
+    END LOOP;
+
+    -- Return all results at once as a single table
+    RETURN QUERY 
+    SELECT * FROM jsonb_to_recordset(results) AS (path TEXT, status TEXT, error_message TEXT);
+
+END;
+$BODY$;
 
 
 ---------
@@ -3061,6 +3572,109 @@ if there are records in the table for this embedding e.g. the table like p8.Agen
     );
 END;
 $BODY$;
+
+
+/*
+we may want to chunk but im not sure where i want to do it
+we can left the text column large or created a joined chunk column and embed that 
+if we leave the text large, we can create N chunk embeddings all pointing to the same large text
+the difficult is we need to do a clean up
+It may be that we generate the ID using a chunk and then we need some sort of vacuum for the provider length and checking the text content length
+for example if the user edited the field, we would have to rebuild the chunks and the embeddings
+in general a cte for chunking uses recursion like this
+
+---
+-- Define the parameter for the maximum chunk length
+DECLARE @ChunkLength INT = 9;
+
+WITH ChunkCTE AS (
+    -- Anchor: Get the first chunk from each row
+    SELECT
+        id,
+        -- Include any additional columns you want to retain
+        OtherColumn,
+        CAST(SUBSTRING(text, 1, @ChunkLength) AS VARCHAR(MAX)) AS ChunkText,
+        1 AS ChunkRank,
+        SUBSTRING(text, @ChunkLength + 1, LEN(text)) AS RemainingText
+    FROM MyTable
+
+    UNION ALL
+
+    -- Recursive part: Process the remaining text
+    SELECT
+        id,
+        OtherColumn,
+        CAST(SUBSTRING(RemainingText, 1, @ChunkLength) AS VARCHAR(MAX)),
+        ChunkRank + 1,
+        SUBSTRING(RemainingText, @ChunkLength + 1, LEN(RemainingText))
+    FROM ChunkCTE
+    WHERE LEN(RemainingText) > 0  -- Continue as long as there’s text left to process
+)
+SELECT
+    id,
+    OtherColumn,
+    ChunkRank,
+    ChunkText
+FROM ChunkCTE
+ORDER BY id, ChunkRank
+OPTION (MAXRECURSION 0);  -- Allows unlimited recursion if needed
+
+
+*/
+
+---------
+
+DROP FUNCTION IF EXISTS p8.build_graph_index;
+CREATE OR REPLACE FUNCTION p8.build_graph_index(
+    entity_name TEXT,
+    graph_path_column TEXT DEFAULT 'graph_paths'
+)
+RETURNS TABLE (graph_element TEXT) AS $$
+DECLARE
+    paths_json jsonb;
+    table_name TEXT;
+    schema_name TEXT;
+    quoted_table TEXT;
+BEGIN
+    /*
+        Example usage:
+        SELECT * FROM p8.build_graph_index('public.Chapter', 'concept_graph_paths');
+
+				select * from p8.get_connected_nodes('public.Chapter', 'page3_moby', 'public.Chapter')
+
+		
+    */
+
+    LOAD 'age';
+    SET search_path = ag_catalog, "$user", public;
+
+
+    schema_name := lower(split_part(entity_name, '.', 1));
+    table_name := split_part(entity_name, '.', 2);
+    
+    -- Quote the schema and table name properly
+    quoted_table := format('%s.%I', schema_name, table_name);
+    
+    -- Construct the JSON array of paths in the format name/path/tail
+    EXECUTE format(
+        'SELECT jsonb_agg(name || ''/'' || path) 
+         FROM (SELECT name, unnest(%I) AS path FROM %s 
+               WHERE name IS NOT NULL AND %I IS NOT NULL) sub',
+        graph_path_column, quoted_table, graph_path_column
+    )
+    INTO paths_json;
+
+	 -- Execute the graph creation function with the generated paths
+    EXECUTE format(
+        'SELECT p8.create_graph_from_paths(%L::jsonb);', paths_json
+    );
+	
+    -- Return the list of elements extracted from the JSON array
+    RETURN QUERY 
+    SELECT jsonb_array_elements_text(paths_json);
+END;
+$$ LANGUAGE plpgsql;
+
 
 ---------
 
@@ -3313,6 +3927,59 @@ $BODY$;
 
 ---------
 
+
+DROP FUNCTION IF EXISTS p8.get_graph_nodes_by_id;
+CREATE OR REPLACE FUNCTION p8.get_graph_nodes_by_id(
+    keys bigint[]
+)
+RETURNS TABLE(id text, entity_type text) 
+LANGUAGE 'plpgsql'
+COST 100
+VOLATILE PARALLEL UNSAFE
+AS $BODY$
+DECLARE
+    sql_query text;
+    keys_str text;
+BEGIN
+    /*
+
+    we can use an alt function to get by the business key but this function queries by the AGE BIG INT id
+    This can be useful for low level functions that resolves arbitrary entities of different types and we can resolve the json of the actual entity using another function e.g. as done in get_entities
+
+    Example usage:
+    SELECT * FROM p8.get_graph_nodes_by_id(ARRAY[844424930131969]);
+    */
+
+    -- Convert the array to a Cypher-friendly list format
+    keys_str := array_to_string(keys, ', '); -- Converts [id1, id2] → "id1, id2"
+
+    -- Construct the Cypher query dynamically
+    sql_query := format(
+        'WITH nodes AS (
+            SELECT * 
+            FROM cypher(''percolate'', $$ 
+                MATCH (v)
+                WHERE id(v) IN [%s]
+                RETURN v 
+            $$) AS (v agtype)
+        ), 
+        records AS (
+            SELECT 
+                (v::json)->>''id'' AS id,  -- Extracting the node ID
+                (v::json)->>''label'' AS entity_type -- Extracting the label
+            FROM nodes
+        )
+        SELECT id, entity_type FROM records',
+        keys_str
+    );
+
+    -- Execute the dynamic SQL and return the result
+    RETURN QUERY EXECUTE sql_query;
+END;
+$BODY$;
+
+---------
+
 -- FUNCTION: p8.register_entities(text, boolean, text)
 
 -- DROP FUNCTION IF EXISTS p8.register_entities(text, boolean, text);
@@ -3465,7 +4132,7 @@ DECLARE
     result JSONB := '{}'::JSONB;
 BEGIN
 	/*
-	import p8 get_graph_nodes_by_id 
+	import p8 get_graph_nodes_by_key
 
 	example: selects any entity by its business key by going to the graph for the index and then joining the table
 	this example happens to have a table name which is an entity also in the agents table.
@@ -3477,7 +4144,7 @@ BEGIN
 	
     -- Load nodes based on keys, returning the associated entity type and key
     WITH nodes AS (
-        SELECT id, entity_type FROM p8.get_graph_nodes_by_id(keys)
+        SELECT id, entity_type FROM p8.get_graph_nodes_by_key(keys)
     ),
     grouped_records AS (
         SELECT 
@@ -3621,7 +4288,7 @@ $BODY$;
 
 ---------
 
-CREATE OR REPLACE FUNCTION p8.get_graph_nodes_by_id(
+CREATE OR REPLACE FUNCTION p8.get_graph_nodes_by_key(
     keys text[]
 )
 RETURNS TABLE(id text, entity_type text) -- Returning both id and entity_type
@@ -3788,12 +4455,11 @@ $BODY$;
 
 ---------
 
- 
-
 DROP FUNCTION IF EXISTS p8.query_entity;
 CREATE OR REPLACE FUNCTION p8.query_entity(
     question TEXT,
     table_name TEXT,
+    vector_search_function TEXT DEFAULT 'vector_search_entity',
     min_confidence NUMERIC DEFAULT 0.7)
 RETURNS TABLE(
     query_text TEXT,
@@ -3816,17 +4482,15 @@ DECLARE
     sql_query_result JSONB;
     sql_error TEXT;
     vector_search_result JSONB;
-	embedding_for_text VECTOR;
+    embedding_for_text VECTOR;
 BEGIN
 
-	/*
-	first crude look at merging multipe together
-	we will spend time on this later with a proper fast parallel index
+    /*
+    first crude look at merging multiple together
+    we will spend time on this later with a proper fast parallel index
 
-	select * from p8.query_entity('what sql queries do we have for generating uuids from json', 'p8.PercolateAgent')
-
-
-	*/
+    select * from p8.query_entity('what sql queries do we have for generating uuids from json', 'p8.PercolateAgent')
+    */
 
     -- Extract schema and table name
     schema_name := split_part(table_name, '.', 1);
@@ -3861,17 +4525,17 @@ BEGIN
         END;
     END IF;
 
-    -- Use the vector_search_entity utility function to perform the vector search
+    -- Use the selected vector search function to perform the vector search
     BEGIN
         EXECUTE FORMAT(
             'SELECT jsonb_agg(row_to_json(result)) 
              FROM (
                  SELECT b.*, a.vdistance 
-                 FROM p8.vector_search_entity(%L, %L) a
+                 FROM p8.%I(%L, %L) a
                  JOIN %s.%I b ON b.id = a.id 
                  ORDER BY a.vdistance
              ) result',
-            question, table_name, schema_name, table_without_schema
+            vector_search_function, question, table_name, schema_name, table_without_schema
         ) INTO vector_search_result;
     EXCEPTION
         WHEN OTHERS THEN
@@ -3889,7 +4553,6 @@ BEGIN
         sql_error AS error_message;
 END;
 $BODY$;
-
 
 ---------
 

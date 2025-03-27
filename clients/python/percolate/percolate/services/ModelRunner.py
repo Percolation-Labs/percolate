@@ -12,9 +12,11 @@ GENERIC_P8_PROMPT = """\n# General Advice.
 Use whatever functions are available to you and use world knowledge only if prompted 
 or if there is not other way 
 or the user is obviously asking about real world information that is not covered by functions.
-Observe what functions you have to use and check the message history to avoid calling the same functions with the same parameters repeatedly.
-If you find a function name in your search, you can activate it by with the provided tool to activate_function_by_name assuming you have the correct function name. You should do so without asking the user.
-When generating large output observe the notification that needs to be called first, call it and continue.
+
+- Observe what functions you have to use and check the message history to avoid calling the same functions with the same parameters repeatedly.
+- Your Agent Name is given below and you never need to activate [Agent Name] as a function since the context is already loaded.
+- If you encounter a function name that is not your name such as those lists under agent functions, you can activate it with the provided tool to activate_function_by_name assuming you have the correct function name. You should do so without asking the user.
+- When generating large output observe the notification that needs to be called first, call it and continue.
 Of you call a function that is running another agent, you should always pass the full context from the user in the question. Do not shorten or ask simpler questions which loses the users context.
             """
             
@@ -79,6 +81,7 @@ class ModelRunner:
     def search(self, questions: typing.List[str]):
         """Run a general search on the model that is being used in the current context as per the system prompt
         If you want to add multiple questions supply a list of strings as an array.
+        To find functions use help instead of search. Do not search for functions if there is already a function on the agent that you can activate.
         Args:
             questions: ask one or more questions to search the data store
         """
@@ -87,10 +90,15 @@ class ModelRunner:
 
     def activate_functions_by_name(self, function_names: typing.List[str], **kwargs):
         """Provide a list of function names to load.
-        The names should be fully qualified object_id.function_name
+        The names should be fully qualified object_id.function_name.
+        You should not try to activate self as a function. For example if your name is x.Agent, do not try to activate yourself.
+        If there are functions on an agent you can activate them without searching.
         """
 
         logger.debug(f"activating function {function_names}")
+        for f in function_names:
+            if f == self.agent_model.get_model_full_name():
+                raise Exception("Error - you should not try to load yourself {f} since you are loaded as a callable agent already. Find another function to use in your available functions")
         missing = self._function_manager.add_functions_by_key(function_names)
         available = set(function_names) - set(missing)
         missing_message = f"" if not missing else f" But the functions {missing} could not be loaded"
@@ -239,10 +247,13 @@ class ModelRunner:
                 continue
             if response is not None:
                 # marks the fact that we have unfinished business
+                
+                """for full auditing we should dump the response here"""
+                #p8.repository(AIResponse).update_records(response)
                 break
 
-        """fire telemetry"""
-        p8.dump(question, response, self._context)
+        """fire telemetry TODO and below dump to postgres"""
+        p8.dump(question, self.messages.data, response, self._context, agent=self.agent_model.get_model_full_name())
 
         return response.content
 
