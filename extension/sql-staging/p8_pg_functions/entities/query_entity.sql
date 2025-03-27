@@ -1,9 +1,8 @@
- 
-
 DROP FUNCTION IF EXISTS p8.query_entity;
 CREATE OR REPLACE FUNCTION p8.query_entity(
     question TEXT,
     table_name TEXT,
+    vector_search_function TEXT DEFAULT 'vector_search_entity',
     min_confidence NUMERIC DEFAULT 0.7)
 RETURNS TABLE(
     query_text TEXT,
@@ -26,17 +25,15 @@ DECLARE
     sql_query_result JSONB;
     sql_error TEXT;
     vector_search_result JSONB;
-	embedding_for_text VECTOR;
+    embedding_for_text VECTOR;
 BEGIN
 
-	/*
-	first crude look at merging multipe together
-	we will spend time on this later with a proper fast parallel index
+    /*
+    first crude look at merging multiple together
+    we will spend time on this later with a proper fast parallel index
 
-	select * from p8.query_entity('what sql queries do we have for generating uuids from json', 'p8.PercolateAgent')
-
-
-	*/
+    select * from p8.query_entity('what sql queries do we have for generating uuids from json', 'p8.PercolateAgent')
+    */
 
     -- Extract schema and table name
     schema_name := split_part(table_name, '.', 1);
@@ -71,17 +68,17 @@ BEGIN
         END;
     END IF;
 
-    -- Use the vector_search_entity utility function to perform the vector search
+    -- Use the selected vector search function to perform the vector search
     BEGIN
         EXECUTE FORMAT(
             'SELECT jsonb_agg(row_to_json(result)) 
              FROM (
                  SELECT b.*, a.vdistance 
-                 FROM p8.vector_search_entity(%L, %L) a
+                 FROM p8.%I(%L, %L) a
                  JOIN %s.%I b ON b.id = a.id 
                  ORDER BY a.vdistance
              ) result',
-            question, table_name, schema_name, table_without_schema
+            vector_search_function, question, table_name, schema_name, table_without_schema
         ) INTO vector_search_result;
     EXCEPTION
         WHEN OTHERS THEN

@@ -27,6 +27,10 @@ example
 select * from p8.insert_generated_embeddings('p8.Agent', 'description')
 returns non 0 if it needed to insert somethign
 caller e.g. p8.insert_entity_embeddings('p8.Agent') can flush all required embeddings
+
+
+select * from p8.insert_generated_embeddings('p8.Chapter', 'content')
+
 */
     -- Resolve the model name, defaulting to 'text-embedding-ada-002' if 'default' is provided
     resolved_model := CASE 

@@ -10,7 +10,7 @@ DECLARE
     result JSONB := '{}'::JSONB;
 BEGIN
 	/*
-	import p8 get_graph_nodes_by_id 
+	import p8 get_graph_nodes_by_key
 
 	example: selects any entity by its business key by going to the graph for the index and then joining the table
 	this example happens to have a table name which is an entity also in the agents table.
@@ -22,7 +22,7 @@ BEGIN
 	
     -- Load nodes based on keys, returning the associated entity type and key
     WITH nodes AS (
-        SELECT id, entity_type FROM p8.get_graph_nodes_by_id(keys)
+        SELECT id, entity_type FROM p8.get_graph_nodes_by_key(keys)
     ),
     grouped_records AS (
         SELECT 
