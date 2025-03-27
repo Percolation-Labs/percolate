@@ -45,9 +45,11 @@ def map_openapi_to_function(spec,short_name:str=None):
         if 'schema' in schema:
             schema = schema['schema']
         mapped_schema = {
-            'type': schema.get('type'),
+            #TODO i need to understand the spec better
+            'type': schema.get('type','string'),
             'description': schema.get('description', '')  
         }
+        
         
         if 'enum' in schema:
             mapped_schema['enum'] = schema['enum']
@@ -64,8 +66,7 @@ def map_openapi_to_function(spec,short_name:str=None):
         parameters = {p['name']: _map(p) for p in (spec.get('parameters') or [])}
         required_params = [p['name'] for p in spec.get('parameters') or [] if p.get('required')]
 
-        
-        request_body = (spec.get('request_body') or {}).get('properties', {})#.get('application/json', {}).get('schema')
+        request_body = (spec.get('request_body') or {})#.get('properties', {})#.get('application/json', {}).get('schema')
         # Handle request body if present
         if request_body:
             body_schema = request_body
@@ -167,6 +168,7 @@ class OpenApiSpec:
                     continue
                 """when generating we need to expand the endpoint schema"""
                 s = self.get_expanded_schema_for_endpoint(endpoint,method)
+         
                 fspec = map_openapi_to_function(s,short_name=ep_to_short_names[op_id])
                 yield Function(name=ep_to_short_names[op_id],
                                key=op_id,

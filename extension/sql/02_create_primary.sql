@@ -151,6 +151,8 @@ FOR EACH ROW
 EXECUTE FUNCTION update_updated_at_column();
 
         
+SELECT attach_notify_trigger_to_table('p8', 'Session');
+            
 -- ------------------
 
 -- register entity (p8.AIResponse)------
