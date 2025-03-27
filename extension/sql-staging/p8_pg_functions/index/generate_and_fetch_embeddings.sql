@@ -59,7 +59,7 @@ BEGIN
             SELECT 
                 embedding,
                 ROW_NUMBER() OVER () AS idx
-            FROM p8.fetch_openai_embeddings(
+            FROM p8.fetch_embeddings(
 				(SELECT aggregated_data FROM payload),
                 %L,            
                 %L

@@ -362,10 +362,10 @@ class AIResponse(TokenUsage):
 class Session(AbstractModel):
     """Tracks groups if session dialogue"""
     id: uuid.UUID| str  
-    query: typing.Optional[str] = Field(None,description='the question or context that triggered the session')
+    query: typing.Optional[str] = DefaultEmbeddingField(None,description='the question or context that triggered the session')
     user_rating: typing.Optional[float] = Field(None, description="We can in future rate sessions to learn what works")
     agent: str = Field("Percolate always expects an agent but we support passing a system prompt which we treat as anonymous agent")
-    parent_session_id:typing.Optional[uuid.UUID| str] = Field("A session is a thread from a question+prompt to completion. We maw span child sessions")
+    parent_session_id:typing.Optional[uuid.UUID| str] = Field(None, description="A session is a thread from a question+prompt to completion. We span child sessions")
     
     thread_id: typing.Optional[str] = Field(None,description='An id for a thread which can contain a number of sessions')
     channel_id: typing.Optional[str] = Field(None,description='The channel through which the user came. It could be a messaging platform channel or a system division')
@@ -373,6 +373,22 @@ class Session(AbstractModel):
     metadata: typing.Optional[dict] = Field(default_factory=dict, description="Arbitrary metadata")
     session_completed_at: typing.Optional[datetime.datetime] = Field(default=None,description="An audit timestamp to write back the completion of the session - its optional as it should manage the last timestamp on the AI Responses for the session")
     
+    @classmethod
+    def from_question_and_context(cls, id:str, question:str, context:typing.Any, agent:str=None, **kwargs):
+        """
+        from the session we can track the question and the agent that serviced. we may also want to store other details 
+        """
+        from percolate.services.llm import CallingContext
+        context: CallingContext = context
+        
+        #TODO: we should capture some of context e.g. threads and users 
+        return cls(query=question,
+            id=id or str(uuid.uuid1()), 
+            agent=agent,
+            #TODO user id and channel contexts etc.
+            **kwargs)
+         
+        
 class SessionEvaluation(AbstractModel):
     """Tracks groups if session dialogue"""
     id: uuid.UUID| str  
@@ -387,6 +403,12 @@ class ModelMatrix(AbstractModel):
     enums: typing.Optional[dict] = Field(None, description="The enums used in the model - usually a job will build these and they can be used in query prompts")
     example_sql_queries: typing.Optional[dict] = Field(None, description="A mapping of interesting question to SQL queries - usually a job will build these and they can be used in query prompts")
 
+class Category(AbstractEntityModel):
+    """A category is just a general topic node that can be linked to other nodes and can have an evolving description or summary"""
+    id: uuid.UUID| str  
+    name: str = Field(description="The name of the category node")
+    description: str = DefaultEmbeddingField(description="The content description for the category")
+    
 class Project(AbstractEntityModel):
     """A project is a broadly defined goal with related resources (uses the graph)"""
     id: uuid.UUID| str  
@@ -413,7 +435,7 @@ If the user asks to look for existing plans, you should ask the research agent t
     @classmethod
     def get_model_functions(cls):
         """fetch task external functions"""
-        return {'get_tasks_task_name_comments': 'get comments associated with this task, supplying the task name' }
+        return {'post_tasks_': 'Used to save tasks by posting the task object. Its good practice to first search for a task of a similar name before saving in case of duplicates' }
     
 class User(AbstractEntityModel):
     """save user info"""

@@ -445,3 +445,23 @@ class PostgresService:
         logger.info(f'indexing entity {self.model}')
         return self.index_entity_by_name(self.model.get_model_full_name())
         
+    def run(self, question:str, model:str, max_iterations:int=5,agent:str=None):
+        """this will run the database run function for convenience testing.
+        Run executes an agentic loop using the provided agent class.
+        Sessions and AIResponses are saved in the database.
+        
+        Args:
+            question: ask a question
+            model: the language model will default to gpt-40
+            max_iterations: the number of turns the agent can take - default 5
+            agent: the name of the registered agent to use - defaults to the p8.PercolateAgent
+        """
+        
+        from percolate.utils.env import DEFAULT_MODEL
+        
+        agent = agent or self.model.get_model_full_name() if self.model else None
+        """default agent"""
+        agent = agent or "p8.PercolateAgent"
+        model = model or DEFAULT_MODEL
+        return self.execute(f"""SELECT * FROM run(%s,%s, %s, %s)""", data=(question, max_iterations, model, agent))
+    

@@ -29,13 +29,15 @@ class FunctionManager:
         
             Args: a callable function or percolate Function type
         """
-        
+        EXCLUDED_SYSTEM_FUNCTIONS = ['get_model_functions']
         if not isinstance(function, Function):
-            logger.debug(f"adding function: {function}")
+            #logger.debug(f"adding function: {function}")
             function = _RuntimeFunction.from_callable(function)
         if function.name not in cls._functions:
-            cls._functions[function.name] = function
-            logger.debug(f"added function {function.name}")
+            """we only add not private methods"""
+            if function.name[:1] != '_' and function.name not in EXCLUDED_SYSTEM_FUNCTIONS:
+                cls._functions[function.name] = function
+                logger.debug(f"added function {function.name}")
     
     def activate_agent_context(cls, agent_model: AbstractModel):
         """
