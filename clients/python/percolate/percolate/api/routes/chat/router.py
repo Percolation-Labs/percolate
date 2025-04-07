@@ -194,7 +194,7 @@ def map_delta_to_canonical_format(data, dialect, model):
     Map a streaming delta chunk to canonical format based on the provider dialect.
     
     This helper function converts streaming chunks from different providers
-    (OpenAI, Anthropic, Google) into a consistent format for client consumption.
+    (OpenAI, Anthropic, Google) into a consistent OpenAI delta format for client consumption.
     
     The output format matches the OpenAI delta format:
     ```
@@ -221,98 +221,15 @@ def map_delta_to_canonical_format(data, dialect, model):
     Returns:
         Dict with data converted to canonical format with delta structure
     """
-    # Default values for canonical format
-    canonical = {
-        "id": data.get("id", f"cmpl-{int(time.time())}"),
-        "object": "chat.completion.chunk",
-        "created": int(time.time()),
-        "model": model,
-        "choices": []
-    }
+    # Use the StreamingCompletionsResponseChunk class methods to handle the conversion
+    from .models import StreamingCompletionsResponseChunk
     
-    # Extract content and tool calls based on provider dialect
-    if dialect == 'anthropic':
-        # Handle Anthropic-specific format
-        delta = {}
-        
-        # Extract text content from content_block_delta
-        if data.get("type") == "content_block_delta" and data.get("delta", {}).get("type") == "text_delta":
-            delta["content"] = data.get("delta", {}).get("text", "")
-        
-        # Extract tool calls
-        if data.get("type") == "content_block_delta" and data.get("delta", {}).get("type") == "tool_use":
-            tool_data = data.get("delta", {})
-            if tool_data:
-                delta["tool_calls"] = [{
-                    "index": 0,
-                    "id": tool_data.get("id", f"tool_{int(time.time())}"),
-                    "type": "function",
-                    "function": {
-                        "name": tool_data.get("name", ""),
-                        "arguments": tool_data.get("partial_json", "")
-                    }
-                }]
-        
-        finish_reason = data.get("stop_reason")
-        
-        canonical["choices"] = [{
-            "index": 0,
-            "delta": delta,
-            "finish_reason": finish_reason
-        }]
-        
-    elif dialect == 'google':
-        # Handle Google-specific format
-        delta = {}
-        
-        if data.get("candidates"):
-            candidate = data["candidates"][0]
-            if "content" in candidate and "parts" in candidate["content"]:
-                for part in candidate["content"]["parts"]:
-                    if "text" in part:
-                        # Add text content to delta
-                        delta["content"] = part.get("text", "")
-                    elif "functionCall" in part:
-                        # Add tool call to delta
-                        function_call = part["functionCall"]
-                        if "tool_calls" not in delta:
-                            delta["tool_calls"] = []
-                        
-                        delta["tool_calls"].append({
-                            "index": 0,
-                            "id": f"tool_{int(time.time())}",
-                            "type": "function",
-                            "function": {
-                                "name": function_call.get("name", ""),
-                                "arguments": json.dumps(function_call.get("args", {}))
-                            }
-                        })
-        
-        finish_reason = data.get("candidates", [{}])[0].get("finishReason")
-        
-        canonical["choices"] = [{
-            "index": 0,
-            "delta": delta,
-            "finish_reason": finish_reason
-        }]
-    else:
-        # For OpenAI format, just ensure it has the right structure
-        # This branch shouldn't normally be called since OpenAI already has the right format
-        if "choices" in data and data["choices"]:
-            canonical = data  # Just use the existing format
-        else:
-            # Create a minimal delta structure if we have a non-standard format
-            canonical["choices"] = [{
-                "index": 0,
-                "delta": {"content": ""},
-                "finish_reason": None
-            }]
-    
-    return canonical
+    # This delegates the mapping logic to the appropriate method based on the dialect
+    return StreamingCompletionsResponseChunk.map_to_canonical_format(data, dialect, model)
 
 def stream_generator(response, stream_mode, audit_callback=None, from_dialect='openai', model=None):
     """
-    Stream the LLM response to the client.
+    Stream the LLM response to the client, converting chunks to canonical format and make sure to encode binary "lines"
     
     Args:
         response: The LLM response object (from LanguageModel.__call__)
@@ -324,37 +241,32 @@ def stream_generator(response, stream_mode, audit_callback=None, from_dialect='o
     
     collected_chunks = []
     for chunk in response.iter_lines():
-        if chunk:
-            print(chunk)
-            # if stream_mode == 'sse' and not line.startswith('data:'):
-            #     chunk = f"data: {line}\n\n"
-            # else:
-                
-            """in special cases we will map back to a binary representation in canonical
-            this is not particular efficient but it is convenient for users who want to use the same API format
-            """
-            if from_dialect and from_dialect != 'openai':
-                json_data = chunk.decode('utf-8')[6:]
-                if json_data[:1] =='{':
-                    json_data = json.loads(json_data)
-                    chunk = map_delta_to_canonical_format(json_data, from_dialect, model)
-                    print(f"\n\n***{chunk}***\n\n")
-                    chunk = f"data: {json.dumps(chunk)}\n\n".encode()
-          
-            """add the decoded lines to a set for background processing"""
-            collected_chunks.append(chunk.decode('utf-8'))
+        """add the decoded lines for later processing"""
+        collected_chunks.append(chunk.decode('utf-8'))
         
-            """yield binary chunks"""
-            if isinstance(chunk, str):
-               chunk = chunk.encode('utf-8')
-            if not chunk.endswith(b'\n\n'):
-                chunk = chunk + b'\n\n'
-            yield chunk
+        """
+        this is convenience that comes at a cost - the user is essentially using all models in the open ai format so we must do some parsing
+        TODO: think more about this
+        """
+        if from_dialect and from_dialect != 'openai':
+            json_data = chunk.decode('utf-8')[6:]
+            if json_data and json_data[0] == '{':       
+                """Parse in valid data and use the canonical mapping"""     
+                canonical_data = map_delta_to_canonical_format(json.loads(json_data), from_dialect, model)
+                """recover the SSE binary format"""
+                chunk = f"data: {json.dumps(canonical_data)}\n\n".encode('utf-8')
+        
+        """this should always be the case for properly streaming lines on the client for SSE"""
+        if not chunk.endswith(b'\n\n'):
+            chunk = chunk + b'\n\n'
+            
+        yield chunk
                
     if audit_callback:
         full_response = "".join(collected_chunks)
         audit_callback(full_response)
-
+               
+ 
 def extract_metadata(request, params=None):
     """
     Extract metadata from request and params.
@@ -467,8 +379,13 @@ async def completions(
             audit_request(request, full_response, metadata)
                 
         return StreamingResponse(
-            #fake_data_streamer(),
-            stream_generator(response, stream_mode, audit_callback, from_dialect=dialect),
+            stream_generator(
+                response=response,
+                stream_mode=stream_mode,
+                audit_callback=audit_callback,
+                from_dialect=dialect,  # Pass dialect for canonical format mapping
+                model=request.model  # Pass model name
+            ),
             media_type=media_type
         )
     else:
