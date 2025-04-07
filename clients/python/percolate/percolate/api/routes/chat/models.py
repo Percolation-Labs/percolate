@@ -555,10 +555,16 @@ class CompletionsResponse(BaseModel):
 # Streaming Response Models
 # ---------------------------------------------------------------------------
 
+class StreamingDelta(BaseModel):
+    """Delta content for streaming responses following the OpenAI format."""
+    content: Optional[str] = Field(None, description="Text content in this delta chunk.")
+    tool_calls: Optional[List[Dict[str, Any]]] = Field(None, description="Tool calls in this delta chunk.")
+
 class StreamingChoice(BaseModel):
     """A single streaming choice in a response chunk."""
-    text: Optional[str] = Field(None, description="Partial generated text from this chunk.")
     index: int = Field(..., description="The index of this choice in the returned list.")
+    delta: Optional[StreamingDelta] = Field(None, description="The content delta for this chunk.")
+    text: Optional[str] = Field(None, description="Partial generated text from this chunk (deprecated).")
     logprobs: Optional[Dict[str, Any]] = Field(
         None, description="Partial log probabilities for tokens, if provided."
     )
@@ -566,92 +572,248 @@ class StreamingChoice(BaseModel):
         None, description="Indicates if the generation is complete for this choice in this chunk."
     )
     tool_call: Optional[ToolCall] = Field(
-        None, description="If present in the chunk, details of the tool call triggered."
+        None, description="If present in the chunk, details of the tool call triggered (deprecated)."
     )
 
 class StreamingCompletionsResponseChunk(BaseModel):
-    """A single chunk in a streaming response."""
+    """A single chunk in a streaming response using the OpenAI delta format."""
     id: str = Field(..., description="Unique identifier for the streaming completion.")
-    object: str = Field("text_completion", description="Type of object returned.")
+    object: str = Field("chat.completion.chunk", description="Type of object returned.")
     created: int = Field(..., description="Timestamp for when this chunk was generated.")
     model: str = Field(..., description="The model used for the completion.")
     choices: List[StreamingChoice] = Field(..., description="List of choices for this chunk.")
     
     @classmethod
     def from_anthropic_chunk(cls, chunk: Dict[str, Any], model: str) -> "StreamingCompletionsResponseChunk":
-        """Convert an Anthropic streaming chunk to the OpenAI format."""
-        # Extract text content
-        content = ""
-        if chunk.get("type") == "content_block_delta" and chunk.get("delta", {}).get("type") == "text_delta":
-            content = chunk.get("delta", {}).get("text", "")
+        """
+        Convert an Anthropic streaming chunk to the OpenAI delta format.
         
-        # Handle tool calls
-        tool_call = None
+        Args:
+            chunk: The Anthropic format response chunk
+            model: The model name
+            
+        Returns:
+            A StreamingCompletionsResponseChunk with delta format
+        """
+        # Initialize an empty delta
+        delta = StreamingDelta()
+        
+        # Extract text content from content_block_delta
+        if chunk.get("type") == "content_block_delta" and chunk.get("delta", {}).get("type") == "text_delta":
+            delta.content = chunk.get("delta", {}).get("text", "")
+        
+        # Extract tool calls from content_block_delta with tool_use type
         if chunk.get("type") == "content_block_delta" and chunk.get("delta", {}).get("type") == "tool_use":
             tool_data = chunk.get("delta", {})
             if tool_data:
-                tool_call = ToolCall(
-                    name=tool_data.get("name", ""),
-                    arguments=tool_data.get("partial_json", ""),
-                    id=tool_data.get("id", f"tool_{int(time.time())}")
-                )
+                delta.tool_calls = [{
+                    "index": 0,
+                    "id": tool_data.get("id", f"tool_{int(time.time())}"),
+                    "type": "function",
+                    "function": {
+                        "name": tool_data.get("name", ""),
+                        "arguments": tool_data.get("partial_json", "")
+                    }
+                }]
         
-        # Create streaming choice
-        choices = [
-            StreamingChoice(
-                text=content,
-                index=0,
-                finish_reason=None,
-                logprobs=None,
-                tool_call=tool_call
+        # Get finish reason if present
+        finish_reason = chunk.get("stop_reason")
+        
+        # Create streaming choice with delta
+        choice = StreamingChoice(
+            index=0,
+            delta=delta,
+            finish_reason=finish_reason,
+            logprobs=None
+        )
+        
+        # For backwards compatibility, also set the text and tool_call fields
+        if delta.content:
+            choice.text = delta.content
+        
+        if delta.tool_calls and len(delta.tool_calls) > 0:
+            tool_call_data = delta.tool_calls[0]
+            choice.tool_call = ToolCall(
+                name=tool_call_data["function"]["name"],
+                arguments=tool_call_data["function"]["arguments"],
+                id=tool_call_data["id"]
             )
-        ]
         
         return cls(
             id=chunk.get("id", f"cmpl-{int(time.time())}"),
             created=int(time.time()),
             model=model,
-            choices=choices
+            choices=[choice]
         )
     
     @classmethod
     def from_google_chunk(cls, chunk: Dict[str, Any], model: str) -> "StreamingCompletionsResponseChunk":
-        """Convert a Google streaming chunk to the OpenAI format."""
-        # Extract text content
-        content = ""
-        tool_call = None
+        """
+        Convert a Google streaming chunk to the OpenAI delta format.
         
+        Args:
+            chunk: The Google format response chunk
+            model: The model name
+            
+        Returns:
+            A StreamingCompletionsResponseChunk with delta format
+        """
+        # Initialize an empty delta
+        delta = StreamingDelta()
+        
+        # Extract content and tool calls
         if chunk.get("candidates"):
             candidate = chunk["candidates"][0]
+            
+            # Extract finish reason
+            finish_reason = candidate.get("finishReason")
+            
             if "content" in candidate and "parts" in candidate["content"]:
                 for part in candidate["content"]["parts"]:
                     if "text" in part:
-                        content += part.get("text", "")
+                        # Add text content to delta
+                        delta.content = part.get("text", "")
                     elif "functionCall" in part:
+                        # Add tool call to delta
                         function_call = part["functionCall"]
-                        tool_call = ToolCall(
-                            name=function_call.get("name", ""),
-                            arguments=json.dumps(function_call.get("args", {})),
-                            id=f"tool_{int(time.time())}"
-                        )
-        
-        # Create streaming choice
-        choices = [
-            StreamingChoice(
-                text=content,
+                        if not delta.tool_calls:
+                            delta.tool_calls = []
+                        
+                        delta.tool_calls.append({
+                            "index": 0,
+                            "id": f"tool_{int(time.time())}",
+                            "type": "function",
+                            "function": {
+                                "name": function_call.get("name", ""),
+                                "arguments": json.dumps(function_call.get("args", {}))
+                            }
+                        })
+            
+            # Create streaming choice with delta
+            choice = StreamingChoice(
                 index=0,
-                finish_reason=chunk.get("candidates", [{}])[0].get("finishReason"),
-                logprobs=None,
-                tool_call=tool_call
+                delta=delta,
+                finish_reason=finish_reason,
+                logprobs=None
             )
-        ]
+            
+            # For backwards compatibility, also set the text and tool_call fields
+            if delta.content:
+                choice.text = delta.content
+            
+            if delta.tool_calls and len(delta.tool_calls) > 0:
+                tool_call_data = delta.tool_calls[0]
+                choice.tool_call = ToolCall(
+                    name=tool_call_data["function"]["name"],
+                    arguments=tool_call_data["function"]["arguments"],
+                    id=tool_call_data["id"]
+                )
+            
+            return cls(
+                id=f"cmpl-{int(time.time())}",
+                created=int(time.time()),
+                model=model,
+                choices=[choice]
+            )
         
+        # Default response if no candidates
         return cls(
             id=f"cmpl-{int(time.time())}",
             created=int(time.time()),
             model=model,
-            choices=choices
+            choices=[
+                StreamingChoice(
+                    index=0,
+                    delta=delta,
+                    finish_reason=None,
+                    logprobs=None
+                )
+            ]
         )
+    
+    @staticmethod
+    def map_openai_delta_to_canonical(chunk: Dict[str, Any], model: str) -> Dict[str, Any]:
+        """
+        Map an OpenAI delta format chunk to canonical format.
+        If it already has the right structure, return as is.
+        
+        Args:
+            chunk: The OpenAI format chunk
+            model: The model name
+            
+        Returns:
+            A properly structured OpenAI delta format chunk
+        """
+        # If it's already in the right format with delta, return as is
+        if ("choices" in chunk and 
+            len(chunk["choices"]) > 0 and 
+            "delta" in chunk["choices"][0]):
+            return chunk
+        
+        # Otherwise, try to convert to the right format
+        result = {
+            "id": chunk.get("id", f"cmpl-{int(time.time())}"),
+            "object": "chat.completion.chunk",
+            "created": chunk.get("created", int(time.time())),
+            "model": model or chunk.get("model", "unknown"),
+            "choices": []
+        }
+        
+        # Extract choices with delta format
+        if "choices" in chunk:
+            for i, choice in enumerate(chunk["choices"]):
+                delta = {}
+                
+                # Extract content if present in text field
+                if "text" in choice and choice["text"]:
+                    delta["content"] = choice["text"]
+                
+                # Extract tool call if present
+                if "tool_call" in choice and choice["tool_call"]:
+                    tool_call = choice["tool_call"]
+                    delta["tool_calls"] = [{
+                        "index": 0,
+                        "id": tool_call.get("id", f"tool_{int(time.time())}"),
+                        "type": "function",
+                        "function": {
+                            "name": tool_call.get("name", ""),
+                            "arguments": tool_call.get("arguments", "")
+                        }
+                    }]
+                
+                # Add to choices
+                result["choices"].append({
+                    "index": i,
+                    "delta": delta,
+                    "finish_reason": choice.get("finish_reason")
+                })
+        
+        return result
+    
+    @classmethod
+    def map_to_canonical_format(cls, chunk: Dict[str, Any], dialect: str, model: str) -> Dict[str, Any]:
+        """
+        Map a streaming chunk to canonical OpenAI delta format based on the dialect.
+        
+        Args:
+            chunk: The raw response chunk
+            dialect: The provider dialect ('openai', 'anthropic', 'google')
+            model: The model name
+            
+        Returns:
+            A dict in canonical OpenAI delta format
+        """
+        if dialect == 'anthropic':
+            # Convert Anthropic format to canonical
+            response = cls.from_anthropic_chunk(chunk, model)
+            return response.model_dump()
+        elif dialect == 'google':
+            # Convert Google format to canonical
+            response = cls.from_google_chunk(chunk, model)
+            return response.model_dump()
+        else:
+            # Handle OpenAI or default format
+            return cls.map_openai_delta_to_canonical(chunk, model)
         
     @staticmethod
     def map_anthropic_chunk_to_canonical(chunk: Dict[str, Any], model: str) -> Dict[str, Any]:
