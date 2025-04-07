@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, root_validator
 from typing import Optional, Union, List, Dict, Any, Literal
 import time
 import re
-
+import json
 # ---------------------------------------------------------------------------
 # Metadata Model - Common for all requests
 # ---------------------------------------------------------------------------
@@ -83,6 +83,13 @@ class CompletionsRequestOpenApiFormat(BaseModel):
     metadata: Optional[Dict[str, str]] = Field(
         None, description="Optional field for additional metadata. (Note: This is not part of the official schema.)"
     )
+    
+    def get_tools_as_functions(self):
+        """
+        the tools interface for OpenAI is pushed down to functions internally and we map to other dialects from there
+        """
+        
+        return [r.get('function') for r in self.tools]
     
     def get_dialect(self, params: Optional[Dict] = None) -> str:
         """Determine the dialect from the request and/or parameters.
@@ -170,7 +177,12 @@ class CompletionsRequestOpenApiFormat(BaseModel):
         return result
     
     def to_google_format(self) -> Dict[str, Any]:
-        """Convert OpenAI format to Google format."""
+        """Convert OpenAI format to Google format.
+        
+        this is an example with a tool call
+        
+      
+        """
         prompt = self.prompt
         if isinstance(prompt, list):
             prompt = "\n".join(prompt)
@@ -444,13 +456,62 @@ class CompletionsResponse(BaseModel):
 
     @classmethod
     def from_anthropic_response(cls, response: Dict[str, Any], model: str) -> "CompletionsResponse":
-        """Convert an Anthropic response to the OpenAI format."""
-        # Extract text content
+        """Convert an Anthropic response to the OpenAI format.
+        
+        This supports mapping from tools which come in streaming data chunks like these examples:
+        
+   
+        For non-streaming responses, the tool use block would look like:
+        {
+          "type": "tool_use",
+          "id": "tu_01ABC123",
+          "name": "get_weather",
+          "input": {"location": "Paris, France"}
+        }
+        """
+        # Extract text content and tool calls
         content = ""
-        if isinstance(response.get("content"), list):
-            text_blocks = [block.get("text", "") for block in response.get("content", []) 
-                          if block.get("type") == "text"]
-            content = "".join(text_blocks)
+        tool_call = None
+        
+        # Handle streaming response chunks
+        if response.get("type") == "content_block_delta":
+            delta = response.get("delta", {})
+            # Text delta
+            if delta.get("type") == "text_delta":
+                content = delta.get("text", "")
+            # Tool call delta (JSON)
+            elif delta.get("type") == "input_json_delta":
+                tool_call = ToolCall(
+                    name="unknown_tool",  # Name typically comes from content_block_start
+                    arguments=delta.get("partial_json", "{}"),
+                    id=f"tool_{int(time.time())}"
+                )
+        
+        # Handle tool call initialization in streaming
+        elif response.get("type") == "content_block_start":
+            content_block = response.get("content_block", {})
+            if content_block.get("type") == "tool_use":
+                tool_call = ToolCall(
+                    name=content_block.get("name", ""),
+                    arguments="{}",  # Initial empty arguments
+                    id=content_block.get("id", f"tool_{int(time.time())}")
+                )
+            
+        # Handle non-streaming response
+        elif isinstance(response.get("content"), list):
+            # Process each content block
+            for block in response.get("content", []):
+                # Extract text content
+                if block.get("type") == "text":
+                    content += block.get("text", "")
+                
+                # Extract tool calls
+                elif block.get("type") == "tool_use":
+                    tool_call = ToolCall(
+                        name=block.get("name", ""),
+                        arguments=block.get("input", "{}"),
+                        id=block.get("id", f"tool_{int(time.time())}")
+                    )
         else:
             content = response.get("content", "")
         
@@ -461,7 +522,7 @@ class CompletionsResponse(BaseModel):
                 index=0,
                 finish_reason=response.get("stop_reason"),
                 logprobs=None,
-                tool_call=None  # Handle tool calls if present
+                tool_call=tool_call
             )
         ]
         
@@ -482,15 +543,53 @@ class CompletionsResponse(BaseModel):
     
     @classmethod
     def from_google_response(cls, response: Dict[str, Any], model: str) -> "CompletionsResponse":
-        """Convert a Google response to the OpenAI format."""
-        # Extract content from the first candidate's content parts
+        """Convert a Google response to the OpenAI format.
+        
+        Example with tool call:
+        
+        {
+            "candidates": [{
+                "content": {
+                    "parts": [{
+                        "functionCall": {
+                            "name": "get_weather",
+                            "args": {"location": "Paris, France"}
+                        }
+                    }],
+                    "role": "model"
+                },
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 54,
+                "candidatesTokenCount": 7,
+                "totalTokenCount": 61,
+                "promptTokensDetails": [{"modality": "TEXT", "tokenCount": 54}],
+                "candidatesTokensDetails": [{"modality": "TEXT", "tokenCount": 7}]
+            },
+            "modelVersion": "gemini-1.5-flash"
+        }
+        """
+        # Extract content and function calls from the first candidate's content parts
         content = ""
+        tool_call = None
+        
         if response.get("candidates"):
             candidate = response["candidates"][0]
             if "content" in candidate and "parts" in candidate["content"]:
-                text_parts = [part.get("text", "") for part in candidate["content"]["parts"] 
-                             if "text" in part]
-                content = "".join(text_parts)
+                for part in candidate["content"]["parts"]:
+                    # Extract text content
+                    if "text" in part:
+                        content += part.get("text", "")
+                    
+                    # Extract function call (tool call)
+                    elif "functionCall" in part:
+                        function_call = part["functionCall"]
+                        tool_call = ToolCall(
+                            name=function_call.get("name", ""),
+                            arguments=json.dumps(function_call.get("args", {})),
+                            id=f"tool_{int(time.time())}"
+                        )
         
         # Create choices
         choices = [
@@ -499,7 +598,7 @@ class CompletionsResponse(BaseModel):
                 index=0,
                 finish_reason=response.get("candidates", [{}])[0].get("finishReason"),
                 logprobs=None,
-                tool_call=None  # Handle function calls if present
+                tool_call=tool_call  # Include the extracted tool call
             )
         ]
         
@@ -588,6 +687,27 @@ class StreamingCompletionsResponseChunk(BaseModel):
         """
         Convert an Anthropic streaming chunk to the OpenAI delta format.
         
+        Anthropic streaming chunks have the following formats:
+        
+        # Text content delta:
+        {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" you."}              } 
+        
+        # Tool call start:
+        {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01AzN15tQcN9kHnnhMv6fqVK","name":"get_weather","input":{}}      } 
+        
+        # Tool call delta:
+        {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\""}    } 
+        
+        # Streaming sequence examples:
+        {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}     }
+        {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" you."}              } 
+        {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01AzN15tQcN9kHnnhMv6fqVK","name":"get_weather","input":{}}      } 
+        {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":""}}'
+        {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\""}    }
+        
+        # Stop reason at end of stream:
+        {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}
+        
         Args:
             chunk: The Anthropic format response chunk
             model: The model name
@@ -597,27 +717,48 @@ class StreamingCompletionsResponseChunk(BaseModel):
         """
         # Initialize an empty delta
         delta = StreamingDelta()
-        
-        # Extract text content from content_block_delta
-        if chunk.get("type") == "content_block_delta" and chunk.get("delta", {}).get("type") == "text_delta":
-            delta.content = chunk.get("delta", {}).get("text", "")
-        
-        # Extract tool calls from content_block_delta with tool_use type
-        if chunk.get("type") == "content_block_delta" and chunk.get("delta", {}).get("type") == "tool_use":
-            tool_data = chunk.get("delta", {})
-            if tool_data:
+
+        # Handle streaming response chunks
+        if chunk.get("type") == "content_block_delta":
+            delta_data = chunk.get("delta", {})
+            
+            # Text delta
+            if delta_data.get("type") == "text_delta":
+                delta.content = delta_data.get("text", "")
+                
+            # Tool call JSON delta
+            elif delta_data.get("type") == "input_json_delta" and  delta_data.get("partial_json"):
                 delta.tool_calls = [{
                     "index": 0,
-                    "id": tool_data.get("id", f"tool_{int(time.time())}"),
+                    "id": f"tool_{int(time.time())}",
                     "type": "function",
                     "function": {
-                        "name": tool_data.get("name", ""),
-                        "arguments": tool_data.get("partial_json", "")
+                        "name": "unknown_tool",  # Name typically comes from content_block_start
+                        "arguments": delta_data.get("partial_json")
                     }
                 }]
         
+        # Handle tool call initialization in streaming
+        elif chunk.get("type") == "content_block_start":
+            content_block = chunk.get("content_block", {})
+            if content_block.get("type") == "tool_use":
+                delta.tool_calls = [{
+                    "index": 0,
+                    "id": content_block.get("id", f"tool_{int(time.time())}"),
+                    "type": "function",
+                    "function": {
+                        "name": content_block.get("name", ""),
+                        "arguments": "" 
+                    }
+                }]
+        
+        # Handle message completion with stop reason
+        elif chunk.get("type") == "message_delta" and "stop_reason" in chunk.get("delta", {}):
+            # Only set finish reason, no content or tool_calls
+            pass
+        
         # Get finish reason if present
-        finish_reason = chunk.get("stop_reason")
+        finish_reason = chunk.get("delta", {}).get("stop_reason")
         
         # Create streaming choice with delta
         choice = StreamingChoice(
@@ -650,6 +791,28 @@ class StreamingCompletionsResponseChunk(BaseModel):
     def from_google_chunk(cls, chunk: Dict[str, Any], model: str) -> "StreamingCompletionsResponseChunk":
         """
         Convert a Google streaming chunk to the OpenAI delta format.
+        
+        Google streaming chunks have the following format:
+        
+        {
+            "candidates": [{
+                "content": {
+                    "parts": [
+                        {"text": "Some content"} 
+                        // OR
+                        {"functionCall": {
+                            "name": "get_weather",
+                            "args": {"location": "Paris", "date": "2023-04-01"}
+                        }}
+                    ],
+                    "role": "model"
+                },
+                "finishReason": "STOP" or null
+            }]
+        }
+        
+        For tool calls, each chunk contains the complete function call with full arguments,
+        unlike OpenAI streams which deliver tool calls incrementally.
         
         Args:
             chunk: The Google format response chunk
@@ -737,6 +900,35 @@ class StreamingCompletionsResponseChunk(BaseModel):
         Map an OpenAI delta format chunk to canonical format.
         If it already has the right structure, return as is.
         
+        The canonical OpenAI delta format is:
+        
+        {
+            "id": "chatcmpl-123",
+            "object": "chat.completion.chunk",
+            "created": 1677858242,
+            "model": "gpt-4",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "content": "some text"  // For text content
+                    // OR
+                    "tool_calls": [{        // For tool calls
+                        "index": 0,
+                        "id": "call_abc123",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": "{\"location\":\"Paris\"}"  // May be incremental JSON
+                        }
+                    }]
+                },
+                "finish_reason": null
+            }]
+        }
+        
+        This method also handles the legacy format that uses 'text' instead of 'delta',
+        and converts it to the canonical delta format.
+        
         Args:
             chunk: The OpenAI format chunk
             model: The model name
@@ -806,11 +998,11 @@ class StreamingCompletionsResponseChunk(BaseModel):
         if dialect == 'anthropic':
             # Convert Anthropic format to canonical
             response = cls.from_anthropic_chunk(chunk, model)
-            return response.model_dump()
+            return response.model_dump() if response else None
         elif dialect == 'google':
             # Convert Google format to canonical
-            response = cls.from_google_chunk(chunk, model)
-            return response.model_dump()
+            response = cls.from_google_chunk(chunk, model) 
+            return response.model_dump() if response else None
         else:
             # Handle OpenAI or default format
             return cls.map_openai_delta_to_canonical(chunk, model)
