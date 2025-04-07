@@ -260,8 +260,8 @@ class TestHandlerFunctions:
         # Verify that the LLM was created with the correct model
         mock_llm_class.assert_called_once_with("gpt-4o-mini")
         
-        # Verify that the LLM instance was called
-        mock_instance.assert_called_once()
+        # Verify that the LLM instance._call_raw method was called
+        mock_instance._call_raw.assert_called_once()
     
     def test_handle_anthropic_request(self):
         """Test handling an Anthropic request."""
@@ -279,8 +279,8 @@ class TestHandlerFunctions:
         # Verify that the LLM was created
         mock_llm_class.assert_called_once()
         
-        # Verify that the LLM instance was called
-        mock_instance.assert_called_once()
+        # Verify that the LLM instance._call_raw method was called
+        mock_instance._call_raw.assert_called_once()
     
     def test_handle_google_request(self):
         """Test handling a Google request."""
@@ -298,8 +298,8 @@ class TestHandlerFunctions:
         # Verify that the LLM was created
         mock_llm_class.assert_called_once()
         
-        # Verify that the LLM instance was called
-        mock_instance.assert_called_once()
+        # Verify that the LLM instance._call_raw method was called
+        mock_instance._call_raw.assert_called_once()
 
 
 class TestMetadataExtraction:

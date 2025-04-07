@@ -4,8 +4,17 @@ Chat API router that acts as a proxy for language models like OpenAI, Anthropic,
 This module implements a unified API that can:
 1. Accept requests in any dialect (OpenAI, Anthropic, Google)
 2. Call any model provider using the appropriate format
-3. Stream responses using SSE or standard streaming
-4. Provide consistent response format regardless of the underlying provider
+3. Stream responses using SSE typically but non SSE could be done
+4. Provide consistent response format regardless of the underlying language model
+
+Current version is WIP and may not cover the specs entirely but certainly the lowest common denominator should be covered.
+The purpose of this implementation is to surface user facing things primarily and any thing else can be logged in the database
+
+This API can be hosted on a user instance to service models registered in their database on behalf of users.
+
+Currently we have implemented only the OpenAI scheme/dialect which most models support. 
+There is an argument for implementing anthropic scheme too.
+
 """
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, Query
