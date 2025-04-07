@@ -172,7 +172,7 @@ class LanguageModel:
             
         response = self._call_raw(messages=messages, functions=functions,context=context)
         
-        logger.debug(f"{response=}")
+        logger.debug(f"{response=}, {context=}")
         if debug_response:
             return response
         
@@ -232,7 +232,7 @@ class LanguageModel:
         """
         Simple REST wrapper to use with any language model
         """
-        logger.debug(f"invoking model {self.model_name}")
+        logger.debug(f"invoking model {self.model_name}, {is_streaming=}")
         """select this from the database or other lookup
         e.g. db.execute('select * from "LanguageModelApi" where name = %s ', ('gpt-4o-mini',))[0]
         """
@@ -312,7 +312,7 @@ class LanguageModel:
             if system_prompt:
                 data["system_instruction"] =  { "parts": { "text": system_prompt } }
                     
-        logger.trace(f"request {data=}")
+        logger.debug(f"request {data=}, {is_streaming=}")
    
         response =  requests.post(url, headers=headers, data=json.dumps(data),stream=is_streaming)
         
