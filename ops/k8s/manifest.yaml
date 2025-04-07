@@ -9,13 +9,29 @@ apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
   namespace: p8
-  name: percolate
+  name: percolate-test
 spec:
   #the operator needs to use 16 as a postgres version
   imageName: percolationlabs/postgres-base:16
   instances: 1
   storage:
     size: 10Gi
+  #to install percolate from config maps add config maps from scripts folder run:  python gen_sql_install_configmap.py --apply
+  #this applies to the p8 namespace by default
+  bootstrap:
+    initdb:
+      postInitApplicationSQLRefs:
+        configMapRefs:
+          - name: 00-install
+            key: 00_install.sql
+          - name: 01-add-functions
+            key: 01_add_functions.sql
+          - name: 02-create-primary
+            key: 02_create_primary.sql
+          - name: 03-create-secondary
+            key: 03_create_secondary.sql
+          - name: 10-finalize
+            key: 10_finalize.sql
 #make sure to set a strorage class in your cloud
 #for example in hetnzer kubectl apply -f https://raw.githubusercontent.com/hetznercloud/csi-driver/master/deploy/kubernetes/hcloud-csi.yml
 
@@ -38,10 +54,10 @@ spec:
       containers:
         - name: percolate-api
           image: percolationlabs/percolate-api
+          imagePullPolicy: Always
           ports:
             - containerPort: 5008
           env:
-            env:
             #load the secret from the percolate cluster
             - name: P8_PG_PASSWORD
               valueFrom:

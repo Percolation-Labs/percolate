@@ -51,11 +51,12 @@ import percolate as p8
 from pydantic import BaseModel,Field
 import typing
 from percolate.models import DefaultEmbeddingField
+import uuid
 
 class MyFirstAgent(BaseModel):
     """You are an agent that provides the information you are asked and a second random fact"""
-    #because it has no config it will save to the public database schema
-    
+
+    id: str | uuid.UUID
     name: str = Field(description="Task name")
     #the default embedding field is just settings json_schema_extra.embedding_provider, so you can do that yourself
     description:str = DefaultEmbeddingField(description="Task description")
@@ -84,7 +85,7 @@ docker compose up -d
 ---
 
 You can run the client directly from the python project directory `clients/python/percolate`
-- _You can use the poetry project _
+- _You can use the poetry project_
 
 Use the cli to apply data to your test database. 
 - _This assumes you have launched the docker instance or you have connected to another instance of Percolate._

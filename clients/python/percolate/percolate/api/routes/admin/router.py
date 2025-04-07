@@ -105,7 +105,7 @@ async def get_index(id: uuid.UUID) -> IndexAudit:
     #todo - proper error handling
     records =  PostgresService.get_by_id(id)
     if records:
-        return records[0]
+        return records
     """TODO error not found"""
     return {}
 
