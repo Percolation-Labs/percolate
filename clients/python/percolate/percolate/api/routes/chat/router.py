@@ -189,7 +189,128 @@ async def fake_data_streamer():
     finally:
         print('DONE WITH FAKES')
 
-def stream_generator(response, stream_mode, audit_callback=None):
+def map_delta_to_canonical_format(data, dialect, model):
+    """
+    Map a streaming delta chunk to canonical format based on the provider dialect.
+    
+    This helper function converts streaming chunks from different providers
+    (OpenAI, Anthropic, Google) into a consistent format for client consumption.
+    
+    The output format matches the OpenAI delta format:
+    ```
+    {
+        "id": "chatcmpl-123",
+        "object": "chat.completion.chunk",
+        "created": 1677858242,
+        "model": "gpt-4",
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "content": " is"  // or tool_calls for tool use
+            },
+            "finish_reason": null
+        }]
+    }
+    ```
+    
+    Args:
+        data: The raw response data chunk
+        dialect: The LLM provider dialect ('openai', 'anthropic', 'google')
+        model: The model name
+        
+    Returns:
+        Dict with data converted to canonical format with delta structure
+    """
+    # Default values for canonical format
+    canonical = {
+        "id": data.get("id", f"cmpl-{int(time.time())}"),
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": []
+    }
+    
+    # Extract content and tool calls based on provider dialect
+    if dialect == 'anthropic':
+        # Handle Anthropic-specific format
+        delta = {}
+        
+        # Extract text content from content_block_delta
+        if data.get("type") == "content_block_delta" and data.get("delta", {}).get("type") == "text_delta":
+            delta["content"] = data.get("delta", {}).get("text", "")
+        
+        # Extract tool calls
+        if data.get("type") == "content_block_delta" and data.get("delta", {}).get("type") == "tool_use":
+            tool_data = data.get("delta", {})
+            if tool_data:
+                delta["tool_calls"] = [{
+                    "index": 0,
+                    "id": tool_data.get("id", f"tool_{int(time.time())}"),
+                    "type": "function",
+                    "function": {
+                        "name": tool_data.get("name", ""),
+                        "arguments": tool_data.get("partial_json", "")
+                    }
+                }]
+        
+        finish_reason = data.get("stop_reason")
+        
+        canonical["choices"] = [{
+            "index": 0,
+            "delta": delta,
+            "finish_reason": finish_reason
+        }]
+        
+    elif dialect == 'google':
+        # Handle Google-specific format
+        delta = {}
+        
+        if data.get("candidates"):
+            candidate = data["candidates"][0]
+            if "content" in candidate and "parts" in candidate["content"]:
+                for part in candidate["content"]["parts"]:
+                    if "text" in part:
+                        # Add text content to delta
+                        delta["content"] = part.get("text", "")
+                    elif "functionCall" in part:
+                        # Add tool call to delta
+                        function_call = part["functionCall"]
+                        if "tool_calls" not in delta:
+                            delta["tool_calls"] = []
+                        
+                        delta["tool_calls"].append({
+                            "index": 0,
+                            "id": f"tool_{int(time.time())}",
+                            "type": "function",
+                            "function": {
+                                "name": function_call.get("name", ""),
+                                "arguments": json.dumps(function_call.get("args", {}))
+                            }
+                        })
+        
+        finish_reason = data.get("candidates", [{}])[0].get("finishReason")
+        
+        canonical["choices"] = [{
+            "index": 0,
+            "delta": delta,
+            "finish_reason": finish_reason
+        }]
+    else:
+        # For OpenAI format, just ensure it has the right structure
+        # This branch shouldn't normally be called since OpenAI already has the right format
+        if "choices" in data and data["choices"]:
+            canonical = data  # Just use the existing format
+        else:
+            # Create a minimal delta structure if we have a non-standard format
+            canonical["choices"] = [{
+                "index": 0,
+                "delta": {"content": ""},
+                "finish_reason": None
+            }]
+    
+    return canonical
+
+def stream_generator(response, stream_mode, audit_callback=None, from_dialect='openai', model=None):
     """
     Stream the LLM response to the client.
     
@@ -197,28 +318,38 @@ def stream_generator(response, stream_mode, audit_callback=None):
         response: The LLM response object (from LanguageModel.__call__)
         stream_mode: The streaming mode ('sse' or 'standard')
         audit_callback: Optional callback to run after streaming completes
+        dialect: The API dialect ('openai', 'anthropic', or 'google')
+        model: The model name
     """
     
-    import time
     collected_chunks = []
-    for line in response.iter_lines():
-    
-        if line:
-            if stream_mode == 'sse' and not line.startswith('data:'):
-                print('SSE')
-                chunk = f"data: {line}\n\n"
-            else:
-                chunk = line
+    for chunk in response.iter_lines():
+        if chunk:
+            print(chunk)
+            # if stream_mode == 'sse' and not line.startswith('data:'):
+            #     chunk = f"data: {line}\n\n"
+            # else:
                 
-            """add the decoded lines"""
-            collected_chunks.append(line.decode('utf-8'))
+            """in special cases we will map back to a binary representation in canonical
+            this is not particular efficient but it is convenient for users who want to use the same API format
+            """
+            if from_dialect and from_dialect != 'openai':
+                json_data = chunk.decode('utf-8')[6:]
+                if json_data[:1] =='{':
+                    json_data = json.loads(json_data)
+                    chunk = map_delta_to_canonical_format(json_data, from_dialect, model)
+                    print(f"\n\n***{chunk}***\n\n")
+                    chunk = f"data: {json.dumps(chunk)}\n\n".encode()
+          
+            """add the decoded lines to a set for background processing"""
+            collected_chunks.append(chunk.decode('utf-8'))
         
+            """yield binary chunks"""
             if isinstance(chunk, str):
-               yield chunk.encode('utf-8')
-            else:
-               if not chunk.endswith(b'\n\n'):
-                    chunk = chunk + b'\n\n'
-               yield chunk
+               chunk = chunk.encode('utf-8')
+            if not chunk.endswith(b'\n\n'):
+                chunk = chunk + b'\n\n'
+            yield chunk
                
     if audit_callback:
         full_response = "".join(collected_chunks)
@@ -337,7 +468,7 @@ async def completions(
                 
         return StreamingResponse(
             #fake_data_streamer(),
-            stream_generator(response, stream_mode, audit_callback),
+            stream_generator(response, stream_mode, audit_callback, from_dialect=dialect),
             media_type=media_type
         )
     else:
