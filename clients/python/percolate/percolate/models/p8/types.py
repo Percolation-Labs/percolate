@@ -274,6 +274,7 @@ class ModelField(AbstractEntityModel):
 
 class TokenUsage(AbstractModel):
     """Tracks token usage for language model interactions"""
+    model_config = {'protected_namespaces': ()}
     id: uuid.UUID| str  
     model_name: str
     tokens: typing.Optional[int] = Field(0,description="the number of tokens consumed in total")
@@ -362,6 +363,7 @@ class AIResponse(TokenUsage):
 class Session(AbstractModel):
     """Tracks groups if session dialogue"""
     id: uuid.UUID| str  
+    name: typing.Optional[str] = Field(None, description="The name is a pseudo name to make sessions node compatible")
     query: typing.Optional[str] = DefaultEmbeddingField(None,description='the question or context that triggered the session')
     user_rating: typing.Optional[float] = Field(None, description="We can in future rate sessions to learn what works")
     agent: str = Field("Percolate always expects an agent but we support passing a system prompt which we treat as anonymous agent")
@@ -372,6 +374,17 @@ class Session(AbstractModel):
     channel_type: typing.Optional[str] = Field(None,description='The channel type')
     metadata: typing.Optional[dict] = Field(default_factory=dict, description="Arbitrary metadata")
     session_completed_at: typing.Optional[datetime.datetime] = Field(default=None,description="An audit timestamp to write back the completion of the session - its optional as it should manage the last timestamp on the AI Responses for the session")
+    graph_paths: typing.Optional[typing.List[str]] = Field(None, description="Track all paths extracted by an agent as used to build the KG over user sessions")
+    
+    @model_validator(mode='before')
+    @classmethod
+    def _f(cls, values): 
+        if isinstance(values,dict) and not values.get('id'):
+            """the name is mapped for a hash of the query and can create collisions for now since we only want to index intent"""
+            # TODO - consider if this is ok ^
+            values['name'] = make_uuid({'query': values.get('query', '')})
+        return values
+    
     
     @classmethod
     def from_question_and_context(cls, id:str, question:str, context:typing.Any, agent:str=None, **kwargs):
