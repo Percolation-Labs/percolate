@@ -585,6 +585,17 @@ class StreamingCompletionsResponseChunk(BaseModel):
         if chunk.get("type") == "content_block_delta" and chunk.get("delta", {}).get("type") == "text_delta":
             content = chunk.get("delta", {}).get("text", "")
         
+        # Handle tool calls
+        tool_call = None
+        if chunk.get("type") == "content_block_delta" and chunk.get("delta", {}).get("type") == "tool_use":
+            tool_data = chunk.get("delta", {})
+            if tool_data:
+                tool_call = ToolCall(
+                    name=tool_data.get("name", ""),
+                    arguments=tool_data.get("partial_json", ""),
+                    id=tool_data.get("id", f"tool_{int(time.time())}")
+                )
+        
         # Create streaming choice
         choices = [
             StreamingChoice(
@@ -592,7 +603,7 @@ class StreamingCompletionsResponseChunk(BaseModel):
                 index=0,
                 finish_reason=None,
                 logprobs=None,
-                tool_call=None  # Handle tool calls if needed
+                tool_call=tool_call
             )
         ]
         
@@ -608,12 +619,21 @@ class StreamingCompletionsResponseChunk(BaseModel):
         """Convert a Google streaming chunk to the OpenAI format."""
         # Extract text content
         content = ""
+        tool_call = None
+        
         if chunk.get("candidates"):
             candidate = chunk["candidates"][0]
             if "content" in candidate and "parts" in candidate["content"]:
-                text_parts = [part.get("text", "") for part in candidate["content"]["parts"] 
-                             if "text" in part]
-                content = "".join(text_parts)
+                for part in candidate["content"]["parts"]:
+                    if "text" in part:
+                        content += part.get("text", "")
+                    elif "functionCall" in part:
+                        function_call = part["functionCall"]
+                        tool_call = ToolCall(
+                            name=function_call.get("name", ""),
+                            arguments=json.dumps(function_call.get("args", {})),
+                            id=f"tool_{int(time.time())}"
+                        )
         
         # Create streaming choice
         choices = [
@@ -622,7 +642,7 @@ class StreamingCompletionsResponseChunk(BaseModel):
                 index=0,
                 finish_reason=chunk.get("candidates", [{}])[0].get("finishReason"),
                 logprobs=None,
-                tool_call=None  # Handle function calls if needed
+                tool_call=tool_call
             )
         ]
         
@@ -632,6 +652,91 @@ class StreamingCompletionsResponseChunk(BaseModel):
             model=model,
             choices=choices
         )
+        
+    @staticmethod
+    def map_anthropic_chunk_to_canonical(chunk: Dict[str, Any], model: str) -> Dict[str, Any]:
+        """
+        Map an Anthropic streaming chunk to a canonical format.
+        
+        Args:
+            chunk: The raw Anthropic chunk data
+            model: The model name
+            
+        Returns:
+            Dict with a canonical format for streaming
+        """
+        return StreamingCompletionsResponseChunk.from_anthropic_chunk(chunk, model).model_dump()
+    
+    @staticmethod
+    def map_google_chunk_to_canonical(chunk: Dict[str, Any], model: str) -> Dict[str, Any]:
+        """
+        Map a Google streaming chunk to a canonical format.
+        
+        Args:
+            chunk: The raw Google chunk data
+            model: The model name
+            
+        Returns:
+            Dict with a canonical format for streaming
+        """
+        return StreamingCompletionsResponseChunk.from_google_chunk(chunk, model).model_dump()
+    
+    @staticmethod
+    def map_openai_delta_to_canonical(chunk: Dict[str, Any], model: str) -> Dict[str, Any]:
+        """
+        Map an OpenAI delta chunk to a canonical format.
+        
+        Args:
+            chunk: The raw OpenAI delta chunk data
+            model: The model name
+            
+        Returns:
+            Dict with a canonical format for streaming
+        """
+        # Extract content and tool calls from the delta
+        content = ""
+        tool_call = None
+        finish_reason = None
+        
+        if "choices" in chunk and chunk["choices"]:
+            choice = chunk["choices"][0]
+            delta = choice.get("delta", {})
+            
+            # Extract content if present
+            if "content" in delta:
+                content = delta["content"]
+            
+            # Extract tool calls if present
+            if "tool_calls" in delta:
+                for t_call in delta["tool_calls"]:
+                    if "function" in t_call:
+                        tool_call = ToolCall(
+                            name=t_call["function"].get("name", ""),
+                            arguments=t_call["function"].get("arguments", ""),
+                            id=t_call.get("id", f"tool_{int(time.time())}")
+                        )
+            
+            # Get finish reason if this is a final chunk
+            finish_reason = choice.get("finish_reason")
+        
+        # Create a canonical response
+        choices = [
+            StreamingChoice(
+                text=content,
+                index=0,
+                finish_reason=finish_reason,
+                logprobs=None,
+                tool_call=tool_call
+            )
+        ]
+        
+        return {
+            "id": chunk.get("id", f"cmpl-{int(time.time())}"),
+            "object": "text_completion",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [choice.model_dump() for choice in choices]
+        }
     
     model_config = {
         "json_schema_extra": {
