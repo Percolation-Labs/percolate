@@ -72,11 +72,12 @@ def handle_openai_request(request: CompletionsRequestOpenApiFormat, params: Opti
             session_id=metadata.get('session_id')
         )
     
-    # Make the API call using the raw
+    # Make the API call using the raw - at the moment our raw interface takes functions and not tools - they are elevated internally 
+    # TODO make this explicit at the interface
     try:
         response = llm._call_raw(
             messages=message_stack,
-            functions=None,  # TODO: Add support for functions/tools
+            functions=request.get_tools_as_functions(),
             context=context
         )
         return response
@@ -125,7 +126,7 @@ def handle_anthropic_request(request: CompletionsRequestOpenApiFormat, params: O
     try:
         response = llm._call_raw(
             messages=message_stack,
-            functions=None,  # TODO: Add support for functions/tools
+            functions=request.get_tools_as_functions(),
             context=context
         )
         return response
@@ -167,7 +168,7 @@ def handle_google_request(request: CompletionsRequestOpenApiFormat, params: Opti
     try:
         response = llm._call_raw(
             messages=message_stack,
-            functions=None,  # TODO: Add support for functions/tools
+            functions=request.get_tools_as_functions(),
             context=context
         )
         return response
@@ -211,6 +212,22 @@ def map_delta_to_canonical_format(data, dialect, model):
             "finish_reason": null
         }]
     }
+
+    
+    ```
+    
+    function calls
+    ```
+    {"id":"chatcmpl-BJmlj0fi7Bhan8p48XRMojmVTGpxv",
+    "object":"chat.completion.chunk",
+    "created":1744055399,
+    "model":"gpt-4o-mini-2024-07-18",
+    "service_tier":"default",
+    "system_fingerprint":"fp_86d0290411",
+    "choices":[{"index":0,
+    "delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"}"}}]},
+    "logprobs":null,"finish_reason":null}],
+    "usage":null}
     ```
     
     Args:
@@ -253,6 +270,8 @@ def stream_generator(response, stream_mode, audit_callback=None, from_dialect='o
             if json_data and json_data[0] == '{':       
                 """Parse in valid data and use the canonical mapping"""     
                 canonical_data = map_delta_to_canonical_format(json.loads(json_data), from_dialect, model)
+             
+               
                 """recover the SSE binary format"""
                 chunk = f"data: {json.dumps(canonical_data)}\n\n".encode('utf-8')
         
@@ -392,8 +411,7 @@ async def completions(
         if background_tasks:
             # For non-streaming, add auditing as a background task
             background_tasks.add_task(audit_request, request, response, metadata)
-        
-  
+          
         return JSONResponse(content=response.json(), status_code=response.status_code)
 
 @router.post("/anthropic/completions")
