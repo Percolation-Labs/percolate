@@ -4,20 +4,86 @@ from percolate.utils import logger
 import sys
 logger.remove()  
 logger.add(sys.stderr, level="INFO")  # Set log level to info for typer since DEBUG is default
-
+import time
 import typer
 from typing import List, Optional
 from percolate.utils.ingestion import add
 from percolate.utils.env import sync_model_keys
 import percolate as p8
 from percolate.models.p8 import PercolateAgent
-
+import webbrowser
+import requests
+import os
+import json
 
 app = typer.Typer()
 
 add_app = typer.Typer()
 app.add_typer(add_app, name="add")
+admin_app = typer.Typer()
+app.add_typer(admin_app, name="admin")
 
+"""publish app
+
+<> container . -t "3.2.1" 
+"""
+publish_app = typer.Typer()
+app.add_typer(publish_app, name="publish")
+
+
+PERCOLATE_DOMAIN = "www.percolationlabs.ai"
+
+def authenticate_and_save():
+    """
+    This is used if you want to fetch a service account from percolate
+    """
+    
+    def poll_for_key(key_url, timeout=60, interval=3):
+        """
+        Polls the server for the service account key. requires login from the user in the web browser
+        """
+        elapsed_time = 0
+        while elapsed_time < timeout:
+            response = requests.get(key_url)
+            if response.status_code == 200:
+                return response.json()
+            
+            typer.echo("Waiting for authentication to complete...")
+            time.sleep(interval)
+            elapsed_time += interval
+        
+        typer.echo("Authentication timed out. Please try again.")
+        return None
+
+    AUTH_URL = f"https://{PERCOLATE_DOMAIN}/auth/login?fetch_key=True"
+    webbrowser.open(AUTH_URL)
+    typer.echo("Please complete the authentication in your browser...")
+    credentials_data = poll_for_key(f"https://{PERCOLATE_DOMAIN}/auth/service-key")
+    
+    if credentials_data:
+        config_path = os.path.expanduser("~/.percolate")
+        os.makedirs(config_path, exist_ok=True) 
+        account_file = os.path.join(config_path, "service.json")
+        with open(account_file, "w") as f:
+            json.dump(credentials_data, f, indent=4)
+        typer.echo(f"Authentication successful! Credentials saved to {account_file}")
+    else:
+        typer.echo("Failed to retrieve authentication key. Please try again.")
+        
+@admin_app.command()
+def admin_login():
+    """login to get a local key for authenticated use with percolate server and your database instance"""
+    
+    #when the user logs in we fetch the service account that stores their api key
+    #we can do some things like IP whitelisting and billing configuration
+    authenticate_and_save()
+    
+@admin_app.command()
+def billing():
+    """Login to add a payment method to provision percolate resources"""
+    AUTH_URL = f"https://{PERCOLATE_DOMAIN}/admin/billing"
+    webbrowser.open(AUTH_URL)
+    
 @add_app.command()
 def api(
     uri: str = typer.Argument(..., help="The API URI"),   

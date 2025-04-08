@@ -7,10 +7,12 @@ class EmailMessage(BaseModel):
     """You are an email and newsletter agent. If asked about emails or newsletters you can run a search to answer the users question.
     
     """
-    class Config:
-        namespace: str = "public"
-        functions: dict = {"test":"desc"}
-        
+    
+    model_config = {
+        'namespace': 'public',
+        'functions':  {"test":"desc"}
+    }
+ 
     content: typing.Optional[str] = None
     sender: str 
     receiver: str
