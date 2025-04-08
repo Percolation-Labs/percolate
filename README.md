@@ -244,3 +244,25 @@ To learn more about or stay up to date on Percolate, check out the links below. 
 - [Youtube](https://www.youtube.com/@PercolationLabs)
 - [Bluesky](https://bsky.app/profile/percolationlabs.bsky.social)
 - [Percolation Labs](https://percolationlabs.ai/)
+- 
+
+
+docker run -d \
+  -p 3000:8080 \
+  -v open-webui:/app/backend/data \
+  -e WEBUI_AUTH=false \
+  -e OLLAMA_ENABLED=false \
+  -e OPENAI_API_BASE_URL=http://host.docker.internal:5009 \
+  -e DEFAULT_MODEL=gpt-40-mini \
+  -e ENABLE_MODEL_SELECTOR=true \
+  --name open-webui \
+  ghcr.io/open-webui/open-webui:main
+
+
+
+  -e ALLOWED_MODELS=gpt-40-mini,gpt-4-0125-preview,claude-3-opus \
+
+docker rm -f open-webui
+docker volume rm open-webui
+
+docker logs -f open-webui
