@@ -36,8 +36,7 @@ from percolate.services.llm.utils import stream_openai_response, stream_anthropi
 from percolate.models import MessageStack
 from percolate.services.llm.CallingContext import CallingContext
 from datetime import datetime
-from percolate.utils import logger
-import traceback
+
 # Import models from models.py
 from .models import (
     CompletionsRequestOpenApiFormat, 
@@ -104,7 +103,7 @@ def handle_openai_request(request: CompletionsRequestOpenApiFormat, params: Opti
             context = request.system
             
         # Create a message stack with the prompt
-        message_stack = MessageStack(question=prompt, system_prompt=context)
+        message_stack = MessageStack(question=prompt, context=context)
     
     # Fallback for empty messages/prompt
     if not message_stack:
@@ -113,7 +112,7 @@ def handle_openai_request(request: CompletionsRequestOpenApiFormat, params: Opti
     # Set up streaming if required
     stream_mode = request.get_streaming_mode(params)
     context = None
-    if stream_mode is not None:
+    if stream_mode:
         context = CallingContext(
             prefers_streaming=True,
             model=model_name,
@@ -191,7 +190,7 @@ def handle_anthropic_request(request: CompletionsRequestOpenApiFormat, params: O
             context = request.system
             
         # Create a message stack with the prompt
-        message_stack = MessageStack(question=prompt, system_prompt=context)
+        message_stack = MessageStack(question=prompt, context=context)
     
     # Fallback for empty messages/prompt
     if not message_stack:
@@ -270,7 +269,7 @@ def handle_google_request(request: CompletionsRequestOpenApiFormat, params: Opti
             context = request.system
             
         # Create a message stack with the prompt
-        message_stack = MessageStack(question=prompt, system_prompt=context)
+        message_stack = MessageStack(question=prompt, context=context)
     
     # Fallback for empty messages/prompt
     if not message_stack:
@@ -393,14 +392,14 @@ def stream_generator(response, stream_mode, audit_callback=None, from_dialect='o
                 """Parse in valid data and use the canonical mapping"""     
                 canonical_data = map_delta_to_canonical_format(json.loads(json_data), from_dialect, model)
              
+               
                 """recover the SSE binary format"""
                 chunk = f"data: {json.dumps(canonical_data)}\n\n".encode('utf-8')
         
         """this should always be the case for properly streaming lines on the client for SSE"""
         if not chunk.endswith(b'\n\n'):
             chunk = chunk + b'\n\n'
-        
-        print(chunk)
+            
         yield chunk
                
     if audit_callback:
@@ -467,7 +466,7 @@ async def completions(
     channel_id: Optional[str] = Query(None, description="ID of the channel where the interaction happens"),
     channel_type: Optional[str] = Query(None, description="Type of channel (e.g., slack, web, etc.)"),
     api_provider: Optional[str] = Query(None, description="Override the default provider"),
-    #use_sse: Optional[bool] = Query(False, description="Whether to use Server-Sent Events for streaming"),
+    use_sse: Optional[bool] = Query(False, description="Whether to use Server-Sent Events for streaming"),
     #user: dict = Depends(get_current_token)
 ):
     """
@@ -480,70 +479,66 @@ async def completions(
     - Provide consistent response format
     """
     
+    print(request)
     
-    print(request.stream)
-    try:
-        # Collect query parameters into a dict for easier handling
-        params = {
-            'user_id': user_id,
-            'session_id': session_id,
-            'channel_id': channel_id,
-            'channel_type': channel_type,
-            'api_provider': api_provider
-        }
-        
-        # Remove None values
-        params = {k: v for k, v in params.items() if v is not None}
-        
-        # Determine the dialect based on model or explicit api_provider parameter
-        dialect = request.get_dialect(params)
-        
-        # Determine streaming mode
-        stream_mode = request.get_streaming_mode(params)
-        
-        # Select the appropriate handler based on dialect
-        if dialect == 'anthropic':
-            handler = handle_anthropic_request
-        elif dialect == 'google':
-            handler = handle_google_request
-        else:
-            handler = handle_openai_request
-        
-        # Process the request using the selected handler
-        response = handler(request, params)
-        
-        # Extract metadata for auditing
-        metadata = extract_metadata(request, params)
-        
-        # Handle streaming vs non-streaming responses
-        if stream_mode:
-            # For streaming responses, use StreamingResponse with appropriate media type
-            media_type = "text/event-stream" #if stream_mode == 'sse' else "text/plain"
-            
-            # Create an audit callback for when streaming completes
-            def audit_callback(full_response):
-                audit_request(request, full_response, metadata)
-                    
-            return StreamingResponse(
-                stream_generator(
-                    response=response,
-                    stream_mode=stream_mode,
-                    audit_callback=audit_callback,
-                    from_dialect=dialect,  # Pass dialect for canonical format mapping
-                    model=request.model  # Pass model name
-                ),
-                media_type=media_type
-            )
-        else:
-            if background_tasks:
-                # For non-streaming, add auditing as a background task
-                background_tasks.add_task(audit_request, request, response, metadata)
-            
-            return JSONResponse(content=response.json(), status_code=response.status_code)
-    except:
-        logger.warning(traceback.format_exc())
-        raise HTTPException(status_code=400, detail=f"Something happened that should not have happened.")
+    # Collect query parameters into a dict for easier handling
+    params = {
+        'user_id': user_id,
+        'session_id': session_id,
+        'channel_id': channel_id,
+        'channel_type': channel_type,
+        'api_provider': api_provider,
+        'use_sse': use_sse
+    }
     
+    # Remove None values
+    params = {k: v for k, v in params.items() if v is not None}
+    
+    # Determine the dialect based on model or explicit api_provider parameter
+    dialect = request.get_dialect(params)
+    
+    # Determine streaming mode
+    stream_mode = request.get_streaming_mode(params)
+    
+    # Select the appropriate handler based on dialect
+    if dialect == 'anthropic':
+        handler = handle_anthropic_request
+    elif dialect == 'google':
+        handler = handle_google_request
+    else:
+        handler = handle_openai_request
+    
+    # Process the request using the selected handler
+    response = handler(request, params)
+    
+    # Extract metadata for auditing
+    metadata = extract_metadata(request, params)
+    
+    # Handle streaming vs non-streaming responses
+    if stream_mode:
+        # For streaming responses, use StreamingResponse with appropriate media type
+        media_type = "text/event-stream" if stream_mode == 'sse' else "text/plain"
+        
+        # Create an audit callback for when streaming completes
+        def audit_callback(full_response):
+            audit_request(request, full_response, metadata)
+                
+        return StreamingResponse(
+            stream_generator(
+                response=response,
+                stream_mode=stream_mode,
+                audit_callback=audit_callback,
+                from_dialect=dialect,  # Pass dialect for canonical format mapping
+                model=request.model  # Pass model name
+            ),
+            media_type=media_type
+        )
+    else:
+        if background_tasks:
+            # For non-streaming, add auditing as a background task
+            background_tasks.add_task(audit_request, request, response, metadata)
+          
+        return JSONResponse(content=response.json(), status_code=response.status_code)
 
 @router.post("/anthropic/completions")
 async def anthropic_completions(
