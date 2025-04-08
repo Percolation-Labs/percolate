@@ -1,3 +1,4 @@
+
 WITH generated_id AS (
     SELECT p8.json_to_uuid('{}'::JSONB) AS session_id
 )
@@ -62,3 +63,44 @@ ON CONFLICT (id)
 DO UPDATE SET
     value = EXCLUDED.value,  
 	key =  EXCLUDED.key; 
+
+
+CREATE OR REPLACE FUNCTION grant_full_access_all_schemas(p_user text)
+RETURNS void AS $$
+DECLARE
+    r RECORD;
+BEGIN
+    FOR r IN 
+      SELECT nspname 
+      FROM pg_namespace
+      WHERE nspname NOT LIKE 'pg_%'
+        AND nspname <> 'information_schema'
+    LOOP
+        RAISE NOTICE 'Granting privileges on schema: %', r.nspname;
+
+        -- Grant usage on the schema
+        EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', r.nspname, p_user);
+
+        -- Grant all privileges on all existing tables in the schema
+        EXECUTE format('GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I TO %I', r.nspname, p_user);
+
+        -- Grant all privileges on all existing sequences in the schema
+        EXECUTE format('GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA %I TO %I', r.nspname, p_user);
+
+        -- Grant execute privileges on all existing functions in the schema
+        EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA %I TO %I', r.nspname, p_user);
+
+        -- Set default privileges for future tables in the schema
+        EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I GRANT ALL ON TABLES TO %I', r.nspname, p_user);
+
+        -- Set default privileges for future sequences in the schema
+        EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I GRANT ALL ON SEQUENCES TO %I', r.nspname, p_user);
+
+        -- Set default privileges for future functions in the schema
+        EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I GRANT EXECUTE ON FUNCTIONS TO %I', r.nspname, p_user);
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
+
+--SELECT grant_full_access_all_schemas('app');

@@ -130,6 +130,7 @@ SELECT attach_notify_trigger_to_table('p8', 'Function');
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."Session" (
 id UUID PRIMARY KEY ,
+    name TEXT,
     query TEXT,
     user_rating REAL,
     agent TEXT NOT NULL,
@@ -139,6 +140,7 @@ id UUID PRIMARY KEY ,
     channel_type TEXT,
     metadata JSON,
     session_completed_at TIMESTAMP,
+    graph_paths TEXT[],
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

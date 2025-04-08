@@ -351,6 +351,9 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
             typing.Any: "TEXT",  
         }
 
+        if "EmailStr" in str(py_type):
+            return "TEXT"
+
         if py_type in type_mapping:
             return type_mapping[py_type]
 
