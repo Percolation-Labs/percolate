@@ -1,4 +1,3 @@
-
 CREATE OR REPLACE FUNCTION public.plan(
     question text,
     model_key character varying DEFAULT 'gpt-4o-mini'::character varying,

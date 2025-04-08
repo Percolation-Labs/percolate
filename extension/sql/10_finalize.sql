@@ -103,4 +103,4 @@ END;
 $$ LANGUAGE plpgsql;
 
 
-SELECT grant_full_access_all_schemas('app');
+--SELECT grant_full_access_all_schemas('app');
