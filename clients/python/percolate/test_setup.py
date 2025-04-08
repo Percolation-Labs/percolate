@@ -50,11 +50,7 @@ r = client.post('/chat/completions', json=c.model_dump())
 r.json()
 # -
 
- if from_dialect and from_dialect != 'openai':
-                            canonical_data = map_delta_to_canonical_format(data, from_dialect, model)
-                            chunk = f"data: {json.dumps(canonical_data)}\n\n"
-                        else:
-
+ 
 # ## Now try streaming
 
 # +
