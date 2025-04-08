@@ -8,6 +8,8 @@ from .routes import set_routes
 from percolate import __version__
 from starlette.middleware.sessions import SessionMiddleware
 from uuid import uuid1
+from datetime import datetime
+
 
 app = FastAPI(
     title="Percolate",
@@ -54,10 +56,30 @@ app.add_middleware(
 async def healthcheck():
     return {"status": "ok"}
 
+
+    
 app.include_router(api_router)
 set_routes(app)
 
-
+@app.get("/models")
+def get_models():
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "gpt-4o-mini",
+                "object": "model",
+                "created": int(datetime.now().timestamp()),
+                "owned_by": "custom"
+            },
+            {
+                "id": "gpt-4-0125-preview",
+                "object": "model",
+                "created": int(datetime.now().timestamp()),
+                "owned_by": "custom"
+            }
+        ]
+    }
 def start():
     import uvicorn
 
