@@ -26,17 +26,42 @@ class RequestMetadata(BaseModel):
 # OpenAI API Request Model
 # ---------------------------------------------------------------------------
 
+class MessageContent(BaseModel):
+    """A content part that can be text or an image in a message."""
+    type: str = Field(..., description="Type of content (e.g., 'text', 'image_url')")
+    text: Optional[str] = Field(None, description="Text content when type is 'text'")
+    image_url: Optional[Dict[str, str]] = Field(None, description="Image URL and detail when type is 'image_url'")
+
+class Message(BaseModel):
+    """A single message in the conversation."""
+    role: str = Field(..., description="Role of the message sender (e.g., 'system', 'user', 'assistant', 'tool')")
+    content: Optional[Union[str, List[MessageContent]]] = Field(None, description="Content of the message, which can be a string or structured content")
+    name: Optional[str] = Field(None, description="Name of the sender, typically used for tools or assistants")
+    tool_calls: Optional[List[Dict[str, Any]]] = Field(None, description="Tool calls made by the assistant")
+    tool_call_id: Optional[str] = Field(None, description="ID of the tool call this message is responding to")
+
+class FunctionDefinition(BaseModel):
+    """Definition of a function that can be called by the model."""
+    name: str = Field(..., description="Name of the function")
+    description: Optional[str] = Field(None, description="Description of what the function does")
+    parameters: Dict[str, Any] = Field(..., description="Parameters the function accepts in JSON Schema format")
+
 class CompletionsRequestOpenApiFormat(BaseModel):
-    """The OpenAI API schema completions wrapper for Percolate."""
+    """The OpenAI API schema for completions and chat completions."""
+    # Core parameters
     model: str = Field(..., description="ID of the model to use for this request.")
+    
+    # Support for both completion API and chat completion API
     prompt: Optional[Union[str, List[str]]] = Field(
-        None, description="The prompt(s) to generate completions for."
+        None, description="The prompt(s) to generate completions for (legacy completion API)."
     )
-    suffix: Optional[str] = Field(
-        None, description="A string to append after the completion."
+    messages: Optional[List[Message]] = Field(
+        None, description="A list of messages comprising the conversation so far (chat completion API)."
     )
+    
+    # Common parameters
     max_tokens: Optional[int] = Field(
-        16, description="The maximum number of tokens to generate in the completion."
+        None, description="The maximum number of tokens to generate in the completion."
     )
     temperature: Optional[float] = Field(
         0.7, description="Sampling temperature to use, between 0 and 2."
@@ -50,12 +75,6 @@ class CompletionsRequestOpenApiFormat(BaseModel):
     stream: Optional[bool] = Field(
         False, description="If set to True, partial progress is streamed as data-only server-sent events."
     )
-    logprobs: Optional[int] = Field(
-        None, description="Include the log probabilities on the logprobs most likely tokens, if provided."
-    )
-    echo: Optional[bool] = Field(
-        False, description="If set to True, the prompt is echoed in addition to the completion."
-    )
     stop: Optional[Union[str, List[str]]] = Field(
         None, description="Up to 4 sequences where the API will stop generating further tokens."
     )
@@ -65,33 +84,82 @@ class CompletionsRequestOpenApiFormat(BaseModel):
     frequency_penalty: Optional[float] = Field(
         0.0, description="Penalty for repetition: positive values penalize new tokens based on their frequency in the text so far."
     )
-    best_of: Optional[int] = Field(
-        1, description="Generates multiple completions server-side and returns the best (the one with the highest log probability per token)."
+    
+    # Functions and Tools (Chat Completion API)
+    functions: Optional[List[FunctionDefinition]] = Field(
+        None, description="List of functions the model may generate JSON inputs for (legacy format)."
     )
-    logit_bias: Optional[Dict[str, float]] = Field(
-        None, description="Modify the likelihood of specified tokens appearing in the completion."
-    )
-    user: Optional[str] = Field(
-        None, description="A unique identifier representing the end-user, which can help with rate-limiting and tracking."
+    function_call: Optional[Union[str, Dict[str, str]]] = Field(
+        None, description="Controls how the model calls functions (legacy format). Can be 'auto', 'none', or a specific function name."
     )
     tools: Optional[List[Dict[str, Any]]] = Field(
         None, description="List of tools the model may use. Each tool has a type (usually 'function') and a function object."
     )
     tool_choice: Optional[Union[str, Dict[str, Any]]] = Field(
-        None, description="Controls which (if any) tool is called by the model. 'auto', 'none', or a tool selection object."
+        None, description="Controls which tool is called by the model. 'auto', 'none', or a tool selection object."
+    )
+    
+    # Response format
+    response_format: Optional[Dict[str, str]] = Field(
+        None, description="Format to return the response in, e.g. {\"type\": \"json_object\"} for JSON mode."
+    )
+    
+    # Completion API specific parameters
+    suffix: Optional[str] = Field(
+        None, description="A string to append after the completion (legacy completion API)."
+    )
+    logprobs: Optional[int] = Field(
+        None, description="Include the log probabilities on the logprobs most likely tokens, if provided (legacy completion API)."
+    )
+    echo: Optional[bool] = Field(
+        False, description="If set to True, the prompt is echoed in addition to the completion (legacy completion API)."
+    )
+    best_of: Optional[int] = Field(
+        1, description="Generates multiple completions server-side and returns the best (legacy completion API)."
+    )
+    logit_bias: Optional[Dict[str, float]] = Field(
+        None, description="Modify the likelihood of specified tokens appearing in the completion (works in both APIs)."
+    )
+    
+    # User identification and metadata
+    user: Optional[str] = Field(
+        None, description="A unique identifier representing the end-user, which can help with rate-limiting and tracking."
     )
     metadata: Optional[Dict[str, str]] = Field(
         None, description="Optional field for additional metadata. (Note: This is not part of the official schema.)"
     )
     
+    # System message (convenience parameter)
+    system: Optional[str] = Field(
+        None, description="System message to set the behavior of the assistant. A convenience parameter that will be converted to a message."
+    )
+    
     def get_tools_as_functions(self):
         """
-        the tools interface for OpenAI is pushed down to functions internally and we map to other dialects from there
-        """
-        if not self.tools:
-            return None
+        Extract function definitions from tools or functions field.
         
-        return [r.get('function') for r in self.tools]
+        The tools interface for OpenAI is pushed down to functions internally 
+        and we map to other dialects from there. This handles both the newer
+        tools format and the legacy functions format.
+        
+        Returns:
+            List of function definitions or None if no tools/functions are defined
+        """
+        # First try the newer tools format
+        if self.tools:
+            return [r.get('function') for r in self.tools if r.get('type') == 'function' and 'function' in r]
+        
+        # Then try the legacy functions format
+        elif self.functions:
+            return [
+                {
+                    "name": func.name,
+                    "description": func.description,
+                    "parameters": func.parameters
+                } for func in self.functions
+            ]
+        
+        return None
     
     def get_dialect(self, params: Optional[Dict] = None) -> str:
         """Determine the dialect from the request and/or parameters.
@@ -141,28 +209,14 @@ class CompletionsRequestOpenApiFormat(BaseModel):
         # First check if streaming is requested in the model
         is_streaming = self.stream
         
-        # Then check if use_sse is specified in metadata or params
-        use_sse = False
-        if params and 'use_sse' in params:
-            use_sse = params.get('use_sse', False)
-        elif self.metadata and 'use_sse' in self.metadata:
-            use_sse = self.metadata.get('use_sse', False)
-        
-        # Determine the streaming mode
         if is_streaming:
-            return 'sse' if use_sse else 'standard'
+            return 'sse' #if use_sse else 'standard'
         return None
     
     def to_anthropic_format(self) -> Dict[str, Any]:
         """Convert OpenAI format to Anthropic format."""
-        # Anthropic uses 'messages' instead of 'prompt'
-        prompt = self.prompt
-        if isinstance(prompt, list):
-            prompt = "\n".join(prompt)
-        
         result = {
             "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
             "top_p": self.top_p,
@@ -170,29 +224,71 @@ class CompletionsRequestOpenApiFormat(BaseModel):
             "stream": self.stream,
         }
         
+        # Handle system message if provided
+        if self.system:
+            result["system"] = self.system
+            
+        # Convert messages or prompt to Anthropic format
+        if self.messages:
+            # Convert OpenAI messages to Anthropic messages
+            anthropic_messages = []
+            for msg in self.messages:
+                # Map role (Anthropic only supports user and assistant roles)
+                role = msg.role
+                if role == "system":
+                    # Handle system message (Anthropic has separate system parameter)
+                    result["system"] = msg.content if isinstance(msg.content, str) else None
+                    continue
+                elif role == "tool":
+                    # Convert tool messages to assistant format for Anthropic
+                    role = "assistant"
+                
+                # Handle content (could be string or structured)
+                content = msg.content
+                
+                # Add to messages
+                anthropic_messages.append({
+                    "role": role,
+                    "content": content
+                })
+            
+            result["messages"] = anthropic_messages
+        elif self.prompt:
+            # Convert prompt to message for Anthropic
+            prompt = self.prompt
+            if isinstance(prompt, list):
+                prompt = "\n".join(prompt)
+            
+            result["messages"] = [{"role": "user", "content": prompt}]
+        
         # Add tools if present
         if self.tools:
             # Convert OpenAI tools format to Anthropic format
             # Note: Actual conversion happens in LanguageModel._adapt_tools_for_anthropic
             result["tools"] = self.tools
+        elif self.functions:
+            # Convert legacy functions to tools
+            functions_as_tools = []
+            for func in self.functions:
+                functions_as_tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": func.name,
+                        "description": func.description,
+                        "parameters": func.parameters
+                    }
+                })
+            result["tools"] = functions_as_tools
             
         return result
     
     def to_google_format(self) -> Dict[str, Any]:
         """Convert OpenAI format to Google format.
         
-        this is an example with a tool call
-        
-      
+        This handles both message-based and prompt-based formats, and converts
+        function/tool calls appropriately.
         """
-        prompt = self.prompt
-        if isinstance(prompt, list):
-            prompt = "\n".join(prompt)
-            
         result = {
-            "contents": [
-                {"role": "user", "parts": [{"text": prompt}]}
-            ],
             "generationConfig": {
                 "temperature": self.temperature,
                 "topP": self.top_p,
@@ -200,6 +296,65 @@ class CompletionsRequestOpenApiFormat(BaseModel):
                 "stopSequences": self.stop if isinstance(self.stop, list) else [self.stop] if self.stop else None,
             }
         }
+        
+        # Create the contents (messages) for Google format
+        contents = []
+        
+        # Handle messages if present (chat completion API)
+        if self.messages:
+            for msg in self.messages:
+                role = msg.role
+                # Map OpenAI roles to Google roles
+                if role == "user":
+                    g_role = "user"
+                elif role == "assistant":
+                    g_role = "model"
+                elif role == "system":
+                    g_role = "user"  # Google models handle system messages as user messages
+                    msg = Message(role=g_role, content=f"System: {msg.content}" if isinstance(msg.content, str) else msg.content)
+                elif role == "tool":
+                    g_role = "function"
+                else:
+                    g_role = "user"  # Default to user
+                
+                # Handle content based on type
+                parts = []
+                if isinstance(msg.content, str):
+                    parts.append({"text": msg.content})
+                elif isinstance(msg.content, list):
+                    # Handle structured content (text and images)
+                    for content_item in msg.content:
+                        if content_item.type == "text":
+                            parts.append({"text": content_item.text})
+                        elif content_item.type == "image_url":
+                            parts.append({"inline_data": content_item.image_url})
+                
+                # Add tool calls if present
+                if msg.tool_calls:
+                    for tool_call in msg.tool_calls:
+                        if "function" in tool_call:
+                            parts.append({
+                                "functionCall": {
+                                    "name": tool_call["function"].get("name", ""),
+                                    "args": json.loads(tool_call["function"].get("arguments", "{}"))
+                                }
+                            })
+                
+                contents.append({"role": g_role, "parts": parts})
+        
+        # Handle prompt if no messages (legacy completion API)
+        elif self.prompt:
+            prompt = self.prompt
+            if isinstance(prompt, list):
+                prompt = "\n".join(prompt)
+                
+            # Add system message if present
+            if self.system:
+                contents.append({"role": "user", "parts": [{"text": f"System: {self.system}"}]})
+                
+            contents.append({"role": "user", "parts": [{"text": prompt}]})
+        
+        result["contents"] = contents
         
         # Add tools if present
         if self.tools:
@@ -211,31 +366,63 @@ class CompletionsRequestOpenApiFormat(BaseModel):
             
             if function_declarations:
                 result["tools"] = [{"function_declarations": function_declarations}]
+                
                 # Add tool configuration
-                result["tool_config"] = {
-                    "function_calling_config": {"mode": "AUTO"}
-                }
+                tool_config = {"function_calling_config": {"mode": "AUTO"}}
+                
+                # Handle specific tool choice
+                if self.tool_choice and self.tool_choice != "auto" and self.tool_choice != "none":
+                    if isinstance(self.tool_choice, dict) and "function" in self.tool_choice:
+                        tool_config["function_calling_config"]["mode"] = "ANY"
+                    elif self.tool_choice == "none":
+                        tool_config["function_calling_config"]["mode"] = "NONE"
+                
+                result["tool_config"] = tool_config
+        
+        # Add functions if present (legacy format)
+        elif self.functions:
+            function_declarations = []
+            for func in self.functions:
+                function_declarations.append({
+                    "name": func.name,
+                    "description": func.description,
+                    "parameters": func.parameters
+                })
+            
+            if function_declarations:
+                result["tools"] = [{"function_declarations": function_declarations}]
+                
+                # Add tool configuration
+                tool_config = {"function_calling_config": {"mode": "AUTO"}}
+                
+                # Handle specific function call
+                if self.function_call and self.function_call != "auto" and self.function_call != "none":
+                    if isinstance(self.function_call, dict) and "name" in self.function_call:
+                        tool_config["function_calling_config"]["mode"] = "ANY"
+                    elif self.function_call == "none":
+                        tool_config["function_calling_config"]["mode"] = "NONE"
+                
+                result["tool_config"] = tool_config
         
         return result
     
     model_config = {
         "json_schema_extra": {
             "example": {
+                # Example with messages (Chat Completion API)
                 "model": "gpt-4",
-                "prompt": "What's the weather like in Paris tomorrow?",
-                "suffix": None,
+                "messages": [
+                    {"role": "system", "content": "You are a helpful weather assistant."},
+                    {"role": "user", "content": "What's the weather like in Paris tomorrow?"}
+                ],
                 "max_tokens": 50,
                 "temperature": 0.7,
                 "top_p": 1,
                 "n": 1,
                 "stream": True,
-                "logprobs": None,
-                "echo": False,
                 "stop": "\n",
                 "presence_penalty": 0,
                 "frequency_penalty": 0,
-                "best_of": 1,
-                "logit_bias": {},
                 "user": "user-123",
                 "tools": [
                     {
@@ -261,12 +448,27 @@ class CompletionsRequestOpenApiFormat(BaseModel):
                     }
                 ],
                 "tool_choice": "auto",
+                "response_format": {"type": "text"},
                 "metadata": {
                     "user_id": "u123",
                     "session_id": "sess456",
                     "channel_id": "ch789",
                     "channel_type": "slack",
                     "use_sse": True
+                }
+            },
+            "example2": {
+                # Example with prompt (Legacy Completion API)
+                "model": "gpt-3.5-turbo",
+                "prompt": "What's the weather like in Paris tomorrow?",
+                "system": "You are a helpful weather assistant.",
+                "max_tokens": 50,
+                "temperature": 0.7, 
+                "top_p": 1,
+                "stream": False,
+                "metadata": {
+                    "user_id": "u123",
+                    "session_id": "sess456"
                 }
             }
         }}
