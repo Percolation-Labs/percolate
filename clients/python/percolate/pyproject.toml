@@ -24,6 +24,7 @@ minio = ">=7.2.15"
 python-multipart = ">0"
 html2text = "^2024.2.26"
 authlib = "^1.5.2"
+itsdangerous = "^2.2.0"
 
 [tool.pytest.ini_options]
 markers = [
