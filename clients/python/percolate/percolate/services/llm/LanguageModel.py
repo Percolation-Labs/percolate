@@ -138,13 +138,15 @@ class LanguageModel:
         if not self.params:
             raise Exception(f"The model {model_name} does not exist in the Percolate settings")
         self.params = self.params[0]
-        if not self.params['token']:
+        if self.params['token'] is None:
+        
             """if the token is not stored in the database we use whatever token env key to try and load it from environment"""
             self.params['token'] = os.environ.get(self.params['token_env_key'])
             if not self.params['token']:
                 raise Exception(f"There is no token or token key configured for model {self.model_name} - you should add an entry to Percolate for the model using the examples in p8.LanguageModelApi")
         """we use the env in favour of what is in the store"""
-        self.params['token'] = os.environ.get(self.params['token_env_key']) if self.params.get('token_env_key') else self.params.get('token') 
+        env_token = os.environ.get(self.params['token_env_key'])
+        self.params['token'] = env_token  if env_token is not None and len(env_token) else self.params.get('token') 
         
     def parse(self, response: requests.models.Response, context: CallingContext=None) -> AIResponse:
         """the llm response form openai or other schemes must be parsed into a dialogue.
@@ -165,20 +167,35 @@ class LanguageModel:
                 return AnthropicAIResponseScheme.parse(response,sid=sid,model_name=self.model_name,streaming_callback=streaming_callback)
             return OpenAIResponseScheme.parse(response,sid=sid, model_name=self.model_name,streaming_callback=streaming_callback)
         except Exception as ex:
-            logger.warning(f"failing to parse {response=} {traceback.format_exc()}")
+            logger.warning(f"failing to parse {response} {traceback.format_exc()}")
+            raise
         
     def __call__(self, messages: MessageStack, functions: typing.List[dict], context: CallingContext=None ,debug_response:bool=False ) -> AIResponse:
         """call the language model with the message stack and functions"""
             
-        response = self._call_raw(messages=messages, functions=functions,context=context)
-        
-        logger.debug(f"{response=}, {context=}")
-        if debug_response:
+        try:
+            response = self._call_raw(messages=messages, functions=functions,context=context)
+            
+            logger.debug(f"{response=}, {context=}")
+            if debug_response:
+                return response
+            
+            """for consistency with DB we should audit here and also format the message the same with tool calls etc."""
+            response = self.parse(response,context=context)
             return response
-        
-        """for consistency with DB we should audit here and also format the message the same with tool calls etc."""
-        response = self.parse(response,context=context)
-        return response
+        except:
+            # data = {
+            #     'messages': messages,
+            #     'functions': functions,
+            #     'context': context
+            # }
+            
+            # import pickle
+            # with open('/tmp/p8dump', "wb") as f:
+            #     pickle.dump(data, f)
+            
+            # print('dumped', '/tmp/p8dump')
+            raise
     
     def ask(self, question:str, functions: typing.List[dict]=None, system_prompt: str=None,context: CallingContext=None, **kwargs):
         """simple check frr question. our interface normally uses MessageStack and this is a more generic way
@@ -312,7 +329,7 @@ class LanguageModel:
             if system_prompt:
                 data["system_instruction"] =  { "parts": { "text": system_prompt } }
                     
-        logger.debug(f"request {data=}, {is_streaming=}")
+        logger.trace(f"request {data=}, {is_streaming=}")
    
         response =  requests.post(url, headers=headers, data=json.dumps(data),stream=is_streaming)
         
