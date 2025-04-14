@@ -72,7 +72,7 @@ To connect to your instance you can use your api-key
 
 ```bash
 #from the clients/python/percolate directory where the poetry project lives
-poetry run p8 connect --token [api-key]
+poetry run p8 connect project-name --token [api-key]
 ```
 
 This will fetch the connection details you need to connect to your instance. These connection details include your database `port`.
