@@ -28,7 +28,7 @@ class ModelRunner:
     @property
     def name(self):
         return self.agent_model.get_model_full_name()
-    def __init__(self, model: BaseModel = None, allow_help: bool = True, **kwargs):
+    def __init__(self, model: BaseModel = None, allow_help: bool = True, depth:int=0, **kwargs):
         """
         A model is passed in or the default is used.
         This supplies the agent context such as prompt and functions.
@@ -36,6 +36,7 @@ class ModelRunner:
         More generally the model can provide a structured response format.
         see TODO: for guidance.
         """
+        self.depth = depth  #TODO consider ways to control depth
         self._init_data = kwargs.get('init_data')
         """the agent model is any Pydantic Base model or Abstract model that implements the agent interface"""
         self.agent_model:AbstractModel = AbstractModel.Abstracted(model)
@@ -90,13 +91,16 @@ class ModelRunner:
 
     def activate_functions_by_name(self, function_names: typing.List[str], **kwargs):
         """Provide a list of function names to load.
-        The names should be fully qualified object_id.function_name.
-        You should not try to activate self as a function. For example if your name is x.Agent, do not try to activate yourself.
+        The names should be fully qualified object_id_function_name and we use underscores in place of periods which are illegal.
+        You should not try to activate self as a function. For example if your name is x_Agent, do not try to activate yourself.
         If there are functions on an agent you can activate them without searching.
         """
 
-        logger.debug(f"activating function {function_names}")
+        logger.debug(f"activating function {function_names} - ill replace any '.' with underscores!!")
+        
         for f in function_names:
+            f = f.replace('.','_')
+            
             if f == self.agent_model.get_model_full_name():
                 raise Exception("Error - you should not try to load yourself {f} since you are loaded as a callable agent already. Find another function to use in your available functions")
         missing = self._function_manager.add_functions_by_key(function_names)
@@ -168,6 +172,7 @@ class ModelRunner:
                 data = MessageStackFormatter.format_function_response_data(
                     function_call, data, self._context
                 )
+                
                 """if there is an error, how you format the message matters - some generic ones are added
                 its important to make sure the format coincides with the language model being used in context
                 """

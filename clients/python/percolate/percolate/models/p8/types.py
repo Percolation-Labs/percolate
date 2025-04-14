@@ -14,7 +14,9 @@ import datetime
 from .. import DefaultEmbeddingField
 from percolate.utils.names import EmbeddingProviders
 import percolate as p8
-
+import json
+import os
+import hashlib
 class Function(AbstractEntityModel):
     """Functions are external tools that agents can use. See field comments for context.
     Functions can be searched and used as LLM tools. 
@@ -456,7 +458,9 @@ class User(AbstractEntityModel):
     name: str
     
 class Resources(AbstractModel):
-    """Generic parsed content from files, sites etc. added to the system"""
+    """Generic parsed content from files, sites etc. added to the system.
+    If someone asks about resources, content, files, general information etc. it may be worth doing a search on the Resources
+    """
     id: typing.Optional[uuid.UUID| str] = Field("The id is generated as a hash of the required uri and ordinal")  
     name: typing.Optional[str] = Field(None, description="A short content name - non unique - for example a friendly label for a chunked pdf document or web page title")
     category: typing.Optional[str] = Field(None, description="A content category")
@@ -474,6 +478,46 @@ class Resources(AbstractModel):
             values['id'] = make_uuid({'uri': values['uri'], 'ordinal': values['ordinal']})
         return values
 
+    @classmethod
+    def chunked_resource(
+        cls,
+        uri: str,
+        chunk_size: int = 1000,
+        category: typing.Optional[str] = None,
+        name: typing.Optional[str] = None,
+    ) -> typing.List["Resources"]:
+        """read file contents from web or file and chunks them by some chunk size - sensible defaults are used"""
+        
+        from percolate.utils.parsing import get_content_provider_for_uri
+        from pathlib import Path
+        def sanitize_text(text: str) -> str:
+            return text.replace("\x00", "")  # or use a placeholder like "�"
+
+
+        provider = get_content_provider_for_uri(uri)
+        
+        text = sanitize_text(provider.extract_text(uri))
+
+        name = name or uri
+        chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+
+        resources = []
+        for i, chunk in enumerate(chunks):
+            id_input = f"{uri}-{i}"
+            id_hash = uuid.UUID(hashlib.md5(id_input.encode()).hexdigest())
+
+            resource = cls(
+                id=id_hash,
+                name=f'{name} ({i})',
+                category=category,
+                content=chunk,
+                ordinal=i,
+                uri=uri,
+            )
+            resources.append(resource)
+
+        return resources
+    
 class TaskResources(AbstractModel):
     """A link between tasks and resources since resources can be shared between tasks"""
     id: typing.Optional[uuid.UUID| str] = Field("unique id for rel" )  
@@ -572,6 +616,8 @@ class PercolateAgent(Resources):
     You can lookup entities of different types or plan queries and searches.
     You can call any registered apis and functions and learn more about how they can be used.
     Call the search function to get data about Percolate
+    Only use 'search' if you are asked questions specifically about Percolate otherwise call for help!
+    If you do a search and you do not find any data related to the user question you should ALWAYS ask for help to dig deeper.
     """
     @model_validator(mode='before')
     @classmethod
@@ -593,3 +639,27 @@ class Settings(AbstractModel):
         values['id'] = make_uuid({"key": values['key']})
         return values
     
+    @classmethod
+    def inserts_from_map(cls, values:dict):
+        """given some key value settings, generate an insert batch statement - might be a good idea to wrap these in try blocks """
+        if not values:
+            return ""
+
+        statements = []
+        for key, val in values.items():
+            # Convert value to JSON-safe string, then escape for SQL
+            escaped_key = json.dumps(key)
+            sql_key = f"'{key}'"
+            escaped_val = f"'{val}'"
+
+            """we use a database function that hashes the key for the id and then we add the key value pair"""
+            stmt = f"""
+INSERT INTO p8."Settings" (id, key, value)
+SELECT p8.json_to_uuid('{{"key": {escaped_key}}}'::JSONB), {sql_key}, {escaped_val}
+ON CONFLICT (id)
+DO UPDATE SET value = EXCLUDED.value;
+""".strip()
+            statements.append(stmt)
+
+        return "\n".join(statements)
+            

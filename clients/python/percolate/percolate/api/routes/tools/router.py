@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
 from percolate.api.routes.auth import get_current_token
 from pydantic import BaseModel, Field
 from percolate.services import PostgresService
@@ -7,9 +7,9 @@ from percolate.models.p8 import Function,ApiProxy
 
 import typing
 import percolate as p8
+from percolate.api.routes.auth import get_current_token 
  
- 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_current_token)])
 
 class ToolSearch(BaseModel):
     query: str

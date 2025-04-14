@@ -137,6 +137,7 @@ data:
     -- ------------------
     CREATE TABLE  IF NOT EXISTS  p8."Session" (
     id UUID PRIMARY KEY ,
+        name TEXT,
         query TEXT,
         user_rating REAL,
         agent TEXT NOT NULL,
@@ -146,6 +147,7 @@ data:
         channel_type TEXT,
         metadata JSON,
         session_completed_at TIMESTAMP,
+        graph_paths TEXT[],
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

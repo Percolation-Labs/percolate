@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "percolate-db"
-version = "0.1.817"
+version = "0.1.820"
 description = "A client for working with the [Percolate database](https://github.com/Percolation-Labs/percolate)"
 authors = ["mr-saoirse <amartey@gmail.com>"]
 license = "MIT"
@@ -25,6 +25,7 @@ python-multipart = ">0"
 html2text = "^2024.2.26"
 authlib = "^1.5.2"
 itsdangerous = "^2.2.0"
+pymupdf = "^1.25.5"
 
 [tool.pytest.ini_options]
 markers = [

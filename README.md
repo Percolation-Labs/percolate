@@ -264,5 +264,4 @@ docker run -d \
 
 docker rm -f open-webui
 docker volume rm open-webui
-
 docker logs -f open-webui
