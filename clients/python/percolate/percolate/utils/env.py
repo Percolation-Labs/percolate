@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 from importlib import import_module
-
+import json
 def get_repo_root():
     """the root directory of the project by convention"""
     path = os.environ.get("P8_HOME")
@@ -10,21 +10,48 @@ def get_repo_root():
         path = str(Path(p8.__file__).resolve().parent.parent.parent.parent.parent)
         return path
     return path
+
+def _try_load_account_token(path):
+    """percolate account settings can be saved locally"""
+    try:
+        if Path.exists(path):
+            with open(path,'r') as f:
+                return  json.load(f)
+    except: 
+        pass
+    return {}
     
+user_percolate_home = Path.home() / ".percolate" / 'auth' 
+
+PERCOLATE_ACCOUNT_SETTINGS = _try_load_account_token(user_percolate_home / 'token')
+        
+ 
 P8_HOME = os.environ.get('P8_HOME', get_repo_root())
 STUDIO_HOME = f"{P8_HOME}/studio"
 P8_SCHEMA = 'p8'
 P8_EMBEDDINGS_SCHEMA = 'p8_embeddings'
 #
 POSTGRES_DB = "app"
-POSTGRES_SERVER = os.environ.get('P8_PG_HOST', 'localhost')
-POSTGRES_PORT = os.environ.get('P8_PG_PORT', 5438)
-POSTGRES_PASSWORD = os.environ.get('P8_PG_PASSWORD', 'postgres') 
-POSTGRES_USER = os.environ.get('P8_PG_USER', 'postgres') 
+P8_CONTAINER_REGISTRY = "harbor.percolationlabs.ai"
+
+def from_env_or_project(key, default):
+    """
+    when percolate is run normally, the connection details are loaded from the project
+    in dev we typically want to override these with environment vars
+    """
+    return os.environ.get(key) or PERCOLATE_ACCOUNT_SETTINGS.get(key,default)
+
+"""for now settings these env vars overrides the project"""
+POSTGRES_SERVER = from_env_or_project('P8_PG_HOST', "localhost") 
+POSTGRES_PORT = from_env_or_project('P8_PG_PORT', 5438)
+POSTGRES_PASSWORD = from_env_or_project('P8_PG_PASSWORD', 'postgres') 
+POSTGRES_USER = from_env_or_project('P8_PG_USER', 'postgres') 
+
 POSTGRES_CONNECTION_STRING = f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_SERVER}:{POSTGRES_PORT}/{POSTGRES_DB}"
 TESTDB_CONNECTION_STRING =  f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_SERVER}:{POSTGRES_PORT}/test"
 DEFAULT_CONNECTION_TIMEOUT = 30
-#
+
+"""later we will add these to the project"""
 MINIO_SECRET = os.environ.get('MINIO_SECRET', 'percolate')
 MINIO_SERVER = os.environ.get('MINIO_SERVER', 'localhost:9000')
 MINIO_P8_BUCKET = 'percolate'
@@ -63,3 +90,10 @@ def sync_model_keys(connection_string:str=None) -> dict:
             d[k] = False
     return d
         
+
+
+class DBSettings:
+    def get(self, key, default=None):
+        return load_db_key(key) or default
+    
+SETTINGS = DBSettings()

@@ -59,6 +59,11 @@ class CompletionsRequestOpenApiFormat(BaseModel):
         None, description="A list of messages comprising the conversation so far (chat completion API)."
     )
     
+    # API Authentication
+    bearer_token: Optional[str] = Field(
+        None, description="Bearer token for API authentication."
+    )
+    
     # Common parameters
     max_tokens: Optional[int] = Field(
         None, description="The maximum number of tokens to generate in the completion."

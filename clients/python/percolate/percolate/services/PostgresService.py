@@ -80,14 +80,20 @@ class PostgresService:
         self.conn = psycopg2.connect(self._connection_string)
         return self.conn
     
+    @property
+    def entity_exists(self):
+        """convenience to see if the entity exists"""
+      
+        return self.check_entity_exists()
+    
     def check_entity_exists(self):
         """sanity check for tets"""
   
         assert self.model, "trying to check exists when model is null is not allowed"
         Q = """SELECT EXISTS (    SELECT FROM information_schema.tables    WHERE table_schema = %s AND table_name = %s   )"""
-        result = self.execute(Q,data=(self.model.get_model_name(), self.model.get_model_namespace()))
+        result = self.execute(Q,data=(self.model.get_model_namespace(),self.model.get_model_name()))
         if result:
-            return result[0]
+            return result[0]['exists']
         return False
     
     def repository(self, model: BaseModel, **kwargs) -> "PostgresService":
@@ -129,7 +135,19 @@ class PostgresService:
         
         Q = f"""select * from p8.query_entity(%s,%s) """
         
-        return self.execute(Q, data=(question,self.model.get_model_full_name() ))
+        result =  self.execute(Q, data=(question,self.model.get_model_full_name() ))
+        
+        try:
+            if result:
+                a = result[0].get('relational_result')
+                b = result[0].get('vector_result')
+                if a is None and b is None:
+                    logger.warning(f"Nothing was recovered from the relational or vector result - injecting a prompt")
+                    return [{'status': 'no data', "next-steps": f"There is no data to address the questions {question} further using this query but dont worry - try asking for help to find another tool if we have not already been able to find data for this question elsewhere"}]
+        except:
+            pass
+        
+        return result
         
     def get_model_database_schema(self):
         assert self.model is not None, "The model is empty - you should construct an instance of the postgres service as a repository(Model)"

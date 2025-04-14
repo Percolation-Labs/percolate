@@ -11,16 +11,18 @@ def stream_openai_response(r, printer=None):
     collected_data = {
         'tool_calls': []
     }
+    collected_lines_debug = []
     collected_content = ''
     observed_tool_call = False
     tool_args = {}  # {tool_id: aggregated_args}
-    tool_calls = None
+    tool_calls = {}
     current_role = None
     for line in r.iter_lines():
         if line:
             #print(line)
             # print('')
             decoded_line = line.decode("utf-8").replace("data: ", "").strip() 
+            collected_lines_debug.append(decoded_line)
             if decoded_line and decoded_line != "[DONE]":
                 try:
                     json_data = json.loads(decoded_line)
@@ -46,10 +48,7 @@ def stream_openai_response(r, printer=None):
                             
                         # Check if there are tool calls and aggregate the arguments
                         if "tool_calls" in delta:
-                            if tool_calls is None:
-                                """first message init"""
-                                tool_calls = delta['tool_calls']
-                             
+                            
                             if not observed_tool_call:
                                 observed_tool_call = True
                                 # if printer:
@@ -58,15 +57,21 @@ def stream_openai_response(r, printer=None):
                                 if "index" in tool_call:
                                     """for each tool call, we will index into the initial and aggregate args"""
                                     tool_index = tool_call["index"]
-                                    
+                                    if tool_index not in tool_calls:
+                                        tool_calls[tool_index] = tool_call
                                     if "function" in tool_call and "arguments" in tool_call["function"]:
+                                        if tool_index > len(tool_calls) -1:
+                                            raise Exception(f'the index {tool_index} was expected in {tool_calls} but it was not found - {tool_call=} {collected_lines_debug=}')
+                                        
                                         tool_calls[tool_index]['function']['arguments'] += tool_call["function"]["arguments"]              
                 
                 except json.JSONDecodeError:
+                     
                     pass  # Handle incomplete JSON chunks
     
     collected_data['choices'][0]['message'] = delta
-    collected_data['choices'][0]['message']['tool_calls'] = tool_calls
+    """the dict/stack was good for mapping deltas and now we listify the tool calls again"""
+    collected_data['choices'][0]['message']['tool_calls'] = list(tool_calls.values())
     collected_data['usage'] = json_data['usage']
     if printer:
         printer('\n')

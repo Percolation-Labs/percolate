@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: 100-project-settings
+  namespace: p8
+data:
+  100_project_settings.sql: |
+    -- This is a placeholder for dynamic project settings that should be injected

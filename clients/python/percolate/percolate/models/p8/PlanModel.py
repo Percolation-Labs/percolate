@@ -42,7 +42,7 @@ def expand_refs(
 
 class PlanFunctions(AbstractModel):
     name: str = Field(
-        description="fully qualified function name e.g. <namespace>.<name>"
+        description="fully qualified function name e.g. <namespace>_<name>"
     )
     description: str = Field(
         description="a description of the function preferably with the current context taken into account e.g. provide good example parameters"
