@@ -46,6 +46,7 @@ from .models import (
     CompletionsResponse,
     StreamingCompletionsResponseChunk
 )
+from percolate.utils.env import POSTGRES_PASSWORD
 
 router = APIRouter()
 
@@ -468,7 +469,7 @@ async def completions(
     channel_type: Optional[str] = Query(None, description="Type of channel (e.g., slack, web, etc.)"),
     api_provider: Optional[str] = Query(None, description="Override the default provider"),
     #use_sse: Optional[bool] = Query(False, description="Whether to use Server-Sent Events for streaming"),
-    #user: dict = Depends(get_current_token)
+    token: dict = Depends(get_current_token)
 ):
     """
     Use any model via an OpenAI API format and get model completions as streaming or non-streaming.
@@ -480,8 +481,20 @@ async def completions(
     - Provide consistent response format
     """
     
+    # Check for valid bearer token - this is a temp test key
     
-    print(request.stream)
+    expected_token = "!p3rc0la8!" #<-this a testing idea
+    expected_token = POSTGRES_PASSWORD #<-this will be the secure bearer for now but we could relax to an api key
+    
+    token = request.bearer_token or token
+    if not token:
+        logger.warning(f"No bearer - not authenticated")
+        raise HTTPException(status_code=401, detail="API token is missing")
+    if token != expected_token:
+        logger.warning(f"{token} != {expected_token} - not authenticated")
+        raise HTTPException(status_code=401, detail="API token is incorrect")
+    
+    #print(request.stream)
     try:
         # Collect query parameters into a dict for easier handling
         params = {
@@ -540,6 +553,10 @@ async def completions(
                 background_tasks.add_task(audit_request, request, response, metadata)
             
             return JSONResponse(content=response.json(), status_code=response.status_code)
+    except HTTPException:
+        
+        logger.warning(traceback.format_exc())
+        raise
     except:
         logger.warning(traceback.format_exc())
         raise HTTPException(status_code=400, detail=f"Something happened that should not have happened.")

@@ -1,5 +1,17 @@
 # +
 
+import percolate as p8
+from percolate.models.p8 import PercolateAgent
+from percolate.services.llm import CallingContext
+
+def printer(text):
+    """streaming output"""
+    print(text, end="", flush=True)  
+    if text == None:
+        print('')
+
+
+
 from percolate.api.routes.chat.router import completions, CompletionsRequestOpenApiFormat
 
 from fastapi.testclient import TestClient
@@ -50,7 +62,7 @@ r = client.post('/chat/completions', json=c.model_dump())
 r.json()
 # -
 
- 
+
 # ## Now try streaming
 
 # +
@@ -92,7 +104,7 @@ for chunk in response.iter_lines():
             raise
             
             
-            
+
 
 # +
 # Define the request parameters
@@ -120,7 +132,7 @@ for chunk in response.iter_lines():
                 decoded = decoded['content']
                 print(f"{decoded}",end='')
 
-    
+
 
 # +
 # Define the request parameters

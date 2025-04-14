@@ -1,0 +1,1 @@
+-- This is a placeholder for dynamic project settings that should be injected

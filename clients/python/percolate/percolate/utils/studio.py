@@ -6,7 +6,7 @@ import typing
 import os 
 from percolate.utils import logger,make_uuid
 import percolate as p8
-from percolate.models.p8 import Task, ResearchIteration, Function
+from percolate.models.p8 import Task, ResearchIteration, Function, Resources
 from percolate.services.OpenApiService import OpenApiSpec
        
 
@@ -129,6 +129,7 @@ def apply_project(project:Project|str):
     p8.repository(Function).update_records(
         [
             Function.from_entity(Task),
+            Function.from_entity(Resources),
             Function.from_entity(ResearchIteration),
         ]
     )

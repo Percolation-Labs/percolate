@@ -11,6 +11,10 @@ import percolate as p8
 from percolate.models.p8 import Session,AIResponse
 from percolate.utils import logger
 import traceback
+from percolate.utils.env import SETTINGS
+
+def settings(key, default=None):
+    return SETTINGS.get(key,default)
 
 def dump(question:str, data: typing.List[dict], response:AIResponse, context, **kwargs):
     """we dump the session using the session id from the AI response and we dump the final response"""
@@ -104,9 +108,12 @@ def repository(model:AbstractModel|BaseModel):
     """
     return PostgresService(model)
 
-def Agent(model:AbstractModel|BaseModel, **kwargs)->ModelRunner:
-    """get the model runner in the context of the agent for running reasoning chains"""
-    return ModelRunner(model,**kwargs)
+def Agent(model:AbstractModel|BaseModel, allow_help:bool=True, **kwargs)->ModelRunner:
+    """get the model runner in the context of the agent for running reasoning chains
+    
+    The Allow help is important to consider because it can lead to cascades percolating to far. a depth parameter might be interesting
+    """
+    return ModelRunner(model, allow_help=allow_help, **kwargs)
 
 def resume(session: AskResponse|str) ->AskResponse:
     """
@@ -165,13 +172,14 @@ def get_proxy(proxy_uri:str):
         entity_name = proxy_uri.split('/')[-1]
         class _agent_proxy:
             def __init__(self, entity_name):
-                self.agent = Agent(load_model(entity_name))
+                """TODO: consider if we want to not allow help at depth!!!!!!"""
+                self.agent = Agent(load_model(entity_name),allow_help=False)
                 
             def invoke(self, fn, **kwargs):
-                print(f"**TESTING - calling proxy agent with {kwargs}")
+                #print(f"**TESTING - calling proxy agent with {kwargs}")
                 """provide a proxy that takes the function but hard code as run for now anyway"""
                 data  = self.agent.run(**kwargs)
-                print(f"**TESTING - got data {data}")
+                #print(f"**TESTING - got data {data}")
                 return data
                 
         """here we are percolating by loading the context fully for that agent - we could do a context transfer in future too"""

@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks
 from fastapi import   Depends, Response 
 import json
 from percolate.services import MinioService
-from percolate.api.routes.auth import get_current_token
+from percolate.api.routes.auth import get_api_key, get_current_token
 from pydantic import BaseModel, Field
 import typing
 import uuid
@@ -17,7 +17,7 @@ from fastapi import   Depends, File, UploadFile
 router = APIRouter()
 
 @router.post("/env/sync")
-async def sync_env(user: dict = Depends(get_current_token)):
+async def sync_env(user: dict = Depends(get_api_key)):
     """sync env adds whatever keys you have in your environment your database instance
     This is used on database setup or if keys are missing in database sessions
     """
@@ -31,7 +31,7 @@ class AddApiRequest(BaseModel):
     endpoint_filter: typing.Optional[typing.List[str]] = Field(description="A list of endpoints to filter by when adding endpoints")
     
 @router.post("/add/api")
-async def add_api( add_request:AddApiRequest,  user: dict = Depends(get_current_token)):
+async def add_api( add_request:AddApiRequest,  user: dict = Depends(get_api_key)):
     """add apis to Percolate
     """
     return Response(content=json.dumps({'status':'ok'}))
@@ -44,14 +44,14 @@ class AddAgentRequest(BaseModel):
     
     
 @router.post("/add/agent")
-async def add_agent( add_request:AddAgentRequest,  user: dict = Depends(get_current_token)):
+async def add_agent( add_request:AddAgentRequest,  user: dict = Depends(get_api_key)):
     """add agents to Percolate. Agents require a Json Schema for any structured response you want to use, a system prompt and a dict/mapping of external registered functions.
     Functions can be registered via the add APIs endpoint.
     """
     return Response(content=json.dumps({'status':'ok'}))
 
 @router.post("/add/project")
-async def add_project( project: Project,  user: dict = Depends(get_current_token)):
+async def add_project( project: Project,  user: dict = Depends(get_api_key)):
     """Post the project yaml/json file to apply the settings. This can be used to add apis, agents and models. 
     
     - If you have set environment keys in your API we will sync these to your database if the `sync-env` flag is set in the project options
@@ -76,7 +76,7 @@ class IndexRequest(BaseModel):
 
  
 @router.post("/index/", response_model=IndexAudit)
-async def index_entity(request: IndexRequest, background_tasks: BackgroundTasks, user: dict = Depends(get_current_token))->IndexAudit:
+async def index_entity(request: IndexRequest, background_tasks: BackgroundTasks, user: dict = Depends(get_api_key))->IndexAudit:
     """index entity and get an audit log id to check status
     the index is created as a background tasks and we respond with an id ref that can be used in the get/
     """
