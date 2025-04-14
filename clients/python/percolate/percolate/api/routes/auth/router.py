@@ -14,7 +14,16 @@ router = APIRouter()
 
 
 REDIRECT_URI = "http://127.0.0.1:5000/auth/google/callback"
-SCOPES = "openid email profile https://www.googleapis.com/auth/gmail.readonly"
+SCOPES = [
+    'openid',
+    'email',
+    'profile',
+    'https://www.googleapis.com/auth/gmail.readonly',
+    'https://www.googleapis.com/auth/drive.readonly',
+    'https://www.googleapis.com/auth/documents.readonly'
+]
+SCOPES = " ".join(SCOPES)
+
 TOKEN_PATH = Path.home() / '.percolate' / 'auth' / 'token'
 
 goauth = OAuth()
@@ -57,6 +66,13 @@ async def google_auth_callback(request: Request):
 async def fetch_percolate_project(token = Depends(get_current_token)):
     """Connect with your key to get percolate project settings and keys"""
     
+    """hard coded for test accounts for now"""
+    port = 5432
+    if p8.settings('NAME') == 'rajaas':
+        port = 5433
+    if p8.settings('NAME') == 'devansh':
+        port = 5434
+        
  
     return {
         'NAME': p8.settings('NAME'),
@@ -64,7 +80,7 @@ async def fetch_percolate_project(token = Depends(get_current_token)):
         'PASSWORD': p8.settings('PASSWORD', token),
         'P8_PG_DB': 'app',
         'P8_PG_USER': p8.settings('P8_PG_USER', 'postgres'),
-        'P8_PG_PORT': p8.settings('P8_PG_PORT', 5433), #<-this must be set via a config map for the ingress for the database and requires an LB service
+        'P8_PG_PORT': port,  #p8.settings('P8_PG_PORT', 5433), #<-this must be set via a config map for the ingress for the database and requires an LB service
         'P8_PG_PASSWORD':  token,
         'BUCKET_SECRET': None, #permissions are added for blob/project/ for the user
         'P8_PG_HOST' : p8.settings('P8_PG_HOST', 'rajaas.percolationlabs.ai')    
