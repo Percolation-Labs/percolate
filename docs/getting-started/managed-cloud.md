@@ -8,18 +8,18 @@ description: Getting started with the managed cloud instance
 Percolate cloud is by invitation only at this time. Reach out for an experimental managed instance
 {% endhint %}
 
-You need a `project-name`  and `api-key` to carry out the steps below. You will also be given a database `port`
+You need a `project-name`  and `api-key` to carry out the steps below. You will also be given a database `port` when you use the connect command below.&#x20;
 
 Your `domain` will be `project-name.percolationlabs.ai`&#x20;
 
-If you want to use the OpenWebUI client connect to your instance, you should set the env variables as follows, replacing your project name and api key
+If you want to use the OpenWebUI client to connect to your instance, you should set the env variables as follows, replacing your project name and api key,
 
 ```bash
 export P8_API_KEY="[api-key]"
 export P8_API_URL="https://[project-name].percolationlabs.ai"
 ```
 
-There is a script in the repo you can run but it is shown in full below
+There is a script in the repo you can run but it is shown in full below.
 
 ### Using Open Web UI to connect
 
@@ -54,7 +54,11 @@ docker run -d \
 #docker logs -f open-webui
 ```
 
-The first time it will take some time but you can browse OpenWebUI at `localhost:3000` and select from models that are configured in your instance and chat
+The first time it will take some time but you can browse OpenWebUI at `localhost:3000` and select from models that are configured in your instance and then chat.
+
+{% hint style="info" %}
+We load default models in your instance such as gpt, gemini and claude models. If the API token is set, they will shown in the list. You can add your own models and keys with your database access.
+{% endhint %}
 
 ### Using the Percolate client to connect
 
@@ -71,14 +75,16 @@ To connect to your instance you can use your api-key
 poetry run p8 connect --token [api-key]
 ```
 
-This will fetch the connection details you need to connect to your instance. Then you can interact with Percolate which will use your cloud instance database.
+This will fetch the connection details you need to connect to your instance. These connection details include your database `port`.
+
+You can interact with the Percolate cli, which will use your cloud instance database. When "connected" anything you do in Percolate will use this connection profile.
 
 {% hint style="info" %}
-When developing if you want to connect to the test docker database you will need to either delete the downloaded account details from \~/.percolate/auth/token or set the P8\_DEV\_MODE="true" flag
+When developing if you want to connect to the test docker database instead of the cloud instance you will need to either delete the downloaded account token from \~/.percolate/auth/token or set the P8\_DEV\_MODE="true" flag.&#x20;
 {% endhint %}
 
 {% hint style="info" %}
-the first time you do this you may need to initialize your database unless you have done it via another route. You can do this as described in the getting started using `poetry run p8 init`&#x20;
+The first time you connect you may need to initialize your database unless you have done it via another route. You can do this as described in the getting started guide i.e. using `poetry run p8 init`&#x20;
 
 If you have been invited to try Percolate this will already have been done by the sys admin.
 {% endhint %}
