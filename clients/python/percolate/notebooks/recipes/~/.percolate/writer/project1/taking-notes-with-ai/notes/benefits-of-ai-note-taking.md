@@ -1,0 +1,5 @@
+- AI can transcribe spoken words into text in real time, making it easier to capture information during meetings or lectures.
+- AI can automatically organize notes by topic, date, or context, reducing manual effort.
+- AI-powered search allows users to quickly find specific information within large volumes of notes.
+- AI can summarize lengthy notes, highlight key points, and suggest follow-up actions.
+- AI tools can integrate with calendars, emails, and other productivity apps to provide context-aware reminders and insights.

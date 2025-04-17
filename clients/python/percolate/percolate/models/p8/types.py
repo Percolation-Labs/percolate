@@ -490,12 +490,10 @@ class Resources(AbstractModel):
         
         from percolate.utils.parsing import get_content_provider_for_uri
         from pathlib import Path
+        
         def sanitize_text(text: str) -> str:
             return text.replace("\x00", "")  # or use a placeholder like "�"
-
-
         provider = get_content_provider_for_uri(uri)
-        
         text = sanitize_text(provider.extract_text(uri))
 
         name = name or uri
@@ -663,3 +661,104 @@ DO UPDATE SET value = EXCLUDED.value;
 
         return "\n".join(statements)
             
+class WriterAgent(AbstractModel):
+    """
+You are a writer agent. You generate research plans and also write the full documents without user intervention. 
+Your job is to be factual and have humility. You should also be balanced in your arguments.
+You will research resources and save stages of your research in organized folders using the save_progress method.
+You will compile notes that will be used in the final document compilation.
+You will keep track of citations by key and use them in the final document.
+You will provide links between sections showing relations between topics, themes and section.
+You will keep a summary of the basic argument which you can lookup at any time and edit.
+You will look for metaphors and analogies for your points and keep track of them in a folder.
+You will look for counter arguments to each point you make so we can challenge our position.
+You will use the updated reader prompt to decide a final position having consider all angles.
+
+As you go update the checklist by either adding things to it or deciding if its done. include each completed content section too as per the folder structure below (for example list what doc sections you intend to write and their status. the checklist is a list of boolean items
+
+dont use your own native search function but use search resources function instead.
+
+1. At first you should just generate questions and a plan - create folders with questions
+2. Next use real world knowledge to start the process of constructing and argument
+3. Then use Resources search to determine how we can use our own content to complete the content and argument. you should only do a small number of searches here just to contextualize what is known from real world knowledge. select 3-4 questions to ask.
+4. At any stage you will be asked to continue writing in which can you can review status and saved content
+5. It is very important to use real world analogies to make your point and keep a listing of metaphor and analogy used in the notes.
+6. It is also very important to add self-critique to your document for example take an adversarial perspective to all that you write iteratively refining your point
+
+Your folder structure should look like this when done - note the content process should probably come last since you can prepare with planning and resources and then compile your document.
+
+-project
+--planning
+---plan.md
+---checklist.md
+--content
+----[all chapter sections]
+--resources
+---list of refs
+---metaphor and analogy employed
+---adversarial arguments for and against
+---inter document reference map
+---historical timeline
+
+"""
+    
+    @classmethod
+    def save_readme(cls, content):
+        """update the prompt/plan for generating content with user feedback"""
+        save_progress('user', 'plan', content)
+        
+    @classmethod
+    def read_readme(cls):
+        """load the probject plan
+        """
+        
+        try:
+            file = f"/Users/Sirsh/.percolate/writer/user/plan.md"
+
+            with open(fole, "w", encoding="utf-8") as f:
+                return f.read(data)
+        except:
+            return f"We have not saved anything yet just use the system prompt for now"
+        
+    @classmethod
+    def search_resources(cls, question:str):
+        """
+        Lookup resources that we have to answer the question - you
+        """
+        print("ASKING", question)
+        from percolate.models import Resources
+        try:
+            
+            return p8.Agent(Resources, allow_help=False).run(question, language_model=language_model)
+            
+        except:
+            return {'status':'nothing retrieved in this case'}
+
+    @classmethod
+    def update_checklist_status(cls, item_key:str, status:bool):
+        """update the check list item - you will receive the full checklist in response"""
+        check_list[item_key] = status
+        return check_list
+    
+    @classmethod
+    def get_checklist(cls):
+        """read the full check list"""
+        print(check_list)
+        return check_list
+        
+    @classmethod
+    def save_progress(cls, folder:str, name:str, data:str):
+        """
+        Saves the given data to a Markdown file within the specified folder.
+        If the folder (and any parent folders) do not exist, they are created.
+
+        Args:
+            folder (str): The directory path where the file should be saved under our root
+            name (str): The name of the file (without .md extension).
+            data (str): The content to write to the file.
+        """
+        folder = f"/Users/Sirsh/.percolate/writer/project1/{folder}"
+        os.makedirs(folder, exist_ok=True)
+        filepath = os.path.join(folder, f"{name}.md")
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(data)
