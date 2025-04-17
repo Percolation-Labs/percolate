@@ -76,7 +76,7 @@ class AnthropicAIResponseScheme(AIResponse):
             response = stream_anthropic_response(response,printer=streaming_callback)
         else:
             response = response.json()
-        choice = response['content'] 
+        choice = response.get('content') or []
         def adapt(t):
             """anthropic map to our interface"""
             return {'name': t['name'], 'arguments':t['input'], 'id': t['id'], 'scheme': 'anthropic'}
@@ -244,7 +244,7 @@ class LanguageModel:
                         system_prompt:str=None, 
                         data_content:typing.List[dict]=None,
                         is_streaming:bool = False,
-                        temperature: float = 0.01,
+                        temperature: float = 0.0,
                         **kwargs):
         """
         Simple REST wrapper to use with any language model
@@ -335,7 +335,12 @@ class LanguageModel:
         
         if response.status_code not in [200,201]:
             logger.warning(f"failed to submit: {response.status_code=}  {response.content}")
-            
+        if response.status_code == 429:
+            import time
+            """TODO: should be a flagged thing"""
+            time.sleep(61)
+            logger.warning(f"RATE LIMITED - SLEEPING FOR 1 MINUTE")
+            response =  requests.post(url, headers=headers, data=json.dumps(data),stream=is_streaming)   
         return response
     
     

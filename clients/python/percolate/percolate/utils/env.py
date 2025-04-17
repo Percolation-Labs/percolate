@@ -58,8 +58,8 @@ MINIO_P8_BUCKET = 'percolate'
 #   
 TAVILY_API_KEY = os.environ.get('TAVILY_API_KEY')
 
-GPT_MINI = "gpt-4o-mini"
-DEFAULT_MODEL =   "gpt-4o-2024-08-06"
+GPT_MINI = "gpt-4.1-mini"
+DEFAULT_MODEL =  "gpt-4.1"
 
 def load_db_key(key = "P8_API_KEY"):
     """valid database login requests the key for API access"""
