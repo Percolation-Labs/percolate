@@ -272,7 +272,7 @@ class IcebergModelCatalog:
     def create_table_for_model(self):
         return self._create_table_for_model(self.model)
     
-    def upsert_data(self, data: typing.List[BaseModel], primary_key: str='id'):
+    def update_records(self, data: typing.List[BaseModel], primary_key: str='id'):
         """
         Upsert data based on the join column which is conventionally the id.
         Converts any native Python types like UUID to string for compatibility with PyArrow.
@@ -285,13 +285,14 @@ class IcebergModelCatalog:
         try:
             def map_(d):
                 for k,v in d.items():
-                    if isinstance(v, dict) or isinstance(v,list):
+                    if isinstance(v, dict) :
                         d[k] = str(v)
                 return d
 
             """im doing this crude complex type mapping because i dont yet know how pyiceberg does json data or if it does"""
             arrow_table = pa.Table.from_pylist([map_(d.model_dump()) for d in data],schema=self.model.to_arrow_schema() )
 
+          
             result = table.upsert(df=arrow_table, join_cols=[primary_key])
             logger.info(f"Rows Updated: {result.rows_updated}, Rows Inserted: {result.rows_inserted}")
         except Exception as ex:
