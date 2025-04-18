@@ -146,7 +146,7 @@ class LanguageModel:
                 raise Exception(f"There is no token or token key configured for model {self.model_name} - you should add an entry to Percolate for the model using the examples in p8.LanguageModelApi")
         """we use the env in favour of what is in the store"""
         env_token = os.environ.get(self.params['token_env_key'])
-        self.params['token'] = env_token  if env_token is not None and len(env_token) else self.params.get('token') 
+        self.params['token'] = env_token  if env_token is not None and len(env_token) else self.params.get('token')
         
     def parse(self, response: requests.models.Response, context: CallingContext=None) -> AIResponse:
         """the llm response form openai or other schemes must be parsed into a dialogue.
@@ -221,6 +221,53 @@ class LanguageModel:
     @classmethod 
     def from_context(cls, context: CallingContext) -> "LanguageModel":
         return LanguageModel(model_name=context.model)
+        
+    def get_embedding(self, text: str) -> typing.List[float]:
+        """Get embedding for a single text
+        
+        Args:
+            text: Text to embed
+            
+        Returns:
+            Embedding vector as list of floats
+        """
+        from percolate.utils.embedding import get_embedding
+        
+        # Use the embedding utility with our model settings
+        scheme = self.params.get('scheme', 'openai')
+        model = self.params.get('embedding_model', self.model_name)
+        
+        return get_embedding(
+            text=text,
+            model=model,
+            api_key=self.params['token'],
+            scheme=scheme
+        )
+        
+    def get_embeddings(self, texts: typing.List[str]) -> typing.List[typing.List[float]]:
+        """Get embeddings for multiple texts in batch
+        
+        This is much more efficient than calling get_embedding multiple times
+        as it batches the requests to the embedding provider.
+        
+        Args:
+            texts: List of texts to embed
+            
+        Returns:
+            List of embedding vectors
+        """
+        from percolate.utils.embedding import get_embeddings
+        
+        # Use the embedding utility with our model settings
+        scheme = self.params.get('scheme', 'openai')
+        model = self.params.get('embedding_model', self.model_name)
+        
+        return get_embeddings(
+            texts=texts,
+            model=model,
+            api_key=self.params['token'],
+            scheme=scheme
+        )
     
       
     def _elevate_functions_to_tools(self, functions: typing.List[dict]):
