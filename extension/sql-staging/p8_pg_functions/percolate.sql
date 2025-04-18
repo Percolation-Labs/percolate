@@ -3,7 +3,7 @@ DROP FUNCTION IF EXISTS percolate;
 
 CREATE OR REPLACE FUNCTION public.percolate(
     text TEXT,
-    model VARCHAR(100) DEFAULT 'gpt-4o-mini',
+    model VARCHAR(100) DEFAULT 'gpt-4.1-mini',
     tool_names_in TEXT[] DEFAULT NULL,
     system_prompt TEXT DEFAULT 'Respond to the users query using tools and functions as required',
     token_override TEXT DEFAULT NULL,
@@ -26,7 +26,7 @@ $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION public.percolate_with_tools(
     question TEXT,
     tool_names_in TEXT[],
-    model_key VARCHAR(100) DEFAULT 'gpt-4o-mini',
+    model_key VARCHAR(100) DEFAULT 'gpt-4.1-mini',
     system_prompt TEXT DEFAULT 'Respond to the users query using tools and functions as required',
     token_override TEXT DEFAULT NULL,
     temperature FLOAT DEFAULT 0.01
@@ -51,7 +51,7 @@ DROP FUNCTION IF EXISTS public.percolate_with_agent;
 CREATE OR REPLACE FUNCTION public.percolate_with_agent(
     question text,
     agent text DEFAULT 'p8.PercolateAgent',
-    model_key character varying DEFAULT 'gpt-4o-mini'::character varying,
+    model_key character varying DEFAULT 'gpt-4.1-mini'::character varying,
     tool_names_in text[] DEFAULT NULL::text[],
     system_prompt text DEFAULT 'Respond to the users query using tools and functions as required'::text,
     token_override text DEFAULT NULL::text,
@@ -114,7 +114,7 @@ BEGIN
     SELECT completions_uri, COALESCE(token, token_override), model, scheme
     INTO endpoint_uri, api_token, selected_model, selected_scheme
     FROM p8."LanguageModelApi"
-    WHERE "name" = COALESCE(model_key, 'gpt-4o-mini')
+    WHERE "name" = COALESCE(model_key, 'gpt-4.1-mini')
     LIMIT 1;
 
     -- Ensure API details were found

@@ -21,16 +21,28 @@ def _try_load_account_token(path):
         pass
     return {}
     
-user_percolate_home = Path.home() / ".percolate" / 'auth' 
+user_percolate_home = Path.home() / ".percolate"
+user_percolate_auth = user_percolate_home / 'auth'
+user_percolate_storage = user_percolate_home / 'storage'
 
-PERCOLATE_ACCOUNT_SETTINGS = _try_load_account_token(user_percolate_home / 'token')
+PERCOLATE_ACCOUNT_SETTINGS = _try_load_account_token(user_percolate_auth / 'token')
         
- 
+# Core paths 
 P8_HOME = os.environ.get('P8_HOME', get_repo_root())
 STUDIO_HOME = f"{P8_HOME}/studio"
 P8_SCHEMA = 'p8'
 P8_EMBEDDINGS_SCHEMA = 'p8_embeddings'
-#
+
+# Embedded DB settings
+P8_EMBEDDED_DB_HOME = os.environ.get('P8_EMBEDDED_DB_HOME', str(user_percolate_home / 'storage'))
+ 
+# DuckDB specific settings
+P8_DUCKDB_DIR = os.environ.get('P8_DUCKDB_DIR', str(Path(P8_EMBEDDED_DB_HOME) / 'duckdb'))
+ 
+# Always default PyIceberg to enabled
+PERCOLATE_USE_PYICEBERG = os.environ.get('PERCOLATE_USE_PYICEBERG', "1").lower() in ("1", "true", "yes", "y")
+
+# PostgreSQL settings
 POSTGRES_DB = "app"
 P8_CONTAINER_REGISTRY = "harbor.percolationlabs.ai"
 
@@ -58,8 +70,8 @@ MINIO_P8_BUCKET = 'percolate'
 #   
 TAVILY_API_KEY = os.environ.get('TAVILY_API_KEY')
 
-GPT_MINI = "gpt-4o-mini"
-DEFAULT_MODEL =   "gpt-4o-2024-08-06"
+GPT_MINI = "gpt-4.1-mini"
+DEFAULT_MODEL =  "gpt-4.1"
 
 def load_db_key(key = "P8_API_KEY"):
     """valid database login requests the key for API access"""

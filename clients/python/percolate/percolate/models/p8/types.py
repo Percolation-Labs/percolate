@@ -278,7 +278,7 @@ class TokenUsage(AbstractModel):
     """Tracks token usage for language model interactions"""
     model_config = {'protected_namespaces': ()}
     id: uuid.UUID| str  
-    model_name: str
+    model: str
     tokens: typing.Optional[int] = Field(0,description="the number of tokens consumed in total")
     tokens_in: typing.Optional[int] = Field(0, description="the number of tokens consumed for input")
     tokens_out: typing.Optional[int] = Field(0, description="the number of tokens consumed for output")
@@ -358,7 +358,7 @@ class AIResponse(TokenUsage):
             content=message.get('content') or '',
             tokens_in=usage['prompt_tokens'],
             tokens_out=usage['completion_tokens'],
-            model_name = response['model'],
+            model = response['model'],
             status='TOLL_CALL' if not tool_calls else 'RESPONSE',
             session_id=sid
         )
@@ -490,12 +490,10 @@ class Resources(AbstractModel):
         
         from percolate.utils.parsing import get_content_provider_for_uri
         from pathlib import Path
+        
         def sanitize_text(text: str) -> str:
             return text.replace("\x00", "")  # or use a placeholder like "�"
-
-
         provider = get_content_provider_for_uri(uri)
-        
         text = sanitize_text(provider.extract_text(uri))
 
         name = name or uri
@@ -662,4 +660,4 @@ DO UPDATE SET value = EXCLUDED.value;
             statements.append(stmt)
 
         return "\n".join(statements)
-            
+ 

@@ -124,6 +124,22 @@ class AbstractModelMixin:
         """
         return SqlModelHelper(cls)
     
+    
+    @classmethod
+    def to_arrow_schema(cls):
+        """get the arrow schema for the pydantic model with some conventions"""
+    
+    @classmethod
+    def to_arrow_schema(cls):
+        """
+        get the arrow schema from the pydantic type
+        """
+        from percolate.utils.types.pydantic import pydantic_to_arrow_schema
+
+        return pydantic_to_arrow_schema(
+            cls
+        )
+    
 class AbstractModel(BaseModel, ABC, AbstractModelMixin):
     """Percolate's abstract model type with mixing methods"""
     

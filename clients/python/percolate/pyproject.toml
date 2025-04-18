@@ -26,6 +26,16 @@ html2text = "^2024.2.26"
 authlib = "^1.5.2"
 itsdangerous = "^2.2.0"
 pymupdf = "^1.25.5"
+duckdb = "^0.10.0"
+polars = "^0.20.5"
+kuzu = "^0.0.11"
+pyarrow = "^19.0.1"
+
+[tool.poetry.group.iceberg]
+optional = true
+
+[tool.poetry.group.iceberg.dependencies]
+pyiceberg = "^0.6.0"
 
 [tool.pytest.ini_options]
 markers = [

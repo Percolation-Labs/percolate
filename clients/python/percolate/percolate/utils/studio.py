@@ -98,6 +98,12 @@ def apply_project(project:Project|str):
     from percolate.utils.index import index_codebase
     from percolate.utils.env import sync_model_keys
     from percolate.models.p8 import ApiProxy
+    from percolate.models.p8 import sample_models, LanguageModelApi
+    
+    try:
+        p8.repository(LanguageModelApi).update_records(sample_models)
+    except:
+        pass
     
     if isinstance(project,str):
         project = open_project(project)

@@ -53,7 +53,7 @@ def stream_openai_response(r, printer=None):
                                 observed_tool_call = True
                                 # if printer:
                                 #     printer(f'invoking {delta["tool_calls"]}')
-                            for tool_call in delta["tool_calls"]:
+                            for tool_call in (delta.get("tool_calls") or []):
                                 if "index" in tool_call:
                                     """for each tool call, we will index into the initial and aggregate args"""
                                     tool_index = tool_call["index"]
