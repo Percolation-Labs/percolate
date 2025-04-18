@@ -63,36 +63,6 @@ class DuckDBService:
         # Install and load VSS for vector search
         self.conn.execute("INSTALL vss;")
         self.conn.execute("LOAD vss;")
-        
-        # Install and load Iceberg for direct Iceberg table access if available
-        try:
-            from percolate.utils.env import P8_ICEBERG_WAREHOUSE, PERCOLATE_USE_PYICEBERG
-            
-            if PERCOLATE_USE_PYICEBERG:
-                # Try to load the Iceberg extension if available
-                try:
-                    self.conn.execute("INSTALL iceberg;")
-                    self.conn.execute("LOAD iceberg;")
-                
-                    # Check if the iceberg_catalog function exists
-                    catalog_check = self.conn.execute(
-                        "SELECT COUNT(*) as exists FROM duckdb_functions() WHERE function_name = 'iceberg_catalog'"
-                    ).fetchone()
-                    
-                    if catalog_check and catalog_check[0] > 0:
-                        # Use iceberg_catalog if available 
-                        self.conn.execute(f"CALL iceberg_catalog('percolate', 'file://{P8_ICEBERG_WAREHOUSE}')")
-                        logger.info(f"Registered Iceberg catalog 'percolate' with warehouse at {P8_ICEBERG_WAREHOUSE}")
-                    else:
-                        # Use alternative iceberg_scan approach for older versions
-                        logger.info(f"Using iceberg_scan for Iceberg integration (iceberg_catalog not available)")
-                        # We'll use iceberg_scan directly in queries
-                        
-                except Exception as e:
-                    logger.debug(f"Error loading Iceberg extension: {e}")
-        except Exception as e:
-            logger.warning(f"Failed to set up Iceberg integration: {e}")
-            # Non-critical error, we can continue without Iceberg integration
     
     def __repr__(self):
         return f"DuckDBService({self.model.get_model_full_name() if self.model else None}, {self.db_path})"
@@ -219,20 +189,8 @@ class DuckDBService:
                 
         except Exception as e:
             logger.warning(f"Table creation failed with IcebergModelCatalog: {e}")
-            # Fall back to SQL-based creation if IcebergModelCatalog fails
-            try:
-                script = self.helper.create_script()
-                self.execute(script)
-                logger.debug(f"Created table {self.helper.model.get_model_table_name()} with SQL fallback")
-                
-                # Create embedding table if needed
-                if self.helper.table_has_embeddings:
-                    embedding_script = self.helper.create_embedding_table_script()
-                    self.execute(embedding_script)
-                    logger.debug(f"Created embedding table with SQL fallback")
-            except Exception as sql_error:
-                logger.error(f"SQL fallback table creation also failed: {sql_error}")
-                raise
+            
+            raise
                 
         # Register with graph database if requested
         if register_entities and 'name' in self.helper.model.model_fields:
@@ -350,29 +308,10 @@ class DuckDBService:
             # Create catalog for this model - using IcebergModelCatalog is now required
             catalog = IcebergModelCatalog(self.model)
             
-            # Ensure the table exists by attempting to create it
-            # This will handle schema migration if needed
-            table = catalog.create_table_for_model()
-            
-            # Ensure DuckDB Iceberg integration is set up
-            # This makes the tables available directly to DuckDB queries
-            from percolate.utils.env import PERCOLATE_USE_PYICEBERG, P8_ICEBERG_WAREHOUSE
-            if PERCOLATE_USE_PYICEBERG:
-                if self.conn is None:
-                    self.conn = self._connect()
-                    self._setup_extensions()
-                
-                try:
-                    # Make sure the Iceberg extension and catalog are loaded
-                    self.conn.execute("INSTALL iceberg;")
-                    self.conn.execute("LOAD iceberg;")
-                    self.conn.execute(f"CALL iceberg_catalog('percolate', 'file://{P8_ICEBERG_WAREHOUSE}')")
-                except Exception as e:
-                    logger.debug(f"Iceberg setup in update_records: {e}")
-                    # Non-critical error, continue with operation
+     
             
             # Perform upsert using the catalog
-            catalog.upsert_data(records, primary_key=id_field)
+            catalog.update_records(records, primary_key=id_field)
             
             logger.info(f"Successfully upserted {len(records)} records with IcebergModelCatalog")
             
@@ -388,7 +327,7 @@ class DuckDBService:
         except Exception as e:
             # If upsert failed, use the SQL-based fallback
             logger.warning(f"IcebergModelCatalog upsert failed: {e}, falling back to SQL")
-            return self._sql_upsert_fallback(records)
+            raise
             
     def _sql_upsert_fallback(self, records):
         """Fallback to SQL-based upsert when IcebergModelCatalog fails"""
@@ -431,7 +370,7 @@ class DuckDBService:
             try:
                 catalog = IcebergModelCatalog(self.model)
                 # For each record, try to insert/update in IcebergModelCatalog
-                catalog.upsert_data(records)
+                catalog.update_records(records)
                 logger.debug(f"Successfully added records to IcebergModelCatalog after SQL upsert")
             except Exception as ex:
                 logger.debug(f"Failed to sync with IcebergModelCatalog after SQL upsert: {ex}")
@@ -707,77 +646,7 @@ class DuckDBService:
         """
         assert self.model is not None, "Model is required for select operation"
         
-        # Try using direct Iceberg integration first if enabled
-        try:
-            from percolate.utils.env import PERCOLATE_USE_PYICEBERG, P8_ICEBERG_WAREHOUSE
-            
-            if PERCOLATE_USE_PYICEBERG:
-                # Build a query for the Iceberg table
-                field_str = "*" if not fields else ", ".join(fields)
-                model_namespace = self.model.get_model_namespace().lower()
-                model_name = self.model.get_model_name().lower()
-                
-                # Try using iceberg_scan directly (works with most DuckDB versions)
-                iceberg_metadata_location = f"{P8_ICEBERG_WAREHOUSE}/{model_namespace}.db/{model_name}"
-                
-                # Check if the catalog method exists
-                try:
-                    catalog_check = self.conn.execute(
-                        "SELECT COUNT(*) as exists FROM duckdb_functions() WHERE function_name = 'iceberg_catalog'"
-                    ).fetchone()
-                    
-                    if catalog_check and catalog_check[0] > 0:
-                        # Modern DuckDB with iceberg_catalog support
-                        iceberg_table = f"percolate.{model_namespace}.{model_name}"
-                        
-                        # Build where clause
-                        where_clause = ""
-                        params = []
-                        if kwargs:
-                            clauses = []
-                            for key, value in kwargs.items():
-                                clauses.append(f"{key} = ?")
-                                params.append(value)
-                            where_clause = f" WHERE {' AND '.join(clauses)}"
-                        
-                        iceberg_query = f"SELECT {field_str} FROM {iceberg_table}{where_clause}"
-                    else:
-                        # Older DuckDB with only iceberg_scan support
-                        if os.path.exists(f"{iceberg_metadata_location}/metadata"):
-                            # Build where clause for iceberg_scan
-                            filter_expr = "TRUE"
-                            params = []
-                            if kwargs:
-                                clauses = []
-                                for key, value in kwargs.items():
-                                    clauses.append(f"{key} = ?")
-                                    params.append(value)
-                                filter_expr = f"{' AND '.join(clauses)}"
-                                
-                            # Use iceberg_scan directly
-                            iceberg_query = f"""
-                            SELECT {field_str} FROM iceberg_scan(
-                                '{iceberg_metadata_location}', 
-                                selected_fields='{field_str if field_str != '*' else ''}',
-                                where_expr='{filter_expr}'
-                            )
-                            """
-                        else:
-                            raise FileNotFoundError(f"Iceberg metadata not found at {iceberg_metadata_location}")
-                            
-                    # Try to query using the appropriate method
-                    try:
-                        result = self.execute(iceberg_query, data=tuple(params) if params else None)
-                        if result is not None:
-                            logger.debug(f"Direct Iceberg query successful")
-                            return result
-                    except Exception as e:
-                        logger.debug(f"Direct Iceberg query failed, falling back to SQL: {e}")
-                        
-                except Exception as e:
-                    logger.debug(f"Error determining Iceberg capability: {e}")
-        except Exception as e:
-            logger.debug(f"Error setting up Iceberg query, falling back to SQL: {e}")
+ 
         
         # Fall back to SQL query
         query = self.helper.select_query(fields, **kwargs)
@@ -864,13 +733,9 @@ class DuckDBService:
                 valid_records.append(record)
             
             # Create a repository for embedding records
-            embedding_repo = self.repository(EmbeddingRecord)
+            embedding_repo = IcebergModelCatalog(EmbeddingRecord)
             
-            # Ensure embedding table exists by registering the model
-            if not embedding_repo.entity_exists:
-                logger.info("Embedding table does not exist, creating it")
-                embedding_repo.register()
-            
+   
             # Process records in batches
             for i in range(0, len(valid_records), batch_size):
                 batch = valid_records[i:i+batch_size]
@@ -904,13 +769,11 @@ class DuckDBService:
                     results["errors"].append(f"Embedding API error: {str(e)}")
                     continue
                 
+                # return embedding_records, embedding_repo
                 # Use the standard update_records method to properly handle upserts
                 if embedding_records:
                     # Insert/update embedding records using the same mechanism as regular records
-                    embedding_repo.update_records(
-                        records=embedding_records,
-                        batch_size=batch_size
-                    )
+                    embedding_repo.update_records( embedding_records    )
                     
                     results["embeddings_added"] += len(embedding_records)
                 
@@ -918,6 +781,7 @@ class DuckDBService:
             logger.error(f"Failed to add embeddings: {e}")
             results["success"] = False
             results["errors"].append(str(e))
+            raise
             
         return results
         
