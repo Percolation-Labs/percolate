@@ -19,9 +19,9 @@ class TaskSearch(BaseModel):
     query: str
 
 @router.post("/search", response_model=typing.List[Task])
-async def search_task(search:TaskSearch)->typing.List[Task]:
+async def search_task(search: TaskSearch, user: dict = Depends(get_current_token)) -> typing.List[Task]:
     """semantic task search"""
-    result =  p8.repository(Task).search(search.query)
+    result = p8.repository(Task).search(search.query)
     
     """the semantic result is the one we want here"""
     if result and result[0].get('vector_result'):
@@ -30,15 +30,18 @@ async def search_task(search:TaskSearch)->typing.List[Task]:
     """todo error handling"""
     
 @router.post("/", response_model=Task)
-async def create_task(task: Task)->Task:
+async def create_task(task: Task, user: dict = Depends(get_current_token)) -> Task:
     """create a task"""
-    results =  p8.repository(Task).update_records(task)
+    results = p8.repository(Task).update_records(task)
     if results:
         return results[0]
     raise Exception("this should not happened but we will be adding error stuff")
 
 @router.get("/{task_name}/comments")
-async def get_task_comments_by_name(task_name: str = Path(..., description="The unique name of the task"))->typing.List[dict]:
+async def get_task_comments_by_name(
+    task_name: str = Path(..., description="The unique name of the task"),
+    user: dict = Depends(get_current_token)
+) -> typing.List[dict]:
     """Fetch the comments related to this task if you know its entity name"""
     return [{
         'user': 'dummy_user',
@@ -48,15 +51,21 @@ async def get_task_comments_by_name(task_name: str = Path(..., description="The 
         'comment': 'dummy_comment'
     }]
 
-@router.get("/{task_name}",response_model=Task)
-async def get_task_by_name(task_name: str = Path(..., description="The unique name of the task"))->Task:
+@router.get("/{task_name}", response_model=Task)
+async def get_task_by_name(
+    task_name: str = Path(..., description="The unique name of the task"),
+    user: dict = Depends(get_current_token)
+) -> Task:
     """Retrieve a task by name"""
     return {}
 
 @router.post("/research", response_model=ResearchIteration)
-async def create_research_iteration(task: ResearchIteration)->ResearchIteration:
+async def create_research_iteration(
+    task: ResearchIteration,
+    user: dict = Depends(get_current_token)
+) -> ResearchIteration:
     """create a research plan - conceptual diagram and question set"""
-    results =  p8.repository(ResearchIteration).update_records(task)
+    results = p8.repository(ResearchIteration).update_records(task)
     if results:
         return results[0]
     raise Exception("this should not happened but we will be adding error stuff")
@@ -76,7 +85,10 @@ def exec_research_tasks(task):
     return {}
             
 @router.post("/research/execute", response_model=ResearchIteration)
-async def execute_research_iteration(task: ResearchIteration)->ResearchIteration:
+async def execute_research_iteration(
+    task: ResearchIteration,
+    user: dict = Depends(get_current_token)
+) -> ResearchIteration:
     """execute a research plan - perform each search in the question set - this can take time so should be done as background tasks"""
     
     logger.debug(task)
@@ -87,10 +99,14 @@ async def execute_research_iteration(task: ResearchIteration)->ResearchIteration
     return task
 
 @router.post("/research/queue", response_model=ResearchIteration)
-async def queue_research_iteration(task: ResearchIteration, background_tasks: BackgroundTasks)->ResearchIteration:
+async def queue_research_iteration(
+    task: ResearchIteration, 
+    background_tasks: BackgroundTasks,
+    user: dict = Depends(get_current_token)
+) -> ResearchIteration:
     """execute a research plan - perform each search in the question set - this can take time so should be done as background tasks"""
     
-    result = background_tasks(exec_research_tasks,task)
+    result = background_tasks(exec_research_tasks, task)
     
     """handle errors and/or update the task response to say we have changed its status to queue"""
     

@@ -278,7 +278,7 @@ class TokenUsage(AbstractModel):
     """Tracks token usage for language model interactions"""
     model_config = {'protected_namespaces': ()}
     id: uuid.UUID| str  
-    model: str
+    model_name: str
     tokens: typing.Optional[int] = Field(0,description="the number of tokens consumed in total")
     tokens_in: typing.Optional[int] = Field(0, description="the number of tokens consumed for input")
     tokens_out: typing.Optional[int] = Field(0, description="the number of tokens consumed for output")
@@ -368,7 +368,7 @@ class Session(AbstractModel):
     name: typing.Optional[str] = Field(None, description="The name is a pseudo name to make sessions node compatible")
     query: typing.Optional[str] = DefaultEmbeddingField(None,description='the question or context that triggered the session')
     user_rating: typing.Optional[float] = Field(None, description="We can in future rate sessions to learn what works")
-    agent: str = Field("Percolate always expects an agent but we support passing a system prompt which we treat as anonymous agent")
+    agent: str = Field('percolate', description="Percolate always expects an agent but we support passing a system prompt which we treat as anonymous agent")
     parent_session_id:typing.Optional[uuid.UUID| str] = Field(None, description="A session is a thread from a question+prompt to completion. We span child sessions")
     
     thread_id: typing.Optional[str] = Field(None,description='An id for a thread which can contain a number of sessions')
@@ -377,6 +377,7 @@ class Session(AbstractModel):
     metadata: typing.Optional[dict] = Field(default_factory=dict, description="Arbitrary metadata")
     session_completed_at: typing.Optional[datetime.datetime] = Field(default=None,description="An audit timestamp to write back the completion of the session - its optional as it should manage the last timestamp on the AI Responses for the session")
     graph_paths: typing.Optional[typing.List[str]] = Field(None, description="Track all paths extracted by an agent as used to build the KG over user sessions")
+    userid:  typing.Optional[uuid.UUID| str ] = Field(None,description="The user id to use")
     
     @model_validator(mode='before')
     @classmethod

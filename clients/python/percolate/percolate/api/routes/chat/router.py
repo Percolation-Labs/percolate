@@ -443,15 +443,43 @@ def audit_request(request, response, metadata=None):
     Audit the request and response in the database.
     This is a placeholder for the actual implementation.
     
+    Mappings of metadata
+    the incoming session_id is actually the thread_id
+    the session id (id) itself can be generated from a uuid for this chat message
+    the user id should be a hash of the incoming string which is possibly an email (userid) is the convention in percolate for users ??
+    the query is the request question 
+   
     Args:
         request: The original request
         response: The LLM response
         metadata: Additional metadata
     """
     # TODO: Implement actual database auditing
-    # For now, just print
-    print(f"AUDIT: Request to {request.model} with metadata {metadata}")
-    print(f"AUDIT: Response received with {getattr(response, 'tokens_out', 'unknown')} tokens")
+    
+    from percolate.models import Session
+    from percolate.utils import make_uuid
+       
+    if 'userid' in metadata:
+        metadata['userid'] = make_uuid(metadata['userid'])
+    
+ 
+    try:
+        s = Session(id=str(uuid.uuid1()), **metadata)
+        p8.repository(Session).update_records(s)
+        logger.info(f"audited {s=}")
+        
+    except:
+        logger.warning("Problem with audit request")
+        logger.warning(traceback.format_exc())
+        
+    try:
+        
+        pass
+    except:
+        logger.warning("Problem with audit response")
+        logger.warning(traceback.format_exc())
+
+
 
 # ---------------------------------------------------------------------------
 # API Endpoints
@@ -468,6 +496,8 @@ async def completions(
     channel_id: Optional[str] = Query(None, description="ID of the channel where the interaction happens"),
     channel_type: Optional[str] = Query(None, description="Type of channel (e.g., slack, web, etc.)"),
     api_provider: Optional[str] = Query(None, description="Override the default provider"),
+    device_info: Optional[str] = Query(None, description="Device info Base64 encoded with arbitrary parameters such as GPS"),
+    
     #use_sse: Optional[bool] = Query(False, description="Whether to use Server-Sent Events for streaming"),
     token: dict = Depends(get_current_token)
 ):
@@ -483,6 +513,8 @@ async def completions(
     
     # Check for valid bearer token - this is a temp test key
     
+    print(user_id, session_id)
+    
     expected_token = "!p3rc0la8!" #<-this a testing idea
     expected_token = POSTGRES_PASSWORD #<-this will be the secure bearer for now but we could relax to an api key
     
@@ -494,16 +526,22 @@ async def completions(
         logger.warning(f"{token} != {expected_token} - not authenticated")
         raise HTTPException(status_code=401, detail="API token is incorrect")
     
+    
+    print(request)
     #print(request.stream)
     try:
         # Collect query parameters into a dict for easier handling
         params = {
-            'user_id': user_id,
-            'session_id': session_id,
+            'userid': user_id,
+            'thread_id': session_id,
             'channel_id': channel_id,
             'channel_type': channel_type,
-            'api_provider': api_provider
+            'api_provider': api_provider,
+            'query': request.compile_question(),
+            'agent': request.compile_system()
         }
+        
+        """TODO process device info"""
         
         # Remove None values
         params = {k: v for k, v in params.items() if v is not None}
@@ -525,8 +563,8 @@ async def completions(
         # Process the request using the selected handler
         response = handler(request, params)
         
-        # Extract metadata for auditing
-        metadata = extract_metadata(request, params)
+        # Extract metadata for auditing - for now they are as is and we probably will not support them in the request since its better to stick to the openai scheme in the payload - but we can test this in future
+        metadata = params# extract_metadata(request, params)
         
         # Handle streaming vs non-streaming responses
         if stream_mode:
