@@ -62,11 +62,18 @@ POSTGRES_USER = from_env_or_project('P8_PG_USER', 'postgres')
 POSTGRES_CONNECTION_STRING = f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_SERVER}:{POSTGRES_PORT}/{POSTGRES_DB}"
 TESTDB_CONNECTION_STRING =  f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_SERVER}:{POSTGRES_PORT}/test"
 DEFAULT_CONNECTION_TIMEOUT = 30
-
+ 
 """later we will add these to the project"""
 MINIO_SECRET = os.environ.get('MINIO_SECRET', 'percolate')
 MINIO_SERVER = os.environ.get('MINIO_SERVER', 'localhost:9000')
 MINIO_P8_BUCKET = 'percolate'
+
+# S3 configuration
+S3_ACCESS_KEY = os.environ.get('S3_ACCESS_KEY')
+S3_SECRET = os.environ.get('S3_SECRET')
+S3_URL = os.environ.get('S3_URL', 'hel1.your-objectstorage.com')
+S3_DEFAULT_BUCKET = os.environ.get('S3_DEFAULT_BUCKET', 'percolate')
+S3_BUCKET_NAME = os.environ.get('S3_BUCKET_NAME', S3_DEFAULT_BUCKET)
 #   
 TAVILY_API_KEY = os.environ.get('TAVILY_API_KEY')
 

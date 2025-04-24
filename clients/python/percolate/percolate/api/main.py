@@ -1,6 +1,6 @@
 
 from __future__ import annotations
-from fastapi import APIRouter, FastAPI, Response, UploadFile, File, Form
+from fastapi import APIRouter, FastAPI, Response, UploadFile, File, Form, Request
 from http import HTTPStatus
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
@@ -9,6 +9,18 @@ from percolate import __version__
 from starlette.middleware.sessions import SessionMiddleware
 from uuid import uuid1
 from datetime import datetime
+from starlette.middleware.base import BaseHTTPMiddleware
+
+class PayloadLoggerMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        body = await request.body()
+        print("Raw Payload:", body.decode())
+
+        # Rebuild the request stream so the endpoint can read it again
+        request._receive = lambda: {'type': 'http.request', 'body': body, 'more_body': False}
+
+        response = await call_next(request)
+        return response
 
 
 app = FastAPI(
@@ -31,10 +43,11 @@ app = FastAPI(
     redoc_url=f"/docs",
 )
 
-
 k = str(uuid1())
-
+ 
 app.add_middleware(SessionMiddleware, secret_key=k)
+#app.add_middleware(PayloadLoggerMiddleware)
+
 
 api_router = APIRouter()
 
