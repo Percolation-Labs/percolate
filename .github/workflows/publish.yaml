@@ -43,24 +43,24 @@ jobs:
           echo "version=$TAG" >> $GITHUB_ENV  # Save the version to an environment variable
           echo "version=$TAG" >> $GITHUB_OUTPUT  # Also store in outputs for later use
       #git tag is the SoT for the version and we write it on to the toml file
-      - name: Sync Version to pyproject.toml
-        working-directory: clients/python/percolate
-        run: |
-          VERSION=${{ env.version }}
-          poetry run python scripts/update_version.py "$VERSION"
-        shell: bash
-      #commit back to main in CI
-      - name: Commit and Push Version Update to pyproject.toml
-        working-directory: clients/python/percolate
-        run: |
-          git checkout $GITHUB_REF
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-          git add pyproject.toml __version__
-          git commit -m "Update version to ${{ env.version }}"
-          git push --no-tags https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/Percolation-Labs/percolate HEAD:${GITHUB_REF}
-        env:
-          version: ${{ env.version }}
+      # - name: Sync Version to pyproject.toml
+      #   working-directory: clients/python/percolate
+      #   run: |
+      #     VERSION=${{ env.version }}
+      #     poetry run python scripts/update_version.py "$VERSION"
+      #   shell: bash
+      # #commit back to main in CI
+      # - name: Commit and Push Version Update to pyproject.toml
+      #   working-directory: clients/python/percolate
+      #   run: |
+      #     git checkout $GITHUB_REF
+      #     git config user.name "GitHub Actions"
+      #     git config user.email "actions@github.com"
+      #     git add pyproject.toml __version__
+      #     git commit -m "Update version to ${{ env.version }}"
+      #     git push --no-tags https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/Percolation-Labs/percolate HEAD:${GITHUB_REF}
+      #   env:
+      #     version: ${{ env.version }}
       - name: Run Tests (excluding slow)
         working-directory: clients/python/percolate
         run: |
