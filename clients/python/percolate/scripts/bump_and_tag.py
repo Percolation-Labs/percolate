@@ -10,7 +10,6 @@ PYPROJECT = os.path.join(MODULE_ROOT, 'pyproject.toml')
 VERSION_FILE = os.path.join(MODULE_ROOT, '__version__')
 
 def run(*cmd, check=True, **kwargs):
-    print(f"> {' '.join(cmd)}")
     return subprocess.run(cmd, check=check, **kwargs)
 
 def read_poetry_version():
