@@ -5,7 +5,77 @@ these have not been well tested for all cases but for function calling and simpl
 import requests
 import json
 import os
+import base64
+import io
 
+def audio_to_text(
+    base64_audio: str,
+    model: str = "whisper-1",
+    temperature: float = 0.0,
+    response_format: str = "json",
+    language: str = None
+) -> dict:
+    """
+    Transcribes a base64-encoded audio sample to text using OpenAI's Whisper API (REST).
+
+    Parameters:
+        base64_audio (str): The audio content encoded in base64.
+        model (str): The Whisper model to use (default: "whisper-1").
+        api_key (str): Your OpenAI API key. If None, reads from OPENAI_API_KEY env var.
+        temperature (float): Sampling temperature (between 0 and 1). Lower values make output more deterministic.
+        response_format (str): The format of the response: "json", "text", "srt", "verbose_json", or "vtt".
+        language (str): The language spoken in the audio (ISO-639-1). If None, auto-detect.
+
+    Returns:
+        dict: Parsed JSON response containing transcription and metadata (or raw text if response_format != "json").
+    """
+    from .LanguageModel import try_get_open_ai_key
+
+    # Get API key
+    key = try_get_open_ai_key()
+    if not key:
+        raise ValueError("OpenAI API key must be provided or set in OPENAI_API_KEY environment variable.")
+
+    # Decode base64 audio
+    try:
+        audio_bytes = base64.b64decode(base64_audio)
+    except Exception as e:
+        raise ValueError("Invalid base64 audio data.") from e
+
+    # Prepare file payload
+    audio_file = io.BytesIO(audio_bytes)
+    audio_file.name = "audio.wav"  # Whisper supports wav, mp3, etc.
+
+    # Construct multipart form data
+    files = {
+        "file": (audio_file.name, audio_file, "application/octet-stream"),
+        "model": (None, model),
+        "temperature": (None, str(temperature)),
+        "response_format": (None, response_format)
+    }
+    if language:
+        files["language"] = (None, language)
+
+    headers = {
+        "Authorization": f"Bearer {key}"
+    }
+
+    endpoint = "https://api.openai.com/v1/audio/transcriptions"
+    response = requests.post(endpoint, headers=headers, files=files)
+
+    # Raise for HTTP errors
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as http_err:
+        raise RuntimeError(f"OpenAI API request failed: {http_err} - {response.text}")
+
+    # Return parsed content
+    if response_format == "json":
+        return response.json()
+    else:
+        # For non-JSON responses, return raw text
+        return {"text": response.text}
+    
 def stream_openai_response(r, printer=None):
     """stream the response into the expected structure but expose a printer"""
     collected_data = {

@@ -55,10 +55,19 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 
 def handle_openai_request(request: CompletionsRequestOpenApiFormat, params: Optional[Dict] = None, language_model_class=LanguageModel):
-    """Process an OpenAI format request and return a response."""
-    # Extract metadata from request or params
-    metadata = extract_metadata(request, params)
+    """Process an OpenAI format request and return a response.
     
+    we are checking of this is audio and we do inline transcription
+    """
+    from percolate.services.llm.utils import audio_to_text
+    # Extract metadata from request or params
+    metadata = params or {}#extract_metadata(request, params)
+    
+    is_audio = False
+    if is_audio:= metadata.get('is_audio'):
+        """TODO: we only support this on the open ai handler for now as its experimental - not sure how we want to deal with transcription inline"""
+        logger.info(f"is_audio set so we will assume ALL user content is based 64 audio")
+     
     # Create a language model instance
     model_name = request.model
     try:
@@ -82,6 +91,13 @@ def handle_openai_request(request: CompletionsRequestOpenApiFormat, params: Opti
                 system_content += msg.content + "\n"
             elif msg.role == "user" and isinstance(msg.content, str):
                 last_user_content = msg.content
+                if is_audio:
+                    try:
+                        logger.info(f'transcribing supposed based 64 encoded audio content - {last_user_content[:10]}...{last_user_content[-10:]}')
+                        last_user_content = audio_to_text(last_user_content)['text']
+                        metadata['transcribed_audio'] = last_user_content
+                    except:
+                        logger.warning(f"Failed to transcribe and we will let the language model handle it or not for now - {traceback.format_exc()}") 
         
         # If system message was provided separately
         if request.system and not system_content:
@@ -401,7 +417,7 @@ def stream_generator(response, stream_mode, audit_callback=None, from_dialect='o
         if not chunk.endswith(b'\n\n'):
             chunk = chunk + b'\n\n'
         
-        print(chunk)
+        #print(chunk)
         yield chunk
                
     if audit_callback:
@@ -461,7 +477,10 @@ def audit_request(request, response, metadata=None):
        
     if 'userid' in metadata:
         metadata['userid'] = make_uuid(metadata['userid'])
-    
+    if 'transcribed_audio' in metadata:
+        """a little janky on the interface but for efficiency we dont want to dump all of this - we could link a raw file later against the id"""
+        metadata['query'] = metadata['transcribed_audio'] 
+        """before overwriting dump audio record to file storage"""
  
     try:
         s = Session(id=str(uuid.uuid1()), **metadata)
@@ -480,7 +499,26 @@ def audit_request(request, response, metadata=None):
         logger.warning(traceback.format_exc())
 
 
+def try_decode_device_info(di):
+    """
+    Base64 encoded map is added - try to get it and return as JSON.
+    """
+    import base64
+    import json
 
+    if di:
+        try:
+            # Base64 decode
+            decoded_bytes = base64.b64decode(di)
+            # Decode bytes to string (assuming UTF-8)
+            decoded_str = decoded_bytes.decode('utf-8')
+            # Parse JSON
+            return json.loads(decoded_str)
+        except Exception:
+            # If anything goes wrong, just return the original input
+            return {}
+
+    return di
 # ---------------------------------------------------------------------------
 # API Endpoints
 # ---------------------------------------------------------------------------
@@ -496,6 +534,7 @@ async def completions(
     channel_id: Optional[str] = Query(None, description="ID of the channel where the interaction happens"),
     channel_type: Optional[str] = Query(None, description="Type of channel (e.g., slack, web, etc.)"),
     api_provider: Optional[str] = Query(None, description="Override the default provider"),
+    is_audio: Optional[bool] = Query(False, description="Client asks to decoded base 64 audio using a model"),
     device_info: Optional[str] = Query(None, description="Device info Base64 encoded with arbitrary parameters such as GPS"),
     
     #use_sse: Optional[bool] = Query(False, description="Whether to use Server-Sent Events for streaming"),
@@ -513,7 +552,13 @@ async def completions(
     
     # Check for valid bearer token - this is a temp test key
     
-    print(user_id, session_id)
+    if device_info:
+        device_info = try_decode_device_info(device_info)
+        logger.info(f"We have device info {device_info=}")
+    else:
+        logger.info(f"we did not get any device info")
+    
+    logger.info(f"{user_id}, {session_id}")
     
     expected_token = "!p3rc0la8!" #<-this a testing idea
     expected_token = POSTGRES_PASSWORD #<-this will be the secure bearer for now but we could relax to an api key
@@ -526,9 +571,7 @@ async def completions(
         logger.warning(f"{token} != {expected_token} - not authenticated")
         raise HTTPException(status_code=401, detail="API token is incorrect")
     
-    
-    print(request)
-    #print(request.stream)
+ 
     try:
         # Collect query parameters into a dict for easier handling
         params = {
@@ -537,8 +580,10 @@ async def completions(
             'channel_id': channel_id,
             'channel_type': channel_type,
             'api_provider': api_provider,
+            'is_audio': is_audio,
             'query': request.compile_question(),
             'agent': request.compile_system()
+        
         }
         
         """TODO process device info"""

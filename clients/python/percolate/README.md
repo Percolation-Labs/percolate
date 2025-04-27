@@ -47,3 +47,7 @@ git attribute removes contents on commit to avoid checking in output cells.
 ```bash
 git config --global filter.strip-notebook-output.clean "jq --indent 1 '.cells[] |= if .outputs then .outputs = [] else . end | .metadata = {}' 2>/dev/null || cat"
 ```
+
+
+# Issues encountered
+- https://github.com/fsspec/s3fs/issues/932
