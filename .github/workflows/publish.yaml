@@ -35,24 +35,8 @@ jobs:
       - name: Sync Version to pyproject.toml
         run: |
           VERSION=${{ env.version }}
-          python -c "
-          import toml
-          from pathlib import Path
-
-          # Path to your pyproject.toml file
-          toml_file = Path('clients/python/percolate/pyproject.toml')
-
-          # Load the toml file
-          data = toml.load(toml_file)
-
-          # Set the version in pyproject.toml to the tag version
-          data['tool']['poetry']['version'] = '$VERSION'
-
-          # Write the changes back to the file
-          with toml_file.open('w') as f:
-              toml.dump(data, f)
-          "
-          echo "Updated pyproject.toml with version $VERSION"
+          python scripts/update_version.py "$VERSION"
+        shell: bash
 
       - name: Run Tests (excluding slow)
         working-directory: clients/python/percolate
@@ -107,3 +91,4 @@ jobs:
 #git tag 0.1.822
 # Push the tag to GitHub
 #git push origin  0.1.822
+#
