@@ -46,11 +46,9 @@ def main():
     new = bump_semver(old, major=args.major, minor=args.minor)
     print(f"Bumping version: {old} → {new}")
 
-    # Update pyproject.toml via Poetry
     os.chdir(MODULE_ROOT)
     run('poetry', 'version', new)
 
-    # Write __version__ file
     write_version_file(new)
     run('git', 'add', 'pyproject.toml', '__version__')
     run('git', 'commit', '-m', f'Bump version to {new}')
