@@ -14,8 +14,7 @@ from percolate.utils import logger
 
 router = APIRouter()
 
-project_name = p8.settings('NAME')
-
+ 
 REDIRECT_URI = "http://127.0.0.1:5000/auth/google/callback"# if not project_name else f"https://{project_name}.percolationlabs.ai/auth/google/callback"
 SCOPES = [
     'openid',
