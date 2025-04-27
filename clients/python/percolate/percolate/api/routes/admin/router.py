@@ -111,6 +111,17 @@ async def get_index(id: uuid.UUID, user: dict = Depends(get_api_key)) -> IndexAu
     return {}
 
 
+
+@router.post("/content/bookmark")
+async def upload_uri(request : dict, task_id: str = "default", add_resource: bool = True, user: dict = Depends(get_current_token)):
+    """book mark uris the same way we upload file content"""
+
+    """TODO""" 
+       
+    logger.info(f"{request=}")
+       
+    return Response(json.dumps({"status":'received'}))
+
 @router.post("/content/upload")
 async def upload_file(file: UploadFile = File(...), task_id: str = "default", add_resource: bool = True, user: dict = Depends(get_current_token)):
     """
@@ -126,6 +137,8 @@ async def upload_file(file: UploadFile = File(...), task_id: str = "default", ad
     Returns:
         JSON with the filename and status message
     """
+ 
+    
     try:
         
         # Upload to S3 using put_object with bytes
@@ -133,7 +146,7 @@ async def upload_file(file: UploadFile = File(...), task_id: str = "default", ad
         result = s3_service.upload_file(
             project_name=task_id,
             file_name=file.filename,
-            file_content=file.file,  # Send bytes directly
+            file_content=file.file,
             content_type=file.content_type
         )
         

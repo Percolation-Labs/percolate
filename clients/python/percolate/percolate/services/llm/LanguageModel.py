@@ -127,6 +127,20 @@ class GoogleAIResponseScheme(AIResponse):
                 status='RESPONSE' if not tool_calls else "TOOL_CALLS",
                 tool_calls=tool_calls)
 
+def try_get_open_ai_key():
+    """
+    for now we default to open ai keys for many types of models e.g. whisper or embeddings but we could generally use this to load other keys but we need to flesh out the abstraction
+    """
+    db = PostgresService()
+    
+    try:
+        params = db.execute("""select token from p8."LanguageModelApi" where token_env_key = 'OPENAI_API_KEY' and token is not null limit 1""")
+        if params:
+            return params[0]['token']
+    except:
+        logger.warning(f"failed to get the open ai key - {traceback.format_exc()}")        
+    
+
 class LanguageModel:
     """the simplest language model wrapper we can make"""
     def __init__(self, model_name:str):

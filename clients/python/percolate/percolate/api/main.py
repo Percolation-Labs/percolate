@@ -10,6 +10,9 @@ from starlette.middleware.sessions import SessionMiddleware
 from uuid import uuid1
 from datetime import datetime
 from starlette.middleware.base import BaseHTTPMiddleware
+import os
+import json
+from percolate.utils import logger
 
 class PayloadLoggerMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
@@ -44,6 +47,8 @@ app = FastAPI(
 )
 
 k = str(uuid1())
+
+logger.info('Percolate api app started')
  
 app.add_middleware(SessionMiddleware, secret_key=k)
 #app.add_middleware(PayloadLoggerMiddleware)
@@ -70,6 +75,34 @@ async def healthcheck():
     return {"status": "ok"}
 
 
+    
+# Create the apple-app-site-association file content
+# Replace YOUR_TEAM_ID with your actual Apple Developer Team ID
+def get_aasa_content(team_id):
+    return {
+        "applinks": {
+            "apps": [],
+            "details": [
+                {
+                    "appID": f"{team_id}.EEPIS.EepisApp",
+                    "paths": ["/auth/google/callback*"]
+                }
+            ]
+        }
+    }
+
+@app.get("/.well-known/apple-app-site-association")
+async def serve_apple_app_site_association():
+    # Replace with your actual Team ID
+    team_id = os.environ.get("APPLE_TEAM_ID", "SG2497YYXJ")
+    
+    content = get_aasa_content(team_id)
+    
+    # Return JSON with the correct content type
+    return Response(
+        content=json.dumps(content),
+        media_type="application/json"
+    )
     
 app.include_router(api_router)
 set_routes(app)
