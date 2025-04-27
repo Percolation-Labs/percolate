@@ -104,8 +104,8 @@ jobs:
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/percolate-api:${{ steps.extract_version.outputs.version }}
             ${{ secrets.DOCKER_USERNAME }}/percolate-api${{ steps.is_final.outputs.final == 'true' && ':latest' || '' }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=percolate-api
+          cache-to: type=gha,mode=max,scope=percolate-api
 
       # Set a tag as 'latest' on Docker Hub (trust the build for now)
       - name: Tag Docker Image as Latest (if Final Release)
