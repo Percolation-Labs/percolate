@@ -44,6 +44,7 @@ jobs:
           echo "version=$TAG" >> $GITHUB_OUTPUT  # Also store in outputs for later use
 
       - name: Sync Version to pyproject.toml
+        working-directory: clients/python/percolate
         run: |
           VERSION=${{ env.version }}
           poetry run python scripts/update_version.py "$VERSION"

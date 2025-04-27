@@ -5,8 +5,8 @@ import sys
 # Get the version from the command-line argument
 version = sys.argv[1]
 
-# Path to your pyproject.toml file
-toml_file = Path('clients/python/percolate/pyproject.toml')
+# Path to your pyproject.toml file - assume we are running this script from the root of the python project
+toml_file = Path('pyproject.toml')
 
 # Load the toml file
 data = toml.load(toml_file)
