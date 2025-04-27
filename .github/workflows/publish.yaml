@@ -57,7 +57,7 @@ jobs:
           git config user.email "actions@github.com"
           git add pyproject.toml
           git commit -m "Update version to ${{ env.version }}"
-          git push origin $GITHUB_REF
+          git push https://github-actions:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }} HEAD:${GITHUB_REF}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Run Tests (excluding slow)
