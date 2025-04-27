@@ -18,12 +18,23 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: 1.5.1
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          installer-parallel: true
+
+      - name: Configure Poetry
+        run: |
+          poetry config virtualenvs.create true --local
+          poetry config virtualenvs.in-project true --local
+
       - name: Install Dependencies
         working-directory: clients/python/percolate
         run: |
-          python -m pip install --upgrade pip
-          pip install poetry pytest toml
-          poetry install
+          poetry install --no-interaction --no-ansi
 
       - name: Extract Version from Git Tag
         id: extract_version
@@ -41,7 +52,6 @@ jobs:
       - name: Run Tests (excluding slow)
         working-directory: clients/python/percolate
         run: |
-          source $(poetry env info -p)/bin/activate
           poetry run pytest -m "not slow"
 
       - name: Build Package
@@ -87,9 +97,3 @@ jobs:
             ${{ secrets.DOCKER_USERNAME }}/your-image-name${{ steps.is_final.outputs.final == 'true' && ':latest' || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-# Create a tag for the release version
-#git tag 0.1.822
-# Push the tag to GitHub
-#git push origin  0.1.822
-#
