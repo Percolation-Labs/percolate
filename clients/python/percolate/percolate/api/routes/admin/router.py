@@ -1,8 +1,9 @@
 # routers/drafts.py
 from fastapi import APIRouter, HTTPException, BackgroundTasks
-from fastapi import   Depends, Response 
+from fastapi import   Depends, Response
 import json
-from percolate.services import MinioService
+import time
+from percolate.services import MinioService, S3Service
 from percolate.api.routes.auth import get_api_key, get_current_token
 from pydantic import BaseModel, Field
 import typing
@@ -61,8 +62,8 @@ async def add_project( project: Project,  user: dict = Depends(get_api_key)):
     return Response(content=json.dumps(results))
 
 
-@router.get("/slow-endpoint",include_in_schema=False)
-async def slow_response():
+@router.get("/slow-endpoint", include_in_schema=False)
+async def slow_response(user: dict = Depends(get_current_token)):
     """a test utility"""
     import time
     time.sleep(10)  # Simulate a delay
@@ -98,28 +99,261 @@ async def index_entity(request: IndexRequest, background_tasks: BackgroundTasks,
         raise HTTPException(status_code=500, detail="Failed to manage the index")
     
 @router.get("/index/{id}", response_model=IndexAudit)
-async def get_index(id: uuid.UUID) -> IndexAudit:
+async def get_index(id: uuid.UUID, user: dict = Depends(get_api_key)) -> IndexAudit:
     """
     request the status of the index by id
     """
     #todo - proper error handling
-    records =  PostgresService.get_by_id(id)
+    records = PostgresService.get_by_id(id)
     if records:
         return records
     """TODO error not found"""
     return {}
 
 
-@router.post("/content/upload/")
-async def upload_file(file: UploadFile = File(...),folder:str='default', task_id:str=None, add_resource:bool=True):
-    """uploads a file to a folder and stores it as a file resource which is indexed.
-    task ids are optional to associate files with tasks. Resources are added as database records for content indexing
+
+@router.post("/content/bookmark")
+async def upload_uri(request : dict, task_id: str = "default", add_resource: bool = True, user: dict = Depends(get_current_token)):
+    """book mark uris the same way we upload file content"""
+
+    """TODO""" 
+       
+    logger.info(f"{request=}")
+       
+    return Response(json.dumps({"status":'received'}))
+
+@router.post("/content/upload")
+async def upload_file(file: UploadFile = File(...), task_id: str = "default", add_resource: bool = True, user: dict = Depends(get_current_token)):
+    """
+    Uploads a file to S3 storage and optionally stores it as a file resource which is indexed.
+    Files are stored under the task_id folder structure.
+    
+    Args:
+        file: The file to upload
+        task_id: The task ID to associate with the file, defaults to "default"
+        add_resource: Whether to add the file as a database resource for content indexing
+        user: The authenticated user (injected by dependency)
+    
+    Returns:
+        JSON with the filename and status message
+    """
+ 
+    
+    try:
+        
+        # Upload to S3 using put_object with bytes
+        s3_service = S3Service()
+        result = s3_service.upload_file(
+            project_name=task_id,
+            file_name=file.filename,
+            file_content=file.file,
+            content_type=file.content_type
+        )
+        
+        # TODO: If add_resource is True, add file metadata to database for indexing
+        
+        logger.info(f"Uploaded file {result['key']} to S3 successfully")
+        return {
+            "key": result["key"],
+            "filename": result["name"],
+            "task_id": task_id,
+            "size": result["size"],
+            "content_type": result["content_type"],
+            "last_modified": result["last_modified"],
+            "etag": result["etag"],
+            "message": "Uploaded successfully to S3"
+        }
+    except Exception as e:
+        logger.error(f"File upload failed: {str(e)}")
+        logger.warning(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"File upload failed: {str(e)}")
+
+@router.get("/content/files")
+async def list_files(task_id: str = "default", prefix: str = None, user: dict = Depends(get_current_token)):
+    """
+    Lists files stored in S3 under the specified task_id.
+    
+    Args:
+        task_id: The task ID folder to list files from, defaults to "default"
+        prefix: Additional prefix to filter files within the task_id folder
+        user: The authenticated user (injected by dependency)
+    
+    Returns:
+        JSON list of files with metadata
     """
     try:
-        # Read file and upload to MinIO
-        content = await file.read()
-        MinioService().add_file(f"{folder}/{file.filename}",content, file.content_type)
-    
-        return {"filename": f"{folder}/{file.filename}", "message": "Uploaded successfully"}
+        # List files from S3
+        s3_service = S3Service()
+        files = s3_service.list_files(
+            project_name=task_id,
+            prefix=prefix
+        )
+        
+        return {
+            "task_id": task_id,
+            "files": files,
+            "count": len(files)
+        }
     except Exception as e:
-        return {"error": str(e)}
+        logger.error(f"Failed to list files: {str(e)}")
+        logger.warning(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to list files: {str(e)}")
+
+@router.get("/content/file/{task_id}/{filename:path}")
+async def get_file(task_id: str, filename: str, prefix: str = None, user: dict = Depends(get_current_token)):
+    """
+    Retrieves a file from S3 storage.
+    
+    Args:
+        task_id: The task ID/project name associated with the file
+        filename: The filename to retrieve
+        prefix: Optional subfolder within the task_id/project
+        user: The authenticated user (injected by dependency)
+    
+    Returns:
+        The file content as a response
+    """
+    try:
+        # Get file from S3
+        s3_service = S3Service()
+        result = s3_service.download_file(
+            project_name=task_id,
+            file_name=filename,
+            prefix=prefix
+        )
+        
+        # Get content and content type from the result
+        content = result["content"]
+        content_type = result["content_type"]
+        
+        # Return the file content
+        return Response(content=content, media_type=content_type)
+    except Exception as e:
+        logger.error(f"Failed to retrieve file {filename} from project {task_id}: {str(e)}")
+        logger.warning(traceback.format_exc())
+        raise HTTPException(status_code=404, detail=f"File not found or error retrieving: {str(e)}")
+
+@router.delete("/content/file/{task_id}/{filename:path}")
+async def delete_file(task_id: str, filename: str, prefix: str = None, user: dict = Depends(get_current_token)):
+    """
+    Deletes a file from S3 storage.
+    
+    Args:
+        task_id: The task ID/project name associated with the file
+        filename: The filename to delete
+        prefix: Optional subfolder within the task_id/project
+        user: The authenticated user (injected by dependency)
+    
+    Returns:
+        JSON with deletion status
+    """
+    try:
+        # Delete file from S3
+        s3_service = S3Service()
+        result = s3_service.delete_file(
+            project_name=task_id,
+            file_name=filename,
+            prefix=prefix
+        )
+        
+        # Return success response
+        return {
+            "key": result["key"],
+            "filename": result["name"],
+            "task_id": task_id,
+            "message": "File deleted successfully",
+            "status": result["status"]
+        }
+    except Exception as e:
+        logger.error(f"Failed to delete file {filename} from project {task_id}: {str(e)}")
+        logger.warning(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"File deletion failed: {str(e)}")
+
+@router.get("/content/url/{task_id}/{filename:path}")
+async def get_presigned_url(
+    task_id: str, 
+    filename: str, 
+    operation: str = "get_object", 
+    expires_in: int = 3600, 
+    prefix: str = None, 
+    user: dict = Depends(get_current_token)
+):
+    """
+    Generates a presigned URL for direct access to a file in S3 storage.
+    
+    Args:
+        task_id: The task ID/project name associated with the file
+        filename: The filename to access
+        operation: The S3 operation ('get_object', 'put_object', etc.)
+        expires_in: URL expiration time in seconds (default: 1 hour)
+        prefix: Optional subfolder within the task_id/project
+        user: The authenticated user (injected by dependency)
+    
+    Returns:
+        JSON with the presigned URL
+    """
+    try:
+        # Generate presigned URL
+        s3_service = S3Service()
+        url = s3_service.get_presigned_url(
+            project_name=task_id,
+            file_name=filename,
+            operation=operation,
+            expires_in=expires_in,
+            prefix=prefix
+        )
+        
+        # Return the URL
+        return {
+            "url": url,
+            "task_id": task_id,
+            "filename": filename,
+            "operation": operation,
+            "expires_in": expires_in,
+            "expires_at": int(time.time() + expires_in),
+            "message": f"Generated {operation} URL expiring in {expires_in} seconds"
+        }
+    except Exception as e:
+        logger.error(f"Failed to generate presigned URL for {filename} in project {task_id}: {str(e)}")
+        logger.warning(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to generate presigned URL: {str(e)}")
+
+class CreateS3KeyRequest(BaseModel):
+    """Request model for creating S3 access keys for a project"""
+    project_name: str = Field(description="The project name to create keys for")
+    read_only: bool = Field(default=False, description="Whether to create read-only keys")
+
+@router.post("/content/keys")
+async def create_project_keys(
+    request: CreateS3KeyRequest,
+    user: dict = Depends(get_api_key)  # Higher security: require API key
+):
+    """
+    Creates access keys for a specific project in S3 storage.
+    These keys will have limited permissions to only access files within the project.
+    
+    Args:
+        request: The request model containing project_name and read_only flag
+        user: The authenticated admin user (injected by dependency)
+    
+    Returns:
+        JSON with the created access keys
+    """
+    try:
+        # Create project access keys
+        s3_service = S3Service()
+        key_data = s3_service.create_user_key(
+            project_name=request.project_name,
+            read_only=request.read_only
+        )
+        
+        # Return the key data (sensitive information - admin access only)
+        return {
+            **key_data,
+            "created_at": int(time.time()),
+            "message": f"Created {'read-only' if request.read_only else 'read-write'} keys for project {request.project_name}"
+        }
+    except Exception as e:
+        logger.error(f"Failed to create keys for project {request.project_name}: {str(e)}")
+        logger.warning(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to create project keys: {str(e)}")

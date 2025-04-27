@@ -139,6 +139,21 @@ class CompletionsRequestOpenApiFormat(BaseModel):
         None, description="System message to set the behavior of the assistant. A convenience parameter that will be converted to a message."
     )
     
+    
+    def compile_question(self):
+        """
+        all user role messages are used as context
+        """
+        
+        return "\n".join([m.content for m in self.messages if m.role == 'user'])
+    
+    def compile_system(self):
+        """
+        all user role messages are used as context
+        """
+        
+        return "\n".join([m.content for m in self.messages if m.role == 'system'])
+    
     def get_tools_as_functions(self):
         """
         Extract function definitions from tools or functions field.

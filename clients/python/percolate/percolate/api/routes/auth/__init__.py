@@ -36,6 +36,9 @@ def get_current_token(
 
     """we should allow the API_TOKEN which can be lower security i.e. allow some users to use without providing keys to the castle"""
     """TODO single and multi ten auth"""
+    
+    print('compare', token, POSTGRES_PASSWORD)
+    
     if token != POSTGRES_PASSWORD:
         raise HTTPException(
             status_code=401,

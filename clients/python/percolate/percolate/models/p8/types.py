@@ -358,7 +358,7 @@ class AIResponse(TokenUsage):
             content=message.get('content') or '',
             tokens_in=usage['prompt_tokens'],
             tokens_out=usage['completion_tokens'],
-            model_name = response['model'],
+            model = response['model'],
             status='TOLL_CALL' if not tool_calls else 'RESPONSE',
             session_id=sid
         )
@@ -368,7 +368,7 @@ class Session(AbstractModel):
     name: typing.Optional[str] = Field(None, description="The name is a pseudo name to make sessions node compatible")
     query: typing.Optional[str] = DefaultEmbeddingField(None,description='the question or context that triggered the session')
     user_rating: typing.Optional[float] = Field(None, description="We can in future rate sessions to learn what works")
-    agent: str = Field("Percolate always expects an agent but we support passing a system prompt which we treat as anonymous agent")
+    agent: str = Field('percolate', description="Percolate always expects an agent but we support passing a system prompt which we treat as anonymous agent")
     parent_session_id:typing.Optional[uuid.UUID| str] = Field(None, description="A session is a thread from a question+prompt to completion. We span child sessions")
     
     thread_id: typing.Optional[str] = Field(None,description='An id for a thread which can contain a number of sessions')
@@ -377,6 +377,7 @@ class Session(AbstractModel):
     metadata: typing.Optional[dict] = Field(default_factory=dict, description="Arbitrary metadata")
     session_completed_at: typing.Optional[datetime.datetime] = Field(default=None,description="An audit timestamp to write back the completion of the session - its optional as it should manage the last timestamp on the AI Responses for the session")
     graph_paths: typing.Optional[typing.List[str]] = Field(None, description="Track all paths extracted by an agent as used to build the KG over user sessions")
+    userid:  typing.Optional[uuid.UUID| str ] = Field(None,description="The user id to use")
     
     @model_validator(mode='before')
     @classmethod
@@ -490,12 +491,10 @@ class Resources(AbstractModel):
         
         from percolate.utils.parsing import get_content_provider_for_uri
         from pathlib import Path
+        
         def sanitize_text(text: str) -> str:
             return text.replace("\x00", "")  # or use a placeholder like "�"
-
-
         provider = get_content_provider_for_uri(uri)
-        
         text = sanitize_text(provider.extract_text(uri))
 
         name = name or uri
@@ -662,4 +661,4 @@ DO UPDATE SET value = EXCLUDED.value;
             statements.append(stmt)
 
         return "\n".join(statements)
-            
+ 

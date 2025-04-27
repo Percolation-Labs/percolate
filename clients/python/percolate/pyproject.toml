@@ -8,6 +8,8 @@ readme = "README.md"
 packages = [{include = "percolate"}]
 
 [tool.poetry.dependencies]
+httpx = "0.27.0"
+httpcore = "^1.0.0"
 python = ">=3.10,<4.0"
 pydantic = ">=2.0.0"
 psycopg2-binary = ">=2.0.0"
@@ -26,6 +28,18 @@ html2text = "^2024.2.26"
 authlib = "^1.5.2"
 itsdangerous = "^2.2.0"
 pymupdf = "^1.25.5"
+duckdb = "^0.10.0"
+polars = "^0.20.5"
+kuzu = "^0.0.11"
+pyarrow = "^19.0.1"
+aiobotocore="2.16.0"
+boto3 = "1.35.0"
+
+[tool.poetry.group.iceberg]
+optional = true
+
+[tool.poetry.group.iceberg.dependencies]
+pyiceberg = "^0.6.0"
 
 [tool.pytest.ini_options]
 markers = [
