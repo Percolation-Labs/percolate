@@ -123,3 +123,4 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         
+#python ./clients/python/percolate/scripts/bump_and_tag.py 
