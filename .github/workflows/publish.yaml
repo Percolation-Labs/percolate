@@ -40,27 +40,10 @@ jobs:
         id: extract_version
         run: |
           TAG=${GITHUB_REF#refs/tags/}  # Get the tag (e.g., '1.2.3')
+          TAG=${TAG#v}
           echo "version=$TAG" >> $GITHUB_ENV  # Save the version to an environment variable
           echo "version=$TAG" >> $GITHUB_OUTPUT  # Also store in outputs for later use
-      #git tag is the SoT for the version and we write it on to the toml file
-      # - name: Sync Version to pyproject.toml
-      #   working-directory: clients/python/percolate
-      #   run: |
-      #     VERSION=${{ env.version }}
-      #     poetry run python scripts/update_version.py "$VERSION"
-      #   shell: bash
-      # #commit back to main in CI
-      # - name: Commit and Push Version Update to pyproject.toml
-      #   working-directory: clients/python/percolate
-      #   run: |
-      #     git checkout $GITHUB_REF
-      #     git config user.name "GitHub Actions"
-      #     git config user.email "actions@github.com"
-      #     git add pyproject.toml __version__
-      #     git commit -m "Update version to ${{ env.version }}"
-      #     git push --no-tags https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/Percolation-Labs/percolate HEAD:${GITHUB_REF}
-      #   env:
-      #     version: ${{ env.version }}
+
       - name: Run Tests (excluding slow)
         working-directory: clients/python/percolate
         run: |
@@ -111,7 +94,7 @@ jobs:
       - name: Tag Docker Image as Latest (if Final Release)
         if: ${{ steps.is_final.outputs.final == 'true' }}
         run: |
-          docker tag ${{ secrets.DOCKER_USERNAME }}/percolate-api:${{ steps.extract_version.outputs.version }} ${{ secrets.DOCKER_USERNAME }}/your-image-name:latest
+          docker tag ${{ secrets.DOCKER_USERNAME }}/percolate-api:${{ steps.extract_version.outputs.version }} ${{ secrets.DOCKER_USERNAME }}/percolate-api:latest
           docker push ${{ secrets.DOCKER_USERNAME }}/percolate-api:latest
       # Create GitHub Release
       - name: Create GitHub Release
@@ -123,3 +106,25 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         
+#python ./clients/python/percolate/scripts/bump_and_tag.py 
+
+# some options like this could in theory re tag if we wanted git tags to be SoT but its a finicky option
+#git tag is the SoT for the version and we write it on to the toml file
+# - name: Sync Version to pyproject.toml
+#   working-directory: clients/python/percolate
+#   run: |
+#     VERSION=${{ env.version }}
+#     poetry run python scripts/update_version.py "$VERSION"
+#   shell: bash
+# #commit back to main in CI
+# - name: Commit and Push Version Update to pyproject.toml
+#   working-directory: clients/python/percolate
+#   run: |
+#     git checkout $GITHUB_REF
+#     git config user.name "GitHub Actions"
+#     git config user.email "actions@github.com"
+#     git add pyproject.toml __version__
+#     git commit -m "Update version to ${{ env.version }}"
+#     git push --no-tags https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/Percolation-Labs/percolate HEAD:${GITHUB_REF}
+#   env:
+#     version: ${{ env.version }}

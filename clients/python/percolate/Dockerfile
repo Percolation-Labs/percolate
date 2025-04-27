@@ -12,8 +12,8 @@ FROM python:3.10-slim
 RUN apt-get update && apt-get install -y poppler-utils graphviz
 WORKDIR /code
 COPY --from=requirements-stage /tmp/requirements.txt /code/requirements.txt
-RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt
-#
+RUN pip install--upgrade -r /code/requirements.txt 
+# --no-cache-dir ^ i remove this because im trying to understand github caching
 COPY ./percolate /code/percolate
 # ENV PYTHONPATH="${PYTHONPATH}:/code"
 ENV PATH=/usr/bin:$PATH
