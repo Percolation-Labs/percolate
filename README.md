@@ -74,6 +74,8 @@ p8.repository(MyFirstAgent).register()
 
 ## Easy set up
 
+
+
 The easiest way to get started is simply to launch the docker instance and connect to postgres using your preferred client on port 5438 using `postgres:postgres` to login
 
 - **Note** that ollama is added to the docker image by default to play with open source embeddings and it takes a minute to fetch the first time. But you can comment this out if you are not interested in this 
@@ -153,6 +155,16 @@ python percolate/cli.py ask 'how do i connect to Percolate using docker compose'
 # python percolate/cli.py ask 'what is our entire process of adding embeddings and flushing those embeddings to make sure entities are indexed fully'
 # python percolate/cli.py ask 'how is minio used in percolate'
 ```
+
+### Fetch tagged release
+
+As this repository is under heavy development and because we only run full tests on tagged releases you may want to fetch the latest tagged release. This pair of commands can help with that.
+
+```bash
+git config --global alias.latest '!git fetch --tags && git checkout $(git describe --tags `git rev-list --tags --max-count=1`)'
+git latest
+```
+
 
 ### Installing To K8s
 
