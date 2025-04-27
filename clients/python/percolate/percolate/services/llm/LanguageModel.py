@@ -76,7 +76,7 @@ class AnthropicAIResponseScheme(AIResponse):
             response = stream_anthropic_response(response,printer=streaming_callback)
         else:
             response = response.json()
-        choice = response['content'] 
+        choice = response.get('content') or []
         def adapt(t):
             """anthropic map to our interface"""
             return {'name': t['name'], 'arguments':t['input'], 'id': t['id'], 'scheme': 'anthropic'}
@@ -127,6 +127,20 @@ class GoogleAIResponseScheme(AIResponse):
                 status='RESPONSE' if not tool_calls else "TOOL_CALLS",
                 tool_calls=tool_calls)
 
+def try_get_open_ai_key():
+    """
+    for now we default to open ai keys for many types of models e.g. whisper or embeddings but we could generally use this to load other keys but we need to flesh out the abstraction
+    """
+    db = PostgresService()
+    
+    try:
+        params = db.execute("""select token from p8."LanguageModelApi" where token_env_key = 'OPENAI_API_KEY' and token is not null limit 1""")
+        if params:
+            return params[0]['token']
+    except:
+        logger.warning(f"failed to get the open ai key - {traceback.format_exc()}")        
+    
+
 class LanguageModel:
     """the simplest language model wrapper we can make"""
     def __init__(self, model_name:str):
@@ -146,7 +160,7 @@ class LanguageModel:
                 raise Exception(f"There is no token or token key configured for model {self.model_name} - you should add an entry to Percolate for the model using the examples in p8.LanguageModelApi")
         """we use the env in favour of what is in the store"""
         env_token = os.environ.get(self.params['token_env_key'])
-        self.params['token'] = env_token  if env_token is not None and len(env_token) else self.params.get('token') 
+        self.params['token'] = env_token  if env_token is not None and len(env_token) else self.params.get('token')
         
     def parse(self, response: requests.models.Response, context: CallingContext=None) -> AIResponse:
         """the llm response form openai or other schemes must be parsed into a dialogue.
@@ -221,6 +235,53 @@ class LanguageModel:
     @classmethod 
     def from_context(cls, context: CallingContext) -> "LanguageModel":
         return LanguageModel(model_name=context.model)
+        
+    def get_embedding(self, text: str) -> typing.List[float]:
+        """Get embedding for a single text
+        
+        Args:
+            text: Text to embed
+            
+        Returns:
+            Embedding vector as list of floats
+        """
+        from percolate.utils.embedding import get_embedding
+        
+        # Use the embedding utility with our model settings
+        scheme = self.params.get('scheme', 'openai')
+        model = self.params.get('embedding_model', self.model_name)
+        
+        return get_embedding(
+            text=text,
+            model=model,
+            api_key=self.params['token'],
+            scheme=scheme
+        )
+        
+    def get_embeddings(self, texts: typing.List[str]) -> typing.List[typing.List[float]]:
+        """Get embeddings for multiple texts in batch
+        
+        This is much more efficient than calling get_embedding multiple times
+        as it batches the requests to the embedding provider.
+        
+        Args:
+            texts: List of texts to embed
+            
+        Returns:
+            List of embedding vectors
+        """
+        from percolate.utils.embedding import get_embeddings
+        
+        # Use the embedding utility with our model settings
+        scheme = self.params.get('scheme', 'openai')
+        model = self.params.get('embedding_model', self.model_name)
+        
+        return get_embeddings(
+            texts=texts,
+            model=model,
+            api_key=self.params['token'],
+            scheme=scheme
+        )
     
       
     def _elevate_functions_to_tools(self, functions: typing.List[dict]):
@@ -244,7 +305,7 @@ class LanguageModel:
                         system_prompt:str=None, 
                         data_content:typing.List[dict]=None,
                         is_streaming:bool = False,
-                        temperature: float = 0.01,
+                        temperature: float = 0.0,
                         **kwargs):
         """
         Simple REST wrapper to use with any language model
@@ -335,7 +396,12 @@ class LanguageModel:
         
         if response.status_code not in [200,201]:
             logger.warning(f"failed to submit: {response.status_code=}  {response.content}")
-            
+        if response.status_code == 429:
+            import time
+            """TODO: should be a flagged thing"""
+            time.sleep(61)
+            logger.warning(f"RATE LIMITED - SLEEPING FOR 1 MINUTE")
+            response =  requests.post(url, headers=headers, data=json.dumps(data),stream=is_streaming)   
         return response
     
     

@@ -17,7 +17,10 @@ sample_models = [
     LanguageModelApi(id = make_uuid('gemini-2.0-pro-exp-02-05'), name = 'gemini-2.0-pro-exp-02-05', scheme='google', completions_uri='https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-pro-exp-02-05:generateContent', token_env_key='GEMINI_API_KEY'),
     LanguageModelApi(id = make_uuid('deepseek-chat'), name = 'deepseek-chat', scheme='openai', completions_uri='https://api.deepseek.com/chat/completions', token_env_key='DEEPSEEK_API_KEY'),
     LanguageModelApi(id = make_uuid('grok-2-latest'), name = 'grok-2-latest', scheme='openai', completions_uri='https://api.x.ai/v1/chat/completions', token_env_key='XAI_API_KEY'),    
+    LanguageModelApi(id = make_uuid('mercury-coder-small'), name = 'mercury-coder-small', scheme='openai', completions_uri='https://api.inceptionlabs.ai/v1/chat/completions', token_env_key='INCEPTION_API_KEY'),    
 ]
+for m in ['gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano']:
+    sample_models.append(LanguageModelApi(id = make_uuid(m), name = m, scheme='openai', completions_uri='https://api.openai.com/v1/chat/completions', token_env_key='OPENAI_API_KEY'))
 
  
 """

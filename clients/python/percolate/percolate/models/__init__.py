@@ -1,4 +1,4 @@
-from pydantic import Field
+from pydantic import Field, BaseModel
 from functools import partial
 import typing
 
@@ -23,6 +23,29 @@ def get_p8_models():
 
 
 from .p8 import * 
+
+def repository(model:BaseModel, **kwargs):
+    """Repository factory function.
+    
+    First tries to use PostgresService, then falls back to DuckDBService
+    if embedded services are available.
+    
+    Args:
+        model: Pydantic model to create repository for
+        **kwargs: Additional arguments for service initialization
+    
+    Returns:
+        Repository instance
+    """
+    try:
+        from percolate.services import PostgresService
+        return PostgresService(model, **kwargs)
+    except ImportError:
+        try:
+            from percolate.services.embedded import DuckDBService
+            return DuckDBService(model, **kwargs)
+        except ImportError:
+            raise ImportError("No database service available. Install either psycopg2-binary or duckdb.")
 
 def bootstrap(apply:bool = False, apply_to_test_database: bool= True, root='../../../../extension/', alt_connection:str=None):
     """util to generate the sql that we use to setup percolate"""

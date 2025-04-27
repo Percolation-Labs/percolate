@@ -23,6 +23,8 @@ EXPOSE 5008
 CMD ["hypercorn", "--bind", "0.0.0.0:5008",  "percolate.api.main:app"]
 
 
+#runninng poetry build and lock is not a bad idea here
+
 #add --push if preferred
 #docker buildx create --use
 #docker buildx build --platform linux/amd64,linux/arm64 -t percolationlabs/percolate-api:latest --push .
