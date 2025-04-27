@@ -41,7 +41,7 @@ jobs:
       - name: Run Tests (excluding slow)
         working-directory: clients/python/percolate
         run: |
-          pytest -m "not slow"
+          poetry run pytest -m "not slow"
 
       - name: Build Package
         working-directory: clients/python/percolate
