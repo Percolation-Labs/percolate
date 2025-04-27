@@ -41,6 +41,11 @@ optional = true
 [tool.poetry.group.iceberg.dependencies]
 pyiceberg = "^0.6.0"
 
+
+[tool.poetry.group.dev.dependencies]
+toml = "^0.10.2"
+pytest = "^8.3.5"
+
 [tool.pytest.ini_options]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')"
