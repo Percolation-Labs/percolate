@@ -50,33 +50,30 @@ jobs:
           poetry run python scripts/update_version.py "$VERSION"
         shell: bash
       #commit back to main in CI
-      - name: Commit and Push Version Change to pyproject.toml
+      - name: Commit and Push Version Update to pyproject.toml
         working-directory: clients/python/percolate
         run: |
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
           git add pyproject.toml
           git commit -m "Update version to ${{ env.version }}"
-          git push https://github-actions:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }} HEAD:${GITHUB_REF}
+          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/Percolation-Labs/percolate HEAD:${GITHUB_REF}
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          version: ${{ env.version }}
       - name: Run Tests (excluding slow)
         working-directory: clients/python/percolate
         run: |
           poetry run pytest -m "not slow"
-
       - name: Build Package
         working-directory: clients/python/percolate
         run: |
           poetry build
-
       - name: Publish to PyPI
         working-directory: clients/python/percolate
         env:
           POETRY_PYPI_TOKEN_PYPI: ${{ secrets.PYPI_TOKEN }}
         run: |
           poetry publish --username __token__ --password $POETRY_PYPI_TOKEN_PYPI
-
       # Setup for multi-arch docker build
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
