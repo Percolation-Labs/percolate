@@ -58,7 +58,7 @@ jobs:
           git config user.email "actions@github.com"
           git add pyproject.toml __version__
           git commit -m "Update version to ${{ env.version }}"
-          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/Percolation-Labs/percolate HEAD:${GITHUB_REF}
+          git push --no-tags https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/Percolation-Labs/percolate HEAD:${GITHUB_REF}
         env:
           version: ${{ env.version }}
       - name: Run Tests (excluding slow)
