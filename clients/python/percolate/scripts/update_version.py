@@ -17,5 +17,8 @@ data['tool']['poetry']['version'] = version
 # Write the changes back to the file
 with toml_file.open('w') as f:
     toml.dump(data, f)
+    
+with open("__version__", 'w') as f:
+    f.write(version)
 
 print(f"Updated pyproject.toml with version {version}")
