@@ -41,6 +41,7 @@ jobs:
       - name: Run Tests (excluding slow)
         working-directory: clients/python/percolate
         run: |
+          source $(poetry env info -p)/bin/activate
           poetry run pytest -m "not slow"
 
       - name: Build Package
