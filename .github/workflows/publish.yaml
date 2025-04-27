@@ -46,7 +46,7 @@ jobs:
       - name: Sync Version to pyproject.toml
         run: |
           VERSION=${{ env.version }}
-          python scripts/update_version.py "$VERSION"
+          poetry run python scripts/update_version.py "$VERSION"
         shell: bash
 
       - name: Run Tests (excluding slow)
