@@ -19,7 +19,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install Dependencies
-        working-directory: clients/python/poetry
+        working-directory: clients/python/percolate
         run: |
           python -m pip install --upgrade pip
           pip install poetry pytest
@@ -40,7 +40,7 @@ jobs:
             from pathlib import Path
 
             # Path to your pyproject.toml file
-            toml_file = Path('clients/python/poetry/pyproject.toml')
+            toml_file = Path('clients/python/percolate/pyproject.toml')
 
             # Load the toml file
             data = toml.load(toml_file)
@@ -55,17 +55,17 @@ jobs:
           echo "Updated pyproject.toml with version $VERSION"
 
       - name: Run Tests (excluding slow)
-        working-directory: clients/python/poetry
+        working-directory: clients/python/percolate
         run: |
           pytest -m "not slow"
 
       - name: Build Package
-        working-directory: clients/python/poetry
+        working-directory: clients/python/percolate
         run: |
           poetry build
 
       - name: Publish to PyPI
-        working-directory: clients/python/poetry
+        working-directory: clients/python/percolate
         env:
           POETRY_PYPI_TOKEN_PYPI: ${{ secrets.PYPI_TOKEN }}
         run: |
@@ -93,8 +93,8 @@ jobs:
       - name: Build and Push Multi-Arch Docker Image
         uses: docker/build-push-action@v5
         with:
-          context: clients/python/poetry
-          file: clients/python/poetry/Dockerfile
+          context: clients/python/percolate
+          file: clients/python/percolate/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
@@ -102,3 +102,8 @@ jobs:
             ${{ secrets.DOCKER_USERNAME }}/your-image-name${{ steps.is_final.outputs.final == 'true' && ':latest' || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+# Create a tag for the release version
+#git tag 0.1.822
+# Push the tag to GitHub
+#git push origin  0.1.822
