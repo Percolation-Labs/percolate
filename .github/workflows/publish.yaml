@@ -106,19 +106,20 @@ jobs:
             ${{ secrets.DOCKER_USERNAME }}/percolate-api${{ steps.is_final.outputs.final == 'true' && ':latest' || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      # Create GitHub Release
-      - name: Create GitHub Release
-        working-directory: clients/python/percolate
-        run: |
-          TAG=${{ steps.extract_version.outputs.version }}
-          gh auth login --with-token < ${{ secrets.GITHUB_TOKEN }}  # Authenticate with GitHub
-          gh release create $TAG clients/python/percolate/dist/* --title "Release $TAG" --notes "Release notes for version $TAG"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        
+
       # Set a tag as 'latest' on Docker Hub (trust the build for now)
       - name: Tag Docker Image as Latest (if Final Release)
         if: ${{ steps.is_final.outputs.final == 'true' }}
         run: |
           docker tag ${{ secrets.DOCKER_USERNAME }}/percolate-api:${{ steps.extract_version.outputs.version }} ${{ secrets.DOCKER_USERNAME }}/your-image-name:latest
           docker push ${{ secrets.DOCKER_USERNAME }}/percolate-api:latest
+      # Create GitHub Release
+      - name: Create GitHub Release
+        working-directory: clients/python/percolate
+        run: |
+          TAG=${{ steps.extract_version.outputs.version }}
+          gh auth login --with-token < ${{ secrets.GITHUB_TOKEN }}  # Authenticate with GitHub
+          gh release create $TAG ./dist/* --title "Release $TAG" --notes "Release notes for version $TAG"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        
