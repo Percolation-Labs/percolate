@@ -90,6 +90,10 @@ jobs:
           cache-from: type=gha,scope=percolate-api
           cache-to: type=gha,mode=max,scope=percolate-api
 
+      #we pull so we then tag latest
+      - name: Pull Built Image
+        run: |
+          docker pull ${{ secrets.DOCKER_USERNAME }}/percolate-api:${{ steps.extract_version.outputs.version }}
       # Set a tag as 'latest' on Docker Hub (trust the build for now)
       - name: Tag Docker Image as Latest (if Final Release)
         if: ${{ steps.is_final.outputs.final == 'true' }}
