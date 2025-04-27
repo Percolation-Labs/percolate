@@ -36,22 +36,22 @@ jobs:
         run: |
           VERSION=${{ env.version }}
           python -c "
-            import toml
-            from pathlib import Path
+          import toml
+          from pathlib import Path
 
-            # Path to your pyproject.toml file
-            toml_file = Path('clients/python/percolate/pyproject.toml')
+          # Path to your pyproject.toml file
+          toml_file = Path('clients/python/percolate/pyproject.toml')
 
-            # Load the toml file
-            data = toml.load(toml_file)
+          # Load the toml file
+          data = toml.load(toml_file)
 
-            # Set the version in pyproject.toml to the tag version
-            data['tool']['poetry']['version'] = '$VERSION'
+          # Set the version in pyproject.toml to the tag version
+          data['tool']['poetry']['version'] = '$VERSION'
 
-            # Write the changes back to the file
-            with toml_file.open('w') as f:
-                toml.dump(data, f)
-            "
+          # Write the changes back to the file
+          with toml_file.open('w') as f:
+              toml.dump(data, f)
+          "
           echo "Updated pyproject.toml with version $VERSION"
 
       - name: Run Tests (excluding slow)
