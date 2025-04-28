@@ -102,7 +102,7 @@ class SqlModelHelper:
         for dcol in ['created_at', 'updated_at', 'deleted_at']:
             if dcol not in mapping.keys():
                 columns.append(f"{dcol} TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        if 'user_id' not in mapping.keys():
+        if 'userid' not in mapping.keys():
             columns.append("userid UUID")
 
         if_not_exists_flag = '' if not if_not_exists else " IF NOT EXISTS "

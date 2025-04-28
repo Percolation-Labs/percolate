@@ -14,6 +14,8 @@ from percolate.utils import logger
 import traceback
 from percolate.utils.studio import Project, apply_project
 from fastapi import   Depends, File, UploadFile
+import percolate as p8
+from percolate.utils import parse_base64_dict, try_parse_base64_dict
 
 router = APIRouter()
 
@@ -113,17 +115,85 @@ async def get_index(id: uuid.UUID, user: dict = Depends(get_api_key)) -> IndexAu
 
 
 @router.post("/content/bookmark")
-async def upload_uri(request : dict, task_id: str = "default", add_resource: bool = True, user: dict = Depends(get_current_token)):
-    """book mark uris the same way we upload file content"""
+async def upload_uri(request : dict,
+                     background_tasks: BackgroundTasks, 
+                     task_id: str = None, 
+                     user_id:str=None,
+                     device_info:str =None, 
+                     is_public_resource:bool = True,
+                     expand_resource:bool=False,
+                     token: dict = Depends(get_current_token)):
+    """book mark uris the same way we upload file content. Resources are assumed public by default e.g. a public we reference but can be "owned" too
+    A task_id is a thread id for a session parent e.g. a chat with actions pinned. but by default we just pin to the daily diary
+    """
 
-    """TODO""" 
+    from percolate.models.p8 import Resources, SessionResources, Session
+    
+    """quickly audit the bookmark and do the rest as a background task
+    im likely to make resources and task resources first class citizens and also create a user session model and functions that do this in the database
+    """
+    
+    #
+    """any alias is fine"""
+    uri = request.get('uri') or request.get('url')
+    intent =  request.get('description') or request.get('summary') or request.get('content')
+    resource_title = request.get('title') or request.get('name')
+    """get device info from the base64string"""
+    device_info:dict = try_parse_base64_dict(device_info) or {}
+  
+  
+    if not task_id:
+        task = Session.daily_diary_entry(user_id,query=uri, metadata=device_info)
+        task_id = task.id
+    else:
+        task = Session.task_thread_entry(thread_id=task_id, userid=user_id, query=uri, metadata=device_info)
+    
+    """we are always auditing intent"""
+    p8.repository(Session).update_records(task)   
+        
+    def index_resources():
+        try: 
+      
+            """upsert the resource - allowing for aliases at least for now"""
+             #the intent is the default but the user does not 'own' this public resource and we can process resources in the background - the session stores the user intent
+            head =resources = Resources(name=resource_title,  summary = intent, uri = uri, userid=None if is_public_resource else user_id)    
+            length = 1
+            if expand_resource:
+                resources = Resources.chunked_resource(uri, name=resource_title, userid= None if is_public_resource else user_id) 
+                head = resources[0]
+                length = len(resources)
+            
+            """link the resource to sessions
+            We store only the head resource in the session for IIR for now
+            """
+            tr = SessionResources(resource_id=head.id, task_id=task_id,count=length)
+        
+            """for now we insert seps but in future we will have a function for this"""
+            p8.repository(Resources).update_records(resources)
+            p8.repository(SessionResources).update_records(tr)
+            
+            logger.debug(f"Saved task resource {tr=}")
+        except:
+            logger.warning(f"Failing background task")
+            logger.warning(f"{traceback.format_exc()}")
+            """todo implement failure system logs"""
+            
+
+    """background task"""
+    background_tasks.add_task(index_resources)
        
     logger.info(f"{request=}")
        
-    return Response(json.dumps({"status":'received'}))
+    return Response(json.dumps({"status":f'received uri {uri}'}))
 
 @router.post("/content/upload")
-async def upload_file(file: UploadFile = File(...), task_id: str = "default", add_resource: bool = True, user: dict = Depends(get_current_token)):
+async def upload_file(file: UploadFile = File(...),
+                      background_tasks: BackgroundTasks = None, 
+                      task_id: str = None,
+                      add_resource: bool = True, 
+                      user_id:str = None, 
+                      device_info:str =None,
+                      token: dict = Depends(get_current_token)):
     """
     Uploads a file to S3 storage and optionally stores it as a file resource which is indexed.
     Files are stored under the task_id folder structure.
@@ -137,7 +207,39 @@ async def upload_file(file: UploadFile = File(...), task_id: str = "default", ad
     Returns:
         JSON with the filename and status message
     """
- 
+    from percolate.models import Resources,Session,SessionResources
+    device_info = try_parse_base64_dict(device_info)
+                 
+    def index_resource(file_upload_result:dict):
+        """given a file upload result which provides e.g. the key, index the resource"""
+        
+        try:         
+            logger.debug(f"indexing {file_upload_result=}")
+            uri = file_upload_result['uri']
+            if not task_id:
+                """the user can upload either in a session context or we just pin to daily activity"""
+                task = Session.daily_diary_entry(user_id,query= uri, metadata=device_info)
+                task_id = task.id
+            else:
+                task = Session.task_thread_entry(thread_id=task_id, userid=user_id, query=uri, metadata=device_info)
+                
+            """we are always auditing intent"""
+            p8.repository(Session).update_records(task)   
+
+            resources = Resources.chunked_resource(uri,userid=user_id)
+            if resources:
+                _ = p8.repository(Resources).update_records(resources)
+                """resources can be stored as chunked but we store a ref to the head only"""
+                tr = SessionResources(resource_id=resources[0].id, task_id=task_id,count=len(resources))
+            
+                """for now we insert seps but in future we will have a function for this"""
+                p8.repository(Resources).update_records(resources)
+                p8.repository(SessionResources).update_records(tr)
+                
+                logger.debug(f"uploaded {len(resources)} resource chunks ref={uri}")
+        except:
+            logger.warning(f"Failing background task")
+            logger.warning(f"{traceback.format_exc()}")     
     
     try:
         
@@ -147,10 +249,12 @@ async def upload_file(file: UploadFile = File(...), task_id: str = "default", ad
             project_name=task_id,
             file_name=file.filename,
             file_content=file.file,
-            content_type=file.content_type
+            content_type=file.content_type,
+            fetch_presigned_url=True
         )
         
-        # TODO: If add_resource is True, add file metadata to database for indexing
+        if add_resource:
+            background_tasks.add_task(index_resource, file_upload_result=result)
         
         logger.info(f"Uploaded file {result['key']} to S3 successfully")
         return {
