@@ -100,13 +100,15 @@ jobs:
         run: |
           docker tag ${{ secrets.DOCKER_USERNAME }}/percolate-api:${{ steps.extract_version.outputs.version }} ${{ secrets.DOCKER_USERNAME }}/percolate-api:latest
           docker push ${{ secrets.DOCKER_USERNAME }}/percolate-api:latest
-      # Create GitHub Release
+      # Create GitHub Release??
       - name: Create GitHub Release
-        working-directory: clients/python/percolate
-        run: |
-          TAG=${{ steps.extract_version.outputs.version }}
-          gh auth login --with-token < ${{ secrets.GITHUB_TOKEN }}  # Authenticate with GitHub
-          gh release create $TAG ./dist/* --title "Release $TAG" --notes "Release notes for version $TAG"
+        uses: elgohr/Github-Release-Action@v5
+        with:
+          title: "Release ${{ steps.extract_version.outputs.version }}"
+          tag: ${{ steps.extract_version.outputs.version }}
+          files: clients/python/percolate/dist/*
+          draft: false
+          prerelease: ${{ steps.is_final.outputs.final == 'false' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         
