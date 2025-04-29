@@ -1,6 +1,6 @@
 -- FUNCTION: p8.nl2sql(text, character varying, character varying, character varying, double precision)
 
--- DROP FUNCTION IF EXISTS p8.nl2sql(text, character varying, character varying, character varying, double precision);
+DROP FUNCTION IF EXISTS p8.nl2sql;
 
 CREATE OR REPLACE FUNCTION p8.nl2sql(
 	question text,
@@ -82,7 +82,11 @@ BEGIN
         -- Parse the JSON response string to JSONB and extract the content
         (api_response->'choices'->0->'message'->>'content')::JSONB AS response,  -- Content as JSONB
         ((api_response->'choices'->0->'message'->>'content')::JSONB->>'query')::TEXT AS query,  -- Extract query
-        ((api_response->'choices'->0->'message'->>'content')::JSONB->>'confidence')::NUMERIC AS confidence;  -- Extract confidence
+        CASE
+            WHEN ((api_response->'choices'->0->'message'->>'content')::JSONB->>'confidence') ~ '^[0-9]*\.?[0-9]+$'
+            THEN ((api_response->'choices'->0->'message'->>'content')::JSONB->>'confidence')::NUMERIC
+            ELSE 0.5
+        END AS confidence;
 
 EXCEPTION
     WHEN OTHERS THEN

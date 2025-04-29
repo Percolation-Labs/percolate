@@ -92,17 +92,15 @@ def handle_agent_request(request: CompletionsRequestOpenApiFormat, params: Optio
     here we use Percolate memory proxy agents which pass through the open ai schema but block and call functions
     """
     
-    """default for now"""
+    """default for now but load from repo or database in future"""
     from percolate.models import Resources
     
-    # Extract metadata from request or params
-    metadata = params or {}#extract_metadata(request, params)
+    metadata = params or {} 
     system_content, last_user_content = get_messages_by_role_from_request(request, params)
     agent = p8.Agent(Resources)
     """todo construct context"""
-    ctx = CallingContext()
+    ctx = CallingContext(plan=system_content,username=metadata.get('user_id'), channel_ts=metadata.get('session_id'))
     return agent.stream(last_user_content,context=ctx)
-    
     
     
 def handle_openai_request(request: CompletionsRequestOpenApiFormat, params: Optional[Dict] = None, language_model_class=LanguageModel):
@@ -715,11 +713,13 @@ async def agent_completions(
 ):
     """
     Use any model via an OpenAI API format and get model completions as streaming or non-streaming.
+    The Agent endpoint specifically allows for you to use your own agent configured in the database on your API.
+    Agents have their own crud, search, external functions and of course system prompt
     
     This endpoint can:
     - Accept requests in OpenAI format
     - Call any LLM provider (OpenAI, Anthropic, Google)
-    - Stream responses with SSE or standard streaming
+    - Stream responses 
     - Provide consistent response format
     """
     
@@ -731,6 +731,8 @@ async def agent_completions(
         4.  call `stream_generator` with all args or refactor to remove some
     """
     # Check for valid bearer token - this is a temp test key
+    
+    logger.debug(request)
     
     if device_info:
         device_info = try_decode_device_info(device_info)
