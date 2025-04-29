@@ -396,6 +396,8 @@ def stream_generator(response, stream_mode, audit_callback=None, from_dialect='o
     """
     
     collected_chunks = []
+    
+    """TODO: Percolate agents can implement a response with iter_lines() that behave the same as thing but are agentic"""
     for chunk in response.iter_lines():
         """add the decoded lines for later processing"""
         collected_chunks.append(chunk.decode('utf-8'))
@@ -597,7 +599,7 @@ async def completions(
         # Determine streaming mode
         stream_mode = request.get_streaming_mode(params)
         
-        # Select the appropriate handler based on dialect
+        # Select the appropriate handler based on dialect - we can introduce the percolate proxy here as one way to keep the same endpoint
         if dialect == 'anthropic':
             handler = handle_anthropic_request
         elif dialect == 'google':

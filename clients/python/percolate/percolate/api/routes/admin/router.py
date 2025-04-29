@@ -1,6 +1,7 @@
 # routers/drafts.py
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from fastapi import   Depends, Response
+from fastapi.responses import JSONResponse
 import json
 import time
 from percolate.services import MinioService, S3Service
@@ -15,7 +16,7 @@ import traceback
 from percolate.utils.studio import Project, apply_project
 from fastapi import   Depends, File, UploadFile
 import percolate as p8
-from percolate.utils import parse_base64_dict, try_parse_base64_dict
+from percolate.utils import try_parse_base64_dict
 
 router = APIRouter()
 
@@ -86,7 +87,7 @@ async def index_entity(request: IndexRequest, background_tasks: BackgroundTasks,
     id=uuid.uuid1()
     s = PostgresService(IndexAudit)
     try:
-        
+        logger.debug(f"Handling index request {request=}")
         record = IndexAudit(id=id, model_name='percolate', entity_full_name=request.entity_full_name, metrics={}, status="REQUESTED", message="Indexed requested")
         s.update_records(record)
         """todo create an audit record pending and use that in the api response"""
@@ -133,6 +134,8 @@ async def upload_uri(request : dict,
     im likely to make resources and task resources first class citizens and also create a user session model and functions that do this in the database
     """
     
+    """compatibility with modes"""
+    user_id = user_id or request.get('user_id')
     #
     """any alias is fine"""
     uri = request.get('uri') or request.get('url')
@@ -156,17 +159,24 @@ async def upload_uri(request : dict,
       
             """upsert the resource - allowing for aliases at least for now"""
              #the intent is the default but the user does not 'own' this public resource and we can process resources in the background - the session stores the user intent
-            head =resources = Resources(name=resource_title,  summary = intent, uri = uri, userid=None if is_public_resource else user_id)    
+            head =resources = Resources(name=resource_title,
+                                        content=intent,
+                                        summary = intent, 
+                                        uri = uri,
+                                        userid=None if is_public_resource else user_id)    
             length = 1
             if expand_resource:
-                resources = Resources.chunked_resource(uri, name=resource_title, userid= None if is_public_resource else user_id) 
+                """we attempt to fetch the resource in markdown for the default provider"""
+                resources = Resources.chunked_resource(uri,
+                                                       try_markdown=True,
+                                                       name=resource_title, userid= None if is_public_resource else user_id) 
                 head = resources[0]
                 length = len(resources)
             
             """link the resource to sessions
             We store only the head resource in the session for IIR for now
             """
-            tr = SessionResources(resource_id=head.id, task_id=task_id,count=length)
+            tr = SessionResources(resource_id=head.id, session_id=task_id,count=length)
         
             """for now we insert seps but in future we will have a function for this"""
             p8.repository(Resources).update_records(resources)
@@ -184,11 +194,11 @@ async def upload_uri(request : dict,
        
     logger.info(f"{request=}")
        
-    return Response(json.dumps({"status":f'received uri {uri}'}))
+    return JSONResponse({"status":f'received uri {uri}'})
 
 @router.post("/content/upload")
-async def upload_file(file: UploadFile = File(...),
-                      background_tasks: BackgroundTasks = None, 
+async def upload_file(background_tasks: BackgroundTasks,
+                      file: UploadFile = File(...),
                       task_id: str = None,
                       add_resource: bool = True, 
                       user_id:str = None, 
@@ -210,7 +220,7 @@ async def upload_file(file: UploadFile = File(...),
     from percolate.models import Resources,Session,SessionResources
     device_info = try_parse_base64_dict(device_info)
                  
-    def index_resource(file_upload_result:dict):
+    def index_resource(file_upload_result:dict,task_id:str=None):
         """given a file upload result which provides e.g. the key, index the resource"""
         
         try:         
@@ -218,7 +228,7 @@ async def upload_file(file: UploadFile = File(...),
             uri = file_upload_result['uri']
             if not task_id:
                 """the user can upload either in a session context or we just pin to daily activity"""
-                task = Session.daily_diary_entry(user_id,query= uri, metadata=device_info)
+                task = Session.daily_diary_entry(userid=user_id,query= uri, metadata=device_info)
                 task_id = task.id
             else:
                 task = Session.task_thread_entry(thread_id=task_id, userid=user_id, query=uri, metadata=device_info)
@@ -226,14 +236,14 @@ async def upload_file(file: UploadFile = File(...),
             """we are always auditing intent"""
             p8.repository(Session).update_records(task)   
 
-            resources = Resources.chunked_resource(uri,userid=user_id)
+            """TODO in future push down S3 urls and add a provider that the chunker and maybe the database can use"""
+            resources = Resources.chunked_resource(name=file.filename, uri=uri,userid=user_id)
+            
             if resources:
                 _ = p8.repository(Resources).update_records(resources)
                 """resources can be stored as chunked but we store a ref to the head only"""
-                tr = SessionResources(resource_id=resources[0].id, task_id=task_id,count=len(resources))
-            
+                tr = SessionResources(resource_id=resources[0].id, session_id=task_id,count=len(resources))
                 """for now we insert seps but in future we will have a function for this"""
-                p8.repository(Resources).update_records(resources)
                 p8.repository(SessionResources).update_records(tr)
                 
                 logger.debug(f"uploaded {len(resources)} resource chunks ref={uri}")
@@ -245,8 +255,13 @@ async def upload_file(file: UploadFile = File(...),
         
         # Upload to S3 using put_object with bytes
         s3_service = S3Service()
+        print("USERID", user_id)
+        path = f'users/{user_id}/' if user_id else ''
+        """todo still deciding on a file path scheme"""
+        path += f"{task_id or 'default'}"
+        
         result = s3_service.upload_file(
-            project_name=task_id,
+            project_name=path,
             file_name=file.filename,
             file_content=file.file,
             content_type=file.content_type,
@@ -254,10 +269,10 @@ async def upload_file(file: UploadFile = File(...),
         )
         
         if add_resource:
-            background_tasks.add_task(index_resource, file_upload_result=result)
+            background_tasks.add_task(index_resource, file_upload_result=result,task_id=task_id)
         
         logger.info(f"Uploaded file {result['key']} to S3 successfully")
-        return {
+        return JSONResponse({
             "key": result["key"],
             "filename": result["name"],
             "task_id": task_id,
@@ -265,8 +280,9 @@ async def upload_file(file: UploadFile = File(...),
             "content_type": result["content_type"],
             "last_modified": result["last_modified"],
             "etag": result["etag"],
+            "path": path,
             "message": "Uploaded successfully to S3"
-        }
+        })
     except Exception as e:
         logger.error(f"File upload failed: {str(e)}")
         logger.warning(traceback.format_exc())

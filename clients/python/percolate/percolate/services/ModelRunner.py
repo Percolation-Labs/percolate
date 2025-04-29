@@ -7,6 +7,7 @@ from percolate.models.p8 import Function
 from .FunctionManager import FunctionManager
 from percolate.models import AbstractModel, MessageStack
 from percolate.services.llm import CallingContext, FunctionCall, LanguageModel, MessageStackFormatter
+from percolate.services.llm.utils import HybridResponse
 
 GENERIC_P8_PROMPT = """\n# General Advice.
 Use whatever functions are available to you and use world knowledge only if prompted 
@@ -210,8 +211,92 @@ class ModelRunner:
         """
         return self.run(question, context, data=data, limit=limit,language_model=language_model)
 
+    def iter_lines(self, question: str, context: CallingContext = None, limit: int = None,
+                   data: typing.List[dict] = None, language_model: str = None, audit: bool = True):
+        """
+        Stream the agentic loop as SSE events.  This method orchestrates successive
+        LLM calls until no function calls remain.  It always yields SSE-formatted
+        text chunks; upon detecting a function call it yields a placeholder event
+        (e.g. "data: I'm working on it"), invokes the function, updates the
+        message stack, and continues streaming from the model.
 
-    def run(self, question: str, context: CallingContext = None, limit: int = None, data: typing.List[dict] = None, language_model:str=None):
+        Args:
+            question: The user question to begin the loop.
+            context: Optional CallingContext; if omitted, a new streaming context is used.
+            limit: Max number of agent iterations (function call loops).
+            data: Initial data payload for the agent.
+            language_model: Override the LLM model name.
+            audit: If True, dump audit record after completion.
+
+        Yields:
+            str: SSE-formatted event strings (e.g. "data: ...\n\n").
+        """
+                # Loop until model returns no function calls or limit reached
+        import json
+        from percolate.services.llm.utils import sse_openai_compatible_stream_with_tool_call_collapse, build_full_tool_call_message
+        
+        # Prepare streaming + hybrid context so LLM client returns HybridResponse
+        if context:
+            ctx = context.in_streaming_mode(model=language_model)
+        else:
+            ctx = CallingContext.with_model(language_model).in_streaming_mode()
+        self._context = ctx
+        # Initialize message stack as in run()
+        payload = data if data is not None else self._init_data
+        self.messages = self.agent_model.build_message_stack(
+            question=question,
+            functions=self.functions.keys(),
+            data=payload,
+            system_prompt_preamble=GENERIC_P8_PROMPT
+        )
+        # Create a streaming-capable LLM client
+        lm_client = LanguageModel.from_context(ctx)
+        max_loops = limit or ctx.max_iterations
+        for _ in range(max_loops):
+            # Invoke the model to get raw streaming HTTP response
+            raw_response = lm_client._call_raw(
+                messages=self.messages,
+                functions=self.function_descriptions,
+                context=ctx,
+            )
+
+            # Collapse tool call fragments into complete deltas
+            saw_tool_call = False
+            for line, chunk in sse_openai_compatible_stream_with_tool_call_collapse(raw_response):
+                #print(chunk)
+                choice = chunk['choices'][0]
+                finish = choice.get('finish_reason')
+                # Handle tool call batch
+                if finish == 'tool_calls':
+                    saw_tool_call = True
+                    # Notify user of tool invocation
+                    
+                    # Invoke each buffered function call
+                    for tc in choice['delta']['tool_calls']:
+                        """only tested for OpenAI scheme for now and the chunker will probably adapt - we add the verbatim response to the messages so its declared""" 
+                        fc = FunctionCall(id=tc['id'], **tc['function'], scheme='openai') 
+                        yield f"data: im calling {fc.name}...\n\n"
+                        """announce the function call on the message stack"""
+                        self.messages.add(fc.to_assistant_message())
+                        self.invoke(fc)
+                    # Break to start next iteration and re-query the model
+                    break
+                # Stream content deltas
+                delta = choice.get('delta', {}) or {}
+                if 'content' in delta:
+                    #if there is a printer we can print the delta['content]
+                    if context.streaming_callback:
+                        context.streaming_callback(line)
+                    """yield the full formatted message for compliance"""
+                    yield f"{line}\n\n"
+                # End of response
+                if finish == 'stop':
+                    return
+            # If no tool call detected, we are done
+            if not saw_tool_call:
+                return
+
+    def run(self, question: str, context: CallingContext = None, limit: int = None, data: typing.List[dict] = None, language_model:str=None, audit:bool=True):
         """Ask a question to kick of the agent loop
         
         Args:
@@ -231,8 +316,8 @@ class ModelRunner:
         """messages are system prompt etc. agent model's can override how message stack is constructed
            we add p8 preamble in percolate - in future this could be disabled per model
         """
-        self.messages = self.agent_model.build_message_stack(question=question, functions=self.functions.keys(), data=data,
-                                                             system_prompt_preamble=GENERIC_P8_PROMPT)
+        self.messages = self.agent_model.build_message_stack(question=question, functions=self.functions.keys(),
+                                                             data=data, system_prompt_preamble=GENERIC_P8_PROMPT)
 
         """run the agent loop to completion"""
         for _ in range(limit or self._context.max_iterations):
@@ -252,13 +337,14 @@ class ModelRunner:
                 continue
             if response is not None:
                 # marks the fact that we have unfinished business
-                
                 """for full auditing we should dump the response here"""
                 #p8.repository(AIResponse).update_records(response)
                 break
 
+        
         """fire telemetry TODO and below dump to postgres"""
-        p8.dump(question, self.messages.data, response, self._context, agent=self.agent_model.get_model_full_name())
+        if audit:
+            p8.dump(question, self.messages.data, response, self._context, agent=self.agent_model.get_model_full_name())
 
         return response.content
 

@@ -31,3 +31,6 @@ CMD ["hypercorn", "--bind", "0.0.0.0:5008",  "percolate.api.main:app"]
 #docker pull percolationlabs/percolate-api:latest
 #docker run -p 5009:5008 percolationlabs/percolate-api:latest
 #docker compose up -d --no-deps --build percolate-api
+
+
+#kubectl rollout restart deployment percolate-api -n <ns>

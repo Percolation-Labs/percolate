@@ -14,17 +14,6 @@ import os
 import json
 from percolate.utils import logger
 
-class PayloadLoggerMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        body = await request.body()
-        print("Raw Payload:", body.decode())
-
-        # Rebuild the request stream so the endpoint can read it again
-        request._receive = lambda: {'type': 'http.request', 'body': body, 'more_body': False}
-
-        response = await call_next(request)
-        return response
-
 
 app = FastAPI(
     title="Percolate",
@@ -73,6 +62,10 @@ app.add_middleware(
 @app.get("/healthcheck", include_in_schema=False)
 async def healthcheck():
     return {"status": "ok"}
+
+@app.get("/ping", include_in_schema=False)
+async def ping():
+    return Response(status_code=HTTPStatus.OK)
 
 
     

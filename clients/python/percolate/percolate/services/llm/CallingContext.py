@@ -41,6 +41,12 @@ class ApiCallingContext(BaseModel):
         default=False,
         description="Indicate if a streaming response is preferred with or without a callback",
     )
+    
+    is_hybrid_streaming: typing.Optional[bool] = Field(
+        default=False,
+        description="Hybrid Streaming calls functions internally but streams text content",
+    )
+      
     temperature: typing.Optional[float] = Field(
         default=DEFAULT_MODEL_TEMPERATURE, description="The LLM temperature"
     )
@@ -77,6 +83,19 @@ class CallingContext(ApiCallingContext):
         default=None,
         description="A callback to send final response e.g a Slack Say method",
     )
+
+    @staticmethod
+    def simple_printer(d):
+        print(d,end='')
+    
+    def in_streaming_mode(cls, is_hybrid_streaming:bool=True, model:str=None):
+        """convert context as is to streaming"""
+        data = cls.model_dump()
+        data['prefers_streaming'] = True
+        data['is_hybrid_streaming'] = is_hybrid_streaming
+        if model:
+            data['model'] = model
+        return CallingContext(**data)
 
     @property
     def is_streaming(cls):
