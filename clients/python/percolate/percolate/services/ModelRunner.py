@@ -242,13 +242,16 @@ class ModelRunner:
             else:
                 ctx = CallingContext.with_model(language_model).in_streaming_mode()
             self._context = ctx
+            
+            """we can add a users system prompt to the generic and then merge an agents prompt after that"""
+            sys_prompt = GENERIC_P8_PROMPT if not context.plan else  f"{GENERIC_P8_PROMPT}\n\n{context.plan}"
             # Initialize message stack as in run()
             payload = data if data is not None else self._init_data
             self.messages = self.agent_model.build_message_stack(
                 question=question,
                 functions=self.functions.keys(),
                 data=payload,
-                system_prompt_preamble=GENERIC_P8_PROMPT
+                system_prompt_preamble=sys_prompt
             )
             # Create a streaming-capable LLM client
             lm_client = LanguageModel.from_context(ctx)
