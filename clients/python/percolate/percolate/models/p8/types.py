@@ -331,6 +331,7 @@ class AIResponse(TokenUsage):
     We generate questions with sessions and then that triggers an exchange. 
     Normally the Dialogue is round trip transaction.
     """
+    model_config = {'protected_namespaces': ()}
     id: uuid.UUID| str  
     role: str = Field(description="The role of the user/agent in the conversation")
     content: str = DefaultEmbeddingField(description="The content for this part of the conversation") #TODO we may not want to automatically generate embeddings for this table
@@ -354,14 +355,14 @@ class AIResponse(TokenUsage):
         message = choice['message']
         tool_calls= message.get('tool_calls')
         return cls(
-            id= str(uuid.uuid1()),
-            role = message['role'],
-            tool_calls = tool_calls,
+            id=str(uuid.uuid1()),
+            role=message.get('role'),
+            tool_calls=tool_calls,
             content=message.get('content') or '',
             tokens_in=usage['prompt_tokens'],
             tokens_out=usage['completion_tokens'],
-            model = response['model'],
-            status='TOLL_CALL' if not tool_calls else 'RESPONSE',
+            model_name=response['model'],
+            status='TOOL_CALL' if not tool_calls else 'RESPONSE',
             session_id=sid
         )
 class Session(AbstractModel):
@@ -403,9 +404,9 @@ class Session(AbstractModel):
         return values
     
     @classmethod
-    def get_daily_diary_thread_id(cls, userid:str, metadata:dict=None, channel_type:str=None):
+    def get_daily_diary_thread_id(cls, userid:str,  session_type:str=None):
         """this is a simple hash for filtering and respect the contract for threads"""
-        daily_diary_id = make_uuid({"user_id": userid, "channel_type": 'daily_digest'})
+        daily_diary_id = make_uuid({"user_id": userid, "session_type": session_type})
         return daily_diary_id
     
     @classmethod
@@ -420,7 +421,7 @@ class Session(AbstractModel):
                        name =f"Diary entry {get_iso_timestamp()}",
                        session_type=session_type, 
                        userid=userid,
-                       thread_id=cls.get_daily_diary_thread_id(), 
+                       thread_id=cls.get_daily_diary_thread_id(userid=userid,session_type=session_type), 
                        metadata=metadata)
     
     @classmethod
@@ -534,39 +535,34 @@ class Resources(AbstractModel):
     @classmethod
     def _f(cls, values):
         if not values.get('id'):
-            values['id'] = make_uuid({'uri': values['uri'], 'ordinal': values['ordinal']})
+            """you need to be careful with the id i.e. ordinals and uris should make the resource unique
+            filenames for example should not be used but replaced with e.g. an s3 global uri
+            """
+            values['id'] = make_uuid({'uri': values['uri'], 'ordinal': values.get('ordinal') or 0})
         return values
 
     @classmethod
-    def chunked_resource(
-        cls,
-        uri: str,
+    def chunked_resource_from_text(cls,
+        text: str,
+        uri:str,
         chunk_size: int = 1000,
         category: typing.Optional[str] = None,
         name: typing.Optional[str] = None,
-        userid: typing.Optional[str] = None,
+        userid: typing.Optional[str] = None
     ) -> typing.List["Resources"]:
-        """read file contents from web or file and chunks them by some chunk size - sensible defaults are used"""
-        
-        from percolate.utils.parsing import get_content_provider_for_uri
-        from pathlib import Path
-        
-        def sanitize_text(text: str) -> str:
-            return text.replace("\x00", "")  # or use a placeholder like "�"
-        provider = get_content_provider_for_uri(uri)
-        text = sanitize_text(provider.extract_text(uri))
-
+        """load text into simple chunked resource"""
         name = name or uri
         chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
 
         resources = []
         for i, chunk in enumerate(chunks):
-            id_input = f"{uri}-{i}"
-            id_hash = uuid.UUID(hashlib.md5(id_input.encode()).hexdigest())
+            """TODO: NB!!!!!! HERE WE ARE USING URIS WITHOUT PARAMETERS AS GLOBALLY UNIQUE"""
+            id_input = f"{uri.split('?')[0]}-{i}"
+            id_hash = make_uuid(id_input)
 
             resource = cls(
                 id=id_hash,
-                name=f'{name} ({i})',
+                name=f'{name} ({i})' if i > 0 else name,
                 category=category,
                 content=chunk,
                 ordinal=i,
@@ -576,21 +572,86 @@ class Resources(AbstractModel):
             resources.append(resource)
 
         return resources
-    
+        
+        
+    @classmethod
+    def chunked_resource(
+        cls,
+        uri: str,
+        chunk_size: int = 1000,
+        category: typing.Optional[str] = None,
+        name: typing.Optional[str] = None,
+        userid: typing.Optional[str] = None,
+        try_markdown:bool = False
+    ) -> typing.List["Resources"]:
+        """read file contents from web or file and chunks them by some chunk size - sensible defaults are used
+        
+        the uri is used as the id but we excluded parameters from the uri
+        """
+        
+        from percolate.utils.parsing import get_content_provider_for_uri
+        from pathlib import Path
+        
+        def sanitize_text(text: str) -> str:
+            """this is a dump serializer for now as we work out the data model"""
+            import html2text    
+            t =  text.replace("\x00", "")  # or use a placeholder like "�"
+            if try_markdown:
+                try:
+                     t = html2text.html2text(t)
+                except Exception as ex:
+                    #print("HTMLPARSE", ex)
+                    pass
+            return t
+           
+        """TODO add an S3 provider that understands signing""" 
+        provider = get_content_provider_for_uri(uri)
+        text = sanitize_text(provider.extract_text(uri))
+        
+        return cls.chunked_resource_from_text(text, 
+                                              uri, 
+                                              chunk_size=chunk_size,
+                                              name=name,
+                                              userid=userid, 
+                                              category=category)
+
 class TaskResources(AbstractModel):
-    """A link between tasks and resources since resources can be shared between tasks"""
-    id: typing.Optional[uuid.UUID| str] = Field("unique id for rel" )  
-    resource_id: typing.Optional[uuid.UUID| str] = Field("The resource id" )  
-    session_id:  typing.Optional[uuid.UUID| str] = Field("The session id is typically a task or research iteration but can be any session id to group resources" )  
+    """(Deprecate)A link between tasks and resources since resources can be shared between tasks"""
+    id: typing.Optional[uuid.UUID| str] = Field(None, description="unique id for rel" )  
+    resource_id: uuid.UUID| str = Field("The resource id" )  
+    session_id:  uuid.UUID| str = Field("The session id is typically a task or research iteration but can be any session id to group resources" )  
     user_metadata: typing.Optional[dict] = Field(default_factory=dict, description="User-specific metadata for this resource")
     relevance_score: typing.Optional[float] = Field(default=None, description="How relevant this resource is to the session")
+    @model_validator(mode='before')
+    @classmethod
+    def _f(cls, values):
+        if not values.get('id'):
+            """
+            """
+            values['resource_id'] = str(values['resource_id'])
+            values['session_id'] = str(values['session_id'])
+            
+            values['id'] = make_uuid({'resource_id': values['resource_id'], 'session_id': values.get('session_id') or 0})
+            
+        return values
     
 class SessionResources(AbstractModel):
     """A link between sessions and resources since resources can be shared between sessions"""
-    id: typing.Optional[uuid.UUID| str] = Field("unique id for rel" )  
-    resource_id: typing.Optional[uuid.UUID| str] = Field("The resource id" )  
-    session_id:  typing.Optional[uuid.UUID| str] = Field("The session id is any user intent from a chat/request/trigger" )  
+    id: typing.Optional[uuid.UUID| str] = Field(None, description="unique id for rel" )  
+    resource_id: uuid.UUID| str = Field("The resource id" )  
+    session_id:  uuid.UUID| str = Field("The session id is any user intent from a chat/request/trigger" )  
     count: typing.Optional[int] = Field(1, description="In a model where we only store head we can track an estimate for chunk count")
+    
+    @model_validator(mode='before')
+    @classmethod
+    def _f(cls, values):
+        if not values.get('id'):
+            """
+            """
+            values['resource_id'] = str(values['resource_id'])
+            values['session_id'] = str(values['session_id'])
+            values['id'] = make_uuid({'resource_id': values['resource_id'], 'session_id': values.get('session_id') or 0})
+        return values
 class _QuestionSet(BaseModel):
     query:str = Field(description="The question/query to search")
     concept_keys: typing.Optional[typing.List[str]] = Field(default_factory=list, description="A list of codes related to the concept diagram matching questions to the research structure")

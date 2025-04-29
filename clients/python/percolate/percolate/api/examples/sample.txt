@@ -1,0 +1,2 @@
+This is a sample text file for testing the /admin/content/upload endpoint.
+You can replace this file with any other file for upload testing.
