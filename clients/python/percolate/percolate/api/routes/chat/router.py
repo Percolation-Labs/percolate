@@ -17,7 +17,7 @@ There is an argument for implementing anthropic scheme too.
 
 """
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, Query
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, Query, Path
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 import uuid
@@ -54,6 +54,57 @@ router = APIRouter()
 # Handler functions for different dialects
 # ---------------------------------------------------------------------------
 
+def get_messages_by_role_from_request(request:CompletionsRequestOpenApiFormat, metadata:dict):
+    """"""
+    from percolate.services.llm.utils import audio_to_text
+    system_content = ""
+    last_user_content = ""
+        
+    # Handle messages-based format (Chat Completion API)
+    if request.messages:
+        # Create a MessageStack from the messages
+        # Note: For now, we'll extract the last user message as the question
+        # and combine any system messages as context
+
+        is_audio = False
+        if is_audio:= metadata.get('is_audio'):
+            """TODO: we only support this on the open ai handler for now as its experimental - not sure how we want to deal with transcription inline"""
+            logger.info(f"is_audio set so we will assume ALL user content is based 64 audio")
+     
+ 
+        for msg in request.messages:
+            if msg.role == "system" and isinstance(msg.content, str):
+                system_content += msg.content + "\n"
+            elif msg.role == "user" and isinstance(msg.content, str):
+                last_user_content = msg.content
+                if is_audio:
+                    try:
+                        logger.info(f'transcribing supposed based 64 encoded audio content - {last_user_content[:10]}...{last_user_content[-10:]}')
+                        last_user_content = audio_to_text(last_user_content)['text']
+                        metadata['transcribed_audio'] = last_user_content
+                    except:
+                        logger.warning(f"Failed to transcribe and we will let the language model handle it or not for now - {traceback.format_exc()}") 
+
+    return system_content, last_user_content
+
+def handle_agent_request(request: CompletionsRequestOpenApiFormat, params: Optional[Dict] = None, language_model_class=LanguageModel, agent_model_name:str=None):
+    """
+    here we use Percolate memory proxy agents which pass through the open ai schema but block and call functions
+    """
+    
+    """default for now"""
+    from percolate.models import Resources
+    
+    # Extract metadata from request or params
+    metadata = params or {}#extract_metadata(request, params)
+    system_content, last_user_content = get_messages_by_role_from_request(request, params)
+    agent = p8.Agent(Resources)
+    """todo construct context"""
+    ctx = CallingContext()
+    return agent.stream(last_user_content,context=ctx)
+    
+    
+    
 def handle_openai_request(request: CompletionsRequestOpenApiFormat, params: Optional[Dict] = None, language_model_class=LanguageModel):
     """Process an OpenAI format request and return a response.
     
@@ -552,6 +603,8 @@ async def completions(
     - Provide consistent response format
     """
     
+    """TODO we can add basic memory support for completions if enabled but this is a dumb relay and we use the agent/completions for more sophisticated interactions """
+    
     # Check for valid bearer token - this is a temp test key
     
     if device_info:
@@ -587,8 +640,6 @@ async def completions(
             'agent': request.compile_system()
         
         }
-        
-        """TODO process device info"""
         
         # Remove None values
         params = {k: v for k, v in params.items() if v is not None}
@@ -646,7 +697,99 @@ async def completions(
         logger.warning(traceback.format_exc())
         raise HTTPException(status_code=400, detail=f"Something happened that should not have happened.")
     
-
+    
+@router.post("/agent/{agent_name}/completions")
+async def agent_completions(
+    request: CompletionsRequestOpenApiFormat,
+    background_tasks: BackgroundTasks,
+    user_id: Optional[str] = Query(None, description="ID of the end user making the request"),
+    session_id: Optional[str] = Query(None, description="ID for grouping related interactions"),
+    channel_id: Optional[str] = Query(None, description="ID of the channel where the interaction happens"),
+    channel_type: Optional[str] = Query(None, description="Type of channel (e.g., slack, web, etc.)"),
+    api_provider: Optional[str] = Query(None, description="Override the default provider"),
+    is_audio: Optional[bool] = Query(False, description="Client asks to decoded base 64 audio using a model"),
+    device_info: Optional[str] = Query(None, description="Device info Base64 encoded with arbitrary parameters such as GPS"),
+    agent_name: Optional[str] = Path(..., description="Route to a specific agent"),
+    #use_sse: Optional[bool] = Query(False, description="Whether to use Server-Sent Events for streaming"),
+    token: dict = Depends(get_current_token)
+):
+    """
+    Use any model via an OpenAI API format and get model completions as streaming or non-streaming.
+    
+    This endpoint can:
+    - Accept requests in OpenAI format
+    - Call any LLM provider (OpenAI, Anthropic, Google)
+    - Stream responses with SSE or standard streaming
+    - Provide consistent response format
+    """
+    
+    """
+    TODO
+        1.  actually load the correct Agent (via `load_model(agent_name)`),
+        2.  pass the model name into a real LLM runner (or ModelRunner) instead of `Resources`,
+        3.  generate a proper JSON payload when `stream=False`,
+        4.  call `stream_generator` with all args or refactor to remove some
+    """
+    # Check for valid bearer token - this is a temp test key
+    
+    if device_info:
+        device_info = try_decode_device_info(device_info)
+        logger.info(f"We have device info {device_info=}")
+    else:
+        logger.info(f"we did not get any device info")
+        
+    if agent_name:
+        """internal vs external web conventions for names"""
+        agent_name= agent_name.replace('-','.')
+    
+    logger.info(f"{user_id}, {session_id}")
+    
+    expected_token = "!p3rc0la8!" #<-this a testing idea
+    expected_token = POSTGRES_PASSWORD #<-this will be the secure bearer for now but we could relax to an api key
+    
+    token = request.bearer_token or token
+    if not token:
+        logger.warning(f"No bearer - not authenticated")
+        raise HTTPException(status_code=401, detail="API token is missing")
+    if token != expected_token:
+        logger.warning(f"{token} != {expected_token} - not authenticated")
+        raise HTTPException(status_code=401, detail="API token is incorrect")
+    
+ 
+    try:
+        # Collect query parameters into a dict for easier handling
+        params = {
+            'userid': user_id,
+            'thread_id': session_id,
+            'channel_id': channel_id,
+            'channel_type': channel_type,
+            'api_provider': api_provider,
+            'is_audio': is_audio,
+            'query': request.compile_question(),
+            'agent': request.compile_system()
+        
+        }
+        from percolate.models import Resources
+        # Remove None values
+        params = {k: v for k, v in params.items() if v is not None}
+        stream_mode = request.get_streaming_mode(params)
+        """wrap the agent call - we can lookup and agent and use the iter lines to get the sse or return the non streaming response"""
+        response = handle_agent_request(request, params, request.model, agent_model_name=agent_name)
+        if stream_mode:
+            return StreamingResponse(
+                stream_generator( response,stream_mode=stream_mode ),
+                media_type="text/event-stream"
+            )
+    
+        """TODO handle an open ai scheme from the handler"""
+        return JSONResponse(content=response, status_code=201)
+    except HTTPException:
+        logger.warning(traceback.format_exc())
+        raise
+    except:
+        logger.warning(traceback.format_exc())
+        raise HTTPException(status_code=400, detail=f"Something happened that should not have happened.")
+    
 @router.post("/anthropic/completions")
 async def anthropic_completions(
     request: AnthropicCompletionsRequest,
@@ -707,76 +850,7 @@ async def google_completions(
     # Use the standard completions endpoint to handle it
     return await completions(openai_request, background_tasks, user=user)
 
-@router.post("/agent/{agent}/completions")
-async def agent_completions(
-    request: CompletionsRequestOpenApiFormat,
-    agent: str,
-    background_tasks: BackgroundTasks,
-    user: dict = Depends(get_current_token)
-):
-    """
-    Use any model with a specific Percolate agent and get model completions.
-    
-    If the agent is used for processing server-side, this endpoint will:
-    - Return streaming responses if streaming is enabled
-    - Return a callback ID for polling if streaming is disabled
-    """
-    # Extract metadata
-    metadata = extract_metadata(request)
-    session_id = metadata.get("session_id", str(uuid.uuid4()))
-    
-    # Determine streaming mode
-    stream_mode = request.get_streaming_mode()
-    
-    # Create a Percolate agent
-    try:
-        percolate_agent = p8.Agent(p8.load_model(agent))
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to load agent '{agent}': {str(e)}")
-    
-    # Extract prompt
-    prompt = request.prompt
-    if isinstance(prompt, list):
-        prompt = "\n".join(prompt)
-    
-    if stream_mode:
-        # For streaming, we run the agent and stream the results
-        # TODO: Implement actual streaming of agent responses
-        async def agent_stream_generator():
-            try:
-                response = percolate_agent.run(prompt, language_model=request.model)
-                if stream_mode == 'sse':
-                    yield f"data: {json.dumps(response)}\n\n"
-                else:
-                    yield json.dumps(response)
-            except Exception as e:
-                if stream_mode == 'sse':
-                    yield f"data: {json.dumps({'error': str(e)})}\n\n"
-                else:
-                    yield json.dumps({'error': str(e)})
-        
-        media_type = "text/event-stream" if stream_mode == 'sse' else "application/json"
-        return StreamingResponse(agent_stream_generator(), media_type=media_type)
-    else:
-        # For non-streaming, we run in the background and return a callback ID
-        callback_id = f"agent_task_{uuid.uuid4()}"
-        
-        # Start the agent in the background
-        background_tasks.add_task(
-            run_agent_in_background,
-            percolate_agent,
-            prompt,
-            request.model,
-            callback_id,
-            session_id
-        )
-        
-        # Return the callback ID for polling
-        return JSONResponse(content={
-            "id": callback_id,
-            "status": "processing",
-            "message": "Agent is processing your request. Use the poll-completions endpoint to check for results."
-        })
+ 
 
 async def run_agent_in_background(agent, prompt, model, callback_id, session_id):
     """Run an agent in the background and store results for polling."""
@@ -793,29 +867,7 @@ async def run_agent_in_background(agent, prompt, model, callback_id, session_id)
         # Store the error for polling
         print(f"FAILED AGENT TASK {callback_id}: {str(e)}")
 
-@router.get("/agent/{agent}/poll-completions/{callback_id}")
-async def poll_agent_completions(
-    callback_id: str,
-    agent: str,
-    user: dict = Depends(get_current_token)
-):
-    """
-    Poll for results from an agent running in the background.
-    
-    This endpoint is paired with agent_completions for checking the status
-    of background agent tasks.
-    """
-    # TODO: Implement actual retrieval of results from database/cache
-    
-    # For now, return a mock response
-    return JSONResponse(content={
-        "id": callback_id,
-        "status": "completed",
-        "result": {
-            "content": "This is a placeholder response. Implement actual result retrieval."
-        }
-    })
-
+ 
 class SimpleAskRequest(BaseModel):
     """Request model for a simple question to an agent."""
     model: Optional[str] = Field(None, description="The language model to use - Percolate defaults to GPT models")
