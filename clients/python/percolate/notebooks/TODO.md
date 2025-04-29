@@ -35,9 +35,15 @@ We dont really have a good database migration approach - this requires more thou
 - when a schema is upserted and embedding fields we dont add the notify trigger that is only added when tables are created with embedding fields. We can attach this trigger in the alter.
 - We dont refresh embeddings today when fields are updated - we need to invalidate embeddings when there are row updates - there is an argument in some cases the fuzzyness is ok for some tables so we might make this optional
 - WE have yet to implement multiple embeddings types e.g. ollama or multiple embeddings for searching. 
-- 
+- we need a dignostic to test embeddings since there are a few moving parts and better error handling
 - 
 
 
 ## Misc bugs
 - there is a flaw in the test database use where we are not syncing table schema e.g. we added name to model and it was not added in the creation script
+- 
+
+
+## Syncs
+- for box and drive we will use a fix sync table to keep track of resources that we have synced or now name|id|sync_ate|size|modified
+- 

@@ -162,10 +162,14 @@ class LanguageModel:
         env_token = os.environ.get(self.params['token_env_key'])
         self.params['token'] = env_token  if env_token is not None and len(env_token) else self.params.get('token')
         
-    def parse(self, response: requests.models.Response, context: CallingContext=None) -> AIResponse:
-        """the llm response form openai or other schemes must be parsed into a dialogue.
+    def parse(self, response: requests.models.Response | typing.Any, context: CallingContext=None) -> AIResponse:
+        """the llm response or HybridResponse from streaming is parsed into our canonical AIResponse.
         this is also done inside the database and here we replicate the interface before dumping and returning to the executor
         """
+        from .utils import HybridResponse
+        # If we got a HybridResponse, convert it directly without extra API calls
+        if isinstance(response, HybridResponse):
+            return response.to_ai_response(session_id=context.session_id if context else None)
         streaming_callback = context.streaming_callback if context and context.streaming_callback else None
 
         try:
@@ -184,8 +188,11 @@ class LanguageModel:
             logger.warning(f"failing to parse {response} {traceback.format_exc()}")
             raise
         
-    def __call__(self, messages: MessageStack, functions: typing.List[dict], context: CallingContext=None ,debug_response:bool=False ) -> AIResponse:
-        """call the language model with the message stack and functions"""
+    def __call__(self, messages: MessageStack, functions: typing.List[dict], context: CallingContext=None, debug_response:bool=False ) -> AIResponse:
+        """call the language model with the message stack and functions.
+        We return the parsed response unless the caller asks for the raw
+        We support a hybrid mode of return the content stream and holding the function call
+        """
             
         try:
             response = self._call_raw(messages=messages, functions=functions,context=context)
@@ -193,6 +200,9 @@ class LanguageModel:
             logger.debug(f"{response=}, {context=}")
             if debug_response:
                 return response
+            
+            if context.is_hybrid_streaming:
+                return HybridResponse(response)
             
             """for consistency with DB we should audit here and also format the message the same with tool calls etc."""
             response = self.parse(response,context=context)
@@ -392,7 +402,7 @@ class LanguageModel:
                     
         logger.trace(f"request {data=}, {is_streaming=}")
    
-        response =  requests.post(url, headers=headers, data=json.dumps(data),stream=is_streaming)
+        response =  requests.post(url, headers=headers, data=json.dumps(data), stream=is_streaming)
         
         if response.status_code not in [200,201]:
             logger.warning(f"failed to submit: {response.status_code=}  {response.content}")

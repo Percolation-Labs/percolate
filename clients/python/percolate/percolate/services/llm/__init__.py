@@ -17,6 +17,26 @@ class FunctionCall(BaseModel):
         if self.scheme == 'google':
             return 'user'
         return "tool"
+    
+    def to_assistant_message(self, scheme:str='openai'):
+        """
+        assistant declares function call or rather tool call
+        """
+        args_str = self.arguments if isinstance(self.arguments,str) else json.dumps(self.arguments)
+        return { "role": "assistant",
+                "content": '',
+                "tool_calls": [
+                     {
+                        "id": self.id,
+                        "type": "function",
+                        "function": {
+                            "name":self.name,
+                            "arguments": args_str
+                        }
+                    }
+                ]
+            }
+    
     @model_validator(mode='before')
     @classmethod
     def _val(cls, values):
