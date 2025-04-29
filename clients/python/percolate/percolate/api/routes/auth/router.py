@@ -6,13 +6,17 @@ import os
 from pathlib import Path
 import json
 from fastapi.responses import  JSONResponse
-from . import get_current_token
+from . import get_current_token, get_api_key
 import percolate as p8
 import typing
 from fastapi.responses import RedirectResponse
 from percolate.utils import logger
 
 router = APIRouter()
+@router.get("/ping")
+async def ping(token: str = Depends(get_api_key)):
+    """Ping endpoint to verify API key authentication"""
+    return Response(status_code=200)
 
  
 REDIRECT_URI = "http://127.0.0.1:5000/auth/google/callback"# if not project_name else f"https://{project_name}.percolationlabs.ai/auth/google/callback"

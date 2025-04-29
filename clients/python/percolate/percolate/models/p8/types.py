@@ -15,8 +15,10 @@ from .. import DefaultEmbeddingField
 from percolate.utils.names import EmbeddingProviders
 import percolate as p8
 import json
-import os
+from percolate.utils import get_iso_timestamp
 import hashlib
+
+
 class Function(AbstractEntityModel):
     """Functions are external tools that agents can use. See field comments for context.
     Functions can be searched and used as LLM tools. 
@@ -329,6 +331,7 @@ class AIResponse(TokenUsage):
     We generate questions with sessions and then that triggers an exchange. 
     Normally the Dialogue is round trip transaction.
     """
+    model_config = {'protected_namespaces': ()}
     id: uuid.UUID| str  
     role: str = Field(description="The role of the user/agent in the conversation")
     content: str = DefaultEmbeddingField(description="The content for this part of the conversation") #TODO we may not want to automatically generate embeddings for this table
@@ -352,32 +355,44 @@ class AIResponse(TokenUsage):
         message = choice['message']
         tool_calls= message.get('tool_calls')
         return cls(
-            id= str(uuid.uuid1()),
-            role = message['role'],
-            tool_calls = tool_calls,
+            id=str(uuid.uuid1()),
+            role=message.get('role'),
+            tool_calls=tool_calls,
             content=message.get('content') or '',
             tokens_in=usage['prompt_tokens'],
             tokens_out=usage['completion_tokens'],
-            model = response['model'],
-            status='TOLL_CALL' if not tool_calls else 'RESPONSE',
+            model_name=response['model'],
+            status='TOOL_CALL' if not tool_calls else 'RESPONSE',
             session_id=sid
         )
 class Session(AbstractModel):
-    """Tracks groups if session dialogue"""
+    """Tracks groups if session dialogue - sessions are requests that produce actions or activity. 
+    Typical example is interacting with an AI but also it could be simply a request to bookmark or ingestion some content.
+    From the user's perspective a session is a single interaction but internally the system performs multiple hops in general - hence "session"
+    Sessions can be interactions with the system or agent but they can be inferred e.g. from user activity
+    Sessions can also be abstract for example a daily diary can be an abstract session with the intent of capturing daily activity
+    Sessions can be hierarchical and moments can be generated from sessions.
+    
+    Sessions model user intent.
+    """
     id: uuid.UUID| str  
-    name: typing.Optional[str] = Field(None, description="The name is a pseudo name to make sessions node compatible")
-    query: typing.Optional[str] = DefaultEmbeddingField(None,description='the question or context that triggered the session')
+    """i should maybe deprecate the name here as this is a dense audit but then maybe we should just archive?"""
+    name: typing.Optional[str] = Field(None, description="The name is a pseudo name to make sessions node-compatible")
+    query: typing.Optional[str] = DefaultEmbeddingField(None,description='the question or context that triggered the session - query can be an intent and it can be inferred')
     user_rating: typing.Optional[float] = Field(None, description="We can in future rate sessions to learn what works")
     agent: str = Field('percolate', description="Percolate always expects an agent but we support passing a system prompt which we treat as anonymous agent")
     parent_session_id:typing.Optional[uuid.UUID| str] = Field(None, description="A session is a thread from a question+prompt to completion. We span child sessions")
     
     thread_id: typing.Optional[str] = Field(None,description='An id for a thread which can contain a number of sessions')
-    channel_id: typing.Optional[str] = Field(None,description='The channel through which the user came. It could be a messaging platform channel or a system division')
-    channel_type: typing.Optional[str] = Field(None,description='The channel type')
-    metadata: typing.Optional[dict] = Field(default_factory=dict, description="Arbitrary metadata")
+    channel_id: typing.Optional[str] = Field(None, description="The platform/channel ID through which the user is interacting (e.g., specific Slack channel ID)")
+    channel_type: typing.Optional[str] = Field('percolate', description="The platform type (e.g., 'slack', 'percolate', 'email') - the device info + the channel type tells if its mobile etc")
+    session_type: typing.Optional[str] = Field('conversation', description="The type of session (e.g., 'conversation', 'resource_management', 'task_creation', 'daily_digest')")
+
+    metadata: typing.Optional[dict] = Field(default_factory=dict, description="Arbitrary metadata - typically this is device info and other context")
     session_completed_at: typing.Optional[datetime.datetime] = Field(default=None,description="An audit timestamp to write back the completion of the session - its optional as it should manage the last timestamp on the AI Responses for the session")
     graph_paths: typing.Optional[typing.List[str]] = Field(None, description="Track all paths extracted by an agent as used to build the KG over user sessions")
-    userid:  typing.Optional[uuid.UUID| str ] = Field(None,description="The user id to use")
+    userid:  typing.Optional[uuid.UUID| str ] = Field(None,description="The user id to use") #implicit
+        
     
     @model_validator(mode='before')
     @classmethod
@@ -387,6 +402,44 @@ class Session(AbstractModel):
             # TODO - consider if this is ok ^
             values['name'] = make_uuid({'query': values.get('query', '')})
         return values
+    
+    @classmethod
+    def get_daily_diary_thread_id(cls, userid:str,  session_type:str=None):
+        """this is a simple hash for filtering and respect the contract for threads"""
+        daily_diary_id = make_uuid({"user_id": userid, "session_type": session_type})
+        return daily_diary_id
+    
+    @classmethod
+    def daily_diary_entry(cls, userid:str, query:str, metadata:dict=None, session_type:str='daily_digest'):
+        """
+        generates a task for the daily diary
+        the query should be the intent e.g. a question from a user or an action such as upload file
+        """
+        
+        return Session(id = str(uuid.uuid1()), 
+                       query=query,
+                       name =f"Diary entry {get_iso_timestamp()}",
+                       session_type=session_type, 
+                       userid=userid,
+                       thread_id=cls.get_daily_diary_thread_id(userid=userid,session_type=session_type), 
+                       metadata=metadata)
+    
+    @classmethod
+    def task_thread_entry(cls, thread_id :str,  userid:str, query:str, metadata:dict=None,session_type:str='daily_digest'):
+        """
+        generates a task for the daily diary
+        the query should be the intent e.g. a question from a user or an action such as upload file
+        """
+        
+        return Session(id = str(uuid.uuid1()), 
+                       query=query,
+                       name =f"Diary entry {get_iso_timestamp()}",
+                       session_type=session_type, 
+                       userid=userid,
+                       thread_id=thread_id, 
+                       metadata=metadata)
+    
+    
     
     
     @classmethod
@@ -431,7 +484,10 @@ class Project(AbstractEntityModel):
     name: str = Field(description="The name of the entity e.g. a model in the types or a user defined model")
     description: str = DefaultEmbeddingField(description="The content for this part of the conversation")
     target_date: typing.Optional[datetime.datetime] = Field(None, description="Optional target date")
- 
+    collaborator_ids: typing.List[uuid.UUID] = Field(default_factory=list, description="Users collaborating on this project")
+    status: typing.Optional[str] = Field(default="active", description="Project status")
+    priority: typing.Optional[int] = Field(default=1, description="Priority level (1-5), 1 being the highest priority")
+    
 class Task(Project):
     """Tasks are sub projects. A project can describe a larger objective and be broken down into tasks.
 If if you need to do research or you are asked to search or create a research iteration/plan for world knowledge searches you MUST ask the _ResearchIteration agent_ to help perform the research on your behalf (you can request this agent with the help i.e. ask for an agent by name). 
@@ -440,6 +496,8 @@ If the user asks to look for existing plans, you should ask the research agent t
     """
     id: typing.Optional[uuid.UUID| str] = Field(None,description= 'id generated for the name and project - these must be unique or they are overwritten')
     project_name: typing.Optional[str] = Field(None, description="The related project name if relevant")
+    estimated_effort: typing.Optional[float] = Field(default=None, description="Estimated effort in hours")
+    progress: typing.Optional[float] = Field(default=0.0, description="Completion progress (0-1)")
     
     @model_validator(mode='before')
     @classmethod
@@ -471,14 +529,51 @@ class Resources(AbstractModel):
     uri: str = Field("An external source or content ref e.g. a PDF file on blob storage or public URI")
     metadata: typing.Optional[dict] = {} #for emails it could be sender and receiver info and date
     graph_paths: typing.Optional[typing.List[str]] = Field(None, description="Track all paths extracted by an agent as used to build the KG")
+    #userid:  typing.Optional[uuid.UUID| str ] = Field(None,description="The user id if the resource is owned - many resources are public") implicit
     
     @model_validator(mode='before')
     @classmethod
     def _f(cls, values):
         if not values.get('id'):
-            values['id'] = make_uuid({'uri': values['uri'], 'ordinal': values['ordinal']})
+            """you need to be careful with the id i.e. ordinals and uris should make the resource unique
+            filenames for example should not be used but replaced with e.g. an s3 global uri
+            """
+            values['id'] = make_uuid({'uri': values['uri'], 'ordinal': values.get('ordinal') or 0})
         return values
 
+    @classmethod
+    def chunked_resource_from_text(cls,
+        text: str,
+        uri:str,
+        chunk_size: int = 1000,
+        category: typing.Optional[str] = None,
+        name: typing.Optional[str] = None,
+        userid: typing.Optional[str] = None
+    ) -> typing.List["Resources"]:
+        """load text into simple chunked resource"""
+        name = name or uri
+        chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+
+        resources = []
+        for i, chunk in enumerate(chunks):
+            """TODO: NB!!!!!! HERE WE ARE USING URIS WITHOUT PARAMETERS AS GLOBALLY UNIQUE"""
+            id_input = f"{uri.split('?')[0]}-{i}"
+            id_hash = make_uuid(id_input)
+
+            resource = cls(
+                id=id_hash,
+                name=f'{name} ({i})' if i > 0 else name,
+                category=category,
+                content=chunk,
+                ordinal=i,
+                uri=uri,
+                userid=userid
+            )
+            resources.append(resource)
+
+        return resources
+        
+        
     @classmethod
     def chunked_resource(
         cls,
@@ -486,43 +581,77 @@ class Resources(AbstractModel):
         chunk_size: int = 1000,
         category: typing.Optional[str] = None,
         name: typing.Optional[str] = None,
+        userid: typing.Optional[str] = None,
+        try_markdown:bool = False
     ) -> typing.List["Resources"]:
-        """read file contents from web or file and chunks them by some chunk size - sensible defaults are used"""
+        """read file contents from web or file and chunks them by some chunk size - sensible defaults are used
+        
+        the uri is used as the id but we excluded parameters from the uri
+        """
         
         from percolate.utils.parsing import get_content_provider_for_uri
         from pathlib import Path
         
         def sanitize_text(text: str) -> str:
-            return text.replace("\x00", "")  # or use a placeholder like "�"
+            """this is a dump serializer for now as we work out the data model"""
+            import html2text    
+            t =  text.replace("\x00", "")  # or use a placeholder like "�"
+            if try_markdown:
+                try:
+                     t = html2text.html2text(t)
+                except Exception as ex:
+                    #print("HTMLPARSE", ex)
+                    pass
+            return t
+           
+        """TODO add an S3 provider that understands signing""" 
         provider = get_content_provider_for_uri(uri)
         text = sanitize_text(provider.extract_text(uri))
+        
+        return cls.chunked_resource_from_text(text, 
+                                              uri, 
+                                              chunk_size=chunk_size,
+                                              name=name,
+                                              userid=userid, 
+                                              category=category)
 
-        name = name or uri
-        chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
-
-        resources = []
-        for i, chunk in enumerate(chunks):
-            id_input = f"{uri}-{i}"
-            id_hash = uuid.UUID(hashlib.md5(id_input.encode()).hexdigest())
-
-            resource = cls(
-                id=id_hash,
-                name=f'{name} ({i})',
-                category=category,
-                content=chunk,
-                ordinal=i,
-                uri=uri,
-            )
-            resources.append(resource)
-
-        return resources
-    
 class TaskResources(AbstractModel):
-    """A link between tasks and resources since resources can be shared between tasks"""
-    id: typing.Optional[uuid.UUID| str] = Field("unique id for rel" )  
-    resource_id: typing.Optional[uuid.UUID| str] = Field("The resource id" )  
-    session_id:  typing.Optional[uuid.UUID| str] = Field("The session id is typically a task or research iteration but can be any session id to group resources" )  
+    """(Deprecate)A link between tasks and resources since resources can be shared between tasks"""
+    id: typing.Optional[uuid.UUID| str] = Field(None, description="unique id for rel" )  
+    resource_id: uuid.UUID| str = Field("The resource id" )  
+    session_id:  uuid.UUID| str = Field("The session id is typically a task or research iteration but can be any session id to group resources" )  
+    user_metadata: typing.Optional[dict] = Field(default_factory=dict, description="User-specific metadata for this resource")
+    relevance_score: typing.Optional[float] = Field(default=None, description="How relevant this resource is to the session")
+    @model_validator(mode='before')
+    @classmethod
+    def _f(cls, values):
+        if not values.get('id'):
+            """
+            """
+            values['resource_id'] = str(values['resource_id'])
+            values['session_id'] = str(values['session_id'])
+            
+            values['id'] = make_uuid({'resource_id': values['resource_id'], 'session_id': values.get('session_id') or 0})
+            
+        return values
     
+class SessionResources(AbstractModel):
+    """A link between sessions and resources since resources can be shared between sessions"""
+    id: typing.Optional[uuid.UUID| str] = Field(None, description="unique id for rel" )  
+    resource_id: uuid.UUID| str = Field("The resource id" )  
+    session_id:  uuid.UUID| str = Field("The session id is any user intent from a chat/request/trigger" )  
+    count: typing.Optional[int] = Field(1, description="In a model where we only store head we can track an estimate for chunk count")
+    
+    @model_validator(mode='before')
+    @classmethod
+    def _f(cls, values):
+        if not values.get('id'):
+            """
+            """
+            values['resource_id'] = str(values['resource_id'])
+            values['session_id'] = str(values['session_id'])
+            values['id'] = make_uuid({'resource_id': values['resource_id'], 'session_id': values.get('session_id') or 0})
+        return values
 class _QuestionSet(BaseModel):
     query:str = Field(description="The question/query to search")
     concept_keys: typing.Optional[typing.List[str]] = Field(default_factory=list, description="A list of codes related to the concept diagram matching questions to the research structure")

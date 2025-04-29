@@ -233,7 +233,9 @@ class S3Service:
                     file_name: str, 
                     file_content: typing.Union[BinaryIO, bytes],
                     content_type: str = None,
-                    prefix: str = None) -> Dict[str, Any]:
+                    prefix: str = None,
+                    fetch_presigned_url:bool=False
+                    ) -> Dict[str, Any]:
         """
         Upload a file to the project subfolder.
         
@@ -249,7 +251,7 @@ class S3Service:
         """
         try:
             # Construct the full key
-            key = f"{project_name}/"
+            key = f"{project_name or 'default'}/"
             if prefix:
                 # Ensure prefix doesn't start with '/' and ends with '/'
                 prefix = prefix.strip('/')
@@ -285,7 +287,8 @@ class S3Service:
                 "content_type": head_response.get('ContentType', 'application/octet-stream'),
                 "last_modified": head_response.get('LastModified').isoformat() if 'LastModified' in head_response else None,
                 "etag": head_response.get('ETag', '').strip('"'),
-                "status": "success"
+                "status": "success",
+                "uri" : self.get_presigned_url(project_name,file_name)
             }
             
         except ClientError as e:
