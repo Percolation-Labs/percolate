@@ -480,7 +480,6 @@ class LLMStreamIterator:
             if isinstance(item, AIResponse):
                 self.ai_responses.append(item)
                 continue
-         
             try:
                 for piece in _parse_open_ai_response(item):
                     self._content += piece
@@ -524,7 +523,6 @@ def _parse_open_ai_response(json_data):
         try:
             data = json.loads(json_data[6:])
         except json.JSONDecodeError:
-            
             return
     else:
         data = json_data
