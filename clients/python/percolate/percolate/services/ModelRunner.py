@@ -283,6 +283,12 @@ class ModelRunner:
                     context=ctx,
                 )
 
+                """if we use non open ai models we have a choice where we want to adapt the deltas TBD
+                in v0 ill probably make the contract openai adapter upstream but for example users may want to relay messages in another scheme
+                there are essential three adaptations we need; function call aggregation needs to be buffered and does not need relay; 
+                token usage also needs to be adapter and does not need relay;
+                the decisions is simply around if the raw content line should be sent in the open ai or other scheme - here its the raw 'line' that is relayed in one scheme or another                
+                """
                 for line, chunk in sse_openai_compatible_stream_with_tool_call_collapse(raw_response):
                     #print(chunk)
                     choice = chunk['choices'][0] if chunk.get('choices') else {}

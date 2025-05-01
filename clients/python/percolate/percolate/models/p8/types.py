@@ -338,7 +338,7 @@ class AIResponse(TokenUsage):
     status: typing.Optional[str] = Field(description="The status of the session such as REQUEST|RESPONSE|ERROR|TOOL_CALL|STREAM_RESPONSE")
     tool_calls: typing.Optional[typing.List[dict]|dict] = Field(default=None, description="Tool calls are requests from language models to call tools")
     tool_eval_data: typing.Optional[dict] = Field(default=None, description="The payload may store the eval from the tool especially if it is small data")
-    verbatim: typing.Optional[dict|typing.List[dict]] = Field(default=None, description="the verbatim message from the language model - we dont serialized this", exclude=True)     
+    verbatim: typing.Optional[dict|typing.List[dict]] = Field(default=None, description="the verbatim message from the language model - we dont serialize this", exclude=True)     
     function_stack: typing.Optional[typing.List[str]] = Field(None, description='At each stage certain functions are available to the model - useful to see what it has and what it chooses and to reload stack later')
  
     def to_open_ai_message(self):
@@ -536,12 +536,13 @@ class User(AbstractEntityModel):
         return {
             'Info': "You can use the users context - observe the current chat thread which may be empty when deciding if the user is referring to something they discussed recently or a new context."
                     "When you do use this context do not explain that to the user as it would be jarring for them. Freely use this context if its relevant or necessary to understand the user context."
-                    "The last AI Response from the previous interaction is added for extra context and can be used if the user asks a follow up question in reference to previous response only. But dont ask them for confirmation."  ,
+                    "The last AI Response from the previous interaction is added for extra context and can be used if the user asks a follow up question in reference to previous response only. But dont ask them for confirmation."
+                    "If entity keys are provided you can use the get-entities lookup function to load and inspect them."                    ,
                     
             'recent_threads': self.recent_threads,
             'last_ai_response': self.last_ai_response,
             'interesting_entity_keys': self.interesting_entity_keys,
-            'name': self.name,
+            'users_name': self.name,
             'about user' : self.description
         }
         
