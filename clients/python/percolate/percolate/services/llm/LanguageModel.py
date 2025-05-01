@@ -152,8 +152,8 @@ class LanguageModel:
         if not self.params:
             raise Exception(f"The model {model_name} does not exist in the Percolate settings")
         self.params = self.params[0]
-        if self.params['token'] is None:
         
+        if self.params['token'] is None:
             """if the token is not stored in the database we use whatever token env key to try and load it from environment"""
             self.params['token'] = os.environ.get(self.params['token_env_key'])
             if not self.params['token']:
@@ -161,6 +161,7 @@ class LanguageModel:
         """we use the env in favour of what is in the store"""
         env_token = os.environ.get(self.params['token_env_key'])
         self.params['token'] = env_token  if env_token is not None and len(env_token) else self.params.get('token')
+        self._scheme = self.params.get('scheme','openai')
         
     def parse(self, response: requests.models.Response | typing.Any, context: CallingContext=None) -> AIResponse:
         """the llm response or HybridResponse from streaming is parsed into our canonical AIResponse.
@@ -201,8 +202,7 @@ class LanguageModel:
             if debug_response:
                 return response
             
-            if context.is_hybrid_streaming:
-                return HybridResponse(response)
+       
             
             """for consistency with DB we should audit here and also format the message the same with tool calls etc."""
             response = self.parse(response,context=context)
@@ -416,3 +416,64 @@ class LanguageModel:
     
     
     
+    def parse_ai_response(self, partial: dict, usage: dict, ctx: CallingContext) -> AIResponse:
+        """
+        Normalize a partial LLM response (tool call or content) and usage dict into an AIResponse.
+        """
+        # Normalize the incoming payload to a plain dict
+        if hasattr(partial, 'model_dump'):
+            data = partial.model_dump()
+        elif hasattr(partial, 'dict'):
+            try:
+                data = partial.dict()
+            except Exception:
+                data = {}
+        elif isinstance(partial, dict):
+            data = partial
+        else:
+            data = {}
+
+        # Extract core fields
+        content = data.get('content', '')
+        role = data.get('role', 'assistant')
+        tool_calls = data.get('tool_calls')
+        tool_eval_data = data if tool_calls else None
+        verbatim = data.get('verbatim')
+        function_stack = data.get('function_stack')
+
+        # Token usage comes solely from the provided usage dict
+        if usage and isinstance(usage, dict):
+            tokens_in = usage.get('prompt_tokens', usage.get('input_tokens', 0))
+            tokens_out = usage.get('completion_tokens', usage.get('output_tokens', 0))
+        else:
+            tokens_in = tokens_out = 0
+
+        # Determine status based on presence of a tool call
+        status = 'TOOL_CALL_RESPONSE' if tool_calls else 'COMPLETED'
+
+        return AIResponse(
+            id=str(uuid.uuid1()),
+            model_name=self.model_name,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            session_id=ctx.session_id,
+            role=role,
+            content=content,
+            status=status,
+            tool_calls=tool_calls,
+            tool_eval_data=tool_eval_data,
+            verbatim=verbatim,
+            function_stack=function_stack,
+        )
+    
+    def get_stream_iterator(self, content_generator, context:CallingContext):
+        """
+        The stream iterator is a wrapper that helps with custom streaming logic, formatting and auditing
+        """
+        # Wrap the streaming generator and collected AIResponses for auditing
+        return LLMStreamIterator(
+            content_generator,
+            scheme=self._scheme,
+            context=context
+        )
+        

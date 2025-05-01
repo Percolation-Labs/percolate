@@ -37,6 +37,9 @@ from percolate.models import MessageStack
 from percolate.services.llm.CallingContext import CallingContext
 from datetime import datetime
 from percolate.utils import logger
+from percolate.models import Session, User,AIResponse
+from percolate.utils import make_uuid
+
 import traceback
 # Import models from models.py
 from .models import (
@@ -96,11 +99,12 @@ def handle_agent_request(request: CompletionsRequestOpenApiFormat, params: Optio
     from percolate.models import Resources
     
     metadata = params or {} 
-    system_content, last_user_content = get_messages_by_role_from_request(request, params)
+    system_content, query = get_messages_by_role_from_request(request, params)
     agent = p8.Agent(Resources)
     """todo construct context"""
-    ctx = CallingContext(plan=system_content,username=metadata.get('user_id'), channel_ts=metadata.get('session_id'))
-    return agent.stream(last_user_content,context=ctx)
+    userid = metadata.get('userid') or metadata.get('user_id')
+    ctx = CallingContext(plan=system_content,username=userid, session_id=str(uuid.uuid1()), channel_ts=metadata.get('session_id'))
+    return agent.stream(query,context=ctx)
     
     
 def handle_openai_request(request: CompletionsRequestOpenApiFormat, params: Optional[Dict] = None, language_model_class=LanguageModel):
@@ -460,7 +464,7 @@ def stream_generator(response, stream_mode, audit_callback=None, from_dialect='o
             if json_data and json_data[0] == '{':       
                 """Parse in valid data and use the canonical mapping"""     
                 canonical_data = map_delta_to_canonical_format(json.loads(json_data), from_dialect, model)
-             
+
                 """recover the SSE binary format"""
                 chunk = f"data: {json.dumps(canonical_data)}\n\n".encode('utf-8')
         
@@ -505,7 +509,11 @@ def extract_metadata(request, params=None):
     
     return metadata
 
-def audit_request(request, response, metadata=None):
+def audit_request(request:str, 
+                  response:str|dict, 
+                  metadata:dict=None,
+                  user_model = None,
+                  max_response_audit_length: int=None):
     """
     Audit the request and response in the database.
     This is a placeholder for the actual implementation.
@@ -521,35 +529,52 @@ def audit_request(request, response, metadata=None):
         response: The LLM response
         metadata: Additional metadata
     """
-    # TODO: Implement actual database auditing
-    
-    from percolate.models import Session
-    from percolate.utils import make_uuid
-       
-    if 'userid' in metadata:
-        metadata['userid'] = make_uuid(metadata['userid'])
+ 
     if 'transcribed_audio' in metadata:
         """a little janky on the interface but for efficiency we dont want to dump all of this - we could link a raw file later against the id"""
         metadata['query'] = metadata['transcribed_audio'] 
         """before overwriting dump audio record to file storage"""
- 
+    
+    """we generate a session id if the response did not provided one"""
+    session_id = getattr(response, 'session_id', str(uuid.uuid1()))
     try:
-        s = Session(id=str(uuid.uuid1()), **metadata)
+        s = Session(id=session_id, **metadata)
         p8.repository(Session).update_records(s)
         logger.info(f"audited {s=}")
         
     except:
         logger.warning("Problem with audit request")
         logger.warning(traceback.format_exc())
-        
+
     try:
         
-        pass
+        """Update the user context here - we can also schedule model updates of the user
+        -the function will at a minimum merge the latest session's thread into user history
+        - we can model the user on a background job occasionally but we can add quick session tags here
+        - an example of how this might work our tool use audit observes keys that were used as adds them to popular keys 
+        - while we can construct graph paths from the conversation - the process can write discovered graph paths to both session and user model
+        """
+      
+        last_ai_response = getattr(response, 'content', None)
+        p8.repository(User).execute('select * from p8.update_user_model(%s, %s)', data=(metadata['userid'],last_ai_response))
+        logger.info(f"updated user model {metadata['userid']}")
+        
+    except:
+        logger.warning("Problem with audit user")
+        logger.warning(traceback.format_exc())
+         
+           
+    try:
+        """audit ai responses which is only use in the agentic mode"""
+        if hasattr(response, 'ai_responses'):
+            p8.repository(AIResponse).update_records(response.ai_responses)
+            logger.debug(f"Added AI Response audit")
     except:
         logger.warning("Problem with audit response")
         logger.warning(traceback.format_exc())
 
 
+         
 def try_decode_device_info(di):
     """
     Base64 encoded map is added - try to get it and return as JSON.
@@ -570,6 +595,14 @@ def try_decode_device_info(di):
             return {}
 
     return di
+
+def _ensure_user_hash(userid):
+    """
+    ths is temporary thing to turn emails into user id for testing
+    """
+    
+    if userid:
+        return make_uuid( userid.lower() )
 # ---------------------------------------------------------------------------
 # API Endpoints
 # ---------------------------------------------------------------------------
@@ -624,19 +657,18 @@ async def completions(
         logger.warning(f"{token} != {expected_token} - not authenticated")
         raise HTTPException(status_code=401, detail="API token is incorrect")
     
- 
     try:
         # Collect query parameters into a dict for easier handling
         params = {
-            'userid': user_id,
+            'userid': _ensure_user_hash(user_id),
             'thread_id': session_id,
             'channel_id': channel_id,
             'channel_type': channel_type,
             'api_provider': api_provider,
             'is_audio': is_audio,
             'query': request.compile_question(),
-            'agent': request.compile_system()
-        
+            'agent': request.compile_system(),
+            'metadata': device_info
         }
         
         # Remove None values
@@ -756,20 +788,19 @@ async def agent_completions(
     if token != expected_token:
         logger.warning(f"{token} != {expected_token} - not authenticated")
         raise HTTPException(status_code=401, detail="API token is incorrect")
-    
  
     try:
         # Collect query parameters into a dict for easier handling
         params = {
-            'userid': user_id,
+            'userid': _ensure_user_hash(user_id),
             'thread_id': session_id,
             'channel_id': channel_id,
             'channel_type': channel_type,
             'api_provider': api_provider,
             'is_audio': is_audio,
             'query': request.compile_question(),
-            'agent': request.compile_system()
-        
+            'agent': request.compile_system(),
+            'metadata': device_info
         }
         from percolate.models import Resources
         # Remove None values
@@ -777,11 +808,18 @@ async def agent_completions(
         stream_mode = request.get_streaming_mode(params)
         """wrap the agent call - we can lookup and agent and use the iter lines to get the sse or return the non streaming response"""
         response = handle_agent_request(request, params, request.model, agent_model_name=agent_name)
+        
+        if background_tasks:
+            background_tasks.add_task(audit_request, request, response, params)
+                
         if stream_mode:
+            
             return StreamingResponse(
                 stream_generator( response,stream_mode=stream_mode ),
                 media_type="text/event-stream"
             )
+            
+            
     
         """TODO handle an open ai scheme from the handler"""
         return JSONResponse(content=response, status_code=201)

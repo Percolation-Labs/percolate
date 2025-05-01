@@ -355,12 +355,11 @@ class PostgresService:
     def get_by_id(cls, id: str, as_model:bool = False) -> dict|AbstractModel:
         """select dictionary values by if unless as model set set - returns one value"""
         data =  cls.select(id=id)
-        if data and as_model and cls.model:
-            data = [cls.model(**d) for d in data][0]
-            if as_model:
-                assert cls.model, "You have asked for a model but the model is not set on the repository"
-                return cls.model(**data)
-        return data
+        if data:
+            data = data[0]
+        if as_model and cls.model:
+            data = cls.model(**data) 
+        return data 
     
     def select_to_model(self, fields: typing.List[str] = None):
         """
