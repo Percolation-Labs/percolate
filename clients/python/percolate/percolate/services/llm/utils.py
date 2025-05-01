@@ -300,297 +300,6 @@ def request_openai(messages,functions):
     
     return requests.post(url, headers=headers, data=json.dumps(data))
 
-
-class HybridResponse:
-    """
-    HybridResponse wraps a streaming LLM HTTP response to buffer function (tool) calls
-    while streaming non-function content as Server-Sent Events (SSE).
-
-    Attributes:
-        _response: The underlying HTTP response object with an iter_lines() method.
-        _tool_calls: List[FunctionCall] buffered during streaming.
-        _content: str concatenated text content from the stream.
-    """
-    def __init__(self, response):
-        """
-        Initialize a HybridResponse.
-
-        Args:
-            response: HTTP response object with a .iter_lines() method (e.g., requests.Response).
-        """
-        self._response = response
-        # Buffer for SSE-formatted event strings
-        self._buffered_lines: list[str] = []
-        # Flag indicating whether the response stream is fully consumed and buffered
-        self._buffering_done: bool = False
-        # Buffered list of FunctionCall objects
-        self._tool_calls: list[FunctionCall] = []
-        # Accumulated text content
-        self._content: str = ""
-        # Metadata for building final AIResponse
-        self._id: typing.Optional[str] = None
-        self._model: typing.Optional[str] = None
-        self._usage: typing.Optional[dict] = None
-        self._role: typing.Optional[str] = None
-
-    def iter_lines(self, emit_function_events: bool = False, printer=None):
-        """
-        Iterate over the streaming response, yielding SSE-formatted lines for text content.
-        Function calls are buffered internally. Optionally emits SSE events for function calls.
-
-        Args:
-            emit_function_events (bool): If True, emits an SSE event of type "function_call"
-                when a function call is encountered.
-            printer (callable): Optional callback to receive raw text chunks as they arrive.
-
-        Yields:
-            str: SSE-formatted event string (ending with a blank line).
-        """
-        # If buffering is complete, replay cached SSE events
-        if self._buffering_done:
-            for sse_line in self._buffered_lines:
-                yield sse_line
-            return
-        # Stream for the first time: consume HTTP response, buffer, and yield
-        for raw_line in self._response.iter_lines():
-            if not raw_line:
-                continue
-            # Decode bytes to string
-            try:
-                line = raw_line.decode("utf-8").strip()
-            except Exception:
-                # Non-UTF8 or binary content, pass through raw
-                yield raw_line
-                continue
-            # Strip SSE "data:" prefix if present
-            if line.startswith("data:"):
-                line = line[len("data:"):].strip()
-            # Skip empty or terminator lines
-            if not line or line == "[DONE]":
-                continue
-            # Try to parse JSON payload
-            try:
-                payload = json.loads(line)
-                # Capture metadata from JSON chunks if present
-                if 'id' in payload:
-                    self._id = payload.get('id') or self._id
-                if 'model' in payload:
-                    self._model = payload.get('model') or self._model
-                if 'usage' in payload:
-                    self._usage = payload.get('usage')
-            except json.JSONDecodeError:
-                # Not JSON, emit as raw data event
-                sse_line = f"data: {line}\n\n"
-                self._buffered_lines.append(sse_line)
-                yield sse_line
-                if printer:
-                    printer(line)
-                continue
-            # Handle OpenAI-style response with 'choices'
-            if "choices" in payload and payload["choices"]:
-                delta = payload["choices"][0].get("delta", {})
-                # Capture role from delta if present
-                if 'role' in delta:
-                    self._role = delta.get('role')
-                # Detect OpenAI-style function_call in delta (name + argument fragments)
-                # if "function_call" in delta and delta["function_call"]:
-                #     fc = delta["function_call"]
-                #     # Buffer each fragment: name or arguments string
-                #     func_call = FunctionCall(
-                #         name=fc.get("name", "") or "",
-                #         arguments=fc.get("arguments", {}) or "",
-                #         id=fc.get("id", "") or "",
-                #         scheme=None,
-                #     )
-                #     self._tool_calls.append(func_call)
-                #     # Optionally emit an SSE event for the function call fragment
-                #     if emit_function_events:
-                #         sse_line = f"event: function_call\n" + f"data: {func_call.json()}\n\n"
-                #         self._buffered_lines.append(sse_line)
-                #         yield sse_line
-                #     continue
-                # Detect alternative 'tool_calls' array in delta
-                if "tool_calls" in delta and delta["tool_calls"]:
-                    for call in delta.get("tool_calls"):
-                        fn = call.get("function", {})
-                        func_call = FunctionCall(
-                            name=fn.get("name", ""),
-                            arguments=fn.get("arguments") or {},
-                            id=call.get("id", ""),
-                            scheme=None,
-                        )
-                        self._tool_calls.append(func_call)
-                        if emit_function_events:
-                            sse_line = f"event: function_call\n" + f"data: {func_call.json()}\n\n"
-                            self._buffered_lines.append(sse_line)
-                            yield sse_line
-                    # skip streaming this chunk as text
-                    continue
-                # Detect text content in delta
-                text = delta.get("content")
-                if text:
-                    # Buffer and stream text content
-                    self._content += text
-                    sse_line = f"data: {text}\n\n"
-                    self._buffered_lines.append(sse_line)
-                    yield sse_line
-                    if printer:
-                        printer(text)
-                    continue
-            # Fallback: unknown JSON payload
-            sse_line = f"data: {json.dumps(payload)}\n\n"
-            self._buffered_lines.append(sse_line)
-            yield sse_line
-            if printer:
-                printer(json.dumps(payload))
-        # End of stream: emit done event
-        done_event = "event: done\n\n"
-        self._buffered_lines.append(done_event)
-        yield done_event
-        # Mark buffering complete for future replay
-        self._buffering_done = True
-
-    @property
-    def tool_calls(self) -> list[FunctionCall]:
-        """
-        Get the list of buffered function/tool calls, merging any partial
-        fragments from both OpenAI-style `function_call` and alternative
-        `tool_calls` delta formats into complete calls with full arguments.
-
-        Returns:
-            List[FunctionCall]: Complete function call objects.
-        """
-        # Ensure the stream is consumed before returning calls
-        if not self._buffering_done:
-            for _ in self.iter_lines():
-                pass
-        merged_calls: list[FunctionCall] = []
-        last_name: str | None = None
-        last_id: str = ''
-        args_buffer: dict = {}
-        args_str: str = ''
-        for fc in self._tool_calls:
-            # Detect start of a new call (name provided)
-            if fc.name:
-                # Flush previous call if exists
-                if last_name is not None:
-                    final_args = args_buffer.copy()
-                    # Parse any accumulated JSON string fragments
-                    if args_str:
-                        try:
-                            parsed = json.loads(args_str)
-                            if isinstance(parsed, dict):
-                                final_args.update(parsed)
-                        except Exception:
-                            pass
-                    merged_calls.append(
-                        FunctionCall(name=last_name, arguments=final_args, id=last_id, scheme=fc.scheme)
-                    )
-                # Start buffering a new call
-                last_name = fc.name
-                last_id = fc.id or ''
-                args_buffer = {}
-                args_str = ''
-            # Merge dict arguments
-            if isinstance(fc.arguments, dict) and fc.arguments:
-                args_buffer.update(fc.arguments)
-            # Accumulate string fragments
-            elif isinstance(fc.arguments, str) and fc.arguments:
-                args_str += fc.arguments
-        # Flush final call if present
-        if last_name is not None:
-            final_args = args_buffer.copy()
-            if args_str:
-                try:
-                    parsed = json.loads(args_str)
-                    if isinstance(parsed, dict):
-                        final_args.update(parsed)
-                except Exception:
-                    pass
-            merged_calls.append(
-                FunctionCall(name=last_name, arguments=final_args, id=last_id, scheme=None)
-            )
-        return merged_calls
-
-    @property
-    def content(self) -> str:
-        """
-        Get the concatenated text content from the stream.
-
-        Returns:
-            str: Aggregated text content.
-        """
-        # Ensure the stream is consumed before returning content
-        if not self._buffering_done:
-            for _ in self.iter_lines():
-                pass
-        return self._content
-    
-    def to_ai_response(self, session_id: typing.Optional[str] = None) -> AIResponse:
-        """
-        Convert buffered stream into a structured AIResponse without extra LLM calls.
-
-        Args:
-            session_id (str): Optional session ID to attach.
-
-        Returns:
-            AIResponse: Parsed response with content, usage, and tool_calls.
-        """
-        # Build a minimal OpenAI-style response dict
-        resp = {
-            'choices': [{
-                'message': {
-                    'role': self._role or 'assistant',
-                    'content': self._content,
-                    'tool_calls': [fc.model_dump() for fc in self.tool_calls]
-                }
-            }],
-            'usage': self._usage or {},
-            'model': self._model or ''
-        }
-        # Use the AIResponse factory to parse it
-        return AIResponse.from_open_ai_response(resp, session_id)
-    
-    @staticmethod
-    # Example helper: stream until a function call is encountered, notify user, and expose the call for inspection
-    def stream_with_inspection(response, printer=None):  # noqa: E302
-        """
-        Stream non-function content normally, and when a function call is detected,
-        emit a generic notification to the user and return the HybridResponse
-        for later inspection of tool_calls.
-
-        Usage:
-            # response: requests.Response with stream=True
-            hr = stream_with_inspection(response, printer=send_sse)
-            # at this point hr.tool_calls contains any FunctionCall objects
-
-        Args:
-            response: HTTP response object with .iter_lines()
-            printer: Optional callable(str) to receive SSE-formatted lines.
-
-        Returns:
-            HybridResponse: buffered response with content and tool_calls available.
-        """
-        hr = HybridResponse(response)
-        # Stream with function events enabled to catch the first function_call
-        for sse in hr.iter_lines(emit_function_events=True, printer=printer):
-            # Detect the SSE event for function_call
-            if sse.startswith("event: function_call"):
-                # Notify user with a generic message
-                note = "data: I'm looking into it\n\n"
-                if printer:
-                    printer(note)
-                break
-            # Relay normal SSE lines
-            if printer:
-                printer(sse)
-            else:
-                yield sse
-        # Return HybridResponse so caller can inspect hr.tool_calls
-        return hr
-    
-
-
  
 def request_anthropic(messages, functions):
     url = "https://api.anthropic.com/v1/messages"
@@ -653,38 +362,13 @@ def request_google(messages, functions):
     
     return requests.post(url, headers=headers, data=json.dumps(data))
 
- 
-
-def build_full_tool_call_message(delta_chunk):
-    """
-    Converts a streaming-style delta chunk with 'tool_calls'
-    into a full non-streaming assistant message.
-    """
-
-    choice = delta_chunk["choices"][0]
-    index = choice.get("index", 0)
-    tool_calls = choice["delta"].get("tool_calls", [])
-    
-    return {
-        "choices": [
-            {
-                "index": index,
-                "message": {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": tool_calls
-                },
-                "finish_reason": choice.get("finish_reason", "tool_calls")
-            }
-        ]
-    }
 
 def sse_openai_compatible_stream_with_tool_call_collapse(response) -> typing.Generator[typing.Dict[str, typing.Any], None, None]:
     """
-    Mimics OpenAI's SSE stream format, collapsing tool_call delta fragments
+    Mimics OpenAI's SSE stream format, except we are collapsing tool_call delta fragments
     into a single delta message once all arguments are collected.
 
-    Streams content deltas normally, but accumulates tool call fragments
+    Streams content-deltas normally, but accumulates tool call fragments
     into a single tool_call delta message keyed by ID.
 
     When we first receive a tool_call with id, name, and index, we:
@@ -697,10 +381,12 @@ def sse_openai_compatible_stream_with_tool_call_collapse(response) -> typing.Gen
         response: an SSE-style HTTP response using OpenAI's streaming format.
         raw_openai_format: If True, passes through OpenAI's exact SSE chunk format.
     """
+    
     tool_call_map: typing.Dict[str, typing.Dict[str, typing.Any]] = {}
     finished_tool_calls = False
 
     for line in response.iter_lines(decode_unicode=True):
+   
         if not line or not line.startswith("data: "):
             continue
     
@@ -712,19 +398,21 @@ def sse_openai_compatible_stream_with_tool_call_collapse(response) -> typing.Gen
             chunk = json.loads(raw_data)
         except json.JSONDecodeError:
             continue  # skip malformed chunk
-
+        
+        """in the end there is just usage so break after yield"""            
+        
+        if chunk.get('usage'):
+            yield line, chunk
+            continue
+        
         choice = chunk["choices"][0]
         delta = choice.get("delta", {})
         finish_reason = choice.get("finish_reason")
         index = choice.get("index", 0)
 
-        #print(chunk)
-    
-        # Stream normal assistant content
         if  delta.get('content'):
              yield line, chunk
 
-        # Handle tool_call deltas
         if "tool_calls" in delta:
             for tool_delta in delta["tool_calls"]:
                 if tool_delta.get("id"):
@@ -734,38 +422,104 @@ def sse_openai_compatible_stream_with_tool_call_collapse(response) -> typing.Gen
                     t = tool_call_map[tool_delta['index']] 
                     t["function"]["arguments"] += tool_delta["function"]["arguments"]
 
-        # Emit combined tool_calls when model is done
         elif finish_reason == "tool_calls" and not finished_tool_calls:
             finished_tool_calls = True
             full_tool_calls = list(tool_call_map.values())
 
+            # Consolidate all accumulated tool call fragments into one delta
             consolidated_chunk = {
                 "choices": [
                     {
-                        "delta": {
-                            "tool_calls": full_tool_calls
-                        },
+                        "delta": {"tool_calls": full_tool_calls},
                         "index": index,
                         "finish_reason": "tool_calls",
-                        'role': 'assistant'
+                        "role": "assistant"
                     }
                 ]
             }
 
-            yield line, consolidated_chunk 
 
-        # Emit final stop message
+            yield line, consolidated_chunk
+
         elif finish_reason == "stop":
             yield line, chunk
 
+ 
+class LLMStreamIterator:
+    """
+    Wraps a streaming generator of LLM responses to:
 
-def print_openai_delta_content(json_data):
+    - Yield SSE-formatted lines via iter_lines(), compatible with OpenAI-style streaming.
+    - Aggregate text content deltas into a final content string accessible via the .content property.
+    - Collect AIResponse objects for each tool call response in the .ai_responses list, for auditing.
+
+    Attributes:
+        ai_responses (List[AIResponse]): Captured AIResponse objects from tool call executions.
+        content (str): Full aggregated content sent to the user; available after iter_lines() is fully consumed.
+        scheme (str): Dialect of the LLM API (e.g., 'openai', 'anthropic', 'google').
+        usage (dict): Token usage dict (e.g., prompt_tokens, completion_tokens, total_tokens) from the final SSE chunk; available after iter_lines() consumption.
     """
-    Safely parses the given JSON (string or dict) and prints any
-    'content' values found under choices[].delta.
-    this is a convenience for printing and testing delta chunks
-    """
+    def __init__(self, g, context=None, scheme:str='openai'):
+        self.g = g
+        self.ai_responses =  []
+        self._is_consumed = False
+        self._content = ""
+        self.scheme = scheme
+        self.context = context
+        # Holds LLM token usage from the final SSE chunk (prompt, completion, total)
+        self._usage = {}
+        
+    """return the response object """
+    def iter_lines(self, **kwargs):
+        """
+        Yield SSE-formatted bytes while aggregating content deltas and capturing token usage.
+        """
+        self._is_consumed = False
+        for item in self.g():
+            # Collect the tool call responses but in future we will probably flush these
+            if isinstance(item, AIResponse):
+                self.ai_responses.append(item)
+                continue
+         
+            try:
+                for piece in _parse_open_ai_response(item):
+                    self._content += piece
+            except Exception:
+                pass
+            yield item.encode('utf-8') ##SSE
+        self._is_consumed = True
+   
+    @property
+    def status_code(self):
+        """TODO - we many want to implement this"""
+        return 200
     
+    @property
+    def session_id(self):
+        """this at the moment is needed because when audit the session we should use a single session id and its not clear who knows what when yet"""
+        if self.context:
+            return self.context.session_id
+
+    @property
+    def content(self):
+        """this is a collector for use by auditing tools"""
+        if not self._is_consumed:
+            raise Exception(f"You are trying to read content from an unconsumed iterator - you must iterate iter_lines first")
+        return self._content
+    
+    @property
+    def usage(self):
+        """
+        Return token usage (prompt_tokens, completion_tokens, total_tokens) from the final SSE chunk.
+        Must be accessed after iter_lines() has been fully consumed.
+        """
+        if not self._is_consumed:
+            raise Exception("You must fully consume iter_lines() before accessing usage")
+        return self._usage
+    
+    
+def _parse_open_ai_response(json_data):
+    """parse the open ai message structure for the delta to get the actual content"""
     if isinstance(json_data, str):
         try:
             data = json.loads(json_data[6:])
@@ -778,4 +532,13 @@ def print_openai_delta_content(json_data):
         delta = choice.get("delta", {})
         content = delta.get("content")
         if content is not None:
-            print(content,end='')
+            yield content
+            
+def print_openai_delta_content(json_data):
+    """
+    Safely parses the given JSON (string or dict) and prints any
+    'content' values found under choices[].delta.
+    this is a convenience for printing and testing delta chunks
+    """
+    for content in _parse_open_ai_response(json_data):
+        print(content,end='')

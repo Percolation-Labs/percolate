@@ -7,7 +7,8 @@ from percolate.models.p8 import Function
 from .FunctionManager import FunctionManager
 from percolate.models import AbstractModel, MessageStack
 from percolate.services.llm import CallingContext, FunctionCall, LanguageModel, MessageStackFormatter
-from percolate.services.llm.utils import HybridResponse
+from percolate.services.llm.utils import LLMStreamIterator
+import uuid
 
 GENERIC_P8_PROMPT = """\n# General Advice.
 Use whatever functions are available to you and use world knowledge only if prompted 
@@ -19,6 +20,8 @@ or the user is obviously asking about real world information that is not covered
 - If you encounter a function name that is not your name such as those lists under agent functions, you can activate it with the provided tool to activate_function_by_name assuming you have the correct function name. You should do so without asking the user.
 - When generating large output observe the notification that needs to be called first, call it and continue.
 Of you call a function that is running another agent, you should always pass the full context from the user in the question. Do not shorten or ask simpler questions which loses the users context.
+- you can use the users context if you are given -for example it may be useful to use their recent chat history or ai responses if they seem to be referring to older context.
+ If you do use recent context do not explain or ask for confirmation as this can be jarring for the user.
             """
             
 class ModelRunner:
@@ -191,6 +194,7 @@ class ModelRunner:
         # print(data) # maybe trace here
         """update messages with data if we can or add error messages to notify the language model"""
         self.messages.add(data)
+        return data
 
     @property
     def functions(self) -> typing.Dict[str, Function]:
@@ -217,7 +221,7 @@ class ModelRunner:
         Stream the agentic loop as SSE events.  This method orchestrates successive
         LLM calls until no function calls remain.  It always yields SSE-formatted
         text chunks; upon detecting a function call it yields a placeholder event
-        (e.g. "data: I'm working on it"), invokes the function, updates the
+        (e.g. "data: im performing function X"), invokes the function, updates the
         message stack, and continues streaming from the model.
 
         Args:
@@ -231,17 +235,22 @@ class ModelRunner:
         Yields:
             str: SSE-formatted event strings (e.g. "data: ...\n\n").
         """
-                # Loop until model returns no function calls or limit reached
-     
+
         from percolate.services.llm.utils import sse_openai_compatible_stream_with_tool_call_collapse 
+        from percolate.models import AIResponse,User
+        
+        if context:
+            ctx = context.in_streaming_mode(model=language_model)
+        else:
+            ctx = CallingContext.with_model(language_model).in_streaming_mode()
+        self._context = ctx
+        lm_client = LanguageModel.from_context(ctx)
+        # The streaming generator will yield AIResponse objects for auditing directly
         
         def _generator():
             # Prepare streaming + hybrid context so LLM client returns HybridResponse
-            if context:
-                ctx = context.in_streaming_mode(model=language_model)
-            else:
-                ctx = CallingContext.with_model(language_model).in_streaming_mode()
-            self._context = ctx
+    
+            """capture the tool call and eval for auditing"""
             
             """we can add a users system prompt to the generic and then merge an agents prompt after that"""
             sys_prompt = GENERIC_P8_PROMPT if not context.plan else  f"{GENERIC_P8_PROMPT}\n\n{context.plan}"
@@ -251,70 +260,71 @@ class ModelRunner:
                 question=question,
                 functions=self.functions.keys(),
                 data=payload,
-                system_prompt_preamble=sys_prompt
+                system_prompt_preamble=sys_prompt,
+                user_memory = ctx.get_user_memory()
             )
-            # Create a streaming-capable LLM client
-            lm_client = LanguageModel.from_context(ctx)
+
             max_loops = limit or ctx.max_iterations
+            last_ai_response = None 
+            saw_stop = False #this is to kill the entire agent loop
             for _ in range(max_loops):
-                # Invoke the model to get raw streaming HTTP response
+                turn_content = ''
+                saw_tool_call = False
+                turn_usage = {}
+                last_ai_response = None
                 raw_response = lm_client._call_raw(
                     messages=self.messages,
                     functions=self.function_descriptions,
                     context=ctx,
                 )
 
-                # Collapse tool call fragments into complete deltas
-                saw_tool_call = False
                 for line, chunk in sse_openai_compatible_stream_with_tool_call_collapse(raw_response):
                     #print(chunk)
-                    choice = chunk['choices'][0]
+                    choice = chunk['choices'][0] if chunk.get('choices') else {}
                     finish = choice.get('finish_reason')
                     # Handle tool call batch
                     if finish == 'tool_calls':
+                        # Tool-call turn: capture usage and mark
                         saw_tool_call = True
-                        # Notify user of tool invocation
-                        
-                        # Invoke each buffered function call
-                        for tc in choice['delta']['tool_calls']:
-                            """only tested for OpenAI scheme for now and the chunker will probably adapt - we add the verbatim response to the messages so its declared""" 
-                            fc = FunctionCall(id=tc['id'], **tc['function'], scheme='openai') 
+                        turn_usage = chunk.get('usage', {}) or {}
+                        # Invoke each buffered function call and build aggregate response data
+                        tool_call_evals = {}
+                        for tc in choice['delta'].get('tool_calls', []):
+                            fc = FunctionCall(id=tc['id'], **tc['function'], scheme='openai')
                             yield f"data: im calling {fc.name}...\n\n"
-                            """announce the function call on the message stack"""
                             self.messages.add(fc.to_assistant_message())
-                            self.invoke(fc)
-                        # Break to start next iteration and re-query the model
-                        break
+                            tool_call_evals[fc.id] = self.invoke(fc)
+                        last_ai_response = {
+                            'tool_calls': choice['delta'].get('tool_calls', []),
+                            'tool_eval_data': tool_call_evals
+                        }
+     
                     # Stream content deltas
                     delta = choice.get('delta', {}) or {}
                     if 'content' in delta:
-                        #if there is a printer we can print the delta['content]
+                        # Extract incremental piece
+                        piece = delta.get('content') or ''
+                        # Send to any streaming callback
                         if context.streaming_callback:
                             context.streaming_callback(line)
-                        """yield the full formatted message for compliance"""
+                        # Accumulate content for this turn
+                        turn_content += piece
+                        # Yield the SSE-formatted line for client
                         yield f"{line}\n\n"
-                    # End of response
-                    if finish == 'stop':
-                        return
-                # If no tool call detected, we are done
-                if not saw_tool_call:
-                    return
 
-        class _Iterator:
-            """implement a familiar response iterator interface for convenience with routers"""
-            def __init__(self, g):
-                self.g = g
-            """return the response object """
-            def iter_lines(self, **kwargs):
-                for item in self.g():
-                    yield item.encode('utf-8')
-                    
-            @property
-            def status_code(self):
-                """TODO - we many want to implement this"""
-                return 200
-            
-        return _Iterator(_generator)
+                    """in this single request loop"""
+                    if not saw_tool_call:
+                        last_ai_response = {'content': turn_content}
+                    if finish == 'stop':
+                        saw_stop = True
+                    if turn_usage:= chunk.get('usage'):
+                        yield lm_client.parse_ai_response(last_ai_response, turn_usage, ctx)
+                        #saw stop and usage is always last anyway
+                """break out of the agentic loop"""
+                if saw_stop:
+                    break
+                     
+        return lm_client.get_stream_iterator(_generator, context=ctx)
                 
 
     def run(self, question: str, context: CallingContext = None, limit: int = None, data: typing.List[dict] = None, language_model:str=None, audit:bool=True):

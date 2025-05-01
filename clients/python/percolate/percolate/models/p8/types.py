@@ -383,7 +383,7 @@ class Session(AbstractModel):
     agent: str = Field('percolate', description="Percolate always expects an agent but we support passing a system prompt which we treat as anonymous agent")
     parent_session_id:typing.Optional[uuid.UUID| str] = Field(None, description="A session is a thread from a question+prompt to completion. We span child sessions")
     
-    thread_id: typing.Optional[str] = Field(None,description='An id for a thread which can contain a number of sessions')
+    thread_id: typing.Optional[str] = Field(None,description='An id for a thread which can contain a number of sessions - thread matches are case insensitive ie.. MyID==myid - typically we prefer ids to be uuids but depends on the system')
     channel_id: typing.Optional[str] = Field(None, description="The platform/channel ID through which the user is interacting (e.g., specific Slack channel ID)")
     channel_type: typing.Optional[str] = Field('percolate', description="The platform type (e.g., 'slack', 'percolate', 'email') - the device info + the channel type tells if its mobile etc")
     session_type: typing.Optional[str] = Field('conversation', description="The type of session (e.g., 'conversation', 'resource_management', 'task_creation', 'daily_digest')")
@@ -512,10 +512,40 @@ If the user asks to look for existing plans, you should ask the research agent t
         return {'post_tasks_': 'Used to save tasks by posting the task object. Its good practice to first search for a task of a similar name before saving in case of duplicates' }
     
 class User(AbstractEntityModel):
-    """save user info"""
+    """A model of a logged in user"""
     id: uuid.UUID| str  
-    name: str
+    name: typing.Optional[str] = Field(None,description="A display name for a user")
+    email: typing.Optional[str] = Field(None,description="email of the user if we know it")
+    slack_id: typing.Optional[str] = Field(None,description="slack user U12345")
+    linkedin: typing.Optional[str] = Field(None,description="linkedin profile for user discovery")
+    twitter: typing.Optional[str] = Field(None,description="twitter profile for user discovery")
+
+    description: typing.Optional[str] = DefaultEmbeddingField(default='', description="A learned description of the user")
+    #current_chat_thread: typing.Optional[typing.List[str]] = Field(default_factory=list, description="A thread is a single conversation on any channel - the session contains a list of messages with thread id binding them")
+    recent_threads: typing.Optional[typing.List[dict]|dict] = Field(default_factory=list, description="A thread is a single conversation on any channel - the session contains a list of messages with thread id binding them")
+    last_ai_response: typing.Optional[str] = Field(None, description="We store this context for managing conversations and state")
+    interesting_entity_keys: typing.Optional[dict] = Field(default_factory=dict, description="For the agents convenience a short term mapping of interesting keys with optional descriptions based on user activity")
+    token: typing.Optional[str] = Field(None, description="A token for user authentication to Percolate")
+    roles: typing.Optional[typing.List[str]] = Field(default_factory=list, description="A list of roles the user is a member of")
+    graph_paths: typing.Optional[typing.List[str]] = Field(None, description="Track all paths extracted by an agent as used to build the KG")
+    metadata: typing.Optional[dict] = Field(default_factory=dict, description="Arbitrary user metadata")
     
+    def as_memory(self,**kwargs):
+        """the user memory structure"""
+
+        return {
+            'Info': "You can use the users context - observe the current chat thread which may be empty when deciding if the user is referring to something they discussed recently or a new context."
+                    "When you do use this context do not explain that to the user as it would be jarring for them. Freely use this context if its relevant or necessary to understand the user context."
+                    "The last AI Response from the previous interaction is added for extra context and can be used if the user asks a follow up question in reference to previous response only. But dont ask them for confirmation."  ,
+                    
+            'recent_threads': self.recent_threads,
+            'last_ai_response': self.last_ai_response,
+            'interesting_entity_keys': self.interesting_entity_keys,
+            'name': self.name,
+            'about user' : self.description
+        }
+        
+        
 class Resources(AbstractModel):
     """Generic parsed content from files, sites etc. added to the system.
     If someone asks about resources, content, files, general information etc. it may be worth doing a search on the Resources

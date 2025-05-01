@@ -41,7 +41,7 @@ We dont really have a good database migration approach - this requires more thou
 
 ## Misc bugs
 - there is a flaw in the test database use where we are not syncing table schema e.g. we added name to model and it was not added in the creation script
-- 
+- we rely a lot of pydantic type hints but dont have a good validator e.g. check that types do not have things like typing.Option[typing.List] without the [str] part - this would cause problems that may be hard to understand at the moment
 
 
 ## Syncs
