@@ -119,7 +119,7 @@ class PostgresService:
             
 
         
-    def search(self, question:str):
+    def search(self, question:str,user_id:str=None):
         """
         If the repository has been activated with a model we use the models search function
         Otherwise we use percolates generic plan and search.
@@ -133,9 +133,9 @@ class PostgresService:
         if isinstance(question,list):
             question = '\n'.join(question)
         
-        Q = f"""select * from p8.query_entity(%s,%s) """
+        Q = f"""select * from p8.query_entity(%s,%s, %s) """
         
-        result =  self.execute(Q, data=(question,self.model.get_model_full_name() ))
+        result =  self.execute(Q, data=(question,self.model.get_model_full_name(),user_id ))
         
         try:
             if result:

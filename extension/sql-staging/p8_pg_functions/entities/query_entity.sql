@@ -2,6 +2,7 @@ DROP FUNCTION IF EXISTS p8.query_entity;
 CREATE OR REPLACE FUNCTION p8.query_entity(
     question TEXT,
     table_name TEXT,
+	    user_id UUID DEFAULT NULL,
     vector_search_function TEXT DEFAULT 'vector_search_entity',
     min_confidence NUMERIC DEFAULT 0.7)
 RETURNS TABLE(
@@ -31,6 +32,11 @@ BEGIN
     /*
     first crude look at merging multiple together
     we will spend time on this later with a proper fast parallel index
+
+		select * from p8.nl2sql('what is my favourite color', 'p8.UserFact' )
+	
+	    select * from p8.query_entity('what is my favourite color', 'p8.UserFact', 'e9c56a28-1d09-5253-af36-4b9d812f6bfa')
+	  select * from p8.query_entity('what is my favourite color', 'p8.UserFact', '10e0a97d-a064-553a-9043-3c1f0a6e6725')
 
     select * from p8.query_entity('what sql queries do we have for generating uuids from json', 'p8.PercolateAgent')
     */
@@ -69,17 +75,34 @@ BEGIN
     END IF;
 
     -- Use the selected vector search function to perform the vector search
-    BEGIN
-        EXECUTE FORMAT(
-            'SELECT jsonb_agg(row_to_json(result)) 
-             FROM (
-                 SELECT b.*, a.vdistance 
-                 FROM p8.%I(%L, %L) a
-                 JOIN %s.%I b ON b.id = a.id 
-                 ORDER BY a.vdistance
-             ) result',
-            vector_search_function, question, table_name, schema_name, table_without_schema
-        ) INTO vector_search_result;
+    -- update this to filter by user id if its provided
+        BEGIN
+        IF user_id IS NOT NULL THEN
+            EXECUTE FORMAT(
+                'SELECT jsonb_agg(row_to_json(result)) 
+                 FROM (
+                     SELECT b.*, a.vdistance 
+                     FROM p8.%I(%L, %L) a
+                     JOIN %I.%I b ON b.id = a.id  
+                     WHERE b.userid = %L
+                     ORDER BY a.vdistance
+                 ) result',
+                vector_search_function, question, table_name,
+                schema_name, table_without_schema, user_id
+            ) INTO vector_search_result;
+        ELSE
+            EXECUTE FORMAT(
+                'SELECT jsonb_agg(row_to_json(result)) 
+                 FROM (
+                     SELECT b.*, a.vdistance 
+                     FROM p8.%I(%L, %L) a
+                     JOIN %I.%I b ON b.id = a.id  
+                     ORDER BY a.vdistance
+                 ) result',
+                vector_search_function, question, table_name,
+                schema_name, table_without_schema
+            ) INTO vector_search_result;
+        END IF;
     EXCEPTION
         WHEN OTHERS THEN
             sql_error := COALESCE(sql_error, '') || '; Vector search error: ' || SQLERRM;
