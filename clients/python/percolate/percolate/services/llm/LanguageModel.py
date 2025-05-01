@@ -167,10 +167,7 @@ class LanguageModel:
         """the llm response or HybridResponse from streaming is parsed into our canonical AIResponse.
         this is also done inside the database and here we replicate the interface before dumping and returning to the executor
         """
-        from .utils import HybridResponse
-        # If we got a HybridResponse, convert it directly without extra API calls
-        if isinstance(response, HybridResponse):
-            return response.to_ai_response(session_id=context.session_id if context else None)
+ 
         streaming_callback = context.streaming_callback if context and context.streaming_callback else None
 
         try:

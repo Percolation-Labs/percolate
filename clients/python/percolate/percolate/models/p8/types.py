@@ -537,19 +537,70 @@ class User(AbstractEntityModel):
             'Info': "You can use the users context - observe the current chat thread which may be empty when deciding if the user is referring to something they discussed recently or a new context."
                     "When you do use this context do not explain that to the user as it would be jarring for them. Freely use this context if its relevant or necessary to understand the user context."
                     "The last AI Response from the previous interaction is added for extra context and can be used if the user asks a follow up question in reference to previous response only. But dont ask them for confirmation."
-                    "If entity keys are provided you can use the get-entities lookup function to load and inspect them."                    ,
+                    "If entity keys are provided you can use the get-entities lookup function to load and inspect them.",
+                    "some tools may accept a user id and you can use the user id here for those tool calls e.g. to do user specific searches"
                     
             'recent_threads': self.recent_threads,
             'last_ai_response': self.last_ai_response,
             'interesting_entity_keys': self.interesting_entity_keys,
             'users_name': self.name,
-            'about user' : self.description
+            'about user' : self.description,
+            'user_id': self.id
         }
+        
+class UserFact(AbstractModel):
+    """
+    important information or trivial about a user typically submitted by a user over time.
+    we can search specifically for user submitted data using vector search or entity lookup for labeled data.
+    """
+    id: uuid.UUID| str  
+    name: typing.Optional[str] = Field(None,description="A unique entity name e.g. user_id-label")
+    label: typing.Optional[str] = Field(None,description="The friendly label for the piece of information")
+    description: typing.Optional[str] = DefaultEmbeddingField(default='', description="A description from the user e.g. my nick name is, my favourite color is, i have traveled to, i like foods like...")
+    invalidated: typing.Optional[bool] = Field(False, description="We can store old information but invalidate it - if we retrieve such information we may discard it as relevant")
+    graph_paths: typing.Optional[typing.List[str]] = Field(None, description="Track all paths extracted by an agent as used to build the KG")
+    userid: str
+    
+    @classmethod
+    def save_user_fact(cls, label:str, description:str, user_id: str, graph_paths:typing.List[str]=None):
+        """save the user fact with a unique label for the information
+        
+        Args:
+            description: details about the user fact
+            unique_label: a user level unique label about the fact - should not collide with other user facts (best effort)
+            user_id: the user id supplied in context- if not known do not try to use this function
+            graph_paths: graph paths are tags of the form A/B where A is more specific than B e.g. LLMs/AI
+        """
+        name = f"{user_id}.{label}"
+        id = make_uuid(name)
+        u = UserFact(id=id,nae=name, label=label,description=description, graph_paths=graph_paths,userid=user_id)
+        return p8.repository(u).update_records(u)
+    
+    @classmethod
+    def search_user_facts(cls, query:str, user_id:str):
+        """
+        Search semantically filtered by a given user id
+        
+        Args:
+            query: a detailed question to search for
+            user_id: str the provided user id if known - if not known, do not try to use this function
+        """
+        
+        """for now just search all but filter by user id assumed"""
+        return p8.repository(UserFact).search(query,user_id=user_id)
+    
+    @classmethod
+    def get_user_entity(cls, label:str,user_id:str):
+        """looks up a user entity using the label qualified with the user id"""
+        name = f"{user_id}.{label}"
+        return p8.repository(UserFact).get_entities(name)
         
         
 class Resources(AbstractModel):
     """Generic parsed content from files, sites etc. added to the system.
-    If someone asks about resources, content, files, general information etc. it may be worth doing a search on the Resources
+    If someone asks about resources, content, files, general information etc. it may be worth doing a search on the Resources.
+    If a user expresses interests or preferences or trivia about themselves - you can save it in the background but response naturally in conversation about it.
+    If the user asks information about themselves you can also try to search for user facts if you dont have the answer.
     """
     id: typing.Optional[uuid.UUID| str] = Field("The id is generated as a hash of the required uri and ordinal")  
     name: typing.Optional[str] = Field(None, description="A short content name - non unique - for example a friendly label for a chunked pdf document or web page title")
@@ -571,6 +622,31 @@ class Resources(AbstractModel):
             """
             values['id'] = make_uuid({'uri': values['uri'], 'ordinal': values.get('ordinal') or 0})
         return values
+    
+    @classmethod
+    def search_facts_by_users(cls, query:str, user_id:str):
+        """
+        Search semantically filtered by a given user id
+        
+        Args:
+            query: a detailed question to search for
+            user_id: str the provided user id if known - if not known, do not try to use this function
+        """
+        
+        return UserFact.search_user_facts(query, user_id)
+    
+    @classmethod
+    def save_user_fact(cls, description:str, unique_label:str, user_id:str, graph_paths:typing.List[str]):
+        """save the user fact with a unique label for the information
+        
+        Args:
+            description: details about the user fact
+            unique_label: a user level unique label about the fact - should not collide with other user facts (best effort)
+            user_id: the user id supplied in context- if not known do not try to use this function
+            graph_paths: graph paths are tags of the form A/B where A is more specific than B e.g. LLMs/AI
+        """
+        
+        return UserFact.save_user_fact(unique_label, description=description,user_id=user_id, graph_paths=graph_paths)
 
     @classmethod
     def chunked_resource_from_text(cls,

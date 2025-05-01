@@ -5,9 +5,9 @@ DROP FUNCTION IF EXISTS p8.nl2sql;
 CREATE OR REPLACE FUNCTION p8.nl2sql(
 	question text,
 	agent_name character varying,
-	model_in character varying DEFAULT 'gpt-4o-2024-08-06'::character varying,
+	model_in character varying DEFAULT 'gpt-4.1-mini'::character varying,
 	api_token character varying DEFAULT NULL::character varying,
-	temperature double precision DEFAULT 0.01)
+	temperature double precision DEFAULT 0.0)
     RETURNS TABLE(response jsonb, query text, confidence numeric) 
     LANGUAGE 'plpgsql'
     COST 100

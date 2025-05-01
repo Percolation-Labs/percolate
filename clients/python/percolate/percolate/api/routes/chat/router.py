@@ -73,8 +73,7 @@ def get_messages_by_role_from_request(request:CompletionsRequestOpenApiFormat, m
         if is_audio:= metadata.get('is_audio'):
             """TODO: we only support this on the open ai handler for now as its experimental - not sure how we want to deal with transcription inline"""
             logger.info(f"is_audio set so we will assume ALL user content is based 64 audio")
-     
- 
+      
         for msg in request.messages:
             if msg.role == "system" and isinstance(msg.content, str):
                 system_content += msg.content + "\n"
