@@ -573,7 +573,7 @@ class UserFact(AbstractModel):
         """
         name = f"{user_id}.{label}"
         id = make_uuid(name)
-        u = UserFact(id=id,nae=name, label=label,description=description, graph_paths=graph_paths,userid=user_id)
+        u = UserFact(id=id,name=name, label=label,description=description, graph_paths=graph_paths,userid=user_id)
         return p8.repository(u).update_records(u)
     
     @classmethod
