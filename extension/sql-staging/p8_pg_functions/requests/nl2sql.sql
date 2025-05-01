@@ -48,6 +48,9 @@ BEGIN
             LIMIT 1;
     END IF;
 
+    select http_set_curlopt('CURLOPT_TIMEOUT','8000') into ack_http_timeout;
+    RAISE NOTICE 'THE HTTP TIMEOUT IS HARDCODED TO 8000ms';
+
     -- API call to OpenAI with the necessary headers and payload
     WITH T AS(
         SELECT 'system' AS "role", 

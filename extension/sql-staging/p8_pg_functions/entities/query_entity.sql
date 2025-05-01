@@ -27,13 +27,14 @@ DECLARE
     sql_error TEXT;
     vector_search_result JSONB;
     embedding_for_text VECTOR;
+		ack_http_timeout BOOLEAN;
 BEGIN
 
     /*
     first crude look at merging multiple together
     we will spend time on this later with a proper fast parallel index
 
-		select * from p8.nl2sql('what is my favourite color', 'p8.UserFact' )
+		select * from p8.nl2sql('current place of residence', 'p8.UserFact' )
 	
 	    select * from p8.query_entity('what is my favourite color', 'p8.UserFact', 'e9c56a28-1d09-5253-af36-4b9d812f6bfa')
 	  select * from p8.query_entity('what is my favourite color', 'p8.UserFact', '10e0a97d-a064-553a-9043-3c1f0a6e6725')
@@ -46,14 +47,17 @@ BEGIN
     table_without_schema := split_part(table_name, '.', 2);
     full_table_name := FORMAT('%I."%I"', schema_name, table_without_schema);
 
-    -- Get the embedding for the question
-    SELECT p8.get_embedding_for_text(question) INTO embedding_for_text;
-
-    -- Call the nl2sql function to get the SQL query and confidence
+    select http_set_curlopt('CURLOPT_TIMEOUT','8000') into 	ack_http_timeout ;
+    RAISE NOTICE 'THE HTTP TIMEOUT IS HARDCODED TO 8000ms';  
+	-- Call the nl2sql function to get the SQL query and confidence
+	
     SELECT "query", nq.confidence INTO query_to_execute, query_confidence  
     FROM p8.nl2sql(question, table_name) nq;
-
-    -- Replace 'YOUR_TABLE' in the query with the actual table name
+	
+    -- Get the embedding for the question
+    SELECT p8.get_embedding_for_text(question) INTO embedding_for_text;
+    
+	-- Replace 'YOUR_TABLE' in the query with the actual table name
     query_to_execute := REPLACE(query_to_execute, 'YOUR_TABLE', full_table_name);
 
     -- Initialize error variables
