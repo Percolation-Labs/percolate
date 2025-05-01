@@ -568,7 +568,7 @@ class UserFact(AbstractModel):
         Args:
             description: details about the user fact
             unique_label: a user level unique label about the fact - should not collide with other user facts (best effort)
-            user_id: the user id supplied in context- if not known do not try to use this function
+            user_id: the user id supplied in context- cif not known do not try to use this function
             graph_paths: graph paths are tags of the form A/B where A is more specific than B e.g. LLMs/AI
         """
         name = f"{user_id}.{label}"
