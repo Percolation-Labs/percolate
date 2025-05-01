@@ -248,9 +248,14 @@ class ModelRunner:
         # The streaming generator will yield AIResponse objects for auditing directly
         
         def _generator():
-            # Prepare streaming + hybrid context so LLM client returns HybridResponse
-    
-            """capture the tool call and eval for auditing"""
+            """the generator manages the agentic loop which in turn manage the streaming loops
+            It yields content in the target format i.e. SSE/OpenAI but also sends the internal AIResponse which is not typically sent to the user
+            The AIResponses are turns (tool calls + evals) which are used in the agentic loop but also audited (the main reason we yield them)
+            This process could be simplified if we flush the AIResponse on another thread to not block the user and save them so that we dont need to collect
+            An auditor singleton or repository singleton could just queue up entities and flush them on another thread
+            
+            We write events using a protocol event:
+            """
             
             """we can add a users system prompt to the generic and then merge an agents prompt after that"""
             sys_prompt = GENERIC_P8_PROMPT if not context.plan else  f"{GENERIC_P8_PROMPT}\n\n{context.plan}"
@@ -282,6 +287,7 @@ class ModelRunner:
                     #print(chunk)
                     choice = chunk['choices'][0] if chunk.get('choices') else {}
                     finish = choice.get('finish_reason')
+                    
                     # Handle tool call batch
                     if finish == 'tool_calls':
                         # Tool-call turn: capture usage and mark
@@ -291,18 +297,19 @@ class ModelRunner:
                         tool_call_evals = {}
                         for tc in choice['delta'].get('tool_calls', []):
                             fc = FunctionCall(id=tc['id'], **tc['function'], scheme='openai')
-                            yield f"data: im calling {fc.name}...\n\n"
+                            yield f"event: im calling {fc.name}...\n\n"
                             self.messages.add(fc.to_assistant_message())
                             tool_call_evals[fc.id] = self.invoke(fc)
+                            
                         last_ai_response = {
                             'tool_calls': choice['delta'].get('tool_calls', []),
-                            'tool_eval_data': tool_call_evals
+                            'tool_eval_data': tool_call_evals,
+                            'function_stack': self.functions.keys()
                         }
      
                     # Stream content deltas
                     delta = choice.get('delta', {}) or {}
                     if 'content' in delta:
-                        # Extract incremental piece
                         piece = delta.get('content') or ''
                         # Send to any streaming callback
                         if context.streaming_callback:
@@ -321,8 +328,7 @@ class ModelRunner:
                         yield lm_client.parse_ai_response(last_ai_response, turn_usage, ctx)
                         #saw stop and usage is always last anyway
                 """break out of the agentic loop"""
-                if saw_stop:
-                    break
+                if saw_stop: break
                      
         return lm_client.get_stream_iterator(_generator, context=ctx)
                 

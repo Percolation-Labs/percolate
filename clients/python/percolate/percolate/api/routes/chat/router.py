@@ -818,9 +818,7 @@ async def agent_completions(
                 stream_generator( response,stream_mode=stream_mode ),
                 media_type="text/event-stream"
             )
-            
-            
-    
+                
         """TODO handle an open ai scheme from the handler"""
         return JSONResponse(content=response, status_code=201)
     except HTTPException:
