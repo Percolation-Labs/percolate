@@ -5,6 +5,7 @@ from urllib.parse import urlparse
 from abc import ABC, abstractmethod
 from pathlib import Path
 import fitz  # PyMuPDF
+from percolate import logger
 
 def is_url(uri: str) -> bool:
     parsed = urlparse(uri)
@@ -26,8 +27,7 @@ def resolve_path_or_download(uri: str) -> Path:
     raise FileNotFoundError(f"Cannot resolve URI: {uri}")
 
 
-
-
+ 
 class BaseContentProvider(ABC):
     @abstractmethod
     def extract_text(self, uri: str) -> str:
@@ -36,8 +36,10 @@ class BaseContentProvider(ABC):
 class PDFContentProvider(BaseContentProvider):
     def extract_text(self, uri: str) -> str:
         path = resolve_path_or_download(uri)
+ 
         with fitz.open(str(path)) as doc:
-            return "\n".join(page.get_text() for page in doc)
+            return  "\n".join(page.get_text() for page in doc)
+ 
 
 class DefaultContentProvider(BaseContentProvider):
     def extract_text(self, uri: str) -> str:
