@@ -24,6 +24,9 @@ from percolate.services.llm.proxy.models import (
 )
 from percolate.services.llm.CallingContext import CallingContext
 
+# mark all tests in this module as slow to skip during regular runs (calls external LLMs)
+pytestmark = pytest.mark.slow
+
 
 # Mock response class that emulates a streaming HTTP response
 class MockResponse:

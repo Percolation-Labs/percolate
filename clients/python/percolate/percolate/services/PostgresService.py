@@ -14,6 +14,7 @@ import traceback
 import uuid
 import json
 from percolate.models.p8 import   Function
+from percolate.services.PercolateGraph import  PercolateGraph
 class PostgresService:
     """the postgres service wrapper for sinking and querying entities/models"""
 
@@ -21,6 +22,7 @@ class PostgresService:
         try:
             self._connection_string = connection_string or POSTGRES_CONNECTION_STRING
             self.conn = None
+            self._graph = PercolateGraph(self)
             self.helper = SqlModelHelper(AbstractModel)  
             if model:
                 """we do this because its easy for user to assume the instance is what we want instead of the type"""
@@ -36,6 +38,10 @@ class PostgresService:
                     "Could not connect - you will need to check your env and call pg._connect again"
                 )
             
+    @property
+    def graph(self):
+        return self._graph
+    
     def _create_db(self,name:str):
         """this util is to create a test database primarily"""
         
