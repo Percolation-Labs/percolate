@@ -60,6 +60,12 @@ class Edge(BaseModel):
     end_id: int
     metadata: typing.Dict[str, typing.Union[str, datetime.datetime]] = Field(alias="properties")
 
+    @model_validator(mode='before')
+    @classmethod
+    def _val(cls, values):
+        """remove forbidden cypher chars in case provided does not"""
+        values['label'] = values['label'].replace('-','_')
+        return values
 
 class ConceptLinks(BaseModel):
     """Concept links are used in the memory system to connect users to concepts"""
