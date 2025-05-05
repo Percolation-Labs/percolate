@@ -84,7 +84,7 @@ class PlanModel(AbstractModel):
         description="A dependency graph - plans can be chained into waves of functions that can be called in parallel or one after the other. Data dependencies are injected to downstream plans",
         default=None,
     )
-    user_id: typing.Optional[str] = Field(None, description="A user that owns the plan")
+    userid: typing.Optional[str] = Field(None, description="A user that owns the plan")
 
     @model_validator(mode="before")
     @classmethod

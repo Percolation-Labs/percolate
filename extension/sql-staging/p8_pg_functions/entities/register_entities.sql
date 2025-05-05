@@ -41,19 +41,14 @@ BEGIN
     -- Create the VIEW script
     view_script := format(
         $$
-        CREATE OR REPLACE VIEW p8."%s" AS (
-
+        CREATE OR REPLACE VIEW p8."%s" AS ( 
             WITH G AS (
-                SELECT id AS gid,
-                       (properties::json->>'uid')::VARCHAR AS node_uid,
-                       (properties::json->>'key')::VARCHAR AS node_key
+                SELECT id AS gid,   (properties::json->>'uid')::VARCHAR AS node_uid,  (properties::json->>'key')::VARCHAR AS node_key
                 FROM %s."%s" g
             )
-            -- In future we might join user id and deleted at metadata - its assumed the 'entity' interface implemented and name exists
-            SELECT t.name AS key,
-                   t.id::VARCHAR(50) AS uid,
-                   t.updated_at,
-                   t.created_at,
+            -- In future we might join user role and deleted at metadata - its assumed the 'entity' interface implemented and name exists
+            SELECT t.name AS key,    t.id::VARCHAR(50) AS uid,    t.updated_at,    t.created_at,    t.userid,
+                   --role and other system fields
                    G.*
             FROM %s."%s" t
                  LEFT JOIN g ON t.id::character varying(50)::text = g.node_uid::character varying(50)::text 

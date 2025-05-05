@@ -14,6 +14,7 @@ import traceback
 import uuid
 import json
 from percolate.models.p8 import   Function
+from percolate.services.PercolateGraph import  PercolateGraph
 class PostgresService:
     """the postgres service wrapper for sinking and querying entities/models"""
 
@@ -21,6 +22,7 @@ class PostgresService:
         try:
             self._connection_string = connection_string or POSTGRES_CONNECTION_STRING
             self.conn = None
+            self._graph = PercolateGraph(self)
             self.helper = SqlModelHelper(AbstractModel)  
             if model:
                 """we do this because its easy for user to assume the instance is what we want instead of the type"""
@@ -36,6 +38,10 @@ class PostgresService:
                     "Could not connect - you will need to check your env and call pg._connect again"
                 )
             
+    @property
+    def graph(self):
+        return self._graph
+    
     def _create_db(self,name:str):
         """this util is to create a test database primarily"""
         
@@ -100,15 +106,21 @@ class PostgresService:
         """a connection in the context of the abstract model for crud support"""
         return PostgresService(model=model, connection_string=self._connection_string, **kwargs)
 
-    def get_entities(self, keys: str | typing.List[str]):
+    def get_entities(self, keys: str | typing.List[str], userid: str = None):
         """
-        use the get_entities database function to lookup entities
+        use the get_entities database function to lookup entities, with optional user_id for access control
+
+        Args:
+            keys: one or more business keys (list of entity names) to fetch
+            userid: optional user identifier to include private entities owned by this user
         """
         if keys:
-            if not isinstance(keys,list):
+            if not isinstance(keys, list):
                 keys = [keys]
-                
-        data = self.execute(f"""SELECT * FROM p8.get_entities(%s)""", data=(keys,))     if keys else None  
+        # Call SQL function with optional userid; when userid is None, only public entities are returned
+        data = self.execute(
+            """SELECT * FROM p8.get_entities(%s, %s)""", data=(keys, userid)
+        ) if keys else None
             
         if not data:
             return [{
@@ -119,7 +131,7 @@ class PostgresService:
             
 
         
-    def search(self, question:str):
+    def search(self, question:str,user_id:str=None):
         """
         If the repository has been activated with a model we use the models search function
         Otherwise we use percolates generic plan and search.
@@ -133,9 +145,9 @@ class PostgresService:
         if isinstance(question,list):
             question = '\n'.join(question)
         
-        Q = f"""select * from p8.query_entity(%s,%s) """
+        Q = f"""select * from p8.query_entity(%s,%s, %s) """
         
-        result =  self.execute(Q, data=(question,self.model.get_model_full_name() ))
+        result =  self.execute(Q, data=(question,self.model.get_model_full_name(),user_id ))
         
         try:
             if result:
@@ -355,12 +367,11 @@ class PostgresService:
     def get_by_id(cls, id: str, as_model:bool = False) -> dict|AbstractModel:
         """select dictionary values by if unless as model set set - returns one value"""
         data =  cls.select(id=id)
-        if data and as_model and cls.model:
-            data = [cls.model(**d) for d in data][0]
-            if as_model:
-                assert cls.model, "You have asked for a model but the model is not set on the repository"
-                return cls.model(**data)
-        return data
+        if data:
+            data = data[0]
+        if as_model and cls.model:
+            data = cls.model(**data) 
+        return data 
     
     def select_to_model(self, fields: typing.List[str] = None):
         """

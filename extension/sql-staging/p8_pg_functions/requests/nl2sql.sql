@@ -1,13 +1,13 @@
 -- FUNCTION: p8.nl2sql(text, character varying, character varying, character varying, double precision)
 
--- DROP FUNCTION IF EXISTS p8.nl2sql(text, character varying, character varying, character varying, double precision);
+DROP FUNCTION IF EXISTS p8.nl2sql;
 
 CREATE OR REPLACE FUNCTION p8.nl2sql(
 	question text,
 	agent_name character varying,
-	model_in character varying DEFAULT 'gpt-4o-2024-08-06'::character varying,
+	model_in character varying DEFAULT 'gpt-4.1-mini'::character varying,
 	api_token character varying DEFAULT NULL::character varying,
-	temperature double precision DEFAULT 0.01)
+	temperature double precision DEFAULT 0.0)
     RETURNS TABLE(response jsonb, query text, confidence numeric) 
     LANGUAGE 'plpgsql'
     COST 100
@@ -48,6 +48,9 @@ BEGIN
             LIMIT 1;
     END IF;
 
+    select http_set_curlopt('CURLOPT_TIMEOUT','8000') into ack_http_timeout;
+    RAISE NOTICE 'THE HTTP TIMEOUT IS HARDCODED TO 8000ms';
+
     -- API call to OpenAI with the necessary headers and payload
     WITH T AS(
         SELECT 'system' AS "role", 
@@ -82,7 +85,11 @@ BEGIN
         -- Parse the JSON response string to JSONB and extract the content
         (api_response->'choices'->0->'message'->>'content')::JSONB AS response,  -- Content as JSONB
         ((api_response->'choices'->0->'message'->>'content')::JSONB->>'query')::TEXT AS query,  -- Extract query
-        ((api_response->'choices'->0->'message'->>'content')::JSONB->>'confidence')::NUMERIC AS confidence;  -- Extract confidence
+        CASE
+            WHEN ((api_response->'choices'->0->'message'->>'content')::JSONB->>'confidence') ~ '^[0-9]*\.?[0-9]+$'
+            THEN ((api_response->'choices'->0->'message'->>'content')::JSONB->>'confidence')::NUMERIC
+            ELSE 0.5
+        END AS confidence;
 
 EXCEPTION
     WHEN OTHERS THEN

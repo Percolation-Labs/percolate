@@ -6,6 +6,18 @@ DEFAULT_MAX_AGENT_LOOPS = 5
 DEFAULT_MODEL_TEMPERATURE = 0.0
 
 
+def get_user_memory(user_id, thread_id, **kwargs):
+    """
+    lookup a user state
+    """
+    
+    from percolate.models import User
+    import percolate as p8
+    user = p8.repository(User).get_by_id(id=user_id, as_model=True)
+    
+    if user:
+        return user.as_memory(**kwargs)
+
 class ApiCallingContext(BaseModel):
     """calling context object - all have defaults
     an agent session uses these things to control how to communicate with the user or the LLM Api
@@ -83,6 +95,13 @@ class CallingContext(ApiCallingContext):
         default=None,
         description="A callback to send final response e.g a Slack Say method",
     )
+    
+    def get_user_memory(self):
+        """
+        given a user context we can lookup the users recents
+        """
+        if self.username:
+            return get_user_memory(self.username,self.channel_ts)
 
     @staticmethod
     def simple_printer(d):

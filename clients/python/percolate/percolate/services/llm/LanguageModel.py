@@ -152,8 +152,8 @@ class LanguageModel:
         if not self.params:
             raise Exception(f"The model {model_name} does not exist in the Percolate settings")
         self.params = self.params[0]
-        if self.params['token'] is None:
         
+        if self.params['token'] is None:
             """if the token is not stored in the database we use whatever token env key to try and load it from environment"""
             self.params['token'] = os.environ.get(self.params['token_env_key'])
             if not self.params['token']:
@@ -161,15 +161,13 @@ class LanguageModel:
         """we use the env in favour of what is in the store"""
         env_token = os.environ.get(self.params['token_env_key'])
         self.params['token'] = env_token  if env_token is not None and len(env_token) else self.params.get('token')
+        self._scheme = self.params.get('scheme','openai')
         
     def parse(self, response: requests.models.Response | typing.Any, context: CallingContext=None) -> AIResponse:
         """the llm response or HybridResponse from streaming is parsed into our canonical AIResponse.
         this is also done inside the database and here we replicate the interface before dumping and returning to the executor
         """
-        from .utils import HybridResponse
-        # If we got a HybridResponse, convert it directly without extra API calls
-        if isinstance(response, HybridResponse):
-            return response.to_ai_response(session_id=context.session_id if context else None)
+ 
         streaming_callback = context.streaming_callback if context and context.streaming_callback else None
 
         try:
@@ -201,8 +199,7 @@ class LanguageModel:
             if debug_response:
                 return response
             
-            if context.is_hybrid_streaming:
-                return HybridResponse(response)
+       
             
             """for consistency with DB we should audit here and also format the message the same with tool calls etc."""
             response = self.parse(response,context=context)
@@ -416,3 +413,144 @@ class LanguageModel:
     
     
     
+    def parse_ai_response(self, partial: dict, usage: dict, ctx: CallingContext) -> AIResponse:
+        """
+        Normalize a partial LLM response (tool call or content) and usage dict into an AIResponse.
+        
+        This method creates an AIResponse object, then optionally audits it using the background worker.
+        
+        Args:
+            partial: Partial response data (content or tool calls)
+            usage: Token usage dictionary
+            ctx: Calling context with session info
+            
+        Returns:
+            AIResponse: The created response object
+        """
+        # Normalize the incoming payload to a plain dict
+        if hasattr(partial, 'model_dump'):
+            data = partial.model_dump()
+        elif hasattr(partial, 'dict'):
+            try:
+                data = partial.dict()
+            except Exception:
+                data = {}
+        elif isinstance(partial, dict):
+            data = partial
+        else:
+            data = {}
+
+        # Extract core fields
+        content = data.get('content', '')
+        role = data.get('role', 'assistant')
+        tool_calls = data.get('tool_calls')
+        tool_eval_data = data.get('tool_eval_data') or (data if tool_calls else None)
+        verbatim = data.get('verbatim')
+        function_stack = data.get('function_stack')
+
+        # Token usage comes solely from the provided usage dict
+        if usage and isinstance(usage, dict):
+            tokens_in = usage.get('prompt_tokens', usage.get('input_tokens', 0))
+            tokens_out = usage.get('completion_tokens', usage.get('output_tokens', 0))
+        else:
+            tokens_in = tokens_out = 0
+
+        # Determine status based on presence of a tool call
+        status = 'TOOL_CALL_RESPONSE' if tool_calls else 'COMPLETED'
+
+        # Create the AIResponse object
+        ai_response = AIResponse(
+            id=str(uuid.uuid1()),
+            model_name=self.model_name,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            session_id=ctx.session_id,
+            role=role,
+            content=content,
+            status=status,
+            tool_calls=tool_calls,
+            tool_eval_data=tool_eval_data,
+            verbatim=verbatim,
+            function_stack=function_stack,
+        )
+        
+        # If we're configured to audit, send to background worker
+        if getattr(ctx, 'audit', True):
+            self._audit_response(ai_response)
+            
+        return ai_response
+        
+    def _audit_response(self, response: AIResponse) -> None:
+        """
+        Send an AIResponse to the background audit worker.
+        
+        Args:
+            response: The AIResponse to audit
+        """
+        try:
+            from percolate.services.llm.proxy.utils import BackgroundAudit
+            
+            # Get or create a background auditor
+            if not hasattr(self, '_auditor'):
+                self._auditor = BackgroundAudit()
+                
+            # Send to background worker
+            self._auditor.add_response(response)
+            
+        except Exception as ex:
+            logger.warning(f"Failed to audit AIResponse: {ex}")
+            # Don't raise - auditing failures shouldn't block the response flow
+    
+    def stream_with_proxy(self, messages, functions, context):
+        """
+        Stream LLM requests using the proxy architecture.
+        
+        This method handles the lower-level details of creating the appropriate
+        request object and passing it to the proxy stream generator.
+        
+        Args:
+            messages: MessageStack or list of message dictionaries
+            functions: Function definitions to include in the request
+            context: CallingContext with API credentials and settings
+        
+        Returns:
+            Generator yielding (line, chunk) tuples
+        """
+        from percolate.services.llm.proxy.stream_generators import request_stream_from_model
+        from percolate.services.llm.proxy.models import OpenAIRequest, AnthropicRequest, GoogleRequest
+        
+        message_data = messages.data if hasattr(messages, 'data') else messages
+        
+        R = OpenAIRequest
+        if self._scheme == 'anthropic':
+            R = AnthropicRequest 
+        elif self._scheme == 'google':
+            R = GoogleRequest 
+         
+        request = R(
+            model=self.model_name,
+            messages=message_data,
+            stream=True,
+            tools=functions
+        )
+        
+        # Use proxy stream generator - source_scheme determined by model params
+        return request_stream_from_model(
+            request=request,
+            context=context,
+            target_scheme='openai',  
+            relay_tool_use_events=False,  
+            relay_usage_events=False  
+        )
+        
+    def get_stream_iterator(self, content_generator, context:CallingContext):
+        """
+        The stream iterator is a wrapper that helps with custom streaming logic, formatting and auditing
+        """
+        # Wrap the streaming generator and collected AIResponses for auditing
+        return LLMStreamIterator(
+            content_generator,
+            scheme=self._scheme,
+            context=context
+        )
+        

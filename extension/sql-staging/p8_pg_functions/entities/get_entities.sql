@@ -1,5 +1,6 @@
 CREATE OR REPLACE FUNCTION p8.get_entities(
-    keys text[]
+    keys text[],
+    userid text DEFAULT NULL
 )
 RETURNS jsonb
 LANGUAGE 'plpgsql'
@@ -15,14 +16,17 @@ BEGIN
 	example: selects any entity by its business key by going to the graph for the index and then joining the table
 	this example happens to have a table name which is an entity also in the agents table.
 	
-	select * from p8.get_entities(ARRAY['p8.Agent']);
+		-- Example without user filter (returns all matching entities)
+		-- select * from p8.get_entities(ARRAY['p8.Agent']);
+		-- Example with user filter (returns only public or user-specific entities)
+		-- select * from p8.get_entities(ARRAY['p8.Agent'], 'user123');
 	*/
 
     LOAD  'age'; SET search_path = ag_catalog, "$user", public;
 	
     -- Load nodes based on keys, returning the associated entity type and key
     WITH nodes AS (
-        SELECT id, entity_type FROM p8.get_graph_nodes_by_key(keys)
+        SELECT id, entity_type FROM p8.get_graph_nodes_by_key(keys, userid)
     ),
     grouped_records AS (
         SELECT 

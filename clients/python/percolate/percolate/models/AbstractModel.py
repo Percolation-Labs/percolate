@@ -110,12 +110,12 @@ class AbstractModelMixin:
         return cls(**values)
     
     @classmethod
-    def build_message_stack(cls, question:str, data: typing.List[dict] = None, **kwargs) -> MessageStack | typing.List[dict]:
+    def build_message_stack(cls, question:str, data: typing.List[dict] = None, user_memory=None, **kwargs) -> MessageStack | typing.List[dict ]:
         """Generate a message stack using a list of messages.
         These messages are in the list of content/role generalized LLM messages.
         This is added here so that BaseModel's can override but by default we just use the MessageStack utility
         """
-        return MessageStack.build_message_stack(cls, question, data=data, **kwargs)
+        return MessageStack.build_message_stack(cls, question, data=data,user_memory=user_memory, **kwargs)
 
     @classmethod
     def to_sql_model_helper(cls):
