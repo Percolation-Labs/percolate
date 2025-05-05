@@ -12,10 +12,21 @@ import uuid
 from percolate.services import PostgresService
 from percolate.models.p8 import IndexAudit
 from percolate.utils import logger
+from apscheduler.triggers.cron import CronTrigger
+from percolate.api.main import scheduler, run_scheduled_job
 import traceback
 from percolate.utils.studio import Project, apply_project
 from fastapi import   Depends, File, UploadFile
 import percolate as p8
+import datetime
+from percolate.models.p8.types import Schedule
+
+# Pydantic model for schedule requests
+class ScheduleCreate(BaseModel):
+    """Request model for creating a schedule."""
+    userid: str = Field(..., description="User id associated with schedule")
+    task: str = Field(..., description="Task to execute")
+    schedule: str = Field(..., description="Cron schedule string, e.g. '0 0 * * *'")
 from percolate.utils import try_parse_base64_dict
 import time
 
@@ -481,3 +492,54 @@ async def create_project_keys(
         logger.error(f"Failed to create keys for project {request.project_name}: {str(e)}")
         logger.warning(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to create project keys: {str(e)}")
+        
+# Scheduled tasks endpoints
+@router.post("/schedules", response_model=Schedule)
+async def create_schedule(request: ScheduleCreate, user: dict = Depends(get_api_key)):
+    """Create a new scheduled task."""
+    # Persist schedule to database
+    record = Schedule(id=str(uuid.uuid1()), userid=request.userid, task=request.task, schedule=request.schedule)
+    result = p8.repository(Schedule).update_records(record)
+    # Determine model instance for scheduling
+    scheduled = Schedule(**result[0]) if result else record
+    # Schedule the job in memory immediately
+    try:
+        trigger = CronTrigger.from_crontab(scheduled.schedule)
+        scheduler.add_job(
+            run_scheduled_job,
+            trigger,
+            args=[scheduled],
+            id=str(scheduled.id)
+        )
+        logger.info(f"Scheduled new job {scheduled.id}")
+    except Exception as e:
+        logger.warning(f"Failed to add job to scheduler: {e}")
+    return scheduled
+   
+@router.get("/schedules", response_model=typing.List[Schedule])
+async def list_schedules(user: dict = Depends(get_api_key)):
+    """List all active (non-disabled) schedules."""
+    repo = p8.repository(Schedule)
+    table = Schedule.get_model_table_name()
+    data = repo.execute(f"SELECT * FROM {table} WHERE disabled_at IS NULL")
+    return [Schedule(**d) for d in data]
+   
+@router.delete("/schedules/{schedule_id}", response_model=Schedule)
+async def disable_schedule(schedule_id: str, user: dict = Depends(get_api_key)):
+    """Disable (soft delete) a schedule by setting its disabled_at timestamp."""
+    repo = p8.repository(Schedule)
+    table = Schedule.get_model_table_name()
+    data = repo.execute(f"SELECT * FROM {table} WHERE id = %s", data=(schedule_id,))
+    if not data:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    existing = Schedule(**data[0])
+    existing.disabled_at = datetime.datetime.utcnow()
+    result = p8.repository(Schedule).update_records(existing)
+    updated = Schedule(**result[0]) if result else existing
+    # Remove from scheduler
+    try:
+        scheduler.remove_job(str(schedule_id))
+        logger.info(f"Removed scheduled job {schedule_id}")
+    except Exception:
+        logger.warning(f"Job {schedule_id} not found in scheduler or failed to remove")
+    return updated
