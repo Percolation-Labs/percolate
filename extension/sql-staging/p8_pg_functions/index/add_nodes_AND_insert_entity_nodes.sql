@@ -34,15 +34,22 @@ BEGIN
 
     -- Loop through each row in the table  
     FOR row IN
-        EXECUTE format('SELECT uid, key, user_id FROM p8."vw_%s_%s" WHERE gid IS NULL LIMIT 1660', 
+        EXECUTE format('SELECT uid, key, userid FROM p8."vw_%s_%s" WHERE gid IS NULL LIMIT 1660',
             schema_name, pure_table_name
         )
     LOOP
-        -- Append Cypher node creation for each row (user ids can be null but if they are there we may need access control)
-        cypher_query := cypher_query || format(
-            '(:%s__%s {uid: "%s", key: "%s", user_id: "%s"}), ',
-            schema_name, pure_table_name, row.uid, row.key, row.user_id
-        );
+        -- Append Cypher node creation for each row (include user_id only when present)
+        IF row.userid IS NULL THEN
+            cypher_query := cypher_query || format(
+                '(:%s__%s {uid: "%s", key: "%s"}), ',
+                schema_name, pure_table_name, row.uid, row.key
+            );
+        ELSE
+            cypher_query := cypher_query || format(
+                '(:%s__%s {uid: "%s", key: "%s", user_id: "%s"}), ',
+                schema_name, pure_table_name, row.uid, row.key, row.userid
+            );
+        END IF;
 
         nodes_created_count := nodes_created_count + 1;
     END LOOP;
@@ -61,7 +68,7 @@ BEGIN
         RETURN nodes_created_count;
     ELSE
         -- No rows to process
-        RAISE NOTICE 'Nothing to do';
+        RAISE NOTICE 'Nothing to do in add_nodes for this batch - all good';
         RETURN 0;
     END IF;
 END;

@@ -106,15 +106,21 @@ class PostgresService:
         """a connection in the context of the abstract model for crud support"""
         return PostgresService(model=model, connection_string=self._connection_string, **kwargs)
 
-    def get_entities(self, keys: str | typing.List[str]):
+    def get_entities(self, keys: str | typing.List[str], userid: str = None):
         """
-        use the get_entities database function to lookup entities
+        use the get_entities database function to lookup entities, with optional user_id for access control
+
+        Args:
+            keys: one or more business keys (list of entity names) to fetch
+            userid: optional user identifier to include private entities owned by this user
         """
         if keys:
-            if not isinstance(keys,list):
+            if not isinstance(keys, list):
                 keys = [keys]
-                
-        data = self.execute(f"""SELECT * FROM p8.get_entities(%s)""", data=(keys,))     if keys else None  
+        # Call SQL function with optional userid; when userid is None, only public entities are returned
+        data = self.execute(
+            """SELECT * FROM p8.get_entities(%s, %s)""", data=(keys, userid)
+        ) if keys else None
             
         if not data:
             return [{
