@@ -239,7 +239,23 @@ def init(
     typer.echo(f"I'll apply project [{name}] to the database")
     status = apply_project(name)
     
+@app.command()
+def migrate(
+    name: str = typer.Argument("default", help="The name of the project to apply"),
+):
+    from percolate.models import CORE_INSTALL_MODELS, PlanModel
+    typer.echo(f"I'll re-register all the models in p8 schema")
     
+    p8.repository(PlanModel).register()
+    return 
+
+    for m in CORE_INSTALL_MODELS:
+        try:
+            p8.repository(m).register()
+        except Exception as ex:
+            logger.warning(f"Failed on this model-> {ex}")
+    typer.echo(f"✅ Done")
+       
 @app.command()
 def connect(project_name: str, 
              token: str = typer.Option(..., "--token", help="Bearer token for authentication")):
