@@ -897,4 +897,20 @@ DO UPDATE SET value = EXCLUDED.value;
             statements.append(stmt)
 
         return "\n".join(statements)
+  
+# Scheduled tasks model
+class Schedule(AbstractModel):
+    """Defines a scheduled task."""
+    id: typing.Optional[uuid.UUID| str] = Field(None, description="Unique schedule id")
+    userid: typing.Optional[uuid.UUID| str] = Field(None, description="User id associated with schedule")
+    task: str = Field(..., description="Task to execute")
+    schedule: str = Field(..., description="Cron schedule string, e.g. '0 0 * * *'")
+    disabled_at: typing.Optional[datetime.datetime] = Field(None, description="Time when schedule was disabled")
+
+    @model_validator(mode='before')
+    @classmethod
+    def _set_defaults(cls, values):
+        if isinstance(values, dict) and not values.get('id'):
+            values['id'] = str(uuid.uuid1())
+        return values
  
