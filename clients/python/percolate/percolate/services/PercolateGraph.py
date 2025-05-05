@@ -161,7 +161,10 @@ class PercolateGraph:
         """
         if not isinstance(relationships,list):
             relationships = [relationships]
+        
         payloads = [rel.model_dump() if not isinstance(rel,dict) else rel for rel in relationships]
+        
+        #print(payloads)
         return self._pg.execute(
             "SELECT p8.add_relationships_to_node(%s::jsonb)",
             data=(json.dumps(payloads),),

@@ -242,3 +242,23 @@ After threshold-based rewiring, we might see:
                  MATCH ()-[r:likes]->()
                  RETURN r
                $$) AS (r agtype);
+
+
+## Use the AGE Graph Viewer
+
+You can fetch the code for the AGE graph viewer and run it locally with
+
+```bash
+#you may or may not this this first line
+export NODE_OPTIONS=--openssl-legacy-provider
+npm run start
+```
+
+Run a query such as below depending on the state of your graph
+
+```sql
+SELECT * FROM cypher('percolate', $$
+  MATCH p = (u:User)-[r*1..2]->(c:Concept)
+  RETURN u.name,  c.name as concept, relationships(p) as relationships
+$$) as (v agtype);
+```
