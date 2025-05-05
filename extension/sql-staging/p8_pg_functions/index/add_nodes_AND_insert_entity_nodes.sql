@@ -23,14 +23,14 @@ BEGIN
 
     -- Loop through each row in the table - graph assumed to be 'one' here
     FOR row IN
-        EXECUTE format('SELECT uid, key FROM p8."vw_%s_%s" WHERE gid IS NULL LIMIT 1660', 
+        EXECUTE format('SELECT uid, key, user_id FROM p8."vw_%s_%s" WHERE gid IS NULL LIMIT 1660', 
             schema_name, pure_table_name
         )
     LOOP
         -- Append Cypher node creation for each row
         cypher_query := cypher_query || format(
-            '(:%s__%s {uid: "%s", key: "%s"}), ',
-            schema_name, pure_table_name, row.uid, row.key
+            '(:%s__%s {uid: "%s", key: "%s", user_id: "%s"}), ',
+            schema_name, pure_table_name, row.uid, row.key, row.user_id
         );
 
         -- Increment the counter for each node
