@@ -338,7 +338,7 @@ class AIResponse(TokenUsage):
     status: typing.Optional[str] = Field(description="The status of the session such as REQUEST|RESPONSE|ERROR|TOOL_CALL|STREAM_RESPONSE")
     tool_calls: typing.Optional[typing.List[dict]|dict] = Field(default=None, description="Tool calls are requests from language models to call tools")
     tool_eval_data: typing.Optional[dict] = Field(default=None, description="The payload may store the eval from the tool especially if it is small data")
-    verbatim: typing.Optional[dict|typing.List[dict]] = Field(default=None, description="the verbatim message from the language model - we dont serialized this", exclude=True)     
+    verbatim: typing.Optional[dict|typing.List[dict]] = Field(default=None, description="the verbatim message from the language model - we dont serialize this", exclude=True)     
     function_stack: typing.Optional[typing.List[str]] = Field(None, description='At each stage certain functions are available to the model - useful to see what it has and what it chooses and to reload stack later')
  
     def to_open_ai_message(self):
@@ -383,7 +383,7 @@ class Session(AbstractModel):
     agent: str = Field('percolate', description="Percolate always expects an agent but we support passing a system prompt which we treat as anonymous agent")
     parent_session_id:typing.Optional[uuid.UUID| str] = Field(None, description="A session is a thread from a question+prompt to completion. We span child sessions")
     
-    thread_id: typing.Optional[str] = Field(None,description='An id for a thread which can contain a number of sessions')
+    thread_id: typing.Optional[str] = Field(None,description='An id for a thread which can contain a number of sessions - thread matches are case insensitive ie.. MyID==myid - typically we prefer ids to be uuids but depends on the system')
     channel_id: typing.Optional[str] = Field(None, description="The platform/channel ID through which the user is interacting (e.g., specific Slack channel ID)")
     channel_type: typing.Optional[str] = Field('percolate', description="The platform type (e.g., 'slack', 'percolate', 'email') - the device info + the channel type tells if its mobile etc")
     session_type: typing.Optional[str] = Field('conversation', description="The type of session (e.g., 'conversation', 'resource_management', 'task_creation', 'daily_digest')")
@@ -512,13 +512,95 @@ If the user asks to look for existing plans, you should ask the research agent t
         return {'post_tasks_': 'Used to save tasks by posting the task object. Its good practice to first search for a task of a similar name before saving in case of duplicates' }
     
 class User(AbstractEntityModel):
-    """save user info"""
+    """A model of a logged in user"""
     id: uuid.UUID| str  
-    name: str
+    name: typing.Optional[str] = Field(None,description="A display name for a user")
+    email: typing.Optional[str] = Field(None,description="email of the user if we know it")
+    slack_id: typing.Optional[str] = Field(None,description="slack user U12345")
+    linkedin: typing.Optional[str] = Field(None,description="linkedin profile for user discovery")
+    twitter: typing.Optional[str] = Field(None,description="twitter profile for user discovery")
+
+    description: typing.Optional[str] = DefaultEmbeddingField(default='', description="A learned description of the user")
+    #current_chat_thread: typing.Optional[typing.List[str]] = Field(default_factory=list, description="A thread is a single conversation on any channel - the session contains a list of messages with thread id binding them")
+    recent_threads: typing.Optional[typing.List[dict]|dict] = Field(default_factory=list, description="A thread is a single conversation on any channel - the session contains a list of messages with thread id binding them")
+    last_ai_response: typing.Optional[str] = Field(None, description="We store this context for managing conversations and state")
+    interesting_entity_keys: typing.Optional[dict] = Field(default_factory=dict, description="For the agents convenience a short term mapping of interesting keys with optional descriptions based on user activity")
+    token: typing.Optional[str] = Field(None, description="A token for user authentication to Percolate")
+    roles: typing.Optional[typing.List[str]] = Field(default_factory=list, description="A list of roles the user is a member of")
+    graph_paths: typing.Optional[typing.List[str]] = Field(None, description="Track all paths extracted by an agent as used to build the KG")
+    metadata: typing.Optional[dict] = Field(default_factory=dict, description="Arbitrary user metadata")
     
+    def as_memory(self,**kwargs):
+        """the user memory structure"""
+
+        return {
+            'Info': "You can use the users context - observe the current chat thread which may be empty when deciding if the user is referring to something they discussed recently or a new context."
+                    "When you do use this context do not explain that to the user as it would be jarring for them. Freely use this context if its relevant or necessary to understand the user context."
+                    "The last AI Response from the previous interaction is added for extra context and can be used if the user asks a follow up question in reference to previous response only. But dont ask them for confirmation."
+                    "If entity keys are provided you can use the get-entities lookup function to load and inspect them.",
+                    "some tools may accept a user id and you can use the user id here for those tool calls e.g. to do user specific searches"
+                    
+            'recent_threads': self.recent_threads,
+            'last_ai_response': self.last_ai_response,
+            'interesting_entity_keys': self.interesting_entity_keys,
+            'users_name': self.name,
+            'about user' : self.description,
+            'user_id': self.id
+        }
+        
+class UserFact(AbstractModel):
+    """
+    important information or trivial about a user typically submitted by a user over time.
+    we can search specifically for user submitted data using vector search or entity lookup for labeled data.
+    """
+    id: uuid.UUID| str  
+    name: typing.Optional[str] = Field(None,description="A unique entity name e.g. user_id-label")
+    label: typing.Optional[str] = Field(None,description="The friendly label for the piece of information")
+    description: typing.Optional[str] = DefaultEmbeddingField(default='', description="A description from the user e.g. my nick name is, my favourite color is, i have traveled to, i like foods like...")
+    invalidated: typing.Optional[bool] = Field(False, description="We can store old information but invalidate it - if we retrieve such information we may discard it as relevant")
+    graph_paths: typing.Optional[typing.List[str]] = Field(None, description="Track all paths extracted by an agent as used to build the KG")
+    userid: str
+    
+    @classmethod
+    def save_user_fact(cls, label:str, description:str, user_id: str, graph_paths:typing.List[str]=None):
+        """save the user fact with a unique label for the information
+        
+        Args:
+            description: details about the user fact
+            unique_label: a user level unique label about the fact - should not collide with other user facts (best effort)
+            user_id: the user id supplied in context- cif not known do not try to use this function
+            graph_paths: graph paths are tags of the form A/B where A is more specific than B e.g. LLMs/AI
+        """
+        name = f"{user_id}.{label}"
+        id = make_uuid(name)
+        u = UserFact(id=id,name=name, label=label,description=description, graph_paths=graph_paths,userid=user_id)
+        return p8.repository(u).update_records(u)
+    
+    @classmethod
+    def search_user_facts(cls, query:str, user_id:str):
+        """
+        Search semantically filtered by a given user id
+        
+        Args:
+            query: a detailed question to search for
+            user_id: str the provided user id if known - if not known, do not try to use this function
+        """
+        
+        """for now just search all but filter by user id assumed"""
+        return p8.repository(UserFact).search(query,user_id=user_id)
+    
+    @classmethod
+    def get_user_entity(cls, label:str,user_id:str):
+        """looks up a user entity using the label qualified with the user id"""
+        name = f"{user_id}.{label}"
+        return p8.repository(UserFact).get_entities(name)
+        
+        
 class Resources(AbstractModel):
     """Generic parsed content from files, sites etc. added to the system.
-    If someone asks about resources, content, files, general information etc. it may be worth doing a search on the Resources
+    If someone asks about resources, content, files, general information etc. it may be worth doing a search on the Resources.
+    If a user expresses interests or preferences or trivia about themselves - you can save it in the background but response naturally in conversation about it.
+    If the user asks information about themselves you can also try to search for user facts if you dont have the answer.
     """
     id: typing.Optional[uuid.UUID| str] = Field("The id is generated as a hash of the required uri and ordinal")  
     name: typing.Optional[str] = Field(None, description="A short content name - non unique - for example a friendly label for a chunked pdf document or web page title")
@@ -540,6 +622,31 @@ class Resources(AbstractModel):
             """
             values['id'] = make_uuid({'uri': values['uri'], 'ordinal': values.get('ordinal') or 0})
         return values
+    
+    @classmethod
+    def search_facts_by_users(cls, query:str, user_id:str):
+        """
+        Search semantically filtered by a given user id
+        
+        Args:
+            query: a detailed question to search for
+            user_id: str the provided user id if known - if not known, do not try to use this function
+        """
+        
+        return UserFact.search_user_facts(query, user_id)
+    
+    @classmethod
+    def save_user_fact(cls, description:str, unique_label:str, user_id:str, graph_paths:typing.List[str]):
+        """save the user fact with a unique label for the information
+        
+        Args:
+            description: details about the user fact
+            unique_label: a user level unique label about the fact - should not collide with other user facts (best effort)
+            user_id: the user id supplied in context- if not known do not try to use this function
+            graph_paths: graph paths are tags of the form A/B where A is more specific than B e.g. LLMs/AI
+        """
+        
+        return UserFact.save_user_fact(unique_label, description=description,user_id=user_id, graph_paths=graph_paths)
 
     @classmethod
     def chunked_resource_from_text(cls,

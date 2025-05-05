@@ -71,7 +71,6 @@ class SqlModelHelper:
         fields = typing.get_type_hints(cls.model)
         field_descriptions = cls.model.model_fields
         mapping =  {k:SqlModelHelper.python_to_postgres_type(v, field_descriptions.get(k)) for k,v in fields.items()}
-
  
         key_field = cls.model.get_model_key_field()
         assert key_field or 'id' in mapping, f"For model {cls.model}, You must supply either an id or a property like name or key on the model or add json_schema_extra with an is_key property on one if your fields"

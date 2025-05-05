@@ -17,6 +17,8 @@ from percolate.utils.studio import Project, apply_project
 from fastapi import   Depends, File, UploadFile
 import percolate as p8
 from percolate.utils import try_parse_base64_dict
+import time
+
 
 router = APIRouter()
 
@@ -80,14 +82,16 @@ class IndexRequest(BaseModel):
 
  
 @router.post("/index/", response_model=IndexAudit)
-async def index_entity(request: IndexRequest, background_tasks: BackgroundTasks, user: dict = Depends(get_api_key))->IndexAudit:
+async def index_entity(request: IndexRequest, background_tasks: BackgroundTasks, sleep_seconds:int=7, user: dict = Depends(get_api_key))->IndexAudit:
     """index entity and get an audit log id to check status
     the index is created as a background tasks and we respond with an id ref that can be used in the get/
+    we sleep for n seconds to allow records to flush after trigger
     """
     id=uuid.uuid1()
     s = PostgresService(IndexAudit)
+    logger.debug(f"Handling index request {request=} {sleep_seconds=}")
+    time.sleep(sleep_seconds)
     try:
-        logger.debug(f"Handling index request {request=}")
         record = IndexAudit(id=id, model_name='percolate', entity_full_name=request.entity_full_name, metrics={}, status="REQUESTED", message="Indexed requested")
         s.update_records(record)
         """todo create an audit record pending and use that in the api response"""

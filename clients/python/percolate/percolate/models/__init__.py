@@ -2,6 +2,8 @@ from pydantic import Field, BaseModel
 from functools import partial
 import typing
 
+     
+
 def EmbeddedField(embedding_provider='default')->Field:
     return partial(Field, json_schema_extra={'embedding_provider':embedding_provider})
 
@@ -24,6 +26,23 @@ def get_p8_models():
 
 from .p8 import * 
 
+
+"""For now we whitelist the models that are installed in the database"""
+CORE_INSTALL_MODELS= [ User, Project, Agent, ModelField, LanguageModelApi, Function, Session, SessionEvaluation, AIResponse, ApiProxy, PlanModel,
+               Settings, PercolateAgent, IndexAudit, Task, TaskResources, ResearchIteration , Resources,SessionResources]
+   
+def migrate_core_models():
+    """apply schema changes"""
+    
+    results = []
+    for model in CORE_INSTALL_MODELS:
+        print(f"""***{model}***""")
+        results.append( p8.repository(model).register() )
+    """TODO results are not ready yet - but we should display a report - in the CLI debug messages will now be shown and we want a table"""
+        
+    """make this a polars dataframe for display"""
+    return results
+   
 def repository(model:BaseModel, **kwargs):
     """Repository factory function.
     
@@ -71,9 +90,9 @@ def bootstrap(apply:bool = False, apply_to_test_database: bool= True, root='../.
     root = root.rstrip('/')
     print('********Building queries*******')
     """build a list of models we want to init with"""
-    models = [ Project, Agent, ModelField, LanguageModelApi, Function, Session, AIResponse, ApiProxy, PlanModel,
-               Settings, PercolateAgent, IndexAudit, Task, TaskResources, ResearchIteration ,Resources]
-        
+    
+    models = CORE_INSTALL_MODELS
+    
     """compile the functions into one file"""
     with open(f'{root}/sql/01_add_functions.sql', 'w') as f:
         print(f)

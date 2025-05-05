@@ -239,7 +239,33 @@ def init(
     typer.echo(f"I'll apply project [{name}] to the database")
     status = apply_project(name)
     
+@app.command()
+def migrate(
+      full: bool = typer.Option(False, "--full", help="⚠️ Runs the full migration i.e. all scripts are re-applied - we do not drop tables")
+):
+    """the migration is inadequate as we should think much more about this
+    We should essentially re-run the installer scripts but this requires a lot more testing
+    for docker we would need to re-up generally with the latest but here we can start by re-registering the entities
+    """
+    from percolate.models import CORE_INSTALL_MODELS,  bootstrap
     
+    typer.echo(f"I'll re-register all the models in p8 schema")
+    
+    if full:
+        confirm = typer.confirm("⚠️ Are you sure you want to run the full bootstrap? This will re-apply all scripts. This *should* not remove data but we are in alpha")
+        if not confirm:
+            typer.echo("❌ Aborting full bootstrap.")
+            raise typer.Exit(code=1)
+        bootstrap(apply=True, apply_to_test_database=False)
+        
+    else:
+        for m in CORE_INSTALL_MODELS:
+            try:
+                p8.repository(m).register()
+            except Exception as ex:
+                logger.warning(f"Failed on this model-> {ex}")
+    typer.echo(f"✅ Done")
+       
 @app.command()
 def connect(project_name: str, 
              token: str = typer.Option(..., "--token", help="Bearer token for authentication")):

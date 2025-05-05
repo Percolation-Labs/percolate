@@ -6,7 +6,7 @@ import typing
 import json
 import enum
 """1 responses from agent calls"""
-
+import datetime
 class AskStatus(enum.Enum):
     QUESTION: str = "QUESTION"
     ERROR: str = "ERROR"
@@ -44,3 +44,47 @@ class AskResponse(BaseModel):
     session_id: str = Field(description="In Percolate a session is stored in the database against a user and question. Each response is pinned to a session", alias='session_id_out')
     
 
+"""Graph types"""
+
+
+class Node(BaseModel):
+    id: int
+    label: str
+    metadata: typing.Dict[str, typing.Union[str, datetime.datetime]] = Field(alias="properties")
+
+
+class Edge(BaseModel):
+    id: int
+    label: str
+    start_id: int
+    end_id: int
+    metadata: typing.Dict[str, typing.Union[str, datetime.datetime]] = Field(alias="properties")
+
+    @model_validator(mode='before')
+    @classmethod
+    def _val(cls, values):
+        """remove forbidden cypher chars in case provided does not"""
+        values['label'] = values['label'].replace('-','_')
+        return values
+
+class ConceptLinks(BaseModel):
+    """Concept links are used in the memory system to connect users to concepts"""
+    u: Node
+    path: typing.List[typing.Union[Node, Edge]]
+    concept: Node
+
+    def get_link(self) -> typing.Dict[str, typing.Union[str, typing.List[typing.Dict[str, typing.Optional[str]]]]]:
+        edges = [
+            {
+                "rel_type": p.label,
+                "name": p.metadata.get("name"),
+                "created_at": p.metadata.get("created_at"),
+                "terminated_at": p.metadata.get("terminated_at"),
+            }
+            for p in self.path
+            if isinstance(p, Edge)
+        ]
+        return {
+            "user": self.u.metadata.get("name"),
+            "edges": edges
+        }

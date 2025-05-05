@@ -1,3 +1,10 @@
+/*
+this file contains two queries that go together. 
+1] The first contains the main logic to add a graph node using a view over entities of type X
+2] the second just iterates to flush batches
+*/
+
+DROP FUNCTION IF EXISTS   p8.add_nodes;
 CREATE OR REPLACE FUNCTION p8.add_nodes(
 	table_name text)
     RETURNS integer
@@ -11,60 +18,70 @@ DECLARE
     sql TEXT;
     schema_name TEXT;
     pure_table_name TEXT;
-    nodes_created_count INTEGER := 0; -- Tracks the number of nodes created
+    nodes_created_count INTEGER := 0;  
 BEGIN
 
+    /*
+    Adding nodes uses a contractual view over age nodes
+    we keep track of any Percolate entity in the graph with a graph id, label (key) and user id if given
+    */
+    --we always need this when using AGE from postgres 
     LOAD  'age'; SET search_path = ag_catalog, "$user", public; 
 
-    -- Initialize the Cypher query
     cypher_query := 'CREATE ';
     schema_name := lower(split_part(table_name, '.', 1));
     pure_table_name := split_part(table_name, '.', 2);
 
-    -- Loop through each row in the table - graph assumed to be 'one' here
+    -- Loop through each row in the table  
     FOR row IN
-        EXECUTE format('SELECT uid, key FROM p8."vw_%s_%s" WHERE gid IS NULL LIMIT 1660', 
+        EXECUTE format('SELECT uid, key, userid FROM p8."vw_%s_%s" WHERE gid IS NULL LIMIT 1660',
             schema_name, pure_table_name
         )
     LOOP
-        -- Append Cypher node creation for each row
-        cypher_query := cypher_query || format(
-            '(:%s__%s {uid: "%s", key: "%s"}), ',
-            schema_name, pure_table_name, row.uid, row.key
-        );
+        -- Append Cypher node creation for each row (include user_id only when present)
+        IF row.userid IS NULL THEN
+            cypher_query := cypher_query || format(
+                '(:%s__%s {uid: "%s", key: "%s"}), ',
+                schema_name, pure_table_name, row.uid, row.key
+            );
+        ELSE
+            cypher_query := cypher_query || format(
+                '(:%s__%s {uid: "%s", key: "%s", user_id: "%s"}), ',
+                schema_name, pure_table_name, row.uid, row.key, row.userid
+            );
+        END IF;
 
-        -- Increment the counter for each node
         nodes_created_count := nodes_created_count + 1;
     END LOOP;
 
+    --run the batch
     IF nodes_created_count > 0 THEN
-        -- Remove the trailing comma and space
         cypher_query := left(cypher_query, length(cypher_query) - 2);
 
-        -- Debug: Optionally print the Cypher query for audit
-        -- RAISE NOTICE 'Generated Cypher Query: %s', cypher_query;
-
-        -- Execute the Cypher query using the cypher function
         sql := format(
             'SELECT * FROM cypher(''percolate'', $$ %s $$) AS (v agtype);',
             cypher_query
         );
 
-        -- Execute the query
         EXECUTE sql;
 
-        -- Return the number of rows processed
         RETURN nodes_created_count;
     ELSE
         -- No rows to process
-        RAISE NOTICE 'Nothing to do';
+        RAISE NOTICE 'Nothing to do in add_nodes for this batch - all good';
         RETURN 0;
     END IF;
 END;
 $BODY$;
 
 
- 
+/*
+------------------------------------------------
+Below is the query for managing batches of inserts
+------------------------------------------------
+*/
+
+DROP FUNCTION IF EXISTS   p8.insert_entity_nodes;
 
 CREATE OR REPLACE FUNCTION p8.insert_entity_nodes(
 	entity_table text)
