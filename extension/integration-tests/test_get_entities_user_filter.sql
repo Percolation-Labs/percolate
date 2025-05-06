@@ -3,7 +3,7 @@ this integration test can be used with the psql tool using the following env var
 P8_PG_HOST
 P8_PG_PORT
 P8_PG_PASSWORD
-
+these env vars are already set in the env
 the database is `app`
 */
 \set ON_ERROR_STOP on
