@@ -11,7 +11,7 @@ from ..AbstractModel import AbstractModel, BaseModel, AbstractEntityModel
 from .. import inspection
 from percolate.utils import make_uuid
 import datetime
-from .. import DefaultEmbeddingField
+from .. import DefaultEmbeddingField, KeyField
 from percolate.utils.names import EmbeddingProviders
 import percolate as p8
 import json
@@ -515,7 +515,7 @@ class User(AbstractEntityModel):
     """A model of a logged in user"""
     id: uuid.UUID| str  
     name: typing.Optional[str] = Field(None,description="A display name for a user")
-    email: typing.Optional[str] = Field(None,description="email of the user if we know it")
+    email: typing.Optional[str] = KeyField(None,description="email of the user if we know it - the key must be something unique like this")
     slack_id: typing.Optional[str] = Field(None,description="slack user U12345")
     linkedin: typing.Optional[str] = Field(None,description="linkedin profile for user discovery")
     twitter: typing.Optional[str] = Field(None,description="twitter profile for user discovery")
