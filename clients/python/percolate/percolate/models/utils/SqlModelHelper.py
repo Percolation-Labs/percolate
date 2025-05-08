@@ -221,7 +221,7 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
         """TODO return true if one or more columns have embeddings"""
         return True
         
-    def select_query(self, fields: typing.List[str] = None, **kwargs):
+    def select_query(self, fields: typing.List[str] = None, since_date_modified:str|datetime.datetime=None, **kwargs):
         """
         if kwargs exist we use to add predicates
         """
@@ -229,12 +229,13 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
 
         if not kwargs:
             return f"""SELECT { fields } FROM {self.table_name} """
-        predicate = SqlModelHelper.construct_where_clause(**kwargs)
+        predicate = SqlModelHelper.construct_where_clause(since_date_modified=since_date_modified, **kwargs)
+        
         return f"""SELECT { fields } FROM {self.table_name} {predicate}"""
     
     
     @classmethod
-    def construct_where_clause(cls, **kwargs) -> str:
+    def construct_where_clause(cls, since_date_modified:str=None, **kwargs) -> str:
         """
         Constructs a SQL WHERE clause from keyword arguments.
 
@@ -249,6 +250,11 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
         where_clauses = []
         params = []
 
+        if since_date_modified:
+            """if there is a modified since param use the system updated_at field to filter"""
+            where_clauses.append(f"""updated_at >= %s""")
+            params.append(since_date_modified)
+            
         for column, value in kwargs.items():
             if isinstance(value, list):
 

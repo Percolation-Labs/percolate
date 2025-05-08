@@ -355,7 +355,8 @@ class PostgresService:
         if kwargs:
             data = tuple(kwargs.values())
         return self.execute(self.helper.select_query(fields, **kwargs), data=data)
-
+    
+    
     def get_by_name(cls, name: str, as_model:bool = False):
         """select model by name"""
         data =  cls.select(name=name)
