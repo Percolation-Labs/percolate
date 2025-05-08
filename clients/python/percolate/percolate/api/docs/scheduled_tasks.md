@@ -107,4 +107,37 @@ When you create or update schedules at runtime via the Admin API, they are persi
    scheduler.remove_job(job_id=str(schedule_id))
    ```
 
-By following these steps, newly created schedules take effect immediately in the running application. 
+
+### For example create a schedule every minute
+```python
+import os
+import requests
+
+# Configuration
+url = "http://localhost:5008/admin/schedules"
+bearer_token = os.getenv("P8_TEST_BEARER_TOKEN")
+
+if not bearer_token:
+    raise EnvironmentError("Environment variable P8_TEST_BEARER_TOKEN not set.")
+
+headers = {
+    "Authorization": f"Bearer {bearer_token}",
+    "Content-Type": "application/json"
+}
+
+payload = {
+    "userid": "10e0a97d-a064-553a-9043-3c1f0a6e6725",
+    "name": "test",
+    "spec": {
+        "system_prompt": "agent do something" 
+    },
+    "schedule": "* * * * *"  
+}
+
+# POST request
+response = requests.post(url, json=payload, headers=headers)
+
+# Output response
+print("Status Code:", response.status_code)
+print("Response:", response.json())
+```

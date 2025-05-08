@@ -23,22 +23,26 @@ scheduler = BackgroundScheduler()
 
 def run_scheduled_job(schedule_record):
     """Placeholder job runner for scheduled tasks."""
-    logger.info(f"Running scheduled task {schedule_record.id} ({schedule_record.task}) for user {schedule_record.userid}")
+    logger.info(f"Running scheduled task {schedule_record} ")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan: start and shutdown scheduler."""
-    # Load and schedule active jobs
+    
     repo = p8.repository(Schedule)
-    table = Schedule.get_model_table_name()
-    data = repo.execute(f"SELECT * FROM {table} WHERE disabled_at IS NULL")
-    for d in data:
-        try:
-            record = Schedule(**d)
-            trigger = CronTrigger.from_crontab(record.schedule)
-            scheduler.add_job(run_scheduled_job, trigger, args=[record], id=str(record.id))
-        except Exception as e:
-            logger.warning(f"Failed to schedule job for record {d.get('id')}: {e}")
+    table = Schedule.get_model_table_name()  
+   
+    try:
+        data = repo.execute(f"SELECT * FROM {table} WHERE disabled_at IS NULL")
+        for d in data:
+            try:
+                record = Schedule(**d)
+                trigger = CronTrigger.from_crontab(record.schedule)
+                scheduler.add_job(run_scheduled_job, trigger, args=[record], id=str(record.id))
+            except Exception as e:
+                logger.warning(f"Failed to schedule job for record {d.get('id')}: {e}")
+    except Exception as ex:
+        logger.warning(f"Failed to load scheduler data {ex}")
     scheduler.start()
     logger.info(f"Scheduler started with jobs: {[j.id for j in scheduler.get_jobs()]}")
     try:

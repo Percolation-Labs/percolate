@@ -13,23 +13,23 @@ from percolate.services import PostgresService
 from percolate.models.p8 import IndexAudit
 from percolate.utils import logger
 from apscheduler.triggers.cron import CronTrigger
-from percolate.api.main import scheduler, run_scheduled_job
+
 import traceback
 from percolate.utils.studio import Project, apply_project
 from fastapi import   Depends, File, UploadFile
 import percolate as p8
 import datetime
 from percolate.models.p8.types import Schedule
-
-# Pydantic model for schedule requests
-class ScheduleCreate(BaseModel):
-    """Request model for creating a schedule."""
-    userid: str = Field(..., description="User id associated with schedule")
-    task: str = Field(..., description="Task to execute")
-    schedule: str = Field(..., description="Cron schedule string, e.g. '0 0 * * *'")
 from percolate.utils import try_parse_base64_dict
 import time
 
+
+class ScheduleCreate(BaseModel):
+    """Request model for creating a schedule."""
+    userid: str = Field(..., description="User id associated with schedule")
+    name: str = Field(..., description="Task to execute")
+    spec: dict = Field(..., description="The task spec can be any json but we have an internal protocol. LLM instructions are valid should use a system_prompt attribute")
+    schedule: str = Field(..., description="Cron schedule string, e.g. '0 0 * * *'")
 
 router = APIRouter()
 
@@ -497,8 +497,9 @@ async def create_project_keys(
 @router.post("/schedules", response_model=Schedule)
 async def create_schedule(request: ScheduleCreate, user: dict = Depends(get_api_key)):
     """Create a new scheduled task."""
+    from percolate.api.main import scheduler, run_scheduled_job
     # Persist schedule to database
-    record = Schedule(id=str(uuid.uuid1()), userid=request.userid, task=request.task, schedule=request.schedule)
+    record = Schedule(id=str(uuid.uuid1()), userid=request.userid, name=request.name, spec=request.spec, schedule=request.schedule)
     result = p8.repository(Schedule).update_records(record)
     # Determine model instance for scheduling
     scheduled = Schedule(**result[0]) if result else record
@@ -519,6 +520,7 @@ async def create_schedule(request: ScheduleCreate, user: dict = Depends(get_api_
 @router.get("/schedules", response_model=typing.List[Schedule])
 async def list_schedules(user: dict = Depends(get_api_key)):
     """List all active (non-disabled) schedules."""
+ 
     repo = p8.repository(Schedule)
     table = Schedule.get_model_table_name()
     data = repo.execute(f"SELECT * FROM {table} WHERE disabled_at IS NULL")
@@ -527,6 +529,7 @@ async def list_schedules(user: dict = Depends(get_api_key)):
 @router.delete("/schedules/{schedule_id}", response_model=Schedule)
 async def disable_schedule(schedule_id: str, user: dict = Depends(get_api_key)):
     """Disable (soft delete) a schedule by setting its disabled_at timestamp."""
+    from percolate.api.main import scheduler
     repo = p8.repository(Schedule)
     table = Schedule.get_model_table_name()
     data = repo.execute(f"SELECT * FROM {table} WHERE id = %s", data=(schedule_id,))

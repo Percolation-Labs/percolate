@@ -17,8 +17,9 @@ import percolate as p8
 import json
 from percolate.utils import get_iso_timestamp
 import hashlib
-
-
+from enum import Enum
+#we shouldnt really need a logger her but we have temp functions being exported to apis
+from percolate.utils import logger
 class Function(AbstractEntityModel):
     """Functions are external tools that agents can use. See field comments for context.
     Functions can be searched and used as LLM tools. 
@@ -529,6 +530,7 @@ class User(AbstractEntityModel):
     roles: typing.Optional[typing.List[str]] = Field(default_factory=list, description="A list of roles the user is a member of")
     graph_paths: typing.Optional[typing.List[str]] = Field(None, description="Track all paths extracted by an agent as used to build the KG")
     metadata: typing.Optional[dict] = Field(default_factory=dict, description="Arbitrary user metadata")
+    email_subscription_active: typing.Optional[bool] = Field(False, description="Users can opt in and out of emails")
     
     def as_memory(self,**kwargs):
         """the user memory structure"""
@@ -611,7 +613,8 @@ class Resources(AbstractModel):
     uri: str = Field("An external source or content ref e.g. a PDF file on blob storage or public URI")
     metadata: typing.Optional[dict] = {} #for emails it could be sender and receiver info and date
     graph_paths: typing.Optional[typing.List[str]] = Field(None, description="Track all paths extracted by an agent as used to build the KG")
-    #userid:  typing.Optional[uuid.UUID| str ] = Field(None,description="The user id if the resource is owned - many resources are public") implicit
+    resource_timestamp: typing.Optional[datetime.datetime] = Field(None,description= 'the database will add a default date but sometimes we want to control when the resource is relevant for - for example a daily log')
+    userid:  typing.Optional[uuid.UUID| str] = Field(None, description="The user id is a system field but if we need to control the user context this is how we do it")  
     
     @model_validator(mode='before')
     @classmethod
@@ -900,10 +903,13 @@ DO UPDATE SET value = EXCLUDED.value;
   
 # Scheduled tasks model
 class Schedule(AbstractModel):
-    """Defines a scheduled task."""
+    """Defines a scheduled task.
+    Tasks are scheduled by the system or by users and can be a system prompt for an agent or a function call
+    """
     id: typing.Optional[uuid.UUID| str] = Field(None, description="Unique schedule id")
     userid: typing.Optional[uuid.UUID| str] = Field(None, description="User id associated with schedule")
-    task: str = Field(..., description="Task to execute")
+    name: str = Field(..., description="Task to execute")
+    spec: dict = Field(..., description="the task spec - The task spec can be any json but we have an internal protocol. LLM instructions are valid should use a system_prompt attribute")
     schedule: str = Field(..., description="Cron schedule string, e.g. '0 0 * * *'")
     disabled_at: typing.Optional[datetime.datetime] = Field(None, description="Time when schedule was disabled")
 
@@ -914,3 +920,190 @@ class Schedule(AbstractModel):
             values['id'] = str(uuid.uuid1())
         return values
  
+ ###
+ ## TODO: the functions on this object will move to SQL function and API level 
+ ###
+class Engram(AbstractModel):
+    """Your role is to observe user text and then create a user memory.
+    A user memory is a link between a `User` node named <user> and a <relationship> and a named concept.
+    You should choose from canonical relationship names if you can;
+    
+    - only use knows relationships for person knows person
+    - feel free to skip relationships that are not defined in the list below
+    
+    Dont assume strong relationships e.g. if someone is 'doing' something that does not mean they are 'skilled' in it.
+    You should look for strong evidence to support each relationship or not mention it at all.........................
+        
+    **Relationship: **
+    - `knows`
+    - `likes`
+    - `likes-not` 
+    - `has-allergy` 
+    - `has-goal`
+    - `has-skill`
+    - `working-on`
+    - `is-learning`
+    - `recommends`
+    - `has-value`
+    - `fears`
+    - `takes-medication-for` 
+    - `plans-to-attend` 
+    - `advocates-for`
+    - `opposes`
+    - `teaches`
+    - `aspires-to`
+    - `reports-to`
+    - 'observed'
+    """
+
+    @classmethod
+    def _add_memory_from_user_sessions(cls, since_days_ago:int=1,limit:int=200):
+        """
+        A helper method to read the data from the sessions and generate memories
+        
+        Args:
+            since_days_ago: how far back in days to look for updated session records
+            limit: primarily not to overload models, limit the records. 
+            Users are unlikely to have more than 100 sessions but file uploads count as sessions
+            TODO: note this is currently for all users so we need to think about scale
+        """
+        
+        from percolate.utils import get_days_ago_iso_timestamp 
+        dt = get_days_ago_iso_timestamp(n=since_days_ago)
+        
+        """NOTE: we need to harden these types"""
+        #in this case this filters things that are not based on user comments
+        session_type ='conversation'
+        
+        data = p8.repository(Session).execute(f""" SELECT a.query, a.created_at, a.userid, a.updated_at, email, u.name
+                                        FROM p8."Session" a
+                                         join p8."User" u on a.userid = u.id 
+                                        where a.updated_at > %s 
+                                        and session_type = %s
+                                        order by a.updated_at desc 
+                                        limit {limit}""", data=(dt,session_type))
+        
+        logger.debug(f"Fetched {len(data)} records to convert to memories")
+        
+        if not data:
+            return
+        
+        return p8.Agent(Engram).run(f"""Please add memories for the users by their name
+                                    - the user_name comes from the email in the data 
+                                    - check the function signature for parameter structure
+                                    ```json
+                                    {json.dumps(data,default=str)}
+                                    ```
+                                    """)
+            
+    @classmethod
+    def add_memory(cls, relationships: typing.List[dict]):
+        """
+        Add a user memory by linking a user to a concept by a relationships type
+        You should determine the user name from the content
+        Te relationships are a list of dicts with `user_name`, `relationship` and `target_name`
+        For target names try to use simple keywords and phrases without special characters or punctuation
+        
+        Args:
+            relationships: a list of relationships object|dicts with `user_name`, `relationship` and `target_name`
+        """
+        
+        from percolate.services import PostgresService
+        
+        for r in relationships:
+            r['source_label'] = 'User'
+            r['source_name'] = r['user_name']
+            r['rel_type'] = r['relationship'].replace('-','_')
+            
+        r = PostgresService().graph.add_relationships(relationships)
+                
+        return r
+    
+    @classmethod
+    def describe_user(cls, user_name:str):
+        """supply a user name and get their memory graph to construct a narrative for that person 
+        - feel free to infer some things the person might do or like but be clear if its assumed
+        Make the description conversational rather than bullet points.
+        Args:
+            user_name: the unique user name as given
+        """
+        from percolate.services import PostgresService
+         
+        return PostgresService().graph.get_user_concept_links(user_name,as_model=True)
+        
+
+class AuditStatus(Enum):
+    """Status enum for audit"""
+    Fail="Fail"
+    Success="Success"
+class Audit(AbstractModel):
+    """Generic event audit for Percolate"""
+    id: typing.Optional[uuid.UUID| str] = Field(None, description="Unique id")
+    userid: typing.Optional[uuid.UUID| str] = Field(None, description="Optional user context")
+    status: str = Field(..., description="audit status e.g. Fail|Success")
+    caller:str = Field(..., description="The calling object e.g. a class or service")
+    status_payload: typing.Optional[dict] = Field(default_factory={}, description="Details about the event")
+    error_trace : typing.Optional[str] = Field(None, description="If there is an error dump the stack trace")
+
+
+# """The daily digest agent will evolve with the help of some API utils
+# - we want to summarize changes in the user including their readings etc
+# - we want to summarize new resources they have uploaded 
+# - we want to specifically look at their evolving memory graph
+# """
+class DigestAgent(AbstractModel):
+    """You are the digestion agent for the user - generate daily or weekly digests to email to the user.
+    - Users upload resources like images, document, audio etc and we process them every day
+    - Users also interact via that sessions
+    - As users interact we build a knowledge graph for their memories. 
+    Every time period you should look at what is changing and give a user summary. Create sections. 
+    Only add the section when there is something relevant and do not comment on the fact that there is nothing to add if there is not.
+    1. Provide a brief summary of the user; their goals, fears, thoughts and dreams as though you are taking to them like an oracle or good friend
+    2. Do not be to nice to them. Be polite but challenge them to be better and to grow
+    3. Call out any interesting information related to their goals
+    4. Call out any appointments or reminders that came up that day that they may want to recall
+    5. When looking at graph edges, observe any new edges added based on timestamps
+    6. Call out an logical or factual inaccuracies or any conflicts or contradictions that they may want to
+    7. Suggest any tasks they may want to keep an eye to get closer to their goals and any new tasks they may want to initiate (you may need access to their full task list)
+    8. If you have access to their calendar (disabled for now) list any appointments coming up in the following day or two
+    """
+    @classmethod
+    def get_daily_digest(cls,name:str, user_name:str,**kwargs):
+        """
+        The daily digest will be a combination of data feeds which could be pushed into the data tier
+        It should be resource uploaded in the last N hours and the users profile
+        """
+        from percolate.utils import get_days_ago_iso_timestamp
+        
+        #fetch by the user name which is the email address
+        user = p8.repository(User).execute(""" SELECT * FROM p8."User" where email = %s """, data=(user_name,))
+        if not user:
+            raise Exception(f"Could not find user by name `{user_name}`")
+        if isinstance(user,list):
+            user = user[0]
+        user_id = user['id']
+        
+        #TODO we will unify user and p8 user
+        q= f""" 'MATCH p = (u:User {{name: ''{user_name}''}})-[r*1..2]->(c:Concept)
+                   RETURN u.name,  c.name as concept, relationships(p) as relationships  ',
+                    'name agtype,  concept agtype, relationships agtype'"""
+                                                    
+        user_graph = p8.repository(User).execute(f"""   select * from cypher_query({q})  """)
+        #TODO compact the graph
+        
+        """if would be good to render the graph as an image and make it available
+           the caller can select the user_graph and do that if they wish or the agent can just build a summary from it
+        """
+        
+        recent_resources_summarized = p8.repository(Resources).execute(""" SELECT * FROM p8."Resources" where userid=%s and updated_at >= %s  """,
+                                                                            data=(user_id, get_days_ago_iso_timestamp(n=1)))
+        
+        """do a check on the context length for now and summarize if there is too much"""
+        
+        return {
+            'user_last_session': user['updated_at'],
+            'digest_scope': name,
+            'user': user,
+            'user_graph': user_graph,
+            'recent_resources_upload': recent_resources_summarized            
+        }
