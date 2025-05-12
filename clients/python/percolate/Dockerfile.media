@@ -40,14 +40,7 @@ COPY --from=requirements-stage /tmp/requirements.txt /code/requirements.txt
 RUN pip install --upgrade -r /code/requirements.txt
 
 # Install additional Python packages specifically for audio processing
-RUN pip install \
-    numpy>=1.24.1,<2.0.0 \
-    torch>=2.0.0,<2.3.0 \
-    torchaudio>=2.0.0,<2.3.0 \
-    pydub>=0.25.1 \
-    boto3>=1.26.0 \
-    requests>=2.28.0 \
-    httpx>=0.24.0
+RUN pip install "numpy>=1.24.1,<2.0.0" "torch>=2.0.0,<2.3.0" "torchaudio>=2.0.0,<2.3.0" "pydub>=0.25.1" "boto3>=1.26.0" "requests>=2.28.0" "httpx>=0.24.0"
 
 # Copy application code
 COPY ./percolate /code/percolate
@@ -56,19 +49,15 @@ COPY ./percolate /code/percolate
 ENV PATH=/usr/bin:$PATH
 ENV PYTHONUNBUFFERED=0
 
-# Configure services to use
-ENV ENABLE_AUDIO_PROCESSING=true
-ENV S3_URL=""
-ENV S3_ACCESS_KEY=""
-ENV S3_SECRET=""
-ENV S3_AUDIO_BUCKET="percolate-audio"
-ENV OPENAI_API_KEY=""
+
 
 # Expose the API port
 EXPOSE 5008
 
 # Command to run the application
 CMD ["hypercorn", "--bind", "0.0.0.0:5008", "percolate.api.main:app"]
+
+#docker buildx build -f Dockerfile.media --platform linux/amd64,linux/arm64 -t percolationlabs/percolate-api:media --push .
 
 # Usage instructions:
 # 

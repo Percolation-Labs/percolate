@@ -25,7 +25,7 @@ class AudioFile(AbstractModel):
     model_config = {'namespace': 'public'}
     
     id: uuid.UUID = Field(default_factory=uuid.uuid4)
-    user_id: str
+    user_id: Optional[str | uuid.UUID] = Field(default=None, description="The user id if known")
     project_name: str
     filename: str
     file_size: int
@@ -112,7 +112,7 @@ class AudioPipeline(AbstractModel):
     model_config = {'namespace': 'public'}
     
     id: uuid.UUID = Field(default_factory=uuid.uuid4)
-    audio_file_id: uuid.UUID
+    audio_file_id: str|uuid.UUID
     status: str
     started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: Optional[datetime] = None

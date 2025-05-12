@@ -2,3 +2,4 @@
 .vscode
 .res
 **/.claude/settings.local.json
+.aiscripts
