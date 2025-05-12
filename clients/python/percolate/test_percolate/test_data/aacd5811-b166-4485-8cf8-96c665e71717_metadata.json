@@ -1,0 +1,13 @@
+{
+  "id": "aacd5811-b166-4485-8cf8-96c665e71717",
+  "audio_file_id": "21ce80c8-5d24-4311-9252-3dfd8935ef61",
+  "start_time": 0.0,
+  "end_time": 20.0,
+  "duration": 20.0,
+  "s3_uri": "file:///Users/sirsh/code/mr_saoirse/percolate/clients/python/percolate/test_data/chunk_1_aacd5811-b166-4485-8cf8-96c665e71717.wav",
+  "transcription": "This is a sample transcription for chunk 1. It contains some test speech content for demonstration.",
+  "confidence": 0.9,
+  "metadata": {
+    "created_at": "2025-05-12T03:12:40.545291+00:00"
+  }
+}
