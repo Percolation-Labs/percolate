@@ -17,6 +17,7 @@ KeyField = KeyField()
 from . import utils
 from .MessageStack import  MessageStack
 from .AbstractModel import AbstractModel
+from . import media
 
 def get_p8_models():
     """convenience to load all p8 models in the library"""

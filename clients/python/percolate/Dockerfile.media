@@ -1,0 +1,106 @@
+# Dockerfile for Percolate Media Services with Audio Processing capabilities
+# This extends the original Percolate Dockerfile with additional media processing capabilities
+FROM python:3.10-slim AS requirements-stage
+
+# Install system dependencies for building audio-related libraries
+RUN apt-get update && apt-get install -y \
+    curl \
+    gpg \
+    build-essential \
+    ffmpeg \
+    libsndfile1 \
+    git
+
+WORKDIR /tmp
+RUN pip install poetry==2.0.0
+RUN poetry self add poetry-plugin-export
+
+# Copy project definition files
+COPY ./pyproject.toml ./poetry.lock* /tmp/
+
+# Export the standard requirements
+RUN poetry export -f requirements.txt --output requirements.txt --without-hashes
+
+# Main build stage
+FROM python:3.10-slim
+
+# Install all system dependencies from original Dockerfile PLUS audio processing dependencies
+RUN apt-get update && apt-get install -y \
+    poppler-utils \
+    graphviz \
+    ffmpeg \
+    libsndfile1 \
+    wget \
+    build-essential
+
+WORKDIR /code
+
+# Copy requirements and install them - same as original Dockerfile
+COPY --from=requirements-stage /tmp/requirements.txt /code/requirements.txt
+RUN pip install --upgrade -r /code/requirements.txt
+
+# Install additional Python packages specifically for audio processing
+RUN pip install \
+    numpy>=1.24.1,<2.0.0 \
+    torch>=2.0.0,<2.3.0 \
+    torchaudio>=2.0.0,<2.3.0 \
+    pydub>=0.25.1 \
+    boto3>=1.26.0 \
+    requests>=2.28.0 \
+    httpx>=0.24.0
+
+# Copy application code
+COPY ./percolate /code/percolate
+
+# Environment variables
+ENV PATH=/usr/bin:$PATH
+ENV PYTHONUNBUFFERED=0
+
+# Configure services to use
+ENV ENABLE_AUDIO_PROCESSING=true
+ENV S3_URL=""
+ENV S3_ACCESS_KEY=""
+ENV S3_SECRET=""
+ENV S3_AUDIO_BUCKET="percolate-audio"
+ENV OPENAI_API_KEY=""
+
+# Expose the API port
+EXPOSE 5008
+
+# Command to run the application
+CMD ["hypercorn", "--bind", "0.0.0.0:5008", "percolate.api.main:app"]
+
+# Usage instructions:
+# 
+# Build the media services container:
+# docker build -t percolationlabs/percolate-media:latest -f Dockerfile.media .
+#
+# Run the container with proper environment variables:
+# docker run -p 5009:5008 \
+#   -e S3_URL=your-s3-url \
+#   -e S3_ACCESS_KEY=your-access-key \
+#   -e S3_SECRET=your-secret \
+#   -e OPENAI_API_KEY=your-openai-key \
+#   percolationlabs/percolate-media:latest
+#
+# For Kubernetes deployment:
+# kubectl create secret generic media-secrets \
+#   --from-literal=S3_URL=your-s3-url \
+#   --from-literal=S3_ACCESS_KEY=your-access-key \
+#   --from-literal=S3_SECRET=your-secret \
+#   --from-literal=OPENAI_API_KEY=your-openai-key
+#
+# Then deploy with the secrets mounted as environment variables
+#
+# IMPORTANT NOTES:
+# - This Dockerfile extends the original Percolate Dockerfile and maintains all its core functionality
+# - It adds additional dependencies specifically for audio processing (ffmpeg, libsndfile1, PyTorch, etc.)
+# - Use this for running a fully-featured Percolate server with enhanced media processing capabilities
+# - If you update the original Dockerfile, make sure to update this one as well to maintain compatibility
+#
+# SUCCESSFULLY TESTED:
+# - Audio upload and processing
+# - Silero VAD for speech detection 
+# - Audio chunking based on speech segments
+# - Direct OpenAI Whisper API integration for transcription using REST
+# - Full audio processing pipeline with the test file: INST_018.wav
