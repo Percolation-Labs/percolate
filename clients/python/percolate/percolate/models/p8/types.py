@@ -532,6 +532,10 @@ class User(AbstractEntityModel):
     metadata: typing.Optional[dict] = Field(default_factory=dict, description="Arbitrary user metadata")
     email_subscription_active: typing.Optional[bool] = Field(False, description="Users can opt in and out of emails")
     
+    @staticmethod
+    def id_from_email(email):
+        return make_uuid(email)
+    
     def as_memory(self,**kwargs):
         """the user memory structure"""
 

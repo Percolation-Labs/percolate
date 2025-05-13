@@ -11,6 +11,7 @@ import percolate as p8
 import typing
 from fastapi.responses import RedirectResponse
 from percolate.utils import logger
+from datetime import time,datetime
 
 router = APIRouter()
 @router.get("/ping")
@@ -78,14 +79,21 @@ async def internal_callback(request: Request, token:str=None):
     
     
 @router.get("/google/login")
-async def login_via_google(request: Request, redirect_uri: typing.Optional[str] = Query(None)):
+async def login_via_google(request: Request, redirect_uri: typing.Optional[str] = Query(None), sync_files: bool = Query(False)):
     """
     Begin Google OAuth login. Saves client redirect_uri (e.g. custom scheme) in session,
-    but only sends registered backend URI to Google...
+    but only sends registered backend URI to Google.
+    
+    Args:
+        redirect_uri: Optional redirect URI for client apps to receive the token
+        sync_files: If True, requests additional scopes for file sync and ensures offline access
     """
     # Save client's requested redirect_uri (e.g. shello://auth) to session
     if redirect_uri:
         request.session["app_redirect_uri"] = redirect_uri
+    
+    # Store sync_files parameter in session for callback handling
+    request.session["sync_files"] = sync_files
         
     callback_url = str(request.url_for("google_auth_callback"))
     """hack because otherwise i need to setup some stuff"""
@@ -100,12 +108,13 @@ async def login_via_google(request: Request, redirect_uri: typing.Optional[str] 
     if "oauth_state" in request.session:
         del request.session["oauth_state"]
     
+    # Always request offline access (even if not syncing files) to get refresh token
     return await google.authorize_redirect(
         request,
         callback_url,  # Must be registered in Google Console -> REDIRECT_URI = "http://127.0.0.1:5000/auth/google/callback"
         scope=SCOPES,
         prompt="consent",
-        access_type="offline",
+        access_type="offline",  # This is key for getting a refresh token
         include_granted_scopes="true"
     )
 
@@ -116,6 +125,8 @@ async def google_auth_callback(request: Request, token:str=None):
     """
     Handle Google OAuth callback. Extracts token, optionally persists it,
     and redirects to original app URI with token as a query param.
+    
+    If sync_files was requested, also stores credentials in the database for file sync.
     """
     
     if token:
@@ -129,6 +140,9 @@ async def google_auth_callback(request: Request, token:str=None):
     else:
         app_redirect_uri = None
         
+    # Get sync_files preference
+    sync_files = request.session.get('sync_files', False)
+        
     google = goauth.create_client('google')
     token = await google.authorize_access_token(request)
 
@@ -139,6 +153,15 @@ async def google_auth_callback(request: Request, token:str=None):
     GOOGLE_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(GOOGLE_TOKEN_PATH, 'w') as f:
         json.dump(token, f)
+    
+    # If this authentication is for file sync, store credentials in database
+    if sync_files and "refresh_token" in token:
+        try:
+            # Use the FileSync service to store OAuth credentials
+            from percolate.services.sync.file_sync import FileSync
+            await FileSync.store_oauth_credentials(token)
+        except Exception as e:
+            logger.error(f"Error storing sync credentials: {str(e)}")
 
     id_token = token.get("id_token")
     if not id_token:

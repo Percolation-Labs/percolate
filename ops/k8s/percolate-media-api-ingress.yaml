@@ -18,7 +18,7 @@ metadata:
 spec:
   ingressClassName: nginx
   rules:
-  - host: media.percolationlabs.ai
+  - host: eepis.percolationlabs.ai
     http:
       paths:
       - backend:
@@ -30,5 +30,5 @@ spec:
         pathType: Prefix
   tls:
   - hosts:
-    - media.percolationlabs.ai
+    - eepis.percolationlabs.ai
     secretName: percolationlabs-tls
