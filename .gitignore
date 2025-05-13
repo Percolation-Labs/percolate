@@ -3,3 +3,4 @@
 .res
 **/.claude/settings.local.json
 .aiscripts
+test_data
