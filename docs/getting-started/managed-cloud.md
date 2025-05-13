@@ -93,7 +93,7 @@ To test that you are connected you can ask a question which will use configured 
 
 ```bash
 #from the same cli directory
-peotry run p8 ask "what is the capital of ireland?"
+poetry run p8 ask "what is the capital of ireland?"
 ```
 
 If this works you are connected and using language models.&#x20;
