@@ -1,0 +1,115 @@
+# Dockerfile for Percolate Media Services with Audio Processing capabilities
+# This uses a multi-stage build to minimize image size
+
+# First stage: Generate requirements file
+FROM python:3.10-slim AS requirements-stage
+
+# Install minimal dependencies for poetry
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /var/cache/apt/archives
+
+WORKDIR /tmp
+RUN pip install --no-cache-dir poetry==2.0.0
+RUN poetry self add poetry-plugin-export
+
+# Copy project definition files
+COPY ./pyproject.toml ./poetry.lock* /tmp/
+
+# Export the standard requirements
+RUN poetry export -f requirements.txt --output requirements.txt --without-hashes
+
+# Main build stage with minimal base image
+FROM python:3.10-slim
+
+# Install only essential system dependencies and clean up in a single layer
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    libsndfile1 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /var/cache/apt/archives
+
+WORKDIR /code
+
+# Copy requirements and install them - same as original Dockerfile
+COPY --from=requirements-stage /tmp/requirements.txt /code/requirements.txt
+
+# Install all required packages in a single layer to reduce image size
+RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt \
+    && pip install --no-cache-dir \
+        "numpy>=1.24.1,<2.0.0" \
+        "pydub>=0.25.1" \
+        "boto3>=1.26.0" \
+        "requests>=2.28.0" \
+        "httpx>=0.24.0" \
+        "silero-vad>=5.1.2" \
+        "onnxruntime>=1.16.1" \
+    && rm -rf /code/requirements.txt
+
+# Install PyTorch and torchaudio - ensuring all dependencies are included
+# DO NOT attempt to delete shared libraries or other critical components
+RUN pip install --no-cache-dir \
+    torch==2.1.0 \
+    torchaudio==2.1.0 \
+    && find /usr/local/lib/python3.10/site-packages -name "*.pyc" -delete
+
+# Copy only the necessary application code
+COPY ./percolate /code/percolate
+
+# Set environment variable to disable JIT to reduce memory usage
+ENV PYTORCH_JIT=0
+
+# Verify torch installation is complete and properly linked
+RUN python -c "import torch; import torchaudio; print(f'PyTorch {torch.__version__} installed successfully with {torch.cuda.device_count()} CUDA devices')"
+
+# Environment variables
+ENV PATH=/usr/bin:$PATH
+ENV PYTHONUNBUFFERED=0
+
+
+
+# Expose the API port
+EXPOSE 5008
+
+# Command to run the application
+CMD ["hypercorn", "--bind", "0.0.0.0:5008", "percolate.api.main:app"]
+
+#docker buildx build -f Dockerfile.media --platform linux/amd64,linux/arm64 -t percolationlabs/percolate-api:media --push .
+
+# Usage instructions:
+# 
+# Build the media services container:
+# docker build -t percolationlabs/percolate-media:latest -f Dockerfile.media .
+#
+# Run the container with proper environment variables:
+# docker run -p 5009:5008 \
+#   -e S3_URL=your-s3-url \
+#   -e S3_ACCESS_KEY=your-access-key \
+#   -e S3_SECRET=your-secret \
+#   -e OPENAI_API_KEY=your-openai-key \
+#   percolationlabs/percolate-media:latest
+#
+# For Kubernetes deployment:
+# kubectl create secret generic media-secrets \
+#   --from-literal=S3_URL=your-s3-url \
+#   --from-literal=S3_ACCESS_KEY=your-access-key \
+#   --from-literal=S3_SECRET=your-secret \
+#   --from-literal=OPENAI_API_KEY=your-openai-key
+#
+# Then deploy with the secrets mounted as environment variables
+#
+# IMPORTANT NOTES:
+# - This Dockerfile extends the original Percolate Dockerfile and maintains all its core functionality
+# - It adds additional dependencies specifically for audio processing (ffmpeg, libsndfile1, PyTorch, etc.)
+# - Use this for running a fully-featured Percolate server with enhanced media processing capabilities
+# - If you update the original Dockerfile, make sure to update this one as well to maintain compatibility
+#
+# SUCCESSFULLY TESTED:
+# - Audio upload and processing
+# - Silero VAD for speech detection 
+# - Audio chunking based on speech segments
+# - Direct OpenAI Whisper API integration for transcription using REST
+# - Full audio processing pipeline with the test file: INST_018.wav

@@ -12,10 +12,12 @@ DefaultEmbeddingField = EmbeddedField()
 def KeyField():
     return partial(Field, json_schema_extra={'is_key':True})
 
+KeyField = KeyField()
 
 from . import utils
 from .MessageStack import  MessageStack
 from .AbstractModel import AbstractModel
+from . import media
 
 def get_p8_models():
     """convenience to load all p8 models in the library"""
@@ -29,7 +31,7 @@ from .p8 import *
 
 """For now we whitelist the models that are installed in the database"""
 CORE_INSTALL_MODELS= [ User, Project, Agent, ModelField, LanguageModelApi, Function, Session, SessionEvaluation, AIResponse, ApiProxy, PlanModel,
-               Settings, PercolateAgent, IndexAudit, Task, TaskResources, ResearchIteration , Resources,SessionResources]
+               Settings, PercolateAgent, IndexAudit, Task, TaskResources, ResearchIteration , Resources,SessionResources, Schedule, Audit]
    
 def migrate_core_models():
     """apply schema changes"""
