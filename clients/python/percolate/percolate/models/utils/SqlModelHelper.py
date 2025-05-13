@@ -7,21 +7,23 @@ import datetime
 import types
 import json
 from percolate.utils import make_uuid
+
+
 class SqlModelHelper:
     def __init__(cls, model: BaseModel):
-        cls.model:AbstractModel = AbstractModel.Abstracted(model)
+        cls.model: AbstractModel = AbstractModel.Abstracted(model)
         cls.table_name = cls.model.get_model_table_name()
         cls.field_names = SqlModelHelper.select_fields(model)
         cls.metadata = {}
-        
+
     @property
     def model_name(cls):
         if cls.model:
             return cls.model.get_model_full_name()
-        
+
     def __repr__(self):
         return f"SqlModelHelper({self.model_name})"
-    
+
     @property
     def should_model_notify_index_update(self):
         """
@@ -29,25 +31,25 @@ class SqlModelHelper:
         """
         fields = self.model.model_fields
         """example of disable or force enable in special cases"""
-        index_notify = self.model.model_config.get('index_notify')
+        index_notify = self.model.model_config.get("index_notify")
         if index_notify is not None:
             return index_notify
         """always in this case for graph entity by convention unless disabled"""
-        if 'name' in fields:
+        if "name" in fields:
             return True
         """and always if there are embeddings"""
-        for k,v in fields.items():
-            if (v.json_schema_extra or{}).get('embedding_provider'):
+        for k, v in fields.items():
+            if (v.json_schema_extra or {}).get("embedding_provider"):
                 return True
         """otherwise skip it"""
         return False
-        
-    def create_script(cls,if_not_exists:bool = False):
+
+    def create_script(cls, if_not_exists: bool = False):
         """
 
         Args:
             if_not_exists: by default we try and fail to create for schema migration - but initially set this to True to create a clean DB
-            
+
         (WIP) generate tables for entities -> short term we do a single table with now schema management
         then we will add basic migrations and split out the embeddings + add system fields
         we also need to add the other embedding types - if we do async process we need a metadata server
@@ -62,50 +64,57 @@ class SqlModelHelper:
         - we can check existing columns and use an alter to add new ones if the table exists
 
         """
-       
+
         def is_optional(field):
             return typing.get_origin(field) is typing.Union and type(
                 None
             ) in typing.get_args(field)
-            
+
         fields = typing.get_type_hints(cls.model)
         field_descriptions = cls.model.model_fields
-        mapping =  {k:SqlModelHelper.python_to_postgres_type(v, field_descriptions.get(k)) for k,v in fields.items()}
- 
+        mapping = {
+            k: SqlModelHelper.python_to_postgres_type(v, field_descriptions.get(k))
+            for k, v in fields.items()
+        }
+
         key_field = cls.model.get_model_key_field()
-        assert key_field or 'id' in mapping, f"For model {cls.model}, You must supply either an id or a property like name or key on the model or add json_schema_extra with an is_key property on one if your fields"
-        
+        assert (
+            key_field or "id" in mapping
+        ), f"For model {cls.model}, You must supply either an id or a property like name or key on the model or add json_schema_extra with an is_key property on one if your fields"
+
         """this is assumed for now"""
-        
+
         table_name = cls.model.get_model_table_name()
-        
+
         columns = []
         """Percolate controls the id as a function of a business key or name"""
-        if 'id' not in mapping:
+        if "id" not in mapping:
             columns.append(f"ID UUID PRIMARY KEY")
-            
+
         key_set = False
         for field_name, field_type in mapping.items():
             column_definition = f"{field_name} {field_type}"
-            if field_name == 'id':
+            if field_name == "id":
                 column_definition += " PRIMARY KEY "
-            if field_name in ['name','key', 'id']:
+            if field_name in ["name", "key", "id"]:
                 key_set = True
             elif not is_optional(fields[field_name]):
                 column_definition += " NOT NULL"
             columns.append(column_definition)
 
         if not key_set:
-            raise ValueError("The model input does not specify a key field. Add a name or key field or specify is_key on one of your fields")
+            raise ValueError(
+                "The model input does not specify a key field. Add a name or key field or specify is_key on one of your fields"
+            )
         """add system fields"""
-        for dcol in ['created_at', 'updated_at', 'deleted_at']:
+        for dcol in ["created_at", "updated_at", "deleted_at"]:
             if dcol not in mapping.keys():
                 columns.append(f"{dcol} TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        if 'userid' not in mapping.keys():
+        if "userid" not in mapping.keys():
             columns.append("userid UUID")
 
-        if_not_exists_flag = '' if not if_not_exists else " IF NOT EXISTS "
-        columns_str = ",\n    ".join(columns)
+        if_not_exists_flag = "" if not if_not_exists else " IF NOT EXISTS "
+        columns_str = ",\n    ".join(list(set(columns)))
         create_table_script = f"""CREATE TABLE {if_not_exists_flag} {table_name} (
 {columns_str}
 );
@@ -116,14 +125,14 @@ FOR EACH ROW
 EXECUTE FUNCTION update_updated_at_column();
 
         """
-    
-        #in some case we will attach the notify by calling this function attach_notify_trigger_to_table(schema_name TEXT, table_name TEXT)
-              
+
+        # in some case we will attach the notify by calling this function attach_notify_trigger_to_table(schema_name TEXT, table_name TEXT)
+
         if cls.should_model_notify_index_update:
             create_table_script += f"""
 SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls.model.get_model_name()}');
             """
-        
+
         return create_table_script
 
     def upsert_query(
@@ -131,7 +140,7 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
         batch_size: int,
         returning="*",  # ID, * etc.
         restricted_update_fields: str = None,
-        id_field: str = 'id' # by convention
+        id_field: str = "id"  # by convention
         # records: typing.List[typing.Any],
         # TODO return * or just id for performance
     ):
@@ -199,7 +208,7 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
         """
 
         return upsert_statement.strip()
-    
+
     @classmethod
     def select_fields(cls, model):
         """select db relevant fields"""
@@ -212,16 +221,19 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
             if attr.get("sql_child_relation"):
                 continue
             fields.append(k)
-        return fields   
-    
-
+        return fields
 
     @property
-    def table_has_embeddings(self)->bool:
+    def table_has_embeddings(self) -> bool:
         """TODO return true if one or more columns have embeddings"""
         return True
-        
-    def select_query(self, fields: typing.List[str] = None, since_date_modified:str|datetime.datetime=None, **kwargs):
+
+    def select_query(
+        self,
+        fields: typing.List[str] = None,
+        since_date_modified: str | datetime.datetime = None,
+        **kwargs,
+    ):
         """
         if kwargs exist we use to add predicates
         """
@@ -229,13 +241,14 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
 
         if not kwargs:
             return f"""SELECT { fields } FROM {self.table_name} """
-        predicate = SqlModelHelper.construct_where_clause(since_date_modified=since_date_modified, **kwargs)
-        
+        predicate = SqlModelHelper.construct_where_clause(
+            since_date_modified=since_date_modified, **kwargs
+        )
+
         return f"""SELECT { fields } FROM {self.table_name} {predicate}"""
-    
-    
+
     @classmethod
-    def construct_where_clause(cls, since_date_modified:str=None, **kwargs) -> str:
+    def construct_where_clause(cls, since_date_modified: str = None, **kwargs) -> str:
         """
         Constructs a SQL WHERE clause from keyword arguments.
 
@@ -254,7 +267,7 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
             """if there is a modified since param use the system updated_at field to filter"""
             where_clauses.append(f"""updated_at >= %s""")
             params.append(since_date_modified)
-            
+
         for column, value in kwargs.items():
             if isinstance(value, list):
 
@@ -268,13 +281,13 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
         where_clause = " AND ".join(where_clauses)
 
         return f"WHERE {where_clause}" if where_clauses else ""
-    
-    def create_embedding_table_script(cls)->str:
+
+    def create_embedding_table_script(cls) -> str:
         """
         Given a model, we create the corresponding embeddings table
-        
+
         """
-     
+
         Q = f"""CREATE TABLE  IF NOT EXISTS {cls.model.get_model_embedding_table_name()} (
     id UUID PRIMARY KEY,  -- Hash-based unique ID - we typically hash the column key and provider and column being indexed
     source_record_id UUID NOT NULL,  -- Foreign key to primary table
@@ -290,22 +303,22 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
 );
 """
         return Q
-    
-    def try_generate_migration_script(self, field_list: typing.List[dict]) ->str:
+
+    def try_generate_migration_script(self, field_list: typing.List[dict]) -> str:
         """
-        pass in fields like this 
-        
+        pass in fields like this
+
         [{'field_name': 'name', 'field_type': 'character varying'},
         {'field_name': 'id', 'field_type': 'uuid'},
         {'field_name': 'entity_name', 'field_type': 'character varying'},
         {'field_name': 'field_type', 'field_type': 'character varying'},
         {'field_name': 'deleted_at', 'field_type': 'timestamp without time zone'},
         {'field_name': 'userid', 'field_type': 'uuid'}]
-        
+
         We will add any new fields but we will not remove or modify existing fields yet
         """
-        
-        field_names = [f['field_name'] for f in field_list]
+
+        field_names = [f["field_name"] for f in field_list]
         fields = typing.get_type_hints(self.model)
         field_descriptions = self.model.model_fields
         new_fields = set(fields.keys()) - set(field_names)
@@ -313,10 +326,12 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
         if new_fields:
             script = ""
             for f in new_fields:
-                ptype = SqlModelHelper.python_to_postgres_type(fields[f], field_descriptions.get(f))
+                ptype = SqlModelHelper.python_to_postgres_type(
+                    fields[f], field_descriptions.get(f)
+                )
                 script += f"ALTER TABLE {self.table_name} ADD COLUMN {f} {ptype}; "
         return script
-    
+
     @staticmethod
     def python_to_postgres_types(model: BaseModel):
         """map postgres from pydantic types
@@ -326,10 +341,15 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
         fields = typing.get_type_hints(model)
         field_descriptions = model.model_fields
 
-        return {k:SqlModelHelper.python_to_postgres_type(v, field_descriptions.get(k)) for k,v in fields.items()}
-          
-    @staticmethod      
-    def python_to_postgres_type(py_type: typing.Any, field_annotation: FieldInfo = None) -> str:
+        return {
+            k: SqlModelHelper.python_to_postgres_type(v, field_descriptions.get(k))
+            for k, v in fields.items()
+        }
+
+    @staticmethod
+    def python_to_postgres_type(
+        py_type: typing.Any, field_annotation: FieldInfo = None
+    ) -> str:
         """
         Maps Python types to PostgreSQL types.
         The field hints can be added as overrides to what we would use by default for types
@@ -337,11 +357,11 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
 
         if field_annotation:
             metadata = field_annotation.json_schema_extra or {}
-            if metadata.get('varchar_length'):
+            if metadata.get("varchar_length"):
                 return f"VARCHAR({metadata.get('varchar_length')})"
-            if metadata.get('sql_type'):
-                return metadata.get('sql_type')
-        
+            if metadata.get("sql_type"):
+                return metadata.get("sql_type")
+
         type_mapping = {
             str: "TEXT",
             int: "INTEGER",
@@ -353,7 +373,7 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
             set: "[]",
             tuple: "ARRAY",
             datetime.datetime: "TIMESTAMP",
-            typing.Any: "TEXT",  
+            typing.Any: "TEXT",
         }
 
         if "EmailStr" in str(py_type):
@@ -364,84 +384,90 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
 
         origin = typing.get_origin(py_type)
         if origin is typing.Union or origin is types.UnionType:
-            sub_types = [SqlModelHelper.python_to_postgres_type(t) for t in py_type.__args__ if t is not type(None)] 
+            sub_types = [
+                SqlModelHelper.python_to_postgres_type(t)
+                for t in py_type.__args__
+                if t is not type(None)
+            ]
             if len(sub_types) == 1:
-                return sub_types[0]  
-            
-            if 'UUID' in sub_types:
-                return "UUID" #precedence
+                return sub_types[0]
 
-            union =  f"UNION({', '.join(sub_types)})" 
-            
-            if 'JSON' in union:
+            if "UUID" in sub_types:
+                return "UUID"  # precedence
+
+            union = f"UNION({', '.join(sub_types)})"
+
+            if "JSON" in union:
                 return "JSON"
-            if 'TEXT[]' in union:
-                return 'TEXT[]'
-            if 'TIMESTAMP' in union:
-                return 'TIMESTAMP'
-            
+            if "TEXT[]" in union:
+                return "TEXT[]"
+            if "TIMESTAMP" in union:
+                return "TIMESTAMP"
+
             raise Exception(f"Need to handle disambiguation for union types - {union}")
 
         if origin in {list, typing.List, tuple, typing.Tuple}:
             sub_type = py_type.__args__[0] if py_type.__args__ else typing.Any
             pg_type = SqlModelHelper.python_to_postgres_type(sub_type)
             """decide if we want json arrays or just json"""
-            if pg_type == 'JSON':
+            if pg_type == "JSON":
                 return pg_type
             return f"{pg_type}{type_mapping[list]}"
 
         if origin in {dict, typing.Dict}:
             return type_mapping[dict]
 
-        if hasattr(py_type, 'model_dump'):
+        if hasattr(py_type, "model_dump"):
             return "JSON"
 
         raise ValueError(f"Unsupported type: {py_type}")
-    
+
     def get_model_field_models(self):
         """wraps the field from model method"""
         from percolate.models.p8 import ModelField
+
         return ModelField.get_fields_from_model(self.model)
-    
+
     def get_model_agent_record(self):
         """wraps the agent from model method"""
         from percolate.models.p8 import Agent
+
         return Agent.from_abstract_model(self.model)
-    
-    def serialize_for_db(cls, model: dict|BaseModel, index:int=-1):
-            """this exists only to allow for generalized types
-            abstract models can implement model_dump to have an alt serialization path
-            """
-            if isinstance(model, dict):
-                data = model
-            elif hasattr(model, "model_dump"):
-                data = model.model_dump()
-            else:
-                data = vars(model) 
-                
-            def adapt(item):
-                """we could implement SQL a little better - but needs more work"""
-                if isinstance(item, str):
-                    """i dont love this TODO"""
-                    return item.replace("'", "''")
-                if isinstance(item, uuid.UUID):
-                    return str(item)
-                if isinstance(item, dict):
-                    return json.dumps(item,default=str)
-                if isinstance(item, list) and len(item) and isinstance(item[0],dict):
-                    return json.dumps(item,default=str)
-                return item
-                 
-            data = {k:adapt(v) for k,v in data.items()}
-            if 'id' not in data:
-                business_key = model.get_model_key_field()
-                """if there is no id we always hash the business key on the model and use it
+
+    def serialize_for_db(cls, model: dict | BaseModel, index: int = -1):
+        """this exists only to allow for generalized types
+        abstract models can implement model_dump to have an alt serialization path
+        """
+        if isinstance(model, dict):
+            data = model
+        elif hasattr(model, "model_dump"):
+            data = model.model_dump()
+        else:
+            data = vars(model)
+
+        def adapt(item):
+            """we could implement SQL a little better - but needs more work"""
+            if isinstance(item, str):
+                """i dont love this TODO"""
+                return item.replace("'", "''")
+            if isinstance(item, uuid.UUID):
+                return str(item)
+            if isinstance(item, dict):
+                return json.dumps(item, default=str)
+            if isinstance(item, list) and len(item) and isinstance(item[0], dict):
+                return json.dumps(item, default=str)
+            return item
+
+        data = {k: adapt(v) for k, v in data.items()}
+        if "id" not in data:
+            business_key = model.get_model_key_field()
+            """if there is no id we always hash the business key on the model and use it
                 we will recommend that an ID and name are provided for models that want to save data. This is a unique id and a user friendly name pairing
                 """
-                data['id'] = make_uuid(data[business_key])
-                            
-            return data
-        
+            data["id"] = make_uuid(data[business_key])
+
+        return data
+
     def get_data_load_statement(self, records: typing.List[BaseModel]):
         """Generate the insert statement for the data"""
 
@@ -451,7 +477,7 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
         def sql_repr(value):
             """Properly escape SQL values"""
             if value is None:
-                return 'NULL'
+                return "NULL"
             if isinstance(value, str):
                 return f"""'{value.replace("'", "''")}'"""
             return str(value)
@@ -473,20 +499,20 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
 
         return f"""INSERT INTO {table_name} ({cols}) VALUES
     {values}
-    ON CONFLICT (id) DO UPDATE SET {conflicts};"""        
-    
+    ON CONFLICT (id) DO UPDATE SET {conflicts};"""
+
     # def get_data_load_statement(self, records: typing.List[BaseModel]):
     #     """Generate the insert statement for the data"""
-        
+
     #     if not isinstance(records,list):
     #         records = [records]
-            
+
     #     def sql_repr(s):
     #         """WIP - use SQL properly"""
     #         return repr(s if not isinstance(s,str) else s.replace("'","''"))  if s else 'NULL'
-        
+
     #     if len(records):
-            
+
     #         sample = self.serialize_for_db(records[0])
     #         cols = f",".join(sample.keys())
     #         values = ",\n ".join(  f"({', '.join([sql_repr(v) for _,v in self.serialize_for_db(obj).items() ])})" for obj in records)
@@ -494,9 +520,9 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
     #         conflicts =  f",".join([f"{f}=EXCLUDED.{f}" for f in [c for c in sample.keys() if c not in ['id']]])
     #         return f"""INSERT INTO {self.model.get_model_table_name()}({cols}) VALUES\n {values}
     #     ON CONFLICT (id) DO UPDATE SET {conflicts}   ;"""
-        
+
     def get_register_entities_query(self):
         """get the registration script for entities that have names and add the initial entities for testing to the graph"""
-        
-        if 'name' in self.model.model_fields:
-            return  f"""select * from p8.register_entities('{self.model.get_model_full_name()}');"""
+
+        if "name" in self.model.model_fields:
+            return f"""select * from p8.register_entities('{self.model.get_model_full_name()}');"""
