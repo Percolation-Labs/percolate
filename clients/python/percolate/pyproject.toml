@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "percolate-db"
-version = "0.1.858"
+version = "0.1.859"
 description = "A client for working with the [Percolate database](https://github.com/Percolation-Labs/percolate)"
 authors = ["mr-saoirse <amartey@gmail.com>"]
 license = "MIT"
@@ -8,6 +8,7 @@ readme = "README.md"
 packages = [{include = "percolate"}]
 
 [tool.poetry.dependencies]
+apscheduler = "^3.10.1"
 httpx = "0.27.0"
 httpcore = "^1.0.0"
 python = ">=3.10,<4.0"
@@ -35,6 +36,7 @@ pyarrow = "^19.0.1"
 aiobotocore="2.16.0"
 boto3 = "1.35.0"
 mammoth = "^1.9.0"
+markdown = "^3.8"
 
 [tool.poetry.group.iceberg]
 optional = true

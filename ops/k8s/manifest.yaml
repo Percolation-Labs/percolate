@@ -1,21 +1,33 @@
 #by default this will but everything in the p8 namespace and create that namespace
 #if not put here, then we need to configure P8_PG_HOST for the app
+#in reality we should create the namespace first and add the scripts gen_sql_install_configmap and then apply the cluster manifest
 apiVersion: v1
 kind: Namespace
 metadata:
   name: p8
 ---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: percolate-env
+  namespace: p8
+data:
+  P8_PG_PORT: "5432"
+  P8_PG_USER: "app"
+  P8_PG_HOST: "percolate-rw.p8.svc.cluster.local"
+---
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
   namespace: p8
-  name: percolate-test
+  name: percolate
 spec:
   #the operator needs to use 16 as a postgres version
   imageName: percolationlabs/postgres-base:16
-  instances: 1
+  #reduce instances for testing a smaller cluster
+  instances: 2
   storage:
-    size: 10Gi
+    size: 100Gi
   #to install percolate from config maps add config maps from scripts folder run:  python gen_sql_install_configmap.py --apply
   #this applies to the p8 namespace by default
   bootstrap:
@@ -32,7 +44,7 @@ spec:
             key: 03_create_secondary.sql
           - name: 10-finalize
             key: 10_finalize.sql
-#make sure to set a strorage class in your cloud
+#make sure to set a storage class in your cloud
 #for example in hetnzer kubectl apply -f https://raw.githubusercontent.com/hetznercloud/csi-driver/master/deploy/kubernetes/hcloud-csi.yml
 
 ---
@@ -42,7 +54,7 @@ metadata:
   namespace: p8
   name: percolate-api
 spec:
-  replicas: 1
+  replicas: 3
   selector:
     matchLabels:
       app: "percolate-api"
@@ -65,15 +77,10 @@ spec:
                   #this is the name of the pg database and the secret corresponding
                   name: percolate-app
                   key: password
-            - name: P8_PG_PORT
-              value: "5432"
-            - name: P8_PG_USER
-              value: "app"
-            - name: P8_PG_HOST
-              value: "percolate-rw.p8.svc.cluster.local"
-          # envFrom:
-          #   - configMapRef:
-          #       name: percolate-env
+          #Environment variables loaded from ConfigMap
+          envFrom:
+            - configMapRef:
+                name: percolate-env
           resources:
             limits:
               cpu: "500m"

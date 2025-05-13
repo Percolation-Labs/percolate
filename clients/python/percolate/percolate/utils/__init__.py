@@ -7,6 +7,7 @@ from pathlib import Path
 import os
 from .env import get_repo_root
 import datetime
+from datetime import timedelta, timezone
 import base64
 import json
 
@@ -41,7 +42,17 @@ def get_iso_timestamp():
         str: ISO formatted timestamp (YYYY-MM-DDTHH:MM:SS)
     """
     now = datetime.datetime.now()
-    return now.strftime("%Y-%m-%dT%H:%M:%S")
+    return now.isoformat()
+
+def get_days_ago_iso_timestamp(n=1):
+    """
+    Returns the current time as an ISO 8601 formatted string with second precision.
+    
+    Returns:
+        str: ISO formatted timestamp (YYYY-MM-DDTHH:MM:SS)
+    """
+    dt_24h_ago = datetime.datetime.now(timezone.utc) - timedelta(days=n)
+    return dt_24h_ago.isoformat()
 
 def uuid_str_from_dict(d):
     """
@@ -60,7 +71,7 @@ def make_uuid(input_object: str | dict):
     if isinstance(input_object, dict):
         return uuid_str_from_dict(input_object)
 
-    return str(uuid.uuid5(uuid.NAMESPACE_DNS   , input_object))
+    return str(uuid.uuid5(uuid.NAMESPACE_DNS, input_object))
 
 
 def batch_collection(collection, batch_size):
