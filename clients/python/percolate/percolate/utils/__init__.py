@@ -71,7 +71,7 @@ def make_uuid(input_object: str | dict):
     if isinstance(input_object, dict):
         return uuid_str_from_dict(input_object)
 
-    return str(uuid.uuid5(uuid.NAMESPACE_DNS   , input_object))
+    return str(uuid.uuid5(uuid.NAMESPACE_DNS, input_object))
 
 
 def batch_collection(collection, batch_size):

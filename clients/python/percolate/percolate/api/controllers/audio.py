@@ -12,7 +12,7 @@ import asyncio
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone
 from fastapi import HTTPException, UploadFile
-
+from percolate.utils import make_uuid
 import percolate as p8
 from percolate.utils import logger
 from percolate.services.S3Service import S3Service
@@ -34,7 +34,8 @@ async def upload_audio_file(
     user_id: Optional[str], 
     project_name: str,
     metadata: Optional[Dict[str, Any]] = None,
-    use_s3: bool = True  # Default to using S3
+    use_s3: bool = True,
+    file_key:Optional[str] = None
 ) -> AudioUploadResponse:
     """
     Upload an audio file to S3 and create an AudioFile record.
@@ -69,11 +70,10 @@ async def upload_audio_file(
         logger.debug(f"Temporary file created at: {temp_file_path}")
     
     try:
-        # Get file size
+       
         file_size = os.path.getsize(temp_file_path)
         
-        # Create a unique ID for the file
-        file_id = str(uuid.uuid4())
+        file_id = str(uuid.uuid4()) if not file_key else make_uuid({'file_key': file_key, 'user_id':user_id})
         
         # Initialize with uploading status first
         audio_file = AudioFile(

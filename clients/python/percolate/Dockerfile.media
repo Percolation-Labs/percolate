@@ -1,18 +1,18 @@
 # Dockerfile for Percolate Media Services with Audio Processing capabilities
-# This extends the original Percolate Dockerfile with additional media processing capabilities
+# This uses a multi-stage build to minimize image size
+
+# First stage: Generate requirements file
 FROM python:3.10-slim AS requirements-stage
 
-# Install system dependencies for building audio-related libraries
-RUN apt-get update && apt-get install -y \
+# Install minimal dependencies for poetry
+RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
-    gpg \
-    build-essential \
-    ffmpeg \
-    libsndfile1 \
-    git
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /var/cache/apt/archives
 
 WORKDIR /tmp
-RUN pip install poetry==2.0.0
+RUN pip install --no-cache-dir poetry==2.0.0
 RUN poetry self add poetry-plugin-export
 
 # Copy project definition files
@@ -21,29 +21,49 @@ COPY ./pyproject.toml ./poetry.lock* /tmp/
 # Export the standard requirements
 RUN poetry export -f requirements.txt --output requirements.txt --without-hashes
 
-# Main build stage
+# Main build stage with minimal base image
 FROM python:3.10-slim
 
-# Install all system dependencies from original Dockerfile PLUS audio processing dependencies
-RUN apt-get update && apt-get install -y \
-    poppler-utils \
-    graphviz \
+# Install only essential system dependencies and clean up in a single layer
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libsndfile1 \
-    wget \
-    build-essential
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /var/cache/apt/archives
 
 WORKDIR /code
 
 # Copy requirements and install them - same as original Dockerfile
 COPY --from=requirements-stage /tmp/requirements.txt /code/requirements.txt
-RUN pip install --upgrade -r /code/requirements.txt
 
-# Install additional Python packages specifically for audio processing
-RUN pip install "numpy>=1.24.1,<2.0.0" "torch>=2.0.0,<2.3.0" "torchaudio>=2.0.0,<2.3.0" "pydub>=0.25.1" "boto3>=1.26.0" "requests>=2.28.0" "httpx>=0.24.0"
+# Install all required packages in a single layer to reduce image size
+RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt \
+    && pip install --no-cache-dir \
+        "numpy>=1.24.1,<2.0.0" \
+        "pydub>=0.25.1" \
+        "boto3>=1.26.0" \
+        "requests>=2.28.0" \
+        "httpx>=0.24.0" \
+        "silero-vad>=5.1.2" \
+        "onnxruntime>=1.16.1" \
+    && rm -rf /code/requirements.txt
 
-# Copy application code
+# Install PyTorch and torchaudio - ensuring all dependencies are included
+# DO NOT attempt to delete shared libraries or other critical components
+RUN pip install --no-cache-dir \
+    torch==2.1.0 \
+    torchaudio==2.1.0 \
+    && find /usr/local/lib/python3.10/site-packages -name "*.pyc" -delete
+
+# Copy only the necessary application code
 COPY ./percolate /code/percolate
+
+# Set environment variable to disable JIT to reduce memory usage
+ENV PYTORCH_JIT=0
+
+# Verify torch installation is complete and properly linked
+RUN python -c "import torch; import torchaudio; print(f'PyTorch {torch.__version__} installed successfully with {torch.cuda.device_count()} CUDA devices')"
 
 # Environment variables
 ENV PATH=/usr/bin:$PATH

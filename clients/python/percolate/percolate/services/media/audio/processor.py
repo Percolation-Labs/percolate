@@ -83,8 +83,9 @@ class AudioProcessor:
         except ImportError:
             logger.info("PyTorch is not available - will use energy-based VAD")
         
+        from percolate.services.llm.LanguageModel import try_get_open_ai_key
         # Check for OpenAI API key
-        self.openai_api_key = os.environ.get("OPENAI_API_KEY")
+        self.openai_api_key = os.environ.get("OPENAI_API_KEY") or try_get_open_ai_key()
         self.openai_available = self.openai_api_key is not None
         if self.openai_available:
             logger.info("OpenAI API key found, will use REST API for transcription")
@@ -413,23 +414,29 @@ class AudioProcessor:
                 
                 logger.info(f"Processed chunk {i+1}: {transcription[:50]}...")
             except Exception as e:
-                # Log the transcription error but don't hide it with a placeholder
+                # Log the transcription error but don't add it to the transcription field
                 error_message = f"Transcription failed: {str(e)}"
                 logger.error(f"Error transcribing chunk {i+1}: {error_message}")
                 
-                # Update the chunk with the error message
-                chunk.transcription = f"[ERROR] {error_message}"
+                # Keep transcription field empty for failed transcriptions
+                chunk.transcription = ""
                 chunk.confidence = 0.0
                 
-                # Update the chunk in the database with the error
+                # Store error in metadata instead
+                if not hasattr(chunk, 'metadata') or chunk.metadata is None:
+                    chunk.metadata = {}
+                chunk.metadata["error"] = error_message
+                chunk.metadata["transcription_status"] = "failed"
+                
+                # Update the chunk in the database with the error in metadata
                 try:
                     p8.repository(AudioChunk).update_records([chunk])
-                    logger.info(f"Updated chunk {chunk_id} with transcription error")
+                    logger.info(f"Updated chunk {chunk_id} with transcription error in metadata")
                 except Exception as db_error:
                     logger.error(f"Error updating chunk with transcription error: {db_error}")
                     # Continue processing other chunks
                 
-                logger.info(f"Chunk {i+1} marked with error: {error_message[:50]}...")
+                logger.info(f"Chunk {i+1} marked with error in metadata: {error_message[:50]}...")
             
             # Add the chunk to our records regardless of transcription success
             chunk_records.append(chunk)
@@ -578,7 +585,67 @@ class AudioProcessor:
         audio_file.status = AudioProcessingStatus.COMPLETED
         audio_file.metadata["completed_at"] = datetime.now(timezone.utc).isoformat()
         audio_file.metadata["chunk_count"] = chunk_count
+        
+        # Export chunks as a single Resource
+        self.export_resource_for_file_chunks(audio_file)
+        
         p8.repository(AudioFile).update_records([audio_file])
+        
+    def export_resource_for_file_chunks(self, audio_file: AudioFile) -> None:
+        """
+        Combine all chunks for an audio file into a single Resource object.
+        
+        This allows other parts of the system to easily access the full transcription
+        as a standard Resource, while the individual chunks remain available for
+        fine-grained access.
+        
+        Args:
+            audio_file: The AudioFile whose chunks should be combined
+        """
+        from percolate.models.p8.types import Resources
+        import percolate as p8
+        from percolate.utils import make_uuid
+           
+        try:
+            # Get all chunks for this file and sort them by start time
+            chunks = p8.repository(AudioChunk).select(
+                audio_file_id=str(audio_file.id)
+            )
+            
+            chunks = sorted(chunks, key=lambda chunk: getattr(chunk, 'start_time', 0) if hasattr(chunk, 'start_time') else 0)
+            full_text = f"\n".join([c['transcription'] for c in chunks])         
+       
+            resource_id = make_uuid(audio_file.s3_uri)
+            
+            # Create the Resource
+            resource = Resources(
+                id=resource_id,
+                name=audio_file.filename,
+                category="audio_transcription",
+                content=full_text,
+                uri=audio_file.s3_uri,
+                metadata={
+                    "audio_file_id": str(audio_file.id),
+                    "content_type": audio_file.content_type,
+                    "chunk_count": len(chunks),
+                   # "duration": sum(chunk.duration for chunk in chunks if hasattr(chunk, 'duration')),
+                    "source": "audio_transcription"
+                },
+                userid=next(
+                    (chunk.userid for chunk in chunks if hasattr(chunk, 'userid') and chunk.userid), 
+                    None
+                )
+            )
+            
+            # Save the Resource
+            p8.repository(Resources).update_records([resource])
+            logger.info(f"Created Resource {resource_id} for audio file {audio_file.id} with {len(chunks)} chunks")
+            
+        except Exception as e:
+            logger.error(f"Error creating Resource for audio file {audio_file.id}: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            # Don't re-raise - this is a non-critical operation
     
     def _cleanup_temp_files(self):
         """Clean up any temporary files/directories created during processing."""

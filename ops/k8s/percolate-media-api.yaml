@@ -17,7 +17,7 @@ metadata:
   name: percolate-media-api
   namespace: eepis
 spec:
-  replicas: 5
+  replicas: 3
   selector:
     matchLabels:
       app: percolate-media-api
