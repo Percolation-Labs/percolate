@@ -18,6 +18,7 @@ AS $BODY$
 DECLARE
     table_schema_prompt TEXT;
     api_response JSON;
+    ack_http_timeout BOOLEAN;
 BEGIN
 	/*
 	imports
