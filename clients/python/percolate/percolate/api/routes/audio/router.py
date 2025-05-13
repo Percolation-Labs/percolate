@@ -97,15 +97,38 @@ def process_chunk_for_response(chunk) -> Dict:
             # Convert to AudioChunk object first
             chunk_dict = AudioChunk(**chunk).model_dump()
         
+        # Get metadata if available
+        metadata = chunk_dict.get('metadata', {}) or {}
+        
+        # Check if there's an error in metadata
+        error = metadata.get('error', '')
+        transcription_status = metadata.get('transcription_status', '')
+        
+        # Get the transcription
+        transcription = chunk_dict.get('transcription', '')
+        
+        # If there's an error and no transcription, add a status note
+        if error and transcription_status == 'failed' and not transcription:
+            transcription_note = f"[Transcription failed]"
+        else:
+            transcription_note = transcription
+        
         # Return a standardized format
-        return {
+        response = {
             "id": str(chunk_dict.get('id', '')),
             "start_time": chunk_dict.get('start_time', 0),
             "end_time": chunk_dict.get('end_time', 0),
             "duration": chunk_dict.get('duration', 0),
-            "transcription": chunk_dict.get('transcription', ''),
+            "transcription": transcription_note,
             "confidence": chunk_dict.get('confidence', 0)
         }
+        
+        # Add error information if available
+        if error:
+            response["error"] = error
+            response["transcription_status"] = transcription_status
+            
+        return response
     except Exception as e:
         logger.error(f"Error processing chunk: {str(e)}")
         return {
@@ -113,7 +136,9 @@ def process_chunk_for_response(chunk) -> Dict:
             "start_time": 0,
             "end_time": 0,
             "duration": 0,
-            "transcription": f"Error processing chunk: {str(e)}",
+            "transcription": "",
+            "error": f"Error processing chunk: {str(e)}",
+            "transcription_status": "error",
             "confidence": 0
         }
 
@@ -158,6 +183,7 @@ async def upload_audio(
     project_name: str = Form(...),
     metadata: Optional[str] = Form(None),
     user_id: Optional[str] = Form(None),
+    file_key: Optional[str] = Form(None),
     process_audio: bool = Form(True)
 ):
     """
@@ -184,7 +210,8 @@ async def upload_audio(
             file=file,
             user_id=req_user_id,
             project_name=project_name,
-            metadata=parsed_metadata
+            metadata=parsed_metadata,
+            file_key=file_key
         )
         
         # Start processing in background if requested
@@ -349,10 +376,17 @@ async def get_transcription(file_id: str):
             processed_chunks.append(chunk_dict)
             
             transcription = chunk_dict.get('transcription', '')
-            if transcription:
+            # Only add non-empty transcriptions to the full text
+            if transcription and not (transcription.startswith('[') and transcription.endswith(']')):
                 start_time = chunk_dict.get('start_time', 0)
                 end_time = chunk_dict.get('end_time', 0)
                 full_text_segments.append(f"[{start_time:.2f}s - {end_time:.2f}s]: {transcription}")
+            # If there's an error, add a placeholder noting the failure
+            elif 'error' in chunk_dict:
+                start_time = chunk_dict.get('start_time', 0)
+                end_time = chunk_dict.get('end_time', 0)
+                # Don't add the actual error message to the transcript
+                full_text_segments.append(f"[{start_time:.2f}s - {end_time:.2f}s]: [Transcription unavailable]")
         
         # Add placeholder if no chunks found
         if not processed_chunks:
