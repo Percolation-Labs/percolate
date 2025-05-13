@@ -40,10 +40,10 @@ import pytest
 
 import pytest
 
-@pytest.mark.skip("Skipping bootstrap test: no live database in CI environment")
+# @pytest.mark.skip("Skipping bootstrap test: no live database in CI environment")
 @pytest.mark.slow
 def test_scripts_bootstrap():
-	from percolate.models import bootstrap
+    from percolate.models import bootstrap
 
-	"""this generates the script that we use for setup of percolate (WIP)"""
-	bootstrap(root='../../../extension/', apply=True)
+    """this generates the script that we use for setup of percolate (WIP)"""
+    bootstrap(root="../../../extension/", apply=True)

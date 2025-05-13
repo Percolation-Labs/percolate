@@ -1,11 +1,13 @@
 #by default this will but everything in the p8 namespace and create that namespace
 #if not put here, then we need to configure P8_PG_HOST for the app
 #in reality we should create the namespace first and add the scripts gen_sql_install_configmap and then apply the cluster manifest
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: p8
----
+##
+#                 1. kubectl create namespace k8
+# apiVersion: v1
+# kind: Namespace
+# metadata:
+#   name: p8
+# ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -17,6 +19,7 @@ data:
   P8_PG_HOST: "percolate-rw.p8.svc.cluster.local"
 ---
 apiVersion: postgresql.cnpg.io/v1
+#see https://cloudnative-pg.io/documentation/preview/samples/cluster-example-full.yaml
 kind: Cluster
 metadata:
   namespace: p8
@@ -25,9 +28,21 @@ spec:
   #the operator needs to use 16 as a postgres version
   imageName: percolationlabs/postgres-base:16
   #reduce instances for testing a smaller cluster
-  instances: 2
+  instances: 3
   storage:
     size: 100Gi
+  #if you want the super user access supply this
+  #
+  # 2. kubectl create secret generic p8-su-cred -n p8  --type=kubernetes.io/basic-auth  --from-literal=username=postgres  --from-literal=password="$(openssl rand -base64 32)"
+  # decode with:> 
+  # kubectl get secret p8-su-cred -n p8 -o jsonpath='{.data.password}' | base64 -d && echo
+  #
+  ###############################################
+  enableSuperuserAccess: true
+  superuserSecret:
+    name: p8-su-cred
+  ###
+  #  3. add the percolate scripts as configmaps and then apply this manifest
   #to install percolate from config maps add config maps from scripts folder run:  python gen_sql_install_configmap.py --apply
   #this applies to the p8 namespace by default
   bootstrap:

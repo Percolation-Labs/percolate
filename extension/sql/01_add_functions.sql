@@ -858,6 +858,159 @@ $$ LANGUAGE plpgsql;
 
 ---------
 
+DROP FUNCTION IF EXISTS p8.ping_api();
+
+CREATE OR REPLACE FUNCTION p8.ping_api()
+RETURNS INTEGER AS
+$$
+DECLARE
+    api_token_in TEXT;
+    proxy_uri_in TEXT;
+    http_result RECORD;
+BEGIN
+    -- Fetch API details from the p8."ApiProxy" table
+    SELECT token, proxy_uri 
+    INTO api_token_in, proxy_uri_in
+    FROM p8."ApiProxy"
+    WHERE name = 'percolate'
+    LIMIT 1;
+
+    -- If no API details are found, exit early
+    IF api_token_in IS NULL OR proxy_uri_in IS NULL THEN
+        RAISE NOTICE 'API details not found, skipping ping';
+        RETURN NULL;
+    END IF;
+
+    BEGIN
+        -- Make the GET request to /auth/ping
+        SELECT *
+        INTO http_result
+        FROM public.http(
+            ( 'GET', 
+              proxy_uri_in || '/auth/ping',
+              ARRAY[http_header('Authorization', 'Bearer ' || api_token_in)],
+              NULL,
+              NULL
+            )::http_request
+        );
+    EXCEPTION 
+        WHEN OTHERS THEN
+            RAISE NOTICE 'Error executing ping request: %', SQLERRM;
+            RETURN NULL;
+    END;
+
+    -- Log and return the status code
+    RAISE NOTICE 'Pinged %/auth/ping - Status: %, Response: %', proxy_uri_in, http_result.status, http_result.content;
+    RETURN http_result.status;
+END;
+$$ LANGUAGE plpgsql;
+
+
+---------
+
+-- Function: p8.add_relationships_to_node
+-- Description:
+--   Batch processing of relationships (edges) in the graph. This function expects a JSONB
+--   array of edge objects, each with the following fields:
+--     source_label    TEXT         -- source node label (e.g. 'User', 'Topic')
+--     source_name     TEXT         -- source node name/identifier
+--     rel_type        TEXT         -- the relationship type (e.g. 'likes', 'knows')
+--     target_name     TEXT         -- target node name/identifier
+--     activate        BOOLEAN      -- whether to activate (true) or deactivate (false) the relationship
+--     source_user_id  TEXT         -- optional user_id for source node scoping (null for global)
+--     target_label    TEXT         -- optional target node label (defaults to 'Concept')
+--     target_user_id  TEXT         -- optional user_id for target node scoping (null for global)
+--     rel_props       JSONB        -- optional relationship properties as JSONB
+--
+-- Returns:
+--   INTEGER: The number of relationships processed.
+-- Usage:
+--   SELECT p8.add_relationships_to_node('[
+--     {
+--       "source_label": "User",
+--       "source_name": "sirsh@email.com",
+--       "rel_type": "likes",
+--       "target_name": "Coffee",
+--       "activate": true,
+--       "source_user_id": null,
+--       "target_label": "Concept",
+--       "target_user_id": null,
+--       "rel_props": {"confidence": "0.95"}
+--     },
+--     {
+--       "source_label": "User",
+--       "source_name": "sirsh@email.com",
+--       "rel_type": "dislikes",
+--       "target_name": "Tea",
+--       "activate": true
+--     }
+--   ]'::jsonb);
+
+DROP FUNCTION IF EXISTS p8.add_relationships_to_node;
+CREATE OR REPLACE FUNCTION p8.add_relationships_to_node(edges JSONB)
+RETURNS INTEGER
+LANGUAGE plpgsql
+VOLATILE PARALLEL UNSAFE
+AS $BODY$
+DECLARE
+    edge JSONB;
+    count INTEGER := 0;
+    
+    -- Edge fields
+    source_label TEXT;
+    source_name TEXT;
+    rel_type TEXT;
+    target_name TEXT;
+    activate BOOLEAN;
+    source_user_id TEXT;
+    target_label TEXT;
+    target_user_id TEXT;
+    rel_props JSONB;
+BEGIN
+    -- Process each edge in the input JSON array
+    FOR edge IN SELECT * FROM jsonb_array_elements(edges)
+    LOOP
+        -- Extract required fields
+        source_label := edge->>'source_label';
+        source_name := edge->>'source_name';
+        rel_type := edge->>'rel_type';
+        target_name := edge->>'target_name';
+        
+        -- Extract optional fields with defaults
+        activate := COALESCE((edge->>'activate')::boolean, TRUE);
+        source_user_id := edge->>'source_user_id';
+        target_label := COALESCE(edge->>'target_label', 'Concept');
+        target_user_id := edge->>'target_user_id';
+        rel_props := COALESCE(edge->'rel_props', '{}'::jsonb);
+        
+        -- Validate required fields
+        IF source_label IS NULL OR source_name IS NULL OR rel_type IS NULL OR target_name IS NULL THEN
+            RAISE NOTICE 'Skipping invalid edge: missing required fields.';
+            CONTINUE;
+        END IF;
+        
+        -- Call the single relationship function
+        PERFORM p8.add_relationship_to_node(
+            source_label,
+            source_name,
+            rel_type,
+            target_name,
+            activate,
+            source_user_id,
+            target_label,
+            target_user_id,
+            rel_props
+        );
+        
+        count := count + 1;
+    END LOOP;
+    
+    RETURN count;
+END;
+$BODY$;
+
+---------
+
 
 DROP FUNCTION IF EXISTS p8.get_paths;
 
@@ -976,6 +1129,273 @@ BEGIN
 END;
 $BODY$;
 
+
+---------
+
+-- Function: p8.get_relationships
+-- Description:
+--   Retrieves relationships from the graph database, optionally filtered by source and target.
+--   Returns active relationships by default (terminated_at IS NULL).
+--
+-- Parameters:
+--   source_label     TEXT   - Source node label to filter by (optional)
+--   source_name      TEXT   - Source node name to filter by (optional)
+--   rel_type         TEXT   - Relationship type to filter by (optional)
+--   target_label     TEXT   - Target node label to filter by (optional)
+--   target_name      TEXT   - Target node name to filter by (optional)
+--   source_user_id   TEXT   - Source node user_id to filter by (optional)
+--   target_user_id   TEXT   - Target node user_id to filter by (optional)
+--   include_inactive BOOLEAN- Whether to include terminated relationships (default FALSE)
+--
+-- Returns:
+--   TABLE of relationship information
+--   
+-- Usage:
+--   SELECT * FROM p8.get_relationships('User', 'alice@example.com');
+--   SELECT * FROM p8.get_relationships(rel_type := 'likes');
+--   SELECT * FROM p8.get_relationships('User', NULL, NULL, 'Topic');
+
+DROP FUNCTION IF EXISTS p8.get_relationships;
+CREATE OR REPLACE FUNCTION p8.get_relationships(
+    source_label     TEXT    DEFAULT NULL,
+    source_name      TEXT    DEFAULT NULL,
+    rel_type         TEXT    DEFAULT NULL,
+    target_label     TEXT    DEFAULT NULL,
+    target_name      TEXT    DEFAULT NULL,
+    source_user_id   TEXT    DEFAULT NULL,
+    target_user_id   TEXT    DEFAULT NULL,
+    include_inactive BOOLEAN DEFAULT FALSE
+)
+RETURNS TABLE(
+    src_label    TEXT,
+    src_name     TEXT,
+    src_user_id  TEXT,
+    relationship TEXT,
+    tgt_label    TEXT,
+    tgt_name     TEXT,
+    tgt_user_id  TEXT,
+    created_at   TIMESTAMP,
+    terminated_at TIMESTAMP,
+    properties   JSONB
+)
+LANGUAGE plpgsql
+VOLATILE PARALLEL UNSAFE
+AS $BODY$
+DECLARE
+    cypher_query TEXT;
+    match_clause TEXT := 'MATCH (a)';
+    where_clauses TEXT[] := '{}';
+    relation_clause TEXT := '-[r]->';
+    where_clause TEXT := '';
+BEGIN
+    -- Load AGE extension
+    LOAD 'age';
+    SET search_path = ag_catalog, "$user", public;
+    
+    -- Check if graph exists
+    IF NOT EXISTS (SELECT 1 FROM ag_graph WHERE name = 'percolate') THEN
+        RETURN;
+    END IF;
+    
+    -- Build source node match conditions
+    IF source_label IS NOT NULL THEN
+        match_clause := format('MATCH (a:%s)', source_label);
+        
+        IF source_name IS NOT NULL THEN
+            where_clauses := array_append(where_clauses, format('a.name = ''%s''', source_name));
+        END IF;
+        
+        IF source_user_id IS NOT NULL THEN
+            where_clauses := array_append(where_clauses, format('a.user_id = ''%s''', source_user_id));
+        ELSE
+            where_clauses := array_append(where_clauses, 'a.user_id IS NULL');
+        END IF;
+    ELSE
+        match_clause := 'MATCH (a)';
+    END IF;
+    
+    -- Build relationship match
+    IF rel_type IS NOT NULL THEN
+        relation_clause := format('-[r:%s]->', rel_type);
+    ELSE
+        relation_clause := '-[r]->';
+    END IF;
+    
+    -- Build target node match conditions
+    IF target_label IS NOT NULL THEN
+        match_clause := format('%s%s(b:%s)', match_clause, relation_clause, target_label);
+        
+        IF target_name IS NOT NULL THEN
+            where_clauses := array_append(where_clauses, format('b.name = ''%s''', target_name));
+        END IF;
+        
+        IF target_user_id IS NOT NULL THEN
+            where_clauses := array_append(where_clauses, format('b.user_id = ''%s''', target_user_id));
+        ELSE
+            where_clauses := array_append(where_clauses, 'b.user_id IS NULL');
+        END IF;
+    ELSE
+        match_clause := format('%s%s(b)', match_clause, relation_clause);
+    END IF;
+    
+    -- Filter active relationships by default
+    IF NOT include_inactive THEN
+        where_clauses := array_append(where_clauses, 'r.terminated_at IS NULL');
+    END IF;
+    
+    -- Combine WHERE clauses if any exist
+    IF array_length(where_clauses, 1) > 1 THEN
+        -- Remove the first empty element
+        where_clauses := where_clauses[2:array_length(where_clauses, 1)];
+        where_clause := ' WHERE ' || array_to_string(where_clauses, ' AND ');
+    END IF;
+    
+    -- Build the complete Cypher query
+    cypher_query := format('%s%s
+                          RETURN 
+                             a.label AS src_label, 
+                             a.name AS src_name,
+                             a.user_id AS src_user_id,
+                             r.label AS relationship,
+                             b.label AS tgt_label,
+                             b.name AS tgt_name,
+                             b.user_id AS tgt_user_id,
+                             r.created_at,
+                             r.terminated_at,
+                             r',
+                         match_clause, where_clause);
+    
+    -- Execute and return results
+    RETURN QUERY 
+    SELECT 
+        (v).src_label::TEXT,
+        (v).src_name::TEXT,
+        (v).src_user_id::TEXT,
+        (v).relationship::TEXT,
+        (v).tgt_label::TEXT,
+        (v).tgt_name::TEXT,
+        (v).tgt_user_id::TEXT,
+        ((v).created_at)::TIMESTAMP,
+        ((v).terminated_at)::TIMESTAMP,
+        (to_jsonb((v).r) - 'created_at' - 'terminated_at' - 'id' - 'label' - 'start_id' - 'end_id')::JSONB AS properties
+    FROM cypher('percolate', cypher_query) AS (v agtype);
+END;
+$BODY$;
+
+---------
+
+-- Function: p8.add_relationship_to_node
+-- Description:
+--   Idempotently MERGE two graph nodes (scoped by optional user_id) and a relationship between them.
+--   Nodes default to label 'Concept' if not specified. The relationship is MERGEd only once,
+--   with a created_at timestamp and extra properties from a JSONB map.
+--   
+--   When activate=TRUE (default), relationship is created or reactivated.
+--   When activate=FALSE, relationship is marked as terminated with current timestamp.
+--
+/*
+Usage example:
+
+ SELECT p8.add_relationship_to_node('User', 'sirsh@email.com',  'interested_in',   'GraphDB');
+ SELECT p8.add_relationship_to_node('User', 'sirsh@email.com',  'interested_in',   'Percolated');
+ SELECT p8.add_relationship_to_node('User', 'sirsh@email.com',  'interested_in',   'Math');
+
+ SELECT p8.add_relationship_to_node('User', 'sirsh@gmail.com',  'interested_in',   'GraphDB', True, '123');
+ SELECT p8.add_relationship_to_node('User', 'sirsh@gmail.com',  'interested_in',   'Percolated', True, '123');
+ 
+ --rel props
+  SELECT p8.add_relationship_to_node('User', 'sirsh@gmail.com',  'interested_in',   'Percolated', True, '123', NULL, NULL, '{
+  "source": "user_input",
+  "weight": "0.75",
+  "notes": "Added via API",
+  "confidence": "high"
+}'::jsonb);
+ 
+
+  */
+
+  
+DROP FUNCTION IF EXISTS p8.add_relationship_to_node;
+CREATE OR REPLACE FUNCTION p8.add_relationship_to_node(
+    source_label      text,
+    source_name       text,
+    rel_type          text,
+    target_name       text,
+    activate          boolean    DEFAULT true,
+    source_user_id    text       DEFAULT NULL,
+    target_label      text       DEFAULT 'Concept',
+    target_user_id    text       DEFAULT NULL,
+    rel_props         jsonb      DEFAULT '{}'::jsonb
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+AS $BODY$
+DECLARE
+    f_query          text;
+    sql              text;
+    src_user_clause  text;
+    tgt_user_clause  text;
+    prop_set_clause  text := '';
+    kv               record;
+    ts               text := now()::timestamp::text;
+    result_data      jsonb;
+BEGIN
+    -- 1) Load AGE extension and set search_path
+    LOAD 'age';
+    SET search_path = ag_catalog, "$user", public;
+
+	target_label:= COALESCE(target_label,'Concept');
+    -- 3) Build user_id property fragments for source and target
+    src_user_clause := CASE
+        WHEN source_user_id IS NULL OR trim(source_user_id) = ''
+            THEN ''
+        ELSE format(', user_id: %L', source_user_id)
+    END;
+    tgt_user_clause := CASE
+        WHEN target_user_id IS NULL OR trim(target_user_id) = ''
+            THEN 'user_id: no_id'
+        ELSE format('user_id: %L', target_user_id)
+    END;
+
+    -- 4) Turn any extra JSONB props into `, r.key = 'value'` fragments
+    FOR kv IN SELECT * FROM jsonb_each_text(rel_props) LOOP
+        prop_set_clause := prop_set_clause
+            || format(', r.%I = %L', kv.key, kv.value);
+    END LOOP;
+
+    -- 5) Modified Cypher query to return the relationship and nodes
+    f_query := format(
+        'MERGE (a:%s {name: %L %s})
+         MERGE (b:%s {name: %L})
+		 WITH a, b
+		 MERGE (a)-[r:%s]->(b)
+         SET
+           r.created_at    = coalesce(r.created_at, %L),
+           r.terminated_at = CASE WHEN %s THEN null ELSE %L END 
+           %s
+         RETURN a AS source_node, r AS relationship, b AS target_node',
+        source_label, source_name, src_user_clause,
+        target_label, target_name,
+        rel_type,
+        ts,
+        activate::text, ts,
+        prop_set_clause
+    );
+
+raise NOTICE '%',f_query;
+	
+    -- 6) Execute Cypher query and fetch the result
+    SELECT row_to_json(t)::jsonb INTO result_data
+    FROM (
+        SELECT * FROM cypher_query(f_query,
+		'a agtype, r agtype, b agtype'
+		) 
+
+    ) t;
+    
+    RETURN result_data;
+END;
+$BODY$;
 
 ---------
 
@@ -2609,14 +3029,14 @@ $BODY$;
 
 -- FUNCTION: p8.nl2sql(text, character varying, character varying, character varying, double precision)
 
--- DROP FUNCTION IF EXISTS p8.nl2sql(text, character varying, character varying, character varying, double precision);
+DROP FUNCTION IF EXISTS p8.nl2sql;
 
 CREATE OR REPLACE FUNCTION p8.nl2sql(
 	question text,
 	agent_name character varying,
-	model_in character varying DEFAULT 'gpt-4o-2024-08-06'::character varying,
+	model_in character varying DEFAULT 'gpt-4.1-mini'::character varying,
 	api_token character varying DEFAULT NULL::character varying,
-	temperature double precision DEFAULT 0.01)
+	temperature double precision DEFAULT 0.0)
     RETURNS TABLE(response jsonb, query text, confidence numeric) 
     LANGUAGE 'plpgsql'
     COST 100
@@ -2627,6 +3047,7 @@ AS $BODY$
 DECLARE
     table_schema_prompt TEXT;
     api_response JSON;
+    ack_http_timeout BOOLEAN;
 BEGIN
 	/*
 	imports
@@ -2657,12 +3078,15 @@ BEGIN
             LIMIT 1;
     END IF;
 
+    select http_set_curlopt('CURLOPT_TIMEOUT','8000') into ack_http_timeout;
+    RAISE NOTICE 'THE HTTP TIMEOUT IS HARDCODED TO 8000ms';
+
     -- API call to OpenAI with the necessary headers and payload
     WITH T AS(
         SELECT 'system' AS "role", 
 		   'you will generate a PostgreSQL query for the provided table metadata that can '
 		|| ' query that table (but replace table with YOUR_TABLE) to answer the users question and respond in json format'
-		|| 'responding with the query and numeric confidence as a number from 0 to 1 - escape characters so that the json can be loaded in postgres.' 
+		|| 'responding with the query and a strictly numeric confidence as a number from 0 to 1 - escape characters so that the json can be loaded in postgres.' 
 		AS "content" 
         UNION
         SELECT 'system' AS "role", table_schema_prompt AS "content" 
@@ -2691,7 +3115,11 @@ BEGIN
         -- Parse the JSON response string to JSONB and extract the content
         (api_response->'choices'->0->'message'->>'content')::JSONB AS response,  -- Content as JSONB
         ((api_response->'choices'->0->'message'->>'content')::JSONB->>'query')::TEXT AS query,  -- Extract query
-        ((api_response->'choices'->0->'message'->>'content')::JSONB->>'confidence')::NUMERIC AS confidence;  -- Extract confidence
+        CASE
+            WHEN ((api_response->'choices'->0->'message'->>'content')::JSONB->>'confidence') ~ '^[0-9]*\.?[0-9]+$'
+            THEN ((api_response->'choices'->0->'message'->>'content')::JSONB->>'confidence')::NUMERIC
+            ELSE 0.5
+        END AS confidence;
 
 EXCEPTION
     WHEN OTHERS THEN
@@ -2702,6 +3130,603 @@ $BODY$;
 ALTER FUNCTION p8.nl2sql(text, character varying, character varying, character varying, double precision)
     OWNER TO postgres;
 
+
+---------
+
+DROP FUNCTION IF EXISTS p8.parallel_search;
+
+CREATE OR REPLACE FUNCTION p8.parallel_search(
+    query TEXT,
+    entity_types TEXT[] DEFAULT NULL,
+    user_id UUID DEFAULT NULL,
+    max_results INTEGER DEFAULT 10,
+    include_graph BOOLEAN DEFAULT TRUE,
+    include_execution_stats BOOLEAN DEFAULT FALSE
+)
+RETURNS TABLE(
+    entity_type TEXT,
+    id UUID,
+    score NUMERIC,
+    content JSONB,
+    rank INTEGER,
+    execution_stats JSONB
+) 
+LANGUAGE 'plpgsql'
+COST 100
+VOLATILE PARALLEL SAFE
+ROWS 1000
+AS $BODY$
+DECLARE
+    entity_type TEXT;
+    default_entities TEXT[];
+    result_data JSONB := '[]'::JSONB;
+    execution_stats_data JSONB := '{}'::JSONB;
+BEGIN
+    /*
+    A high-level parallel search across multiple entity types with unified ranking.
+    Executes SQL queries, vector searches, and graph traversals in parallel.
+    
+    Example usage:
+    -- Search across all default entities:
+    SELECT * FROM p8.parallel_search('customer retention strategies');
+    
+    -- Search specific entities:
+    SELECT * FROM p8.parallel_search('favorite color', ARRAY['p8.UserFact'], 'e9c56a28-1d09-5253-af36-4b9d812f6bfa');
+    
+    -- Search with execution statistics:
+    SELECT * FROM p8.parallel_search('database performance', NULL, NULL, 10, true, true);
+    */
+    
+    -- If no entity types provided, use default set of searchable entities
+    IF entity_types IS NULL THEN
+        SELECT ARRAY_AGG(entity_name) INTO default_entities
+        FROM p8."ModelField"
+        WHERE embedding_provider IS NOT NULL
+        GROUP BY entity_name
+        LIMIT 10; -- Limit to top 10 entity types for performance
+        
+        entity_types := default_entities;
+    END IF;
+    
+    -- Process each entity type in parallel
+    FOR entity_type IN SELECT unnest(entity_types) LOOP
+        -- Use a separate background worker for each entity type
+        PERFORM pg_background_send('
+            SELECT pg_notify(
+                ''parallel_search_result'', 
+                json_build_object(
+                    ''entity_type'', $1,
+                    ''results'', (
+                        SELECT json_build_object(
+                            ''query_results'', q.*,
+                            ''merged_results'', (
+                                SELECT json_agg(m.*)
+                                FROM p8.merge_search_results(
+                                    q.relational_result,
+                                    q.vector_result,
+                                    CASE WHEN $2 THEN q.graph_result ELSE NULL END,
+                                    0.4, 0.4, 0.2, $3
+                                ) m
+                            )
+                        )
+                        FROM p8.query_entity_fast($4, $1, $5) q
+                    )
+                )::text
+            )', 
+            ARRAY[entity_type, include_graph, max_results, query, user_id]
+        );
+    END LOOP;
+    
+    -- Collect results from all background workers
+    DECLARE
+        notification_payload JSONB;
+        all_results JSONB := '[]'::JSONB;
+        wait_count INTEGER := 0;
+        max_wait INTEGER := 300; -- Maximum wait iterations (30 seconds at 100ms intervals)
+        entity_count INTEGER := array_length(entity_types, 1);
+        processed_count INTEGER := 0;
+    BEGIN
+        -- Listen for notifications from background workers
+        LISTEN parallel_search_result;
+        
+        -- Wait for results or timeout
+        WHILE processed_count < entity_count AND wait_count < max_wait LOOP
+            -- Check for notifications
+            FOR notification_payload IN
+                SELECT payload::jsonb
+                FROM pg_notification_queue_usage 
+                WHERE channel = 'parallel_search_result'
+            LOOP
+                -- Process notification
+                processed_count := processed_count + 1;
+                
+                -- Extract entity type and results
+                DECLARE
+                    current_entity TEXT := notification_payload->>'entity_type';
+                    entity_results JSONB := notification_payload->'results'->'merged_results';
+                    query_execution_stats JSONB := jsonb_build_object(
+                        current_entity, 
+                        notification_payload->'results'->'query_results'->'execution_time_ms'
+                    );
+                BEGIN
+                    -- Add entity type to each result
+                    SELECT jsonb_agg(
+                        jsonb_set(r, '{entity_type}', to_jsonb(current_entity))
+                    )
+                    FROM jsonb_array_elements(entity_results) r
+                    INTO entity_results;
+                    
+                    -- Add to overall results
+                    all_results := all_results || COALESCE(entity_results, '[]'::JSONB);
+                    
+                    -- Add execution stats if requested
+                    IF include_execution_stats THEN
+                        execution_stats_data := execution_stats_data || query_execution_stats;
+                    END IF;
+                END;
+            END LOOP;
+            
+            -- If not all entities processed, wait a bit
+            IF processed_count < entity_count THEN
+                PERFORM pg_sleep(0.1);
+                wait_count := wait_count + 1;
+            END IF;
+        END LOOP;
+        
+        -- Stop listening
+        UNLISTEN parallel_search_result;
+        
+        -- Re-rank all results across entity types
+        SELECT jsonb_agg(r ORDER BY (r->>'score')::NUMERIC DESC)
+        FROM jsonb_array_elements(all_results) r
+        INTO result_data;
+    END;
+    
+    -- Return final results
+    RETURN QUERY 
+    SELECT 
+        (r->>'entity_type')::TEXT AS entity_type,
+        (r->>'id')::UUID AS id,
+        (r->>'score')::NUMERIC AS score,
+        (r->>'content')::JSONB AS content,
+        ROW_NUMBER() OVER (ORDER BY (r->>'score')::NUMERIC DESC) AS rank,
+        CASE WHEN include_execution_stats THEN execution_stats_data ELSE NULL END AS execution_stats
+    FROM jsonb_array_elements(COALESCE(result_data, '[]'::JSONB)) r
+    ORDER BY score DESC
+    LIMIT max_results;
+END;
+$BODY$;
+
+COMMENT ON FUNCTION p8.parallel_search IS 
+'High-level search function that executes parallel searches across multiple entity types, 
+combining SQL, vector, and graph search approaches for comprehensive results.';
+
+---------
+
+DROP FUNCTION IF EXISTS p8.query_entity_fast;
+
+CREATE OR REPLACE FUNCTION p8.query_entity_fast(
+    question TEXT,
+    table_name TEXT,
+    user_id TEXT DEFAULT NULL,
+    graph_max_depth INTEGER DEFAULT 2,
+    min_confidence NUMERIC DEFAULT 0.7,
+    limit_results INTEGER DEFAULT 5,
+    use_sql_index BOOLEAN DEFAULT FALSE
+)
+RETURNS TABLE(
+    query_text TEXT,
+    confidence NUMERIC,
+    relational_result JSONB,
+    vector_result JSONB,
+    graph_result JSONB,
+    hybrid_score NUMERIC,
+    execution_time_ms JSONB,
+    error_message TEXT
+) 
+LANGUAGE 'plpgsql'
+COST 100
+VOLATILE PARALLEL SAFE
+ROWS 1000
+AS $BODY$
+DECLARE
+    schema_name TEXT;
+    table_without_schema TEXT;
+    full_table_name TEXT;
+    sql_query TEXT;
+    sql_confidence NUMERIC;
+    sql_start_time TIMESTAMPTZ;
+    sql_end_time TIMESTAMPTZ;
+    vector_start_time TIMESTAMPTZ;
+    vector_end_time TIMESTAMPTZ;
+    graph_start_time TIMESTAMPTZ;
+    graph_end_time TIMESTAMPTZ;
+    sql_query_result JSONB;
+    vector_search_result JSONB;
+    graph_result_data JSONB;
+    error_messages TEXT[];
+    timing_data JSONB;
+    hybrid_score NUMERIC;
+BEGIN
+    /*
+    Parallel query execution for entity search combining:
+    1. SQL query generation and execution (if use_sql_index is TRUE)
+    2. Vector similarity search
+    3. Graph traversal for related entities
+    
+    The use_sql_index parameter controls whether to use SQL-based searching.
+    It is FALSE by default because SQL searches with ILIKE patterns are not efficient 
+    for content tables with rich text, as they require sequential scans unless special 
+    GIN indexes are set up. Vector search is generally more effective for semantic matching.
+    
+    Example usage:
+    SELECT * FROM p8.query_entity_fast('what is my favorite color', 'p8.UserFact', 'e9c56a28-1d09-5253-af36-4b9d812f6bfa');
+    SELECT * FROM p8.query_entity_fast('documents about database performance', 'p8.Document');
+    SELECT * FROM p8.query_entity_fast('research on AI', 'p8.Resources', NULL, 2, 0.7, 5, FALSE); -- Disable SQL index
+    SELECT * FROM p8.query_entity_fast('research on AI', 'p8.Resources', NULL, 2, 0.7, 5, TRUE);  -- Enable SQL index
+    */
+
+    -- Extract schema and table name
+    schema_name := split_part(table_name, '.', 1);
+    table_without_schema := split_part(table_name, '.', 2);
+    full_table_name := FORMAT('%I."%I"', schema_name, table_without_schema);
+    
+    -- Initialize results
+    sql_query_result := NULL;
+    vector_search_result := NULL;
+    graph_result_data := NULL;
+    error_messages := ARRAY[]::TEXT[];
+
+    -- BLOCK 1: Generate SQL query using nl2sql if use_sql_index is enabled
+    sql_start_time := clock_timestamp();
+    
+    IF use_sql_index THEN
+        -- Execute nl2sql synchronously only if SQL index is enabled
+        BEGIN
+            SELECT nl."query", nl.confidence INTO sql_query, sql_confidence
+            FROM p8.nl2sql(question, table_name) AS nl;
+        EXCEPTION WHEN OTHERS THEN
+            error_messages := array_append(error_messages, 'NL2SQL error: ' || SQLERRM);
+            sql_query := NULL;
+            sql_confidence := 0;
+        END;
+    ELSE
+        -- Skip SQL query generation if SQL index is disabled
+        sql_query := NULL;
+        sql_confidence := 0;
+        error_messages := array_append(error_messages, 'SQL indexing disabled by use_sql_index parameter');
+    END IF;
+    
+    -- PARALLEL BLOCK 2: Perform vector search
+    vector_start_time := clock_timestamp();
+    
+    BEGIN
+        -- Try a simplified vector search approach - see if p8.vector_search_entity exists
+        BEGIN
+            -- Just check if the function exists and the table exists
+            EXECUTE FORMAT('
+                SELECT COUNT(*) 
+                FROM pg_proc p 
+                JOIN pg_namespace n ON p.pronamespace = n.oid
+                WHERE n.nspname = ''p8'' AND p.proname = ''vector_search_entity''');
+                
+            -- If no exception, we can try to run the function
+            IF user_id IS NOT NULL THEN
+                BEGIN
+                    -- Execute vector search with user_id filter
+                    EXECUTE FORMAT('
+                        SELECT jsonb_agg(row_to_json(result)) 
+                        FROM (
+                            SELECT b.*, a.vdistance 
+                            FROM p8.vector_search_entity($1, $2, 0.75, $3) a
+                            JOIN %I.%I b ON b.id = a.id
+                            WHERE b.userid = $4::TEXT
+                            ORDER BY a.vdistance
+                        ) result', schema_name, table_without_schema)
+                        INTO vector_search_result
+                        USING question, table_name, limit_results, user_id;
+                        
+                    -- Handle null result
+                    IF vector_search_result IS NULL THEN
+                        vector_search_result := '[]'::jsonb;
+                    END IF;
+                EXCEPTION WHEN OTHERS THEN
+                    error_messages := array_append(error_messages, 'Vector search user filter error: ' || SQLERRM);
+                    vector_search_result := '[]'::jsonb;
+                END;
+            ELSE
+                BEGIN
+                    -- Execute vector search without user_id filter
+                    EXECUTE FORMAT('
+                        SELECT jsonb_agg(row_to_json(result)) 
+                        FROM (
+                            SELECT b.*, a.vdistance 
+                            FROM p8.vector_search_entity($1, $2, 0.75, $3) a
+                            JOIN %I.%I b ON b.id = a.id
+                            ORDER BY a.vdistance
+                        ) result', schema_name, table_without_schema)
+                        INTO vector_search_result
+                        USING question, table_name, limit_results;
+                        
+                    -- Handle null result
+                    IF vector_search_result IS NULL THEN
+                        vector_search_result := '[]'::jsonb;
+                    END IF;
+                EXCEPTION WHEN OTHERS THEN
+                    error_messages := array_append(error_messages, 'Vector search error: ' || SQLERRM);
+                    vector_search_result := '[]'::jsonb;
+                END;
+            END IF;
+        EXCEPTION WHEN OTHERS THEN
+            error_messages := array_append(error_messages, 'Vector search function not available: ' || SQLERRM);
+            vector_search_result := '[]'::jsonb;
+        END;
+    EXCEPTION WHEN OTHERS THEN
+        error_messages := array_append(error_messages, 'Vector search outer error: ' || SQLERRM);
+        vector_search_result := '[]'::jsonb;
+    END;
+    
+    vector_end_time := clock_timestamp();
+    
+    -- PARALLEL BLOCK 3: Perform graph traversal
+    graph_start_time := clock_timestamp();
+    
+    BEGIN
+        -- Simplified graph traversal that won't error out
+        -- In a production environment, we would implement full graph traversal
+        graph_result_data := '[]'::jsonb;
+    EXCEPTION WHEN OTHERS THEN
+        error_messages := array_append(error_messages, 'Graph traversal error: ' || SQLERRM);
+        graph_result_data := '[]'::jsonb;
+    END;
+    
+    graph_end_time := clock_timestamp();
+    
+    -- Execute SQL query based on nl2sql results (only if use_sql_index is TRUE)
+    BEGIN
+        -- Initialize empty result
+        sql_query_result := '[]'::jsonb;
+        
+        -- Only proceed if SQL querying is enabled and we have a query
+        IF use_sql_index AND sql_query IS NOT NULL THEN
+            -- Clean up quotes in table names
+            sql_query := REPLACE(sql_query, 'YOUR_TABLE', full_table_name);
+            -- Fix possible double quoting issue
+            sql_query := REPLACE(sql_query, '""', '"');
+            
+            -- Execute SQL query if confidence is high enough
+            IF sql_confidence >= min_confidence THEN
+                BEGIN
+                    sql_query := rtrim(sql_query, ';');
+                    
+                    -- Try to execute the query directly, handle possible issues
+                    BEGIN
+                        EXECUTE FORMAT('SELECT jsonb_agg(row_to_json(t)) FROM (%s) t', sql_query)
+                        INTO sql_query_result;
+                        
+                        -- Handle null result
+                        IF sql_query_result IS NULL THEN
+                            sql_query_result := '[]'::jsonb;
+                        END IF;
+                    EXCEPTION WHEN OTHERS THEN
+                        error_messages := array_append(error_messages, 'SQL execution error: ' || SQLERRM);
+                        sql_query_result := '[]'::jsonb;
+                    END;
+                EXCEPTION WHEN OTHERS THEN
+                    error_messages := array_append(error_messages, 'SQL execution error: ' || SQLERRM);
+                END;
+            ELSE
+                error_messages := array_append(error_messages, 'SQL confidence too low: ' || sql_confidence::TEXT);
+            END IF;
+        ELSIF NOT use_sql_index THEN
+            -- Skip execution, set empty array
+            sql_query_result := '[]'::jsonb;
+        ELSE
+            error_messages := array_append(error_messages, 'No valid SQL query available');
+        END IF;
+    END;
+    
+    sql_end_time := clock_timestamp();
+    
+    -- Combine results with hybrid scoring
+    DECLARE
+        hybrid_score_value NUMERIC := 0;
+        sql_results_count INTEGER := 0;
+        sql_weight NUMERIC;
+        vector_weight NUMERIC;
+        graph_weight NUMERIC;
+    BEGIN
+        -- Determine weights based on whether SQL is used
+        IF use_sql_index THEN
+            -- Standard weights when all search types are enabled
+            sql_weight := 0.4;
+            vector_weight := 0.4;
+            graph_weight := 0.2;
+        ELSE
+            -- Adjusted weights when SQL is disabled - increase vector weight
+            sql_weight := 0.0;
+            vector_weight := 0.8;
+            graph_weight := 0.2;
+        END IF;
+        
+        -- Calculate hybrid score based on available results
+        IF use_sql_index AND sql_query_result IS NOT NULL THEN
+            sql_results_count := jsonb_array_length(sql_query_result);
+            IF sql_results_count > 0 AND sql_confidence >= min_confidence THEN
+                -- Weight by both confidence and number of results
+                hybrid_score_value := hybrid_score_value + (sql_confidence * sql_weight);
+                
+                -- Add a small bonus for each result found (up to 5 max)
+                hybrid_score_value := hybrid_score_value + 
+                    LEAST(sql_results_count, 5) * 0.02;
+            END IF;
+        END IF;
+        
+        IF vector_search_result IS NOT NULL AND jsonb_array_length(vector_search_result) > 0 THEN
+            -- Use best vector match score (1 - distance) as component
+            hybrid_score_value := hybrid_score_value + 
+                (1 - (vector_search_result->0->>'vdistance')::NUMERIC) * vector_weight;
+                
+            -- Add a small bonus for each result found (up to 5 max)
+            hybrid_score_value := hybrid_score_value + 
+                LEAST(jsonb_array_length(vector_search_result), 5) * 0.02;
+        END IF;
+        
+        IF graph_result_data IS NOT NULL AND jsonb_array_length(graph_result_data) > 0 THEN
+            -- Give score boost based on graph connectivity
+            hybrid_score_value := hybrid_score_value + graph_weight;
+        END IF;
+        
+        -- Set variable for return query (scale to 0-1 range)
+        hybrid_score := LEAST(hybrid_score_value, 1.0);
+    END;
+    
+    -- Prepare timing information
+    timing_data := jsonb_build_object(
+        'sql_query_ms', EXTRACT(EPOCH FROM (sql_end_time - sql_start_time)) * 1000,
+        'vector_search_ms', EXTRACT(EPOCH FROM (vector_end_time - vector_start_time)) * 1000,
+        'graph_traversal_ms', EXTRACT(EPOCH FROM (graph_end_time - graph_start_time)) * 1000,
+        'total_ms', EXTRACT(EPOCH FROM (clock_timestamp() - sql_start_time)) * 1000
+    );
+    
+    -- Return all results
+    RETURN QUERY 
+    SELECT 
+        sql_query AS query_text,
+        sql_confidence AS confidence,
+        sql_query_result AS relational_result,
+        vector_search_result AS vector_result,
+        graph_result_data AS graph_result,
+        hybrid_score AS hybrid_score,
+        timing_data AS execution_time_ms,
+        array_to_string(error_messages, '; ') AS error_message;
+END;
+$BODY$;
+
+COMMENT ON FUNCTION p8.query_entity_fast IS 
+'Parallel entity query function that optionally executes SQL queries, vector search, and graph traversal 
+for faster results and hybrid scoring. By default, SQL indexing is disabled (use_sql_index=FALSE) 
+because ILIKE-based SQL queries on rich text fields are inefficient without proper GIN indexes.';
+
+---------
+
+DROP FUNCTION IF EXISTS p8.merge_search_results;
+
+CREATE OR REPLACE FUNCTION p8.merge_search_results(
+    sql_results JSONB,
+    vector_results JSONB,
+    graph_results JSONB,
+    sql_weight NUMERIC DEFAULT 0.4,
+    vector_weight NUMERIC DEFAULT 0.4,
+    graph_weight NUMERIC DEFAULT 0.2,
+    max_results INTEGER DEFAULT 10
+)
+RETURNS TABLE(
+    id UUID,
+    score NUMERIC,
+    content JSONB,
+    source TEXT,
+    rank INTEGER
+) 
+LANGUAGE 'plpgsql'
+COST 100
+VOLATILE PARALLEL SAFE
+ROWS 1000
+AS $BODY$
+DECLARE
+    combined_results JSONB;
+    sql_count INTEGER;
+    vector_count INTEGER;
+    graph_count INTEGER;
+BEGIN
+    /*
+    Merges search results from different sources (SQL, vector, graph) with weighted scoring
+    
+    Example usage:
+    SELECT * FROM p8.merge_search_results(
+        query_result.relational_result, 
+        query_result.vector_result, 
+        query_result.graph_result
+    ) FROM p8.query_entity_fast('what is my favorite color', 'p8.UserFact') AS query_result;
+    */
+    
+    -- Initialize counters
+    sql_count := CASE WHEN sql_results IS NOT NULL THEN jsonb_array_length(sql_results) ELSE 0 END;
+    vector_count := CASE WHEN vector_results IS NOT NULL THEN jsonb_array_length(vector_results) ELSE 0 END;
+    graph_count := CASE WHEN graph_results IS NOT NULL THEN jsonb_array_length(graph_results) ELSE 0 END;
+    
+    -- Create a CTE for SQL results
+    RETURN QUERY WITH
+    sql_data AS (
+        SELECT 
+            (r->>'id')::UUID AS id,
+            sql_weight AS base_score,
+            r AS content,
+            'sql' AS source,
+            idx AS original_rank
+        FROM jsonb_array_elements(COALESCE(sql_results, '[]'::JSONB)) WITH ORDINALITY AS a(r, idx)
+        WHERE idx <= max_results
+    ),
+    
+    -- Create a CTE for vector results
+    vector_data AS (
+        SELECT 
+            (r->>'id')::UUID AS id,
+            vector_weight * (1 - COALESCE((r->>'vdistance')::NUMERIC, 0.5)) AS base_score,
+            r AS content,
+            'vector' AS source,
+            idx AS original_rank
+        FROM jsonb_array_elements(COALESCE(vector_results, '[]'::JSONB)) WITH ORDINALITY AS a(r, idx)
+        WHERE idx <= max_results
+    ),
+    
+    -- Create a CTE for graph results - assuming graph results have target node IDs
+    graph_data AS (
+        SELECT 
+            (r->>'target_node_id')::UUID AS id,
+            graph_weight * (1 - (r->>'path_length')::NUMERIC / 10) AS base_score,
+            r AS content,
+            'graph' AS source,
+            idx AS original_rank
+        FROM jsonb_array_elements(COALESCE(graph_results, '[]'::JSONB)) WITH ORDINALITY AS a(r, idx)
+        WHERE idx <= max_results
+    ),
+    
+    -- Union all results
+    all_results AS (
+        SELECT * FROM sql_data
+        UNION ALL
+        SELECT * FROM vector_data
+        UNION ALL
+        SELECT * FROM graph_data
+    ),
+    
+    -- Group by ID to combine scores from different sources
+    grouped_results AS (
+        SELECT 
+            id,
+            SUM(base_score) AS total_score,
+            jsonb_agg(jsonb_build_object('content', content, 'source', source, 'rank', original_rank)) AS all_content,
+            STRING_AGG(source, ',') AS sources
+        FROM all_results
+        GROUP BY id
+    )
+    
+    -- Final output with ranking
+    SELECT 
+        id,
+        total_score AS score,
+        all_content AS content,
+        sources AS source,
+        RANK() OVER (ORDER BY total_score DESC) AS rank
+    FROM grouped_results
+    ORDER BY score DESC
+    LIMIT max_results;
+END;
+$BODY$;
+
+COMMENT ON FUNCTION p8.merge_search_results IS 
+'Merges and scores results from SQL, vector, and graph searches to provide a unified ranking.';
 
 ---------
 
@@ -2769,6 +3794,130 @@ BEGIN
 END;
 $BODY$;
 
+
+
+---------
+
+DROP FUNCTION IF EXISTS p8.get_user_concept_links;
+CREATE OR REPLACE FUNCTION p8.get_user_concept_links(
+  user_name TEXT,
+   rel_type TEXT DEFAULT NULL,
+  select_hub BOOLEAN DEFAULT FALSE,
+  depth INT DEFAULT 2
+)
+RETURNS TABLE (
+  results JSONB
+) AS
+$$
+DECLARE
+  formatted_cypher_query TEXT;
+  rel_pattern TEXT;
+  where_clause TEXT;
+BEGIN
+
+  /*
+  	select concept nodes linked to users. 
+  	- By default we include all concept nodes that are terminal and exclude hubs which are structural
+  	- you can explicitly pass the flag NULL to show all which is really just a testing device
+  	- you can pass flag True to just show hubs
+    - rel_type allows filtering by relationship type
+
+	select * from p8.get_user_concept_links('Tom', 'has_allergy' )
+  */
+
+  -- Construct relationship pattern based on rel_type
+  rel_pattern := CASE 
+    WHEN rel_type IS NULL THEN '[*1..' || depth || ']'  -- any relationship type
+    ELSE '[:' || rel_type || '*1..' || depth || ']'     -- specific relationship type
+  END;
+
+  -- Construct WHERE clause
+  where_clause := CASE 
+    WHEN select_hub IS NULL THEN ''
+    WHEN select_hub THEN 'WHERE c.is_hub = true'
+    ELSE 'WHERE COALESCE(c.is_hub, false) = false'
+  END;
+
+  -- Format the complete Cypher query
+  formatted_cypher_query := format($cq$
+    MATCH path = (u:User {name: '%s'})-%s->(c:Concept)
+    %s
+    RETURN u AS u, c AS concept, path
+  $cq$,
+    user_name,
+    rel_pattern,
+    where_clause
+  );
+
+  RETURN QUERY
+  SELECT * FROM cypher_query(
+    formatted_cypher_query,
+    'u agtype, concept agtype, path agtype'
+  );
+
+END;
+$$ LANGUAGE plpgsql;
+
+
+---------
+
+DROP FUNCTION IF EXISTS p8.update_user_model;
+CREATE OR REPLACE FUNCTION p8.update_user_model(
+  user_uuid UUID,
+  last_ai_response_in TEXT
+)
+RETURNS void AS $$
+DECLARE
+  latest_thread_id TEXT;
+  latest_thread_timestamp TIMESTAMP;
+  questions TEXT[];
+BEGIN
+   /*
+ a routine to update the user model including kick of async complex tasks
+ thread ids can be from any system but we prefer uuids. 
+ For this reason we do a case insensitive string match on the ids
+ 
+ select * from p8.update_user_model('10e0a97d-a064-553a-9043-3c1f0a6e6725'::uuid, 'Hello, how can I help?')
+ select * from p8."User" where id = '10e0a97d-a064-553a-9043-3c1f0a6e6725'
+
+  SELECT thread_id
+  INTO latest_thread_id
+  FROM p8."Session"
+  WHERE userid = user_uuid
+  ORDER BY created_at DESC
+  LIMIT 1;
+
+  SELECT ARRAY_AGG(query ORDER BY created_at)
+      FROM p8."Session"
+      WHERE lower(thread_id) = lower('325aa22e-f6e0-47ba-aa0d-eaafb5e99466')
+	  
+ */
+  SELECT thread_id, updated_at
+  INTO latest_thread_id, latest_thread_timestamp
+  FROM p8."Session"
+  WHERE userid = user_uuid
+  ORDER BY created_at DESC
+  LIMIT 1;
+
+  IF latest_thread_id IS NOT NULL THEN
+    -- Get list of queries in the thread
+    SELECT ARRAY_AGG(query ORDER BY created_at)
+    INTO questions
+    FROM p8."Session"
+    WHERE lower(thread_id) = lower(latest_thread_id::TEXT);
+
+    -- Overwrite recent_threads with a new array of one object
+    UPDATE p8."User"
+    SET recent_threads = jsonb_build_array(jsonb_build_object(
+          'thread_timestamp', latest_thread_timestamp,
+          'thread_id', latest_thread_id,
+          'questions', questions
+        )),
+        last_ai_response = last_ai_response_in
+    WHERE id = user_uuid;
+  END IF;
+END;
+$$ LANGUAGE plpgsql;
 
 
 ---------
@@ -2844,6 +3993,89 @@ END;
 $BODY$;
 
 ALTER FUNCTION p8.insert_entity_embeddings(text, text)
+    OWNER TO postgres;
+
+
+---------
+
+DROP FUNCTION IF EXISTS p8.perform_compact_user_memory_batch;
+CREATE OR REPLACE FUNCTION p8.perform_compact_user_memory_batch(
+	threshold integer DEFAULT 7)
+RETURNS integer
+LANGUAGE 'plpgsql'
+COST 100
+VOLATILE PARALLEL UNSAFE
+AS $BODY$
+DECLARE
+  batch RECORD;
+  formatted_cypher_query TEXT;
+  affected_count INTEGER := 0;
+BEGIN
+  /*
+  This function compacts User→Concept relationships when they exceed a threshold.
+  It inserts a Hub node between them for each user and relationship type.
+
+  This function which could be generalized to other node types specifically compacts relationships between User and Concept nodes.
+  It's assumed that the users node has a user_id which is important for qualifying user memories by named entities.
+
+  A threshold defaults to 7 which means that as users have greater than 7 direct links we insert a Hub Node between them. 
+  If we need to later add more direct links they will always be merged onto the same hub node for that user and that relationship type.
+  For example the relationships 'likes' or 'has-skills' will be linked to a hub for that relationship type.
+
+  Today we do not compact hubs but another process could do that in future e.g. like-good-italian or something very specific.
+  The true value of this for now is simply knowing that the relationships exist and can be expanded. Recall that this expansion as far as actual entity lookups should be small data.
+
+  Example:
+    SELECT * FROM p8.perform_compact_user_memory_batch(5);
+	*/
+
+
+  -- Step 1: Get batches of relationship groups
+  formatted_cypher_query := format('
+    MATCH (a:User)-[r]->(b:Concept)
+    WITH a, TYPE(r) AS relType, collect(r) AS rels, collect(b) AS targets
+    WITH a, a.user_id AS user_id, relType AS rel_type, rels, targets, size(rels) AS rel_count
+    WHERE rel_count > %s
+    RETURN user_id, rel_type, rels, targets, rel_count
+    ORDER BY rel_count DESC
+    LIMIT 100', threshold);
+
+  FOR batch IN
+    SELECT 
+      result->'rels' AS rels,
+      (result->>'rel_count')::INTEGER AS rel_count,
+      --user ids are required but we dont want to blow up the query
+      COALESCE(result->>'user_id', '') AS user_id,
+      result->>'rel_type' AS rel_type  
+    FROM cypher_query(
+      formatted_cypher_query,
+      'user_id text, rel_type text, rels agtype, targets agtype, rel_count integer'
+    )
+  LOOP
+    -- Step 2: Rewire relationships into hub pattern
+    select * from cypher_query(
+      '
+        MATCH (a:User {user_id: ''' || batch.user_id || '''})-[r:' || batch.rel_type || ']->(b:Concept)
+        WITH a, b, r, properties(r) AS props
+        MERGE (c:Concept {is_hub:true, name: ''' || 'has_' || batch.rel_type || ''', user_id: ''' || batch.user_id || '''})
+        CREATE (c)-[newRel:' || batch.rel_type || ']->(b)
+        SET newRel = props
+        MERGE (a)-[newRel2:' || batch.rel_type || ']->(c)
+        SET newRel2 = props
+        DELETE r
+      ');
+
+    RAISE NOTICE 'Processed batch for user % with relType %', batch.user_id, batch.rel_type;
+
+    -- Increment affected count
+    affected_count := affected_count + 1;
+  END LOOP;
+
+  RETURN affected_count;
+END;
+$BODY$;
+
+ALTER FUNCTION p8.perform_compact_user_memory_batch(integer)
     OWNER TO postgres;
 
 
@@ -3055,6 +4287,13 @@ $BODY$;
 
 ---------
 
+/*
+this file contains two queries that go together. 
+1] The first contains the main logic to add a graph node using a view over entities of type X
+2] the second just iterates to flush batches
+*/
+
+DROP FUNCTION IF EXISTS   p8.add_nodes;
 CREATE OR REPLACE FUNCTION p8.add_nodes(
 	table_name text)
     RETURNS integer
@@ -3068,60 +4307,70 @@ DECLARE
     sql TEXT;
     schema_name TEXT;
     pure_table_name TEXT;
-    nodes_created_count INTEGER := 0; -- Tracks the number of nodes created
+    nodes_created_count INTEGER := 0;  
 BEGIN
 
+    /*
+    Adding nodes uses a contractual view over age nodes
+    we keep track of any Percolate entity in the graph with a graph id, label (key) and user id if given
+    */
+    --we always need this when using AGE from postgres 
     LOAD  'age'; SET search_path = ag_catalog, "$user", public; 
 
-    -- Initialize the Cypher query
     cypher_query := 'CREATE ';
     schema_name := lower(split_part(table_name, '.', 1));
     pure_table_name := split_part(table_name, '.', 2);
 
-    -- Loop through each row in the table - graph assumed to be 'one' here
+    -- Loop through each row in the table  
     FOR row IN
-        EXECUTE format('SELECT uid, key FROM p8."vw_%s_%s" WHERE gid IS NULL LIMIT 1660', 
+        EXECUTE format('SELECT uid, key, userid FROM p8."vw_%s_%s" WHERE gid IS NULL LIMIT 1660',
             schema_name, pure_table_name
         )
     LOOP
-        -- Append Cypher node creation for each row
-        cypher_query := cypher_query || format(
-            '(:%s__%s {uid: "%s", key: "%s"}), ',
-            schema_name, pure_table_name, row.uid, row.key
-        );
+        -- Append Cypher node creation for each row (include user_id only when present)
+        IF row.userid IS NULL THEN
+            cypher_query := cypher_query || format(
+                '(:%s__%s {uid: "%s", key: "%s"}), ',
+                schema_name, pure_table_name, row.uid, row.key
+            );
+        ELSE
+            cypher_query := cypher_query || format(
+                '(:%s__%s {uid: "%s", key: "%s", user_id: "%s"}), ',
+                schema_name, pure_table_name, row.uid, row.key, row.userid
+            );
+        END IF;
 
-        -- Increment the counter for each node
         nodes_created_count := nodes_created_count + 1;
     END LOOP;
 
+    --run the batch
     IF nodes_created_count > 0 THEN
-        -- Remove the trailing comma and space
         cypher_query := left(cypher_query, length(cypher_query) - 2);
 
-        -- Debug: Optionally print the Cypher query for audit
-        -- RAISE NOTICE 'Generated Cypher Query: %s', cypher_query;
-
-        -- Execute the Cypher query using the cypher function
         sql := format(
             'SELECT * FROM cypher(''percolate'', $$ %s $$) AS (v agtype);',
             cypher_query
         );
 
-        -- Execute the query
         EXECUTE sql;
 
-        -- Return the number of rows processed
         RETURN nodes_created_count;
     ELSE
         -- No rows to process
-        RAISE NOTICE 'Nothing to do';
+        RAISE NOTICE 'Nothing to do in add_nodes for this batch - all good';
         RETURN 0;
     END IF;
 END;
 $BODY$;
 
 
- 
+/*
+------------------------------------------------
+Below is the query for managing batches of inserts
+------------------------------------------------
+*/
+
+DROP FUNCTION IF EXISTS   p8.insert_entity_nodes;
 
 CREATE OR REPLACE FUNCTION p8.insert_entity_nodes(
 	entity_table text)
@@ -4000,12 +5249,23 @@ DECLARE
     table_name TEXT;
     graph_node TEXT;
     view_name TEXT;
+    -- dynamically determined business key field for graph nodes
+    key_col TEXT;
 BEGIN
     -- Split schema and table name
     schema_name := split_part(qualified_table_name, '.', 1);
     table_name := split_part(qualified_table_name, '.', 2);
     graph_node := format('%s__%s', schema_name, table_name);
     view_name := format('vw_%s_%s', schema_name, table_name);
+    -- Determine the business key field for this entity (default to 'name')
+    SELECT COALESCE(
+        (SELECT mf.name
+         FROM p8."ModelField" mf
+         WHERE mf.entity_name = qualified_table_name AND mf.is_key = true
+         LIMIT 1),
+        'name'
+    )
+    INTO key_col;
 
     -- Create the LOAD and Cypher script
     load_and_cypher_script := format(
@@ -4020,28 +5280,36 @@ BEGIN
         graph_name, graph_node
     );
 
-    -- Create the VIEW script
+    -- Create the VIEW script, using dynamic key_col
+    -- the key col default to name or key by convention but could be anything
+    -- in principle if we change the key column it could invalidate the index 
+    -- forcing us to rebuild for a new key in extreme cases
     view_script := format(
         $$
         CREATE OR REPLACE VIEW p8."%s" AS (
-
             WITH G AS (
                 SELECT id AS gid,
                        (properties::json->>'uid')::VARCHAR AS node_uid,
                        (properties::json->>'key')::VARCHAR AS node_key
                 FROM %s."%s" g
             )
-            -- In future we might join user id and deleted at metadata - its assumed the 'entity' interface implemented and name exists
-            SELECT t.name AS key,
+
+            SELECT t.%s AS key,
                    t.id::VARCHAR(50) AS uid,
                    t.updated_at,
                    t.created_at,
+                   t.userid,
                    G.*
             FROM %s."%s" t
-                 LEFT JOIN g ON t.id::character varying(50)::text = g.node_uid::character varying(50)::text 
+            LEFT JOIN G ON t.id::character varying(50)::text = G.node_uid::character varying(50)::text
         );
         $$,
-        view_name, graph_name, graph_node, schema_name, table_name
+        view_name,
+        graph_name,
+        graph_node,
+        key_col,
+        schema_name,
+        table_name
     );
 
 	IF NOT plan THEN
@@ -4121,7 +5389,8 @@ $BODY$;
 ---------
 
 CREATE OR REPLACE FUNCTION p8.get_entities(
-    keys text[]
+    keys text[],
+    userid text DEFAULT NULL
 )
 RETURNS jsonb
 LANGUAGE 'plpgsql'
@@ -4137,14 +5406,17 @@ BEGIN
 	example: selects any entity by its business key by going to the graph for the index and then joining the table
 	this example happens to have a table name which is an entity also in the agents table.
 	
-	select * from p8.get_entities(ARRAY['p8.Agent']);
+		-- Example without user filter (returns all matching entities)
+		-- select * from p8.get_entities(ARRAY['p8.Agent']);
+		-- Example with user filter (returns only public or user-specific entities)
+		-- select * from p8.get_entities(ARRAY['p8.Agent'], 'user123');
 	*/
 
     LOAD  'age'; SET search_path = ag_catalog, "$user", public;
 	
     -- Load nodes based on keys, returning the associated entity type and key
     WITH nodes AS (
-        SELECT id, entity_type FROM p8.get_graph_nodes_by_key(keys)
+        SELECT id, entity_type FROM p8.get_graph_nodes_by_key(keys, userid)
     ),
     grouped_records AS (
         SELECT 
@@ -4289,7 +5561,8 @@ $BODY$;
 ---------
 
 CREATE OR REPLACE FUNCTION p8.get_graph_nodes_by_key(
-    keys text[]
+    keys text[],
+    userid text DEFAULT NULL
 )
 RETURNS TABLE(id text, entity_type text) -- Returning both id and entity_type
 LANGUAGE 'plpgsql'
@@ -4300,11 +5573,25 @@ DECLARE
     sql_query text;
 BEGIN
     -- Construct the dynamic SQL with quoted keys and square brackets
+    -- Build the dynamic SQL for retrieving graph nodes, optionally filtering by user_id
+    -- Start building the Cypher match, filtering by business key
     sql_query := 'WITH nodes AS (
                     SELECT * 
                     FROM cypher(''percolate'', $$ 
                         MATCH (v)
-                        WHERE v.key IN [' || array_to_string(ARRAY(SELECT quote_literal(k) FROM unnest(keys) AS k), ', ') || '] 
+                        WHERE v.key IN ['
+                 || array_to_string(ARRAY(SELECT quote_literal(k) FROM unnest(keys) AS k), ', ')
+                 || ']';
+    
+    IF userid IS NOT NULL THEN
+        -- Include public nodes and those owned by the given user
+        sql_query := sql_query || ' AND (v.user_id IS NULL OR v.user_id = ' || quote_literal(userid) || ')';
+    ELSE
+        -- With no user filter, include only public nodes
+        sql_query := sql_query || ' AND v.user_id IS NULL';
+    END IF;
+
+    sql_query := sql_query || ' 
                         RETURN v, v.uid 
                     $$) AS (v agtype, key agtype)
                   ), 
@@ -4459,6 +5746,7 @@ DROP FUNCTION IF EXISTS p8.query_entity;
 CREATE OR REPLACE FUNCTION p8.query_entity(
     question TEXT,
     table_name TEXT,
+	    user_id UUID DEFAULT NULL,
     vector_search_function TEXT DEFAULT 'vector_search_entity',
     min_confidence NUMERIC DEFAULT 0.7)
 RETURNS TABLE(
@@ -4483,11 +5771,17 @@ DECLARE
     sql_error TEXT;
     vector_search_result JSONB;
     embedding_for_text VECTOR;
+		ack_http_timeout BOOLEAN;
 BEGIN
 
     /*
     first crude look at merging multiple together
     we will spend time on this later with a proper fast parallel index
+
+		select * from p8.nl2sql('current place of residence', 'p8.UserFact' )
+	
+	    select * from p8.query_entity('what is my favourite color', 'p8.UserFact', 'e9c56a28-1d09-5253-af36-4b9d812f6bfa')
+	  select * from p8.query_entity('what is my favourite color', 'p8.UserFact', '10e0a97d-a064-553a-9043-3c1f0a6e6725')
 
     select * from p8.query_entity('what sql queries do we have for generating uuids from json', 'p8.PercolateAgent')
     */
@@ -4497,14 +5791,17 @@ BEGIN
     table_without_schema := split_part(table_name, '.', 2);
     full_table_name := FORMAT('%I."%I"', schema_name, table_without_schema);
 
-    -- Get the embedding for the question
-    SELECT p8.get_embedding_for_text(question) INTO embedding_for_text;
-
-    -- Call the nl2sql function to get the SQL query and confidence
+    select http_set_curlopt('CURLOPT_TIMEOUT','8000') into 	ack_http_timeout ;
+    RAISE NOTICE 'THE HTTP TIMEOUT IS HARDCODED TO 8000ms';  
+	-- Call the nl2sql function to get the SQL query and confidence
+	
     SELECT "query", nq.confidence INTO query_to_execute, query_confidence  
     FROM p8.nl2sql(question, table_name) nq;
-
-    -- Replace 'YOUR_TABLE' in the query with the actual table name
+	
+    -- Get the embedding for the question
+    SELECT p8.get_embedding_for_text(question) INTO embedding_for_text;
+    
+	-- Replace 'YOUR_TABLE' in the query with the actual table name
     query_to_execute := REPLACE(query_to_execute, 'YOUR_TABLE', full_table_name);
 
     -- Initialize error variables
@@ -4526,17 +5823,34 @@ BEGIN
     END IF;
 
     -- Use the selected vector search function to perform the vector search
-    BEGIN
-        EXECUTE FORMAT(
-            'SELECT jsonb_agg(row_to_json(result)) 
-             FROM (
-                 SELECT b.*, a.vdistance 
-                 FROM p8.%I(%L, %L) a
-                 JOIN %s.%I b ON b.id = a.id 
-                 ORDER BY a.vdistance
-             ) result',
-            vector_search_function, question, table_name, schema_name, table_without_schema
-        ) INTO vector_search_result;
+    -- update this to filter by user id if its provided
+        BEGIN
+        IF user_id IS NOT NULL THEN
+            EXECUTE FORMAT(
+                'SELECT jsonb_agg(row_to_json(result)) 
+                 FROM (
+                     SELECT b.*, a.vdistance 
+                     FROM p8.%I(%L, %L) a
+                     JOIN %I.%I b ON b.id = a.id  
+                     WHERE b.userid = %L
+                     ORDER BY a.vdistance
+                 ) result',
+                vector_search_function, question, table_name,
+                schema_name, table_without_schema, user_id
+            ) INTO vector_search_result;
+        ELSE
+            EXECUTE FORMAT(
+                'SELECT jsonb_agg(row_to_json(result)) 
+                 FROM (
+                     SELECT b.*, a.vdistance 
+                     FROM p8.%I(%L, %L) a
+                     JOIN %I.%I b ON b.id = a.id  
+                     ORDER BY a.vdistance
+                 ) result',
+                vector_search_function, question, table_name,
+                schema_name, table_without_schema
+            ) INTO vector_search_result;
+        END IF;
     EXCEPTION
         WHEN OTHERS THEN
             sql_error := COALESCE(sql_error, '') || '; Vector search error: ' || SQLERRM;
