@@ -92,13 +92,13 @@ class AudioProcessor:
         else:
             logger.info("OpenAI API key not found, will use placeholder transcription")
     
-    async def process_file(self, file_id: str, user_id: Optional[str] = None) -> bool:
+    async def process_file(self, file_id: str, userid: Optional[str] = None) -> bool:
         """
         Process an audio file through the pipeline.
         
         Args:
             file_id: ID of the audio file to process
-            user_id: Optional user ID to associate with chunks (must be a valid UUID)
+            userid: Optional user ID to associate with chunks (must be a valid UUID)
             
         Returns:
             bool: True if processing was successful
@@ -108,15 +108,15 @@ class AudioProcessor:
         # Ensure file_id is a string
         file_id = str(file_id)
         
-        # Validate user_id is a proper UUID if provided
-        if user_id:
+        # Validate userid is a proper UUID if provided
+        if userid:
             try:
-                uuid_obj = uuid.UUID(user_id)
-                user_id = str(uuid_obj)  # Normalize the format
-                logger.info(f"Using user ID: {user_id}")
+                uuid_obj = uuid.UUID(userid)
+                userid = str(uuid_obj)  # Normalize the format
+                logger.info(f"Using user ID: {userid}")
             except (ValueError, TypeError):
-                logger.warning(f"Invalid user ID provided: {user_id} - will not associate chunks with a user")
-                user_id = None  # Reset to None if invalid
+                logger.warning(f"Invalid user ID provided: {userid} - will not associate chunks with a user")
+                userid = None  # Reset to None if invalid
         
         # Get the audio file record
         audio_file = self._get_audio_file(file_id)
@@ -156,7 +156,7 @@ class AudioProcessor:
             # Transcribe and process chunks
             self._update_audio_status(audio_file, AudioProcessingStatus.TRANSCRIBING)
             chunk_records = await self._process_speech_chunks(
-                audio_file, speech_segments, chunks_dir, user_id
+                audio_file, speech_segments, chunks_dir, userid
             )
             
             # Save chunks to database
@@ -327,7 +327,7 @@ class AudioProcessor:
         audio_file: AudioFile,
         speech_segments: List[Tuple[float, float]],
         chunks_dir: str,
-        user_id: Optional[str]
+        userid: Optional[str]
     ) -> List[AudioChunk]:
         """Process speech segments into audio chunks and transcribe them."""
         chunk_records = []
@@ -373,17 +373,17 @@ class AudioProcessor:
                 "confidence": 0.0,    # Will update after transcription
             }
             
-            # Only add user_id if it's a valid UUID - otherwise leave it blank
-            if user_id:
+            # Only add userid if it's a valid UUID - otherwise leave it blank
+            if userid:
                 try:
                     # Validate the UUID - will raise ValueError if invalid
-                    uuid_obj = uuid.UUID(user_id)
+                    uuid_obj = uuid.UUID(userid)
                     # Only add if it's a valid UUID
                     chunk_data["userid"] = str(uuid_obj)
-                    logger.debug(f"Using valid UUID for userid: {user_id}")
+                    logger.debug(f"Using valid UUID for userid: {userid}")
                 except (ValueError, TypeError):
                     # If it's not a valid UUID, don't include it at all
-                    logger.warning(f"Ignoring invalid UUID for userid: {user_id}")
+                    logger.warning(f"Ignoring invalid UUID for userid: {userid}")
                     # No userid will be added to chunk_data
                 
             chunk = AudioChunk(**chunk_data)

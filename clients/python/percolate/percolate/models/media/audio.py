@@ -25,7 +25,7 @@ class AudioFile(AbstractModel):
     model_config = {'namespace': 'public'}
     
     id: uuid.UUID = Field(default_factory=uuid.uuid4)
-    user_id: Optional[str | uuid.UUID] = Field(default=None, description="The user id if known")
+    userid: Optional[str | uuid.UUID] = Field(default=None, description="The user id if known")
     project_name: str
     filename: str
     file_size: int
