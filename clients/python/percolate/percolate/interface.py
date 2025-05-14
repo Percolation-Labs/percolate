@@ -13,8 +13,26 @@ from percolate.utils import logger
 import traceback
 from percolate.utils.env import SETTINGS
 
+
+CUSTOM_PROVIDER = {}
+
+
+def set_custom_model_provider(fn):
+    """a function that maps an entity name to a model"""
+    CUSTOM_PROVIDER['DATA'] = fn
+
 def settings(key, default=None):
     return SETTINGS.get(key,default)
+
+def custom_load_model(name):
+    """if the custom model loader is specified we can do this"""
+    loader = CUSTOM_PROVIDER.get('data')
+    if loader:
+        try:
+            return loader(name)
+        except:
+            logger.warning(f"tried and failed to load model {name} with provider {loader}")
+    return None
 
 def dump(question:str, data: typing.List[dict], response:AIResponse, context, **kwargs):
     """we dump the session using the session id from the AI response and we dump the final response"""
@@ -172,8 +190,11 @@ def get_proxy(proxy_uri:str):
         entity_name = proxy_uri.split('/')[-1]
         class _agent_proxy:
             def __init__(self, entity_name):
+               
+                """in percolate we load models by inspection but you can specify a custom loader at module level"""
+                M = custom_load_model(entity_name) or load_model(entity_name)
                 """TODO: consider if we want to not allow help at depth!!!!!!"""
-                self.agent = Agent(load_model(entity_name),allow_help=False)
+                self.agent = Agent(M,allow_help=False)
                 
             def invoke(self, fn, **kwargs):
                 #print(f"**TESTING - calling proxy agent with {kwargs}")
