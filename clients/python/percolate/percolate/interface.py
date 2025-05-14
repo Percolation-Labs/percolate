@@ -192,7 +192,9 @@ def get_proxy(proxy_uri:str):
             def __init__(self, entity_name):
                
                 """in percolate we load models by inspection but you can specify a custom loader at module level"""
-                M = custom_load_model(entity_name) or load_model(entity_name)
+                M = custom_load_model(entity_name)
+                if not M:
+                    M = load_model(entity_name)
                 """TODO: consider if we want to not allow help at depth!!!!!!"""
                 self.agent = Agent(M,allow_help=False)
                 
