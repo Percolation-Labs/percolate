@@ -294,7 +294,8 @@ class OpenApiService:
         f = getattr(requests, function.verb)
         """rewrite the url with the kwargs"""
         endpoint = endpoint.format_map(kwargs)
-        endpoint = f"{self.uri}/{endpoint.lstrip('/')}"
+        """make sure to rstrip and lstip"""
+        endpoint = f"{self.uri.rstrip('/')}/{endpoint.lstrip('/')}"
 
         
         # if data is None: #callers dont necessarily know about data and may pass kwargs
