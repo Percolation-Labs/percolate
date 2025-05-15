@@ -8,6 +8,7 @@ from .tools import router as tool_router
 from .integrations import router as x_router
 from .auth import router as auth_router
 from .audio import router as audio_router
+from .tus import router as tus_router
 
 def set_routes(app: FastAPI):
     app.include_router(auth_router, prefix=f"/auth", tags=["Auth"])
@@ -18,3 +19,4 @@ def set_routes(app: FastAPI):
     app.include_router(chat_router, prefix=f"/chat", tags=["Chat"])
     app.include_router(x_router, prefix=f"/x", tags=["Integrations"])
     app.include_router(audio_router, prefix=f"/audio", tags=["Audio"])
+    app.include_router(tus_router, prefix=f"/tus", tags=["Uploads"])

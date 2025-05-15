@@ -13,7 +13,18 @@ from .audio import (
     register_audio_models
 )
 
+from .tus import (
+    TusFileUpload,
+    TusFileChunk,
+    TusUploadStatus,
+    TusUploadMetadata,
+    TusUploadPatchResponse,
+    TusUploadCreationResponse,
+    register_tus_models
+)
+
 __all__ = [
+    # Audio models
     'AudioFile',
     'AudioChunk',
     'AudioProcessingStatus',
@@ -23,5 +34,14 @@ __all__ = [
     'ChunkingConfig',
     'TranscriptionConfig',
     'AudioPipelineConfig',
-    'register_audio_models'
+    'register_audio_models',
+    
+    # Tus models
+    'TusFileUpload',
+    'TusFileChunk',
+    'TusUploadStatus',
+    'TusUploadMetadata',
+    'TusUploadPatchResponse',
+    'TusUploadCreationResponse',
+    'register_tus_models'
 ]
