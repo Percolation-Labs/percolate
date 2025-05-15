@@ -43,6 +43,7 @@ async def lifespan(app: FastAPI):
                 logger.warning(f"Failed to schedule job for record {d.get('id')}: {e}")
     except Exception as ex:
         logger.warning(f"Failed to load scheduler data {ex}")
+    
     scheduler.start()
     logger.info(f"Scheduler started with jobs: {[j.id for j in scheduler.get_jobs()]}")
     try:
@@ -177,6 +178,7 @@ if __name__ == "__main__":
     if running the docker image we keep the same port and stop the service in docker - this makes it easier to test in dev
     for example: 
     1. docker compose stop percolate-api
+    #export for whatever env e.g. for using pos
     2. uvicorn percolate.api.main:app --port 5008 --reload 
     Now we are running the dev server on the same location that the database etc expects
     Also add percolate-api mapped to localhost in your hosts files
