@@ -24,6 +24,7 @@ from percolate.models.media.tus import (
     TusUploadPatchResponse,
     TusUploadCreationResponse
 )
+from .resource_creator import create_resources_from_upload
 
 # Configuration options
 DEFAULT_CHUNK_SIZE = 5 * 1024 * 1024  # 5MB
@@ -374,6 +375,17 @@ async def upload_to_s3_background(upload_id: str, final_path: str) -> None:
         p8.repository(TusFileUpload).update_records([upload])
         
         logger.info(f"S3 upload completed: ID={upload.id}, URI={upload.s3_uri}")
+        
+        # Create resources from the uploaded file
+        try:
+            logger.info(f"Creating resources for upload: {upload_id}")
+            resources = await create_resources_from_upload(upload_id)
+            logger.info(f"Created {len(resources)} resources for upload: {upload_id}")
+        except Exception as resource_error:
+            logger.error(f"Error creating resources: {str(resource_error)}")
+            # Don't fail the S3 upload, just log the error
+            upload.upload_metadata["resource_creation_error"] = str(resource_error)
+            p8.repository(TusFileUpload).update_records([upload])
         
     except Exception as e:
         logger.error(f"Error uploading to S3: {str(e)}", exc_info=True)

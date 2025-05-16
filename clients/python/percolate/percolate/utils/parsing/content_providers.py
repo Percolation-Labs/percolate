@@ -46,8 +46,13 @@ class DefaultContentProvider(BaseContentProvider):
         path = resolve_path_or_download(uri)
         return path.read_text()
 
+# Import DOCXContentProvider after base classes are defined to avoid circular import
+from .docx_provider import DOCXContentProvider
+
 content_providers = {
     ".pdf": PDFContentProvider(),
+    ".docx": DOCXContentProvider(),
+    ".doc": DOCXContentProvider(),  # Will handle old doc format too
 }
 
 default_provider = DefaultContentProvider()
