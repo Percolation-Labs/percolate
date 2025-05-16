@@ -26,7 +26,8 @@ from percolate.models.media.tus import (
 )
 from percolate.utils import logger
 from pydantic import BaseModel
-from . import get_user_id, get_project_name
+from . import get_project_name
+from percolate.api.routes.auth import hybrid_auth, require_user_auth
 
 # Constants for Tus protocol
 TUS_VERSION = "1.0.0"
@@ -36,8 +37,11 @@ TUS_API_VERSION = os.environ.get("TUS_API_VERSION", "v1")
 TUS_API_PATH = os.environ.get("TUS_API_PATH", "/tus")
 DEFAULT_EXPIRATION = int(os.environ.get("TUS_DEFAULT_EXPIRATION", "86400"))  # 24 hours in seconds
 
-# Create the router
-router = APIRouter()
+# Create the router with hybrid authentication required for all endpoints
+# This supports both bearer tokens (for testing/API access) and session auth (for users)
+router = APIRouter(
+    dependencies=[Depends(hybrid_auth)]
+)
 
 # Helper functions
 
@@ -110,14 +114,13 @@ async def tus_create_upload(
     request: Request,
     response: Response,
     background_tasks: BackgroundTasks,
-    user_id: Optional[str] = Depends(get_user_id),
+    user_id: Optional[str] = Depends(hybrid_auth),  # Optional - None for bearer auth
     project_name: str = Depends(get_project_name),
     upload_metadata: Optional[str] = Header(None),
     upload_length: Optional[int] = Header(None),
     upload_defer_length: Optional[int] = Header(None),
     content_type: Optional[str] = Header(None),
     content_length: Optional[int] = Header(None),
-    x_user_id: Optional[str] = Header(None)  # Custom header for user ID
 ):
     """
     Handle POST request - Create a new upload
@@ -167,10 +170,10 @@ async def tus_create_upload(
     # Calculate expiration
     expires_in = timedelta(seconds=DEFAULT_EXPIRATION)
     
-    # Use X-User-ID header if provided (takes precedence over Depends(get_user_id))
-    effective_user_id = x_user_id or user_id
-    if effective_user_id:
-        logger.info(f"Using user ID: {effective_user_id}")
+    if user_id:
+        logger.info(f"Using user ID from session: {user_id}")
+    else:
+        logger.info("Using bearer token authentication (no user context)")
     
     # Create the upload
     upload_response = await tus_controller.create_upload(
@@ -178,7 +181,7 @@ async def tus_create_upload(
         filename=filename,
         file_size=upload_length or 0,
         metadata=metadata,
-        user_id=effective_user_id,
+        user_id=user_id,
         project_name=project_name,
         content_type=content_type,
         expires_in=expires_in,
@@ -374,7 +377,7 @@ async def tus_delete_upload(
 )
 async def list_uploads(
     response: Response,
-    user_id: Optional[str] = Depends(get_user_id),
+    user_id: Optional[str] = Depends(hybrid_auth),  # Optional - None for bearer auth
     project_name: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     tags: Optional[List[str]] = Query(None),
@@ -436,8 +439,8 @@ async def finalize_upload(
     """
     logger.info(f"Finalize upload request for: {upload_id}")
     
-    # Finalize the upload
-    final_path = await tus_controller.finalize_upload(upload_id)
+    # Finalize the upload with background S3 upload
+    final_path = await tus_controller.finalize_upload(upload_id, background_tasks)
     
     # Set Tus response headers for consistency
     tus_response_headers(response)
@@ -542,7 +545,7 @@ async def get_user_files_by_id(
 )
 async def get_recent_user_uploads(
     response: Response,
-    user_id: str = Depends(get_user_id),
+    user_id: str = Depends(require_user_auth),  # Must have user context
     limit: int = Query(10, gt=0, le=100),
     project_name: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
@@ -557,10 +560,6 @@ async def get_recent_user_uploads(
     """
     logger.info(f"Get recent uploads for user: {user_id}, tags: {tags}, search: {search}")
     
-    # Validate user is authenticated
-    if not user_id:
-        response.status_code = 401
-        return {"error": "Authentication required"}
     
     # Convert status string to enum if provided
     status_enum = None
@@ -600,8 +599,7 @@ async def update_upload_tags(
     response: Response,
     upload_id: str = Path(...),
     tags: List[str] = Query(..., max_items=3),
-    user_id: Optional[str] = Depends(get_user_id),
-    x_user_id: Optional[str] = Header(None)  # Custom header for user ID
+    user_id: Optional[str] = Depends(hybrid_auth),  # Optional - None for bearer auth
 ):
     """
     Update the tags for an upload
@@ -609,23 +607,19 @@ async def update_upload_tags(
     This endpoint allows setting up to 3 tags on an upload for categorization and searching
     """
     logger.info(f"Update tags for upload: {upload_id}, tags: {tags}")
-    
-    # Use X-User-ID header if provided (takes precedence over Depends(get_user_id))
-    effective_user_id = x_user_id or user_id
-    if effective_user_id:
-        logger.info(f"Using user ID: {effective_user_id}")
-    
-    # Validate user is authenticated if authentication is required
-    if not effective_user_id:
-        response.status_code = 401
-        return {"error": "Authentication required"}
+    if user_id:
+        logger.info(f"Using user ID: {user_id}")
+    else:
+        logger.info("Using bearer token authentication (admin access)")
     
     try:
         # Get the upload
         upload = await tus_controller.get_upload_info(upload_id)
         
         # Check if user is authorized to modify this upload
-        if upload.user_id and str(upload.user_id) != effective_user_id:
+        # Bearer token auth allows updates to any upload (admin access)
+        # Session auth requires ownership
+        if user_id and upload.user_id and str(upload.user_id) != user_id:
             response.status_code = 403
             return {"error": "Not authorized to modify this upload"}
         
@@ -665,7 +659,7 @@ async def update_upload_tags(
 async def semantic_search(
     response: Response,
     query: str = Query(..., min_length=3),
-    user_id: Optional[str] = Depends(get_user_id),
+    user_id: Optional[str] = Depends(hybrid_auth),  # Optional - None for bearer auth
     project_name: Optional[str] = Query(None),
     tags: Optional[List[str]] = Query(None),
     limit: int = Query(10, gt=0, le=100),

@@ -18,6 +18,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import percolate as p8
 from percolate.models.p8.types import Schedule
+from percolate.utils.session_key import get_stable_session_key
 # Global scheduler instance
 scheduler = BackgroundScheduler()
 
@@ -73,11 +74,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-k = str(uuid1())
+# Use stable session key for session persistence across restarts
+session_key = get_stable_session_key()
 
-logger.info('Percolate api app started')
+logger.info('Percolate api app started with stable session key')
  
-app.add_middleware(SessionMiddleware, secret_key=k)
+app.add_middleware(SessionMiddleware, secret_key=session_key)
 #app.add_middleware(PayloadLoggerMiddleware)
 
 
