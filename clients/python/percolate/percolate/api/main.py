@@ -85,6 +85,7 @@ api_router = APIRouter()
 
 origins = [
     "http://localhost:5008",
+     "http://localhost:8000",
 ]
 
 app.add_middleware(
@@ -93,6 +94,17 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=[
+        "Location",
+        "Upload-Offset", 
+        "Upload-Length", 
+        "Tus-Version", 
+        "Tus-Resumable", 
+        "Tus-Max-Size", 
+        "Tus-Extension", 
+        "Upload-Metadata",
+        "Upload-Expires"
+    ],
 )
 
 
