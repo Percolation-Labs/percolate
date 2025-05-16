@@ -2,6 +2,7 @@
 CREATE EXTENSION IF NOT EXISTS HTTP;
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS age;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 -----------------------------------------
 -----------------------------------------

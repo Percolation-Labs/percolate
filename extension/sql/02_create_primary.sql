@@ -2,25 +2,28 @@
 -- register entity (p8.User)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."User" (
-recent_threads JSON,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    linkedin TEXT,
-    graph_paths TEXT[],
-    slack_id TEXT,
-    roles TEXT[],
-    userid UUID,
-    last_ai_response TEXT,
-    id UUID PRIMARY KEY ,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    metadata JSON,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+session_id TEXT,
     description TEXT,
-    interesting_entity_keys JSON,
-    email_subscription_active BOOLEAN,
-    twitter TEXT,
     email TEXT,
+    name TEXT,
+    slack_id TEXT,
+    linkedin TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    metadata JSON,
+    recent_threads JSON,
+    token_expiry TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    email_subscription_active BOOLEAN,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    interesting_entity_keys JSON,
     token TEXT,
-    name TEXT
+    userid UUID,
+    id UUID PRIMARY KEY ,
+    twitter TEXT,
+    roles TEXT[],
+    graph_paths TEXT[],
+    last_session_at TIMESTAMP,
+    last_ai_response TEXT
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."User";
 CREATE   TRIGGER update_updated_at_trigger
@@ -36,17 +39,17 @@ SELECT attach_notify_trigger_to_table('p8', 'User');
 -- register entity (p8.Project)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."Project" (
-id UUID PRIMARY KEY ,
+collaborator_ids UUID[] NOT NULL,
     target_date TIMESTAMP,
-    status TEXT,
-    collaborator_ids UUID[] NOT NULL,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    userid UUID,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     description TEXT NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    userid UUID,
+    id UUID PRIMARY KEY ,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status TEXT,
+    name TEXT,
     priority INTEGER,
-    name TEXT
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."Project";
 CREATE   TRIGGER update_updated_at_trigger
@@ -62,16 +65,16 @@ SELECT attach_notify_trigger_to_table('p8', 'Project');
 -- register entity (p8.Agent)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."Agent" (
-id UUID PRIMARY KEY ,
-    spec JSON NOT NULL,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    functions JSON,
-    category TEXT,
-    userid UUID,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+description TEXT NOT NULL,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    description TEXT NOT NULL,
-    name TEXT
+    userid UUID,
+    category TEXT,
+    id UUID PRIMARY KEY ,
+    functions JSON,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    name TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    spec JSON NOT NULL
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."Agent";
 CREATE   TRIGGER update_updated_at_trigger
@@ -87,17 +90,17 @@ SELECT attach_notify_trigger_to_table('p8', 'Agent');
 -- register entity (p8.ModelField)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."ModelField" (
-entity_name TEXT NOT NULL,
-    field_type TEXT NOT NULL,
-    id UUID PRIMARY KEY ,
-    is_key BOOLEAN,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    userid UUID,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+embedding_provider TEXT,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    embedding_provider TEXT,
+    is_key BOOLEAN,
+    field_type TEXT NOT NULL,
+    userid UUID,
+    id UUID PRIMARY KEY ,
     description TEXT,
-    name TEXT
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    name TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    entity_name TEXT NOT NULL
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."ModelField";
 CREATE   TRIGGER update_updated_at_trigger
@@ -113,17 +116,17 @@ SELECT attach_notify_trigger_to_table('p8', 'ModelField');
 -- register entity (p8.LanguageModelApi)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."LanguageModelApi" (
-id UUID PRIMARY KEY ,
-    completions_uri TEXT NOT NULL,
+scheme TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    token TEXT,
+    userid UUID,
+    id UUID PRIMARY KEY ,
     deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     model TEXT,
-    userid UUID,
+    name TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    token_env_key TEXT,
-    token TEXT,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    scheme TEXT,
-    name TEXT
+    completions_uri TEXT NOT NULL,
+    token_env_key TEXT
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."LanguageModelApi";
 CREATE   TRIGGER update_updated_at_trigger
@@ -139,18 +142,18 @@ SELECT attach_notify_trigger_to_table('p8', 'LanguageModelApi');
 -- register entity (p8.Function)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."Function" (
-id UUID PRIMARY KEY ,
-    function_spec JSON NOT NULL,
-    proxy_uri TEXT NOT NULL,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    endpoint TEXT,
-    userid UUID,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    verb TEXT,
-    key TEXT,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+endpoint TEXT,
     description TEXT NOT NULL,
-    name TEXT
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    key TEXT,
+    userid UUID,
+    verb TEXT,
+    id UUID PRIMARY KEY ,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    function_spec JSON NOT NULL,
+    name TEXT,
+    proxy_uri TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."Function";
 CREATE   TRIGGER update_updated_at_trigger
@@ -166,23 +169,23 @@ SELECT attach_notify_trigger_to_table('p8', 'Function');
 -- register entity (p8.Session)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."Session" (
-id UUID PRIMARY KEY ,
+session_completed_at TIMESTAMP,
+    thread_id TEXT,
     query TEXT,
-    session_type TEXT,
+    agent TEXT NOT NULL,
+    metadata JSON,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    userid UUID,
+    channel_id TEXT,
+    id UUID PRIMARY KEY ,
     graph_paths TEXT[],
     user_rating REAL,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    metadata JSON,
-    userid UUID,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     channel_type TEXT,
-    thread_id TEXT,
-    parent_session_id UUID,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    session_completed_at TIMESTAMP,
-    channel_id TEXT,
-    agent TEXT NOT NULL,
-    name TEXT
+    session_type TEXT,
+    name TEXT,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    parent_session_id UUID
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."Session";
 CREATE   TRIGGER update_updated_at_trigger
@@ -198,14 +201,14 @@ SELECT attach_notify_trigger_to_table('p8', 'Session');
 -- register entity (p8.SessionEvaluation)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."SessionEvaluation" (
-id UUID PRIMARY KEY ,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    userid UUID,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    rating REAL NOT NULL,
+updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     session_id UUID NOT NULL,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    comments TEXT
+    userid UUID,
+    rating REAL NOT NULL,
+    id UUID PRIMARY KEY ,
+    comments TEXT,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."SessionEvaluation";
 CREATE   TRIGGER update_updated_at_trigger
@@ -219,24 +222,24 @@ EXECUTE FUNCTION update_updated_at_column();
 -- register entity (p8.AIResponse)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."AIResponse" (
-id UUID PRIMARY KEY ,
-    tokens_other INTEGER,
-    tokens_in INTEGER,
-    role TEXT NOT NULL,
-    status TEXT,
-    verbatim JSON,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    tool_calls JSON,
+tool_eval_data JSON,
     model_name TEXT NOT NULL,
-    content TEXT NOT NULL,
-    tokens_out INTEGER,
-    session_id UUID,
-    tool_eval_data JSON,
-    function_stack TEXT[],
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    tokens_other INTEGER,
+    function_stack TEXT[],
+    tokens_out INTEGER,
+    tokens_in INTEGER,
+    session_id UUID,
+    role TEXT NOT NULL,
+    tokens INTEGER,
+    id UUID PRIMARY KEY ,
+    content TEXT NOT NULL,
+    verbatim JSON,
     userid UUID,
-    tokens INTEGER
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status TEXT,
+    tool_calls JSON
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."AIResponse";
 CREATE   TRIGGER update_updated_at_trigger
@@ -252,14 +255,14 @@ SELECT attach_notify_trigger_to_table('p8', 'AIResponse');
 -- register entity (p8.ApiProxy)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."ApiProxy" (
-id UUID PRIMARY KEY ,
-    proxy_uri TEXT NOT NULL,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    userid UUID,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     token TEXT,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    name TEXT
+    userid UUID,
+    id UUID PRIMARY KEY ,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    proxy_uri TEXT NOT NULL,
+    name TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."ApiProxy";
 CREATE   TRIGGER update_updated_at_trigger
@@ -275,17 +278,17 @@ SELECT attach_notify_trigger_to_table('p8', 'ApiProxy');
 -- register entity (p8.PlanModel)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."PlanModel" (
-id UUID PRIMARY KEY ,
-    questions TEXT[],
-    extra_arguments JSON,
+extra_arguments JSON,
     depends JSON,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    functions JSON,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    plan_description TEXT NOT NULL,
     userid TEXT,
-    name TEXT
+    id UUID PRIMARY KEY ,
+    plan_description TEXT NOT NULL,
+    functions JSON,
+    questions TEXT[],
+    name TEXT,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."PlanModel";
 CREATE   TRIGGER update_updated_at_trigger
@@ -301,13 +304,13 @@ SELECT attach_notify_trigger_to_table('p8', 'PlanModel');
 -- register entity (p8.Settings)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."Settings" (
-id UUID PRIMARY KEY ,
+updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    key TEXT,
+    userid UUID,
+    id UUID PRIMARY KEY ,
     deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     value TEXT NOT NULL,
-    userid UUID,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    key TEXT,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."Settings";
 CREATE   TRIGGER update_updated_at_trigger
@@ -321,20 +324,20 @@ EXECUTE FUNCTION update_updated_at_column();
 -- register entity (p8.PercolateAgent)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."PercolateAgent" (
-id UUID PRIMARY KEY ,
-    graph_paths TEXT[],
-    uri TEXT NOT NULL,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    category TEXT,
-    summary TEXT,
-    content TEXT NOT NULL,
+updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     metadata JSON,
+    content TEXT NOT NULL,
     userid UUID,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    category TEXT,
+    id UUID PRIMARY KEY ,
     resource_timestamp TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    ordinal INTEGER NOT NULL,
-    name TEXT
+    summary TEXT,
+    graph_paths TEXT[],
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    name TEXT,
+    uri TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    ordinal INTEGER NOT NULL
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."PercolateAgent";
 CREATE   TRIGGER update_updated_at_trigger
@@ -350,21 +353,21 @@ SELECT attach_notify_trigger_to_table('p8', 'PercolateAgent');
 -- register entity (p8.IndexAudit)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."IndexAudit" (
-id UUID PRIMARY KEY ,
-    tokens_other INTEGER,
-    tokens_in INTEGER,
-    entity_full_name TEXT NOT NULL,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    metrics JSON,
-    model_name TEXT NOT NULL,
-    userid UUID,
-    tokens_out INTEGER,
-    session_id UUID,
+model_name TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    tokens_other INTEGER,
+    tokens_out INTEGER,
+    tokens_in INTEGER,
+    session_id UUID,
+    message TEXT,
     tokens INTEGER,
-    status TEXT NOT NULL,
-    message TEXT
+    id UUID PRIMARY KEY ,
+    userid UUID,
+    entity_full_name TEXT NOT NULL,
+    metrics JSON,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status TEXT NOT NULL
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."IndexAudit";
 CREATE   TRIGGER update_updated_at_trigger
@@ -378,20 +381,20 @@ EXECUTE FUNCTION update_updated_at_column();
 -- register entity (p8.Task)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."Task" (
-estimated_effort REAL,
-    id UUID PRIMARY KEY ,
+collaborator_ids UUID[] NOT NULL,
     target_date TIMESTAMP,
-    status TEXT,
-    collaborator_ids UUID[] NOT NULL,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    project_name TEXT,
-    userid UUID,
-    progress REAL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     description TEXT NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    userid UUID,
+    project_name TEXT,
+    id UUID PRIMARY KEY ,
+    progress REAL,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status TEXT,
+    name TEXT,
     priority INTEGER,
-    name TEXT
+    estimated_effort REAL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."Task";
 CREATE   TRIGGER update_updated_at_trigger
@@ -407,15 +410,15 @@ SELECT attach_notify_trigger_to_table('p8', 'Task');
 -- register entity (p8.TaskResources)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."TaskResources" (
-user_metadata JSON,
-    id UUID PRIMARY KEY ,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    userid UUID,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    relevance_score REAL,
+updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     session_id UUID NOT NULL,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    resource_id UUID NOT NULL
+    relevance_score REAL,
+    userid UUID,
+    id UUID PRIMARY KEY ,
+    user_metadata JSON,
+    resource_id UUID NOT NULL,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."TaskResources";
 CREATE   TRIGGER update_updated_at_trigger
@@ -429,16 +432,16 @@ EXECUTE FUNCTION update_updated_at_column();
 -- register entity (p8.ResearchIteration)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."ResearchIteration" (
-id UUID PRIMARY KEY ,
-    content TEXT,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    userid UUID,
+content TEXT,
     iteration INTEGER NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     conceptual_diagram TEXT,
-    question_set JSON NOT NULL,
-    task_id UUID
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    userid UUID,
+    id UUID PRIMARY KEY ,
+    task_id UUID,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    question_set JSON NOT NULL
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."ResearchIteration";
 CREATE   TRIGGER update_updated_at_trigger
@@ -454,20 +457,20 @@ SELECT attach_notify_trigger_to_table('p8', 'ResearchIteration');
 -- register entity (p8.Resources)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."Resources" (
-id UUID PRIMARY KEY ,
-    graph_paths TEXT[],
-    uri TEXT NOT NULL,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    category TEXT,
-    summary TEXT,
-    content TEXT NOT NULL,
+updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     metadata JSON,
+    content TEXT NOT NULL,
     userid UUID,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    category TEXT,
+    id UUID PRIMARY KEY ,
     resource_timestamp TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    ordinal INTEGER NOT NULL,
-    name TEXT
+    summary TEXT,
+    graph_paths TEXT[],
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    name TEXT,
+    uri TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    ordinal INTEGER NOT NULL
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."Resources";
 CREATE   TRIGGER update_updated_at_trigger
@@ -483,14 +486,14 @@ SELECT attach_notify_trigger_to_table('p8', 'Resources');
 -- register entity (p8.SessionResources)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."SessionResources" (
-id UUID PRIMARY KEY ,
-    count INTEGER,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    userid UUID,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     session_id UUID NOT NULL,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    resource_id UUID NOT NULL
+    userid UUID,
+    id UUID PRIMARY KEY ,
+    resource_id UUID NOT NULL,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    count INTEGER,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."SessionResources";
 CREATE   TRIGGER update_updated_at_trigger
@@ -504,15 +507,15 @@ EXECUTE FUNCTION update_updated_at_column();
 -- register entity (p8.Schedule)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."Schedule" (
-id UUID PRIMARY KEY ,
-    spec JSON NOT NULL,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    schedule TEXT NOT NULL,
+updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     userid UUID,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    schedule TEXT NOT NULL,
+    id UUID PRIMARY KEY ,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    name TEXT,
     disabled_at TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    name TEXT
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    spec JSON NOT NULL
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."Schedule";
 CREATE   TRIGGER update_updated_at_trigger
@@ -528,14 +531,14 @@ SELECT attach_notify_trigger_to_table('p8', 'Schedule');
 -- register entity (p8.Audit)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."Audit" (
-id UUID PRIMARY KEY ,
-    status_payload JSON,
+caller TEXT NOT NULL,
     error_trace TEXT,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    userid UUID,
-    caller TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status_payload JSON,
+    userid UUID,
+    id UUID PRIMARY KEY ,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     status TEXT NOT NULL
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."Audit";

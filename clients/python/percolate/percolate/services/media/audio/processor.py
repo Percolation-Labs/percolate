@@ -418,6 +418,10 @@ class AudioProcessor:
                 error_message = f"Transcription failed: {str(e)}"
                 logger.error(f"Error transcribing chunk {i+1}: {error_message}")
                 
+                # If it's an SSL error, add more context
+                if "SSL" in str(e) or "ssl" in str(e):
+                    logger.info("SSL error detected - this might be due to network/certificate issues")
+                
                 # Keep transcription field empty for failed transcriptions
                 chunk.transcription = ""
                 chunk.confidence = 0.0
@@ -440,6 +444,10 @@ class AudioProcessor:
             
             # Add the chunk to our records regardless of transcription success
             chunk_records.append(chunk)
+            
+            # Add a small delay between API calls to avoid rate limiting
+            if i < len(speech_segments) - 1:  # Don't delay after the last chunk
+                await asyncio.sleep(0.5)
         
         return chunk_records
     
@@ -965,6 +973,27 @@ class AudioProcessor:
         
         # Attempt to transcribe the audio file
         import requests
+        import ssl
+        from urllib3.util.ssl_ import create_urllib3_context
+        
+        # Create a custom SSL context to handle modern TLS
+        ssl_context = create_urllib3_context()
+        ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
+        
+        # Create a session with retry logic and proper SSL configuration
+        session = requests.Session()
+        
+        # Configure retries
+        from urllib3.util.retry import Retry
+        from requests.adapters import HTTPAdapter
+        
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        session.mount("https://", adapter)
         
         url = "https://api.openai.com/v1/audio/transcriptions"
         headers = {
@@ -986,9 +1015,17 @@ class AudioProcessor:
                 "response_format": "text"
             }
             
-            # Send the request with a timeout
+            # Send the request with a timeout and SSL error handling
             logger.info("Sending request to OpenAI API...")
-            response = requests.post(url, headers=headers, files=files, data=data, timeout=60)
+            try:
+                response = session.post(url, headers=headers, files=files, data=data, timeout=60)
+            except requests.exceptions.SSLError as ssl_error:
+                logger.error(f"SSL error occurred: {ssl_error}")
+                # Try once more with a fresh session
+                logger.info("Retrying with a fresh session...")
+                new_session = requests.Session()
+                new_session.mount("https://", adapter)
+                response = new_session.post(url, headers=headers, files=files, data=data, timeout=60)
             
             # Handle the response
             if response.status_code == 200:

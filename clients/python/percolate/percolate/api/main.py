@@ -18,7 +18,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import percolate as p8
 from percolate.models.p8.types import Schedule
-from percolate.utils.session_key import get_stable_session_key
+from percolate.api.routes.auth.utils import get_stable_session_key
 # Global scheduler instance
 scheduler = BackgroundScheduler()
 
@@ -87,7 +87,11 @@ api_router = APIRouter()
 
 origins = [
     "http://localhost:5008",
-     "http://localhost:8000",
+    "http://localhost:8000",
+    "http://localhost:5000",
+    "http://127.0.0.1:5008",
+    "http://127.0.0.1:8000",
+    "http://127.0.0.1:5000",
 ]
 
 app.add_middleware(

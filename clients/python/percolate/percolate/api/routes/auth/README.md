@@ -200,7 +200,7 @@ Get detailed session information for debugging.
 Initiates Google OAuth login flow.
 - **Method**: GET
 - **Parameters**: 
-  - `redirect_uri`: Optional custom redirect after login
+  - `redirect_uri`: Optional custom redirect after login (e.g., mobile app scheme, client page URL)
   - `sync_files`: Whether to request file sync permissions
 - **Response**: Redirect to Google OAuth
 
@@ -217,6 +217,40 @@ Handles OAuth callback from Google.
   - Without `redirect_uri`: Returns `{"token": id_token}`
 - **Note**: Currently returns the actual ID token to the client (not just session)
 
+### Custom Redirect URI Support
+
+Clients can provide a `redirect_uri` parameter when initiating login to control where users are redirected after authentication. This enables:
+
+1. **Mobile App Integration**: Use custom URL schemes like `myapp://auth/callback`
+2. **Web Client Pages**: Redirect to specific pages like `https://mysite.com/dashboard`
+3. **Single Page Applications**: Return to the current client-side route
+
+**Example Usage:**
+```bash
+# Mobile app with custom scheme
+/auth/google/login?redirect_uri=myapp://auth/callback
+
+# Web application
+/auth/google/login?redirect_uri=https://myapp.com/auth/complete
+
+# Local development
+/auth/google/login?redirect_uri=http://localhost:3000/auth/callback
+```
+
+**What Happens:**
+1. Client initiates login with `redirect_uri` parameter
+2. User completes Google OAuth flow
+3. Server callback receives the OAuth token
+4. Server redirects to `{redirect_uri}?token={id_token}`
+5. Client receives the JWT token in the query parameter
+
+**Token Usage:**
+- The token provided in the redirect is a JWT ID token containing user information
+- Clients can decode this token to extract user profile data (name, email, picture, etc.)
+- This token provides all necessary user info for client-side session persistence
+
+**Note:** The `/auth/session/info` endpoint is available for retrieving user information later, but is not necessary during the login flow since the JWT token already contains the user profile data.
+
 ### `/auth/connect`
 Get project configuration (requires authentication).
 - **Method**: GET
@@ -227,9 +261,84 @@ Get project configuration (requires authentication).
 
 ### Session Storage
 
-Sessions are managed by FastAPI's SessionMiddleware:
+Sessions are managed by FastAPI's SessionMiddleware with a stable secret key to ensure persistence across server restarts.
+
+### Session Persistence Fix
+
+The authentication system now uses a stable session key instead of generating a random key on each server restart. This ensures that user sessions persist across server restarts.
+
+**Previous Issue:**
 ```python
-app.add_middleware(SessionMiddleware, secret_key=generated_key)
+k = str(uuid1())  # Random key each time!
+app.add_middleware(SessionMiddleware, secret_key=k)
+```
+
+**Current Implementation:**
+```python
+# Use stable session key for session persistence across restarts
+session_key = get_stable_session_key()
+app.add_middleware(SessionMiddleware, secret_key=session_key)
+```
+
+### How Stable Session Keys Work
+
+The `get_stable_session_key()` function:
+1. First checks `P8_SESSION_KEY` environment variable
+2. Falls back to loading from `~/.percolate/auth/session_key.json`
+3. Generates and saves a new key if neither exists
+
+This ensures:
+- Sessions survive server restarts
+- Users stay logged in during development
+- Better user experience
+
+### Configuration Options
+
+#### Option 1: Environment Variable (Recommended for Production)
+```bash
+export P8_SESSION_KEY="your-stable-secret-key"
+uvicorn percolate.api.main:app --port 5000
+```
+
+#### Option 2: Automatic File-Based (Development)
+Simply start the server - it will automatically create and use a persistent key:
+```bash
+uvicorn percolate.api.main:app --port 5000
+```
+
+The key is stored in `~/.percolate/auth/session_key.json` with restricted permissions (0600).
+
+### Security Considerations
+
+- The session key file has restricted permissions (0600)
+- For production, use the `P8_SESSION_KEY` environment variable
+- Never commit the session key to version control
+- Rotate the key periodically for security
+
+### OAuth Re-Login Handling
+
+The system handles re-login attempts when a user already has an active session:
+
+1. **Detection**: Checks if a token exists in the session (indicating previous login)
+2. **Session Clearing**: Clears the entire session to ensure fresh OAuth flow
+3. **Data Preservation**: Preserves `app_redirect_uri` and `sync_files` settings
+4. **Clean Start**: Removes any OAuth state keys to allow authlib to create new ones
+
+**Implementation:**
+```python
+if 'token' in request.session:
+    logger.info("Re-login detected - clearing session for fresh OAuth flow")
+    # Keep only the app_redirect_uri and sync_files if they were just set
+    temp_redirect = request.session.get('app_redirect_uri')
+    temp_sync = request.session.get('sync_files', False)
+    
+    # Clear the entire session
+    request.session.clear()
+    
+    # Restore the values we need
+    if temp_redirect:
+        request.session['app_redirect_uri'] = temp_redirect
+    request.session['sync_files'] = temp_sync
 ```
 
 ### Token Validation
@@ -424,6 +533,56 @@ print(f"TUS endpoint status: {response.status_code}")
    - Bearer token: No session, no user context
    - Session cookie: Has session ID and user context
 
+## OAuth Troubleshooting Guide
+
+### Common OAuth Issues and Solutions
+
+#### 1. State Mismatch Error
+**Symptom**: `MismatchingStateError: CSRF Warning! State not equal in request and response.`
+
+**Causes**:
+- Session persistence between login attempts
+- OAuth state not being created due to existing session data
+- Expired OAuth state keys
+
+**Solution**: The system now automatically detects re-login attempts and clears the session:
+```python
+# Automatically handled in login endpoint
+if 'token' in request.session:
+    # Clear session for fresh OAuth flow
+```
+
+**Debug Logs**:
+```
+Session keys before OAuth redirect: ['sync_files', 'token', 'session_id']
+Re-login detected - clearing session for fresh OAuth flow
+```
+
+#### 2. Session Not Persisting
+**Symptom**: Users have to re-login after server restart
+
+**Cause**: Random session key generation on startup
+
+**Solution**: Use stable session key (implemented)
+```python
+session_key = get_stable_session_key()
+app.add_middleware(SessionMiddleware, secret_key=session_key)
+```
+
+#### 3. OAuth State Debugging
+To debug OAuth state issues, check the logs:
+
+```
+# Login attempt
+Session keys before OAuth redirect: [...]
+OAuth states in session: ['_state_google_knjekfzmvgWjEQdW7lkZdVb80F0LN4']
+
+# Callback
+Session keys at callback start: [...]
+Query params: state=knjekfzmvgWjEQdW7lkZdVb80F0LN4, code=...
+OAuth states in session: ['_state_google_knjekfzmvgWjEQdW7lkZdVb80F0LN4']
+```
+
 ## Notes
 
 - The system uses JWT tokens from Google OAuth
@@ -434,3 +593,4 @@ print(f"TUS endpoint status: {response.status_code}")
 - Session cookies are HttpOnly (not accessible via JavaScript)
 - Session IDs are generated server-side (UUID)
 - Each login creates a new session ID
+- Re-login attempts automatically clear previous session data

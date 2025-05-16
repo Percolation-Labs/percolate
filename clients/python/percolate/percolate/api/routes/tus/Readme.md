@@ -15,6 +15,7 @@ This implementation provides robust file upload capabilities with:
 3. **User Association**: Files are associated with users through session or API
 4. **Project Organization**: Files are organized by project
 5. **Search**: Support for searching uploads by tag and text
+6. **Automatic Resource Creation**: Uploaded files are automatically processed to create searchable resources
 
 ## Supported Extensions
 
@@ -146,3 +147,30 @@ For comprehensive testing, use the provided test scripts:
    ```
 
 For more details, see [TESTING.md](./TESTING.md) and [IMPLEMENTATION.md](./IMPLEMENTATION.md).
+
+## Automatic Resource Creation
+
+After a file is uploaded and finalized, Percolate automatically creates searchable resources based on the file type:
+
+### Audio Files (.wav, .mp3, etc.)
+- Audio files are processed through the audio pipeline
+- Audio is transcribed using the configured transcription service
+- Transcriptions are chunked and stored as searchable resources
+- Each resource includes metadata about timestamps and confidence scores
+
+### Document Files (.pdf, .txt, .docx, .doc)
+- Text is extracted from documents using appropriate parsers
+- Content is chunked into searchable segments with overlap
+- Each chunk is stored as a resource with metadata
+- Resources maintain references to the original S3 URI
+
+### Resource Structure
+Each created resource includes:
+- `content`: The actual text content (transcription or document text)
+- `uri`: Reference to the original file in S3
+- `user_id`: The user who uploaded the file
+- `metadata`: Additional information about the source and processing
+- `ordinal`: The chunk order for maintaining sequence
+- `category`: Type of resource (audio_transcription, document, etc.)
+
+Resources can be queried through the standard Percolate resources API, enabling semantic search across all uploaded content.
