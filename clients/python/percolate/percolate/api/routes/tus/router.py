@@ -60,14 +60,18 @@ def log_model(model: BaseModel, prefix: str = "") -> None:
     except Exception as e:
         logger.error(f"Error logging model: {str(e)}")
 
-def tus_response_headers(response: Response, upload_id: Optional[str] = None, upload_offset: Optional[int] = None, expiry: Optional[datetime] = None):
+def tus_response_headers(response: Response, upload_id: Optional[str] = None, upload_offset: Optional[int] = None, expiry: Optional[datetime] = None, location: Optional[str] = None):
     """Add standard Tus response headers to a response"""
     response.headers["Tus-Resumable"] = TUS_VERSION
     response.headers["Tus-Version"] = TUS_VERSION
     response.headers["Tus-Extension"] = TUS_EXTENSIONS
     response.headers["Tus-Max-Size"] = str(TUS_MAX_SIZE)
     
-    if upload_id:
+    if upload_id and location:
+        # Use the absolute URL if provided
+        response.headers["Location"] = location
+    elif upload_id:
+        # Fall back to relative path if no absolute URL provided
         location = f"{TUS_API_PATH}/{upload_id}"
         response.headers["Location"] = location
         
@@ -188,7 +192,8 @@ async def tus_create_upload(
     tus_response_headers(
         response=response, 
         upload_id=str(upload_response.upload_id),
-        expiry=upload_response.expires_at
+        expiry=upload_response.expires_at,
+        location=upload_response.location
     )
     
     # Add Upload-Expires header
