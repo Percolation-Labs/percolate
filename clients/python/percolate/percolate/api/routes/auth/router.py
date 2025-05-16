@@ -6,18 +6,32 @@ import os
 from pathlib import Path
 import json
 from fastapi.responses import  JSONResponse
-from . import get_current_token, get_api_key
+from . import get_current_token, get_api_key, hybrid_auth
 import percolate as p8
 import typing
 from fastapi.responses import RedirectResponse
 from percolate.utils import logger
 from datetime import time,datetime
-
+from percolate.models import User
+from percolate.utils import make_uuid
+from .utils import extract_user_info_from_token, store_user_with_token
+import uuid
+from datetime import timezone
+      
 router = APIRouter()
 @router.get("/ping")
-async def ping(token: str = Depends(get_api_key)):
-    """Ping endpoint to verify API key authentication"""
-    return Response(status_code=200)
+async def ping(request: Request, user_id: typing.Optional[str] = Depends(hybrid_auth)):
+    """Ping endpoint to verify authentication (bearer token or session)"""
+    session_id = request.session.get('session_id')
+    if user_id:
+        return {
+            "message": "pong", 
+            "user_id": user_id, 
+            "auth_type": "session",
+            "session_id": session_id
+        }
+    else:
+        return {"message": "pong", "auth_type": "bearer"}
 
  
 REDIRECT_URI = "http://127.0.0.1:5000/auth/google/callback"# if not project_name else f"https://{project_name}.percolationlabs.ai/auth/google/callback"
@@ -45,30 +59,7 @@ goauth.register(
 )
 
 
-# #https://docs.authlib.org/en/latest/client/starlette.html
-# @router.get("/google/login")
-# async def login_via_google(request: Request, redirect_uri: typing.Optional[str] = Query(None)):
-#     """Use Google OAuth to login, allowing optional override of redirect URI."""
-#     final_redirect_uri = redirect_uri or REDIRECT_URI
-#     google = goauth.create_client('google')
-#     return await google.authorize_redirect(
-#         request, final_redirect_uri, scope=SCOPES,
-#         prompt="consent",           
-#         access_type="offline",         
-#         include_granted_scopes="true"
-#     )
-# @router.get("/google/callback")
-# async def google_auth_callback(request: Request):
-#     """a callback from the oauth flow"""
-#     google = goauth.create_client('google')
-#     token = await google.authorize_access_token(request)
-#     request.session['token'] = token
-#     GOOGLE_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-#     with open(GOOGLE_TOKEN_PATH, 'w') as f:
-#         json.dump(token, f)
-#     userinfo = token['userinfo']
 
-#     return JSONResponse(content={"token": token, "user_info": userinfo})
 @router.get("/internal-callback")
 async def internal_callback(request: Request, token:str=None):
     if token:
@@ -155,6 +146,7 @@ async def google_auth_callback(request: Request, token:str=None):
         json.dump(token, f)
     
     # If this authentication is for file sync, store credentials in database
+    #will deprecate this to unify with other creds
     if sync_files and "refresh_token" in token:
         try:
             # Use the FileSync service to store OAuth credentials
@@ -163,6 +155,17 @@ async def google_auth_callback(request: Request, token:str=None):
         except Exception as e:
             logger.error(f"Error storing sync credentials: {str(e)}")
 
+
+        
+    # Create a unique session ID and store it in the session
+    session_id = str(uuid.uuid4())
+    request.session['session_id'] = session_id
+    logger.info(f"Created new session with ID: {session_id}")
+    
+    # Store the user with token and session
+    user = store_user_with_token(token, session_id)
+    logger.info(f"Stored user: {user.email} with session: {session_id}")
+ 
     id_token = token.get("id_token")
     if not id_token:
         return JSONResponse(status_code=400, content={"error": "No id_token found"})
@@ -176,9 +179,46 @@ async def google_auth_callback(request: Request, token:str=None):
 
     # NOTE: Later, replace this logic with:
     #  - Validate Google's id_token server-side
-    #  - Issue your own short-lived app token (e.g., JWT)
+    #  - Issue our own short-lived app token (e.g., JWT)
     #  - Set secure HttpOnly cookie or return token in redirect or JSON response
     
+@router.get("/session/info")
+async def session_info(request: Request, user_id: typing.Optional[str] = Depends(hybrid_auth)):
+    """Get current session information for testing"""
+    session_data = dict(request.session)
+    session_cookie = request.cookies.get('session')
+    
+    return {
+        "user_id": user_id,
+        "session_id": session_data.get('session_id'),
+        "session_cookie_present": bool(session_cookie),
+        "session_data_keys": list(session_data.keys()),
+        "auth_type": "session" if user_id else "none"
+    }
+
+
+@router.get("/session/debug")
+async def session_debug(request: Request):
+    """Debug endpoint to see raw session data"""
+    session_cookie = request.cookies.get('session')
+    
+    # Get raw session data
+    session_data = {}
+    try:
+        session_data = dict(request.session)
+    except Exception as e:
+        session_data = {"error": str(e)}
+    
+    return {
+        "cookies": dict(request.cookies),
+        "session_cookie_present": bool(session_cookie),
+        "session_cookie_length": len(session_cookie) if session_cookie else 0,
+        "session_data": session_data,
+        "session_keys": list(session_data.keys()) if isinstance(session_data, dict) else [],
+        "headers": dict(request.headers)
+    }
+
+
 @router.get("/connect")
 async def fetch_percolate_project(token = Depends(get_current_token)):
     """Connect with your key to get percolate project settings and keys.

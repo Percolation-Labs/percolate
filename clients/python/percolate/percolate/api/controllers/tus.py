@@ -311,12 +311,91 @@ async def process_chunk(
         logger.error(f"Error processing chunk: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error processing chunk: {str(e)}")
 
-async def finalize_upload(upload_id: Union[str, uuid.UUID]) -> str:
+async def upload_to_s3_background(upload_id: str, final_path: str) -> None:
+    """
+    Background task to upload file to S3.
+    
+    Args:
+        upload_id: The ID of the upload
+        final_path: Path to the assembled file
+    """
+    logger.info(f"Starting background S3 upload for: {upload_id}")
+    
+    try:
+        # Get the upload record
+        upload = await get_upload_info(upload_id)
+        
+        s3_service = S3Service()
+        
+        # Create key using project and filename
+        project = upload.project_name or "default"
+        user_prefix = upload.user_id or "anonymous"
+        
+        # Don't include tags in the S3 path structure as requested
+        # Simply use project/user structure for better organization
+        s3_key = f"{project}/uploads/{user_prefix}/{upload_id}/{upload.filename}"
+        
+        # Upload the file to S3
+        with open(final_path, "rb") as final_file:
+            upload_result = s3_service.upload_file(
+                project_name=project,
+                file_name=upload.filename,
+                file_content=final_file,
+                content_type=upload.content_type or "application/octet-stream",
+                prefix=f"uploads/{user_prefix}/{upload_id}"
+            )
+        
+        # Get the S3 URI from the upload result
+        s3_uri = upload_result.get("uri")
+        if not s3_uri:
+            # Construct URI if not provided by the service
+            s3_uri = f"s3://{s3_service.default_bucket}/{s3_key}"
+        
+        logger.info(f"File uploaded to S3: {s3_uri}")
+        
+        # Update the upload record with S3 info - using direct fields
+        upload.s3_uri = s3_uri
+        upload.s3_key = s3_key
+        upload.s3_bucket = s3_service.default_bucket
+        
+        # Also keep in metadata for backward compatibility
+        upload.upload_metadata["s3_uri"] = s3_uri
+        upload.upload_metadata["s3_key"] = s3_key
+        upload.upload_metadata["storage_type"] = "s3"
+        
+        # Update tags to metadata for S3 search compatibility
+        if hasattr(upload, 'tags') and upload.tags:
+            upload.upload_metadata["tags"] = upload.tags
+            
+        # Update status to indicate S3 upload is complete
+        upload.upload_metadata["s3_upload_status"] = "completed"
+        
+        # Save the upload record
+        p8.repository(TusFileUpload).update_records([upload])
+        
+        logger.info(f"S3 upload completed: ID={upload.id}, URI={upload.s3_uri}")
+        
+    except Exception as e:
+        logger.error(f"Error uploading to S3: {str(e)}", exc_info=True)
+        try:
+            # Update the upload record to indicate S3 upload failed
+            upload = await get_upload_info(upload_id)
+            upload.upload_metadata["storage_type"] = "local"
+            upload.upload_metadata["local_path"] = final_path
+            upload.upload_metadata["s3_upload_status"] = "failed"
+            upload.upload_metadata["s3_upload_error"] = str(e)
+            p8.repository(TusFileUpload).update_records([upload])
+        except Exception as update_error:
+            logger.error(f"Error updating upload record after S3 failure: {str(update_error)}")
+
+
+async def finalize_upload(upload_id: Union[str, uuid.UUID], background_tasks=None) -> str:
     """
     Finalize a completed upload by assembling chunks if needed.
     
     Args:
         upload_id: The ID of the upload
+        background_tasks: Optional FastAPI BackgroundTasks for async S3 upload
         
     Returns:
         Path to the assembled file
@@ -339,6 +418,9 @@ async def finalize_upload(upload_id: Union[str, uuid.UUID]) -> str:
         # Check if the file was already assembled
         if os.path.exists(final_path):
             logger.info(f"Upload {upload_id} already finalized at: {final_path}")
+            # Still check if S3 upload is needed
+            if background_tasks and not upload.upload_metadata.get("s3_upload_status"):
+                background_tasks.add_task(upload_to_s3_background, upload_id_str, final_path)
             return final_path
             
         # Get all chunks for this upload
@@ -358,74 +440,19 @@ async def finalize_upload(upload_id: Union[str, uuid.UUID]) -> str:
         
         logger.info(f"Upload {upload_id} finalized at: {final_path}")
         
-        # We always use S3 for final storage
-        try:
-            logger.info("Using S3 for final storage")
-            s3_service = S3Service()
-            
-            # Create key using project and filename
-            project = upload.project_name or "default"
-            user_prefix = upload.user_id or "anonymous"
-            
-            # Don't include tags in the S3 path structure as requested
-            # Simply use project/user structure for better organization
-            s3_key = f"{project}/uploads/{user_prefix}/{upload_id_str}/{upload.filename}"
-            
-            # Upload the file to S3
-            with open(final_path, "rb") as final_file:
-                upload_result = s3_service.upload_file(
-                    project_name=project,
-                    file_name=upload.filename,
-                    file_content=final_file,
-                    content_type=upload.content_type or "application/octet-stream",
-                    prefix=f"uploads/{user_prefix}/{upload_id_str}"
-                )
-            
-            # Get the S3 URI from the upload result
-            s3_uri = upload_result.get("uri")
-            if not s3_uri:
-                # Construct URI if not provided by the service
-                s3_uri = f"s3://{s3_service.default_bucket}/{s3_key}"
-            
-            logger.info(f"File uploaded to S3: {s3_uri}")
-            
-            # Update the upload record with S3 info - using direct fields
-            upload.s3_uri = s3_uri
-            upload.s3_key = s3_key
-            upload.s3_bucket = s3_service.default_bucket
-            
-            # Also keep in metadata for backward compatibility
-            upload.upload_metadata["s3_uri"] = s3_uri
-            upload.upload_metadata["s3_key"] = s3_key
-            upload.upload_metadata["storage_type"] = "s3"
-            
-            # Note: When creating resources from uploads, use s3_uri as a join key
-            # We could set resource_id later when processing the file, for example:
-            # upload.resource_id = resource_id  # Set when a resource is created from this file
-            
-            # Update tags to metadata for S3 search compatibility
-            if hasattr(upload, 'tags') and upload.tags:
-                upload.upload_metadata["tags"] = upload.tags
-                
-            # Save the upload record
-            p8.repository(TusFileUpload).update_records([upload])
-            
-            # Log the detailed upload info for verification
-            logger.info(f"File saved to S3: ID={upload.id}, Filename={upload.filename}, S3 URI={upload.s3_uri}, Bucket={upload.s3_bucket}, Key={upload.s3_key}, Tags={upload.tags}")
-            
-        except Exception as s3_error:
-            logger.error(f"Error uploading to S3: {str(s3_error)}", exc_info=True)
-            # Fall back to local storage only if S3 fails
-            upload.upload_metadata["storage_type"] = "local"
-            upload.upload_metadata["local_path"] = final_path
-            upload.s3_uri = None
-            upload.s3_key = None
-            upload.s3_bucket = None
-            p8.repository(TusFileUpload).update_records([upload])
-            
-            # Log the error for debugging
-            logger.error(f"Falling back to local storage for file: ID={upload.id}, Path={final_path}")
+        # Mark the upload as locally finalized
+        upload.upload_metadata["storage_type"] = "local"
+        upload.upload_metadata["local_path"] = final_path
+        upload.upload_metadata["s3_upload_status"] = "pending"
+        p8.repository(TusFileUpload).update_records([upload])
         
+        # Queue S3 upload as background task if available
+        if background_tasks:
+            logger.info(f"Queuing S3 upload as background task for: {upload_id}")
+            background_tasks.add_task(upload_to_s3_background, upload_id_str, final_path)
+        else:
+            logger.warning(f"No background tasks available, S3 upload will not be performed")
+            
         return final_path
     except HTTPException:
         raise
