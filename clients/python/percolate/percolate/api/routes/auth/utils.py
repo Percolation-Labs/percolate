@@ -7,7 +7,6 @@ from percolate.models import User
 import percolate as p8
 from percolate.utils import make_uuid
 import typing
-from sqlalchemy import text
 from percolate.services import PostgresService
 import os
 import uuid
@@ -181,16 +180,15 @@ def is_valid_token_for_user(email: str) -> bool:
     try:
         pg = PostgresService()
         
-        # Query for user by email and check token expiry
-        query = text("""
+        query = """
             SELECT token, token_expiry
-            FROM p8.users
-            WHERE email = :email
+            FROM p8."User"
+            WHERE email = %s
             AND token IS NOT NULL
             AND token_expiry > NOW()
-        """)
+        """
         
-        result = pg.execute_sql(query, {"email": email})
+        result = pg.execute(query,data=(email,))
         
         # If we get a result, the token is valid
         if len(result) > 0:

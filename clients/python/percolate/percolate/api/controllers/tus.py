@@ -92,8 +92,23 @@ async def create_upload(
     
     # Build the upload URI
     # This should be the absolute path to the upload, including hostname and scheme
-    scheme = request.url.scheme
+    # Check X-Forwarded-Proto header first (when behind a proxy/load balancer)
+    forwarded_proto = request.headers.get('X-Forwarded-Proto') or request.headers.get('x-forwarded-proto')
+    
+    if forwarded_proto:
+        scheme = forwarded_proto
+    else:
+        # Log warning when X-Forwarded-Proto is not set
+        logger.warning(f"X-Forwarded-Proto header not set by proxy for host: {request.headers.get('host')}")
+        scheme = request.url.scheme
+    
+    # In production, always force HTTPS for *.percolationlabs.ai domains
     host = request.headers.get('host', request.url.netloc)
+    if host.endswith('.percolationlabs.ai') or host == 'percolationlabs.ai':
+        scheme = 'https'
+        if not forwarded_proto:
+            logger.warning(f"Forcing HTTPS for {host} due to missing X-Forwarded-Proto header")
+    
     upload_uri = f"{scheme}://{host}{TUS_API_ROOT_PATH}/{upload_id}"
     
     # Handle tags - limit to 3 tags

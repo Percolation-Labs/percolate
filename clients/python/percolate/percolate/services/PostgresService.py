@@ -420,8 +420,9 @@ class PostgresService:
     def get_by_id(cls, id: str, as_model: bool = False) -> dict | AbstractModel:
         """select dictionary values by if unless as model set set - returns one value"""
         data = cls.select(id=id)
-        if data:
-            data = data[0]
+        if not data:
+            return
+        data = data[0]
         if as_model and cls.model:
             data = cls.model(**data)
         return data

@@ -37,44 +37,30 @@ WORKDIR /code
 # Copy requirements and install them - same as original Dockerfile
 COPY --from=requirements-stage /tmp/requirements.txt /code/requirements.txt
 
-# Install all required packages in a single layer to reduce image size
-RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt \
-    && pip install --no-cache-dir \
-        "numpy>=1.24.1,<2.0.0" \
-        "pydub>=0.25.1" \
-        "boto3>=1.26.0" \
-        "requests>=2.28.0" \
-        "httpx>=0.24.0" \
-        "silero-vad>=5.1.2" \
-        "onnxruntime>=1.16.1" \
-    && rm -rf /code/requirements.txt
-
-# Install PyTorch and torchaudio - ensuring all dependencies are included
-# DO NOT attempt to delete shared libraries or other critical components
 RUN pip install --no-cache-dir \
     torch==2.1.0 \
     torchaudio==2.1.0 \
     && find /usr/local/lib/python3.10/site-packages -name "*.pyc" -delete
 
-# Copy only the necessary application code
-COPY ./percolate /code/percolate
+RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt \
+    && pip install --no-cache-dir \
+    "numpy>=1.24.1,<2.0.0" \
+    "pydub>=0.25.1" \
+    "boto3>=1.26.0" \
+    "requests>=2.28.0" \
+    "httpx>=0.24.0" \
+    "silero-vad>=5.1.2" \
+    "onnxruntime>=1.16.1" \
+    && rm -rf /code/requirements.txt
 
-# Set environment variable to disable JIT to reduce memory usage
 ENV PYTORCH_JIT=0
 
-# Verify torch installation is complete and properly linked
-RUN python -c "import torch; import torchaudio; print(f'PyTorch {torch.__version__} installed successfully with {torch.cuda.device_count()} CUDA devices')"
+COPY ./percolate /code/percolate
 
-# Environment variables
 ENV PATH=/usr/bin:$PATH
 ENV PYTHONUNBUFFERED=0
-
-
-
-# Expose the API port
 EXPOSE 5008
 
-# Command to run the application
 CMD ["hypercorn", "--bind", "0.0.0.0:5008", "percolate.api.main:app"]
 
 #docker buildx build -f Dockerfile.media --platform linux/amd64,linux/arm64 -t percolationlabs/percolate-api:media --push .
@@ -83,7 +69,9 @@ CMD ["hypercorn", "--bind", "0.0.0.0:5008", "percolate.api.main:app"]
 # 
 # Build the media services container:
 # docker build -t percolationlabs/percolate-media:latest -f Dockerfile.media .
-#
+# you can build this docker image as the main one too e.g. for eepis we are doing this
+# docker build -t percolationlabs/percolate-api:latest -f Dockerfile.media .
+
 # Run the container with proper environment variables:
 # docker run -p 5009:5008 \
 #   -e S3_URL=your-s3-url \

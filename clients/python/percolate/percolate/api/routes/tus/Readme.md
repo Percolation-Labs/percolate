@@ -174,3 +174,13 @@ Each created resource includes:
 - `category`: Type of resource (audio_transcription, document, etc.)
 
 Resources can be queried through the standard Percolate resources API, enabling semantic search across all uploaded content.
+
+
+HTTPS - always check this
+
+  Location header: https://eepis.percolationlabs.ai/tus/3ca3e70d-3858-1823-cdd7-c56e259110f3
+  ✅ SUCCESS: HTTPS URL returned
+
+  Both tests passed:
+  1. Regular upload returns HTTPS URLs
+  2. Upload with X-Forwarded-Proto header also returns HTTPS URLs
