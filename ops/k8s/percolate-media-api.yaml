@@ -44,7 +44,7 @@ spec:
             memory: 5Gi
           requests:
             cpu: 1000m
-            memory: 4Gi
+            memory: 4Gi 
         envFrom:
         - configMapRef:
             name: percolate-env

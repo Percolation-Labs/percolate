@@ -1,6 +1,7 @@
 import typing
 from pydantic import BaseModel, Field
 from percolate.utils.env import DEFAULT_MODEL
+from percolate.utils import logger
 
 DEFAULT_MAX_AGENT_LOOPS = 5
 DEFAULT_MODEL_TEMPERATURE = 0.0
@@ -10,13 +11,17 @@ def get_user_memory(user_id, thread_id, **kwargs):
     """
     lookup a user state
     """
-    
-    from percolate.models import User
-    import percolate as p8
-    user = p8.repository(User).get_by_id(id=user_id, as_model=True)
-    
-    if user:
-        return user.as_memory(**kwargs)
+   
+    try: 
+        from percolate.models import User
+        import percolate as p8
+        user = p8.repository(User).get_by_id(id=user_id, as_model=True)
+        
+        if user:
+            return user.as_memory(**kwargs)
+    except:
+        logger.warning(f"Failed to get memory for user {user_id}")
+        raise
 
 class ApiCallingContext(BaseModel):
     """calling context object - all have defaults

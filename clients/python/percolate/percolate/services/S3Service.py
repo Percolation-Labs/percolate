@@ -65,7 +65,7 @@ class S3Service:
             aws_access_key_id=self.access_key,
             aws_secret_access_key=self.secret_key,
             endpoint_url=self.endpoint_url,
-            # Use S3 signature (not s3v4) for compatibility with Hetzner
+            # Use s3v4 signature for compatibility with Hetzner
             # This configuration has been tested to work with file uploads
             config=boto3.session.Config(
                 signature_version=signature_version,
@@ -85,6 +85,22 @@ class S3Service:
                 s3={'addressing_style': 'path'}
             )
         )
+    
+    def _validate_connection(self):
+        """Validate the S3 connection by attempting a simple operation."""
+        try:
+            # Test the connection with a head_bucket operation
+            self.s3_client.head_bucket(Bucket=self.default_bucket)
+            logger.debug(f"S3 connection validated successfully for bucket: {self.default_bucket}")
+        except ClientError as e:
+            error_code = e.response['Error']['Code']
+            if error_code == '404':
+                raise ValueError(f"Bucket '{self.default_bucket}' not found")
+            elif error_code == '403':
+                raise ValueError(f"Access denied to bucket '{self.default_bucket}'. Check S3 credentials.")
+            else:
+                logger.error(f"Failed to validate S3 connection: {str(e)}")
+                raise
     
     def create_user_key(self, 
                         project_name: str, 
@@ -225,8 +241,18 @@ class S3Service:
             return files
             
         except ClientError as e:
-            logger.error(f"Error listing files: {str(e)}")
-            raise
+            error_code = e.response['Error']['Code']
+            error_message = str(e)
+            
+            if error_code == 'SignatureDoesNotMatch':
+                logger.error(f"S3 signature mismatch. Current signature version: {self.s3_client._client_config.signature_version}. Try using 's3v4' instead.")
+                raise ValueError(f"S3 signature mismatch error: {error_message}")
+            elif error_code == 'NoSuchBucket':
+                logger.error(f"Bucket '{self.default_bucket}' does not exist")
+                raise ValueError(f"Bucket '{self.default_bucket}' does not exist")
+            else:
+                logger.error(f"Error listing files: {error_message}")
+                raise
     
     def create_s3_uri(self, project_name: str = None, file_name: str = None, prefix: str = None) -> str:
         """
@@ -317,8 +343,21 @@ class S3Service:
             }
             
         except ClientError as e:
-            logger.error(f"Error uploading file to {s3_uri}: {str(e)}")
-            raise
+            error_code = e.response['Error']['Code']
+            error_message = str(e)
+            
+            if error_code == 'SignatureDoesNotMatch':
+                logger.error(f"S3 signature mismatch during upload. Try using 's3v4' signature version.")
+                raise ValueError(f"S3 signature mismatch error: {error_message}")
+            elif error_code == 'NoSuchBucket':
+                logger.error(f"Bucket '{bucket_name}' does not exist")
+                raise ValueError(f"Bucket '{bucket_name}' does not exist")
+            elif error_code == 'InvalidAccessKeyId':
+                logger.error("Invalid S3 access key ID")
+                raise ValueError("Invalid S3 access key ID. Check your S3_ACCESS_KEY environment variable.")
+            else:
+                logger.error(f"Error uploading file to {s3_uri}: {error_message}")
+                raise
     
     def upload_file(self, 
                     project_name: str, 
@@ -465,10 +504,21 @@ class S3Service:
             }
             
         except ClientError as e:
-            logger.error(f"Error downloading file from URI {s3_uri}: {str(e)}")
-            if e.response['Error']['Code'] == 'NoSuchKey':
+            error_code = e.response['Error']['Code']
+            error_message = str(e)
+            
+            if error_code == 'NoSuchKey':
+                logger.error(f"File does not exist at {s3_uri}")
                 raise ValueError(f"File does not exist at {s3_uri}")
-            raise
+            elif error_code == 'SignatureDoesNotMatch':
+                logger.error(f"S3 signature mismatch during download. Try using 's3v4' signature version.")
+                raise ValueError(f"S3 signature mismatch error: {error_message}")
+            elif error_code == 'NoSuchBucket':
+                logger.error(f"Bucket does not exist in URI: {s3_uri}")
+                raise ValueError(f"Bucket does not exist in URI: {s3_uri}")
+            else:
+                logger.error(f"Error downloading file from URI {s3_uri}: {error_message}")
+                raise
             
     def download_file_from_bucket(self, bucket_name: str, object_key: str, local_path: str = None) -> Dict[str, Any]:
         """
@@ -520,8 +570,23 @@ class S3Service:
             }
             
         except ClientError as e:
-            logger.error(f"Error deleting file at {s3_uri}: {str(e)}")
-            raise
+            error_code = e.response['Error']['Code']
+            error_message = str(e)
+            
+            if error_code == 'NoSuchKey':
+                # Deletion of non-existent key is often not an error
+                logger.warning(f"File does not exist at {s3_uri}, considering as already deleted")
+                return {
+                    "uri": s3_uri,
+                    "name": object_key.split('/')[-1] if '/' in object_key else object_key,
+                    "status": "not_found"
+                }
+            elif error_code == 'SignatureDoesNotMatch':
+                logger.error(f"S3 signature mismatch during delete. Try using 's3v4' signature version.")
+                raise ValueError(f"S3 signature mismatch error: {error_message}")
+            else:
+                logger.error(f"Error deleting file at {s3_uri}: {error_message}")
+                raise
             
     def delete_file(self, 
                     project_name: str, 

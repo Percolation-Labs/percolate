@@ -3,4 +3,5 @@
 .res
 **/.claude/settings.local.json
 .aiscripts
+.eepis
 test_data
