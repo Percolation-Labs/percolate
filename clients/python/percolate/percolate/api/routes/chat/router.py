@@ -28,7 +28,7 @@ from typing import Optional, Dict, Any, List, Callable
 
 # Import Percolate modules
 from percolate.models.p8 import Task
-from percolate.api.routes.auth import get_current_token
+from percolate.api.routes.auth import get_current_token, hybrid_auth
 import percolate as p8
 from percolate.services import ModelRunner
 from percolate.services.llm import LanguageModel
@@ -600,8 +600,10 @@ def _ensure_user_hash(userid):
     ths is temporary thing to turn emails into user id for testing
     """
     
-    if userid:
+    """testing helper for email mapping"""
+    if userid and "@" in userid:
         return make_uuid( userid.lower() )
+    return userid
 # ---------------------------------------------------------------------------
 # API Endpoints
 # ---------------------------------------------------------------------------
@@ -621,7 +623,7 @@ async def completions(
     device_info: Optional[str] = Query(None, description="Device info Base64 encoded with arbitrary parameters such as GPS"),
     
     #use_sse: Optional[bool] = Query(False, description="Whether to use Server-Sent Events for streaming"),
-    token: dict = Depends(get_current_token)
+    auth_user_id: Optional[str] = Depends(hybrid_auth)
 ):
     """
     Use any model via an OpenAI API format and get model completions as streaming or non-streaming.
@@ -635,7 +637,8 @@ async def completions(
     
     """TODO we can add basic memory support for completions if enabled but this is a dumb relay and we use the agent/completions for more sophisticated interactions """
     
-    # Check for valid bearer token - this is a temp test key
+    # Check for valid authentication - either session or bearer token
+    # auth_user_id will be None for bearer token auth, or the user ID for session auth
     
     if device_info:
         device_info = try_decode_device_info(device_info)
@@ -643,23 +646,14 @@ async def completions(
     else:
         logger.info(f"we did not get any device info")
     
-    logger.info(f"{user_id}, {session_id}")
-    
-    expected_token = "!p3rc0la8!" #<-this a testing idea
-    expected_token = POSTGRES_PASSWORD #<-this will be the secure bearer for now but we could relax to an api key
-    
-    token = request.bearer_token or token
-    if not token:
-        logger.warning(f"No bearer - not authenticated")
-        raise HTTPException(status_code=401, detail="API token is missing")
-    if token != expected_token:
-        logger.warning(f"{token} != {expected_token} - not authenticated")
-        raise HTTPException(status_code=401, detail="API token is incorrect")
+    # Use auth_user_id from HybridAuth if available, otherwise fall back to query param
+    effective_user_id = auth_user_id or user_id
+    logger.info(f"{effective_user_id}, {session_id}, auth method: {'session' if auth_user_id else 'bearer'}")
     
     try:
         # Collect query parameters into a dict for easier handling
         params = {
-            'userid': _ensure_user_hash(user_id),
+            'userid': _ensure_user_hash(effective_user_id),
             'thread_id': session_id,
             'channel_id': channel_id,
             'channel_type': channel_type,
@@ -740,7 +734,7 @@ async def agent_completions(
     device_info: Optional[str] = Query(None, description="Device info Base64 encoded with arbitrary parameters such as GPS"),
     agent_name: Optional[str] = Path(..., description="Route to a specific agent"),
     #use_sse: Optional[bool] = Query(False, description="Whether to use Server-Sent Events for streaming"),
-    token: dict = Depends(get_current_token)
+    auth_user_id: Optional[str] = Depends(hybrid_auth)
 ):
     """
     Use any model via an OpenAI API format and get model completions as streaming or non-streaming.
@@ -775,23 +769,23 @@ async def agent_completions(
         """internal vs external web conventions for names"""
         agent_name= agent_name.replace('-','.')
     
-    logger.info(f"{user_id}, {session_id}")
+    logger.info(f"Session for {user_id=}, {session_id=}")
     
     expected_token = "!p3rc0la8!" #<-this a testing idea
     expected_token = POSTGRES_PASSWORD #<-this will be the secure bearer for now but we could relax to an api key
-    
-    token = request.bearer_token or token
-    if not token:
+    effective_user_id = auth_user_id or user_id
+    # token = request.bearer_token
+    if not effective_user_id:
         logger.warning(f"No bearer - not authenticated")
-        raise HTTPException(status_code=401, detail="API token is missing")
-    if token != expected_token:
-        logger.warning(f"{token} != {expected_token} - not authenticated")
-        raise HTTPException(status_code=401, detail="API token is incorrect")
+        raise HTTPException(status_code=401, detail="User not authenticated - supply a token or create a valid user session")
+    # if token != expected_token:
+    #     logger.warning(f"{token} != {expected_token} - not authenticated")
+    #     raise HTTPException(status_code=401, detail="API token is incorrect")
  
     try:
         # Collect query parameters into a dict for easier handling
         params = {
-            'userid': _ensure_user_hash(user_id),
+            'userid': _ensure_user_hash(effective_user_id),
             'thread_id': session_id,
             'channel_id': channel_id,
             'channel_type': channel_type,

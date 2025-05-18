@@ -14,12 +14,13 @@ import traceback
 from percolate.utils.env import SETTINGS
 
 
+
 CUSTOM_PROVIDER = {}
 
 
 def set_custom_model_provider(fn):
     """a function that maps an entity name to a model"""
-    CUSTOM_PROVIDER['DATA'] = fn
+    CUSTOM_PROVIDER['data'] = fn
 
 def settings(key, default=None):
     return SETTINGS.get(key,default)
@@ -192,7 +193,9 @@ def get_proxy(proxy_uri:str):
             def __init__(self, entity_name):
                
                 """in percolate we load models by inspection but you can specify a custom loader at module level"""
-                M = custom_load_model(entity_name) or load_model(entity_name)
+                M = custom_load_model(entity_name)
+                if M is None:
+                    M = load_model(entity_name)
                 """TODO: consider if we want to not allow help at depth!!!!!!"""
                 self.agent = Agent(M,allow_help=False)
                 
@@ -223,3 +226,4 @@ def get_planner()->typing.Callable:
     from functools import partial
     a = Agent(PlanModel,allow_help=False, init_data =repository(Function).select())
     return a
+

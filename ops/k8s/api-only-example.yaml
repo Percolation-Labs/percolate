@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: p8
+  name: percolate-api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: "percolate-api"
+  template:
+    metadata:
+      labels:
+        app: percolate-api
+    spec:
+      containers:
+        - name: percolate-api
+          image: percolationlabs/percolate-api
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 5008
+          env:
+            #load the secret from the percolate cluster
+            - name: P8_PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  #this is the name of the pg database and the secret corresponding
+                  name: p8-su-cred
+                  key: password
+          #Environment variables loaded from ConfigMap
+          envFrom:
+            - configMapRef:
+                name: percolate-env
+          resources:
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+            requests:
+              cpu: "250m"
+              memory: "256Mi"

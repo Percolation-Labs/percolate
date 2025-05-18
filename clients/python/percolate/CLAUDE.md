@@ -1,5 +1,9 @@
 # Percolate Python Client Reference
 
+## Claude notes
+if i create any scripts i should place them in a .claude folder at context root so as not to bloat the repo
+
+
 ## Build & Run Commands
 - Install dependencies: `poetry install`
 - Run API server: `uvicorn percolate.api.main:app --port 5000 --reload`

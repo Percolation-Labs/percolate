@@ -86,4 +86,4 @@ def json_loads(s):
         return parse_fenced_code_blocks(s)
     raise Exception(f"Cannot parse the string as json or fenced json")
 
-from .content_providers import get_content_provider_for_uri
+from .providers import get_content_provider_for_uri

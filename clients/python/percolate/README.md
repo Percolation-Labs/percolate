@@ -51,3 +51,5 @@ git config --global filter.strip-notebook-output.clean "jq --indent 1 '.cells[] 
 
 # Issues encountered
 - https://github.com/fsspec/s3fs/issues/932
+- https://github.com/boto/boto3/issues/3738 [XAmzContentSHA256Mismatch]
+- -https://github.com/boto/boto3/issues/4392 | https://github.com/boto/boto3/issues/4400 
