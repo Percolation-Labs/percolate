@@ -717,9 +717,12 @@ class FileSync:
             
             # Upload to S3
             try:
-                s3_result = self.s3_service.upload_file(
-                    project_name="percolate",
-                    file_name=s3_path,
+                # Build the S3 URI
+                s3_uri = f"s3://{self.s3_service.default_bucket}/percolate/{s3_path}"
+                
+                # Use direct bytes upload since we have the content in memory
+                s3_result = self.s3_service.upload_filebytes_to_uri(
+                    s3_uri=s3_uri,
                     file_content=content,
                     content_type=content_type
                 )

@@ -18,6 +18,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import percolate as p8
 from percolate.models.p8.types import Schedule
+from percolate.api.routes.auth.utils import get_stable_session_key
 # Global scheduler instance
 scheduler = BackgroundScheduler()
 
@@ -43,6 +44,7 @@ async def lifespan(app: FastAPI):
                 logger.warning(f"Failed to schedule job for record {d.get('id')}: {e}")
     except Exception as ex:
         logger.warning(f"Failed to load scheduler data {ex}")
+    
     scheduler.start()
     logger.info(f"Scheduler started with jobs: {[j.id for j in scheduler.get_jobs()]}")
     try:
@@ -72,11 +74,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-k = str(uuid1())
+# Use stable session key for session persistence across restarts
+session_key = get_stable_session_key()
 
-logger.info('Percolate api app started')
+logger.info('Percolate api app started with stable session key')
  
-app.add_middleware(SessionMiddleware, secret_key=k)
+app.add_middleware(SessionMiddleware, secret_key=session_key)
 #app.add_middleware(PayloadLoggerMiddleware)
 
 
@@ -84,6 +87,12 @@ api_router = APIRouter()
 
 origins = [
     "http://localhost:5008",
+    "http://localhost:8000",
+    "http://localhost:5000",
+    "http://127.0.0.1:5008",
+    "http://127.0.0.1:8000",
+    "http://127.0.0.1:5000",
+    "https://vault.percolationlabs.ai"
 ]
 
 app.add_middleware(
@@ -92,6 +101,17 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=[
+        "Location",
+        "Upload-Offset", 
+        "Upload-Length", 
+        "Tus-Version", 
+        "Tus-Resumable", 
+        "Tus-Max-Size", 
+        "Tus-Extension", 
+        "Upload-Metadata",
+        "Upload-Expires"
+    ],
 )
 
 
@@ -177,6 +197,7 @@ if __name__ == "__main__":
     if running the docker image we keep the same port and stop the service in docker - this makes it easier to test in dev
     for example: 
     1. docker compose stop percolate-api
+    #export for whatever env e.g. for using pos
     2. uvicorn percolate.api.main:app --port 5008 --reload 
     Now we are running the dev server on the same location that the database etc expects
     Also add percolate-api mapped to localhost in your hosts files

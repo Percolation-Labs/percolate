@@ -10,7 +10,7 @@ This controller provides functionality for:
 import os
 import boto3
 import uuid
-from typing import List, Dict, Any, Optional, BinaryIO
+from typing import List, Dict, Any, Optional, BinaryIO, Union
 from botocore.exceptions import ClientError
 from percolate.utils import logger
 from percolate.utils.env import S3_URL
@@ -65,11 +65,14 @@ class S3Service:
             aws_access_key_id=self.access_key,
             aws_secret_access_key=self.secret_key,
             endpoint_url=self.endpoint_url,
-            # Use S3 signature (not s3v4) for compatibility with Hetzner
+            # Use s3v4 signature for compatibility with Hetzner
             # This configuration has been tested to work with file uploads
             config=boto3.session.Config(
                 signature_version=signature_version,
-                s3={'addressing_style': 'path'}
+                s3={'addressing_style': 'path'},
+                #CHECK SUM ISSUE ONLY FOR NEWER BOTO - pinning 1.26.0 was fine without this but that could cause dep conflicts elsewhere
+                request_checksum_calculation="when_required", 
+                response_checksum_validation="when_required"
             )
         )
         
@@ -85,6 +88,22 @@ class S3Service:
                 s3={'addressing_style': 'path'}
             )
         )
+    
+    def _validate_connection(self):
+        """Validate the S3 connection by attempting a simple operation."""
+        try:
+            # Test the connection with a head_bucket operation
+            self.s3_client.head_bucket(Bucket=self.default_bucket)
+            logger.debug(f"S3 connection validated successfully for bucket: {self.default_bucket}")
+        except ClientError as e:
+            error_code = e.response['Error']['Code']
+            if error_code == '404':
+                raise ValueError(f"Bucket '{self.default_bucket}' not found")
+            elif error_code == '403':
+                raise ValueError(f"Access denied to bucket '{self.default_bucket}'. Check S3 credentials.")
+            else:
+                logger.error(f"Failed to validate S3 connection: {str(e)}")
+                raise
     
     def create_user_key(self, 
                         project_name: str, 
@@ -225,8 +244,18 @@ class S3Service:
             return files
             
         except ClientError as e:
-            logger.error(f"Error listing files: {str(e)}")
-            raise
+            error_code = e.response['Error']['Code']
+            error_message = str(e)
+            
+            if error_code == 'SignatureDoesNotMatch':
+                logger.error(f"S3 signature mismatch. Current signature version: {self.s3_client._client_config.signature_version}. Try using 's3v4' instead.")
+                raise ValueError(f"S3 signature mismatch error: {error_message}")
+            elif error_code == 'NoSuchBucket':
+                logger.error(f"Bucket '{self.default_bucket}' does not exist")
+                raise ValueError(f"Bucket '{self.default_bucket}' does not exist")
+            else:
+                logger.error(f"Error listing files: {error_message}")
+                raise
     
     def create_s3_uri(self, project_name: str = None, file_name: str = None, prefix: str = None) -> str:
         """
@@ -260,13 +289,13 @@ class S3Service:
             
         return uri
         
-    def upload_file_to_uri(self, 
-                         s3_uri: str,
-                         file_content: typing.Union[BinaryIO, bytes],
-                         content_type: str = None
-                         ) -> Dict[str, Any]:
+    def upload_filebytes_to_uri(self, 
+                               s3_uri: str,
+                               file_content: typing.Union[BinaryIO, bytes],
+                               content_type: str = None
+                               ) -> Dict[str, Any]:
         """
-        Upload a file to a specific S3 URI.
+        Upload file bytes or file-like object to a specific S3 URI.
         
         Args:
             s3_uri: The S3 URI to upload to
@@ -283,6 +312,10 @@ class S3Service:
             object_key = parsed["key"]
             
             # Prepare parameters for put_object
+            # If file_content is a file object, ensure it's at the beginning
+            if hasattr(file_content, 'seek'):
+                file_content.seek(0)
+            
             put_params = {
                 'Bucket': bucket_name,
                 'Key': object_key,
@@ -293,9 +326,32 @@ class S3Service:
             if content_type:
                 put_params['ContentType'] = content_type
                 
-            logger.debug(f"Uploading file to {s3_uri}")
-            # Upload the file using put_object
-            response = self.s3_client.put_object(**put_params)
+            logger.debug(f"Uploading file bytes to {s3_uri}")
+            
+            # Try regular upload first
+            try:
+                response = self.s3_client.put_object(**put_params)
+                
+            except ClientError as e:
+                error_code = e.response.get('Error', {}).get('Code')
+                error_message = str(e)
+                
+                # Check if it's a SHA256 mismatch error
+                if error_code in ['XAmzContentSHA256Mismatch', 'BadDigest'] or 'SHA256' in error_message:
+                    logger.warning(f"SHA256 mismatch detected in put_object, falling back to presigned POST: {error_message}")
+                    
+                    # Use presigned POST as fallback
+                    self._upload_bytes_presigned_post(
+                        file_content=file_content,
+                        bucket_name=bucket_name,
+                        object_key=object_key,
+                        content_type=content_type
+                    )
+                    
+                    logger.info(f"Successfully uploaded to {s3_uri} using presigned POST fallback")
+                else:
+                    # Re-raise if it's not a SHA256 error
+                    raise
             
             # Get the uploaded file's metadata
             head_response = self.s3_client.head_object(
@@ -317,8 +373,229 @@ class S3Service:
             }
             
         except ClientError as e:
-            logger.error(f"Error uploading file to {s3_uri}: {str(e)}")
+            error_code = e.response['Error']['Code']
+            error_message = str(e)
+            
+            if error_code == 'SignatureDoesNotMatch':
+                logger.error(f"S3 signature mismatch during upload. Try using 's3v4' signature version.")
+                raise ValueError(f"S3 signature mismatch error: {error_message}")
+            elif error_code == 'NoSuchBucket':
+                logger.error(f"Bucket '{bucket_name}' does not exist")
+                raise ValueError(f"Bucket '{bucket_name}' does not exist")
+            elif error_code == 'InvalidAccessKeyId':
+                logger.error("Invalid S3 access key ID")
+                raise ValueError("Invalid S3 access key ID. Check your S3_ACCESS_KEY environment variable.")
+            else:
+                logger.error(f"Error uploading file to {s3_uri}: {error_message}")
+                raise
+    
+    def upload_file_to_uri(self,
+                          s3_uri: str,
+                          file_path_or_content: typing.Union[str, BinaryIO, bytes],
+                          content_type: str = None) -> Dict[str, Any]:
+        """
+        Upload a file to a specific S3 URI from file path or content.
+        
+        Args:
+            s3_uri: The S3 URI to upload to
+            file_path_or_content: File path string, bytes, or file-like object
+            content_type: Optional MIME type
+            
+        Returns:
+            Dict with upload status and file metadata
+        """
+        if isinstance(file_path_or_content, str):
+            # It's a file path - use streaming upload
+            return self.upload_file_stream_to_uri(s3_uri, file_path_or_content, content_type)
+        else:
+            # It's bytes or file object - use the bytes upload
+            return self.upload_filebytes_to_uri(s3_uri, file_path_or_content, content_type)
+    
+    def upload_file_stream_to_uri(self,
+                                  s3_uri: str,
+                                  file_path: str,
+                                  content_type: str = None) -> Dict[str, Any]:
+        """
+        Upload a file to S3 using streaming (memory-friendly) for large files.
+        
+        Args:
+            s3_uri: The S3 URI to upload to
+            file_path: Path to the file on disk
+            content_type: Optional MIME type
+            
+        Returns:
+            Dict with upload status and file metadata
+        """
+        try:
+            # Parse the URI
+            parsed = self.parse_s3_uri(s3_uri)
+            bucket_name = parsed["bucket"]
+            object_key = parsed["key"]
+            
+            # Get file size
+            file_size = os.path.getsize(file_path)
+            
+            # Determine content type if not provided
+            if not content_type:
+                import mimetypes
+                content_type, _ = mimetypes.guess_type(file_path)
+                if not content_type:
+                    content_type = 'application/octet-stream'
+            
+            logger.debug(f"Streaming upload of {file_path} ({file_size} bytes) to {s3_uri}")
+            
+            # Try regular upload first
+            try:
+                self.s3_client.upload_file(
+                    Filename=file_path,
+                    Bucket=bucket_name,
+                    Key=object_key,
+                    ExtraArgs={'ContentType': content_type}
+                )
+                logger.debug(f"Regular upload successful for {file_path}")
+                
+            except ClientError as e:
+                error_code = e.response.get('Error', {}).get('Code')
+                error_message = str(e)
+                
+                # Check if it's a SHA256 mismatch error
+                if error_code in ['XAmzContentSHA256Mismatch', 'BadDigest'] or 'SHA256' in error_message:
+                    logger.warning(f"SHA256 mismatch detected, falling back to presigned upload: {error_message}")
+                    
+                    # Use presigned PUT as fallback
+                    self._upload_file_presigned_put(
+                        file_path=file_path,
+                        bucket_name=bucket_name,
+                        object_key=object_key,
+                        content_type=content_type
+                    )
+                    
+                    logger.info(f"Successfully uploaded {file_path} using presigned PUT fallback")
+                else:
+                    # Re-raise if it's not a SHA256 error
+                    raise
+            
+            head_response = self.s3_client.head_object(
+                Bucket=bucket_name,
+                Key=object_key
+            )
+            
+            # Get filename from the object key
+            file_name = object_key.split('/')[-1] if '/' in object_key else object_key
+            
+            return {
+                "uri": s3_uri,
+                "name": file_name,
+                "size": head_response.get('ContentLength', 0),
+                "content_type": head_response.get('ContentType', 'application/octet-stream'),
+                "last_modified": head_response.get('LastModified').isoformat() if 'LastModified' in head_response else None,
+                "etag": head_response.get('ETag', '').strip('"'),
+                "status": "success",
+                "upload_method": "streaming"
+            }
+            
+        except ClientError as e:
+            error_code = e.response['Error']['Code']
+            error_message = str(e)
+            
+            if error_code == 'NoSuchBucket':
+                logger.error(f"Bucket '{bucket_name}' does not exist")
+                raise ValueError(f"Bucket '{bucket_name}' does not exist")
+            else:
+                logger.error(f"Error streaming file to {s3_uri}: {error_message}")
+                raise
+        except FileNotFoundError:
+            logger.error(f"File not found: {file_path}")
+            raise ValueError(f"File not found: {file_path}")
+        except Exception as e:
+            import traceback
+            logger.info('')
+            logger.error(f"Unexpected error during streaming upload: {traceback.format_exc()}")
+            logger.info('')
             raise
+    
+    def _upload_file_presigned_put(self, file_path: str, bucket_name: str, object_key: str, content_type: str = None):
+        """
+        Upload a file using presigned PUT URL.
+        This is used as a fallback when regular upload fails with SHA256 mismatch.
+        
+        Args:
+            file_path: Path to the file to upload
+            bucket_name: S3 bucket name
+            object_key: S3 object key
+            content_type: Optional MIME type
+        """
+        import requests
+        
+        # Generate presigned PUT URL
+        presigned_url = self.s3_client.generate_presigned_url(
+            'put_object',
+            Params={
+                'Bucket': bucket_name,
+                'Key': object_key,
+                'ContentType': content_type or 'application/octet-stream'
+            },
+            ExpiresIn=3600
+        )
+        
+        # Stream upload using requests
+        with open(file_path, 'rb') as f:
+            response = requests.put(
+                presigned_url,
+                data=f,  # This streams the file
+                headers={'Content-Type': content_type or 'application/octet-stream'}
+            )
+            
+            if response.status_code not in [200, 201]:
+                raise Exception(f"Presigned PUT upload failed: {response.status_code} - {response.text}")
+    
+    def _upload_bytes_presigned_post(self, file_content: Union[BinaryIO, bytes], bucket_name: str, object_key: str, content_type: str = None):
+        """
+        Upload bytes or file-like object using presigned POST.
+        This is used as a fallback when regular upload fails with SHA256 mismatch.
+        
+        Args:
+            file_content: Bytes or file-like object to upload
+            bucket_name: S3 bucket name
+            object_key: S3 object key
+            content_type: Optional MIME type
+        """
+        import requests
+        
+        # Generate presigned POST data
+        post_data = self.s3_client.generate_presigned_post(
+            Bucket=bucket_name,
+            Key=object_key,
+            Fields={
+                'Content-Type': content_type or 'application/octet-stream'
+            },
+            ExpiresIn=300  # 5 minutes
+        )
+        
+        # Prepare file content
+        if hasattr(file_content, 'seek'):
+            file_content.seek(0)
+            content_data = file_content.read()
+        else:
+            content_data = file_content
+        
+        # Upload using requests
+        files = {
+            'file': (
+                object_key.split('/')[-1],
+                content_data,
+                content_type or 'application/octet-stream'
+            )
+        }
+        
+        response = requests.post(
+            post_data['url'],
+            data=post_data['fields'],
+            files=files
+        )
+        
+        if response.status_code not in [200, 201, 204]:
+            raise Exception(f"Presigned POST upload failed: {response.status_code} - {response.text}")
     
     def upload_file(self, 
                     project_name: str, 
@@ -345,8 +622,41 @@ class S3Service:
         # Create the S3 URI
         s3_uri = self.create_s3_uri(project_name, file_name, prefix)
         
-        # Use the URI-based upload method
+        # Use the URI-based upload method (this now accepts strings, bytes, or file objects)
         result = self.upload_file_to_uri(s3_uri, file_content, content_type)
+        
+        # Add a presigned URL if requested
+        if fetch_presigned_url:
+            result["presigned_url"] = self.get_presigned_url_for_uri(s3_uri)
+            
+        return result
+    
+    def upload_file_stream(self,
+                          project_name: str,
+                          file_name: str,
+                          file_path: str,
+                          content_type: str = None,
+                          prefix: str = None,
+                          fetch_presigned_url: bool = False) -> Dict[str, Any]:
+        """
+        Upload a file from disk using streaming (memory-friendly).
+        
+        Args:
+            project_name: The project name
+            file_name: The name of the file to be saved  
+            file_path: Path to the file on disk
+            content_type: Optional MIME type
+            prefix: Optional additional prefix
+            fetch_presigned_url: If True, include a presigned URL
+            
+        Returns:
+            Dict with upload status and file metadata
+        """
+        # Create the S3 URI
+        s3_uri = self.create_s3_uri(project_name, file_name, prefix)
+        
+        # Use the streaming upload method
+        result = self.upload_file_stream_to_uri(s3_uri, file_path, content_type)
         
         # Add a presigned URL if requested
         if fetch_presigned_url:
@@ -465,10 +775,21 @@ class S3Service:
             }
             
         except ClientError as e:
-            logger.error(f"Error downloading file from URI {s3_uri}: {str(e)}")
-            if e.response['Error']['Code'] == 'NoSuchKey':
+            error_code = e.response['Error']['Code']
+            error_message = str(e)
+            
+            if error_code == 'NoSuchKey':
+                logger.error(f"File does not exist at {s3_uri}")
                 raise ValueError(f"File does not exist at {s3_uri}")
-            raise
+            elif error_code == 'SignatureDoesNotMatch':
+                logger.error(f"S3 signature mismatch during download. Try using 's3v4' signature version.")
+                raise ValueError(f"S3 signature mismatch error: {error_message}")
+            elif error_code == 'NoSuchBucket':
+                logger.error(f"Bucket does not exist in URI: {s3_uri}")
+                raise ValueError(f"Bucket does not exist in URI: {s3_uri}")
+            else:
+                logger.error(f"Error downloading file from URI {s3_uri}: {error_message}")
+                raise
             
     def download_file_from_bucket(self, bucket_name: str, object_key: str, local_path: str = None) -> Dict[str, Any]:
         """
@@ -520,8 +841,23 @@ class S3Service:
             }
             
         except ClientError as e:
-            logger.error(f"Error deleting file at {s3_uri}: {str(e)}")
-            raise
+            error_code = e.response['Error']['Code']
+            error_message = str(e)
+            
+            if error_code == 'NoSuchKey':
+                # Deletion of non-existent key is often not an error
+                logger.warning(f"File does not exist at {s3_uri}, considering as already deleted")
+                return {
+                    "uri": s3_uri,
+                    "name": object_key.split('/')[-1] if '/' in object_key else object_key,
+                    "status": "not_found"
+                }
+            elif error_code == 'SignatureDoesNotMatch':
+                logger.error(f"S3 signature mismatch during delete. Try using 's3v4' signature version.")
+                raise ValueError(f"S3 signature mismatch error: {error_message}")
+            else:
+                logger.error(f"Error deleting file at {s3_uri}: {error_message}")
+                raise
             
     def delete_file(self, 
                     project_name: str, 
@@ -641,3 +977,207 @@ class S3Service:
         
         # Use the URI-based method
         return self.get_presigned_url_for_uri(s3_uri, operation, expires_in)
+    
+    async def upload_file_multipart(self,
+                                    project_name: str,
+                                    file_name: str,
+                                    file_path: str,
+                                    content_type: str = None,
+                                    prefix: str = None,
+                                    chunk_size: int = 10 * 1024 * 1024) -> Dict[str, Any]:
+        """
+        Upload a large file using multipart upload for memory-efficient streaming.
+        
+        Args:
+            project_name: The project name
+            file_name: The file name
+            file_path: Path to the file on disk
+            content_type: Optional MIME type
+            prefix: Optional additional prefix
+            chunk_size: Size of each chunk in bytes (default 10MB)
+            
+        Returns:
+            Dict with upload status and metadata
+        """
+        import asyncio
+        from concurrent.futures import ThreadPoolExecutor
+        
+        try:
+            # Create the S3 key
+            full_prefix = f"{project_name}/"
+            if prefix:
+                prefix = prefix.strip('/')
+                if prefix:
+                    full_prefix += f"{prefix}/"
+            
+            s3_key = full_prefix + file_name
+            
+            # Get file size
+            file_size = os.path.getsize(file_path)
+            
+            # For small files, use regular upload
+            if file_size < chunk_size:
+                with open(file_path, 'rb') as f:
+                    return self.upload_file(
+                        project_name=project_name,
+                        file_name=file_name,
+                        file_content=f,
+                        content_type=content_type,
+                        prefix=prefix
+                    )
+            
+            # Start multipart upload
+            logger.info(f"Starting multipart upload for large file: {file_name} ({file_size} bytes)")
+            
+            create_params = {
+                'Bucket': self.default_bucket,
+                'Key': s3_key
+            }
+            if content_type:
+                create_params['ContentType'] = content_type
+            
+            response = self.s3_client.create_multipart_upload(**create_params)
+            upload_id = response['UploadId']
+            
+            # Upload parts
+            parts = []
+            part_number = 1
+            
+            def upload_part(part_data: bytes, part_num: int) -> dict:
+                """Upload a single part"""
+                response = self.s3_client.upload_part(
+                    Bucket=self.default_bucket,
+                    Key=s3_key,
+                    PartNumber=part_num,
+                    UploadId=upload_id,
+                    Body=part_data
+                )
+                return {
+                    'PartNumber': part_num,
+                    'ETag': response['ETag']
+                }
+            
+            # Use thread pool for parallel uploads
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                futures = []
+                
+                with open(file_path, 'rb') as f:
+                    while True:
+                        # Read chunk
+                        chunk = f.read(chunk_size)
+                        if not chunk:
+                            break
+                        
+                        # Submit upload task
+                        future = executor.submit(upload_part, chunk, part_number)
+                        futures.append(future)
+                        part_number += 1
+                
+                # Wait for all uploads to complete
+                for future in futures:
+                    part = future.result()
+                    parts.append(part)
+            
+            # Complete multipart upload
+            complete_response = self.s3_client.complete_multipart_upload(
+                Bucket=self.default_bucket,
+                Key=s3_key,
+                UploadId=upload_id,
+                MultipartUpload={'Parts': parts}
+            )
+            
+            # Create S3 URI
+            s3_uri = f"s3://{self.default_bucket}/{s3_key}"
+            
+            logger.info(f"Multipart upload completed: {s3_uri}")
+            
+            return {
+                "uri": s3_uri,
+                "name": file_name,
+                "size": file_size,
+                "content_type": content_type or "application/octet-stream",
+                "status": "success",
+                "upload_type": "multipart",
+                "parts": len(parts)
+            }
+            
+        except Exception as e:
+            # Abort multipart upload on error
+            if 'upload_id' in locals():
+                try:
+                    self.s3_client.abort_multipart_upload(
+                        Bucket=self.default_bucket,
+                        Key=s3_key,
+                        UploadId=upload_id
+                    )
+                except:
+                    pass
+            
+            logger.error(f"Error in multipart upload: {str(e)}")
+            raise
+    
+    def upload_file_multipart_sync(self,
+                                   project_name: str,
+                                   file_name: str,
+                                   file_path: str,
+                                   content_type: str = None,
+                                   prefix: str = None,
+                                   chunk_size: int = 10 * 1024 * 1024) -> Dict[str, Any]:
+        """
+        Synchronous version of multipart upload for use in async contexts.
+        """
+        import asyncio
+        
+        # Create a new event loop for this sync method
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(
+                self.upload_file_multipart(
+                    project_name=project_name,
+                    file_name=file_name,
+                    file_path=file_path,
+                    content_type=content_type,
+                    prefix=prefix,
+                    chunk_size=chunk_size
+                )
+            )
+        finally:
+            loop.close()
+    
+    def upload_file_from_path(self,
+                              project_name: str,
+                              file_name: str,
+                              file_path: str,
+                              content_type: str = None,
+                              prefix: str = None) -> Dict[str, Any]:
+        """
+        Upload a file from a file path, choosing the best method based on file size.
+        This method handles the SHA mismatch issue properly.
+        """
+        file_size = os.path.getsize(file_path)
+        
+        if file_size > 10 * 1024 * 1024:  # > 10MB
+            # Use multipart upload for large files
+            logger.info(f"Using multipart upload for {file_name} ({file_size} bytes)")
+            return self.upload_file_multipart_sync(
+                project_name=project_name,
+                file_name=file_name,
+                file_path=file_path,
+                content_type=content_type,
+                prefix=prefix
+            )
+        else:
+            # For small files, use regular upload with proper handling
+            logger.info(f"Using regular upload for {file_name} ({file_size} bytes)")
+            
+            # Read the file content completely to avoid SHA mismatch
+            with open(file_path, 'rb') as f:
+                file_content = f.read()
+            
+            return self.upload_file(
+                project_name=project_name,
+                file_name=file_name,
+                file_content=file_content,
+                content_type=content_type,
+                prefix=prefix
+            )

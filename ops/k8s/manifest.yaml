@@ -15,7 +15,7 @@ metadata:
   namespace: p8
 data:
   P8_PG_PORT: "5432"
-  P8_PG_USER: "app"
+  P8_PG_USER: "postgres"
   P8_PG_HOST: "percolate-rw.p8.svc.cluster.local"
 ---
 apiVersion: postgresql.cnpg.io/v1
@@ -90,7 +90,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   #this is the name of the pg database and the secret corresponding
-                  name: percolate-app
+                  name: p8-su-cred
                   key: password
           #Environment variables loaded from ConfigMap
           envFrom:

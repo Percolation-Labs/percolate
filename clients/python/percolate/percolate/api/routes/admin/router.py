@@ -1,6 +1,6 @@
 # routers/drafts.py
 from fastapi import APIRouter, HTTPException, BackgroundTasks
-from fastapi import   Depends, Response
+from fastapi import   Depends, Response, Form, Request
 from fastapi.responses import JSONResponse
 import json
 import time
@@ -211,14 +211,43 @@ async def upload_uri(request : dict,
        
     return JSONResponse({"status":f'received uri {uri}'})
 
+from percolate.api.routes.auth import hybrid_auth, HybridAuth
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+# Create a version of hybrid_auth that allows anonymous access
+class OptionalHybridAuth(HybridAuth):
+    """
+    Variation of HybridAuth that allows anonymous access.
+    Returns user_id if authenticated, None if not.
+    """
+    
+    async def __call__(
+        self, 
+        request: Request,
+        credentials: typing.Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False))
+    ) -> typing.Optional[str]:
+        """
+        Returns user_id if authenticated, None if not authenticated.
+        Does not raise 401 for anonymous access.
+        """
+        try:
+            # Try to authenticate using the parent class logic
+            return await super().__call__(request, credentials)
+        except HTTPException:
+            # If authentication fails, return None instead of raising 401
+            return None
+
+# Create a singleton instance
+optional_hybrid_auth = OptionalHybridAuth()
+
 @router.post("/content/upload")
 async def upload_file(background_tasks: BackgroundTasks,
                       file: UploadFile = File(...),
-                      task_id: str = None,
-                      add_resource: bool = True, 
-                      user_id:str = None, 
-                      device_info:str =None,
-                      token: dict = Depends(get_current_token)):
+                      task_id: str = Form(None),
+                      add_resource: bool = Form(True), 
+                      user_id:str = Form(None), 
+                      device_info:str = Form(None),
+                      auth_user_id: typing.Optional[str] = Depends(optional_hybrid_auth)):
     """
     Uploads a file to S3 storage and optionally stores it as a file resource which is indexed.
     Files are stored under the task_id folder structure.
@@ -234,6 +263,11 @@ async def upload_file(background_tasks: BackgroundTasks,
     """
     from percolate.models import Resources,Session,SessionResources
     device_info = try_parse_base64_dict(device_info)
+    
+    # Use hybrid auth - prefer user_id parameter over auth_user_id
+    effective_user_id = user_id if user_id else auth_user_id
+    logger.info(f"Using user_id: {effective_user_id} (param: {user_id}, auth: {auth_user_id})")
+    logger.info(f"Received task_id: {task_id}")
                  
     def index_resource(file_upload_result:dict,task_id:str=None):
         """given a file upload result which provides e.g. the key, index the resource"""
@@ -243,16 +277,16 @@ async def upload_file(background_tasks: BackgroundTasks,
             uri = file_upload_result['uri']
             if not task_id:
                 """the user can upload either in a session context or we just pin to daily activity"""
-                task = Session.daily_diary_entry(userid=user_id,query= uri, metadata=device_info)
+                task = Session.daily_diary_entry(userid=effective_user_id,query= uri, metadata=device_info)
                 task_id = task.id
             else:
-                task = Session.task_thread_entry(thread_id=task_id, userid=user_id, query=uri, metadata=device_info)
+                task = Session.task_thread_entry(thread_id=task_id, userid=effective_user_id, query=uri, metadata=device_info)
                 
             """we are always auditing intent"""
             p8.repository(Session).update_records(task)   
 
             """TODO in future push down S3 urls and add a provider that the chunker and maybe the database can use"""
-            resources = Resources.chunked_resource(name=file.filename, uri=uri,userid=user_id)
+            resources = Resources.chunked_resource(name=file.filename, uri=uri,userid=effective_user_id)
             
             if resources:
                 _ = p8.repository(Resources).update_records(resources)
@@ -270,25 +304,46 @@ async def upload_file(background_tasks: BackgroundTasks,
         
         # Upload to S3 using put_object with bytes
         s3_service = S3Service()
-        print("USERID", user_id)
-        path = f'users/{user_id}/' if user_id else ''
+        logger.info(f"Uploading file for user: {effective_user_id}")
+        path = f'users/{effective_user_id}/' if effective_user_id else ''
         """todo still deciding on a file path scheme"""
         path += f"{task_id or 'default'}"
         
-        result = s3_service.upload_file(
-            project_name=path,
-            file_name=file.filename,
-            file_content=file.file,
-            content_type=file.content_type,
-            fetch_presigned_url=True
+        # Build the full S3 URI
+        s3_key = f"{path}/{file.filename}"
+        s3_uri = f"s3://{s3_service.default_bucket}/{s3_key}"
+        
+        # Use direct bytes upload since this is a small file from user upload
+        file_content = file.file.read()
+        file.file.seek(0)  # Reset file pointer
+        
+        result = s3_service.upload_filebytes_to_uri(
+            s3_uri=s3_uri,
+            file_content=file_content,
+            content_type=file.content_type
         )
+        
+        # Get presigned URL separately if needed
+        result["presigned_url"] = s3_service.get_presigned_url_for_uri(s3_uri)
         
         if add_resource:
             background_tasks.add_task(index_resource, file_upload_result=result,task_id=task_id)
         
-        logger.info(f"Uploaded file {result['key']} to S3 successfully")
+        logger.info(f"Uploaded file {result['name']} to S3 successfully")
+        
+        # Determine auth method
+        auth_method = None
+        if user_id:
+            auth_method = "user_id_param"
+        elif auth_user_id:
+            auth_method = "bearer_token"
+            
+        # Extract key from URI - the part after the bucket name
+        uri_parts = result["uri"].split('/', 3)
+        key = uri_parts[3] if len(uri_parts) > 3 else result["name"]
+            
         return JSONResponse({
-            "key": result["key"],
+            "key": key,
             "filename": result["name"],
             "task_id": task_id,
             "size": result["size"],
@@ -296,7 +351,10 @@ async def upload_file(background_tasks: BackgroundTasks,
             "last_modified": result["last_modified"],
             "etag": result["etag"],
             "path": path,
-            "message": "Uploaded successfully to S3"
+            "user_id": effective_user_id,
+            "auth_method": auth_method,
+            "message": "Uploaded successfully to S3",
+            "presigned_url": result["presigned_url"]
         })
     except Exception as e:
         logger.error(f"File upload failed: {str(e)}")

@@ -6,18 +6,32 @@ import os
 from pathlib import Path
 import json
 from fastapi.responses import  JSONResponse
-from . import get_current_token, get_api_key
+from . import get_current_token, get_api_key, hybrid_auth
 import percolate as p8
 import typing
 from fastapi.responses import RedirectResponse
 from percolate.utils import logger
 from datetime import time,datetime
-
+from percolate.models import User
+from percolate.utils import make_uuid
+from .utils import extract_user_info_from_token, store_user_with_token,decode_jwt_token
+import uuid
+from datetime import timezone
+      
 router = APIRouter()
 @router.get("/ping")
-async def ping(token: str = Depends(get_api_key)):
-    """Ping endpoint to verify API key authentication"""
-    return Response(status_code=200)
+async def ping(request: Request, user_id: typing.Optional[str] = Depends(hybrid_auth)):
+    """Ping endpoint to verify authentication (bearer token or session)"""
+    session_id = request.session.get('session_id')
+    if user_id:
+        return {
+            "message": "pong", 
+            "user_id": user_id, 
+            "auth_type": "session",
+            "session_id": session_id
+        }
+    else:
+        return {"message": "pong", "auth_type": "bearer"}
 
  
 REDIRECT_URI = "http://127.0.0.1:5000/auth/google/callback"# if not project_name else f"https://{project_name}.percolationlabs.ai/auth/google/callback"
@@ -45,30 +59,7 @@ goauth.register(
 )
 
 
-# #https://docs.authlib.org/en/latest/client/starlette.html
-# @router.get("/google/login")
-# async def login_via_google(request: Request, redirect_uri: typing.Optional[str] = Query(None)):
-#     """Use Google OAuth to login, allowing optional override of redirect URI."""
-#     final_redirect_uri = redirect_uri or REDIRECT_URI
-#     google = goauth.create_client('google')
-#     return await google.authorize_redirect(
-#         request, final_redirect_uri, scope=SCOPES,
-#         prompt="consent",           
-#         access_type="offline",         
-#         include_granted_scopes="true"
-#     )
-# @router.get("/google/callback")
-# async def google_auth_callback(request: Request):
-#     """a callback from the oauth flow"""
-#     google = goauth.create_client('google')
-#     token = await google.authorize_access_token(request)
-#     request.session['token'] = token
-#     GOOGLE_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-#     with open(GOOGLE_TOKEN_PATH, 'w') as f:
-#         json.dump(token, f)
-#     userinfo = token['userinfo']
 
-#     return JSONResponse(content={"token": token, "user_info": userinfo})
 @router.get("/internal-callback")
 async def internal_callback(request: Request, token:str=None):
     if token:
@@ -105,8 +96,34 @@ async def login_via_google(request: Request, redirect_uri: typing.Optional[str] 
     logger.info(callback_url)
     google = goauth.create_client('google')
 
-    if "oauth_state" in request.session:
-        del request.session["oauth_state"]
+    # Log current session state for debugging
+    logger.info(f"Session keys before OAuth redirect: {list(request.session.keys())}")
+    
+    # Special handling for re-login attempts
+    # If we already have a token in the session, this is a re-login
+    if 'token' in request.session:
+        logger.info("Re-login detected - clearing session for fresh OAuth flow")
+        # Keep only the app_redirect_uri and sync_files if they were just set
+        temp_redirect = request.session.get('app_redirect_uri')
+        temp_sync = request.session.get('sync_files', False)
+        
+        # Clear the entire session
+        request.session.clear()
+        
+        # Restore the values we need
+        if temp_redirect:
+            request.session['app_redirect_uri'] = temp_redirect
+        request.session['sync_files'] = temp_sync
+    
+    # Clear any OAuth-related state patterns
+    keys_to_remove = []
+    for key in list(request.session.keys()):
+        if key.startswith('_'):  # OAuth states start with underscore
+            keys_to_remove.append(key)
+    
+    for key in keys_to_remove:
+        logger.info(f"Removing OAuth key: {key}")
+        del request.session[key]
     
     # Always request offline access (even if not syncing files) to get refresh token
     return await google.authorize_redirect(
@@ -136,15 +153,46 @@ async def google_auth_callback(request: Request, token:str=None):
     # Use app-provided redirect_uri (custom scheme) if previously stored
     if request.session.get('app_redirect_uri'):
         """we just write back to the expected callback and rewrite the token however we like - for now a relay"""
-        app_redirect_uri = request.session.pop("app_redirect_uri")
+        app_redirect_uri = request.session.get("app_redirect_uri")
+        # Only remove after we're done with it, at the end of the function
     else:
         app_redirect_uri = None
         
     # Get sync_files preference
     sync_files = request.session.get('sync_files', False)
         
+    # Log session state at callback
+    logger.info(f"Session keys at callback start: {list(request.session.keys())}")
+    logger.info(f"Query params: state={request.query_params.get('state')}, code={request.query_params.get('code')}")
+    
+    # Debug: Check for OAuth state in session
+    oauth_states = [k for k in request.session.keys() if k.startswith('_state_google_')]
+    logger.info(f"OAuth states in session: {oauth_states}")
+    
     google = goauth.create_client('google')
-    token = await google.authorize_access_token(request)
+    
+    try:
+        token = await google.authorize_access_token(request)
+    except Exception as e:
+        logger.error(f"OAuth error: {str(e)}")
+        logger.error(f"Session keys: {list(request.session.keys())}")
+        logger.error(f"Session ID: {request.session.get('session_id')}")
+        
+        # Log more details about the state mismatch
+        if "mismatching_state" in str(e):
+            state_from_url = request.query_params.get('state')
+            logger.error(f"State from URL: {state_from_url}")
+            logger.error(f"States in session: {oauth_states}")
+            
+        # Return a more helpful error message
+        return JSONResponse(
+            status_code=400, 
+            content={
+                "error": "OAuth authentication failed",
+                "detail": str(e),
+                "hint": "This often happens when sessions are lost between requests. Try logging in again."
+            }
+        )
 
     # Save token in session (optional)
     request.session['token'] = token
@@ -155,6 +203,7 @@ async def google_auth_callback(request: Request, token:str=None):
         json.dump(token, f)
     
     # If this authentication is for file sync, store credentials in database
+    #will deprecate this to unify with other creds
     if sync_files and "refresh_token" in token:
         try:
             # Use the FileSync service to store OAuth credentials
@@ -163,10 +212,27 @@ async def google_auth_callback(request: Request, token:str=None):
         except Exception as e:
             logger.error(f"Error storing sync credentials: {str(e)}")
 
+
+        
+    # Create a unique session ID and store it in the session
+    session_id = str(uuid.uuid4())
+    request.session['session_id'] = session_id
+    logger.info(f"Created new session with ID: {session_id}")
+    
+    # Store the user with token and session
+    user = store_user_with_token(token, session_id)
+    logger.info(f"Stored user: {user.email} with session: {session_id}")
+ 
     id_token = token.get("id_token")
     if not id_token:
         return JSONResponse(status_code=400, content={"error": "No id_token found"})
 
+    # Clean up temporary session data before returning
+    if 'app_redirect_uri' in request.session:
+        del request.session['app_redirect_uri']
+    if 'sync_files' in request.session:
+        del request.session['sync_files']
+    
     if app_redirect_uri:
         logger.debug(f'im redirecting to {app_redirect_uri=} with the token')
         redirect_url = f"{app_redirect_uri}?token={id_token}" ##used to out the token here but its too big so testing without 
@@ -176,9 +242,98 @@ async def google_auth_callback(request: Request, token:str=None):
 
     # NOTE: Later, replace this logic with:
     #  - Validate Google's id_token server-side
-    #  - Issue your own short-lived app token (e.g., JWT)
+    #  - Issue our own short-lived app token (e.g., JWT)
     #  - Set secure HttpOnly cookie or return token in redirect or JSON response
     
+@router.get("/session/info")
+async def session_info(request: Request, user_id: typing.Optional[str] = Depends(hybrid_auth)):
+    """Get current session information including user profile data"""
+    session_data = dict(request.session)
+    session_cookie = request.cookies.get('session')
+    
+    # Start with basic session info
+    response_data = {
+        "user_id": user_id,
+        "session_id": session_data.get('session_id'),
+        "session_cookie_present": bool(session_cookie),
+        "session_data_keys": list(session_data.keys()),
+        "auth_type": "session" if user_id else "none"
+    }
+    
+    # If we have a user_id, get their profile info from the database
+    if user_id:
+        try:
+            user = p8.repository(User).select(id=user_id) 
+            if user:
+                user = User(**user[0])
+            if user and user.token:
+                # Extract user info from the stored token
+                user_info = extract_user_info_from_token(user.token)
+                
+                # Get complete token data for userinfo
+                token_data = {}
+                id_token_data = {}
+                try:
+                    import json
+                    if isinstance(user.token, str) and user.token.startswith('{'):
+                        # Full OAuth token stored as JSON
+                        token_data = json.loads(user.token)
+                        
+                        # Also decode the id_token for additional info
+                        if 'id_token' in token_data:
+                            id_token_data = decode_jwt_token(token_data['id_token'])
+                    else:
+                        # Just an ID token string stored
+                        id_token_data = decode_jwt_token(user.token)
+                except Exception as e:
+                    logger.error(f"Error parsing token data: {str(e)}")
+                
+                # Combine all available user info from various sources
+                response_data.update({
+                    "user_info": {
+                        "id": str(user.id),
+                        "email": user.email or user_info[1] or id_token_data.get('email'),
+                        "name": user.name or id_token_data.get('name'),
+                        "given_name": id_token_data.get('given_name'),
+                        "family_name": id_token_data.get('family_name'),
+                        "picture": id_token_data.get('picture'),
+                        "verified": id_token_data.get('email_verified'),
+                        "locale": id_token_data.get('locale'),
+                        "hd": id_token_data.get('hd'),  # Hosted domain for Google Workspace
+                        "token_expiry": user.token_expiry.isoformat() if user.token_expiry else None,
+                        "last_session_at": user.last_session_at.isoformat() if user.last_session_at else None,
+                        "oauth_provider": "google",  # Hardcoded for now since we only support Google
+                        "scopes": token_data.get('scope', '').split() if 'scope' in token_data else []
+                    }
+                })
+        except Exception as e:
+            logger.error(f"Error fetching user info: {str(e)}")
+    
+    return response_data
+
+
+@router.get("/session/debug")
+async def session_debug(request: Request):
+    """Debug endpoint to see raw session data"""
+    session_cookie = request.cookies.get('session')
+    
+    # Get raw session data
+    session_data = {}
+    try:
+        session_data = dict(request.session)
+    except Exception as e:
+        session_data = {"error": str(e)}
+    
+    return {
+        "cookies": dict(request.cookies),
+        "session_cookie_present": bool(session_cookie),
+        "session_cookie_length": len(session_cookie) if session_cookie else 0,
+        "session_data": session_data,
+        "session_keys": list(session_data.keys()) if isinstance(session_data, dict) else [],
+        "headers": dict(request.headers)
+    }
+
+
 @router.get("/connect")
 async def fetch_percolate_project(token = Depends(get_current_token)):
     """Connect with your key to get percolate project settings and keys.
