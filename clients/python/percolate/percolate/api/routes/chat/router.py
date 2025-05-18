@@ -769,7 +769,7 @@ async def agent_completions(
         """internal vs external web conventions for names"""
         agent_name= agent_name.replace('-','.')
     
-    logger.info(f"{user_id}, {session_id}")
+    logger.info(f"Session for {user_id=}, {session_id=}")
     
     expected_token = "!p3rc0la8!" #<-this a testing idea
     expected_token = POSTGRES_PASSWORD #<-this will be the secure bearer for now but we could relax to an api key

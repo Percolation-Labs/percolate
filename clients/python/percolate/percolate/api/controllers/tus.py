@@ -242,7 +242,8 @@ async def process_chunk(
     upload_id: Union[str, uuid.UUID],
     chunk_data: bytes,
     content_length: int,
-    offset: int
+    offset: int,
+    background_tasks=None
 ) -> TusUploadPatchResponse:
     """
     Process a chunk of a Tus upload.
@@ -252,6 +253,7 @@ async def process_chunk(
         chunk_data: Binary data for the chunk
         content_length: Length of the chunk data
         offset: Offset where this chunk begins
+        background_tasks: Optional FastAPI BackgroundTasks object for async processing
         
     Returns:
         TusUploadPatchResponse with new offset
@@ -302,8 +304,25 @@ async def process_chunk(
             upload.status = TusUploadStatus.COMPLETED
             logger.info(f"Upload {upload_id} completed")
             
-            # Optionally trigger processing in background
-            # We could add background task functionality here later
+            # Save the upload record first
+            p8.repository(TusFileUpload).update_records([upload])
+            
+            # Trigger finalization and resource creation
+            try:
+                logger.info(f"Triggering finalization for completed upload {upload_id}")
+                final_path = await finalize_upload(upload_id, background_tasks=background_tasks)
+                    
+            except Exception as e:
+                logger.error(f"Error during finalization: {str(e)}")
+                # Don't fail the upload, just log the error
+                upload.upload_metadata["finalization_error"] = str(e)
+                p8.repository(TusFileUpload).update_records([upload])
+            
+            return TusUploadPatchResponse(
+                offset=new_offset,
+                upload_id=upload.id,
+                expires_at=upload.expires_at
+            )
         else:
             # If this is the first chunk, mark as in progress
             if upload.status == TusUploadStatus.INITIATED:
@@ -351,15 +370,13 @@ async def upload_to_s3_background(upload_id: str, final_path: str) -> None:
         # Simply use project/user structure for better organization
         s3_key = f"{project}/uploads/{user_prefix}/{upload_id}/{upload.filename}"
         
-        # Upload the file to S3
-        with open(final_path, "rb") as final_file:
-            upload_result = s3_service.upload_file(
-                project_name=project,
-                file_name=upload.filename,
-                file_content=final_file,
-                content_type=upload.content_type or "application/octet-stream",
-                prefix=f"uploads/{user_prefix}/{upload_id}"
-            )
+        # Upload the file to S3 using streaming method
+        s3_uri = f"s3://{s3_service.default_bucket}/{s3_key}"
+        upload_result = s3_service.upload_file_to_uri(
+            s3_uri=s3_uri,
+            file_path_or_content=final_path,  # Path string will trigger streaming upload
+            content_type=upload.content_type or "application/octet-stream"
+        )
         
         # Get the S3 URI from the upload result
         s3_uri = upload_result.get("uri")

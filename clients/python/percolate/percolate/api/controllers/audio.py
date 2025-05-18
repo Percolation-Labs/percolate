@@ -106,14 +106,15 @@ async def upload_audio_file(
                 s3_service = S3Service()
                 
                 # Upload the file to S3
-                with open(temp_file_path, "rb") as audio_file_content:
-                    upload_result = s3_service.upload_file(
-                        project_name=project_name,
-                        file_name=file.filename,
-                        file_content=audio_file_content,
-                        content_type=file.content_type or "audio/wav",
-                        prefix=f"audio/{file_id}"
-                    )
+                # Build the S3 key
+                s3_key = f"{project_name}/audio/{file_id}/{file.filename}"
+                s3_uri = f"s3://{s3_service.default_bucket}/{s3_key}"
+                
+                upload_result = s3_service.upload_file_to_uri(
+                    s3_uri=s3_uri,
+                    file_path_or_content=temp_file_path,
+                    content_type=file.content_type or "audio/wav"
+                )
                 
                 # Get the S3 URI from the upload result
                 s3_uri = upload_result.get("uri")

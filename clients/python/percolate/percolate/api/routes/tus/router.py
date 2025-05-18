@@ -265,6 +265,7 @@ async def tus_upload_info(
 async def tus_upload_chunk(
     request: Request,
     response: Response,
+    background_tasks: BackgroundTasks,
     upload_id: str = Path(...),
     content_type: Optional[str] = Header(None),
     content_length: Optional[int] = Header(None),
@@ -324,7 +325,8 @@ async def tus_upload_chunk(
         upload_id=upload_id,
         chunk_data=chunk_data,
         content_length=content_length,
-        offset=upload_offset
+        offset=upload_offset,
+        background_tasks=background_tasks
     )
     
     # Set Tus response headers
