@@ -1,9 +1,8 @@
- 
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
 from percolate.models.p8 import Task
-from percolate.api.routes.auth import get_current_token
+from percolate.api.routes.auth import hybrid_auth
 import typing
-from fastapi import   Depends
+from typing import Optional
 from pydantic import BaseModel, Field
 from .services import GmailService, EmailMessage
 import requests
@@ -39,7 +38,11 @@ class CalFetch(BaseModel):
     query: str
 
 @router.post("/web/search")
-async def web_search(search_request: WebSearch, background_tasks: BackgroundTasks)->typing.List[WebSearchResult]:
+async def web_search(
+    search_request: WebSearch, 
+    background_tasks: BackgroundTasks,
+    user_id: Optional[str] = Depends(hybrid_auth)
+) -> typing.List[WebSearchResult]:
     """Perform web search"""
     from percolate import PostgresService
     """todo proper parameters and error handling"""
@@ -51,7 +54,10 @@ async def web_search(search_request: WebSearch, background_tasks: BackgroundTask
     
 
 @router.post("/web/fetch")
-async def fetch_web_resource(web_request: WebFetch):
+async def fetch_web_resource(
+    web_request: WebFetch,
+    user_id: Optional[str] = Depends(hybrid_auth)
+):
     """
     fetches any file type, typically used for fetching html pages and optionally converting to markdown
     """
@@ -67,7 +73,11 @@ async def fetch_web_resource(web_request: WebFetch):
 """the assumption below is that for gsuite the user has completed an external oauth flow"""
 
 @router.post("/mail/fetch")
-async def fetch_email(email_request: EmailFetch,  background_tasks: BackgroundTasks)->typing.List[dict]:
+async def fetch_email(
+    email_request: EmailFetch,  
+    background_tasks: BackgroundTasks,
+    user_id: Optional[str] = Depends(hybrid_auth)
+) -> typing.List[dict]:
     """fetch emails for any domain - we use the correct service for the email requested or for the oauth token that is saved.
     for example you can set limit to 5 and filter for the substack.com domain to get newsletters from substack in our inbox
     """
@@ -84,7 +94,10 @@ async def fetch_email(email_request: EmailFetch,  background_tasks: BackgroundTa
     return data
 
 @router.post("/calendar/fetch")
-async def fetch_calendar(calendar_request: CalFetch):
+async def fetch_calendar(
+    calendar_request: CalFetch,
+    user_id: Optional[str] = Depends(hybrid_auth)
+):
     """fetch calender"""
     pass
 

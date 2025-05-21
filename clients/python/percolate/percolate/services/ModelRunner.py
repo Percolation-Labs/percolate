@@ -83,15 +83,31 @@ class ModelRunner:
         return {'message': 'acknowledged', 'output_size_estimate': estimated_length}
         
         
-    def search(self, questions: typing.List[str]):
+    def search(self, questions: typing.List[str], user_id: str | uuid.UUID = None):
         """Run a general search on the model that is being used in the current context as per the system prompt
         If you want to add multiple questions supply a list of strings as an array.
         To find functions use help instead of search. Do not search for functions if there is already a function on the agent that you can activate.
         Args:
             questions: ask one or more questions to search the data store
+            user_id: optional user identifier (email or UUID) for access control
         """
-
-        return self.repo.search(questions)
+        # If no user_id provided, try to get from context
+        if user_id is None and self._context and self._context.username:
+            user_id = self._context.username
+        
+        # Coerce to string for database
+        if user_id:
+            if isinstance(user_id, uuid.UUID):
+                user_id = str(user_id)
+            elif isinstance(user_id, str):
+                try:
+                    # Try to parse as UUID to validate format
+                    uuid.UUID(user_id)
+                except ValueError:
+                    # Not a UUID, could be email - let database handle it
+                    pass
+        
+        return self.repo.search(questions, user_id=user_id)
 
     def activate_functions_by_name(self, function_names: typing.List[str], **kwargs):
         """Provide a list of function names to load.
@@ -115,16 +131,23 @@ class ModelRunner:
             "status": f"Re: the functions {list(available)} are now ready for use. please go ahead and invoke using the full function name. for example for a function called p8_agent_run do not just call run but call p8_agent_run"+missing_message
         }
 
-    def get_entities(self, keys: typing.Optional[str]):
+    def get_entities(self, keys: typing.Optional[str], allow_fuzzy_match: bool = False):
         """Lookup entity by one or more keys. For example if you encounter entity names or keys in question, data etc you can use
-        the entity search to learn more about them
+        the entity search to learn more about them. 
+        
+        If you get no results with exact matching, you should try again with allow_fuzzy_match=True. This is especially useful for:
+        - SKUs or codes that might be slightly misspelled (e.g., KT2011 instead of KT-2011)
+        - Names with typos or variations
+        - Any keys that look inexact or may have formatting differences
+        
         Args:
             keys: one or more names to use to lookup the entity or entities
+            allow_fuzzy_match: if True, uses fuzzy matching to find entities when exact matches fail
         """
-        logger.debug(f"get_entities/{keys=}")
+        logger.debug(f"get_entities/{keys=}, {allow_fuzzy_match=}")
 
         """the function manager can load context and we can also adorn entities with extra metadata"""
-        entities = p8.get_entities(keys )
+        entities = p8.get_entities(keys, allow_fuzzy_match=allow_fuzzy_match)
 
         return entities
 
