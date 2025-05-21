@@ -25,6 +25,7 @@ class AudioFile(AbstractModel):
     model_config = {'namespace': 'public'}
     
     id: uuid.UUID = Field(default_factory=uuid.uuid4)
+    user_id: str = Field(description="The user id")  # Database expects non-nullable text field
     userid: Optional[str | uuid.UUID] = Field(default=None, description="The user id if known")
     project_name: str
     filename: str

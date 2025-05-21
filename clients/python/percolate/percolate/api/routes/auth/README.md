@@ -20,6 +20,111 @@ The Percolate authentication system provides a flexible approach that supports:
 
 ## Authentication Methods
 
+### FastHTML Cookie Authentication
+
+For FastHTML applications using cookie-based authentication with our hybrid auth system:
+
+**How FastHTML Cookie Authentication Works:**
+
+1. **Cookie-Based Sessions**: FastHTML can use its `Cookie` dependency to send session cookies that our hybrid auth will automatically recognize
+2. **Expected Cookie Names**: The system looks for cookies named `session` (FastAPI default) or custom names like `session_` or `auth_token`
+3. **Automatic Recognition**: Our hybrid auth will first check for session authentication before falling back to bearer tokens
+
+**FastHTML Example:**
+
+```python
+from fasthtml import FastHTML, Cookie, Route, Response
+
+app = FastHTML()
+
+# After user login, set the session cookie
+@app.route("/login", methods=["POST"])
+async def login(response: Response):
+    # Perform authentication with Percolate
+    auth_response = requests.post("http://localhost:5000/auth/google/callback")
+    session_token = auth_response.json()["token"]
+    
+    # Set cookie that Percolate will recognize
+    response.set_cookie(
+        key="session",
+        value=session_token,
+        httponly=True,
+        secure=True,  # Use HTTPS in production
+        samesite="lax"
+    )
+    return {"status": "logged in"}
+
+# Making authenticated requests to Percolate
+@app.route("/data")
+async def get_data(session: str = Cookie(None)):
+    # The session cookie is automatically sent with requests
+    headers = {"Cookie": f"session={session}"} if session else {}
+    
+    # Request to Percolate API - hybrid auth will recognize the session
+    response = requests.get(
+        "http://localhost:5000/api/protected",
+        headers=headers
+    )
+    
+    return response.json()
+```
+
+**How Hybrid Auth Processes Cookie Authentication:**
+
+1. **Session Check First**: When a request comes in, hybrid auth first checks for a valid session
+2. **Cookie Extraction**: It looks for the session cookie in the request
+3. **Session Validation**: The session is validated server-side (not just trusting the cookie)
+4. **User Context**: If valid, it returns the user_id associated with the session
+5. **Bearer Fallback**: Only if no valid session is found, it checks for bearer token authentication
+
+**Example Flow:**
+
+```python
+# Hybrid auth flow for FastHTML requests
+class HybridAuth:
+    async def __call__(self, request: Request, credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer)):
+        # 1. First check session from cookie
+        user_id = get_user_from_session(request)  # Extracts from Cookie header
+        if user_id:
+            return user_id  # Session authenticated
+        
+        # 2. Only check bearer if no session
+        if credentials:
+            await get_api_key(credentials)
+            return None  # Bearer authenticated (no user context)
+        
+        # 3. Neither method succeeded
+        raise HTTPException(401)
+```
+
+**Cookie Configuration for FastHTML:**
+
+```python
+# Recommended cookie settings for production
+response.set_cookie(
+    key="session",
+    value=session_token,
+    max_age=86400,  # 24 hours
+    httponly=True,  # Prevent XSS
+    secure=True,    # HTTPS only
+    samesite="lax", # CSRF protection
+    domain=".yourdomain.com",  # Allow subdomains
+    path="/"        # Available site-wide
+)
+```
+
+**Security Benefits:**
+- Session tokens never exposed to JavaScript (httponly)
+- Automatic CSRF protection with proper samesite settings
+- Sessions validated server-side, not just trusting cookies
+- Bearer token fallback for API access without cookies
+
+**Key Points:**
+- FastHTML doesn't need to change how it handles cookies
+- Our hybrid auth automatically recognizes standard session cookies
+- The same endpoint works for both cookie sessions and bearer tokens
+- User context is preserved with sessions, not available with bearer tokens
+
 ### 1. Session-Based Authentication (Google OAuth)
 
 For web users who need personalized access with user context.

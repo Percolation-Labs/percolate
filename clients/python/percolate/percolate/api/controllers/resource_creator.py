@@ -130,18 +130,19 @@ async def create_audio_resources(upload: TusFileUpload, s3_uri: str, user_id: Op
         audio_file = AudioFile(
             filename=upload.filename,
             s3_uri=s3_uri,
-            s3_bucket=upload.s3_bucket,
-            s3_key=upload.s3_key,
             file_size=upload.total_size or 0,
             content_type=upload.content_type or 'audio/x-wav',
-            user_id=user_id,
+            user_id=str(user_id),  # Database requires user_id as text
+            userid=user_id,  # Model field
             project_name=upload.project_name or 'default',
             status=AudioProcessingStatus.UPLOADED,
-            uploaded_at=datetime.now(timezone.utc),
+            upload_date=datetime.now(timezone.utc),  # Fixed: was uploaded_at
             metadata={
                 'tus_upload_id': str(upload.id),
                 'source': 'tus_upload',
-                'original_filename': upload.filename
+                'original_filename': upload.filename,
+                's3_bucket': upload.s3_bucket,
+                's3_key': upload.s3_key
             }
         )
         
@@ -162,40 +163,53 @@ async def create_audio_resources(upload: TusFileUpload, s3_uri: str, user_id: Op
             chunks = p8.repository(AudioChunk).select(audio_file_id=audio_file_id)
             logger.info(f"Found {len(chunks)} chunks for audio file {audio_file_id}")
             
-            # Convert each chunk to a resource
-            for idx, chunk in enumerate(chunks):
-                # Skip chunks without transcription
-                if not chunk.transcription:
-                    logger.warning(f"Skipping chunk {chunk.id} - no transcription")
-                    continue
+            # Create a single resource that combines all chunks
+            # This ensures the resource URI matches the TusFileUpload s3_uri
+            if chunks:
+                # Combine all transcriptions
+                full_transcription = []
+                transcribed_chunks = []
                 
-                # Create resource from chunk
-                resource = Resources(
-                    name=f"{upload.filename} - Segment {idx + 1}",
-                    category="audio_transcription",
-                    content=chunk.transcription,
-                    summary=f"Audio segment {idx + 1}: {chunk.transcription[:100]}..." if len(chunk.transcription) > 100 else chunk.transcription,
-                    ordinal=idx,
-                    uri=s3_uri,
-                    metadata={
-                        'source_type': 'audio',
-                        'audio_file_id': str(audio_file_id),
-                        'chunk_id': str(chunk.id),
-                        'original_filename': upload.filename,
-                        'start_time': chunk.start_time,
-                        'end_time': chunk.end_time,
-                        'duration': chunk.duration,
-                        'timestamp': chunk.start_time,
-                        'confidence': chunk.confidence or 0.0,
-                        'tus_upload_id': str(upload.id),
-                        'file_type': '.wav',
-                        'chunk_index': idx,
-                        'total_chunks': len(chunks)
-                    },
-                    userid=user_id,
-                    resource_timestamp=datetime.now(timezone.utc)
-                )
-                resources.append(resource)
+                for idx, chunk in enumerate(chunks):
+                    if chunk.transcription:
+                        full_transcription.append(f"[{chunk.start_time:.1f}s - {chunk.end_time:.1f}s]: {chunk.transcription}")
+                        transcribed_chunks.append(chunk)
+                
+                if full_transcription:
+                    # Create a single resource for the entire audio file
+                    resource = Resources(
+                        name=upload.filename,
+                        category="audio_transcription",
+                        content="\n\n".join(full_transcription),
+                        summary=f"Audio transcription with {len(transcribed_chunks)} segments",
+                        ordinal=0,
+                        uri=s3_uri,  # This matches the TusFileUpload s3_uri
+                        metadata={
+                            'source_type': 'audio',
+                            'audio_file_id': str(audio_file_id),
+                            'original_filename': upload.filename,
+                            'tus_upload_id': str(upload.id),
+                            'file_type': '.wav',
+                            'total_chunks': len(chunks),
+                            'transcribed_chunks': len(transcribed_chunks),
+                            'total_duration': sum(chunk.duration for chunk in chunks),
+                            'chunk_details': [
+                                {
+                                    'chunk_id': str(chunk.id),
+                                    'start_time': chunk.start_time,
+                                    'end_time': chunk.end_time,
+                                    'duration': chunk.duration,
+                                    'confidence': chunk.confidence or 0.0
+                                }
+                                for chunk in transcribed_chunks
+                            ]
+                        },
+                        userid=user_id,
+                        resource_timestamp=datetime.now(timezone.utc)
+                    )
+                    resources.append(resource)
+                else:
+                    logger.warning(f"No transcribed chunks found for audio file {audio_file_id}")
             
             # Save all resources
             if resources:

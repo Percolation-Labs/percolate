@@ -160,24 +160,10 @@ set_routes(app)
 @app.get("/models")
 def get_models():
     """
-    
     List the models that have configured tokens in the Percolate database. Only models with tokens set will be shown
     """
-    
-    from percolate.models.p8 import LanguageModelApi
-    import percolate as p8
-    
-    data  = p8.repository(LanguageModelApi).execute(f"""select name as id, token_env_key, created_at as created, updated_at as updated from p8."LanguageModelApi" where token is not null """)
-    
-    data =  [{
-        'id': r['id'],
-        'created': r['created'],
-        'updated': r['updated'],
-        'object': 'model',
-        
-    } for r in data]
-    
-    return {'object':'list', 'data': data}
+    from .utils.models import list_available_models
+    return list_available_models()
     
 def start():
     import uvicorn

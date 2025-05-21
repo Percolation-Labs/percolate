@@ -1143,7 +1143,8 @@ INSERT INTO p8."LanguageModelApi" (name, id, model, scheme, completions_uri, tok
  ('mercury-coder-small', '6434fab8-3d74-52b5-9a94-0258f81d8823', 'mercury-coder-small', 'openai', 'https://api.inceptionlabs.ai/v1/chat/completions', 'INCEPTION_API_KEY', NULL),
  ('gpt-4.1', 'a0680251-1522-5e7c-a0bf-da1db8cdc7da', 'gpt-4.1', 'openai', 'https://api.openai.com/v1/chat/completions', 'OPENAI_API_KEY', NULL),
  ('gpt-4.1-mini', '931c3b4d-f486-5473-bdb1-fdf2487294d2', 'gpt-4.1-mini', 'openai', 'https://api.openai.com/v1/chat/completions', 'OPENAI_API_KEY', NULL),
- ('gpt-4.1-nano', 'c26edbfe-9872-5d72-a6c6-e4ada0ce3adb', 'gpt-4.1-nano', 'openai', 'https://api.openai.com/v1/chat/completions', 'OPENAI_API_KEY', NULL)
+ ('gpt-4.1-nano', 'c26edbfe-9872-5d72-a6c6-e4ada0ce3adb', 'gpt-4.1-nano', 'openai', 'https://api.openai.com/v1/chat/completions', 'OPENAI_API_KEY', NULL),
+ ('gpt-4.1-2025-04-14', '069e5783-8cd2-55ab-a4f5-6fc21d806e31', 'gpt-4.1-2025-04-14', 'openai', 'https://api.openai.com/v1/chat/completions', 'OPENAI_API_KEY', NULL)
     ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, model = EXCLUDED.model, scheme = EXCLUDED.scheme, completions_uri = EXCLUDED.completions_uri, token_env_key = EXCLUDED.token_env_key, token = EXCLUDED.token;
 
 -- -----------
