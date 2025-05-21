@@ -2,6 +2,7 @@ import typing
 from pydantic import BaseModel, Field
 from percolate.utils.env import DEFAULT_MODEL
 from percolate.utils import logger
+import uuid
 
 DEFAULT_MAX_AGENT_LOOPS = 5
 DEFAULT_MODEL_TEMPERATURE = 0.0
@@ -49,6 +50,9 @@ class ApiCallingContext(BaseModel):
     )
     username: typing.Optional[str] = Field(
         default=None, description="The session username"
+    )
+    user_id: typing.Optional[str|uuid.UUID] = Field(
+        default=None, description="UUID user id is more accurate if known but we try to resolve"
     )
     channel_context: typing.Optional[str] = Field(
         default=None,

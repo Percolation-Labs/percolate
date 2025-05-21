@@ -22,7 +22,9 @@ from percolate.models.media.tus import (
     TusUploadStatus,
     TusUploadMetadata,
     TusUploadPatchResponse,
-    TusUploadCreationResponse
+    TusUploadCreationResponse,
+    UserUploadSearchRequest,
+    UserUploadSearchResult
 )
 from percolate.utils import logger
 from pydantic import BaseModel
@@ -697,3 +699,139 @@ async def semantic_search(
         "implementation": "placeholder_text_search",
         "note": "This is a placeholder for semantic search. Currently using basic text matching."
     }
+
+
+@router.post(
+    "/user/uploads/search",
+    response_model=List[UserUploadSearchResult],
+    include_in_schema=True,
+)
+async def search_user_uploads(
+    request: UserUploadSearchRequest,
+    response: Response,
+    user_id: str = Depends(require_user_auth),  # Must have user context
+):
+    """
+    Search user uploads with semantic search and tag filtering
+    
+    This endpoint allows users to search their uploads using:
+    - Semantic search: Find files based on content similarity
+    - Tag filtering: Filter by assigned tags
+    - Combined search: Use both semantic search and tags together
+    
+    Returns the top N files based on the search criteria
+    """
+    logger.info(f"User upload search request: user={user_id}, query={request.query_text}, tags={request.tags}, limit={request.limit}")
+    
+    # Get PostgreSQL service
+    from percolate.services import PostgresService
+    pg = PostgresService()
+    
+    # Call the SQL function using PostgresService
+    query = """
+        SELECT * FROM p8.file_upload_search(
+            p_user_id := %s,
+            p_query_text := %s,
+            p_tags := %s,
+            p_limit := %s
+        )
+    """
+    
+    params = [
+        user_id,
+        request.query_text,
+        request.tags if request.tags else None,  # Pass None if no tags
+        request.limit
+    ]
+    
+    try:
+        # Execute the query
+        results = pg.execute(query, params)
+        
+        # Convert results to UserUploadSearchResult objects
+        search_results = []
+        for row in results:
+            # Handle both dict and tuple results from PostgreSQL
+            if isinstance(row, dict):
+                data = row
+            else:
+                # If tuple, convert to dict using column names
+                columns = ['upload_id', 'filename', 'content_type', 'total_size', 'uploaded_size',
+                          'status', 'created_at', 'updated_at', 's3_uri', 'tags', 'resource_id',
+                          'resource_uri', 'resource_name', 'chunk_count', 'resource_size', 
+                          'indexed_at', 'semantic_score']
+                data = dict(zip(columns, row))
+            
+            result = UserUploadSearchResult(
+                upload_id=data['upload_id'],
+                filename=data['filename'],
+                content_type=data['content_type'],
+                total_size=data['total_size'],
+                uploaded_size=data['uploaded_size'],
+                status=data['status'],
+                created_at=data['created_at'],
+                updated_at=data['updated_at'],
+                s3_uri=data['s3_uri'],
+                tags=data['tags'] if data['tags'] else [],
+                resource_id=data['resource_id'],
+                # Resource fields (may be None)
+                resource_uri=data.get('resource_uri'),
+                resource_name=data.get('resource_name'),
+                chunk_count=data.get('chunk_count'),
+                resource_size=data.get('resource_size'),
+                indexed_at=data.get('indexed_at'),
+                semantic_score=data.get('semantic_score')
+            )
+            search_results.append(result)
+        
+        # Log search summary
+        if request.query_text and any(r.semantic_score for r in search_results):
+            logger.info(f"Semantic search completed: {len(search_results)} results with scores")
+        else:
+            logger.info(f"Standard search completed: {len(search_results)} results")
+        
+        # Set Tus response headers for consistency
+        tus_response_headers(response)
+        
+        return search_results
+        
+    except Exception as e:
+        logger.error(f"Error searching uploads: {str(e)}")
+        response.status_code = 500
+        # Return empty array instead of error object to match response_model
+        return []
+
+
+@router.get(
+    "/user/uploads",
+    response_model=List[UserUploadSearchResult],
+    include_in_schema=True,
+)
+async def get_user_uploads(
+    response: Response,
+    user_id: str = Depends(require_user_auth),  # Must have user context
+    query: Optional[str] = Query(None, description="Semantic search query"),
+    tags: Optional[List[str]] = Query(None, description="Filter by tags"),
+    limit: int = Query(20, gt=0, le=100, description="Maximum results to return"),
+):
+    """
+    Get user uploads with optional search and filtering (GET version)
+    
+    This is a GET endpoint version of the search functionality for convenience.
+    Supports the same search capabilities as the POST endpoint:
+    - Semantic search: Find files based on content similarity
+    - Tag filtering: Filter by assigned tags
+    - Combined search: Use both semantic search and tags together
+    """
+  
+    # Create request object and delegate to POST endpoint
+    search_request = UserUploadSearchRequest(
+        query_text=query,
+        tags=tags,
+        limit=limit
+    )
+    
+    logger.info(f"Requesting user uploads {user_id=} {search_request=}")
+    
+    
+    return await search_user_uploads(search_request, response, user_id)

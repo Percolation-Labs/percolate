@@ -161,6 +161,35 @@ class TusUploadCreationResponse(BaseModel):
     location: str
     expires_at: Optional[datetime] = None
 
+
+class UserUploadSearchRequest(BaseModel):
+    """Request model for searching user uploads"""
+    query_text: Optional[str] = Field(None, description="Semantic search query")
+    tags: Optional[List[str]] = Field(None, description="Filter by tags")
+    limit: int = Field(default=20, gt=0, le=100, description="Maximum results to return")
+
+
+class UserUploadSearchResult(BaseModel):
+    """Response model for user upload search results"""
+    upload_id: str
+    filename: str
+    content_type: Optional[str]
+    total_size: int
+    uploaded_size: int
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    s3_uri: Optional[str]
+    tags: Optional[List[str]]
+    resource_id: Optional[str]
+    # Resource-related fields when available
+    resource_uri: Optional[str]
+    resource_name: Optional[str]
+    chunk_count: Optional[int]
+    resource_size: Optional[int]
+    indexed_at: Optional[datetime]
+    semantic_score: Optional[float]
+
 def register_tus_models():
     """
     Register all Tus file upload models with the Percolate database.

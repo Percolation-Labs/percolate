@@ -19,7 +19,7 @@ sample_models = [
     LanguageModelApi(id = make_uuid('grok-2-latest'), name = 'grok-2-latest', scheme='openai', completions_uri='https://api.x.ai/v1/chat/completions', token_env_key='XAI_API_KEY'),    
     LanguageModelApi(id = make_uuid('mercury-coder-small'), name = 'mercury-coder-small', scheme='openai', completions_uri='https://api.inceptionlabs.ai/v1/chat/completions', token_env_key='INCEPTION_API_KEY'),    
 ]
-for m in ['gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano']:
+for m in ['gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano', 'gpt-4.1-2025-04-14']:
     sample_models.append(LanguageModelApi(id = make_uuid(m), name = m, scheme='openai', completions_uri='https://api.openai.com/v1/chat/completions', token_env_key='OPENAI_API_KEY'))
 
  

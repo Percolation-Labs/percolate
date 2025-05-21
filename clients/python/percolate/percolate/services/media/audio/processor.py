@@ -546,7 +546,7 @@ class AudioProcessor:
                 with open(chunk_path, "rb") as chunk_file:
                     upload_result = self.s3_service.upload_file_to_uri(
                         s3_uri=s3_uri,
-                        file_content=chunk_file,
+                        file_path_or_content=chunk_file,
                         content_type="audio/wav"
                     )
                     return upload_result.get("uri") or s3_uri
@@ -607,6 +607,25 @@ class AudioProcessor:
         as a standard Resource, while the individual chunks remain available for
         fine-grained access.
         
+        expect:
+        1. Single Resource per Audio File: Instead of creating separate resources for each chunk, we now create one consolidated resource per audio file that contains all transcriptions with timestamps.
+        2. Matching URIs: The resource's URI now matches the original audio file's S3 URI (from TusFileUpload), ensuring proper joins in the database.
+        3. Preserved Chunk Details: All chunk information is preserved in the resource's metadata, including:
+            - Individual chunk IDs
+            - Start/end times and durations
+            - Transcription confidence scores
+            - Total chunk count and transcribed chunk count
+        4. Formatted Transcription: The content now includes timestamps for each segment in the format:
+        [0.0s - 5.2s]: First transcription segment
+
+        [5.2s - 10.4s]: Second transcription segment
+
+        This solution ensures that:
+        - Database queries can properly join TusFileUpload to Resources via the S3 URI
+        - The full transcription is searchable as a single document
+        - Individual chunk details remain accessible through metadata
+        - The original file relationship is maintained
+        
         Args:
             audio_file: The AudioFile whose chunks should be combined
         """
@@ -621,7 +640,17 @@ class AudioProcessor:
             )
             
             chunks = sorted(chunks, key=lambda chunk: getattr(chunk, 'start_time', 0) if hasattr(chunk, 'start_time') else 0)
-            full_text = f"\n".join([c['transcription'] for c in chunks])         
+            
+            # Format transcriptions with timestamps
+            full_text_parts = []
+            for chunk in chunks:
+                if chunk.get('transcription'):
+                    start_time = chunk.get('start_time', 0)
+                    end_time = chunk.get('end_time', 0) 
+                    text = chunk['transcription']
+                    full_text_parts.append(f"[{start_time:.1f}s - {end_time:.1f}s]: {text}")
+            
+            full_text = "\n\n".join(full_text_parts)
        
             resource_id = make_uuid(audio_file.s3_uri)
             
@@ -631,18 +660,29 @@ class AudioProcessor:
                 name=audio_file.filename,
                 category="audio_transcription",
                 content=full_text,
-                uri=audio_file.s3_uri,
+                uri=audio_file.s3_uri,  # This ensures it matches the TusFileUpload s3_uri
                 metadata={
                     "audio_file_id": str(audio_file.id),
                     "content_type": audio_file.content_type,
                     "chunk_count": len(chunks),
-                   # "duration": sum(chunk.duration for chunk in chunks if hasattr(chunk, 'duration')),
-                    "source": "audio_transcription"
+                    "transcribed_chunks": len(full_text_parts),
+                    "source": "audio_transcription",
+                    "chunk_details": [
+                        {
+                            "chunk_id": str(chunk.get('id')),
+                            "start_time": chunk.get('start_time', 0),
+                            "end_time": chunk.get('end_time', 0),
+                            "duration": chunk.get('duration', 0),
+                            "confidence": chunk.get('confidence', 0.0)
+                        }
+                        for chunk in chunks if chunk.get('transcription')
+                    ]
                 },
                 userid=next(
-                    (chunk.userid for chunk in chunks if hasattr(chunk, 'userid') and chunk.userid), 
+                    (chunk.get('userid') for chunk in chunks if chunk.get('userid')), 
                     None
-                )
+                ),
+                resource_timestamp=datetime.now(timezone.utc)
             )
             
             # Save the Resource
