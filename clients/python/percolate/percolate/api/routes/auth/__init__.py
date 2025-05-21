@@ -53,6 +53,12 @@ async def get_api_key(
 def get_current_token(
     credentials: HTTPAuthorizationCredentials = Depends(bearer),
 ):
+    if credentials is None:
+        raise HTTPException(
+            status_code=401,
+            detail="No authorization header provided",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     token = credentials.credentials
 
     """we should allow the API_TOKEN which can be lower security i.e. allow some users to use without providing keys to the castle"""
@@ -80,22 +86,29 @@ def get_user_from_session(request: Request) -> typing.Optional[str]:
         The user ID if available, None otherwise
     """
     try:
-        logger.debug(f"Session keys: {list(request.session.keys())}")
+    
+        session =  request.session
+      
         # Try to get user info from the session
-        if 'token' in request.session:
+        if 'token' in session:
+            token = session['token']
             logger.debug("Token found in session")
-            token = request.session['token']
-            user_id, email, username = extract_user_info_from_token(token)
-            logger.debug(f"Extracted: user_id={user_id}, email={email}, username={username}")
-            
-            if email:
-                # Look up the user by email to get the percolate user ID
-                user = get_user_from_email(email)
-                if user:
-                    logger.debug(f"Found user ID in session: {user['id']} for email: {email}")
-                    return str(user['id'])
-                else:
-                    logger.debug(f"No user found for email: {email}")
+        else:
+            token = request.cookies.get('session')
+            logger.debug(f"treating session as token - will try extract from cookie as token")
+         
+           
+        user_id, email, username = extract_user_info_from_token(token)
+        logger.debug(f"Extracted: user_id={user_id}, email={email}, username={username}")
+        
+        if email:
+            # Look up the user by email to get the percolate user ID
+            user = get_user_from_email(email)
+            if user:
+                logger.debug(f"Found user ID in session: {user['id']} for email: {email}")
+                return str(user['id'])
+            else:
+                logger.debug(f"No user found for email: {email}")
     except Exception as e:
         logger.error(f"Error getting user from session: {str(e)}")
     
@@ -142,18 +155,26 @@ class HybridAuth:
         """
         
         # Debug logging
+        
+        #logger.debug(f"HybridAuth - ALL COOKIES: {request.cookies}")
+        
         session_cookie = request.cookies.get('session')
         session_keys = list(request.session.keys()) if hasattr(request, 'session') else []
+        #logger.debug(f"HybridAuth -cookie temp: {session_cookie}")
+        # logger.debug(f"HybridAuth - Session of request present: {bool(request.session)}")
         logger.debug(f"HybridAuth - Session cookie present: {bool(session_cookie)}")
-        logger.debug(f"HybridAuth - Session keys: {session_keys}")
-        logger.debug(f"HybridAuth - Bearer token present: {bool(credentials)}")
+        # logger.debug(f"HybridAuth - Session keys: {session_keys}")
+        # logger.debug(f"HybridAuth - Bearer token present: {bool(credentials)}")
         
         # First, try session authentication
         try:
             user_id = get_user_from_session(request)
             if user_id:
-                logger.debug(f"Authenticated via session: user_id={user_id}")
+                #logger.debug(f"Authenticated via session: user_id={user_id}")
                 return user_id
+            else:
+                logger.warning(f"Session auth failed because there is no match for the user with this request object")
+        
         except Exception as e:
             logger.debug(f"Session auth failed: {e}")
         

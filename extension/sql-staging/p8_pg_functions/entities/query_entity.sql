@@ -88,7 +88,7 @@ BEGIN
                      SELECT b.*, a.vdistance 
                      FROM p8.%I(%L, %L) a
                      JOIN %I.%I b ON b.id = a.id  
-                     WHERE b.userid = %L
+                     WHERE (b.userid IS NULL OR b.userid = %L)
                      ORDER BY a.vdistance
                  ) result',
                 vector_search_function, question, table_name,

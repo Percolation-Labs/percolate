@@ -1,7 +1,7 @@
 
  
 from fastapi import APIRouter, Request, Depends, Query, Response
-from authlib.integrations.starlette_client import OAuth
+from authlib.integrations.starlette_client import OAuth, OAuthError
 import os
 from pathlib import Path
 import json
@@ -173,24 +173,34 @@ async def google_auth_callback(request: Request, token:str=None):
     
     try:
         token = await google.authorize_access_token(request)
+    except OAuthError as e:
+        if "mismatching_state" in str(e):
+            return JSONResponse(
+                status_code=460,  # Custom error code
+                content={
+                    "error": "CSRF token mismatch",
+                    "detail": "mismatching_state - Delete cookies and retry login."
+                }
+            )
+        else:
+            logger.error(f"OAuth error: {str(e)}")
+            return JSONResponse(
+                status_code=400, 
+                content={
+                    "error": "OAuth authentication failed",
+                    "detail": str(e)
+                }
+            )
     except Exception as e:
-        logger.error(f"OAuth error: {str(e)}")
+        logger.error(f"Unexpected error during OAuth: {str(e)}")
         logger.error(f"Session keys: {list(request.session.keys())}")
         logger.error(f"Session ID: {request.session.get('session_id')}")
         
-        # Log more details about the state mismatch
-        if "mismatching_state" in str(e):
-            state_from_url = request.query_params.get('state')
-            logger.error(f"State from URL: {state_from_url}")
-            logger.error(f"States in session: {oauth_states}")
-            
-        # Return a more helpful error message
         return JSONResponse(
-            status_code=400, 
+            status_code=500, 
             content={
-                "error": "OAuth authentication failed",
-                "detail": str(e),
-                "hint": "This often happens when sessions are lost between requests. Try logging in again."
+                "error": "Internal server error during authentication",
+                "detail": str(e)
             }
         )
 
@@ -212,8 +222,6 @@ async def google_auth_callback(request: Request, token:str=None):
         except Exception as e:
             logger.error(f"Error storing sync credentials: {str(e)}")
 
-
-        
     # Create a unique session ID and store it in the session
     session_id = str(uuid.uuid4())
     request.session['session_id'] = session_id
@@ -350,7 +358,7 @@ async def fetch_percolate_project(token = Depends(get_current_token)):
  
     return {
         'NAME': project_name,
-        'USER': p8.settings('USER',project_name),
+        'USER': p8.settings('USER') or (project_name),
         'PASSWORD': p8.settings('PASSWORD', token),
         'P8_PG_DB': 'app',
         'P8_PG_USER': p8.settings('P8_PG_USER', 'postgres'),

@@ -128,25 +128,36 @@ class PostgresService:
             model=model, connection_string=self._connection_string, **kwargs
         )
 
-    def get_entities(self, keys: str | typing.List[str], userid: str = None):
+    def get_entities(self, keys: str | typing.List[str], userid: str = None, allow_fuzzy_match: bool = False):
         """
-        use the get_entities database function to lookup entities, with optional user_id for access control
+        use the get_entities or get_fuzzy_entities database function to lookup entities, with optional user_id for access control
 
         Args:
             keys: one or more business keys (list of entity names) to fetch
             userid: optional user identifier to include private entities owned by this user
+            allow_fuzzy_match: if True, uses get_fuzzy_entities instead of get_entities for fuzzy matching
         """
         if keys:
             if not isinstance(keys, list):
                 keys = [keys]
-        # Call SQL function with optional userid; when userid is None, only public entities are returned
-        data = (
-            self.execute(
-                """SELECT * FROM p8.get_entities(%s, %s)""", data=(keys, userid)
+        
+        # Choose which database function to call based on allow_fuzzy_match
+        if allow_fuzzy_match:
+            data = (
+                self.execute(
+                    """SELECT * FROM p8.get_fuzzy_entities(%s, %s)""", data=(keys, userid)
+                )
+                if keys
+                else None
             )
-            if keys
-            else None
-        )
+        else:
+            data = (
+                self.execute(
+                    """SELECT * FROM p8.get_entities(%s, %s)""", data=(keys, userid)
+                )
+                if keys
+                else None
+            )
 
         if not data:
             return [

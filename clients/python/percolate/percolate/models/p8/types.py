@@ -19,7 +19,7 @@ from percolate.utils import get_iso_timestamp
 import hashlib
 from enum import Enum
 #we shouldnt really need a logger her but we have temp functions being exported to apis
-from percolate.utils import logger
+from percolate.utils import logger 
 class Function(AbstractEntityModel):
     """Functions are external tools that agents can use. See field comments for context.
     Functions can be searched and used as LLM tools. 
@@ -451,14 +451,26 @@ class Session(AbstractModel):
         from percolate.services.llm import CallingContext
         context: CallingContext = context
         
-        #TODO: we should capture some of context e.g. threads and users 
+        """support alias for slack only models"""
+        channel_id = getattr(context, 'channel_id', None) or  getattr(context, 'channel_context', None)
+        thread_id = getattr(context, 'thread_id', None) or  getattr(context, 'channel_ts', None)
+        
+        """the email can a slack user so contract is to also supply user id in that context
+        the only legal way to not supply an id is to supply the username from which the id is hashed
+        """
+        user_name = context.username
+        user_id = context.user_id
+        if not user_id:
+            user_id = make_uuid(user_name) if user_name else None
+        # use name below assumed to tbe users email address which is unique
         return cls(query=question,
             id=id or str(uuid.uuid1()), 
             agent=agent,
-            #TODO user id and channel contexts etc.
+            userid = user_id,
+            channel_id=channel_id,
+            thread_id=thread_id,
             **kwargs)
          
-        
 class SessionEvaluation(AbstractModel):
     """Tracks groups if session dialogue"""
     id: uuid.UUID| str  
@@ -538,6 +550,19 @@ class User(AbstractEntityModel):
     @staticmethod
     def id_from_email(email):
         return make_uuid(email)
+    
+    @staticmethod
+    def get_userid_from_username(name:str):
+        """map the user id from the email address or slack name"""
+        from percolate.services import PostgresService
+        pg = PostgresService()
+        Q = f"""
+                SELECT * FROM p8."User" where LOWER(email) = LOWER(%s) or LOWER(slack_id) = LOWER(%s) limit 1
+        """
+        
+        data = pg.execute(Q, data=(name, name))
+        if data:
+            return data[0]['id']
     
     def as_memory(self,**kwargs):
         """the user memory structure"""
@@ -631,6 +656,11 @@ class Resources(AbstractModel):
             filenames for example should not be used but replaced with e.g. an s3 global uri
             """
             values['id'] = make_uuid({'uri': values['uri'], 'ordinal': values.get('ordinal') or 0})
+            
+            """default - set it if you care"""
+            if not values.get('resource_timestamp'):
+                values['resource_timestamp'] = get_iso_timestamp()
+                
         return values
     
     @classmethod
