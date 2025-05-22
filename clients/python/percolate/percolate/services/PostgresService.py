@@ -421,6 +421,71 @@ class PostgresService:
             data = tuple(kwargs.values())
         return self.execute(self.helper.select_query(fields, **kwargs), data=data)
 
+    def select_with_predicates(
+        self, 
+        filter: typing.Dict[str, typing.Any] = None,
+        fields: typing.List[str] = None,
+        limit: int = None,
+        order_by: str = None
+    ):
+        """
+        Enhanced select method with explicit filtering, limiting, and ordering support.
+        
+        Args:
+            filter: Dictionary of field-value pairs for filtering. 
+                   - Scalar values use equality (field = value)
+                   - Lists use IN operator (field IN (values))
+            fields: List of field names to select (defaults to all fields)
+            limit: Maximum number of records to return
+            order_by: Order clause (e.g., 'created_at DESC', 'name ASC')
+            
+        Returns:
+            List of matching records as dictionaries
+            
+        Example:
+            pending_files = p8.repository(SyncFile).select_with_predicates(
+                filter={'status': 'pending', 'userid': user_id},
+                limit=100,
+                order_by='last_sync_at DESC'
+            )
+        """
+        assert (
+            self.model is not None
+        ), "You need to specify a model in the constructor or via a repository to select models"
+
+        # Build the base query
+        selected_fields = fields or self.helper.field_names
+        if isinstance(selected_fields, list):
+            selected_fields = ", ".join(selected_fields)
+        
+        query = f"SELECT {selected_fields} FROM {self.helper.table_name}"
+        data = []
+        
+        # Add WHERE clause if filters provided
+        if filter:
+            where_clauses = []
+            for field, value in filter.items():
+                if isinstance(value, list):
+                    where_clauses.append(f"{field} = ANY(%s)")
+                    data.append(value)
+                else:
+                    where_clauses.append(f"{field} = %s")
+                    data.append(value)
+            
+            if where_clauses:
+                query += " WHERE " + " AND ".join(where_clauses)
+        
+        # Add ORDER BY clause if provided
+        if order_by:
+            query += f" ORDER BY {order_by}"
+        
+        # Add LIMIT clause if provided
+        if limit:
+            query += f" LIMIT {limit}"
+        
+        # Execute the query
+        return self.execute(query, data=tuple(data) if data else None)
+
     def get_by_name(cls, name: str, as_model: bool = False):
         """select model by name"""
         data = cls.select(name=name)
@@ -456,6 +521,9 @@ class PostgresService:
     ):
         """records are updated using typed object relational mapping."""
 
+        if records is None:
+            return []
+        
         if records and not isinstance(records, list):
             records = [records]
 
@@ -465,7 +533,7 @@ class PostgresService:
                 records=records, batch_size=batch_size
             )
 
-        if len(records) > batch_size:
+        if records is not None and len(records) > batch_size:
             logger.info(f"Saving  {len(records)} records in batches of {batch_size}")
             for batch in batch_collection(records, batch_size=batch_size):
                 sample = self.update_records(
