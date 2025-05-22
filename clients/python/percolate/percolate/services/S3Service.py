@@ -49,8 +49,8 @@ def _should_use_aws() -> bool:
     
     Logic:
     1. If P8_USE_AWS_S3 is explicitly set, use that value
-    2. If custom S3 environment variables (S3_ACCESS_KEY, S3_SECRET, S3_URL) are set, use custom S3
-    3. Otherwise, default to AWS (assuming that's the user's intention)
+    2. If ALL custom S3 environment variables (S3_ACCESS_KEY, S3_SECRET) are set, use custom S3
+    3. Otherwise, default to AWS (let boto3 handle credentials or complain if it can't)
     """
     # Explicit override takes precedence
     use_aws_env = os.environ.get('P8_USE_AWS_S3', '').lower()
@@ -59,18 +59,17 @@ def _should_use_aws() -> bool:
     elif use_aws_env in ['false', '0', 'no']:
         return False
     
-    # Auto-detection: if we have custom S3 env vars, use custom S3
+    # Auto-detection: only use custom S3 if we have the required credentials
     custom_env = _resolve_custom_s3_env()
-    has_custom_config = bool(
+    has_custom_credentials = bool(
         custom_env['access_key'] and 
-        custom_env['secret_key'] and 
-        custom_env['endpoint_url']
+        custom_env['secret_key']
     )
     
-    if has_custom_config:
+    if has_custom_credentials:
         return False
     
-    # Default to AWS when no custom S3 config is provided
+    # Default to AWS - let boto3 handle whether credentials are available
     return True
 
 
@@ -99,22 +98,16 @@ def _get_s3_config(use_aws: bool) -> Dict[str, Any]:
     else:
         env_config = _resolve_custom_s3_env()
         
-        # Validate required custom S3 configuration
+        # For custom S3, we must have credentials, but S3_URL is optional
+        # (some services might work with default S3 endpoints)
         if not env_config['access_key'] or not env_config['secret_key']:
             raise ValueError(
-                "Custom S3 configuration requires both S3_ACCESS_KEY and S3_SECRET environment variables. "
-                "Either set these variables for custom S3, or remove them to use AWS S3 as fallback."
+                "Custom S3 configuration requires both S3_ACCESS_KEY and S3_SECRET environment variables."
             )
         
-        if not env_config['endpoint_url']:
-            raise ValueError(
-                "Custom S3 configuration requires S3_URL environment variable. "
-                "Either set S3_URL for custom S3, or remove S3_ACCESS_KEY/S3_SECRET to use AWS S3 as fallback."
-            )
-        
-        # Ensure endpoint URL has correct protocol
+        # Use provided endpoint URL or None (some custom S3 services work with default endpoints)
         endpoint_url = env_config['endpoint_url']
-        if not endpoint_url.startswith("http"):
+        if endpoint_url and not endpoint_url.startswith("http"):
             endpoint_url = f"https://{endpoint_url}"
         
         config = {
@@ -181,7 +174,7 @@ class S3Service:
         else:
             self.use_aws = use_aws
         
-        logger.info(f"Initializing S3Service: {'AWS' if self.use_aws else 'Custom S3'} mode")
+        logger.trace(f"Initializing S3Service: {'AWS' if self.use_aws else 'Custom S3'} mode")
         
         # Get configuration from environment
         env_config = _get_s3_config(self.use_aws)
@@ -230,7 +223,7 @@ class S3Service:
         # Create IAM client (primarily for AWS, may not work with all custom providers)
         self._setup_iam_client(client_kwargs)
         
-        logger.info(f"S3Service initialized successfully: bucket='{self.default_bucket}', "
+        logger.trace(f"S3Service initialized successfully: bucket='{self.default_bucket}', "
                    f"provider='{self.provider_type}', endpoint='{self.endpoint_url or 'default'}'")
     
     def _setup_iam_client(self, base_client_kwargs: Dict[str, Any]):

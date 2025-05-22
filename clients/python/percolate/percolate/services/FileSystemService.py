@@ -126,8 +126,8 @@ class LocalFileSystemProvider(FileSystemProvider):
 class S3FileSystemProvider(FileSystemProvider):
     """S3 file system provider using existing S3Service"""
     
-    def __init__(self, s3_service: Optional[S3Service] = None, use_aws: bool = False):
-        self.s3_service = s3_service or S3Service(use_aws=use_aws)
+    def __init__(self, s3_service: Optional[S3Service] = None):
+        self.s3_service = s3_service or S3Service()
     
     def exists(self, path: str) -> bool:
         try:
@@ -496,9 +496,8 @@ class FileSystemService:
     across local and S3 storage with automatic file type detection and handling.
     """
     
-    def __init__(self, s3_service: Optional[S3Service] = None, use_aws: bool = False):
+    def __init__(self, s3_service: Optional[S3Service] = None):
         self.s3_service = s3_service
-        self.use_aws = use_aws
         self._providers = {}
         self._handlers = []
         
@@ -525,7 +524,7 @@ class FileSystemService:
         """Get the appropriate provider for the given path"""
         if path.startswith('s3://'):
             if 's3' not in self._providers:
-                self._providers['s3'] = S3FileSystemProvider(self.s3_service, self.use_aws)
+                self._providers['s3'] = S3FileSystemProvider(self.s3_service)
             return self._providers['s3']
         else:
             if 'local' not in self._providers:
