@@ -21,37 +21,72 @@ class S3Service:
                  access_key: str = None, 
                  secret_key: str = None, 
                  endpoint_url: str = None,
-                 signature_version:str='s3v4'
+                 signature_version:str='s3v4',
+                 use_aws: bool = False
                  ):
         """
-        Initialize the S3 controller with Hetzner S3 credentials.
+        Initialize the S3 controller with credentials. Falls back to standard AWS credentials if custom S3 vars not set.
         
         Args:
-            access_key: S3 access key. Defaults to S3_ACCESS_KEY environment variable.
-            secret_key: S3 secret key. Defaults to S3_SECRET environment variable.
-            endpoint_url: S3 endpoint URL. Defaults to S3_URL environment variable.
+            access_key: S3 access key. Defaults to S3_ACCESS_KEY environment variable, then AWS_ACCESS_KEY_ID.
+            secret_key: S3 secret key. Defaults to S3_SECRET environment variable, then AWS_SECRET_ACCESS_KEY.
+            endpoint_url: S3 endpoint URL. Defaults to S3_URL environment variable (for custom S3), None for AWS.
+            signature_version: S3 signature version to use (default 's3v4')
+            use_aws: If True, skip S3_ env vars and use only AWS credentials and standard S3 (default False)
             
         Environment Variables:
-            S3_ACCESS_KEY: Access key for Hetzner S3
-            S3_SECRET: Secret key for Hetzner S3
-            S3_URL: Endpoint URL for Hetzner S3 (e.g., 'hel1.your-objectstorage.com')
+            S3_ACCESS_KEY: Access key for custom S3 (Hetzner, etc.)
+            S3_SECRET: Secret key for custom S3
+            S3_URL: Endpoint URL for custom S3 (e.g., 'hel1.your-objectstorage.com')
+            AWS_ACCESS_KEY_ID: Standard AWS access key (fallback)
+            AWS_SECRET_ACCESS_KEY: Standard AWS secret key (fallback)
             S3_DEFAULT_BUCKET: Name of the S3 bucket (defaults to 'percolate')
             S3_BUCKET_NAME: Alternative name for the S3 bucket (used if S3_DEFAULT_BUCKET is not set)
         """
+        # Store the use_aws flag
+        self.use_aws = use_aws
+        
         # Get credentials from environment if not provided
-        self.access_key = access_key or os.environ.get("S3_ACCESS_KEY")
-        self.secret_key = secret_key or os.environ.get("S3_SECRET")
+        if use_aws:
+            # AWS mode: only use AWS credentials, ignore S3_ env vars
+            self.access_key = access_key or os.environ.get("AWS_ACCESS_KEY_ID")
+            self.secret_key = secret_key or os.environ.get("AWS_SECRET_ACCESS_KEY")
+        else:
+            # Custom S3 mode: try custom S3 env vars first, then fall back to standard AWS env vars
+            self.access_key = (access_key or 
+                              os.environ.get("S3_ACCESS_KEY") or 
+                              os.environ.get("AWS_ACCESS_KEY_ID"))
+            self.secret_key = (secret_key or 
+                              os.environ.get("S3_SECRET") or 
+                              os.environ.get("AWS_SECRET_ACCESS_KEY"))
         
         if not self.access_key or not self.secret_key:
-            raise ValueError("S3 credentials must be provided via parameters or environment variables")
+            raise ValueError("S3 credentials must be provided via parameters or environment variables (S3_ACCESS_KEY/S3_SECRET or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY)")
         
         # Get endpoint URL from environment or use provided value
-        self.endpoint_url = endpoint_url or os.environ.get("S3_URL",S3_URL)
-        if not self.endpoint_url:
-            raise ValueError("S3_URL environment variable is required")
+        if use_aws:
+            # AWS mode: force standard AWS S3 (no custom endpoint)
+            self.endpoint_url = endpoint_url  # Usually None for AWS
+        else:
+            # Custom S3 mode: only use custom S3_URL if custom S3 credentials are also set
+            # This ensures we fall back to AWS S3 when using AWS credentials
+            custom_s3_creds = os.environ.get("S3_ACCESS_KEY") and os.environ.get("S3_SECRET")
             
-        # Ensure the endpoint URL has the correct protocol
-        if not self.endpoint_url.startswith("http"):
+            if endpoint_url:
+                self.endpoint_url = endpoint_url
+            elif custom_s3_creds and os.environ.get("S3_URL"):
+                # Only use S3_URL if we have custom S3 credentials
+                self.endpoint_url = os.environ.get("S3_URL")
+            else:
+                # Use standard AWS S3 (no endpoint URL needed)
+                self.endpoint_url = None
+        
+        # For standard AWS S3, we don't need an endpoint URL
+        if self.endpoint_url and self.endpoint_url.lower() in ['none', 'null', '']:
+            self.endpoint_url = None
+            
+        # Ensure the endpoint URL has the correct protocol (only if we have an endpoint)
+        if self.endpoint_url and not self.endpoint_url.startswith("http"):
             self.endpoint_url = f"https://{self.endpoint_url}"
             
         # Get bucket name from environment or use default
@@ -59,35 +94,52 @@ class S3Service:
         
         #print(self.endpoint_url, self.access_key,self.secret_key,self.default_bucket)
         
-        # Create S3 clients with appropriate configuration for Hetzner
-        self.s3_client = boto3.client(
-            's3',
-            aws_access_key_id=self.access_key,
-            aws_secret_access_key=self.secret_key,
-            endpoint_url=self.endpoint_url,
-            # Use s3v4 signature for compatibility with Hetzner
-            # This configuration has been tested to work with file uploads
-            config=boto3.session.Config(
+        # Create S3 client with appropriate configuration
+        # If endpoint_url is None, this will use standard AWS S3
+        client_kwargs = {
+            'aws_access_key_id': self.access_key,
+            'aws_secret_access_key': self.secret_key,
+        }
+        
+        # Only add endpoint_url if we have one (for custom S3 providers)
+        if self.endpoint_url:
+            client_kwargs['endpoint_url'] = self.endpoint_url
+            
+        # Configure based on whether we're using custom S3 or AWS
+        if use_aws or not self.endpoint_url:
+            # Standard AWS S3 configuration
+            config = boto3.session.Config(
+                signature_version='s3v4',
+                s3={'addressing_style': 'virtual'}
+            )
+        else:
+            # Custom S3 provider configuration (Hetzner, etc.)
+            config = boto3.session.Config(
                 signature_version=signature_version,
                 s3={'addressing_style': 'path'},
-                #CHECK SUM ISSUE ONLY FOR NEWER BOTO - pinning 1.26.0 was fine without this but that could cause dep conflicts elsewhere
                 request_checksum_calculation="when_required", 
                 response_checksum_validation="when_required"
             )
-        )
+            
+        client_kwargs['config'] = config
+        self.s3_client = boto3.client('s3', **client_kwargs)
         
         # Create IAM client with the same configuration
         # Note: IAM operations may not be fully supported by all S3 providers
-        self.iam_client = boto3.client(
-            'iam',
-            aws_access_key_id=self.access_key,
-            aws_secret_access_key=self.secret_key,
-            endpoint_url=self.endpoint_url,
-            config=boto3.session.Config(
+        iam_kwargs = {
+            'aws_access_key_id': self.access_key,
+            'aws_secret_access_key': self.secret_key,
+        }
+        
+        # Only add endpoint_url for custom S3 providers (AWS IAM doesn't need custom endpoint)
+        if self.endpoint_url:
+            iam_kwargs['endpoint_url'] = self.endpoint_url
+            iam_kwargs['config'] = boto3.session.Config(
                 signature_version='s3',
                 s3={'addressing_style': 'path'}
             )
-        )
+        
+        self.iam_client = boto3.client('iam', **iam_kwargs)
     
     def _validate_connection(self):
         """Validate the S3 connection by attempting a simple operation."""
