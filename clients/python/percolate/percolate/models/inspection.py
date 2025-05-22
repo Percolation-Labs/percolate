@@ -103,7 +103,7 @@ def get_classes(
     return set(visited)
 
 
-def load_model(name:str, case_sensitive: bool = True):
+def load_model(name:str, case_sensitive: bool = True, use_custom_on_fail:bool=True):
     """
     loads the model by name
     """
@@ -120,7 +120,6 @@ def load_model(name:str, case_sensitive: bool = True):
     if not models:
         raise Exception(f"Could not load {name} from models")
     return models[0]
-
 
 
 def get_innermost_args(type_hint):
