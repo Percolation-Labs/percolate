@@ -80,6 +80,37 @@ TAVILY_API_KEY = os.environ.get('TAVILY_API_KEY')
 GPT_MINI = "gpt-4.1-mini"
 DEFAULT_MODEL =  "gpt-4.1"
 
+# Vision model configuration
+# As of May 22, 2025 - State of the Art Vision Models (Cost vs Speed vs Accuracy)
+#
+# COST-EFFECTIVE OPTIONS (Best value for frequent use):
+# - "gpt-4o-mini": OpenAI's most cost-effective vision model (~33x cheaper than gpt-4o)
+#   Speed: Fast | Cost: $2.50/1M tokens | Accuracy: Good for most tasks
+# - "gemini-2.0-flash": Google's budget option  
+#   Speed: Very Fast | Cost: $0.10/1M input | Accuracy: Good for simple vision tasks
+#
+# BALANCED OPTIONS (Good performance-to-cost ratio):
+# - "gpt-4o": OpenAI's standard vision model (default)
+#   Speed: Fast | Cost: $2/1M input, $8/1M output | Accuracy: Excellent
+# - "gemini-2.5-pro": Google's flagship (for prompts <200K tokens)
+#   Speed: Fast | Cost: $1.25/1M input, $10/1M output | Accuracy: Excellent
+#
+# PREMIUM OPTIONS (Best accuracy, higher cost):
+# - "claude-3.5-sonnet": Anthropic's vision model
+#   Speed: Medium | Cost: $3/1M input, $15/1M output | Accuracy: Superior reasoning
+# - "claude-3.7-sonnet": Anthropic's latest with extended thinking
+#   Speed: Medium | Cost: $3/1M input, $15/1M output | Accuracy: Best for complex analysis
+# - "gemini-2.5-pro": Google's flagship (for prompts >200K tokens)  
+#   Speed: Fast | Cost: $2.50/1M input, $15/1M output | Accuracy: Excellent
+#
+# NOTES:
+# - Image token costs vary by resolution (typically 1000-1600 tokens per image)
+# - Claude excels at extended reasoning and document analysis
+# - Gemini leads in multimodal tasks and benchmark performance  
+# - GPT-4o offers best balance of speed, cost, and accuracy for most use cases
+# - Pricing as of May 2025, subject to change
+P8_DEFAULT_VISION_MODEL = os.environ.get('P8_DEFAULT_VISION_MODEL', 'gpt-4o')
+
 def load_db_key(key = "P8_API_KEY"):
     """valid database login requests the key for API access"""
     from percolate.services import PostgresService
