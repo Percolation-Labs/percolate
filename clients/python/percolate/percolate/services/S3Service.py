@@ -155,8 +155,7 @@ class S3Service:
     def __init__(self, 
                  access_key: str = None, 
                  secret_key: str = None, 
-                 endpoint_url: str = None,
-                 use_aws: bool = None
+                 endpoint_url: str = None
                  ):
         """
         Initialize the S3 service with simplified configuration.
@@ -165,14 +164,10 @@ class S3Service:
             access_key: S3 access key (optional - will use environment)
             secret_key: S3 secret key (optional - will use environment)
             endpoint_url: S3 endpoint URL (optional - will use environment)
-            use_aws: Force AWS mode (optional - will auto-detect from environment)
         """
         
-        # Determine if we should use AWS
-        if use_aws is None:
-            self.use_aws = _should_use_aws()
-        else:
-            self.use_aws = use_aws
+        # Determine if we should use AWS based on environment
+        self.use_aws = _should_use_aws()
         
         logger.trace(f"Initializing S3Service: {'AWS' if self.use_aws else 'Custom S3'} mode")
         
