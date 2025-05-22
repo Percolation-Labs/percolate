@@ -938,7 +938,7 @@ FULL CONTENT:
             if isinstance(file_data, dict):
                 # Other structured data - convert to simple string representation
                 import json
-                return json.dumps(file_data, indent=2)
+                return json.dumps(file_data, indent=2, default=str)
         
         # Unknown format - convert to string
         return str(file_data)
@@ -1456,7 +1456,7 @@ class ResourceChunker:
             else:
                 # Other structured data - convert to simple string representation
                 import json
-                return json.dumps(file_data, indent=2)
+                return json.dumps(file_data, indent=2, default=str)
         else:
             # Unknown format - convert to string
             return str(file_data)
