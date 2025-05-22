@@ -55,27 +55,48 @@ def resolve_path_or_download(uri: str) -> Path:
 
 class BaseContentProvider(ABC):
     @abstractmethod
-    def extract_text(self, uri: str) -> str:
+    def extract_text(self, uri: str, enriched: bool = False) -> str:
+        """Extract text from a file.
+        
+        Args:
+            uri: File path or URL
+            enriched: If True, use advanced processing (LLM analysis, etc.)
+                     If False, use basic text extraction
+        """
         ...
 
 
 class PDFContentProvider(BaseContentProvider):
-    def extract_text(self, uri: str) -> str:
+    def extract_text(self, uri: str, enriched: bool = False) -> str:
         path = resolve_path_or_download(uri)
-        with fitz.open(str(path)) as doc:
-            return "\n".join(page.get_text() for page in doc)
+        
+        if not enriched:
+            # Raw mode: simple text extraction
+            with fitz.open(str(path)) as doc:
+                return "\n".join(page.get_text() for page in doc)
+        else:
+            # Enriched mode: TODO - convert pages to images and use LLM
+            logger.warning("PDF enriched mode not yet implemented, falling back to raw")
+            with fitz.open(str(path)) as doc:
+                return "\n".join(page.get_text() for page in doc)
 
 
 class DefaultContentProvider(BaseContentProvider):
-    def extract_text(self, uri: str) -> str:
+    def extract_text(self, uri: str, enriched: bool = False) -> str:
         path = resolve_path_or_download(uri)
-        return path.read_text()
+        text = path.read_text()
+        
+        if enriched:
+            # Enriched mode: TODO - use LLM to interpret/summarize content
+            logger.warning("Default enriched mode not yet implemented, falling back to raw")
+        
+        return text
 
 
 class DOCXContentProvider(BaseContentProvider):
     """Content provider for Microsoft Word documents."""
     
-    def extract_text(self, uri: str) -> str:
+    def extract_text(self, uri: str, enriched: bool = False) -> str:
         """Extract text from a DOCX file."""
         path = resolve_path_or_download(uri)
         
@@ -126,11 +147,136 @@ class DOCXContentProvider(BaseContentProvider):
             return path.read_text(errors='ignore')
 
 
+# New provider classes for additional formats
+class HTMLContentProvider(BaseContentProvider):
+    def extract_text(self, uri: str, enriched: bool = False) -> str:
+        path = resolve_path_or_download(uri)
+        
+        if not enriched:
+            # Raw mode: strip HTML tags
+            try:
+                if has_html2text:
+                    h = html2text.HTML2Text()
+                    h.ignore_links = True
+                    return h.handle(path.read_text())
+                else:
+                    import re
+                    html_content = path.read_text()
+                    return re.sub(r'<[^>]+>', '', html_content)
+            except Exception as e:
+                logger.error(f"HTML parsing failed: {e}")
+                return path.read_text()
+        else:
+            # Enriched mode: TODO - use LLM to analyze structure and content
+            logger.warning("HTML enriched mode not yet implemented, falling back to raw")
+            return self.extract_text(uri, enriched=False)
+
+
+class MarkdownContentProvider(BaseContentProvider):
+    def extract_text(self, uri: str, enriched: bool = False) -> str:
+        path = resolve_path_or_download(uri)
+        text = path.read_text()
+        
+        if enriched:
+            # Enriched mode: TODO - parse markdown structure, extract metadata
+            logger.warning("Markdown enriched mode not yet implemented, falling back to raw")
+        
+        return text
+
+
+class XLSXContentProvider(BaseContentProvider):
+    def extract_text(self, uri: str, enriched: bool = False) -> str:
+        path = resolve_path_or_download(uri)
+        
+        try:
+            import pandas as pd
+            df = pd.read_excel(str(path), sheet_name=None)  # Read all sheets
+            
+            if not enriched:
+                # Raw mode: concatenate all cell values
+                all_text = []
+                for sheet_name, sheet_df in df.items():
+                    all_text.append(f"Sheet: {sheet_name}\n")
+                    all_text.append(sheet_df.to_string(index=False))
+                return "\n\n".join(all_text)
+            else:
+                # Enriched mode: TODO - analyze data structure, detect patterns
+                logger.warning("XLSX enriched mode not yet implemented, falling back to raw")
+                return self.extract_text(uri, enriched=False)
+                
+        except ImportError:
+            logger.warning("pandas not available, falling back to default provider")
+            return DefaultContentProvider().extract_text(uri, enriched=enriched)
+        except Exception as e:
+            logger.error(f"XLSX parsing failed: {e}")
+            return f"Error reading XLSX file: {e}"
+
+
+class WAVContentProvider(BaseContentProvider):
+    def extract_text(self, uri: str, enriched: bool = False) -> str:
+        path = resolve_path_or_download(uri)
+        
+        if not enriched:
+            # Raw mode: basic file info
+            try:
+                import wave
+                with wave.open(str(path), 'rb') as wav_file:
+                    frames = wav_file.getnframes()
+                    sample_rate = wav_file.getframerate()
+                    duration = frames / sample_rate
+                    return f"Audio file: {path.name}\nDuration: {duration:.2f} seconds\nSample rate: {sample_rate} Hz\nFrames: {frames}"
+            except Exception as e:
+                return f"Audio file: {path.name}\nError reading file: {e}"
+        else:
+            # Enriched mode: TODO - speech-to-text transcription
+            logger.warning("WAV enriched mode (speech-to-text) not yet implemented, falling back to raw")
+            return self.extract_text(uri, enriched=False)
+
+
+class PPTXContentProvider(BaseContentProvider):
+    def extract_text(self, uri: str, enriched: bool = False) -> str:
+        path = resolve_path_or_download(uri)
+        
+        try:
+            from pptx import Presentation
+            prs = Presentation(str(path))
+            
+            if not enriched:
+                # Raw mode: extract all text from slides
+                text_runs = []
+                for slide_num, slide in enumerate(prs.slides, 1):
+                    text_runs.append(f"Slide {slide_num}:")
+                    for shape in slide.shapes:
+                        if hasattr(shape, "text"):
+                            text_runs.append(shape.text)
+                return "\n\n".join(text_runs)
+            else:
+                # Enriched mode: TODO - analyze slide structure, extract images
+                logger.warning("PPTX enriched mode not yet implemented, falling back to raw")
+                return self.extract_text(uri, enriched=False)
+                
+        except ImportError:
+            logger.warning("python-pptx not available, falling back to default provider")
+            return DefaultContentProvider().extract_text(uri, enriched=enriched)
+        except Exception as e:
+            logger.error(f"PPTX parsing failed: {e}")
+            return f"Error reading PPTX file: {e}"
+
+
 content_providers = {
     ".pdf": PDFContentProvider(),
     ".docx": DOCXContentProvider(),
     ".doc": DOCXContentProvider(),  # Will handle old doc format too
     ".txt": DefaultContentProvider(),
+    ".html": HTMLContentProvider(),
+    ".htm": HTMLContentProvider(),
+    ".md": MarkdownContentProvider(),
+    ".markdown": MarkdownContentProvider(),
+    ".xlsx": XLSXContentProvider(),
+    ".xls": XLSXContentProvider(),
+    ".wav": WAVContentProvider(),
+    ".pptx": PPTXContentProvider(),
+    ".ppt": PPTXContentProvider(),
 }
 
 default_provider = DefaultContentProvider()

@@ -722,14 +722,15 @@ class Resources(AbstractModel):
         
         
     @classmethod
-    def chunked_resource(
+    def chunked_resource_old(
         cls,
         uri: str,
         chunk_size: int = 1000,
         category: typing.Optional[str] = None,
         name: typing.Optional[str] = None,
         userid: typing.Optional[str] = None,
-        try_markdown:bool = False
+        try_markdown: bool = False,
+        enriched: bool = False
     ) -> typing.List["Resources"]:
         """read file contents from web or file and chunks them by some chunk size - sensible defaults are used
         
@@ -753,7 +754,7 @@ class Resources(AbstractModel):
            
         """TODO add an S3 provider that understands signing""" 
         provider = get_content_provider_for_uri(uri)
-        text = sanitize_text(provider.extract_text(uri))
+        text = sanitize_text(provider.extract_text(uri, enriched=enriched))
         
         return cls.chunked_resource_from_text(text, 
                                               uri, 
@@ -761,6 +762,82 @@ class Resources(AbstractModel):
                                               name=name,
                                               userid=userid, 
                                               category=category)
+    
+    @classmethod
+    def chunked_resource(
+        cls,
+        uri: str,
+        parsing_mode: typing.Literal["simple", "extended"] = "simple",
+        chunk_size: int = 1000,
+        chunk_overlap: int = 200,
+        category: typing.Optional[str] = None,
+        name: typing.Optional[str] = None,
+        userid: typing.Optional[str] = None,
+        metadata: typing.Optional[typing.Dict[str, typing.Any]] = None,
+        save_to_db: bool = True
+    ) -> typing.List["Resources"]:
+        """
+        Create chunked resources using the new FileSystemService-based approach.
+        
+        Args:
+            uri: File URI (local file://, S3 s3://, or HTTP/HTTPS URL)
+            parsing_mode: "simple" for basic text extraction, "extended" for LLM-enhanced parsing
+            chunk_size: Number of characters per chunk
+            chunk_overlap: Number of characters to overlap between chunks
+            category: Optional category for the resources
+            name: Optional name for the resources
+            userid: Optional user ID to associate with resources
+            metadata: Optional metadata to include with resources
+            save_to_db: Whether to save the resources to the database
+            
+        Returns:
+            List of Resources representing the chunks
+            
+        Raises:
+            ValueError: If file type is not supported or transcription is required for audio/video in simple mode
+            Exception: If parsing fails
+        """
+        from percolate.services.FileSystemService import get_resource_chunker
+        
+        # Get the resource chunker
+        chunker = get_resource_chunker()
+        
+        # Create chunks using the new system
+        try:
+            resources = chunker.chunk_resource_from_uri(
+                uri=uri,
+                parsing_mode=parsing_mode,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                user_id=userid,
+                metadata=metadata
+            )
+            
+            # Override category and name if provided
+            for resource in resources:
+                if category:
+                    resource.category = category
+                if name:
+                    # Modify the name to include chunk info
+                    chunk_index = resource.metadata.get('chunk_index', 0)
+                    if chunk_index > 0:
+                        resource.name = f"{name} (chunk {chunk_index + 1})"
+                    else:
+                        resource.name = name
+            
+            # Save to database if requested
+            if save_to_db:
+                success = chunker.save_chunks_to_database(resources)
+                if not success:
+                    from percolate.utils import logger
+                    logger.warning(f"Failed to save some chunks to database for URI: {uri}")
+            
+            return resources
+            
+        except Exception as e:
+            from percolate.utils import logger
+            logger.error(f"Error creating chunked resources from {uri}: {str(e)}")
+            raise
 
 class TaskResources(AbstractModel):
     """(Deprecate)A link between tasks and resources since resources can be shared between tasks"""
