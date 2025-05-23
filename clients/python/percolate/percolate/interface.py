@@ -107,15 +107,17 @@ def summarize(data:str,context:str):
     return request_openai(stack,None)
     
 
-def get_entities(keys: str | typing.List)->typing.List[dict]:
+def get_entities(keys: str | typing.List, allow_fuzzy_match: bool = False, similarity_threshold: float = 0.3)->typing.List[dict]:
     """
     get entities from their keys in the database
     
     **Args:
         keys: one or more keys 
+        allow_fuzzy_match: if True, uses fuzzy matching to find similar entity names
+        similarity_threshold: threshold for fuzzy matching (default 0.3, lower values are more permissive)
     """
 
-    data =  PostgresService().get_entities(keys)
+    data =  PostgresService().get_entities(keys, allow_fuzzy_match=allow_fuzzy_match, similarity_threshold=similarity_threshold)
  
     return data
 
