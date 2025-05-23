@@ -60,6 +60,12 @@ try:
 except ImportError:
     HAS_MARKDOWN = False
 
+try:
+    from pptx import Presentation
+    HAS_PPTX = True
+except ImportError:
+    HAS_PPTX = False
+
 from percolate.services.S3Service import S3Service
 from percolate.utils import logger
 
@@ -490,6 +496,165 @@ class DocxHandler(FileTypeHandler):
             os.unlink(tmp_path)
 
 
+class PPTXHandler(FileTypeHandler):
+    """Handler for PowerPoint presentations (.pptx, .ppt)"""
+    
+    def can_handle(self, file_path: str) -> bool:
+        """Check if this handler can process the file"""
+        ext = Path(file_path).suffix.lower()
+        return ext in ['.pptx', '.ppt']
+    
+    def read(self, provider: FileSystemProvider, file_path: str, **kwargs) -> Dict[str, Any]:
+        """
+        Read PPTX file and return structured data with text and optionally images.
+        
+        Args:
+            provider: File system provider
+            file_path: Path to the PPTX file
+            mode: 'simple' for text only, 'enriched' for text + LLM image analysis
+            max_images: Maximum number of images to analyze (default: 50)
+            
+        Returns:
+            Dict with slides, text_content, and optionally image_analysis
+        """
+        if not HAS_PPTX:
+            raise ImportError("PPTX support requires python-pptx: pip install python-pptx")
+        
+        # Get enhanced PPTX provider from our parsing utilities
+        try:
+            from percolate.utils.parsing.providers import PPTXContentProvider
+            pptx_provider = PPTXContentProvider()
+            
+            # Use temporary file for PPTX processing
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.pptx', delete=False) as tmp_file:
+                tmp_path = tmp_file.name
+                tmp_file.write(provider.read_bytes(file_path))
+            
+            try:
+                mode = kwargs.get('mode', 'simple')
+                max_images = kwargs.get('max_images', 50)
+                enriched = (mode == 'enriched')
+                
+                # Use our enhanced provider
+                text_content = pptx_provider.extract_text(tmp_path, enriched=enriched, max_images=max_images)
+                
+                # Also get slide-by-slide breakdown
+                prs = Presentation(tmp_path)
+                slides = []
+                
+                for slide_num, slide in enumerate(prs.slides, 1):
+                    slide_text = []
+                    for shape in slide.shapes:
+                        if hasattr(shape, "text") and shape.text.strip():
+                            slide_text.append(shape.text.strip())
+                    
+                    slides.append({
+                        'slide_number': slide_num,
+                        'text': slide_text,
+                        'combined_text': '\n'.join(slide_text)
+                    })
+                
+                result = {
+                    'slides': slides,
+                    'text_content': text_content,
+                    'total_slides': len(slides),
+                    'mode': mode,
+                    'file_path': file_path
+                }
+                
+                # Add metadata if enriched mode and images were analyzed
+                if enriched and '=== SLIDE IMAGE ANALYSIS ===' in text_content:
+                    result['has_image_analysis'] = True
+                    result['max_images_processed'] = max_images
+                else:
+                    result['has_image_analysis'] = False
+                
+                return result
+                
+            finally:
+                os.unlink(tmp_path)
+                
+        except ImportError:
+            # Fallback to basic PPTX handling without our enhanced provider
+            logger.warning("Enhanced PPTX provider not available, using basic extraction")
+            
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.pptx', delete=False) as tmp_file:
+                tmp_path = tmp_file.name
+                tmp_file.write(provider.read_bytes(file_path))
+            
+            try:
+                prs = Presentation(tmp_path)
+                slides = []
+                all_text = []
+                
+                for slide_num, slide in enumerate(prs.slides, 1):
+                    slide_text = []
+                    for shape in slide.shapes:
+                        if hasattr(shape, "text") and shape.text.strip():
+                            slide_text.append(shape.text.strip())
+                    
+                    slides.append({
+                        'slide_number': slide_num,
+                        'text': slide_text,
+                        'combined_text': '\n'.join(slide_text)
+                    })
+                    all_text.extend(slide_text)
+                
+                return {
+                    'slides': slides,
+                    'text_content': '\n\n'.join(all_text),
+                    'total_slides': len(slides),
+                    'mode': 'simple',
+                    'has_image_analysis': False,
+                    'file_path': file_path
+                }
+                
+            finally:
+                os.unlink(tmp_path)
+    
+    def write(self, provider: FileSystemProvider, file_path: str, data: Any, **kwargs) -> None:
+        """
+        Write PPTX file (limited functionality - creates basic presentation)
+        
+        Args:
+            provider: File system provider
+            file_path: Path where to write the PPTX file
+            data: Either string (single slide) or list of strings (multiple slides)
+        """
+        if not HAS_PPTX:
+            raise ImportError("PPTX support requires python-pptx: pip install python-pptx")
+        
+        import tempfile
+        
+        prs = Presentation()
+        
+        if isinstance(data, str):
+            # Single slide
+            slide = prs.slides.add_slide(prs.slide_layouts[1])  # Title and Content layout
+            slide.shapes.title.text = "Generated Slide"
+            slide.shapes.placeholders[1].text = data
+        elif isinstance(data, list):
+            # Multiple slides
+            for i, slide_content in enumerate(data):
+                slide = prs.slides.add_slide(prs.slide_layouts[1])
+                slide.shapes.title.text = f"Slide {i + 1}"
+                slide.shapes.placeholders[1].text = str(slide_content)
+        else:
+            raise ValueError(f"Unsupported data type for PPTX: {type(data)}")
+        
+        with tempfile.NamedTemporaryFile(suffix='.pptx', delete=False) as tmp_file:
+            tmp_path = tmp_file.name
+        
+        try:
+            prs.save(tmp_path)
+            with open(tmp_path, 'rb') as f:
+                provider.write_bytes(file_path, f.read())
+        finally:
+            os.unlink(tmp_path)
+
+
 class FileSystemService:
     """
     Unified file system service that provides a single interface for file operations
@@ -515,6 +680,8 @@ class FileSystemService:
             self.register_handler(ExcelHandler())
         if HAS_DOCX:
             self.register_handler(DocxHandler())
+        if HAS_PPTX:
+            self.register_handler(PPTXHandler())
     
     def register_handler(self, handler: FileTypeHandler):
         """Register a new file type handler"""
