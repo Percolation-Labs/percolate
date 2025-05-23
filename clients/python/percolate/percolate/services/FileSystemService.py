@@ -991,44 +991,48 @@ FULL CONTENT:
         # Use the integrated ResourceChunker
         chunker = ResourceChunker(self)
         
-        # Create chunked resources directly using the model's chunked_resource method
+        # Create chunked resources using the integrated ResourceChunker to avoid circular calls
         try:
-            # Use the model's chunked_resource method if available, otherwise use chunker
-            if hasattr(model_class, 'chunked_resource'):
-                # Convert mode to parsing_mode for Resources.chunked_resource
-                parsing_mode = mode
-                
-                # Extract relevant kwargs for the chunked_resource method
-                chunk_kwargs = {
-                    'parsing_mode': parsing_mode,
-                    'chunk_size': kwargs.get('chunk_size', 1000),
-                    'chunk_overlap': kwargs.get('chunk_overlap', 200),
-                    'category': kwargs.get('category'),
-                    'name': kwargs.get('name'),
-                    'userid': kwargs.get('userid'),
-                    'metadata': kwargs.get('metadata'),
-                    'save_to_db': kwargs.get('save_to_db', False)
-                }
-                
-                # Remove None values
-                chunk_kwargs = {k: v for k, v in chunk_kwargs.items() if v is not None}
-                
-                chunks = model_class.chunked_resource(path, **chunk_kwargs)
-            else:
-                # Fallback to manual chunking for custom models
-                # Create a basic resource instance
-                file_data = self.read(path, mode=mode)
-                content = file_data if isinstance(file_data, str) else str(file_data)
-                
-                resource = model_class(
-                    uri=path,
-                    content=content,
-                    **{k: v for k, v in kwargs.items() if hasattr(model_class, k)}
-                )
-                
-                # Use the integrated ResourceChunker
-                chunker = ResourceChunker(self)
-                chunks = chunker.chunk_resource(resource=resource, mode=mode, **kwargs)
+            # Always use ResourceChunker directly to avoid circular dependency with Resources.chunked_resource
+            chunker = ResourceChunker(self)
+            
+            # Create chunks directly using the ResourceChunker
+            chunks = chunker.chunk_resource_from_uri(
+                uri=path,
+                parsing_mode=mode,
+                chunk_size=kwargs.get('chunk_size', 1000),
+                chunk_overlap=kwargs.get('chunk_overlap', 200),
+                user_id=kwargs.get('userid'),
+                metadata=kwargs.get('metadata')
+            )
+            
+            # Override any additional properties if provided and the model supports them
+            if chunks:
+                for chunk in chunks:
+                    # Override category if provided
+                    if kwargs.get('category'):
+                        chunk.category = kwargs['category']
+                    
+                    # Override name if provided
+                    if kwargs.get('name'):
+                        chunk_index = chunk.metadata.get('chunk_index', 0) if chunk.metadata else 0
+                        if chunk_index > 0:
+                            chunk.name = f"{kwargs['name']} (chunk {chunk_index + 1})"
+                        else:
+                            chunk.name = kwargs['name']
+                    
+                    # If using a custom model class, convert the chunk
+                    if model_class and model_class != type(chunk):
+                        # Try to create an instance of the custom model with the chunk data
+                        try:
+                            chunk_dict = chunk.model_dump() if hasattr(chunk, 'model_dump') else chunk.__dict__
+                            # Filter to only include fields that the custom model accepts
+                            filtered_dict = {k: v for k, v in chunk_dict.items() if hasattr(model_class, k)}
+                            custom_chunk = model_class(**filtered_dict)
+                            chunks[chunks.index(chunk)] = custom_chunk
+                        except Exception as e:
+                            logger.warning(f"Failed to convert chunk to {model_class.__name__}: {e}")
+                            # Keep the original chunk if conversion fails
             
             logger.info(f"Successfully created {len(chunks)} chunks from {path}")
             
