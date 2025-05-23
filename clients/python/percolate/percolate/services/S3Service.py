@@ -110,6 +110,28 @@ def _get_s3_config(use_aws: bool) -> Dict[str, Any]:
         if endpoint_url and not endpoint_url.startswith("http"):
             endpoint_url = f"https://{endpoint_url}"
         
+        # For custom S3 providers, try to add checksum calculation settings
+        # These are important for non-AWS providers but may not be supported in all boto3 versions
+        boto3_config_kwargs = {
+            'signature_version': 's3v4',
+            's3': {'addressing_style': 'path'}
+        }
+        
+        # Try to add checksum settings for custom S3 providers (Hetzner, MinIO, etc.)
+        try:
+            boto3_config_kwargs.update({
+                'request_checksum_calculation': "when_required", 
+                'response_checksum_validation': "when_required"
+            })
+            boto3_config = boto3.session.Config(**boto3_config_kwargs)
+        except TypeError:
+            # Fallback for older boto3 versions that don't support these parameters
+            logger.warning("boto3 version doesn't support checksum calculation parameters, using basic config")
+            boto3_config = boto3.session.Config(
+                signature_version='s3v4',
+                s3={'addressing_style': 'path'}
+            )
+        
         config = {
             'credentials': {
                 'access_key': env_config['access_key'],
@@ -117,12 +139,7 @@ def _get_s3_config(use_aws: bool) -> Dict[str, Any]:
             },
             'endpoint_url': endpoint_url,
             'bucket': env_config['bucket'],
-            'boto3_config': boto3.session.Config(
-                signature_version='s3v4',
-                s3={'addressing_style': 'path'},
-                request_checksum_calculation="when_required", 
-                response_checksum_validation="when_required"
-            ),
+            'boto3_config': boto3_config,
             'provider_type': 'custom'
         }
     
