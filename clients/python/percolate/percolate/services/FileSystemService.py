@@ -1339,6 +1339,8 @@ class ResourceChunker:
             file_type = 'pdf'
         elif ext in ['.docx', '.doc']:
             file_type = 'docx'
+        elif ext in ['.pptx', '.ppt']:
+            file_type = 'pptx'
         elif ext in ['.csv']:
             file_type = 'csv'
         elif ext in ['.json']:
@@ -1638,6 +1640,8 @@ class ResourceChunker:
             return self._extract_extended_pdf_content(file_data, file_name, uri)
         elif file_type == 'image':
             return self._extract_extended_image_content(file_data, file_name)
+        elif file_type == 'pptx':
+            return self._extract_extended_pptx_content(file_data, file_name, uri)
         else:
             # For other file types, use simple content extraction for now
             simple_content = self._extract_simple_content(file_data, file_type)
@@ -1775,6 +1779,43 @@ Analysis provided by: {result['provider']} ({result.get('model', 'unknown model'
         except Exception as e:
             logger.error(f"Error in extended image processing: {str(e)}")
             return f"Image file: {file_name} (analysis error: {str(e)})"
+    
+    def _extract_extended_pptx_content(self, pptx_data: Dict[str, Any], file_name: str, uri: str = None) -> str:
+        """Extract content from PPTX using enhanced parsing with LLM image analysis."""
+        try:
+            # The pptx_data already contains the results from our PPTXHandler
+            # which includes image analysis if available
+            
+            if isinstance(pptx_data, dict) and 'text_content' in pptx_data:
+                # Check if our enhanced parsing already included image analysis
+                if pptx_data.get('has_image_analysis', False):
+                    logger.info(f"PPTX {file_name} already includes image analysis from enhanced provider")
+                    return pptx_data['text_content']
+                else:
+                    # No image analysis was done, but we have the structured data
+                    # Let's try to trigger image analysis if the LLM is available
+                    logger.info(f"Attempting additional image analysis for PPTX {file_name}")
+                    
+                    # Re-read the file with enriched mode to get image analysis
+                    if uri:
+                        try:
+                            # Use the FileSystemService to re-read with enriched mode
+                            temp_fs = FileSystemService(self.s3_service if hasattr(self, 's3_service') else None)
+                            enhanced_result = temp_fs.read(uri, mode='enriched', max_images=50)
+                            if isinstance(enhanced_result, dict) and enhanced_result.get('has_image_analysis', False):
+                                return enhanced_result['text_content']
+                        except Exception as e:
+                            logger.warning(f"Failed to get enhanced PPTX analysis: {e}")
+                    
+                    # Fallback to existing content
+                    return pptx_data['text_content']
+            else:
+                # Fallback for non-dict data
+                return str(pptx_data)
+                
+        except Exception as e:
+            logger.error(f"Error in extended PPTX processing: {str(e)}")
+            return f"PPTX file: {file_name} (extended analysis error: {str(e)})"
     
     def _create_text_chunks(
         self,
