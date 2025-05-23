@@ -4,7 +4,7 @@ Provides /v1 endpoints that mirror OpenAI's API structure.
 This router is excluded from Swagger documentation.
 """
 
-from fastapi import APIRouter, Depends, Request, Response, BackgroundTasks
+from fastapi import APIRouter, Depends, Request, Response, BackgroundTasks, Query
 from fastapi.responses import StreamingResponse
 import os
 from typing import Optional
@@ -76,8 +76,15 @@ async def v1_agent_models(agent_id_or_name: str):
 async def v1_agent_chat_completions(
     agent_id_or_name: str,
     request: CompletionsRequestOpenApiFormat,
-    user_id: Optional[str] = Depends(hybrid_auth),
-    background_tasks: BackgroundTasks = None
+    background_tasks: BackgroundTasks = None,
+    user_id: Optional[str] = Query(None, description="ID of the end user making the request"),
+    session_id: Optional[str] = Query(None, description="ID for grouping related interactions"),
+    channel_id: Optional[str] = Query(None, description="ID of the channel where the interaction happens"),
+    channel_type: Optional[str] = Query(None, description="Type of channel (e.g., slack, web, etc.)"),
+    api_provider: Optional[str] = Query(None, description="Override the default provider"),
+    is_audio: Optional[bool] = Query(False, description="Client asks to decoded base 64 audio using a model"),
+    device_info: Optional[str] = Query(None, description="Device info Base64 encoded with arbitrary parameters such as GPS"),
+    auth_user_id: Optional[str] = Depends(hybrid_auth)
 ):
     """Agent-specific chat completions endpoint"""
     # Map 'default' to the Percolate agent
@@ -85,7 +92,7 @@ async def v1_agent_chat_completions(
         agent_id_or_name = 'p8-PercolateAgent'
     
     # Add agent context to the request
-    if not hasattr(request, 'metadata'):
+    if not hasattr(request, 'metadata') or request.metadata is None:
         request.metadata = {}
     request.metadata['agent_id'] = agent_id_or_name
     
@@ -95,13 +102,13 @@ async def v1_agent_chat_completions(
         background_tasks=background_tasks,
         agent_name=agent_id_or_name,
         user_id=user_id,
-        session_id=None,
-        channel_id=None,
-        channel_type=None,
-        api_provider=None,
-        is_audio=False,
-        device_info=None,
-        auth_user_id=user_id
+        session_id=session_id,
+        channel_id=channel_id,
+        channel_type=channel_type,
+        api_provider=api_provider,
+        is_audio=is_audio,
+        device_info=device_info,
+        auth_user_id=auth_user_id
     )
 
 # Support for base paths like /v1/ and /v1/agents/{agent_id}/
