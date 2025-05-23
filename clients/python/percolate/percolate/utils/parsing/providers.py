@@ -2,6 +2,7 @@
 Content providers for extracting text from various file formats.
 """
 import tempfile
+import os
 from pathlib import Path
 from abc import ABC, abstractmethod
 from urllib.parse import urlparse
@@ -67,7 +68,7 @@ class BaseContentProvider(ABC):
 
 
 class PDFContentProvider(BaseContentProvider):
-    def extract_text(self, uri: str, enriched: bool = False) -> str:
+    def extract_text(self, uri: str, enriched: bool = False, max_images: int = 50) -> str:
         path = resolve_path_or_download(uri)
         
         if not enriched:
@@ -75,10 +76,100 @@ class PDFContentProvider(BaseContentProvider):
             with fitz.open(str(path)) as doc:
                 return "\n".join(page.get_text() for page in doc)
         else:
-            # Enriched mode: TODO - convert pages to images and use LLM
-            logger.warning("PDF enriched mode not yet implemented, falling back to raw")
+            # Enriched mode: extract images and use LLM analysis
+            return self._extract_with_images(path, max_images)
+    
+    def _extract_with_images(self, path: Path, max_images: int = 50) -> str:
+        """Extract text and analyze images from PDF using LLM."""
+        try:
+            from percolate.services.llm.ImageInterpreter import get_image_interpreter
+            
+            with fitz.open(str(path)) as doc:
+                text_content = "\n".join(page.get_text() for page in doc)
+                
+                # Extract images
+                images = self._extract_pdf_images(doc, max_images)
+                
+                if images:
+                    logger.info(f"Analyzing {len(images)} images from PDF with LLM")
+                    interpreter = get_image_interpreter()
+                    
+                    if interpreter.is_available():
+                        result = interpreter.describe_images(
+                            images,
+                            prompt="Describe what you see in this image. Focus on text, charts, diagrams, and key visual information that would be useful for understanding the document content.",
+                            context="This image was extracted from a PDF document"
+                        )
+                        
+                        if result.get("success"):
+                            image_descriptions = result["content"]
+                            text_content += "\n\n=== IMAGE ANALYSIS ===\n" + str(image_descriptions)
+                        else:
+                            logger.warning(f"LLM image analysis failed: {result.get('error')}")
+                    else:
+                        logger.warning("LLM image interpreter not available, skipping image analysis")
+                        
+                    # Clean up temporary files
+                    for img_path in images:
+                        try:
+                            os.unlink(img_path)
+                        except:
+                            pass
+                
+                return text_content
+        except ImportError:
+            logger.warning("Image interpreter not available, falling back to text extraction")
             with fitz.open(str(path)) as doc:
                 return "\n".join(page.get_text() for page in doc)
+    
+    def _extract_pdf_images(self, doc, max_images: int = 50) -> list:
+        """Extract images from PDF, sorted by size, limited to max_images."""
+        images = []
+        temp_dir = tempfile.mkdtemp()
+        
+        try:
+            image_list = []
+            for page_num in range(len(doc)):
+                page = doc.load_page(page_num)
+                image_list_page = page.get_images()
+                
+                for img_index, img in enumerate(image_list_page):
+                    try:
+                        xref = img[0]
+                        pix = fitz.Pixmap(doc, xref)
+                        
+                        if pix.n - pix.alpha < 4:  # GRAY or RGB
+                            img_size = pix.width * pix.height
+                            image_list.append({
+                                'pix': pix,
+                                'size': img_size,
+                                'page': page_num,
+                                'index': img_index
+                            })
+                        else:
+                            pix = None
+                    except Exception as e:
+                        logger.warning(f"Failed to extract image {img_index} from page {page_num}: {e}")
+            
+            # Sort by size (largest first) and take top max_images
+            image_list.sort(key=lambda x: x['size'], reverse=True)
+            image_list = image_list[:max_images]
+            
+            # Save sorted images
+            for i, img_data in enumerate(image_list):
+                try:
+                    pix = img_data['pix']
+                    img_path = os.path.join(temp_dir, f"pdf_image_{i:03d}.png")
+                    pix.save(img_path)
+                    images.append(img_path)
+                    pix = None
+                except Exception as e:
+                    logger.warning(f"Failed to save image {i}: {e}")
+            
+        except Exception as e:
+            logger.error(f"Error extracting PDF images: {e}")
+        
+        return images
 
 
 class DefaultContentProvider(BaseContentProvider):
@@ -234,11 +325,12 @@ class WAVContentProvider(BaseContentProvider):
 
 
 class PPTXContentProvider(BaseContentProvider):
-    def extract_text(self, uri: str, enriched: bool = False) -> str:
+    def extract_text(self, uri: str, enriched: bool = False, max_images: int = 50) -> str:
         path = resolve_path_or_download(uri)
         
         try:
             from pptx import Presentation
+            from pptx.enum.shapes import MSO_SHAPE_TYPE
             prs = Presentation(str(path))
             
             if not enriched:
@@ -251,9 +343,8 @@ class PPTXContentProvider(BaseContentProvider):
                             text_runs.append(shape.text)
                 return "\n\n".join(text_runs)
             else:
-                # Enriched mode: TODO - analyze slide structure, extract images
-                logger.warning("PPTX enriched mode not yet implemented, falling back to raw")
-                return self.extract_text(uri, enriched=False)
+                # Enriched mode: analyze slide structure, extract and analyze images
+                return self._extract_with_images(prs, max_images)
                 
         except ImportError:
             logger.warning("python-pptx not available, falling back to default provider")
@@ -261,6 +352,116 @@ class PPTXContentProvider(BaseContentProvider):
         except Exception as e:
             logger.error(f"PPTX parsing failed: {e}")
             return f"Error reading PPTX file: {e}"
+    
+    def _extract_with_images(self, prs, max_images: int = 50) -> str:
+        """Extract text and analyze images from PPTX using LLM."""
+        try:
+            from pptx.enum.shapes import MSO_SHAPE_TYPE
+            from percolate.services.llm.ImageInterpreter import get_image_interpreter
+            
+            # Extract text first
+            text_runs = []
+            for slide_num, slide in enumerate(prs.slides, 1):
+                text_runs.append(f"Slide {slide_num}:")
+                for shape in slide.shapes:
+                    if hasattr(shape, "text") and shape.text.strip():
+                        text_runs.append(shape.text)
+            
+            text_content = "\n\n".join(text_runs)
+            
+            # Extract images
+            images = self._extract_pptx_images(prs, max_images)
+            
+            if images:
+                logger.info(f"Analyzing {len(images)} images from PPTX with LLM")
+                interpreter = get_image_interpreter()
+                
+                if interpreter.is_available():
+                    result = interpreter.describe_images(
+                        images,
+                        prompt="Describe what you see in this image from a presentation slide. Focus on charts, diagrams, visual data, and any text that might not be captured as regular slide text.",
+                        context="This image was extracted from a PowerPoint presentation slide"
+                    )
+                    
+                    if result.get("success"):
+                        image_descriptions = result["content"]
+                        text_content += "\n\n=== SLIDE IMAGE ANALYSIS ===\n" + str(image_descriptions)
+                    else:
+                        logger.warning(f"LLM image analysis failed: {result.get('error')}")
+                else:
+                    logger.warning("LLM image interpreter not available, skipping image analysis")
+                    
+                # Clean up temporary files
+                for img_path in images:
+                    try:
+                        os.unlink(img_path)
+                    except:
+                        pass
+            
+            return text_content
+            
+        except ImportError:
+            logger.warning("Image interpreter not available, falling back to text extraction")
+            # Fall back to raw mode
+            text_runs = []
+            for slide_num, slide in enumerate(prs.slides, 1):
+                text_runs.append(f"Slide {slide_num}:")
+                for shape in slide.shapes:
+                    if hasattr(shape, "text"):
+                        text_runs.append(shape.text)
+            return "\n\n".join(text_runs)
+    
+    def _extract_pptx_images(self, prs, max_images: int = 50) -> list:
+        """Extract images from PPTX, sorted by size, limited to max_images."""
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
+        
+        images = []
+        temp_dir = tempfile.mkdtemp()
+        image_data = []
+        
+        try:
+            # First pass: collect all images with size info
+            for slide_number, slide in enumerate(prs.slides, start=1):
+                for shape_idx, shape in enumerate(slide.shapes):
+                    if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                        try:
+                            image = shape.image
+                            image_bytes = image.blob
+                            image_size = len(image_bytes)
+                            image_ext = image.ext or 'png'
+                            
+                            image_data.append({
+                                'bytes': image_bytes,
+                                'size': image_size,
+                                'ext': image_ext,
+                                'slide': slide_number,
+                                'shape': shape_idx
+                            })
+                        except Exception as e:
+                            logger.warning(f"Failed to extract image from slide {slide_number}, shape {shape_idx}: {e}")
+            
+            # Sort by size (largest first) and take top max_images
+            image_data.sort(key=lambda x: x['size'], reverse=True)
+            image_data = image_data[:max_images]
+            
+            # Second pass: save the selected images
+            for i, img_info in enumerate(image_data):
+                try:
+                    filename = f"pptx_image_{i:03d}_slide{img_info['slide']}.{img_info['ext']}"
+                    img_path = os.path.join(temp_dir, filename)
+                    
+                    with open(img_path, 'wb') as f:
+                        f.write(img_info['bytes'])
+                    
+                    images.append(img_path)
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to save image {i}: {e}")
+                    
+        except Exception as e:
+            logger.error(f"Error extracting PPTX images: {e}")
+        
+        return images
 
 
 content_providers = {

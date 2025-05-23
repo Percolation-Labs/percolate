@@ -601,7 +601,7 @@ def _ensure_user_hash(userid):
     """
     
     """testing helper for email mapping"""
-    if userid and "@" in userid:
+    if userid and isinstance(userid, str) and "@" in userid:
         return make_uuid( userid.lower() )
     return userid
 # ---------------------------------------------------------------------------
@@ -772,15 +772,9 @@ async def agent_completions(
     logger.info(f"Session for {user_id=}, {session_id=}")
     
     expected_token = "!p3rc0la8!" #<-this a testing idea
-    expected_token = POSTGRES_PASSWORD #<-this will be the secure bearer for now but we could relax to an api key
+    # Use auth_user_id from HybridAuth if available, otherwise fall back to query param
     effective_user_id = auth_user_id or user_id
-    # token = request.bearer_token
-    if not effective_user_id:
-        logger.warning(f"No bearer - not authenticated")
-        raise HTTPException(status_code=401, detail="User not authenticated - supply a token or create a valid user session")
-    # if token != expected_token:
-    #     logger.warning(f"{token} != {expected_token} - not authenticated")
-    #     raise HTTPException(status_code=401, detail="API token is incorrect")
+    logger.info(f"{effective_user_id}, {session_id}, auth method: {'session' if auth_user_id else 'bearer'}")
  
     try:
         # Collect query parameters into a dict for easier handling
@@ -812,8 +806,39 @@ async def agent_completions(
                 media_type="text/event-stream"
             )
                 
-        """TODO handle an open ai scheme from the handler"""
-        return JSONResponse(content=response, status_code=201)
+        # For non-streaming mode, collect all the content from the iterator
+        collected_content = []
+        for chunk in response:
+            if hasattr(chunk, 'content'):
+                collected_content.append(chunk.content)
+            elif isinstance(chunk, str):
+                collected_content.append(chunk)
+            else:
+                collected_content.append(str(chunk))
+        
+        # Create OpenAI-compatible response format
+        full_content = ''.join(collected_content)
+        openai_response = {
+            "id": f"chatcmpl-{uuid.uuid4().hex[:29]}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": request.model,
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": full_content
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": len(str(request.messages)),
+                "completion_tokens": len(full_content),
+                "total_tokens": len(str(request.messages)) + len(full_content)
+            }
+        }
+        
+        return JSONResponse(content=openai_response, status_code=200)
     except HTTPException:
         logger.warning(traceback.format_exc())
         raise

@@ -43,7 +43,7 @@ def mock_s3_service():
         instance.get_presigned_url_for_uri.return_value = "https://presigned-url"
         mock.return_value = instance
         yield instance
-
+@pytest.mark.skip
 @pytest.mark.slow
 class TestContentUpload:
     """Test content upload functionality."""

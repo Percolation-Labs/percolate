@@ -195,8 +195,14 @@ class CompletionsRequestOpenApiFormat(BaseModel):
         """
         # First check if an explicit api_provider is specified in the metadata or params
         if params and params.get('api_provider'):
-            provider = params.get('api_provider').lower()
-            if provider in ['openai', 'anthropic', 'google']:
+            provider_param = params.get('api_provider')
+            # Handle FastAPI Query object or string
+            if hasattr(provider_param, 'default'):
+                provider = str(provider_param.default).lower() if provider_param.default else None
+            else:
+                provider = str(provider_param).lower() if provider_param else None
+            
+            if provider and provider in ['openai', 'anthropic', 'google']:
                 return provider
                 
         if self.metadata and self.metadata.get('api_provider'):
