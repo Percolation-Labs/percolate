@@ -414,7 +414,12 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
                 return pg_type
             return f"{pg_type}{type_mapping[list]}"
 
-        if origin in {dict, typing.Dict}:
+        # Handle dict types more robustly - covers dict, typing.Dict, Dict[str, Any], etc.
+        if origin in {dict, typing.Dict} or (hasattr(typing, 'Dict') and origin is typing.Dict):
+            return type_mapping[dict]
+        
+        # Fallback: check if the type string contains 'dict' for edge cases
+        if 'dict' in str(py_type).lower() or 'Dict' in str(py_type):
             return type_mapping[dict]
 
         if hasattr(py_type, "model_dump"):
@@ -452,9 +457,10 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
                 return item.replace("'", "''")
             if isinstance(item, uuid.UUID):
                 return str(item)
-            if isinstance(item, dict):
+            # Handle dict-like objects more robustly
+            if isinstance(item, dict) or hasattr(item, 'keys'):
                 return json.dumps(item, default=str)
-            if isinstance(item, list) and len(item) and isinstance(item[0], dict):
+            if isinstance(item, list) and len(item) and (isinstance(item[0], dict) or hasattr(item[0], 'keys')):
                 return json.dumps(item, default=str)
             return item
 
