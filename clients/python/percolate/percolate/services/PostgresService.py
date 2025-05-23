@@ -128,7 +128,7 @@ class PostgresService:
             model=model, connection_string=self._connection_string, **kwargs
         )
 
-    def get_entities(self, keys: str | typing.List[str], userid: str = None, allow_fuzzy_match: bool = False):
+    def get_entities(self, keys: str | typing.List[str], userid: str = None, allow_fuzzy_match: bool = False, similarity_threshold: float = 0.3):
         """
         use the get_entities or get_fuzzy_entities database function to lookup entities, with optional user_id for access control
 
@@ -136,6 +136,7 @@ class PostgresService:
             keys: one or more business keys (list of entity names) to fetch
             userid: optional user identifier to include private entities owned by this user
             allow_fuzzy_match: if True, uses get_fuzzy_entities instead of get_entities for fuzzy matching
+            similarity_threshold: threshold for fuzzy matching (default 0.3, lower values are more permissive)
         """
         if keys:
             if not isinstance(keys, list):
@@ -145,7 +146,7 @@ class PostgresService:
         if allow_fuzzy_match:
             data = (
                 self.execute(
-                    """SELECT * FROM p8.get_fuzzy_entities(%s, %s)""", data=(keys, userid)
+                    """SELECT * FROM p8.get_fuzzy_entities(%s, %s, %s)""", data=(keys, userid, similarity_threshold)
                 )
                 if keys
                 else None
