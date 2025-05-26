@@ -103,7 +103,7 @@ def handle_agent_request(request: CompletionsRequestOpenApiFormat, params: Optio
     """todo construct context"""
     userid = metadata.get('userid') or metadata.get('user_id')
     ctx = CallingContext(plan=system_content,username=userid, session_id=str(uuid.uuid1()), channel_ts=metadata.get('session_id'))
-    return agent.stream(query,context=ctx)
+    return agent.stream(query,context=ctx) 
     
     
 def handle_openai_request(request: CompletionsRequestOpenApiFormat, params: Optional[Dict] = None, language_model_class=LanguageModel):
@@ -771,7 +771,7 @@ async def agent_completions(
     
     logger.info(f"Session for {user_id=}, {session_id=}")
     
-    expected_token = "!p3rc0la8!" #<-this a testing idea
+    expected_token = "!p3rc0la8!" #<-this a testing thing
     # Use auth_user_id from HybridAuth if available, otherwise fall back to query param
     effective_user_id = auth_user_id or user_id
     logger.info(f"{effective_user_id}, {session_id}, auth method: {'session' if auth_user_id else 'bearer'}")
@@ -800,7 +800,6 @@ async def agent_completions(
             background_tasks.add_task(audit_request, request, response, params)
                 
         if stream_mode:
-            
             return StreamingResponse(
                 stream_generator( response,stream_mode=stream_mode ),
                 media_type="text/event-stream"
@@ -815,30 +814,8 @@ async def agent_completions(
                 collected_content.append(chunk)
             else:
                 collected_content.append(str(chunk))
-        
-        # Create OpenAI-compatible response format
-        full_content = ''.join(collected_content)
-        openai_response = {
-            "id": f"chatcmpl-{uuid.uuid4().hex[:29]}",
-            "object": "chat.completion",
-            "created": int(time.time()),
-            "model": request.model,
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": full_content
-                },
-                "finish_reason": "stop"
-            }],
-            "usage": {
-                "prompt_tokens": len(str(request.messages)),
-                "completion_tokens": len(full_content),
-                "total_tokens": len(str(request.messages)) + len(full_content)
-            }
-        }
-        
-        return JSONResponse(content=openai_response, status_code=200)
+        """if we get to here the response needs to be streamed into an the protocol"""
+        return JSONResponse(content=response, status_code=200)
     except HTTPException:
         logger.warning(traceback.format_exc())
         raise
