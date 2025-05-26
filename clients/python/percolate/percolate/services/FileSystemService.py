@@ -396,14 +396,64 @@ class ExcelHandler(FileTypeHandler):
             tmp_path = tmp_file.name
         
         try:
-            # Read all sheets
             import pandas as pd
-            excel_data = pd.read_excel(tmp_path, sheet_name=None, **kwargs)
             
-            # Convert to Polars DataFrames
+            # Filter out kwargs that aren't for pandas.read_excel
+            pandas_kwargs = {k: v for k, v in kwargs.items() 
+                           if k not in ['mode']}  # Remove 'mode' and other non-pandas args
+            
+            # Try multiple engines in order of preference for performance and reliability
+            engines_to_try = []
+            
+            # Check if calamine is available (fastest, but newer)
+            try:
+                import python_calamine
+                engines_to_try.append('calamine')
+            except ImportError:
+                pass
+            
+            # Always have openpyxl as fallback
+            engines_to_try.append('openpyxl')
+            
+            excel_data = None
+            last_error = None
+            
+            for engine in engines_to_try:
+                try:
+                    logger.info(f"Attempting to read Excel file with {engine} engine")
+                    excel_data = pd.read_excel(tmp_path, sheet_name=None, engine=engine, **pandas_kwargs)
+                    logger.info(f"Successfully read Excel file with {engine} engine")
+                    break
+                except Exception as e:
+                    logger.warning(f"Failed to read Excel with {engine} engine: {e}")
+                    last_error = e
+                    continue
+            
+            if excel_data is None:
+                raise last_error or Exception("Failed to read Excel file with any available engine")
+            
+            # Convert to Polars DataFrames with robust error handling
             result = {}
             for sheet_name, df in excel_data.items():
-                result[sheet_name] = pl.from_pandas(df)
+                try:
+                    # First, try direct conversion
+                    result[sheet_name] = pl.from_pandas(df)
+                except Exception as e:
+                    logger.warning(f"Direct Polars conversion failed for sheet '{sheet_name}': {e}")
+                    try:
+                        # Fallback 1: Handle NaN values by filling with empty strings
+                        df_filled = df.fillna('')
+                        result[sheet_name] = pl.from_pandas(df_filled)
+                    except Exception as e2:
+                        logger.warning(f"NaN-filled conversion failed for sheet '{sheet_name}': {e2}")
+                        try:
+                            # Fallback 2: Convert all to string to avoid PyArrow type issues
+                            df_str = df.astype(str)
+                            result[sheet_name] = pl.from_pandas(df_str)
+                        except Exception as e3:
+                            logger.error(f"All conversion methods failed for sheet '{sheet_name}': {e3}")
+                            # Return the original pandas DataFrame if Polars conversion fails completely
+                            result[sheet_name] = df
             
             return result
         finally:
@@ -1343,6 +1393,8 @@ class ResourceChunker:
             file_type = 'pptx'
         elif ext in ['.csv']:
             file_type = 'csv'
+        elif ext in ['.xlsx', '.xls']:
+            file_type = 'xlsx'
         elif ext in ['.json']:
             file_type = 'json'
         elif ext in ['.html', '.htm']:
@@ -1604,7 +1656,7 @@ class ResourceChunker:
             # Already parsed as text
             return file_data
         elif isinstance(file_data, dict):
-            # Structured data (JSON, CSV as dict, etc.)
+            # Structured data (JSON, CSV as dict, Excel sheets, etc.)
             if file_type == 'csv' and 'data' in file_data:
                 # CSV data - convert to simple text format
                 rows = file_data['data']
@@ -1623,6 +1675,30 @@ class ResourceChunker:
                     for row in rows:
                         values = [str(row.get(h, "")) for h in headers]
                         lines.append(" | ".join(values))
+                
+                return "\n".join(lines)
+            elif file_type in ['xlsx', 'xls'] or any(k for k in file_data.keys() if hasattr(file_data[k], 'shape')):
+                # Excel data - convert sheets to text format
+                lines = []
+                for sheet_name, df in file_data.items():
+                    lines.append(f"=== SHEET: {sheet_name} ===")
+                    try:
+                        if hasattr(df, 'to_pandas'):
+                            # Polars DataFrame
+                            pandas_df = df.to_pandas()
+                            lines.append(pandas_df.to_string(index=False, max_rows=100))
+                        elif hasattr(df, 'to_string'):
+                            # Pandas DataFrame
+                            lines.append(df.to_string(index=False, max_rows=100))
+                        elif hasattr(df, 'shape'):
+                            # Other DataFrame-like object
+                            lines.append(str(df))
+                        else:
+                            lines.append(str(df))
+                    except Exception as e:
+                        logger.warning(f"Error converting sheet '{sheet_name}' to string: {e}")
+                        lines.append(f"[Error displaying sheet data: {e}]")
+                    lines.append("")  # Add blank line between sheets
                 
                 return "\n".join(lines)
             else:
