@@ -150,27 +150,19 @@ class HybridAuth:
         credentials: typing.Optional[HTTPAuthorizationCredentials] = Depends(bearer)
     ) -> typing.Optional[str]:
         """
-        Returns user_id if session auth is used, None if bearer token is used.
+        Returns user_id if session auth is used, or user_id from header/query if bearer token is used.
         Raises 401 if neither authentication method is valid.
         """
         
         # Debug logging
-        
-        #logger.debug(f"HybridAuth - ALL COOKIES: {request.cookies}")
-        
         session_cookie = request.cookies.get('session')
-        session_keys = list(request.session.keys()) if hasattr(request, 'session') else []
-        #logger.debug(f"HybridAuth -cookie temp: {session_cookie}")
-        # logger.debug(f"HybridAuth - Session of request present: {bool(request.session)}")
         logger.debug(f"HybridAuth - Session cookie present: {bool(session_cookie)}")
-        # logger.debug(f"HybridAuth - Session keys: {session_keys}")
-        # logger.debug(f"HybridAuth - Bearer token present: {bool(credentials)}")
         
         # First, try session authentication
         try:
             user_id = get_user_from_session(request)
             if user_id:
-                #logger.debug(f"Authenticated via session: user_id={user_id}")
+                logger.debug(f"Authenticated via session: user_id={user_id}")
                 return user_id
             else:
                 logger.warning(f"Session auth failed because there is no match for the user with this request object")
@@ -183,8 +175,21 @@ class HybridAuth:
             try:
                 # Validate the bearer token
                 await get_api_key(credentials)
-                logger.debug("Authenticated via bearer token (no user context)")
-                return None  # Valid bearer token but no user context
+                logger.debug("Authenticated via bearer token")
+                
+                # Check for user_id in header first, then query params
+                user_id_from_header = request.headers.get('X-User-ID') or request.headers.get('x-user-id')
+                user_id_from_query = request.query_params.get('user_id')
+                
+                user_id = user_id_from_header or user_id_from_query
+                
+                if user_id:
+                    logger.debug(f"Bearer token auth with user_id: {user_id}")
+                    return user_id
+                else:
+                    logger.debug("Bearer token auth with no user context")
+                    return None  # Valid bearer token but no user context
+                    
             except HTTPException:
                 logger.debug("Bearer token validation failed")
         
