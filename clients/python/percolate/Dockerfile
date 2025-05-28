@@ -34,3 +34,4 @@ CMD ["hypercorn", "--bind", "0.0.0.0:5008",  "percolate.api.main:app"]
 
 
 #kubectl rollout restart deployment percolate-api -n <ns>
+#kubectl logs -l app=percolate-api --all-containers=true --prefix --follow

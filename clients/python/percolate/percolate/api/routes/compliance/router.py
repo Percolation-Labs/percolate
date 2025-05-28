@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 import os
 from typing import Optional
 
-from ..auth import hybrid_auth
+from ..auth import hybrid_auth, require_user_auth
 from ..chat.router import completions, agent_completions
 from ..chat.models import CompletionsRequestOpenApiFormat
 from ...utils.models import list_available_models
@@ -77,7 +77,7 @@ async def v1_agent_chat_completions(
     agent_id_or_name: str,
     request: CompletionsRequestOpenApiFormat,
     background_tasks: BackgroundTasks = None,
-    user_id: Optional[str] = Query(None, description="ID of the end user making the request"),
+    user_id: str = Depends(hybrid_auth),  # Must have user context
     session_id: Optional[str] = Query(None, description="ID for grouping related interactions"),
     channel_id: Optional[str] = Query(None, description="ID of the channel where the interaction happens"),
     channel_type: Optional[str] = Query(None, description="Type of channel (e.g., slack, web, etc.)"),

@@ -26,6 +26,24 @@ def set_custom_model_provider(fn):
 def settings(key, default=None):
     return SETTINGS.get(key,default)
 
+def try_load_model(name):
+    """load the model in different ways"""
+    M = custom_load_model(name)
+    if not M:
+        try:
+            M = load_model(name)
+        except:
+            pass
+        
+    """last resort create custom which can be used from db but we need a strong sense of loading a model from database with schema and functions TODO:"""
+    if not M:
+        namespace, name = name.split('.')
+        M = AbstractModel.create_model(name=name, 
+                                       namespace=namespace,
+                                       description="Please use the search facility to answer the users question")
+        
+    return M
+
 def custom_load_model(name):
     """if the custom model loader is specified we can do this"""
     loader = CUSTOM_PROVIDER.get('data')
