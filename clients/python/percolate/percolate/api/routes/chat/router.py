@@ -28,7 +28,7 @@ from typing import Optional, Dict, Any, List, Callable
 
 # Import Percolate modules
 from percolate.models.p8 import Task
-from percolate.api.routes.auth import get_current_token, hybrid_auth
+from percolate.api.routes.auth import get_current_token, hybrid_auth, require_user_auth
 import percolate as p8
 from percolate.services import ModelRunner
 from percolate.services.llm import LanguageModel
@@ -96,10 +96,13 @@ def handle_agent_request(request: CompletionsRequestOpenApiFormat, params: Optio
     
     """default for now but load from repo or database in future"""
     from percolate.models import Resources
+    from percolate.interface import try_load_model
     
     metadata = params or {} 
     system_content, query = get_messages_by_role_from_request(request, params)
-    agent = p8.Agent(Resources)
+    """load the model that we need or default to resources"""
+    M = try_load_model(agent_model_name) or Resources
+    agent = p8.Agent(M)
     """todo construct context"""
     userid = metadata.get('userid') or metadata.get('user_id')
     ctx = CallingContext(plan=system_content,username=userid, session_id=str(uuid.uuid1()), channel_ts=metadata.get('session_id'))
