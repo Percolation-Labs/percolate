@@ -181,6 +181,10 @@ class ModelRunner:
         
     def invoke(self, function_call: FunctionCall):
         """Invoke function(s) and parse results into messages
+        
+        Test calling a function:>
+ 
+        .invoke(FunctionCall(id='test', name='some_functions', arguments={'arg': 'value'}))
 
         Args:
             function_call (FunctionCall): the payload send from an LLM to call a function

@@ -91,22 +91,73 @@ def get_messages_by_role_from_request(request:CompletionsRequestOpenApiFormat, m
 
 def handle_agent_request(request: CompletionsRequestOpenApiFormat, params: Optional[Dict] = None, language_model_class=LanguageModel, agent_model_name:str=None):
     """
-    here we use Percolate memory proxy agents which pass through the open ai schema but block and call functions
-    """
+    Handle agent requests in both streaming and non-streaming modes.
     
-    """default for now but load from repo or database in future"""
+    This function handles:
+    1. Loading the appropriate agent model
+    2. Setting up the context with user info and system content
+    3. Streaming or non-streaming response based on request.stream flag
+    
+    Args:
+        request: The completion request in OpenAI format
+        params: Optional parameters including user ID, session ID, etc.
+        language_model_class: The language model class to use
+        agent_model_name: The name of the agent model to load
+        
+    Returns:
+        If streaming: A stream iterator that yields SSE chunks
+        If non-streaming: A complete response object in the requested format
+    """
     from percolate.models import Resources
     from percolate.interface import try_load_model
+    from percolate.services.llm.proxy.stream_generators import collect_stream_to_response
+    from percolate.services.llm.proxy.models import OpenAIResponse
     
+    # Extract metadata and prepare context
     metadata = params or {} 
     system_content, query = get_messages_by_role_from_request(request, params)
-    """load the model that we need or default to resources"""
-    M = try_load_model(agent_model_name) or Resources
+    
+    # Load the model that we need or default to Resources
+    if agent_model_name:
+        if '.' in agent_model_name:
+            # Agent name has proper namespace.name format
+            M = try_load_model(agent_model_name) or Resources
+        else:
+            # Agent name lacks namespace, default to Resources
+            logger.warning(f"Agent name '{agent_model_name}' does not contain a namespace (no '.' found). Defaulting to Resources model.")
+            M = Resources
+    else:
+        # No agent name provided, default to Resources
+        M = Resources
     agent = p8.Agent(M)
-    """todo construct context"""
+    
+    # Construct context with user info and session ID
     userid = metadata.get('userid') or metadata.get('user_id')
-    ctx = CallingContext(plan=system_content,username=userid, session_id=str(uuid.uuid1()), channel_ts=metadata.get('session_id'))
-    return agent.stream(query,context=ctx) 
+    ctx = CallingContext(
+        plan=system_content,
+        username=userid, 
+        session_id=str(uuid.uuid1()), 
+        channel_ts=metadata.get('session_id')
+    )
+    
+    # Get the streaming response
+    stream = agent.stream(query, context=ctx)
+    
+    # If streaming mode is requested, return the stream directly
+    if request.stream:
+        return stream
+    
+    # For non-streaming mode, directly pass the LLMStreamIterator to collect_stream_to_response
+    # No need for an adapter anymore as collect_stream_to_response now handles LLMStreamIterator
+    response = collect_stream_to_response(
+        stream,
+        source_scheme='openai',
+        target_scheme='openai',
+        model=request.model
+    )
+    
+    # Return the complete response
+    return response
     
     
 def handle_openai_request(request: CompletionsRequestOpenApiFormat, params: Optional[Dict] = None, language_model_class=LanguageModel):
@@ -557,9 +608,13 @@ def audit_request(request:str,
         - while we can construct graph paths from the conversation - the process can write discovered graph paths to both session and user model
         """
       
-        last_ai_response = getattr(response, 'content', None)
-        p8.repository(User).execute('select * from p8.update_user_model(%s, %s)', data=(metadata['userid'], last_ai_response))
-        logger.info(f"updated user model {metadata['userid']}")
+        last_ai_response = str(getattr(response, 'content', ''))
+        user_id = metadata.get('userid')
+        if user_id:
+            p8.repository(User).execute('select * from p8.update_user_model(%s, %s)', data=(user_id, last_ai_response))
+            logger.info(f"updated user model {metadata['userid']}")
+        else:
+            logger.warning("We do not have a user so we cannot audit.")
         
     except:
         logger.warning("Problem with audit user")
@@ -769,7 +824,14 @@ async def agent_completions(
         
     if agent_name:
         """internal vs external web conventions for names"""
-        agent_name= agent_name.replace('-','.')
+        # Replace hyphens with dots for web-friendly URLs
+        if '-' in agent_name:
+            logger.info(f"Converting agent name from '{agent_name}' to '{agent_name.replace('-', '.')}'")
+            agent_name = agent_name.replace('-','.')
+            
+        # Ensure agent name has a namespace if needed
+        if '.' not in agent_name:
+            logger.warning(f"Agent name '{agent_name}' does not have a namespace. This might cause issues.")
     
     logger.info(f"Session for {user_id=}, {session_id=}")
     
@@ -803,21 +865,18 @@ async def agent_completions(
                 
         if stream_mode:
             return StreamingResponse(
-                stream_generator( response,stream_mode=stream_mode ),
+                stream_generator(response, stream_mode=stream_mode),
                 media_type="text/event-stream"
             )
                 
-        # For non-streaming mode, collect all the content from the iterator
-        collected_content = []
-        for chunk in response:
-            if hasattr(chunk, 'content'):
-                collected_content.append(chunk.content)
-            elif isinstance(chunk, str):
-                collected_content.append(chunk)
-            else:
-                collected_content.append(str(chunk))
-        """if we get to here the response needs to be streamed into an the protocol"""
-        return JSONResponse(content=response, status_code=200)
+        # For non-streaming mode, the handle_agent_request already returns a complete response
+        # Just convert it to JSON and return
+        if hasattr(response, 'model_dump'):
+            # If it's a Pydantic model, use model_dump
+            return JSONResponse(content=response.model_dump(), status_code=200)
+        else:
+            # Otherwise, attempt to convert to JSON
+            return JSONResponse(content=response, status_code=200)
     except HTTPException:
         logger.warning(traceback.format_exc())
         raise
