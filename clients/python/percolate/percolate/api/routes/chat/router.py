@@ -558,14 +558,13 @@ def audit_request(request:str,
         """
       
         last_ai_response = getattr(response, 'content', None)
-        p8.repository(User).execute('select * from p8.update_user_model(%s, %s)', data=(metadata['userid'],last_ai_response))
+        p8.repository(User).execute('select * from p8.update_user_model(%s, %s)', data=(metadata['userid'], last_ai_response))
         logger.info(f"updated user model {metadata['userid']}")
         
     except:
         logger.warning("Problem with audit user")
         logger.warning(traceback.format_exc())
          
-           
     try:
         """audit ai responses which is only use in the agentic mode"""
         if hasattr(response, 'ai_responses'):

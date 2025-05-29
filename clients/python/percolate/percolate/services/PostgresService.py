@@ -517,7 +517,7 @@ class PostgresService:
     def update_records(
         self,
         records: typing.List[BaseModel],
-        batch_size: int = 1000,
+        batch_size: int = 100,
         index_entities: bool = False,
     ):
         """records are updated using typed object relational mapping."""
