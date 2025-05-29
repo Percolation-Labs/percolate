@@ -34,7 +34,7 @@ class ApiCallingContext(BaseModel):
     """
 
     session_id: typing.Optional[str] = Field(
-        default=None, description="A goal orientated session id"
+        default=None, description="A goal orientated session id actually maps to thread_id in the database and not session.id"
     )
 
     session_context: typing.Optional[str] = Field(
@@ -144,3 +144,4 @@ class CallingContext(ApiCallingContext):
         if model_name:
             defaults['model'] = model_name
         return CallingContext(**defaults)
+    

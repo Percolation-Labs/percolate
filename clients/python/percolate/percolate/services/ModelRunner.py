@@ -181,6 +181,10 @@ class ModelRunner:
         
     def invoke(self, function_call: FunctionCall):
         """Invoke function(s) and parse results into messages
+        
+        Test calling a function:>
+ 
+        .invoke(FunctionCall(id='test', name='some_functions', arguments={'arg': 'value'}))
 
         Args:
             function_call (FunctionCall): the payload send from an LLM to call a function
@@ -231,12 +235,12 @@ class ModelRunner:
         return [f.function_spec for _,f  in self._function_manager.functions.items()]
 
     def __call__(
-        self, question: str, context: CallingContext = None, limit: int = None,data: typing.List[dict] = None, language_model:str=None
+        self, question: str, context: CallingContext = None, limit: int = None,data: typing.List[dict] = None, language_model:str=None, audit:bool=False,
     ):
         """
         Ask a question to kick of the agent loop
         """
-        return self.run(question, context, data=data, limit=limit,language_model=language_model)
+        return self.run(question, context, data=data, limit=limit,language_model=language_model,audit=audit)
 
     def stream(self, question: str, context: CallingContext = None, limit: int = None,
                    data: typing.List[dict] = None, language_model: str = None, audit: bool = True):
@@ -266,7 +270,10 @@ class ModelRunner:
             ctx = context.in_streaming_mode(model=language_model)
         else:
             ctx = CallingContext.with_model(language_model).in_streaming_mode()
+        
+        # Store the context
         self._context = ctx
+        
         lm_client = LanguageModel.from_context(ctx)
         # The streaming generator will yield AIResponse objects for auditing directly
         
@@ -281,7 +288,7 @@ class ModelRunner:
             """
             
             """we can add a users system prompt to the generic and then merge an agents prompt after that"""
-            sys_prompt = GENERIC_P8_PROMPT if not context.plan else  f"{GENERIC_P8_PROMPT}\n\n{context.plan}"
+            sys_prompt = GENERIC_P8_PROMPT if not ctx.plan else  f"{GENERIC_P8_PROMPT}\n\n{context.plan}"
             # Initialize message stack as in run()
             payload = data if data is not None else self._init_data
             self.messages = self.agent_model.build_message_stack(
@@ -359,7 +366,7 @@ class ModelRunner:
                 """break out of the agentic loop"""
                 if saw_stop: break
                      
-        return lm_client.get_stream_iterator(_generator, context=ctx)
+        return lm_client.get_stream_iterator(_generator, context=ctx, user_query=question, audit_on_flush=audit)
                 
 
     def run(self, question: str, context: CallingContext = None, limit: int = None, data: typing.List[dict] = None, language_model:str=None, audit:bool=True):

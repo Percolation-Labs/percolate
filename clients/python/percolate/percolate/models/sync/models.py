@@ -128,7 +128,7 @@ class SyncFile(AbstractModel):
     remote_size: Optional[int] = Field(None, description="File size in bytes")
     remote_modified_at: Optional[datetime.datetime] = Field(None, description="Last modified timestamp in the remote system")
     remote_created_at: Optional[datetime.datetime] = Field(None, description="Created timestamp in the remote system")
-    remote_metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional metadata from the remote system")
+    remote_metadata: dict = Field(default_factory=dict, description="Additional metadata from the remote system")
     
     # Local file info
     s3_uri: Optional[str] = Field(None, description="S3 URI where the file is stored locally")

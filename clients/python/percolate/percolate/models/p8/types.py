@@ -571,9 +571,8 @@ class User(AbstractEntityModel):
             'Info': "You can use the users context - observe the current chat thread which may be empty when deciding if the user is referring to something they discussed recently or a new context."
                     "When you do use this context do not explain that to the user as it would be jarring for them. Freely use this context if its relevant or necessary to understand the user context."
                     "The last AI Response from the previous interaction is added for extra context and can be used if the user asks a follow up question in reference to previous response only. But dont ask them for confirmation."
-                    "If entity keys are provided you can use the get-entities lookup function to load and inspect them.",
-                    "some tools may accept a user id and you can use the user id here for those tool calls e.g. to do user specific searches"
-                    
+                    "If entity keys are provided you can use the get-entities lookup function to load and inspect them."
+                    "some tools may accept a user id and you can use the user id here for those tool calls e.g. to do user specific searches",
             'recent_threads': self.recent_threads,
             'last_ai_response': self.last_ai_response,
             'interesting_entity_keys': self.interesting_entity_keys,
@@ -777,7 +776,10 @@ class Resources(AbstractModel):
         save_to_db: bool = True
     ) -> typing.List["Resources"]:
         """
-        Create chunked resources using the new FileSystemService-based approach.
+        Create chunked resources using the FileSystemService unified approach.
+        
+        This method delegates to FileSystemService.read_chunks to ensure consistent
+        behavior across all file processing workflows.
         
         Args:
             uri: File URI (local file://, S3 s3://, or HTTP/HTTPS URL)
@@ -797,13 +799,20 @@ class Resources(AbstractModel):
             ValueError: If file type is not supported or transcription is required for audio/video in simple mode
             Exception: If parsing fails
         """
-        from percolate.services.FileSystemService import get_resource_chunker
+        from percolate.services.FileSystemService import FileSystemService
         
-        # Get the resource chunker
-        chunker = get_resource_chunker()
+        # Use FileSystemService directly to avoid circular dependencies
+        fs = FileSystemService()
         
-        # Create chunks using the new system
         try:
+            # Use read_chunks with ResourceChunker directly to avoid the circular call
+            # We call the ResourceChunker directly since read_chunks would call back to this method
+            chunker = fs._get_resource_chunker() if hasattr(fs, '_get_resource_chunker') else None
+            if not chunker:
+                # Fallback: import ResourceChunker directly
+                from percolate.services.FileSystemService import ResourceChunker
+                chunker = ResourceChunker(fs)
+            
             resources = chunker.chunk_resource_from_uri(
                 uri=uri,
                 parsing_mode=parsing_mode,
@@ -827,10 +836,10 @@ class Resources(AbstractModel):
             
             # Save to database if requested
             if save_to_db:
-                success = chunker.save_chunks_to_database(resources)
-                if not success:
-                    from percolate.utils import logger
-                    logger.warning(f"Failed to save some chunks to database for URI: {uri}")
+                import percolate as p8
+                p8.repository(cls).update_records(resources)
+                from percolate.utils import logger
+                logger.info(f"Saved {len(resources)} chunked resources to database for URI: {uri}")
             
             return resources
             

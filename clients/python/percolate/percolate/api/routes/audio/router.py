@@ -362,12 +362,7 @@ async def get_transcription(file_id: str):
         # Get the audio file
         file = await audio_controller.get_audio_file(file_id)
         
-        # Get chunks - first from test data, then from database
-        chunks = get_test_data_chunks(file_id)
-        if not chunks:
-            chunks = get_chunks_from_db(file_id)
-        
-        # Process chunks for response
+        chunks = get_chunks_from_db(file_id)
         processed_chunks = []
         full_text_segments = []
         

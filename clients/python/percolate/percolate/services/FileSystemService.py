@@ -60,6 +60,12 @@ try:
 except ImportError:
     HAS_MARKDOWN = False
 
+try:
+    from pptx import Presentation
+    HAS_PPTX = True
+except ImportError:
+    HAS_PPTX = False
+
 from percolate.services.S3Service import S3Service
 from percolate.utils import logger
 
@@ -390,14 +396,64 @@ class ExcelHandler(FileTypeHandler):
             tmp_path = tmp_file.name
         
         try:
-            # Read all sheets
             import pandas as pd
-            excel_data = pd.read_excel(tmp_path, sheet_name=None, **kwargs)
             
-            # Convert to Polars DataFrames
+            # Filter out kwargs that aren't for pandas.read_excel
+            pandas_kwargs = {k: v for k, v in kwargs.items() 
+                           if k not in ['mode']}  # Remove 'mode' and other non-pandas args
+            
+            # Try multiple engines in order of preference for performance and reliability
+            engines_to_try = []
+            
+            # Check if calamine is available (fastest, but newer)
+            try:
+                import python_calamine
+                engines_to_try.append('calamine')
+            except ImportError:
+                pass
+            
+            # Always have openpyxl as fallback
+            engines_to_try.append('openpyxl')
+            
+            excel_data = None
+            last_error = None
+            
+            for engine in engines_to_try:
+                try:
+                    logger.info(f"Attempting to read Excel file with {engine} engine")
+                    excel_data = pd.read_excel(tmp_path, sheet_name=None, engine=engine, **pandas_kwargs)
+                    logger.info(f"Successfully read Excel file with {engine} engine")
+                    break
+                except Exception as e:
+                    logger.warning(f"Failed to read Excel with {engine} engine: {e}")
+                    last_error = e
+                    continue
+            
+            if excel_data is None:
+                raise last_error or Exception("Failed to read Excel file with any available engine")
+            
+            # Convert to Polars DataFrames with robust error handling
             result = {}
             for sheet_name, df in excel_data.items():
-                result[sheet_name] = pl.from_pandas(df)
+                try:
+                    # First, try direct conversion
+                    result[sheet_name] = pl.from_pandas(df)
+                except Exception as e:
+                    logger.warning(f"Direct Polars conversion failed for sheet '{sheet_name}': {e}")
+                    try:
+                        # Fallback 1: Handle NaN values by filling with empty strings
+                        df_filled = df.fillna('')
+                        result[sheet_name] = pl.from_pandas(df_filled)
+                    except Exception as e2:
+                        logger.warning(f"NaN-filled conversion failed for sheet '{sheet_name}': {e2}")
+                        try:
+                            # Fallback 2: Convert all to string to avoid PyArrow type issues
+                            df_str = df.astype(str)
+                            result[sheet_name] = pl.from_pandas(df_str)
+                        except Exception as e3:
+                            logger.error(f"All conversion methods failed for sheet '{sheet_name}': {e3}")
+                            # Return the original pandas DataFrame if Polars conversion fails completely
+                            result[sheet_name] = df
             
             return result
         finally:
@@ -490,6 +546,165 @@ class DocxHandler(FileTypeHandler):
             os.unlink(tmp_path)
 
 
+class PPTXHandler(FileTypeHandler):
+    """Handler for PowerPoint presentations (.pptx, .ppt)"""
+    
+    def can_handle(self, file_path: str) -> bool:
+        """Check if this handler can process the file"""
+        ext = Path(file_path).suffix.lower()
+        return ext in ['.pptx', '.ppt']
+    
+    def read(self, provider: FileSystemProvider, file_path: str, **kwargs) -> Dict[str, Any]:
+        """
+        Read PPTX file and return structured data with text and optionally images.
+        
+        Args:
+            provider: File system provider
+            file_path: Path to the PPTX file
+            mode: 'simple' for text only, 'enriched' for text + LLM image analysis
+            max_images: Maximum number of images to analyze (default: 50)
+            
+        Returns:
+            Dict with slides, text_content, and optionally image_analysis
+        """
+        if not HAS_PPTX:
+            raise ImportError("PPTX support requires python-pptx: pip install python-pptx")
+        
+        # Get enhanced PPTX provider from our parsing utilities
+        try:
+            from percolate.utils.parsing.providers import PPTXContentProvider
+            pptx_provider = PPTXContentProvider()
+            
+            # Use temporary file for PPTX processing
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.pptx', delete=False) as tmp_file:
+                tmp_path = tmp_file.name
+                tmp_file.write(provider.read_bytes(file_path))
+            
+            try:
+                mode = kwargs.get('mode', 'simple')
+                max_images = kwargs.get('max_images', 50)
+                enriched = (mode == 'enriched')
+                
+                # Use our enhanced provider
+                text_content = pptx_provider.extract_text(tmp_path, enriched=enriched, max_images=max_images)
+                
+                # Also get slide-by-slide breakdown
+                prs = Presentation(tmp_path)
+                slides = []
+                
+                for slide_num, slide in enumerate(prs.slides, 1):
+                    slide_text = []
+                    for shape in slide.shapes:
+                        if hasattr(shape, "text") and shape.text.strip():
+                            slide_text.append(shape.text.strip())
+                    
+                    slides.append({
+                        'slide_number': slide_num,
+                        'text': slide_text,
+                        'combined_text': '\n'.join(slide_text)
+                    })
+                
+                result = {
+                    'slides': slides,
+                    'text_content': text_content,
+                    'total_slides': len(slides),
+                    'mode': mode,
+                    'file_path': file_path
+                }
+                
+                # Add metadata if enriched mode and images were analyzed
+                if enriched and '=== SLIDE IMAGE ANALYSIS ===' in text_content:
+                    result['has_image_analysis'] = True
+                    result['max_images_processed'] = max_images
+                else:
+                    result['has_image_analysis'] = False
+                
+                return result
+                
+            finally:
+                os.unlink(tmp_path)
+                
+        except ImportError:
+            # Fallback to basic PPTX handling without our enhanced provider
+            logger.warning("Enhanced PPTX provider not available, using basic extraction")
+            
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.pptx', delete=False) as tmp_file:
+                tmp_path = tmp_file.name
+                tmp_file.write(provider.read_bytes(file_path))
+            
+            try:
+                prs = Presentation(tmp_path)
+                slides = []
+                all_text = []
+                
+                for slide_num, slide in enumerate(prs.slides, 1):
+                    slide_text = []
+                    for shape in slide.shapes:
+                        if hasattr(shape, "text") and shape.text.strip():
+                            slide_text.append(shape.text.strip())
+                    
+                    slides.append({
+                        'slide_number': slide_num,
+                        'text': slide_text,
+                        'combined_text': '\n'.join(slide_text)
+                    })
+                    all_text.extend(slide_text)
+                
+                return {
+                    'slides': slides,
+                    'text_content': '\n\n'.join(all_text),
+                    'total_slides': len(slides),
+                    'mode': 'simple',
+                    'has_image_analysis': False,
+                    'file_path': file_path
+                }
+                
+            finally:
+                os.unlink(tmp_path)
+    
+    def write(self, provider: FileSystemProvider, file_path: str, data: Any, **kwargs) -> None:
+        """
+        Write PPTX file (limited functionality - creates basic presentation)
+        
+        Args:
+            provider: File system provider
+            file_path: Path where to write the PPTX file
+            data: Either string (single slide) or list of strings (multiple slides)
+        """
+        if not HAS_PPTX:
+            raise ImportError("PPTX support requires python-pptx: pip install python-pptx")
+        
+        import tempfile
+        
+        prs = Presentation()
+        
+        if isinstance(data, str):
+            # Single slide
+            slide = prs.slides.add_slide(prs.slide_layouts[1])  # Title and Content layout
+            slide.shapes.title.text = "Generated Slide"
+            slide.shapes.placeholders[1].text = data
+        elif isinstance(data, list):
+            # Multiple slides
+            for i, slide_content in enumerate(data):
+                slide = prs.slides.add_slide(prs.slide_layouts[1])
+                slide.shapes.title.text = f"Slide {i + 1}"
+                slide.shapes.placeholders[1].text = str(slide_content)
+        else:
+            raise ValueError(f"Unsupported data type for PPTX: {type(data)}")
+        
+        with tempfile.NamedTemporaryFile(suffix='.pptx', delete=False) as tmp_file:
+            tmp_path = tmp_file.name
+        
+        try:
+            prs.save(tmp_path)
+            with open(tmp_path, 'rb') as f:
+                provider.write_bytes(file_path, f.read())
+        finally:
+            os.unlink(tmp_path)
+
+
 class FileSystemService:
     """
     Unified file system service that provides a single interface for file operations
@@ -515,6 +730,8 @@ class FileSystemService:
             self.register_handler(ExcelHandler())
         if HAS_DOCX:
             self.register_handler(DocxHandler())
+        if HAS_PPTX:
+            self.register_handler(PPTXHandler())
     
     def register_handler(self, handler: FileTypeHandler):
         """Register a new file type handler"""
@@ -991,44 +1208,48 @@ FULL CONTENT:
         # Use the integrated ResourceChunker
         chunker = ResourceChunker(self)
         
-        # Create chunked resources directly using the model's chunked_resource method
+        # Create chunked resources using the integrated ResourceChunker to avoid circular calls
         try:
-            # Use the model's chunked_resource method if available, otherwise use chunker
-            if hasattr(model_class, 'chunked_resource'):
-                # Convert mode to parsing_mode for Resources.chunked_resource
-                parsing_mode = mode
-                
-                # Extract relevant kwargs for the chunked_resource method
-                chunk_kwargs = {
-                    'parsing_mode': parsing_mode,
-                    'chunk_size': kwargs.get('chunk_size', 1000),
-                    'chunk_overlap': kwargs.get('chunk_overlap', 200),
-                    'category': kwargs.get('category'),
-                    'name': kwargs.get('name'),
-                    'userid': kwargs.get('userid'),
-                    'metadata': kwargs.get('metadata'),
-                    'save_to_db': kwargs.get('save_to_db', False)
-                }
-                
-                # Remove None values
-                chunk_kwargs = {k: v for k, v in chunk_kwargs.items() if v is not None}
-                
-                chunks = model_class.chunked_resource(path, **chunk_kwargs)
-            else:
-                # Fallback to manual chunking for custom models
-                # Create a basic resource instance
-                file_data = self.read(path, mode=mode)
-                content = file_data if isinstance(file_data, str) else str(file_data)
-                
-                resource = model_class(
-                    uri=path,
-                    content=content,
-                    **{k: v for k, v in kwargs.items() if hasattr(model_class, k)}
-                )
-                
-                # Use the integrated ResourceChunker
-                chunker = ResourceChunker(self)
-                chunks = chunker.chunk_resource(resource=resource, mode=mode, **kwargs)
+            # Always use ResourceChunker directly to avoid circular dependency with Resources.chunked_resource
+            chunker = ResourceChunker(self)
+            
+            # Create chunks directly using the ResourceChunker
+            chunks = chunker.chunk_resource_from_uri(
+                uri=path,
+                parsing_mode=mode,
+                chunk_size=kwargs.get('chunk_size', 1000),
+                chunk_overlap=kwargs.get('chunk_overlap', 200),
+                user_id=kwargs.get('userid'),
+                metadata=kwargs.get('metadata')
+            )
+            
+            # Override any additional properties if provided and the model supports them
+            if chunks:
+                for chunk in chunks:
+                    # Override category if provided
+                    if kwargs.get('category'):
+                        chunk.category = kwargs['category']
+                    
+                    # Override name if provided
+                    if kwargs.get('name'):
+                        chunk_index = chunk.metadata.get('chunk_index', 0) if chunk.metadata else 0
+                        if chunk_index > 0:
+                            chunk.name = f"{kwargs['name']} (chunk {chunk_index + 1})"
+                        else:
+                            chunk.name = kwargs['name']
+                    
+                    # If using a custom model class, convert the chunk
+                    if model_class and model_class != type(chunk):
+                        # Try to create an instance of the custom model with the chunk data
+                        try:
+                            chunk_dict = chunk.model_dump() if hasattr(chunk, 'model_dump') else chunk.__dict__
+                            # Filter to only include fields that the custom model accepts
+                            filtered_dict = {k: v for k, v in chunk_dict.items() if hasattr(model_class, k)}
+                            custom_chunk = model_class(**filtered_dict)
+                            chunks[chunks.index(chunk)] = custom_chunk
+                        except Exception as e:
+                            logger.warning(f"Failed to convert chunk to {model_class.__name__}: {e}")
+                            # Keep the original chunk if conversion fails
             
             logger.info(f"Successfully created {len(chunks)} chunks from {path}")
             
@@ -1168,8 +1389,12 @@ class ResourceChunker:
             file_type = 'pdf'
         elif ext in ['.docx', '.doc']:
             file_type = 'docx'
+        elif ext in ['.pptx', '.ppt']:
+            file_type = 'pptx'
         elif ext in ['.csv']:
             file_type = 'csv'
+        elif ext in ['.xlsx', '.xls']:
+            file_type = 'xlsx'
         elif ext in ['.json']:
             file_type = 'json'
         elif ext in ['.html', '.htm']:
@@ -1431,7 +1656,7 @@ class ResourceChunker:
             # Already parsed as text
             return file_data
         elif isinstance(file_data, dict):
-            # Structured data (JSON, CSV as dict, etc.)
+            # Structured data (JSON, CSV as dict, Excel sheets, etc.)
             if file_type == 'csv' and 'data' in file_data:
                 # CSV data - convert to simple text format
                 rows = file_data['data']
@@ -1452,6 +1677,30 @@ class ResourceChunker:
                         lines.append(" | ".join(values))
                 
                 return "\n".join(lines)
+            elif file_type in ['xlsx', 'xls'] or any(k for k in file_data.keys() if hasattr(file_data[k], 'shape')):
+                # Excel data - convert sheets to text format
+                lines = []
+                for sheet_name, df in file_data.items():
+                    lines.append(f"=== SHEET: {sheet_name} ===")
+                    try:
+                        if hasattr(df, 'to_pandas'):
+                            # Polars DataFrame
+                            pandas_df = df.to_pandas()
+                            lines.append(pandas_df.to_string(index=False, max_rows=100))
+                        elif hasattr(df, 'to_string'):
+                            # Pandas DataFrame
+                            lines.append(df.to_string(index=False, max_rows=100))
+                        elif hasattr(df, 'shape'):
+                            # Other DataFrame-like object
+                            lines.append(str(df))
+                        else:
+                            lines.append(str(df))
+                    except Exception as e:
+                        logger.warning(f"Error converting sheet '{sheet_name}' to string: {e}")
+                        lines.append(f"[Error displaying sheet data: {e}]")
+                    lines.append("")  # Add blank line between sheets
+                
+                return "\n".join(lines)
             else:
                 # Other structured data - convert to simple string representation
                 import json
@@ -1467,6 +1716,8 @@ class ResourceChunker:
             return self._extract_extended_pdf_content(file_data, file_name, uri)
         elif file_type == 'image':
             return self._extract_extended_image_content(file_data, file_name)
+        elif file_type == 'pptx':
+            return self._extract_extended_pptx_content(file_data, file_name, uri)
         else:
             # For other file types, use simple content extraction for now
             simple_content = self._extract_simple_content(file_data, file_type)
@@ -1604,6 +1855,43 @@ Analysis provided by: {result['provider']} ({result.get('model', 'unknown model'
         except Exception as e:
             logger.error(f"Error in extended image processing: {str(e)}")
             return f"Image file: {file_name} (analysis error: {str(e)})"
+    
+    def _extract_extended_pptx_content(self, pptx_data: Dict[str, Any], file_name: str, uri: str = None) -> str:
+        """Extract content from PPTX using enhanced parsing with LLM image analysis."""
+        try:
+            # The pptx_data already contains the results from our PPTXHandler
+            # which includes image analysis if available
+            
+            if isinstance(pptx_data, dict) and 'text_content' in pptx_data:
+                # Check if our enhanced parsing already included image analysis
+                if pptx_data.get('has_image_analysis', False):
+                    logger.info(f"PPTX {file_name} already includes image analysis from enhanced provider")
+                    return pptx_data['text_content']
+                else:
+                    # No image analysis was done, but we have the structured data
+                    # Let's try to trigger image analysis if the LLM is available
+                    logger.info(f"Attempting additional image analysis for PPTX {file_name}")
+                    
+                    # Re-read the file with enriched mode to get image analysis
+                    if uri:
+                        try:
+                            # Use the FileSystemService to re-read with enriched mode
+                            temp_fs = FileSystemService(self.s3_service if hasattr(self, 's3_service') else None)
+                            enhanced_result = temp_fs.read(uri, mode='enriched', max_images=50)
+                            if isinstance(enhanced_result, dict) and enhanced_result.get('has_image_analysis', False):
+                                return enhanced_result['text_content']
+                        except Exception as e:
+                            logger.warning(f"Failed to get enhanced PPTX analysis: {e}")
+                    
+                    # Fallback to existing content
+                    return pptx_data['text_content']
+            else:
+                # Fallback for non-dict data
+                return str(pptx_data)
+                
+        except Exception as e:
+            logger.error(f"Error in extended PPTX processing: {str(e)}")
+            return f"PPTX file: {file_name} (extended analysis error: {str(e)})"
     
     def _create_text_chunks(
         self,

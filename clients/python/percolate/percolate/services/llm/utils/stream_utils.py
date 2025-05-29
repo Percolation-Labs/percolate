@@ -465,27 +465,36 @@ class LLMStreamIterator:
     - Yield SSE-formatted lines via iter_lines(), compatible with OpenAI-style streaming.
     - Aggregate text content deltas into a final content string accessible via the .content property.
     - Collect AIResponse objects for each tool call response in the .ai_responses list, for auditing.
+    - Optionally audit the entire response when stream is finished using the audit_on_flush flag.
 
     Attributes:
         ai_responses (List[AIResponse]): Captured AIResponse objects from tool call executions.
         content (str): Full aggregated content sent to the user; available after iter_lines() is fully consumed.
         scheme (str): Dialect of the LLM API (e.g., 'openai', 'anthropic', 'google').
         usage (dict): Token usage dict (e.g., prompt_tokens, completion_tokens, total_tokens) from the final SSE chunk; available after iter_lines() consumption.
+        audit_on_flush (bool): If True, will audit the complete response after stream is finished.
     """
-    def __init__(self, g, context=None, scheme:str='openai'):
+    def __init__(self, g, context=None, scheme:str='openai', user_query:str=None, audit_on_flush:bool=False):
         self.g = g
+        self.user_query = user_query
         self.ai_responses = []
         self._is_consumed = False
         self._content = ""
         self.scheme = scheme
         self.context = context
+        self.audit_on_flush = audit_on_flush
         # Holds LLM token usage from the final SSE chunk (prompt, completion, total)
         self._usage = {}
+        # Tool calls collected during streaming
+        self._tool_calls = []
+        # Tool responses collected during streaming
+        self._tool_responses = {}
         
     """return the response object """
     def iter_lines(self, **kwargs):
         """
         Yield SSE-formatted bytes while aggregating content deltas and capturing token usage.
+        When audit_on_flush is True, this will audit the complete response after stream is done.
         """
         self._is_consumed = False
         for item in self.g():
@@ -496,10 +505,65 @@ class LLMStreamIterator:
             try:
                 for piece in _parse_open_ai_response(item):
                     self._content += piece
+                
+                # Try to extract tool calls if present
+                try:
+                    if isinstance(item, str):
+                        data = json.loads(item[6:])
+                    else:
+                        data = item
+                    
+                    # Extract usage information
+                    if "usage" in data:
+                        self._usage = data["usage"]
+                    
+                    # Extract tool calls
+                    if "choices" in data and data["choices"]:
+                        choice = data["choices"][0]
+                        if choice.get("finish_reason") == "tool_calls":
+                            delta = choice.get("delta", {})
+                            if "tool_calls" in delta:
+                                for tool_call in delta["tool_calls"]:
+                                    if "id" in tool_call:
+                                        self._tool_calls.append(tool_call)
+                except Exception:
+                    pass
             except Exception:
                 pass
+            
             yield item.encode('utf-8') ##SSE
+        
         self._is_consumed = True
+        
+        # Audit the response if audit_on_flush is True
+        if self.audit_on_flush:
+            self._audit_response()
+    
+    def _audit_response(self):
+        """
+        Audit the complete response after stream is finished.
+        Uses the audit_response_for_user method which provides a more comprehensive audit.
+        """
+        try:
+            from percolate.services.llm.proxy.utils import audit_response_for_user
+            import uuid
+            
+            logger.info(f"Auditing stream response, content length: {len(self._content)}")
+            
+            # Make sure context has a session_id
+            if self.context and not getattr(self.context, 'session_id', None):
+                self.context.session_id = str(uuid.uuid4())
+                logger.debug(f"Generated new session_id for audit: {self.context.session_id}")
+            
+            # Use the more comprehensive audit_response_for_user method
+            audit_response_for_user(
+                response=self,
+                context=self.context,
+                query=self.user_query
+            )
+            
+        except Exception as e:
+            logger.error(f"Error auditing stream response: {e}")
    
     @property
     def status_code(self):

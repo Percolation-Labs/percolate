@@ -474,32 +474,10 @@ class LanguageModel:
             function_stack=function_stack,
         )
         
-        # If we're configured to audit, send to background worker
-        if getattr(ctx, 'audit', True):
-            self._audit_response(ai_response)
-            
+        # Note: We're no longer auditing individual responses here
+        # Auditing is now done comprehensively at the end of the stream using audit_response_for_user
+        
         return ai_response
-        
-    def _audit_response(self, response: AIResponse) -> None:
-        """
-        Send an AIResponse to the background audit worker.
-        
-        Args:
-            response: The AIResponse to audit
-        """
-        try:
-            from percolate.services.llm.proxy.utils import BackgroundAudit
-            
-            # Get or create a background auditor
-            if not hasattr(self, '_auditor'):
-                self._auditor = BackgroundAudit()
-                
-            # Send to background worker
-            self._auditor.add_response(response)
-            
-        except Exception as ex:
-            logger.warning(f"Failed to audit AIResponse: {ex}")
-            # Don't raise - auditing failures shouldn't block the response flow
     
     def stream_with_proxy(self, messages, functions, context):
         """
@@ -543,14 +521,21 @@ class LanguageModel:
             relay_usage_events=False  
         )
         
-    def get_stream_iterator(self, content_generator, context:CallingContext):
+    def get_stream_iterator(self, content_generator, context:CallingContext, user_query:str=None, audit_on_flush:bool=False):
         """
         The stream iterator is a wrapper that helps with custom streaming logic, formatting and auditing
+        
+        Args:
+            content_generator: Generator function that yields content
+            context: CallingContext with user and session info
+            audit_on_flush: If True, will audit the complete response when stream is done
         """
         # Wrap the streaming generator and collected AIResponses for auditing
         return LLMStreamIterator(
             content_generator,
             scheme=self._scheme,
-            context=context
+            context=context,
+            user_query=user_query,
+            audit_on_flush=audit_on_flush
         )
         

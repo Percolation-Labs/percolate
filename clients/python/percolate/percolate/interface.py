@@ -26,6 +26,24 @@ def set_custom_model_provider(fn):
 def settings(key, default=None):
     return SETTINGS.get(key,default)
 
+def try_load_model(name):
+    """load the model in different ways"""
+    M = custom_load_model(name)
+    if not M:
+        try:
+            M = load_model(name)
+        except:
+            pass
+        
+    """last resort create custom which can be used from db but we need a strong sense of loading a model from database with schema and functions TODO:"""
+    if not M:
+        namespace, name = name.split('.')
+        M = AbstractModel.create_model(name=name, 
+                                       namespace=namespace,
+                                       description="Please use the search facility to answer the users question")
+        
+    return M
+
 def custom_load_model(name):
     """if the custom model loader is specified we can do this"""
     loader = CUSTOM_PROVIDER.get('data')
@@ -107,15 +125,17 @@ def summarize(data:str,context:str):
     return request_openai(stack,None)
     
 
-def get_entities(keys: str | typing.List)->typing.List[dict]:
+def get_entities(keys: str | typing.List, allow_fuzzy_match: bool = False, similarity_threshold: float = 0.3)->typing.List[dict]:
     """
     get entities from their keys in the database
     
     **Args:
         keys: one or more keys 
+        allow_fuzzy_match: if True, uses fuzzy matching to find similar entity names
+        similarity_threshold: threshold for fuzzy matching (default 0.3, lower values are more permissive)
     """
 
-    data =  PostgresService().get_entities(keys)
+    data =  PostgresService().get_entities(keys, allow_fuzzy_match=allow_fuzzy_match, similarity_threshold=similarity_threshold)
  
     return data
 

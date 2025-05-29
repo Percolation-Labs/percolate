@@ -110,6 +110,28 @@ def _get_s3_config(use_aws: bool) -> Dict[str, Any]:
         if endpoint_url and not endpoint_url.startswith("http"):
             endpoint_url = f"https://{endpoint_url}"
         
+        # For custom S3 providers, try to add checksum calculation settings
+        # These are important for non-AWS providers but may not be supported in all boto3 versions
+        boto3_config_kwargs = {
+            'signature_version': 's3v4',
+            's3': {'addressing_style': 'path'}
+        }
+        
+        # Try to add checksum settings for custom S3 providers (Hetzner, MinIO, etc.)
+        try:
+            boto3_config_kwargs.update({
+                'request_checksum_calculation': "when_required", 
+                'response_checksum_validation': "when_required"
+            })
+            boto3_config = boto3.session.Config(**boto3_config_kwargs)
+        except TypeError:
+            # Fallback for older boto3 versions that don't support these parameters
+            logger.warning("boto3 version doesn't support checksum calculation parameters, using basic config")
+            boto3_config = boto3.session.Config(
+                signature_version='s3v4',
+                s3={'addressing_style': 'path'}
+            )
+        
         config = {
             'credentials': {
                 'access_key': env_config['access_key'],
@@ -117,12 +139,7 @@ def _get_s3_config(use_aws: bool) -> Dict[str, Any]:
             },
             'endpoint_url': endpoint_url,
             'bucket': env_config['bucket'],
-            'boto3_config': boto3.session.Config(
-                signature_version='s3v4',
-                s3={'addressing_style': 'path'},
-                request_checksum_calculation="when_required", 
-                response_checksum_validation="when_required"
-            ),
+            'boto3_config': boto3_config,
             'provider_type': 'custom'
         }
     
@@ -155,8 +172,7 @@ class S3Service:
     def __init__(self, 
                  access_key: str = None, 
                  secret_key: str = None, 
-                 endpoint_url: str = None,
-                 use_aws: bool = None
+                 endpoint_url: str = None
                  ):
         """
         Initialize the S3 service with simplified configuration.
@@ -165,14 +181,10 @@ class S3Service:
             access_key: S3 access key (optional - will use environment)
             secret_key: S3 secret key (optional - will use environment)
             endpoint_url: S3 endpoint URL (optional - will use environment)
-            use_aws: Force AWS mode (optional - will auto-detect from environment)
         """
         
-        # Determine if we should use AWS
-        if use_aws is None:
-            self.use_aws = _should_use_aws()
-        else:
-            self.use_aws = use_aws
+        # Determine if we should use AWS based on environment
+        self.use_aws = _should_use_aws()
         
         logger.trace(f"Initializing S3Service: {'AWS' if self.use_aws else 'Custom S3'} mode")
         

@@ -247,3 +247,106 @@ def format_tool_calls_for_openai(tool_calls: typing.List[dict]) -> typing.List[d
         })
     
     return openai_tool_calls
+
+
+def audit_response_for_user(response, context, query: str = None):
+    """
+    Audit an LLM response for a user based on context information.
+    
+    This function creates audit records for both the session and the user model,
+    and handles AIResponse objects if they exist in the response. It's designed to work
+    with LLMStreamIterator or similar response objects that have been collected
+    into a complete response.
+    
+    Args:
+        response: The complete response object with content and usage information
+        context: The CallingContext object containing user information
+        query: Optional query string if not available from context
+    
+    Returns:
+        None
+    """
+    try:
+        from percolate.models import Session, User, AIResponse
+        from percolate.utils import make_uuid, logger
+        import percolate as p8
+        
+        # Extract user information from context
+        user_id = None
+        if context.user_id:
+            user_id = context.user_id
+        elif context.username:
+            # Try to resolve username to user_id
+            if '@' in context.username:
+                # Treat as email and hash it
+                user_id = make_uuid(context.username.lower())
+            else:
+                # Try to lookup the user by username or ID
+                try:
+                    query_id_or_email = "SELECT * FROM p8.\"User\" WHERE id::TEXT = %s OR email = %s"
+                    user_result = p8.repository(User).execute(
+                        query_id_or_email, 
+                        data=(context.username, context.username)
+                    )
+                    if user_result:
+                        user_id = user_result[0]['id']
+                except Exception as e:
+                    logger.warning(f"Failed to lookup user by username: {e}")
+        
+        # Get response content and session information
+        content = getattr(response, 'content', str(response))
+        
+        # Make sure we have a valid session_id
+        session_id = getattr(response, 'session_id', None)
+        if not session_id and context:
+            session_id = getattr(context, 'session_id', None)
+        if not session_id:
+            session_id = str(uuid.uuid4())
+            logger.debug(f"Generated new session_id for audit: {session_id}")
+        
+        # Prepare metadata
+        channel_ts = getattr(context, 'channel_ts', None) if context else None
+        thread_id = getattr(context, 'session_id', None) if context else None
+        
+        metadata = {
+            'userid': user_id,
+            'channel_id': channel_ts,
+            'thread_id': thread_id,
+            'query': query or (getattr(context, 'plan', '') if context else '')
+        }
+        
+        # Audit Session
+        try:
+            session = Session(id=session_id, **metadata)
+            p8.repository(Session).update_records(session)
+            logger.info(f"Audited session: {session_id} for metadata {metadata}")
+        except Exception as e:
+            logger.warning(f"Problem with audit session: {e}")
+        
+        # Update user model if we have a user ID
+        if user_id:
+            try:
+                # Get the response content for user model update
+                response_content = str(content)
+                p8.repository(User).execute(
+                    'SELECT * FROM p8.update_user_model(%s, %s)', 
+                    data=(user_id, response_content)
+                )
+                logger.info(f"Updated user model for: {user_id}")
+            except Exception as e:
+                logger.warning(f"Problem updating user model: {e}")
+        else:
+            logger.warning("No user ID available for user model update")
+        
+        # Audit AI responses if present
+        try:
+            if hasattr(response, 'ai_responses') and response.ai_responses:
+                p8.repository(AIResponse).update_records(response.ai_responses)
+                logger.debug(f"Added {len(response.ai_responses)} AI Response records")
+        except Exception as e:
+            logger.warning(f"Problem with AI response audit: {e}")
+    
+    except Exception as e:
+        logger.error(f"Error in audit_response_for_user: {e}")
+        import traceback
+        logger.error(traceback.format_exc())

@@ -171,22 +171,43 @@ async def upload_uri(request : dict,
         
     def index_resources():
         try: 
-      
-            """upsert the resource - allowing for aliases at least for now"""
-             #the intent is the default but the user does not 'own' this public resource and we can process resources in the background - the session stores the user intent
-            head =resources = Resources(name=resource_title,
-                                        content=intent,
-                                        summary = intent, 
-                                        uri = uri,
-                                        userid=None if is_public_resource else user_id)    
-            length = 1
             if expand_resource:
-                """we attempt to fetch the resource in markdown for the default provider"""
-                resources = Resources.chunked_resource(uri,
-                                                       try_markdown=True,
-                                                       name=resource_title, userid= None if is_public_resource else user_id) 
-                head = resources[0]
-                length = len(resources)
+                """Use the new FileSystemService for resource expansion/chunking"""
+                from percolate.services.FileSystemService import FileSystemService
+                
+                # Initialize FileSystemService which auto-configures for web URIs
+                fs = FileSystemService()
+                
+                # Use the modern read_chunks method with web content support
+                resources = list(fs.read_chunks(
+                    path=uri,
+                    mode='simple',  # Use simple mode for web content
+                    chunk_size=1000,  # Standard chunk size  
+                    chunk_overlap=200,  # Standard overlap
+                    userid=None if is_public_resource else user_id,
+                    name=resource_title,
+                    save_to_db=False  # We'll save manually for better control
+                ))
+                
+                if resources:
+                    head = resources[0]
+                    length = len(resources)
+                else:
+                    # Fallback to simple resource if chunking fails
+                    head = resources = Resources(name=resource_title,
+                                                content=intent,
+                                                summary = intent, 
+                                                uri = uri,
+                                                userid=None if is_public_resource else user_id)    
+                    length = 1
+            else:
+                """Simple resource creation without expansion"""
+                head = resources = Resources(name=resource_title,
+                                            content=intent,
+                                            summary = intent, 
+                                            uri = uri,
+                                            userid=None if is_public_resource else user_id)    
+                length = 1
             
             """link the resource to sessions
             We store only the head resource in the session for IIR for now
@@ -197,7 +218,7 @@ async def upload_uri(request : dict,
             p8.repository(Resources).update_records(resources)
             p8.repository(SessionResources).update_records(tr)
             
-            logger.debug(f"Saved task resource {tr=}")
+            logger.debug(f"Saved task resource {tr=} using {'FileSystemService chunking' if expand_resource else 'simple resource'}")
         except:
             logger.warning(f"Failing background task")
             logger.warning(f"{traceback.format_exc()}")
@@ -285,17 +306,34 @@ async def upload_file(background_tasks: BackgroundTasks,
             """we are always auditing intent"""
             p8.repository(Session).update_records(task)   
 
-            """TODO in future push down S3 urls and add a provider that the chunker and maybe the database can use"""
-            resources = Resources.chunked_resource(name=file.filename, uri=uri,userid=effective_user_id)
+            """Use the new FileSystemService chunking method that works with S3 URIs"""
+            from percolate.services.FileSystemService import FileSystemService
+            
+            # Initialize FileSystemService which auto-configures S3
+            fs = FileSystemService()
+            
+            # Use the modern read_chunks method with proper S3 URI support
+            resources = list(fs.read_chunks(
+                path=uri,
+                mode='simple',  # Use simple mode for faster processing
+                chunk_size=1000,  # Standard chunk size
+                chunk_overlap=200,  # Standard overlap
+                userid=effective_user_id,
+                name=file.filename,
+                save_to_db=False  # We'll save manually for better control
+            ))
             
             if resources:
+                # Save all chunks to database
                 _ = p8.repository(Resources).update_records(resources)
                 """resources can be stored as chunked but we store a ref to the head only"""
                 tr = SessionResources(resource_id=resources[0].id, session_id=task_id,count=len(resources))
                 """for now we insert seps but in future we will have a function for this"""
                 p8.repository(SessionResources).update_records(tr)
                 
-                logger.debug(f"uploaded {len(resources)} resource chunks ref={uri}")
+                logger.debug(f"uploaded {len(resources)} resource chunks using FileSystemService ref={uri}")
+            else:
+                logger.warning(f"No resources created from {uri} - file may be empty or unsupported")
         except:
             logger.warning(f"Failing background task")
             logger.warning(f"{traceback.format_exc()}")     

@@ -62,7 +62,7 @@ class PercolateFS:
     def aws_fs_service(self) -> FileSystemService:
         """Get or create the AWS FileSystemService instance"""
         if self._aws_fs_service is None:
-            self._aws_fs_service = FileSystemService(use_aws=True)
+            self._aws_fs_service = FileSystemService()
         return self._aws_fs_service
     
     def _get_service(self, path: str) -> FileSystemService:
