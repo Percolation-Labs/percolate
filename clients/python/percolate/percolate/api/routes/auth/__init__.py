@@ -86,7 +86,6 @@ def get_user_from_session(request: Request) -> typing.Optional[str]:
         The user ID if available, None otherwise
     """
     try:
-    
         session =  request.session
       
         # Try to get user info from the session
@@ -97,7 +96,6 @@ def get_user_from_session(request: Request) -> typing.Optional[str]:
             token = request.cookies.get('session')
             logger.debug(f"treating session as token - will try extract from cookie as token")
          
-           
         user_id, email, username = extract_user_info_from_token(token)
         logger.debug(f"Extracted: user_id={user_id}, email={email}, username={username}")
         
@@ -140,7 +138,9 @@ def get_user_id(
 class HybridAuth:
     """
     Dependency class that supports both bearer token and session authentication.
-    - Bearer token: Valid API key allows access without user context (for testing/API access)
+    - Bearer token: Valid API key allows access with optional user context:
+      * From user_id query parameter (direct user ID)
+      * From X-User-Email header (resolves to user ID via database lookup)
     - Session: Extracts user_id from session for logged-in users
     """
     
@@ -177,18 +177,28 @@ class HybridAuth:
                 await get_api_key(credentials)
                 logger.debug("Authenticated via bearer token")
                 
-                # Check for user_id in header first, then query params
-                user_id_from_header = request.headers.get('X-User-ID') or request.headers.get('x-user-id')
+                # Only check for user_id in query params (not headers)
                 user_id_from_query = request.query_params.get('user_id')
                 
-                user_id = user_id_from_header or user_id_from_query
+                if user_id_from_query:
+                    logger.debug(f"Bearer token auth with user_id from query param: {user_id_from_query}")
+                    return user_id_from_query
                 
-                if user_id:
-                    logger.debug(f"Bearer token auth with user_id: {user_id}")
-                    return user_id
-                else:
-                    logger.debug("Bearer token auth with no user context")
-                    return None  # Valid bearer token but no user context
+                # If no user_id provided directly, check for email in header
+                user_email = request.headers.get('X-User-Email') or request.headers.get('x-user-email')
+                if user_email:
+                    logger.debug(f"Trying to resolve user_id from email header: {user_email}")
+                    # Look up user by email
+                    user = get_user_from_email(user_email)
+                    if user and user.get('id'):
+                        logger.debug(f"Resolved user_id from email: {user.get('id')}")
+                        return str(user.get('id'))
+                    else:
+                        logger.warning(f"Could not resolve user from email: {user_email}")
+                
+                # If we get here, no user context was found
+                logger.debug("Bearer token auth with no user context")
+                return None  # Valid bearer token but no user context
                     
             except HTTPException:
                 logger.debug("Bearer token validation failed")
