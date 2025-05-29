@@ -295,21 +295,31 @@ def audit_response_for_user(response, context, query: str = None):
         
         # Get response content and session information
         content = getattr(response, 'content', str(response))
-        session_id = getattr(response, 'session_id', getattr(context, 'session_id', str(uuid.uuid4())))
+        
+        # Make sure we have a valid session_id
+        session_id = getattr(response, 'session_id', None)
+        if not session_id and context:
+            session_id = getattr(context, 'session_id', None)
+        if not session_id:
+            session_id = str(uuid.uuid4())
+            logger.debug(f"Generated new session_id for audit: {session_id}")
         
         # Prepare metadata
+        channel_ts = getattr(context, 'channel_ts', None) if context else None
+        thread_id = getattr(context, 'session_id', None) if context else None
+        
         metadata = {
             'userid': user_id,
-            'channel_id': context.channel_ts,
-            'thread_id': context.channel_ts,
-            'query': query or getattr(context, 'plan', '')
+            'channel_id': channel_ts,
+            'thread_id': thread_id,
+            'query': query or (getattr(context, 'plan', '') if context else '')
         }
         
         # Audit Session
         try:
             session = Session(id=session_id, **metadata)
             p8.repository(Session).update_records(session)
-            logger.info(f"Audited session: {session_id}")
+            logger.info(f"Audited session: {session_id} for metadata {metadata}")
         except Exception as e:
             logger.warning(f"Problem with audit session: {e}")
         

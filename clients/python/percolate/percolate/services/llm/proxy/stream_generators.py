@@ -200,7 +200,10 @@ def flush_ai_response_audit(
     usage: typing.Dict[str, int]
 ) -> None:
     """
-    Flush AI response data to audit storage using the background worker.
+    [DEPRECATED] This function has been replaced by audit_response_for_user.
+    
+    Use audit_response_for_user with LLMStreamIterator.audit_on_flush=True instead.
+    This function remains for backward compatibility but only logs a warning.
     
     Args:
         content: The text content
@@ -208,9 +211,11 @@ def flush_ai_response_audit(
         tool_responses: Dictionary of tool responses by tool call ID
         usage: Token usage information
     """
-    # Use the background auditor instance method
-    auditor = BackgroundAudit()
-    auditor.flush_ai_response_audit(content, tool_calls, tool_responses, usage)
+    logger.warning(
+        "flush_ai_response_audit is deprecated. "
+        "Use LLMStreamIterator with audit_on_flush=True instead, "
+        "which will call audit_response_for_user at the end of the stream."
+    )
 
 
 def request_stream_from_model(
