@@ -48,8 +48,20 @@ class ModelRunner:
         self._function_manager = FunctionManager()
         """the help option links in to the function manager planner"""
         self._allow_help = allow_help
+        
+        # Get user context for row-level security
+        self.user_id = kwargs.get('user_id')
+        self.user_groups = kwargs.get('user_groups')
+        self.role_level = kwargs.get('role_level')
+        
         """the repository provides the Percolate database instance"""
-        self.repo = p8.repository(self.agent_model)
+        self.repo = p8.repository(
+            self.agent_model,
+            user_id=self.user_id,
+            user_groups=self.user_groups,
+            role_level=self.role_level
+        )
+        
         """initialize activates the agent model e.g. functions and prompt for use"""
         self.initialize()
         """the messages stack is the most important control element for llm agent sessions"""
@@ -91,9 +103,15 @@ class ModelRunner:
             questions: ask one or more questions to search the data store
             user_id: optional user identifier (email or UUID) for access control
         """
-        # If no user_id provided, try to get from context
-        if user_id is None and self._context and self._context.username:
-            user_id = self._context.username
+        # If no user_id provided, try to get from:
+        # 1. Explicitly passed user_id parameter
+        # 2. Context username
+        # 3. ModelRunner's stored user_id
+        if user_id is None:
+            if self._context and self._context.username:
+                user_id = self._context.username
+            else:
+                user_id = self.user_id
         
         # Coerce to string for database
         if user_id:

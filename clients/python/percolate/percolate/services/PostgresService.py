@@ -10,6 +10,8 @@ from percolate.utils.env import (
     POSTGRES_DB,
     POSTGRES_SERVER,
     DEFAULT_CONNECTION_TIMEOUT,
+    SYSTEM_USER_ID,
+    SYSTEM_USER_ROLE_LEVEL,
 )
 import psycopg2.extras
 from psycopg2 import sql
@@ -30,19 +32,47 @@ class PostgresService:
         model: BaseModel = None,
         connection_string=None,
         on_connect_error: str = None,
+        user_id=None,
+        user_groups=None,
+        role_level=None,
     ):
         try:
             self._connection_string = connection_string or POSTGRES_CONNECTION_STRING
             self.conn = None
             self._graph = PercolateGraph(self)
             self.helper = SqlModelHelper(AbstractModel)
+            
+            # Store user context for row-level security
+            # If no user ID is provided, use the system user ID
+            self.user_id = user_id if user_id is not None else SYSTEM_USER_ID
+            self.user_groups = user_groups or []
+            
+            # Set initial role_level (may be updated during user context loading)
+            if role_level is not None:
+                self.role_level = role_level
+            elif self.user_id == SYSTEM_USER_ID:
+                self.role_level = SYSTEM_USER_ROLE_LEVEL
+            else:
+                # For non-system users, we'll load from the database
+                self.role_level = 100  # Default to public until we load from database
+            
+            # Flag to track if we need to load user context from database
+            self._need_user_context = (user_id is not None and 
+                                       user_id != SYSTEM_USER_ID and 
+                                       (role_level is None or not user_groups))
+            
             if model:
                 """we do this because its easy for user to assume the instance is what we want instead of the type"""
                 self.model = AbstractModel.Abstracted(ensure_model_not_instance(model))
                 self.helper: SqlModelHelper = SqlModelHelper(model)
             else:
                 self.model = None
+                
             self.conn = psycopg2.connect(self._connection_string)
+            
+            # Apply user context when connection is established
+            if self.conn:
+                self._apply_user_context()
 
         except:
             if on_connect_error != "ignore":
@@ -95,13 +125,71 @@ class PostgresService:
         try:
             if self.conn is None:
                 self.conn = open_connection_with_retry(self._connection_string)
+                # Apply user context after reopening
+                self._apply_user_context()
             self.conn.poll()
         except psycopg2.InterfaceError as error:
             self.conn = None  # until we can open it, lets not trust it
             self.conn = open_connection_with_retry(self._connection_string)
+            # Apply user context after reopening
+            self._apply_user_context()
 
+    
+    def _apply_user_context(self):
+        """Apply user context to the PostgreSQL session for row-level security"""
+        if not self.conn:
+            return
+            
+        # Apply context to database session using the p8.set_user_context function
+        cursor = self.conn.cursor()
+        try:
+            # If we have a user_id, use the p8.set_user_context function to set all session variables
+            if self.user_id:
+                # The set_user_context function will:
+                # 1. Set percolate.user_id session variable
+                # 2. Set percolate.role_level session variable (loading from DB if not provided)
+                # 3. Set percolate.user_groups in the future when implemented
+                
+                # Only provide role_level if explicitly set in the constructor
+                if self.role_level is not None and self.role_level != 100:
+                    # Call with explicit role_level
+                    cursor.execute(
+                        f"SELECT p8.set_user_context('{str(self.user_id)}'::UUID, {str(self.role_level)});"
+                    )
+                else:
+                    # Let the function auto-load role_level from the database
+                    cursor.execute(
+                        f"SELECT p8.set_user_context('{str(self.user_id)}'::UUID);"
+                    )
+                
+                # If role_level wasn't explicitly provided, query it back so our local state matches
+                if self.role_level is None or self.role_level == 100:
+                    cursor.execute("SELECT current_setting('percolate.role_level')::INTEGER AS role_level;")
+                    result = cursor.fetchone()
+                    if result:
+                        self.role_level = result[0]
+            
+            # Apply user_groups separately for now (will be integrated into set_user_context later)
+            if self.user_groups:
+                # Convert list to PostgreSQL array syntax
+                if isinstance(self.user_groups, list):
+                    groups_array = "{" + ",".join([str(g) for g in self.user_groups]) + "}"
+                    cursor.execute("SET percolate.user_groups = %s", (groups_array,))
+            
+            # Commit changes
+            self.conn.commit()
+            
+            # Don't need to fetch context again unless connection is reset
+            self._need_user_context = False
+        except Exception as e:
+            logger.warning(f"Error applying user security context: {str(e)}")
+            # If the function failed, fall back to the old approach or just continue without security
+        finally:
+            cursor.close()
+    
     def _connect(self):
         self.conn = psycopg2.connect(self._connection_string)
+        self._apply_user_context()
         return self.conn
 
     @property
@@ -124,8 +212,14 @@ class PostgresService:
 
     def repository(self, model: BaseModel, **kwargs) -> "PostgresService":
         """a connection in the context of the abstract model for crud support"""
+        # Pass through user context to new repository unless overridden in kwargs
         return PostgresService(
-            model=model, connection_string=self._connection_string, **kwargs
+            model=model, 
+            connection_string=self._connection_string, 
+            user_id=kwargs.pop("user_id", self.user_id),
+            user_groups=kwargs.pop("user_groups", self.user_groups),
+            role_level=kwargs.pop("role_level", self.role_level),
+            **kwargs
         )
 
     def get_entities(self, keys: str | typing.List[str], userid: str = None, allow_fuzzy_match: bool = False, similarity_threshold: float = 0.3):

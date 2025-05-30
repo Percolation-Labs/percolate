@@ -140,7 +140,7 @@ class HybridAuth:
     Dependency class that supports both bearer token and session authentication.
     - Bearer token: Valid API key allows access with optional user context:
       * From user_id query parameter (direct user ID)
-      * From X-User-Email header (resolves to user ID via database lookup)
+      * From X-User-Email or X-OpenWebUI-User-Email header (resolves to user ID via database lookup)
     - Session: Extracts user_id from session for logged-in users
     """
     
@@ -157,6 +157,7 @@ class HybridAuth:
         # Debug logging
         session_cookie = request.cookies.get('session')
         logger.debug(f"HybridAuth - Session cookie present: {bool(session_cookie)}")
+        logger.debug(f"HybridAuth - Request headers: {dict(request.headers)}")
         
         # First, try session authentication
         try:
@@ -185,7 +186,10 @@ class HybridAuth:
                     return user_id_from_query
                 
                 # If no user_id provided directly, check for email in header
-                user_email = request.headers.get('X-User-Email') or request.headers.get('x-user-email')
+                user_email = (request.headers.get('X-User-Email') or 
+                             request.headers.get('x-user-email') or 
+                             request.headers.get('X-OpenWebUI-User-Email') or 
+                             request.headers.get('x-openwebui-user-email'))
                 if user_email:
                     logger.debug(f"Trying to resolve user_id from email header: {user_email}")
                     # Look up user by email
