@@ -18,6 +18,7 @@ import json
 from percolate.utils import get_iso_timestamp
 import hashlib
 from enum import Enum
+from .db_types import AccessLevel
 #we shouldnt really need a logger her but we have temp functions being exported to apis
 from percolate.utils import logger 
 class Function(AbstractEntityModel):
@@ -332,7 +333,10 @@ class AIResponse(TokenUsage):
     We generate questions with sessions and then that triggers an exchange. 
     Normally the Dialogue is round trip transaction.
     """
-    model_config = {'protected_namespaces': ()}
+    model_config = {
+        'protected_namespaces': (),
+        'access_level': AccessLevel.ADMIN  # Admin access level
+    }
     id: uuid.UUID| str  
     role: str = Field(description="The role of the user/agent in the conversation")
     content: str = DefaultEmbeddingField(description="The content for this part of the conversation") #TODO we may not want to automatically generate embeddings for this table
@@ -376,6 +380,9 @@ class Session(AbstractModel):
     
     Sessions model user intent.
     """
+    model_config = {
+        'access_level': AccessLevel.ADMIN  # Admin access level
+    }
     id: uuid.UUID| str  
     """i should maybe deprecate the name here as this is a dense audit but then maybe we should just archive?"""
     name: typing.Optional[str] = Field(None, description="The name is a pseudo name to make sessions node-compatible")
@@ -526,6 +533,9 @@ If the user asks to look for existing plans, you should ask the research agent t
     
 class User(AbstractEntityModel):
     """A model of a logged in user"""
+    model_config = {
+        'access_level': AccessLevel.ADMIN  # Admin access
+    }
     id: uuid.UUID| str  
     name: typing.Optional[str] = Field(None,description="A display name for a user")
     email: typing.Optional[str] = KeyField(None,description="email of the user if we know it - the key must be something unique like this")
@@ -543,9 +553,24 @@ class User(AbstractEntityModel):
     session_id: typing.Optional[str] = Field(None, description="Last session ID for the user")
     last_session_at: typing.Optional[datetime.datetime] = Field(None, description="Last session activity timestamp")
     roles: typing.Optional[typing.List[str]] = Field(default_factory=list, description="A list of roles the user is a member of")
+    
+    # Security fields for row-level security
+    role_level: typing.Optional[int] = Field(AccessLevel.PUBLIC, description="User's role level for security (0=God, 1=Admin, 5=Internal, 10=Partner, 100=Public)")
+    groups: typing.Optional[typing.List[str]] = Field(default_factory=list, description="List of groups the user belongs to")
+    
     graph_paths: typing.Optional[typing.List[str]] = Field(None, description="Track all paths extracted by an agent as used to build the KG")
     metadata: typing.Optional[dict] = Field(default_factory=dict, description="Arbitrary user metadata")
     email_subscription_active: typing.Optional[bool] = Field(False, description="Users can opt in and out of emails")
+    userid: typing.Optional[uuid.UUID| str] = Field(None, description="Allow setting user id by default")
+      
+    @model_validator(mode='before')
+    @classmethod
+    def _ids(cls,values):
+        
+        """special case for user owning their own record"""
+        values['userid'] = values.get('userid') or values.get('id')
+        
+        return values
     
     @staticmethod
     def id_from_email(email):
