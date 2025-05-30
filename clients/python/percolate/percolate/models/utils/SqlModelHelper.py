@@ -112,6 +112,22 @@ class SqlModelHelper:
                 columns.append(f"{dcol} TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
         if "userid" not in mapping.keys():
             columns.append("userid UUID")
+            
+        # Add row-level security columns - singular group_id as requested
+        if "user_id" not in mapping.keys():
+            columns.append("user_id UUID")
+        if "group_id" not in mapping.keys():
+            columns.append("group_id UUID")  # Singular group_id column
+            
+        # Get access_level from model_config or default to 100 (public)
+        # Use AccessLevel enum if available, otherwise use numeric value
+        access_level = cls.model.model_config.get("access_level", 100)
+        # Handle both enum and direct int value
+        if hasattr(access_level, "value"):
+            access_level = access_level.value
+            
+        if "required_access_level" not in mapping.keys():
+            columns.append(f"required_access_level INTEGER DEFAULT {access_level}")
 
         if_not_exists_flag = "" if not if_not_exists else " IF NOT EXISTS "
         columns_str = ",\n    ".join(list(set(columns)))
@@ -126,11 +142,16 @@ EXECUTE FUNCTION update_updated_at_column();
 
         """
 
-        # in some case we will attach the notify by calling this function attach_notify_trigger_to_table(schema_name TEXT, table_name TEXT)
-
+        # Attach notification trigger if needed
         if cls.should_model_notify_index_update:
             create_table_script += f"""
 SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls.model.get_model_name()}');
+            """
+            
+        # Attach row-level security policy
+        create_table_script += f"""
+-- Apply row-level security policy
+SELECT p8.attach_rls_policy('{cls.model.get_model_namespace()}', '{cls.model.get_model_name()}');
             """
 
         return create_table_script
