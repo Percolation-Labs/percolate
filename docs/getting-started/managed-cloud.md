@@ -34,7 +34,7 @@ There is a script in the repo you can run but it is shown in full below.
 #source ~/.bash_profile
 
 export OPENAI_API_BASE_URL=${P8_API_URL:-http://host.docker.internal:5009}
-export OPENAI_API_KEY=${P8_API_KEY}
+export OPENWEBUI_OPENAI_API_KEY=${P8_API_KEY}
 
 docker run -d \
   -p 3000:8080 \
@@ -42,7 +42,7 @@ docker run -d \
   -e WEBUI_AUTH=false \
   -e OLLAMA_ENABLED=false \
   -e OPENAI_API_BASE_URL="$OPENAI_API_BASE_URL" \
-  -e OPENAI_API_KEY="$OPENAI_API_KEY" \
+  -e OPENAI_API_KEY="$OPENWEBUI_OPENAI_API_KEY" \
   -e DEFAULT_MODEL=gpt-40-mini \
   -e ENABLE_MODEL_SELECTOR=true \
   --name open-webui \
