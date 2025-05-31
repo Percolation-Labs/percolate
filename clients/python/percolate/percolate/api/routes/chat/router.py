@@ -489,7 +489,7 @@ def map_delta_to_canonical_format(data, dialect, model):
     # This delegates the mapping logic to the appropriate method based on the dialect
     return StreamingCompletionsResponseChunk.map_to_canonical_format(data, dialect, model)
 
-def stream_generator(response, stream_mode, audit_callback=None, from_dialect='openai', model=None):
+def stream_generator(response, stream_mode, audit_callback=None, from_dialect='openai', model=None, agent_name=None):
     """
     Stream the LLM response to the client, converting chunks to canonical format and make sure to encode binary "lines"
     
@@ -497,11 +497,44 @@ def stream_generator(response, stream_mode, audit_callback=None, from_dialect='o
         response: The LLM response object (from LanguageModel.__call__)
         stream_mode: The streaming mode ('sse' or 'standard')
         audit_callback: Optional callback to run after streaming completes
-        dialect: The API dialect ('openai', 'anthropic', or 'google')
+        from_dialect: The API dialect ('openai', 'anthropic', or 'google')
         model: The model name
+        agent_name: The name of the agent being used (for agent completions)
     """
     
     collected_chunks = []
+    done_marker_seen = False
+    
+    # Start with an empty line to immediately flush headers and establish connection
+    yield b'\n'
+    
+
+    # Create proper status message with model and agent info if available
+    message = "Processing request"
+    if model:
+        message += f" with {model}"
+    if agent_name:
+        message += f" using agent {agent_name}"
+    message += "..."
+    
+    status_message = {
+        "status": message
+    }
+    status_event = f'data: {json.dumps(status_message)}\n\n'
+    yield status_event.encode('utf-8')
+    
+    # Send an additional heartbeat to ensure proper streaming initialization
+    # This helps overcome buffering issues in some clients
+    heartbeat = {
+        "id": str(uuid.uuid4()),
+        "object": "chat.completion.chunk",
+        "choices": [{
+            "index": 0,
+            "delta": {"content": ""},
+            "finish_reason": None
+        }]
+    }
+    yield f'data: {json.dumps(heartbeat)}\n\n'.encode('utf-8')
     
     """TODO: Percolate agents can implement a response with iter_lines() that behave the same as thing but are agentic"""
     for chunk in response.iter_lines():
@@ -525,9 +558,31 @@ def stream_generator(response, stream_mode, audit_callback=None, from_dialect='o
         if not chunk.endswith(b'\n\n'):
             chunk = chunk + b'\n\n'
         
-        #print(chunk)
+        # Check if this is a [DONE] marker
+        if chunk.decode('utf-8').strip() == 'data: [DONE]':
+            done_marker_seen = True
+        
         yield chunk
                
+    # Send finish_reason "stop" if we haven't seen a finish_reason yet
+    # This ensures clients know the response is complete
+    finish_chunk = {
+        "id": str(uuid.uuid4()),
+        "object": "chat.completion.chunk",
+        "choices": [{
+            "index": 0,
+            "delta": {},
+            "finish_reason": "stop"
+        }]
+    }
+    yield f'data: {json.dumps(finish_chunk)}\n\n'.encode('utf-8')
+    
+    # Always send a [DONE] marker at the end if we haven't seen one yet
+    # This ensures OpenWebUI knows the stream is complete
+    if not done_marker_seen:
+        done_marker = 'data: [DONE]\n\n'
+        yield done_marker.encode('utf-8')
+    
     if audit_callback:
         full_response = "".join(collected_chunks)
         audit_callback(full_response)
@@ -753,7 +808,8 @@ async def completions(
             def audit_callback(full_response):
                 audit_request(request, full_response, metadata)
                     
-            return StreamingResponse(
+            # Create streaming response with all required headers for OpenWebUI compatibility
+            streaming_response = StreamingResponse(
                 stream_generator(
                     response=response,
                     stream_mode=stream_mode,
@@ -763,6 +819,15 @@ async def completions(
                 ),
                 media_type=media_type
             )
+            
+            # Set essential headers for proper SSE streaming
+            # These headers are critical for preventing buffering in proxies and browsers
+            streaming_response.headers["Cache-Control"] = "no-cache, no-transform"
+            streaming_response.headers["Connection"] = "keep-alive"
+            streaming_response.headers["X-Accel-Buffering"] = "no"
+            streaming_response.headers["Transfer-Encoding"] = "chunked"
+            
+            return streaming_response
         else:
             if background_tasks:
                 # For non-streaming, add auditing as a background task
@@ -864,10 +929,25 @@ async def agent_completions(
             background_tasks.add_task(audit_request, request, response, params)
                 
         if stream_mode:
-            return StreamingResponse(
-                stream_generator(response, stream_mode=stream_mode),
+            # Create streaming response with all required headers for OpenWebUI compatibility
+            streaming_response = StreamingResponse(
+                stream_generator(
+                    response=response, 
+                    stream_mode=stream_mode,
+                    model=request.model,
+                    agent_name=agent_name  # Pass the agent name to display in status messages
+                ),
                 media_type="text/event-stream"
             )
+            
+            # Set essential headers for proper SSE streaming
+            # These headers are critical for preventing buffering in proxies and browsers
+            streaming_response.headers["Cache-Control"] = "no-cache, no-transform"
+            streaming_response.headers["Connection"] = "keep-alive"
+            streaming_response.headers["X-Accel-Buffering"] = "no"
+            streaming_response.headers["Transfer-Encoding"] = "chunked"
+            
+            return streaming_response
                 
         # For non-streaming mode, the handle_agent_request already returns a complete response
         # Just convert it to JSON and return
