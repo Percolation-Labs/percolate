@@ -123,17 +123,83 @@ class PostgresService:
             return psycopg2.connect(conn_string, connect_timeout=5)
 
         try:
-            if self.conn is None:
-                self.conn = open_connection_with_retry(self._connection_string)
-                # Apply user context after reopening
-                self._apply_user_context()
+            # First ensure any existing connection is closed properly
+            if self.conn is not None:
+                try:
+                    self.conn.close()
+                except:
+                    pass  # Ignore errors when closing existing connection
+                self.conn = None
+                
+            # Open a new connection
+            self.conn = open_connection_with_retry(self._connection_string)
+            # Apply user context after reopening
+            self._apply_user_context()
             self.conn.poll()
         except psycopg2.InterfaceError as error:
+            if self.conn is not None:
+                try:
+                    self.conn.close()
+                except:
+                    pass
             self.conn = None  # until we can open it, lets not trust it
             self.conn = open_connection_with_retry(self._connection_string)
             # Apply user context after reopening
             self._apply_user_context()
 
+    
+    def get_user_context(self):
+        """
+        Get the current PostgreSQL session variables related to user context.
+        
+        Returns:
+            dict: A dictionary with user context information (user_id, role_level, user_groups)
+        """
+        # Default context values from local state
+        context = {
+            "user_id": str(self.user_id) if self.user_id else None,
+            "role_level": self.role_level,
+            "user_groups": self.user_groups,
+            "source": "local (no connection)"
+        }
+        
+        # Return local values if no connection
+        if not self.conn:
+            return context
+            
+        # Try to get values from database session
+        cursor = None
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                SELECT 
+                    current_setting('percolate.user_id', true) as user_id,
+                    current_setting('percolate.role_level', true) as role_level,
+                    current_setting('percolate.user_groups', true) as user_groups
+            """)
+            
+            user_id, role_level, user_groups = cursor.fetchone() or (None, None, '')
+            
+            # Parse values
+            role_level = int(role_level) if role_level else None
+            parsed_groups = [g for g in user_groups.strip(',').split(',') if g] if user_groups else []
+            
+            # Update context with session values
+            context.update({
+                "user_id": user_id,
+                "role_level": role_level,
+                "user_groups": parsed_groups,
+                "user_groups_raw": user_groups,
+                "source": "database session"
+            })
+        except Exception as e:
+            context["error"] = str(e)
+            context["source"] = "local (error querying session)"
+        finally:
+            if cursor:
+                cursor.close()
+                
+        return context
     
     def _apply_user_context(self):
         """Apply user context to the PostgreSQL session for row-level security"""
@@ -170,11 +236,14 @@ class PostgresService:
                         self.role_level = result[0]
             
             # Apply user_groups separately for now (will be integrated into set_user_context later)
-            if self.user_groups:
-                # Convert list to PostgreSQL array syntax
+            if self.user_groups and len(self.user_groups) > 0:
+                # For position matching in RLS policy, use comma-separated string with leading/trailing commas
                 if isinstance(self.user_groups, list):
-                    groups_array = "{" + ",".join([str(g) for g in self.user_groups]) + "}"
-                    cursor.execute("SET percolate.user_groups = %s", (groups_array,))
+                    groups_string = ',' + ','.join([str(g) for g in self.user_groups]) + ','
+                    cursor.execute("SET percolate.user_groups = %s", (groups_string,))
+            else:
+                # Set empty string if no groups
+                cursor.execute("SET percolate.user_groups = ''")
             
             # Commit changes
             self.conn.commit()
@@ -469,8 +538,21 @@ class PostgresService:
         try:
             """we can reopen the connection if needed"""
             try:
-                c = cls.conn.cursor()
+                # Try to get a cursor or detect if connection is closed
+                if cls.conn is None:
+                    cls._reopen_connection()
+                    c = cls.conn.cursor()
+                else:
+                    # Test if connection is still valid
+                    try:
+                        cls.conn.poll()
+                        c = cls.conn.cursor()
+                    except (psycopg2.InterfaceError, psycopg2.OperationalError):
+                        # Connection was closed or invalid, reopen it
+                        cls._reopen_connection()
+                        c = cls.conn.cursor()
             except:
+                # Something went wrong, try one more time with a fresh connection
                 cls._reopen_connection()
                 c = cls.conn.cursor()
 
@@ -500,8 +582,10 @@ class PostgresService:
             cls.conn.rollback()
             raise
         finally:
-            cls.conn.close()
-            cls.conn = None
+            # Close connection and set to None - will be reopened with context on next query
+            if cls.conn:
+                cls.conn.close()
+                cls.conn = None
 
     def select(self, fields: typing.List[str] = None, **kwargs):
         """
