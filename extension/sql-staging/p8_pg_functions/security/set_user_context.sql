@@ -50,7 +50,7 @@ BEGIN
     PERFORM set_config('percolate.role_level', v_role_level::TEXT, false);
     
     -- Set user groups if available
-    IF v_groups IS NOT NULL THEN
+    IF v_groups IS NOT NULL AND array_length(v_groups, 1) > 0 THEN
         -- For LIKE pattern matching in the policy, we need commas as separators
         PERFORM set_config('percolate.user_groups', ',' || array_to_string(v_groups, ',') || ',', false);
     ELSE
