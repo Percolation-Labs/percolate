@@ -51,6 +51,9 @@ class CompletionsRequestOpenApiFormat(BaseModel):
     # Core parameters
     model: str = Field(..., description="ID of the model to use for this request.")
     
+    chat_id:  Optional[str] = Field(
+        None, description="If preferred, you can pass the chat id as a top level session id instead of using the request query parameter"
+    )
     # Support for both completion API and chat completion API
     prompt: Optional[Union[str, List[str]]] = Field(
         None, description="The prompt(s) to generate completions for (legacy completion API)."
