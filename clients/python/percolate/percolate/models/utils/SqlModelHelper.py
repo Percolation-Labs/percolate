@@ -113,11 +113,8 @@ class SqlModelHelper:
         if "userid" not in mapping.keys():
             columns.append("userid UUID")
             
-        # Add row-level security columns - singular group_id as requested
-        if "user_id" not in mapping.keys():
-            columns.append("user_id UUID")
-        if "group_id" not in mapping.keys():
-            columns.append("group_id UUID")  # Singular group_id column
+        if "groupid" not in mapping.keys():
+            columns.append("groupid TEXT")  
             
         # Get access_level from model_config or default to 100 (public)
         # Use AccessLevel enum if available, otherwise use numeric value

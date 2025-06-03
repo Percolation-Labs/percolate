@@ -30,23 +30,23 @@ BEGIN
     
     -- Check if the required columns exist, add them if they don't
     BEGIN
-        -- Check for user_id column
+        -- Check for userid column
         IF NOT EXISTS (
             SELECT 1 FROM information_schema.columns c
             WHERE c.table_schema = p_schema_name 
               AND c.table_name = p_table_name
-              AND c.column_name = 'user_id'
+              AND c.column_name = 'userid'
         ) THEN
-            EXECUTE format('ALTER TABLE %I.%I ADD COLUMN user_id UUID', p_schema_name, p_table_name);
-            RAISE NOTICE 'Added user_id column to %.%', p_schema_name, p_table_name;
+            EXECUTE format('ALTER TABLE %I.%I ADD COLUMN userid UUID', p_schema_name, p_table_name);
+            RAISE NOTICE 'Added userid column to %.%', p_schema_name, p_table_name;
         END IF;
         
-        -- Check for group_id column
+        -- Check for groupid column
         IF NOT EXISTS (
             SELECT 1 FROM information_schema.columns c
             WHERE c.table_schema = p_schema_name 
               AND c.table_name = p_table_name
-              AND c.column_name = 'group_id'
+              AND c.column_name = 'groupid'
         ) THEN
             EXECUTE format('ALTER TABLE %I.%I ADD COLUMN groupid TEXT', p_schema_name, p_table_name);
             RAISE NOTICE 'Added groupid column to %.%', p_schema_name, p_table_name;
@@ -126,7 +126,7 @@ BEGIN
             -- SECONDARY CONDITIONS: Elevate user access through ownership or group membership
             (
                 -- 1. User owns the record
-                (current_setting(''percolate.user_id'')::UUID = user_id AND user_id IS NOT NULL)
+                (current_setting(''percolate.user_id'')::UUID = userid AND userid IS NOT NULL)
                 
                 -- 2. User is member of the record''s group
                 OR (
@@ -186,11 +186,11 @@ The policy enforces:
    - This is the primary access control mechanism
    - OR
 2. User-specific access privileges:
-   - User owns the record (user_id matches)
+   - User owns the record (userid matches)
    - User is a member of the record''s group
    
 With this policy, user access can be elevated through ownership or group membership,
-but records without owners (user_id IS NULL) are only visible to users with appropriate role level.
+but records without owners (userid IS NULL) are only visible to users with appropriate role level.
 
 Arguments:
 - schema_name: The schema containing the table

@@ -338,6 +338,28 @@ class ModelRunner:
                 the decisions is simply around if the raw content line should be sent in the open ai or other scheme - here its the raw 'line' that is relayed in one scheme or another                
                 """
                 for line, chunk in sse_openai_compatible_stream_with_tool_call_collapse(raw_response):
+                    # Handle special messages from the stream_utils
+                    if isinstance(chunk, dict) and (chunk.get('status') or chunk.get('content')):
+                        # If it's a content message, we want to forward it
+                        if chunk.get('content'):
+                            # The content is already in the line as a properly formatted SSE message
+                            if isinstance(line, str):
+                                yield line.encode('utf-8')
+                            else:
+                                yield line
+                            continue
+                            
+                        # Status messages are now commented out but this stays for backward compatibility
+                        status_type = chunk.get('status')
+                        if status_type == 'flush':
+                            # Just send a newline to flush buffers
+                            yield b'\n'
+                            continue
+                            
+                        elif status_type == 'function_call_started':
+                            # Skip status messages - we're using content deltas instead
+                            continue
+                    
                     #print(chunk)
                     choice = chunk['choices'][0] if chunk.get('choices') else {}
                     finish = choice.get('finish_reason')
@@ -351,9 +373,20 @@ class ModelRunner:
                         tool_call_evals = {}
                         for tc in choice['delta'].get('tool_calls', []):
                             fc = FunctionCall(id=tc['id'], **tc['function'], scheme='openai')
-                            yield f"event: im calling {fc.name}...\n\n"
+                            # We already sent "Preparing to call" message earlier, now send "executing" message
+                            executing_msg = f"event: executing {fc.name}...\n\n"
+                            yield executing_msg.encode('utf-8')
                             self.messages.add(fc.to_assistant_message())
-                            tool_call_evals[fc.id] = self.invoke(fc)
+                            
+                            # Safely invoke the function, catching any exceptions that might occur
+                            try:
+                                tool_call_evals[fc.id] = self.invoke(fc)
+                            except Exception as e:
+                                logger.error(f"Error executing function {fc.name}: {str(e)}")
+                                # Add error to the evaluations to avoid breaking the stream
+                                tool_call_evals[fc.id] = {
+                                    "error": f"Error executing function: {str(e)}"
+                                }
                             
                         last_ai_response = {
                             'tool_calls': choice['delta'].get('tool_calls', []),
