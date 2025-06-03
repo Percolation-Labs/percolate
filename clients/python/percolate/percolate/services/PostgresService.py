@@ -739,11 +739,16 @@ class PostgresService:
         else:
             logger.warning(f"Nothing to do - records is empty {records}")
 
-    def index_entity_by_name(self, entity_name: str, id: uuid.UUID = None):
+    def index_entity_by_name(self, entity_name: str, id: uuid.UUID = None, sleep_seconds:int=0):
         """
         index entities - a session id can be passed in for the audit callback
         this is very much WIP - it may be this moves into background workers in the database
         """
+        import time
+        if sleep_seconds:
+            """sometimes we want to wait for database things"""
+            logger.debug(f"Handling index request {sleep_seconds=}")
+            time.sleep(sleep_seconds)
 
         assert (
             self.model is not None

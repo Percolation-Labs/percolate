@@ -430,8 +430,44 @@ def sse_openai_compatible_stream_with_tool_call_collapse(response) -> typing.Gen
         if "tool_calls" in delta:
             for tool_delta in delta["tool_calls"]:
                 if tool_delta.get("id"):
-                    """first encounter"""
+                    """first encounter - send status event immediately"""
                     tool_call_map[tool_delta['index']] = tool_delta
+                    
+                    # Get function name for the status message
+                    function_name = tool_delta.get("function", {}).get("name", "unknown_function")
+                    
+                    # Instead of status event, send a normal content delta with a message
+                    # This will be visible to the user in OpenWebUI
+                    status_delta = {
+                        "id": str(uuid.uuid4()),
+                        "object": "chat.completion.chunk",
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"content": f"\n\n🔍 Using function `{function_name}` to answer your question...\n\n"},
+                            "finish_reason": None
+                        }]
+                    }
+                    status_event = f'data: {json.dumps(status_delta)}\n\n'
+                    
+                    # Comment out the original status event code for potential future use
+                    # ---------------------------------------------------------
+                    # # First send a newline to flush any previous data
+                    # yield "\n", {"status": "flush"}
+                    # 
+                    # # Then send the actual status message
+                    # status_message = {
+                    #     "status": f"Preparing to call function: {function_name}...",
+                    #     # Add a timestamp to ensure clients recognize this as a new message
+                    #     "timestamp": time.time()
+                    # }
+                    # # Ensure status_event is a properly formatted string (not bytes)
+                    # status_event = f'data: {json.dumps(status_message)}\n\n'
+                    # # Note: We intentionally don't encode here - the caller will handle encoding
+                    # yield status_event, {"status": "function_call_started"}
+                    # ---------------------------------------------------------
+                    
+                    # Send the content delta instead of status message
+                    yield status_event, {"content": f"Calling function: {function_name}"}
                 else:
                     t = tool_call_map[tool_delta['index']] 
                     t["function"]["arguments"] += tool_delta["function"]["arguments"]
@@ -504,132 +540,138 @@ class LLMStreamIterator:
         done_marker_seen = False
         finish_reason_seen = False
         
-        # Send an empty line first to help flush HTTP headers immediately
-        yield b'\n'
-        
-        # Send a heartbeat status message to ensure clients start rendering immediately
-        heartbeat_message = {
-            "status": "Starting model processing..."
-        }
-        yield f'data: {json.dumps(heartbeat_message)}\n\n'.encode('utf-8')
-        
-        for item in self.g():
-            # Check if this is a [DONE] marker
-            if isinstance(item, str) and item.strip() == 'data: [DONE]':
-                done_marker_seen = True
+        try:
+            # Optimization: Just send a single minimal heartbeat
+            # This ensures headers are flushed but reduces initial delay
+            yield b'data: {"id":"init","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":""},"finish_reason":null}]}\n\n'
             
-            # Collect the tool call responses and emit status messages about them
-            if isinstance(item, AIResponse):
-                self.ai_responses.append(item)
+            for item in self.g():
+                # Check if this is a [DONE] marker
+                if isinstance(item, str) and item.strip() == 'data: [DONE]':
+                    done_marker_seen = True
                 
-                # Debug log to understand what's in the AIResponse
-                logger.debug(f"AIResponse received: {type(item)}")
-                if hasattr(item, 'tool_calls'):
-                    logger.debug(f"tool_calls: {item.tool_calls}")
-                if hasattr(item, 'status'):
-                    logger.debug(f"status: {item.status}")
-                if hasattr(item, 'content'):
-                    logger.debug(f"content preview: {item.content[:100] if item.content else 'None'}")
-                
-                # Extract function name from tool_calls if available
-                function_name = 'unknown_function'
-                if hasattr(item, 'tool_calls') and item.tool_calls:
-                    # Tool calls can be a list or a single dict
-                    tool_calls = item.tool_calls
-                    if isinstance(tool_calls, list) and len(tool_calls) > 0:
-                        # Get from first tool call in the list
-                        if isinstance(tool_calls[0], dict) and 'function' in tool_calls[0]:
-                            function_name = tool_calls[0]['function'].get('name', 'unknown_function')
-                    elif isinstance(tool_calls, dict) and 'function' in tool_calls:
-                        # Get from a single tool call dict
-                        function_name = tool_calls['function'].get('name', 'unknown_function')
-                
-                # Fallback to function_name attribute if it exists
-                function_name = getattr(item, 'function_name', function_name)
-                
-                # Try to get from content field for some implementations that store function name there
-                if function_name == 'unknown_function' and hasattr(item, 'content'):
-                    content = getattr(item, 'content', '')
-                    # Look for common function call patterns in content
-                    if 'calling function:' in content.lower():
-                        try:
-                            # Extract function name after "calling function:"
-                            function_name = content.lower().split('calling function:')[1].strip().split()[0]
-                        except:
-                            pass
-                
-                # Emit a status update with the data.status format
-                status_message = {
-                    "status": f"Calling function: {function_name}..."
-                }
-                
-                # Format as SSE status message and yield
-                status_event = f'data: {json.dumps(status_message)}\n\n'
-                yield status_event.encode('utf-8')
-                continue
-                
-            try:
-                for piece in _parse_open_ai_response(item):
-                    self._content += piece
-                
-                # Try to extract tool calls and finish reason
+                # Collect the tool call responses and emit status messages about them
+                if isinstance(item, AIResponse):
+                    self.ai_responses.append(item)
+                    
+                    # Debug log to understand what's in the AIResponse
+                    logger.debug(f"AIResponse received: {type(item)}")
+                    if hasattr(item, 'tool_calls'):
+                        logger.debug(f"tool_calls: {item.tool_calls}")
+                    if hasattr(item, 'status'):
+                        logger.debug(f"status: {item.status}")
+                    if hasattr(item, 'content'):
+                        logger.debug(f"content preview: {item.content[:100] if item.content else 'None'}")
+                    
+                    # Function calls are now detected much earlier in the stream process
+                    # We still need to yield the AIResponse for auditing, but we don't need to send
+                    # another status message to the client since we already sent one
+                    continue
+                    
                 try:
-                    if isinstance(item, str):
-                        try:
-                            data = json.loads(item[6:])
-                        except:
-                            # If this is the [DONE] marker, continue
-                            if item.strip() == 'data: [DONE]':
-                                done_marker_seen = True
-                                continue
-                            data = None
-                    else:
-                        data = item
+                    for piece in _parse_open_ai_response(item):
+                        self._content += piece
                     
-                    if not data:
-                        continue
+                    # Try to extract tool calls and finish reason
+                    try:
+                        if isinstance(item, str):
+                            try:
+                                data = json.loads(item[6:])
+                            except:
+                                # If this is the [DONE] marker, continue
+                                if item.strip() == 'data: [DONE]':
+                                    done_marker_seen = True
+                                    continue
+                                data = None
+                        else:
+                            data = item
                         
-                    # Extract usage information
-                    if "usage" in data:
-                        self._usage = data["usage"]
-                    
-                    # Extract tool calls and check for finish_reason
-                    if "choices" in data and data["choices"]:
-                        choice = data["choices"][0]
-                        
-                        # Check if we've seen a finish_reason
-                        if choice.get("finish_reason"):
-                            finish_reason_seen = True
+                        if not data:
+                            continue
                             
-                        if choice.get("finish_reason") == "tool_calls":
-                            delta = choice.get("delta", {})
-                            if "tool_calls" in delta:
-                                for tool_call in delta["tool_calls"]:
-                                    if "id" in tool_call:
-                                        self._tool_calls.append(tool_call)
+                        # Extract usage information
+                        if "usage" in data:
+                            self._usage = data["usage"]
+                        
+                        # Extract tool calls and check for finish_reason
+                        if "choices" in data and data["choices"]:
+                            choice = data["choices"][0]
+                            
+                            # Check if we've seen a finish_reason
+                            if choice.get("finish_reason"):
+                                finish_reason_seen = True
+                                
+                            if choice.get("finish_reason") == "tool_calls":
+                                delta = choice.get("delta", {})
+                                if "tool_calls" in delta:
+                                    for tool_call in delta["tool_calls"]:
+                                        if "id" in tool_call:
+                                            self._tool_calls.append(tool_call)
+                                            
+                                            # Get function name
+                                            function_name = tool_call.get("function", {}).get("name", "unknown_function")
+                                            
+                                            # Instead of status event, send a normal content delta with a message
+                                            # This will be visible to the user in OpenWebUI
+                                            status_delta = {
+                                                "id": str(uuid.uuid4()),
+                                                "object": "chat.completion.chunk",
+                                                "choices": [{
+                                                    "index": 0,
+                                                    "delta": {"content": f"\n\n🔍 Using function: `{function_name}` to answer your question...\n\n"},
+                                                    "finish_reason": None
+                                                }]
+                                            }
+                                            
+                                            # Comment out the original status event code for potential future use
+                                            # ---------------------------------------------------------
+                                            # # First send a newline to flush any previous data
+                                            # yield "\n", {"status": "flush"}
+                                            # 
+                                            # # Then send the actual status message
+                                            # status_message = {
+                                            #     "status": f"Preparing to call function: {function_name}...",
+                                            #     # Add a timestamp to ensure clients recognize this as a new message
+                                            #     "timestamp": time.time()
+                                            # }
+                                            # # Ensure status_event is a properly formatted string (not bytes)
+                                            # status_event = f'data: {json.dumps(status_message)}\n\n'
+                                            # yield status_event, {"status": "function_call_started"}
+                                            # ---------------------------------------------------------
+                                            
+                                            # Send the content delta instead
+                                            yield f'data: {json.dumps(status_delta)}\n\n'.encode('utf-8')
+                    except Exception:
+                        pass
                 except Exception:
                     pass
-            except Exception:
-                pass
+                
+                # Handle both string and bytes items
+                if isinstance(item, str):
+                    yield item.encode('utf-8')
+                else:
+                    yield item
             
-            yield item.encode('utf-8')
-        
-        self._is_consumed = True
-        
-        # Send finish_reason "stop" if we haven't seen a finish_reason yet
-        if not finish_reason_seen:
-            finish_chunk = f'data: {{"id":"{uuid.uuid4()}","object":"chat.completion.chunk","choices":[{{"index":0,"delta":{{}},"finish_reason":"stop"}}]}}\n\n'
-            yield finish_chunk.encode('utf-8')
+        except Exception as e:
+            logger.error(f"Error during streaming: {str(e)}")
             
-        # Always send a [DONE] marker at the end if we haven't seen one yet
-        # This ensures OpenWebUI knows the stream is complete
-        if not done_marker_seen:
-            done_marker = 'data: [DONE]\n\n'
-            yield done_marker.encode('utf-8')
-        
-        # Audit the response if audit_on_flush is True
-        if self.audit_on_flush:
-            self._audit_response()
+        finally:
+            self._is_consumed = True
+            
+            # Send finish_reason "stop" if we haven't seen a finish_reason yet
+            if not finish_reason_seen:
+                finish_chunk = f'data: {{"id":"{uuid.uuid4()}","object":"chat.completion.chunk","choices":[{{"index":0,"delta":{{}},"finish_reason":"stop"}}]}}\n\n'
+                yield finish_chunk.encode('utf-8')
+                
+            # Always send a [DONE] marker at the end if we haven't seen one yet
+            # This ensures OpenWebUI knows the stream is complete
+            if not done_marker_seen:
+                done_marker = 'data: [DONE]\n\n'
+                yield done_marker.encode('utf-8')
+            
+            # Audit the response if audit_on_flush is True
+            if self.audit_on_flush:
+                self._audit_response()
     
     def _audit_response(self):
         """

@@ -358,21 +358,31 @@ def collect_stream_to_response(
     if isinstance(stream_iterator, LLMStreamIterator):
         # Consume the iterator if not already consumed
         if not stream_iterator._is_consumed:
-            # Consume all lines, which will populate the content and usage
-            list(stream_iterator.iter_lines())
+            try:
+                # Consume all lines, which will populate the content and usage
+                list(stream_iterator.iter_lines())
+            except Exception as e:
+                # If there's an error in consuming the stream, return a simplified response
+                logger.warning(f"Error consuming stream: {e}")
+                return {
+                    'skipped': 'p8.AIResponse', 
+                    'tokens': 0,
+                    'error': str(e)
+                }
             
         # Extract the aggregated content and tool calls from the iterator
-        content = stream_iterator.content
+        content = getattr(stream_iterator, 'content', '')
         tool_calls = []
         # Extract any tool calls from ai_responses
-        for ai_response in stream_iterator.ai_responses:
+        ai_responses = getattr(stream_iterator, 'ai_responses', [])
+        for ai_response in ai_responses:
             if hasattr(ai_response, 'tool_calls') and ai_response.tool_calls:
                 for tool_call in ai_response.tool_calls:
                     if isinstance(tool_call, dict):
                         tool_calls.append(tool_call)
         
         # Extract usage information
-        usage = stream_iterator._usage or {
+        usage = getattr(stream_iterator, '_usage', None) or {
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "total_tokens": 0
@@ -483,25 +493,46 @@ def collect_stream_to_response(
                     if choice.get("finish_reason") == "tool_calls":
                         tool_calls = list(tool_call_map.values())
     
+    # If we got a dictionary returned earlier (error case), just return it
+    if isinstance(content, dict) and ('skipped' in content or 'error' in content):
+        # Make sure we're not trying to use this as a response directly
+        # Add a type hint to indicate this is a special case
+        content['_response_type'] = 'error_dict'
+        return content
+    
+    # Also handle the case where the entire iterator is already a dict with skipped
+    if isinstance(stream_iterator, dict) and ('skipped' in stream_iterator or 'error' in stream_iterator):
+        stream_iterator['_response_type'] = 'error_dict'
+        return stream_iterator
+        
     # Build the final response in OpenAI format first
-    openai_response = {
-        "id": f"chatcmpl-{int(time.time())}",
-        "object": "chat.completion",
-        "created": int(time.time()),
-        "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": content
-                },
-                # Determine finish reason based on whether we have tool calls
-                "finish_reason": "tool_calls" if tool_calls else "stop"
-            }
-        ],
-        "usage": usage
-    }
+    try:
+        openai_response = {
+            "id": f"chatcmpl-{int(time.time())}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": content
+                    },
+                    # Determine finish reason based on whether we have tool calls
+                    "finish_reason": "tool_calls" if tool_calls else "stop"
+                }
+            ],
+            "usage": usage
+        }
+    except Exception as e:
+        # If there's an error constructing the response, return a simple error dict
+        return {
+            'skipped': 'p8.AIResponse',
+            'tokens': 0,
+            'error': str(e),
+            '_response_type': 'error_dict'
+        }
     
     # Add tool calls if present
     if tool_calls:
