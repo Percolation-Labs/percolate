@@ -39,8 +39,8 @@ Each table in the database will include additional columns to support the RLS mo
 
 ```sql
 -- Added to all Percolate tables
-user_id UUID,                   -- User who owns this record (NULL means no specific owner)
-group_id UUID,                  -- Group that owns this record (NULL means no specific group)
+userid UUID,                   -- User who owns this record (NULL means no specific owner)
+groupid UUID,                  -- Group that owns this record (NULL means no specific group)
 required_access_level INTEGER,  -- Minimum role level required (default 100 = public)
 ```
 
@@ -72,7 +72,7 @@ USING (
     -- 2. Record has no specific owner (user_id is NULL)
     OR user_id IS NULL
     -- 3. User is member of the record's group
-    OR current_setting('percolate.user_groups', 'true')::TEXT[] @> ARRAY[group_id::TEXT]
+    OR current_setting('percolate.user_groups', 'true')::TEXT[] @> ARRAY[groupid::TEXT]
     -- 4. The userid column matches (backward compatibility)
     OR (userid IS NOT NULL AND current_setting('percolate.user_id')::UUID = userid)
   )
@@ -87,84 +87,6 @@ This policy ensures that:
    - The user is a member of the record's group
    - The userid column matches (for backward compatibility)
 
-### 2. Adding Required Functions
-
-```sql
--- Function to check if a user belongs to a group
-CREATE OR REPLACE FUNCTION p8.user_in_group(user_uuid UUID, group_uuid UUID) 
-RETURNS BOOLEAN AS $$
-BEGIN
-  RETURN EXISTS (
-    SELECT 1 FROM p8.user_groups 
-    WHERE user_id = user_uuid AND group_id = group_uuid
-  );
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
-
--- Function to get all groups a user belongs to
-CREATE OR REPLACE FUNCTION p8.get_user_groups(user_uuid UUID) 
-RETURNS UUID[] AS $$
-DECLARE
-  group_ids UUID[];
-BEGIN
-  SELECT array_agg(group_id) INTO group_ids 
-  FROM p8.user_groups 
-  WHERE user_id = user_uuid;
-  
-  RETURN COALESCE(group_ids, '{}'::UUID[]);
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
-
--- Function to attach a standard RLS policy to a table
-CREATE OR REPLACE FUNCTION p8.attach_rls_policy(schema_name TEXT, table_name TEXT)
-RETURNS VOID AS $$
-DECLARE
-    full_table_name TEXT;
-    policy_name TEXT;
-BEGIN
-    -- Construct the full table name
-    full_table_name := schema_name || '.' || table_name;
-    policy_name := table_name || '_access_policy';
-    
-    -- Enable row-level security on the table
-    EXECUTE format('ALTER TABLE %I.%I ENABLE ROW LEVEL SECURITY', schema_name, table_name);
-    EXECUTE format('ALTER TABLE %I.%I FORCE ROW LEVEL SECURITY', schema_name, table_name);
-    
-    -- Drop the policy if it already exists
-    BEGIN
-        EXECUTE format('DROP POLICY IF EXISTS %I ON %I.%I', policy_name, schema_name, table_name);
-    EXCEPTION WHEN OTHERS THEN
-        RAISE NOTICE 'Could not drop policy % on table %', policy_name, full_table_name;
-    END;
-    
-    -- Create the RLS policy
-    EXECUTE format('
-        CREATE POLICY %I ON %I.%I
-        USING (
-            -- PRIMARY CONDITION: Role level check must pass
-            current_setting(''percolate.role_level'')::INTEGER <= required_access_level
-            
-            AND
-            
-            -- SECONDARY CONDITIONS: At least one must be true
-            (
-                -- 1. User owns the record
-                current_setting(''percolate.user_id'')::UUID = user_id 
-                -- 2. Record has no specific owner (user_id is NULL)
-                OR user_id IS NULL
-                -- 3. User is member of the record''s group
-                OR current_setting(''percolate.user_groups'', ''true'')::TEXT[] @> ARRAY[group_id::TEXT]
-                -- 4. The userid column matches (backward compatibility)
-                OR (userid IS NOT NULL AND current_setting(''percolate.user_id'')::UUID = userid)
-            )
-        )', 
-        policy_name, schema_name, table_name
-    );
-    
-    RAISE NOTICE 'Row-level security policy attached to %', full_table_name;
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
-```
 
 ### 3. Setting User Context
 
@@ -185,7 +107,7 @@ Percolate's Pydantic model configuration will be enhanced to include access leve
 class PercolateBaseModel(BaseModel):
     """Base model with security attributes"""
     user_id: Optional[UUID] = None
-    group_id: Optional[UUID] = None
+    groupid: Optional[UUID] = None
     required_access_level: int = 100  # Default to public access
     
     model_config = {
@@ -279,7 +201,7 @@ class PostgresService:
 
 The `p8.attach_rls_policy` function is designed to be fully idempotent, which means it can be safely run multiple times on the same table without causing issues. When executed, the function:
 
-1. Adds security columns (user_id, group_id, required_access_level) if they don't already exist
+1. Adds security columns (userid, groupid, required_access_level) if they don't already exist
 2. Updates the required_access_level for all existing records to match the specified default level
 3. Drops any existing RLS policy on the table before creating a new one
 4. Applies the appropriate RLS policy with the specified access level

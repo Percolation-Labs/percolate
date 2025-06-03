@@ -15,6 +15,18 @@ This API can be hosted on a user instance to service models registered in their 
 Currently we have implemented only the OpenAI scheme/dialect which most models support. 
 There is an argument for implementing anthropic scheme too.
 
+
+Some implementations like OpenWebUI send X-headers for JWT like data and metadata 
+
+open-webui/backend/open_webui/utils/chat.py, the chat ID is included in line 211:
+    "metadata": {
+      **(request.state.metadata if hasattr(request.state, "metadata") else {}),
+      "task": str(TASKS.TITLE_GENERATION),
+      "task_body": form_data,
+      "chat_id": form_data.get("chat_id", None),
+  },
+  
+
 """
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, Query, Path
@@ -39,6 +51,7 @@ from datetime import datetime
 from percolate.utils import logger
 from percolate.models import Session, User,AIResponse
 from percolate.utils import make_uuid
+from percolate.services import ModelCache
 
 import traceback
 # Import models from models.py
@@ -62,6 +75,10 @@ def get_messages_by_role_from_request(request:CompletionsRequestOpenApiFormat, m
     from percolate.services.llm.utils import audio_to_text
     system_content = ""
     last_user_content = ""
+    
+    # logger.debug(f"**********************\n")
+    # logger.debug(request.model_dump())
+    # logger.debug(f"**********************\n")
         
     # Handle messages-based format (Chat Completion API)
     if request.messages:
@@ -75,10 +92,12 @@ def get_messages_by_role_from_request(request:CompletionsRequestOpenApiFormat, m
             logger.info(f"is_audio set so we will assume ALL user content is based 64 audio")
       
         for msg in request.messages:
+            """TODO - there is some cases where we might want to add assistant responses e.g. from OpenWebUI"""
             if msg.role == "system" and isinstance(msg.content, str):
                 system_content += msg.content + "\n"
             elif msg.role == "user" and isinstance(msg.content, str):
-                last_user_content = msg.content
+                """its not clear if we should merge user messages"""
+                last_user_content += msg.content + "\n"
                 if is_audio:
                     try:
                         logger.info(f'transcribing supposed based 64 encoded audio content - {last_user_content[:10]}...{last_user_content[-10:]}')
@@ -94,7 +113,7 @@ def handle_agent_request(request: CompletionsRequestOpenApiFormat, params: Optio
     Handle agent requests in both streaming and non-streaming modes.
     
     This function handles:
-    1. Loading the appropriate agent model
+    1. Loading the appropriate agent model (using ModelCache)
     2. Setting up the context with user info and system content
     3. Streaming or non-streaming response based on request.stream flag
     
@@ -109,7 +128,6 @@ def handle_agent_request(request: CompletionsRequestOpenApiFormat, params: Optio
         If non-streaming: A complete response object in the requested format
     """
     from percolate.models import Resources
-    from percolate.interface import try_load_model
     from percolate.services.llm.proxy.stream_generators import collect_stream_to_response
     from percolate.services.llm.proxy.models import OpenAIResponse
     
@@ -117,48 +135,74 @@ def handle_agent_request(request: CompletionsRequestOpenApiFormat, params: Optio
     metadata = params or {} 
     system_content, query = get_messages_by_role_from_request(request, params)
     
-    # Load the model that we need or default to Resources
+    # Ensure agent_model_name has proper format
     if agent_model_name:
-        if '.' in agent_model_name:
-            # Agent name has proper namespace.name format
-            M = try_load_model(agent_model_name) or Resources
-        else:
-            # Agent name lacks namespace, default to Resources
-            logger.warning(f"Agent name '{agent_model_name}' does not contain a namespace (no '.' found). Defaulting to Resources model.")
-            M = Resources
-    else:
-        # No agent name provided, default to Resources
-        M = Resources
-    agent = p8.Agent(M)
+        # Replace hyphens with dots for web-friendly URLs
+        if '-' in agent_model_name:
+            agent_model_name = agent_model_name.replace('-', '.')
+            
+        # Ensure agent name has a namespace if needed
+        if '.' not in agent_model_name:
+            logger.warning(f"Agent name '{agent_model_name}' does not have a namespace. Will try to load as is, but this might cause issues.")
+    
+    # Get a ModelRunner from cache or create a new one
+    # This ensures we reuse fully initialized ModelRunner instances
+    userid = metadata.get('userid') or metadata.get('user_id')
+    
+    # Import directly from the module to avoid any import issues
+    from percolate.services.ModelRunnerCache import get_runner, get_runner_cache_stats
+    
+    # Log cache stats before access
+    logger.info(f"ModelRunnerCache stats before access: {get_runner_cache_stats()}")
+    
+    # Standardize agent_model_name format
+    if agent_model_name and '-' in agent_model_name:
+        agent_model_name = agent_model_name.replace('-', '.')
+    
+    # Get or create a ModelRunner with user context
+    runner = get_runner(
+        agent_model_name or "p8.Resources",
+        user_id=userid,
+        # Add any other user context needed for row-level security
+        fallback_to_resources=True
+    )
+    
+    # Log cache stats after access
+    logger.info(f"ModelRunnerCache stats after access: {get_runner_cache_stats()}")
+    
+    # The runner is our fully initialized agent
+    agent = runner
     
     # Construct context with user info and session ID
     userid = metadata.get('userid') or metadata.get('user_id')
+    
+    # Use existing session_id if available (which might come from chat_id)
+    # Otherwise generate a new one
+    session_id = metadata.get('session_id') or str(uuid.uuid1())
+    
     ctx = CallingContext(
         plan=system_content,
         username=userid, 
-        session_id=str(uuid.uuid1()), 
-        channel_ts=metadata.get('session_id')
+        session_id=session_id, 
+        channel_ts=metadata.get('channel_ts') or session_id
     )
     
-    # Get the streaming response
+    for key, value in metadata.items():
+        if key not in ['userid', 'user_id', 'session_id', 'channel_ts'] and value:
+            if hasattr(ctx, key) and value:
+                setattr(ctx, key, value)
+    
     stream = agent.stream(query, context=ctx)
     
-    # If streaming mode is requested, return the stream directly
     if request.stream:
         return stream
     
-    # For non-streaming mode, directly pass the LLMStreamIterator to collect_stream_to_response
-    # No need for an adapter anymore as collect_stream_to_response now handles LLMStreamIterator
-    response = collect_stream_to_response(
-        stream,
-        source_scheme='openai',
-        target_scheme='openai',
-        model=request.model
-    )
-    
-    # Return the complete response
-    return response
-    
+    return collect_stream_to_response(
+            stream,
+            source_scheme='openai',
+            target_scheme='openai',
+            model=request.model
+        )
     
 def handle_openai_request(request: CompletionsRequestOpenApiFormat, params: Optional[Dict] = None, language_model_class=LanguageModel):
     """Process an OpenAI format request and return a response.
@@ -237,11 +281,24 @@ def handle_openai_request(request: CompletionsRequestOpenApiFormat, params: Opti
     stream_mode = request.get_streaming_mode(params)
     context = None
     if stream_mode is not None:
+        # Use existing session_id if available (which might come from chat_id)
+        # Otherwise use the one in metadata or generate a new one
+        session_id = metadata.get('session_id') or str(uuid.uuid1())
+        
         context = CallingContext(
             prefers_streaming=True,
             model=model_name,
-            session_id=metadata.get('session_id')
+            session_id=session_id,
+            username=metadata.get('userid') or metadata.get('user_id'),
+            channel_ts=metadata.get('channel_ts') or session_id
         )
+        
+        # Add any other metadata fields to the context
+        for key, value in metadata.items():
+            if key not in ['session_id', 'userid', 'user_id', 'channel_ts'] and value:
+                # Only set if the attribute exists on CallingContext
+                if hasattr(context, key) and value:
+                    setattr(context, key, value)
     
     # Make the API call using the raw - at the moment our raw interface takes functions and not tools - they are elevated internally 
     # TODO make this explicit at the interface
@@ -324,11 +381,24 @@ def handle_anthropic_request(request: CompletionsRequestOpenApiFormat, params: O
     stream_mode = request.get_streaming_mode(params)
     context = None
     if stream_mode:
+        # Use existing session_id if available (which might come from chat_id)
+        # Otherwise use the one in metadata or generate a new one
+        session_id = metadata.get('session_id') or str(uuid.uuid1())
+        
         context = CallingContext(
             prefers_streaming=True,
             model=model_name,
-            session_id=metadata.get('session_id')
+            session_id=session_id,
+            username=metadata.get('userid') or metadata.get('user_id'),
+            channel_ts=metadata.get('channel_ts') or session_id
         )
+        
+        # Add any other metadata fields to the context
+        for key, value in metadata.items():
+            if key not in ['session_id', 'userid', 'user_id', 'channel_ts'] and value:
+                # Only set if the attribute exists on CallingContext
+                if hasattr(context, key) and value:
+                    setattr(context, key, value)
     
     # Make the API call
     try:
@@ -403,11 +473,24 @@ def handle_google_request(request: CompletionsRequestOpenApiFormat, params: Opti
     stream_mode = request.get_streaming_mode(params)
     context = None
     if stream_mode:
+        # Use existing session_id if available (which might come from chat_id)
+        # Otherwise use the one in metadata or generate a new one
+        session_id = metadata.get('session_id') or str(uuid.uuid1())
+        
         context = CallingContext(
             prefers_streaming=True,
             model=model_name,
-            session_id=metadata.get('session_id')
+            session_id=session_id,
+            username=metadata.get('userid') or metadata.get('user_id'),
+            channel_ts=metadata.get('channel_ts') or session_id
         )
+        
+        # Add any other metadata fields to the context
+        for key, value in metadata.items():
+            if key not in ['session_id', 'userid', 'user_id', 'channel_ts'] and value:
+                # Only set if the attribute exists on CallingContext
+                if hasattr(context, key) and value:
+                    setattr(context, key, value)
     
     # Make the API call
     try:
@@ -505,92 +588,85 @@ def stream_generator(response, stream_mode, audit_callback=None, from_dialect='o
     collected_chunks = []
     done_marker_seen = False
     
-    # Start with an empty line to immediately flush headers and establish connection
-    yield b'\n'
-    
+    try:
+        # Optimization: Send only a single minimal heartbeat to establish connection
+        # This reduces initial latency before content starts flowing
+        heartbeat = {
+            "id": str(uuid.uuid4()),
+            "object": "chat.completion.chunk",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": ""},
+                "finish_reason": None
+            }]
+        }
+        yield f'data: {json.dumps(heartbeat)}\n\n'.encode('utf-8')
+        
+        """TODO: Percolate agents can implement a response with iter_lines() that behave the same as thing but are agentic"""
+        for chunk in response.iter_lines():
+            """add the decoded lines for later processing"""
+            collected_chunks.append(chunk.decode('utf-8'))
+            
+            """
+            this is convenience that comes at a cost - the user is essentially using all models in the open ai format so we must do some parsing
+            TODO: think more about this
+            """
+            if from_dialect and from_dialect != 'openai':
+                json_data = chunk.decode('utf-8')[6:]
+                if json_data and json_data[0] == '{':       
+                    """Parse in valid data and use the canonical mapping"""     
+                    canonical_data = map_delta_to_canonical_format(json.loads(json_data), from_dialect, model)
 
-    # Create proper status message with model and agent info if available
-    message = "Processing request"
-    if model:
-        message += f" with {model}"
-    if agent_name:
-        message += f" using agent {agent_name}"
-    message += "..."
+                    """recover the SSE binary format"""
+                    chunk = f"data: {json.dumps(canonical_data)}\n\n".encode('utf-8')
+            
+            """this should always be the case for properly streaming lines on the client for SSE"""
+            if not chunk.endswith(b'\n\n'):
+                chunk = chunk + b'\n\n'
+            
+            # Check if this is a [DONE] marker
+            if chunk.decode('utf-8').strip() == 'data: [DONE]':
+                done_marker_seen = True
+            
+            yield chunk
     
-    status_message = {
-        "status": message
-    }
-    status_event = f'data: {json.dumps(status_message)}\n\n'
-    yield status_event.encode('utf-8')
-    
-    # Send an additional heartbeat to ensure proper streaming initialization
-    # This helps overcome buffering issues in some clients
-    heartbeat = {
-        "id": str(uuid.uuid4()),
-        "object": "chat.completion.chunk",
-        "choices": [{
-            "index": 0,
-            "delta": {"content": ""},
-            "finish_reason": None
-        }]
-    }
-    yield f'data: {json.dumps(heartbeat)}\n\n'.encode('utf-8')
-    
-    """TODO: Percolate agents can implement a response with iter_lines() that behave the same as thing but are agentic"""
-    for chunk in response.iter_lines():
-        """add the decoded lines for later processing"""
-        collected_chunks.append(chunk.decode('utf-8'))
+    except Exception as e:
+        # Log the error but continue to properly close the stream
+        logger.error(f"Error during streaming in stream_generator: {str(e)}")
         
-        """
-        this is convenience that comes at a cost - the user is essentially using all models in the open ai format so we must do some parsing
-        TODO: think more about this
-        """
-        if from_dialect and from_dialect != 'openai':
-            json_data = chunk.decode('utf-8')[6:]
-            if json_data and json_data[0] == '{':       
-                """Parse in valid data and use the canonical mapping"""     
-                canonical_data = map_delta_to_canonical_format(json.loads(json_data), from_dialect, model)
-
-                """recover the SSE binary format"""
-                chunk = f"data: {json.dumps(canonical_data)}\n\n".encode('utf-8')
+    finally:
+        # Send finish_reason "stop" if we haven't seen a finish_reason yet
+        # This ensures clients know the response is complete
+        finish_chunk = {
+            "id": str(uuid.uuid4()),
+            "object": "chat.completion.chunk",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+            }]
+        }
+        yield f'data: {json.dumps(finish_chunk)}\n\n'.encode('utf-8')
         
-        """this should always be the case for properly streaming lines on the client for SSE"""
-        if not chunk.endswith(b'\n\n'):
-            chunk = chunk + b'\n\n'
+        # Always send a [DONE] marker at the end if we haven't seen one yet
+        # This ensures OpenWebUI knows the stream is complete
+        if not done_marker_seen:
+            done_marker = 'data: [DONE]\n\n'
+            yield done_marker.encode('utf-8')
         
-        # Check if this is a [DONE] marker
-        if chunk.decode('utf-8').strip() == 'data: [DONE]':
-            done_marker_seen = True
-        
-        yield chunk
-               
-    # Send finish_reason "stop" if we haven't seen a finish_reason yet
-    # This ensures clients know the response is complete
-    finish_chunk = {
-        "id": str(uuid.uuid4()),
-        "object": "chat.completion.chunk",
-        "choices": [{
-            "index": 0,
-            "delta": {},
-            "finish_reason": "stop"
-        }]
-    }
-    yield f'data: {json.dumps(finish_chunk)}\n\n'.encode('utf-8')
-    
-    # Always send a [DONE] marker at the end if we haven't seen one yet
-    # This ensures OpenWebUI knows the stream is complete
-    if not done_marker_seen:
-        done_marker = 'data: [DONE]\n\n'
-        yield done_marker.encode('utf-8')
-    
-    if audit_callback:
-        full_response = "".join(collected_chunks)
-        audit_callback(full_response)
+        if audit_callback:
+            full_response = "".join(collected_chunks)
+            audit_callback(full_response)
                
  
 def extract_metadata(request, params=None):
     """
     Extract metadata from request and params.
+    
+    This function extracts metadata including:
+    1. Standard metadata fields from the request's metadata attribute
+    2. OpenWebUI-specific metadata like chat_id (at top level or in metadata)
+    3. Additional parameters passed in the params dictionary
     
     Args:
         request: The API request object
@@ -600,20 +676,57 @@ def extract_metadata(request, params=None):
         dict: Combined metadata
     """
     metadata = {}
+    chat_id_source = None
+    
+    # Gather all metadata first, then handle chat_id priority
     
     # Extract from request metadata if available
     if hasattr(request, 'metadata') and request.metadata:
         metadata.update(request.metadata)
     
-    # Extract from params if available
+    # Extract from params if available - lowest priority
     if params:
-        for key in ['user_id', 'session_id', 'channel_id', 'channel_type', 'api_provider', 'use_sse']:
+        for key in ['user_id', 'session_id', 'channel_id', 'channel_type', 'api_provider', 'use_sse', 'metadata']:
             if key in params:
-                metadata[key] = params[key]
+                if key == 'metadata' and isinstance(params[key], dict):
+                    # For nested metadata in params
+                    for param_key, param_value in params[key].items():
+                        # Don't overwrite existing values from higher priority sources
+                        if param_key not in metadata or not metadata[param_key]:
+                            metadata[param_key] = param_value
+                elif key not in metadata or not metadata[key]:
+                    metadata[key] = params[key]
     
-    # Generate session_id if not provided
-    if 'session_id' not in metadata:
+    # Now handle chat_id with explicit priority rules
+    
+    # 1. Top level chat_id has highest priority
+    if hasattr(request, 'chat_id') and request.chat_id:
+        metadata['chat_id'] = request.chat_id
+        metadata['session_id'] = request.chat_id
+        chat_id_source = "top-level"
+        logger.info(f"[CHAT DEBUG] Using top-level chat_id {request.chat_id} as session_id")
+    
+    # 2. Metadata chat_id is next priority
+    elif 'chat_id' in metadata and metadata['chat_id']:
+        metadata['session_id'] = metadata['chat_id']
+        chat_id_source = "metadata"
+        logger.info(f"[CHAT DEBUG] Using OpenWebUI metadata.chat_id {metadata['chat_id']} as session_id")
+    
+    # 3. Params chat_id is lowest priority
+    elif params and 'metadata' in params and isinstance(params['metadata'], dict) \
+            and 'chat_id' in params['metadata'] and params['metadata']['chat_id']:
+        metadata['chat_id'] = params['metadata']['chat_id']
+        metadata['session_id'] = params['metadata']['chat_id']
+        chat_id_source = "params"
+        logger.info(f"[CHAT DEBUG] Using OpenWebUI chat_id {params['metadata']['chat_id']} from params as session_id")
+    
+    # Generate session_id if not provided by any source
+    if 'session_id' not in metadata or not metadata['session_id']:
         metadata['session_id'] = str(uuid.uuid4())
+        logger.info(f"[CHAT DEBUG] Generated new session_id: {metadata['session_id']}")
+    
+    # Log metadata for debugging
+    logger.info(f"[CHAT DEBUG] Final extracted metadata with chat_id from {chat_id_source or 'none'}: {metadata}")
     
     return metadata
 
@@ -645,17 +758,25 @@ def audit_request(request:str,
     
     """we generate a session id if the response did not provided one"""
     session_id = getattr(response, 'session_id', str(uuid.uuid1()))
+    
+    # Clean metadata - remove empty values and don't store session_id twice
+    if metadata:
+        # Create a copy of metadata to avoid modifying the original
+        session_metadata = {k: v for k, v in metadata.items() if v and k != 'session_id'}
+    else:
+        session_metadata = {}
+    
     try:
-        s = Session(id=session_id, **metadata)
+        # Create session record with clean metadata
+        s = Session(id=session_id, **session_metadata)
         p8.repository(Session).update_records(s)
-        logger.info(f"audited {s=}")
+        logger.info(f"Audited session {session_id} with metadata: {session_metadata}")
         
     except:
         logger.warning("Problem with audit request")
         logger.warning(traceback.format_exc())
 
     try:
-        
         """Update the user context here - we can also schedule model updates of the user
         -the function will at a minimum merge the latest session's thread into user history
         - we can model the user on a background job occasionally but we can add quick session tags here
@@ -667,7 +788,7 @@ def audit_request(request:str,
         user_id = metadata.get('userid')
         if user_id:
             p8.repository(User).execute('select * from p8.update_user_model(%s, %s)', data=(user_id, last_ai_response))
-            logger.info(f"updated user model {metadata['userid']}")
+            logger.info(f"Updated user model {metadata['userid']}")
         else:
             logger.warning("We do not have a user so we cannot audit.")
         
@@ -833,7 +954,43 @@ async def completions(
                 # For non-streaming, add auditing as a background task
                 background_tasks.add_task(audit_request, request, response, metadata)
             
-            return JSONResponse(content=response.json(), status_code=response.status_code)
+            # Add debug logging to trace the response flow
+            logger.info(f"Response type in completions: {type(response)}")
+            
+            # Check if the response has a .json() method (likely an OpenAI or similar response)
+            if hasattr(response, 'json') and callable(response.json):
+                try:
+                    return JSONResponse(content=response.json(), status_code=response.status_code)
+                except Exception as e:
+                    logger.error(f"Error creating JSON response: {e}")
+                    # Handle the case where json() fails
+                    from percolate.models import IndexAudit
+                    audit_response = IndexAudit(
+                        id=str(uuid.uuid1()),
+                        model_name=request.model,
+                        status="ERROR",
+                        message=f"Error processing response: {str(e)}",
+                        entity_full_name="ErrorResponse",
+                        skipped='p8.AIResponse',
+                        tokens=0
+                    )
+                    return audit_response
+            elif hasattr(response, 'model_dump'):
+                # It's a Pydantic model, return it directly
+                return response
+            else:
+                # Create a proper response object for validation
+                from percolate.models import IndexAudit
+                audit_response = IndexAudit(
+                    id=str(uuid.uuid1()),
+                    model_name=request.model,
+                    status="SUCCESS",
+                    message="Response processed",
+                    entity_full_name="CompletionResponse",
+                    skipped='p8.AIResponse',
+                    tokens=0
+                )
+                return audit_response
     except HTTPException:
         
         logger.warning(traceback.format_exc())
@@ -887,16 +1044,7 @@ async def agent_completions(
     else:
         logger.info(f"we did not get any device info")
         
-    if agent_name:
-        """internal vs external web conventions for names"""
-        # Replace hyphens with dots for web-friendly URLs
-        if '-' in agent_name:
-            logger.info(f"Converting agent name from '{agent_name}' to '{agent_name.replace('-', '.')}'")
-            agent_name = agent_name.replace('-','.')
-            
-        # Ensure agent name has a namespace if needed
-        if '.' not in agent_name:
-            logger.warning(f"Agent name '{agent_name}' does not have a namespace. This might cause issues.")
+    # Agent name formatting is now handled inside handle_agent_request
     
     logger.info(f"Session for {user_id=}, {session_id=}")
     
@@ -950,13 +1098,9 @@ async def agent_completions(
             return streaming_response
                 
         # For non-streaming mode, the handle_agent_request already returns a complete response
-        # Just convert it to JSON and return
-        if hasattr(response, 'model_dump'):
-            # If it's a Pydantic model, use model_dump
-            return JSONResponse(content=response.model_dump(), status_code=200)
-        else:
-            # Otherwise, attempt to convert to JSON
-            return JSONResponse(content=response, status_code=200)
+
+        return response
+        
     except HTTPException:
         logger.warning(traceback.format_exc())
         raise

@@ -100,14 +100,23 @@ async def index_entity(request: IndexRequest, background_tasks: BackgroundTasks,
     """
     id=uuid.uuid1()
     s = PostgresService(IndexAudit)
-    logger.debug(f"Handling index request {request=} {sleep_seconds=}")
-    time.sleep(sleep_seconds)
+     
     try:
-        record = IndexAudit(id=id, model_name='percolate', entity_full_name=request.entity_full_name, metrics={}, status="REQUESTED", message="Indexed requested")
-        s.update_records(record)
-        """todo create an audit record pending and use that in the api response"""
-        background_tasks.add_task(s.index_entity_by_name, request.entity_full_name, id=id)
-        return record
+        
+        if request.entity_full_name not in ['p8.AIResponse', "p8.IndexAudit"]:
+          
+            record = IndexAudit(id=id, model_name='percolate', entity_full_name=request.entity_full_name, metrics={}, status="REQUESTED", message="Indexed requested")
+            s.update_records(record)
+            """todo create an audit record pending and use that in the api response"""
+            logger.info(f"handling {request=}")
+            background_tasks.add_task(s.index_entity_by_name,
+                                      request.entity_full_name,
+                                      id=id,
+                                      sleep_seconds=sleep_seconds)
+            return record
+        else:
+            record = IndexAudit(id=id,model_name='percolate',entity_full_name=request.entity_full_name, metrics={}, status="SKIPPED", message="Skipped by design")
+            return record
     except Exception as e:
         """handle api errors"""
         logger.warning(f"/admin/index {traceback.format_exc()}")
