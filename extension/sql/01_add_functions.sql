@@ -734,6 +734,408 @@ $$ LANGUAGE plpgsql;
 
 ---------
 
+-- PostgreSQL Row-Level Security Policy Function for Percolate
+-- This file contains the core function for attaching RLS policies to tables
+
+DROP FUNCTION IF EXISTS p8.attach_rls_policy;
+-- Function to attach row-level security policy to a table with configurable access level
+CREATE OR REPLACE FUNCTION p8.attach_rls_policy(
+    p_schema_name TEXT, 
+    p_table_name TEXT, 
+    p_default_access_level INTEGER DEFAULT 5  -- Default to INTERNAL (5)
+)
+RETURNS VOID AS $$
+DECLARE
+    full_table_name TEXT;
+    policy_name TEXT;
+    policy_exists BOOLEAN;
+    has_userid_column BOOLEAN;
+BEGIN
+    -- Construct the full table name
+    full_table_name := p_schema_name || '.' || p_table_name;
+    policy_name := p_table_name || '_access_policy';
+    
+    -- Check if the table exists
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.tables t
+        WHERE t.table_schema = p_schema_name 
+        AND t.table_name = p_table_name
+    ) THEN
+        RAISE EXCEPTION 'Table %.% does not exist', p_schema_name, p_table_name;
+    END IF;
+    
+    -- Check if the required columns exist, add them if they don't
+    BEGIN
+        -- Check for userid column
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns c
+            WHERE c.table_schema = p_schema_name 
+              AND c.table_name = p_table_name
+              AND c.column_name = 'userid'
+        ) THEN
+            EXECUTE format('ALTER TABLE %I.%I ADD COLUMN userid UUID', p_schema_name, p_table_name);
+            RAISE NOTICE 'Added userid column to %.%', p_schema_name, p_table_name;
+        END IF;
+        
+        -- Check for groupid column
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns c
+            WHERE c.table_schema = p_schema_name 
+              AND c.table_name = p_table_name
+              AND c.column_name = 'groupid'
+        ) THEN
+            EXECUTE format('ALTER TABLE %I.%I ADD COLUMN groupid TEXT', p_schema_name, p_table_name);
+            RAISE NOTICE 'Added groupid column to %.%', p_schema_name, p_table_name;
+        END IF;
+        
+        -- Check for required_access_level column
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns c
+            WHERE c.table_schema = p_schema_name 
+              AND c.table_name = p_table_name
+              AND c.column_name = 'required_access_level'
+        ) THEN
+            EXECUTE format('ALTER TABLE %I.%I ADD COLUMN required_access_level INTEGER DEFAULT %s', 
+                           p_schema_name, p_table_name, p_default_access_level);
+            RAISE NOTICE 'Added required_access_level column to %.% with default %', 
+                         p_schema_name, p_table_name, p_default_access_level;
+        ELSE
+            -- Check if the current default value matches the specified default
+            DECLARE
+                current_default TEXT;
+            BEGIN
+                SELECT column_default INTO current_default
+                FROM information_schema.columns 
+                WHERE table_schema = p_schema_name 
+                  AND table_name = p_table_name
+                  AND column_name = 'required_access_level';
+                
+                -- If the default value doesn't match, update it
+                IF current_default IS NULL OR current_default != p_default_access_level::TEXT THEN
+                    EXECUTE format('ALTER TABLE %I.%I ALTER COLUMN required_access_level SET DEFAULT %s', 
+                                   p_schema_name, p_table_name, p_default_access_level);
+                    RAISE NOTICE 'Updated default value of required_access_level to % in %.%', 
+                                 p_default_access_level, p_schema_name, p_table_name;
+                END IF;
+            END;
+            
+            -- Update existing records to the specified access level if they don't match
+            EXECUTE format('UPDATE %I.%I SET required_access_level = %s WHERE required_access_level != %s OR required_access_level IS NULL', 
+                          p_schema_name, p_table_name, p_default_access_level, p_default_access_level);
+            RAISE NOTICE 'Updated required_access_level to % for existing records in %.%', 
+                          p_default_access_level, p_schema_name, p_table_name;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN
+        RAISE NOTICE 'Error adding security columns to %.%: %', p_schema_name, p_table_name, SQLERRM;
+    END;
+    
+    -- Enable row-level security on the table
+    EXECUTE format('ALTER TABLE %I.%I ENABLE ROW LEVEL SECURITY', p_schema_name, p_table_name);
+    
+    -- Check if the policy already exists
+    SELECT EXISTS (
+        SELECT 1 FROM pg_policies p
+        WHERE p.schemaname = p_schema_name
+          AND p.tablename = p_table_name
+          AND p.policyname = policy_name
+    ) INTO policy_exists;
+    
+    -- If the policy exists, drop it before recreating
+    IF policy_exists THEN
+        BEGIN
+            EXECUTE format('DROP POLICY %I ON %I.%I', policy_name, p_schema_name, p_table_name);
+            RAISE NOTICE 'Dropped existing policy % on table %', policy_name, full_table_name;
+        EXCEPTION WHEN OTHERS THEN
+            RAISE NOTICE 'Could not drop policy % on table %: %', policy_name, full_table_name, SQLERRM;
+        END;
+    END IF;
+    
+    -- Create the RLS policy with modified conditions
+    EXECUTE format('
+        CREATE POLICY %I ON %I.%I
+        USING (
+            -- PRIMARY CONDITION: Role level check
+            current_setting(''percolate.role_level'')::INTEGER <= required_access_level
+            
+            OR
+            
+            -- SECONDARY CONDITIONS: Elevate user access through ownership or group membership
+            (
+                -- 1. User owns the record
+                (current_setting(''percolate.user_id'')::UUID = userid AND userid IS NOT NULL)
+                
+                -- 2. User is member of the record''s group
+                OR (
+                    groupid IS NOT NULL AND 
+                    position(groupid IN current_setting(''percolate.user_groups'', ''true'')) > 0
+                )
+            )
+        )', 
+        policy_name, p_schema_name, p_table_name
+    );
+    
+    -- Force RLS even for table owner
+    EXECUTE format('ALTER TABLE %I.%I FORCE ROW LEVEL SECURITY', p_schema_name, p_table_name);
+    
+    RAISE NOTICE 'Row-level security policy attached to % with default access level %', 
+                 full_table_name, p_default_access_level;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+
+DROP FUNCTION IF EXISTS p8.secure_all_tables;
+-- Function to secure all tables in a schema with configurable access levels
+CREATE OR REPLACE FUNCTION p8.secure_all_tables(
+    p_schema_name TEXT DEFAULT 'p8',
+    p_default_access_level INTEGER DEFAULT 5
+)
+RETURNS VOID AS $$
+DECLARE
+    r RECORD;
+BEGIN
+    -- Add security columns to all tables in the schema
+    FOR r IN (
+        SELECT table_name 
+        FROM information_schema.tables 
+        WHERE table_schema = p_schema_name 
+        AND table_type = 'BASE TABLE'
+    ) LOOP
+        BEGIN
+            -- Apply RLS policy to the table with the specified default access level
+            PERFORM p8.attach_rls_policy(p_schema_name, r.table_name, p_default_access_level);
+            RAISE NOTICE 'Secured table: %.%', p_schema_name, r.table_name;
+        EXCEPTION WHEN OTHERS THEN
+            RAISE NOTICE 'Error securing table %.%: %', p_schema_name, r.table_name, SQLERRM;
+        END;
+    END LOOP;
+    
+    RAISE NOTICE 'All tables in % schema have been secured with row-level security (default access level: %)', 
+                 p_schema_name, p_default_access_level;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Documentation
+COMMENT ON FUNCTION p8.attach_rls_policy(TEXT, TEXT, INTEGER) IS 
+'Attaches a row-level security policy to a table with configurable access level.
+The policy enforces:
+1. Role-based access (user''s role level must be sufficient)
+   - This is the primary access control mechanism
+   - OR
+2. User-specific access privileges:
+   - User owns the record (userid matches)
+   - User is a member of the record''s group
+   
+With this policy, user access can be elevated through ownership or group membership,
+but records without owners (userid IS NULL) are only visible to users with appropriate role level.
+
+Arguments:
+- schema_name: The schema containing the table
+- table_name: The name of the table to secure
+- default_access_level: Default access level for the table (default 5 = INTERNAL)
+  (0=GOD, 1=ADMIN, 5=INTERNAL, 10=PARTNER, 100=PUBLIC)
+
+Example:
+SELECT p8.attach_rls_policy(''p8'', ''User'', 1);  -- Require ADMIN access by default';
+
+COMMENT ON FUNCTION p8.secure_all_tables(TEXT, INTEGER) IS
+'Secures all tables in a schema with row-level security policies.
+Adds required security columns if they don''t exist and attaches policies.
+
+Arguments:
+- schema_name: The schema to secure (default ''p8'')
+- default_access_level: Default access level for tables (default 5 = INTERNAL)
+  (0=GOD, 1=ADMIN, 5=INTERNAL, 10=PARTNER, 100=PUBLIC)
+
+Example:
+SELECT p8.secure_all_tables();  -- Secure all tables in p8 schema with INTERNAL access
+SELECT p8.secure_all_tables(''app'', 10);  -- Secure all tables in app schema with PARTNER access';
+
+---------
+
+-- Function to set user context for row-level security
+DROP FUNCTION IF EXISTS p8.set_user_context;
+CREATE OR REPLACE FUNCTION p8.set_user_context(
+    p_user_id UUID, 
+    p_role_level INTEGER = NULL
+)
+RETURNS VOID AS $$
+DECLARE
+    v_role_level INTEGER;
+    v_user_record RECORD;
+    v_groups TEXT[];
+BEGIN
+    -- If role_level not provided, try to load it from the User table
+    IF p_role_level IS NULL THEN
+        -- Get role_level, required_access_level, and groups from the User table
+        SELECT u.role_level, u.required_access_level, u.groups
+        INTO v_user_record
+        FROM p8."User" u
+        WHERE u.id = p_user_id;
+        
+        -- Use role_level if available, otherwise use required_access_level
+        -- If neither is found, default to public access (100)
+        IF v_user_record.role_level IS NOT NULL THEN
+            v_role_level := v_user_record.role_level;
+        ELSIF v_user_record.required_access_level IS NOT NULL THEN
+            -- Use the required_access_level as a fallback
+            -- This makes sense because God users have required_access_level=0
+            -- Admin users have required_access_level=1, etc.
+            v_role_level := v_user_record.required_access_level;
+        ELSE
+            -- Default to public access if nothing is found
+            v_role_level := 100;
+        END IF;
+        
+        -- Get user groups if available
+        v_groups := v_user_record.groups;
+    ELSE
+        -- Use the explicitly provided role level
+        v_role_level := p_role_level;
+        
+        -- Still need to get groups from User table
+        SELECT u.groups
+        INTO v_groups
+        FROM p8."User" u
+        WHERE u.id = p_user_id;
+    END IF;
+    
+    -- Set the session variables
+    PERFORM set_config('percolate.user_id', p_user_id::TEXT, false);
+    PERFORM set_config('percolate.role_level', v_role_level::TEXT, false);
+    
+    -- Set user groups if available
+    IF v_groups IS NOT NULL AND array_length(v_groups, 1) > 0 THEN
+        -- For LIKE pattern matching in the policy, we need commas as separators
+        PERFORM set_config('percolate.user_groups', ',' || array_to_string(v_groups, ',') || ',', false);
+    ELSE
+        -- Set empty string if no groups
+        PERFORM set_config('percolate.user_groups', '', false);
+    END IF;
+    
+    -- Return the role level as a message for debugging
+    RAISE NOTICE 'Set user context: user_id=%, role_level=%, groups=%', 
+                 p_user_id, v_role_level, v_groups;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Documentation
+COMMENT ON FUNCTION p8.set_user_context(UUID, INTEGER) IS 
+'Sets PostgreSQL session variables for row-level security:
+- percolate.user_id: UUID of the current user
+- percolate.role_level: Access level of the user (0=GOD, 1=ADMIN, 5=INTERNAL, 10=PARTNER, 100=PUBLIC)
+- percolate.user_groups: Comma-separated list of groups the user belongs to
+
+Arguments:
+- p_user_id: The user ID to set in the session
+- p_role_level: Optional role level to override the user''s default level
+
+Examples:
+SELECT p8.set_user_context(''4114f279-f345-511b-b375-1953089e078f'');
+SELECT p8.set_user_context(''4114f279-f345-511b-b375-1953089e078f'', 1);
+';
+
+---------
+
+-- Function to create application user with full data access but not database superuser privileges
+-- This ensures the user can access all data but cannot bypass row-level security policies
+
+DROP FUNCTION IF EXISTS p8.create_app_user;
+CREATE OR REPLACE FUNCTION p8.create_app_user(username TEXT, password TEXT)
+RETURNS TEXT AS $$
+DECLARE
+    schema_rec RECORD;
+    conn_string TEXT;
+    role_exists BOOLEAN;
+BEGIN
+    -- Check if the role exists
+    SELECT EXISTS (SELECT FROM pg_roles WHERE rolname = username) INTO role_exists;
+    
+    -- Create the role if it doesn't exist, otherwise update the password
+    IF NOT role_exists THEN
+        EXECUTE format('CREATE ROLE %I WITH LOGIN PASSWORD %L', username, password);
+    ELSE
+        EXECUTE format('ALTER ROLE %I WITH PASSWORD %L', username, password);
+    END IF;
+    
+    -- Ensure the role does not have superuser or BYPASSRLS privileges
+    EXECUTE format('
+    ALTER ROLE %I NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    ', username);
+    
+    -- We'll skip explicit age extension grants for now
+    
+    -- Grant privileges to each non-system schema
+    FOR schema_rec IN (
+        SELECT nspname FROM pg_namespace 
+        WHERE nspname NOT LIKE 'pg_%' 
+        AND nspname != 'information_schema'
+    ) LOOP
+        -- Grant schema usage and create privileges
+        EXECUTE format('GRANT USAGE, CREATE ON SCHEMA %I TO %I;', 
+                      schema_rec.nspname, username);
+        
+        -- Grant all privileges on all tables in the schema
+        EXECUTE format('
+        GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA %I TO %I;
+        ', schema_rec.nspname, username);
+        
+        -- Grant usage on all sequences
+        EXECUTE format('
+        GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA %I TO %I;
+        ', schema_rec.nspname, username);
+        
+        -- Set default privileges for future tables and sequences
+        EXECUTE format('
+        ALTER DEFAULT PRIVILEGES IN SCHEMA %I
+        GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %I;
+        ', schema_rec.nspname, username);
+        
+        EXECUTE format('
+        ALTER DEFAULT PRIVILEGES IN SCHEMA %I
+        GRANT USAGE, SELECT ON SEQUENCES TO %I;
+        ', schema_rec.nspname, username);
+        
+        -- Grant execute on functions
+        EXECUTE format('
+        GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA %I TO %I;
+        ', schema_rec.nspname, username);
+        
+        EXECUTE format('
+        ALTER DEFAULT PRIVILEGES IN SCHEMA %I
+        GRANT EXECUTE ON FUNCTIONS TO %I;
+        ', schema_rec.nspname, username);
+    END LOOP;
+    
+    -- Generate connection string based on current connection
+    -- This assumes current_database() returns the database name
+    conn_string := format('postgresql://%I:%s@%s:%s/%s', 
+                         username, 
+                         password,
+                         (SELECT setting FROM pg_settings WHERE name = 'listen_addresses'),
+                         (SELECT setting FROM pg_settings WHERE name = 'port'),
+                         current_database());
+    
+    RETURN conn_string;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Documentation
+COMMENT ON FUNCTION p8.create_app_user(TEXT, TEXT) IS 
+'Creates a PostgreSQL user with full data access privileges, schema creation rights, but no superuser status.
+This ensures row-level security policies will be enforced while allowing table creation.
+
+Arguments:
+- username: The username for the new application user
+- password: The password for the new user
+
+Returns:
+- Connection string for the new user
+
+Example:
+SELECT p8.create_app_user(''percolate_app'', ''strong_password'');';
+
+---------
+
 -- FUNCTION: p8.encode_url_query(jsonb)
 
 -- DROP FUNCTION IF EXISTS p8.encode_url_query(jsonb);
@@ -4835,6 +5237,8 @@ DECLARE
     sql TEXT;
     schema_name TEXT;
     pure_table_name TEXT;
+    view_name TEXT;
+    view_exists BOOLEAN;
     nodes_created_count INTEGER := 0;  
 BEGIN
 
@@ -4845,15 +5249,30 @@ BEGIN
     --we always need this when using AGE from postgres 
     LOAD  'age'; SET search_path = ag_catalog, "$user", public; 
 
-    cypher_query := 'CREATE ';
     schema_name := lower(split_part(table_name, '.', 1));
     pure_table_name := split_part(table_name, '.', 2);
+    view_name := format('p8."vw_%s_%s"', schema_name, pure_table_name);
+    
+    -- Check if the view exists before attempting to query it
+    EXECUTE format('
+        SELECT EXISTS (
+            SELECT FROM information_schema.views 
+            WHERE table_schema = ''p8'' 
+            AND table_name = ''vw_%s_%s''
+        )', schema_name, pure_table_name) 
+    INTO view_exists;
+    
+    -- If view doesn't exist, log a message and return 0
+    IF NOT view_exists THEN
+        RAISE NOTICE 'View % does not exist - skipping node creation', view_name;
+        RETURN 0;
+    END IF;
+
+    cypher_query := 'CREATE ';
 
     -- Loop through each row in the table  
     FOR row IN
-        EXECUTE format('SELECT uid, key, userid FROM p8."vw_%s_%s" WHERE gid IS NULL LIMIT 1660',
-            schema_name, pure_table_name
-        )
+        EXECUTE format('SELECT uid, key, userid FROM %s WHERE gid IS NULL LIMIT 1660', view_name)
     LOOP
         -- Append Cypher node creation for each row (include user_id only when present)
         IF row.userid IS NULL THEN
@@ -5282,7 +5701,6 @@ $BODY$;
 
 ---------
 
--- FUNCTION: p8.generate_requests_for_embeddings(text, text, text)
 
 DROP FUNCTION IF EXISTS p8.generate_requests_for_embeddings;
 
@@ -5290,7 +5708,7 @@ CREATE OR REPLACE FUNCTION p8.generate_requests_for_embeddings(
 	param_table text,
 	param_description_col text,
 	param_embedding_model text,
-  	max_length integer DEFAULT 30000) -- WARNING that we truncate the string for e.g. the ada model so batches dont fail but we should have an upstream chunking strategy
+	max_length integer DEFAULT 10000)
     RETURNS TABLE(eid uuid, source_id uuid, description text, bid uuid, column_name text, embedding_id text, idx bigint) 
     LANGUAGE 'plpgsql'
     COST 100
@@ -5305,8 +5723,12 @@ DECLARE
 BEGIN
 /*
 if there are records in the table for this embedding e.g. the table like p8.Agents has unfilled records 
+WE are filtering out cases where there is a null or blank description column
 
 		select * from p8.generate_requests_for_embeddings('p8.Resources', 'content', 'text-embedding-ada-002')
+		select * from p8.generate_requests_for_embeddings('p8.Agent', 'description', 'text-embedding-ada-002')
+				select * from p8.generate_requests_for_embeddings('design.bodies', 'generated_garment_description', 'text-embedding-ada-002')
+				select * from p8.generate_requests_for_embeddings('p8.PercolateAgent', 'content', 'text-embedding-ada-002')
 
 */
     -- Sanitize the table name
@@ -5320,7 +5742,7 @@ if there are records in the table for this embedding e.g. the table like p8.Agen
         SELECT 
             b.id AS eid, 
             a.id AS source_id, 
-            LEFT(COALESCE(a.%I, ''), %s)::TEXT AS description, -- Truncate description to max_length - NOTE its important that we chunk upstream!!!! but this stops a blow up downstream           
+            LEFT(COALESCE(a.%I, 'no desc'), %s)::TEXT AS description, -- Truncate description to max_length - NOTE its important that we chunk upstream!!!! but this stops a blow up downstream           
             p8.json_to_uuid(json_build_object(
                 'embedding_id', %L,
                 'column_name', %L,
@@ -5334,6 +5756,8 @@ if there are records in the table for this embedding e.g. the table like p8.Agen
             ON b.source_record_id = a.id 
             AND b.column_name = %L
         WHERE b.id IS NULL
+		and %I IS NOT NULL
+		and %I <> ''
  
         $sql$,
         PARAM_DESCRIPTION_COL,         -- %I for the description column
@@ -5345,59 +5769,14 @@ if there are records in the table for this embedding e.g. the table like p8.Agen
         PSCHEMA,                       -- %I for schema name
         PTABLE,                        -- %I for table name
         sanitized_table,               -- %I for sanitized embedding table
-        PARAM_DESCRIPTION_COL          -- %L for the column name in the join condition
+        PARAM_DESCRIPTION_COL,          -- %L for the column name in the join condition
+		PARAM_DESCRIPTION_COL,
+		PARAM_DESCRIPTION_COL
     );
 END;
 $BODY$;
 
-
-/*
-we may want to chunk but im not sure where i want to do it
-we can left the text column large or created a joined chunk column and embed that 
-if we leave the text large, we can create N chunk embeddings all pointing to the same large text
-the difficult is we need to do a clean up
-It may be that we generate the ID using a chunk and then we need some sort of vacuum for the provider length and checking the text content length
-for example if the user edited the field, we would have to rebuild the chunks and the embeddings
-in general a cte for chunking uses recursion like this
-
----
--- Define the parameter for the maximum chunk length
-DECLARE @ChunkLength INT = 9;
-
-WITH ChunkCTE AS (
-    -- Anchor: Get the first chunk from each row
-    SELECT
-        id,
-        -- Include any additional columns you want to retain
-        OtherColumn,
-        CAST(SUBSTRING(text, 1, @ChunkLength) AS VARCHAR(MAX)) AS ChunkText,
-        1 AS ChunkRank,
-        SUBSTRING(text, @ChunkLength + 1, LEN(text)) AS RemainingText
-    FROM MyTable
-
-    UNION ALL
-
-    -- Recursive part: Process the remaining text
-    SELECT
-        id,
-        OtherColumn,
-        CAST(SUBSTRING(RemainingText, 1, @ChunkLength) AS VARCHAR(MAX)),
-        ChunkRank + 1,
-        SUBSTRING(RemainingText, @ChunkLength + 1, LEN(RemainingText))
-    FROM ChunkCTE
-    WHERE LEN(RemainingText) > 0  -- Continue as long as there’s text left to process
-)
-SELECT
-    id,
-    OtherColumn,
-    ChunkRank,
-    ChunkText
-FROM ChunkCTE
-ORDER BY id, ChunkRank
-OPTION (MAXRECURSION 0);  -- Allows unlimited recursion if needed
-
-
-*/
+ 
 
 ---------
 

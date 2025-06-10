@@ -684,17 +684,17 @@ def extract_metadata(request, params=None):
     if hasattr(request, 'metadata') and request.metadata:
         metadata.update(request.metadata)
     
-    # Extract from params if available - lowest priority
+    # Extract from params if available - highest priority (overrides request metadata)
     if params:
         for key in ['user_id', 'session_id', 'channel_id', 'channel_type', 'api_provider', 'use_sse', 'metadata']:
             if key in params:
                 if key == 'metadata' and isinstance(params[key], dict):
                     # For nested metadata in params
                     for param_key, param_value in params[key].items():
-                        # Don't overwrite existing values from higher priority sources
-                        if param_key not in metadata or not metadata[param_key]:
-                            metadata[param_key] = param_value
-                elif key not in metadata or not metadata[key]:
+                        # Params should override request metadata (highest priority)
+                        metadata[param_key] = param_value
+                else:
+                    # Params override request metadata
                     metadata[key] = params[key]
     
     # Now handle chat_id with explicit priority rules
