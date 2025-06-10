@@ -120,6 +120,26 @@ class TranscriptionService:
     def _transcribe_with_client(self, file_path: str) -> Tuple[str, float]:
         """Transcribe using the official OpenAI client."""
         try:
+            # Verify the file format before sending to OpenAI
+            file_ext = os.path.splitext(file_path)[1].lower()
+            
+            # Log file details
+            file_size_mb = os.path.getsize(file_path) / (1024*1024)
+            logger.info(f"Preparing to transcribe: {file_path} ({file_size_mb:.2f}MB, format: {file_ext})")
+            
+            # Special handling for WAV files to ensure they're properly formatted
+            if file_ext == '.wav':
+                # Try to validate the WAV file
+                try:
+                    import wave
+                    with wave.open(file_path, 'rb') as wav_file:
+                        # Extract basic info
+                        channels, sample_width, frame_rate, n_frames, comp_type, comp_name = wav_file.getparams()
+                        logger.info(f"WAV file info: channels={channels}, rate={frame_rate}, frames={n_frames}")
+                except Exception as wav_error:
+                    logger.warning(f"WAV file validation failed: {str(wav_error)}. File may be corrupted or in non-standard format.")
+            
+            # Proceed with transcription
             with open(file_path, "rb") as audio_file:
                 transcript = self.client.audio.transcriptions.create(
                     model="whisper-1",

@@ -745,47 +745,7 @@ class Resources(AbstractModel):
         return resources
         
         
-    @classmethod
-    def chunked_resource_old(
-        cls,
-        uri: str,
-        chunk_size: int = 1000,
-        category: typing.Optional[str] = None,
-        name: typing.Optional[str] = None,
-        userid: typing.Optional[str] = None,
-        try_markdown: bool = False,
-        enriched: bool = False
-    ) -> typing.List["Resources"]:
-        """read file contents from web or file and chunks them by some chunk size - sensible defaults are used
-        
-        the uri is used as the id but we excluded parameters from the uri
-        """
-        
-        from percolate.utils.parsing import get_content_provider_for_uri
-        from pathlib import Path
-        
-        def sanitize_text(text: str) -> str:
-            """this is a dump serializer for now as we work out the data model"""
-            import html2text    
-            t =  text.replace("\x00", "")  # or use a placeholder like "�"
-            if try_markdown:
-                try:
-                     t = html2text.html2text(t)
-                except Exception as ex:
-                    #print("HTMLPARSE", ex)
-                    pass
-            return t
-           
-        """TODO add an S3 provider that understands signing""" 
-        provider = get_content_provider_for_uri(uri)
-        text = sanitize_text(provider.extract_text(uri, enriched=enriched))
-        
-        return cls.chunked_resource_from_text(text, 
-                                              uri, 
-                                              chunk_size=chunk_size,
-                                              name=name,
-                                              userid=userid, 
-                                              category=category)
+    # chunked_resource_old has been removed - use chunked_resource instead
     
     @classmethod
     def chunked_resource(
@@ -832,10 +792,16 @@ class Resources(AbstractModel):
         try:
             # Use read_chunks with ResourceChunker directly to avoid the circular call
             # We call the ResourceChunker directly since read_chunks would call back to this method
-            chunker = fs._get_resource_chunker() if hasattr(fs, '_get_resource_chunker') else None
+            # Use the new location of ResourceChunker in parsing directory
+            chunker = None
+            if hasattr(fs, '_get_resource_chunker'):
+                try:
+                    chunker = fs._get_resource_chunker()
+                except:
+                    chunker = None
             if not chunker:
                 # Fallback: import ResourceChunker directly
-                from percolate.services.FileSystemService import ResourceChunker
+                from percolate.utils.parsing.ResourceChunker import ResourceChunker
                 chunker = ResourceChunker(fs)
             
             resources = chunker.chunk_resource_from_uri(

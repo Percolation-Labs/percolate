@@ -16,7 +16,7 @@ import os
 import io
 import tempfile
 from pathlib import Path
-from typing import Union, Any, Dict, BinaryIO, Optional, List, Literal, Callable
+from typing import Union, Any, Dict, BinaryIO, Optional, List, Literal, Callable, TypeVar, cast
 from abc import ABC, abstractmethod
 import typing
 import mimetypes
@@ -27,12 +27,8 @@ import polars as pl
 from PIL import Image
 
 # Optional dependencies - gracefully handle imports
-try:
-    import PyPDF2
-    import fitz  # PyMuPDF
-    HAS_PDF = True
-except ImportError:
-    HAS_PDF = False
+# PDF handling is now imported from parsing.pdf_handler
+from percolate.utils.parsing.pdf_handler import get_pdf_handler, HAS_PYPDF as HAS_PDF
 
 try:
     import librosa
@@ -69,6 +65,9 @@ except ImportError:
 from percolate.services.S3Service import S3Service
 from percolate.utils import logger
 
+# Import ResourceChunker factory function instead of direct instantiation
+from percolate.utils.parsing.ResourceChunker import create_resource_chunker, get_resource_chunker
+
 
 class FileSystemProvider(ABC):
     """Abstract base class for file system providers"""
@@ -91,6 +90,21 @@ class FileSystemProvider(ABC):
     
     @abstractmethod
     def write_text(self, path: str, text: str, encoding: str = 'utf-8') -> None:
+        pass
+        
+    @abstractmethod
+    def open(self, path: str, mode: str = 'rb', **kwargs) -> Union[BinaryIO, Any]:
+        """
+        Open a file-like object.
+        
+        Args:
+            path: The file path or URI
+            mode: File mode ('r', 'rb', 'w', 'wb')
+            **kwargs: Additional provider-specific arguments
+            
+        Returns:
+            A file-like object
+        """
         pass
 
 
@@ -127,6 +141,22 @@ class LocalFileSystemProvider(FileSystemProvider):
         Path(normalized_path).parent.mkdir(parents=True, exist_ok=True)
         with open(normalized_path, 'w', encoding=encoding) as f:
             f.write(text)
+            
+    def open(self, path: str, mode: str = 'rb', **kwargs) -> BinaryIO:
+        """
+        Open a file-like object for local files.
+        
+        Args:
+            path: The file path
+            mode: File mode ('r', 'rb', 'w', 'wb')
+            **kwargs: Additional arguments (ignored for local files)
+            
+        Returns:
+            A file-like object
+        """
+        normalized_path = self._normalize_path(path)
+        Path(normalized_path).parent.mkdir(parents=True, exist_ok=True)
+        return open(normalized_path, mode)
 
 
 class S3FileSystemProvider(FileSystemProvider):
@@ -159,6 +189,20 @@ class S3FileSystemProvider(FileSystemProvider):
     def write_text(self, path: str, text: str, encoding: str = 'utf-8') -> None:
         data = text.encode(encoding)
         self.write_bytes(path, data)
+        
+    def open(self, path: str, mode: str = 'rb', version_id: str = None):
+        """
+        Open a file-like object for S3 files.
+        
+        Args:
+            path: The S3 URI
+            mode: File mode ('r', 'rb', 'w', 'wb')
+            version_id: Optional version ID for versioned objects
+            
+        Returns:
+            A file-like object
+        """
+        return self.s3_service.open(path, mode=mode, version_id=version_id)
 
 
 class FileTypeHandler(ABC):
@@ -248,65 +292,25 @@ class ParquetHandler(FileTypeHandler):
 
 
 class PDFHandler(FileTypeHandler):
-    """Handler for PDF files"""
+    """Handler for PDF files using improved implementation from pdf_handler module"""
     
     def can_handle(self, file_path: str) -> bool:
-        return Path(file_path).suffix.lower() == '.pdf' and HAS_PDF
+        """Check if this handler can process the file."""
+        return get_pdf_handler().can_handle(file_path)
     
     def read(self, provider: FileSystemProvider, file_path: str, **kwargs) -> Dict[str, Any]:
         """
         Read PDF and return a dictionary with text content and metadata.
-        Enhanced version based on the existing PDF parser.
+        Enhanced version that delegates to the pdf_handler module.
         """
         if not HAS_PDF:
-            raise ImportError("PDF support requires PyPDF2 and PyMuPDF: pip install PyPDF2 PyMuPDF")
+            raise ImportError("PDF support requires pypdf")
         
-        data = provider.read_bytes(file_path)
-        pdf_stream = io.BytesIO(data)
+        # Use the file stream from the provider
+        pdf_stream = provider.open(file_path, 'rb')
         
-        # Extract text using PyPDF2
-        pdf_reader = PyPDF2.PdfReader(stream=pdf_stream)
-        text_pages = []
-        for page_num in range(len(pdf_reader.pages)):
-            page = pdf_reader.pages[page_num]
-            text = page.extract_text()
-            text_pages.append(text.replace('\n \n', ' '))  # Clean text
-        
-        # Extract images using PyMuPDF
-        pdf_stream.seek(0)  # Reset stream
-        images = []
-        image_info = []
-        
-        with fitz.open(stream=pdf_stream) as pdf_document:
-            for page_num in range(pdf_document.page_count):
-                page = pdf_document.load_page(page_num)
-                page_images = []
-                
-                for img in page.get_images(full=True):
-                    xref = img[0]
-                    base_image = pdf_document.extract_image(xref)
-                    image_bytes = base_image["image"]
-                    image = Image.open(io.BytesIO(image_bytes))
-                    
-                    # Filter out small images (likely logos/decorations)
-                    min_size = kwargs.get('min_image_size', (300, 300))
-                    if image.size[0] >= min_size[0] and image.size[1] >= min_size[1]:
-                        page_images.append(image)
-                
-                images.append(page_images)
-                image_info.append(page.get_image_info())
-        
-        return {
-            'text_pages': text_pages,
-            'images': images,
-            'image_info': image_info,
-            'num_pages': len(text_pages),
-            'metadata': {
-                'title': pdf_reader.metadata.get('/Title', '') if pdf_reader.metadata else '',
-                'author': pdf_reader.metadata.get('/Author', '') if pdf_reader.metadata else '',
-                'subject': pdf_reader.metadata.get('/Subject', '') if pdf_reader.metadata else '',
-            }
-        }
+        # Delegate to the improved PDFHandler implementation
+        return get_pdf_handler().read(pdf_stream, **kwargs)
     
     def write(self, provider: FileSystemProvider, file_path: str, data: bytes, **kwargs) -> None:
         """Write PDF bytes to file"""
@@ -760,6 +764,38 @@ class FileSystemService:
         provider = self._get_provider(path)
         return provider.exists(path)
     
+    def open(self, path: str, mode: str = 'rb', **kwargs) -> Union[BinaryIO, Any]:
+        """
+        Open a file-like object for reading or writing.
+        
+        This method provides a file-like interface for all supported file systems,
+        allowing you to use the same code for local and S3 files.
+        
+        Args:
+            path: File path (local or s3://)
+            mode: File mode ('r', 'rb', 'w', 'wb')
+            **kwargs: Additional arguments passed to the provider
+                - For S3: version_id (Optional version ID for reading specific versions)
+                
+        Returns:
+            A file-like object for reading or writing
+            
+        Usage:
+            # Reading a file
+            with fs.open("s3://bucket/key", "rb") as f:
+                data = f.read()
+                
+            # Writing a file
+            with fs.open("s3://bucket/key", "wb") as f:
+                f.write(b"Hello, World!")
+                
+            # Reading a local file
+            with fs.open("/path/to/file", "r") as f:
+                text = f.read()
+        """
+        provider = self._get_provider(path)
+        return provider.open(path, mode=mode, **kwargs)
+    
     def read_bytes(self, path: str) -> bytes:
         """
         Read a file as raw bytes, bypassing any handlers.
@@ -792,13 +828,21 @@ class FileSystemService:
         provider = self._get_provider(path)
         handler = self._get_handler(path)
         
+        # Special handling for audio files (WAV, MP3, etc.) when using extended mode
+        ext = Path(path).suffix.lower()
+        mode = kwargs.get('mode', 'simple')
+        if ext in ['.wav', '.mp3', '.m4a', '.flac', '.ogg'] and mode == 'extended':
+            # For audio files in extended mode, we should let ResourceChunker handle it directly
+            # rather than trying to read it here, since it requires transcription
+            logger.info(f"Audio file detected with extended mode: {path}")
+            return provider.read_bytes(path)
+        
         if handler:
             try:
                 result = handler.read(provider, path, **kwargs)
                 
                 # Handle extended mode for PDFs
                 if isinstance(handler, PDFHandler):
-                    mode = kwargs.get('mode', 'simple')
                     if mode == 'extended':
                         # Add raw bytes for page conversion
                         if isinstance(result, dict):
@@ -824,11 +868,20 @@ class FileSystemService:
                 
                 return result
             except Exception as e:
-                logger.warning(f"Handler failed for {path}: {e}. Falling back to raw bytes.")
-                return provider.read_bytes(path)
+                # If handler failed for audio file, let ResourceChunker handle it
+                if ext in ['.wav', '.mp3', '.m4a', '.flac', '.ogg']:
+                    logger.warning(f"Audio handler failed, using raw bytes for {path}: {str(e)}")
+                    return provider.read_bytes(path)
+                raise
         else:
-            logger.warning(f"No specific handler for {path}. Returning raw bytes.")
-            return provider.read_bytes(path)
+            if ext in ['.wav', '.mp3', '.m4a', '.flac', '.ogg']:
+                # For audio files, return raw bytes which will be handled by ResourceChunker
+                logger.info(f"No specific handler for audio file {path}. Returning raw bytes.")
+                return provider.read_bytes(path)
+            else:
+                # For other file types, raise an exception
+                raise Exception(f"No specific handler for {path}. Returning raw bytes.")
+            
     
     def write(self, path: str, data: Any, **kwargs) -> None:
         """
@@ -865,12 +918,114 @@ class FileSystemService:
                 raise ValueError(f"No handler for file type {Path(path).suffix} and data type {type(data)}")
     
     def copy(self, source_path: str, dest_path: str, **kwargs) -> None:
-        """Copy a file from source to destination"""
+        """
+        Copy a file from source to destination with optimized handling for different sources.
+        
+        This method intelligently handles different scenarios:
+        - S3 to S3 copies: Uses direct copy operation without downloading content
+        - Local to S3: Uses optimized streaming upload
+        - S3 to local: Uses optimized streaming download
+        - Local to local: Uses file system operations when possible
+        
+        Args:
+            source_path: Path to the source file (local path or s3://)
+            dest_path: Path to the destination file (local path or s3://)
+            **kwargs: Additional arguments passed to the handlers
+                - content_type: Optional MIME type for uploads
+                - mode: Optional mode for handling specific file types
+                
+        Returns:
+            None
+        """
         logger.info(f"Copying file: {source_path} -> {dest_path}")
         
-        # Read from source and write to destination
-        data = self.read(source_path, **kwargs)
-        self.write(dest_path, data, **kwargs)
+        source_provider = self._get_provider(source_path)
+        dest_provider = self._get_provider(dest_path)
+        
+        # Handle S3 to S3 copy (most efficient for same bucket)
+        if (
+            isinstance(source_provider, S3FileSystemProvider) and 
+            isinstance(dest_provider, S3FileSystemProvider)
+        ):
+            try:
+                # Parse S3 URIs
+                source_parsed = source_provider.s3_service.parse_s3_uri(source_path)
+                dest_parsed = dest_provider.s3_service.parse_s3_uri(dest_path)
+                
+                source_bucket = source_parsed["bucket"]
+                source_key = source_parsed["key"]
+                dest_bucket = dest_parsed["bucket"]
+                dest_key = dest_parsed["key"]
+                
+                # If same bucket, use copy_object for efficiency
+                if source_bucket == dest_bucket:
+                    logger.info(f"Using direct S3 copy_object for {source_path} -> {dest_path}")
+                    source_provider.s3_service.s3_client.copy_object(
+                        CopySource={'Bucket': source_bucket, 'Key': source_key},
+                        Bucket=dest_bucket,
+                        Key=dest_key,
+                        ContentType=kwargs.get('content_type')
+                    )
+                    return
+                else:
+                    # Different buckets but still S3-to-S3, use streaming without loading into memory
+                    logger.info(f"Using S3 streaming copy for {source_path} -> {dest_path}")
+                    with source_provider.open(source_path, 'rb') as source_file:
+                        with dest_provider.open(dest_path, 'wb') as dest_file:
+                            # Stream in chunks to avoid memory issues with large files
+                            chunk_size = 10 * 1024 * 1024  # 10MB chunks
+                            while True:
+                                chunk = source_file.read(chunk_size)
+                                if not chunk:
+                                    break
+                                dest_file.write(chunk)
+                    return
+            except Exception as e:
+                logger.warning(f"Direct S3 copy failed, falling back to standard copy: {str(e)}")
+        
+        # Handle local to local copy
+        if (
+            isinstance(source_provider, LocalFileSystemProvider) and 
+            isinstance(dest_provider, LocalFileSystemProvider)
+        ):
+            try:
+                import shutil
+                # Normalize paths by removing file:// prefix if present
+                source_normalized = source_provider._normalize_path(source_path)
+                dest_normalized = dest_provider._normalize_path(dest_path)
+                
+                # Make sure the destination directory exists
+                Path(dest_normalized).parent.mkdir(parents=True, exist_ok=True)
+                
+                # Use shutil for efficient local copy
+                logger.info(f"Using shutil.copy for local file copy: {source_normalized} -> {dest_normalized}")
+                shutil.copy2(source_normalized, dest_normalized)
+                return
+            except Exception as e:
+                logger.warning(f"Local file copy failed, falling back to standard copy: {str(e)}")
+        
+        # For all other cases (or if optimized methods fail), fall back to standard copy
+        logger.info(f"Using standard read/write copy for {source_path} -> {dest_path}")
+        
+        # Get file information to determine if special handling is needed
+        source_info = self.get_file_info(source_path)
+        file_extension = source_info.get('extension', '').lower()
+        
+        # Special handling for large files and specific formats
+        if file_extension in ['.pdf', '.mp4', '.mp3', '.wav', '.zip', '.tar', '.gz']:
+            # Use streaming for large files to avoid memory issues
+            with source_provider.open(source_path, 'rb') as source_file:
+                with dest_provider.open(dest_path, 'wb') as dest_file:
+                    chunk_size = 10 * 1024 * 1024  # 10MB chunks
+                    while True:
+                        chunk = source_file.read(chunk_size)
+                        if not chunk:
+                            break
+                        dest_file.write(chunk)
+        else:
+            # Standard copy for smaller files
+            data = self.read(source_path, **kwargs)
+            self.write(dest_path, data, **kwargs)
     
     def get_file_info(self, path: str) -> Dict[str, Any]:
         """Get information about a file"""
@@ -970,83 +1125,8 @@ class FileSystemService:
     def _extract_extended_pdf_content(self, pdf_data: Dict[str, Any], file_name: str, uri: str = None) -> str:
         """Extract content from PDF using LLM vision analysis of page images."""
         try:
-            # Get image interpreter service
-            from percolate.services.llm.ImageInterpreter import get_image_interpreter
-            interpreter = get_image_interpreter()
-            
-            if not interpreter.is_available():
-                logger.warning("Image interpreter not available, falling back to simple PDF parsing")
-                return self._extract_simple_content(pdf_data, 'pdf')
-            
-            # Convert PDF pages to images for LLM analysis
-            page_images = self._convert_pdf_pages_to_images(pdf_data, file_name, uri)
-            
-            if not page_images:
-                logger.warning("No page images generated, falling back to simple PDF parsing")
-                return self._extract_simple_content(pdf_data, 'pdf')
-            
-            logger.info(f"Analyzing {len(page_images)} PDF pages with LLM vision")
-            
-            # Analyze each page with LLM
-            analyzed_pages = []
-            for i, page_image in enumerate(page_images):
-                try:
-                    prompt = """
-                    Analyze this PDF page image in detail. Extract and describe:
-                    1. All text content (transcribe exactly what you see)
-                    2. Any tables, charts, or structured data
-                    3. Images, diagrams, or visual elements 
-                    4. Layout and formatting structure
-                    5. Any important visual information not captured in plain text
-                    
-                    Provide a comprehensive description that captures both the textual content and visual elements.
-                    """
-                    
-                    result = interpreter.describe_images(
-                        images=page_image,
-                        prompt=prompt,
-                        context=f"PDF page {i+1} from document '{file_name}'",
-                        max_tokens=2000
-                    )
-                    
-                    if result["success"]:
-                        page_content = f"=== PAGE {i+1} ===\n{result['content']}\n"
-                        analyzed_pages.append(page_content)
-                        logger.info(f"Successfully analyzed page {i+1}")
-                    else:
-                        logger.warning(f"Failed to analyze page {i+1}: {result.get('error', 'Unknown error')}")
-                        # Fallback to simple text for this page
-                        if i < len(pdf_data.get('text_pages', [])):
-                            simple_text = pdf_data['text_pages'][i]
-                            page_content = f"=== PAGE {i+1} (TEXT ONLY) ===\n{simple_text}\n"
-                            analyzed_pages.append(page_content)
-                
-                except Exception as e:
-                    logger.error(f"Error analyzing page {i+1}: {str(e)}")
-                    # Fallback to simple text for this page
-                    if i < len(pdf_data.get('text_pages', [])):
-                        simple_text = pdf_data['text_pages'][i]
-                        page_content = f"=== PAGE {i+1} (TEXT ONLY) ===\n{simple_text}\n"
-                        analyzed_pages.append(page_content)
-            
-            # Combine all analyzed pages
-            full_content = "\n".join(analyzed_pages)
-            
-            # Add summary information
-            summary = f"""
-DOCUMENT ANALYSIS SUMMARY:
-- Document: {file_name}
-- Total Pages: {len(page_images)}
-- Analysis Method: LLM Vision + Text Extraction
-- Pages Successfully Analyzed: {len([p for p in analyzed_pages if 'TEXT ONLY' not in p])}
-
-FULL CONTENT:
-{full_content}
-"""
-            
-            logger.info(f"Extended PDF analysis complete: {len(full_content)} characters")
-            return summary
-            
+            # Delegate to our improved PDFHandler implementation
+            return get_pdf_handler().extract_extended_content(pdf_data, file_name, uri)            
         except Exception as e:
             logger.error(f"Error in extended PDF processing: {str(e)}")
             logger.info("Falling back to simple PDF parsing")
@@ -1054,114 +1134,60 @@ FULL CONTENT:
     
     def _convert_pdf_pages_to_images(self, pdf_data: Dict[str, Any], file_name: str, uri: str = None) -> List[Image.Image]:
         """Convert PDF pages to PIL Images for LLM analysis"""
-        pdf2image_failed = False
-        fitz_failed = False
-        
-        try:
-            # Try pdf2image first (requires poppler)
-            # Prefer convert_from_path if we have a URI, as it's more reliable
-            if uri:
-                from pdf2image import convert_from_path
-                logger.info(f"Converting PDF pages to images using pdf2image convert_from_path for {file_name}")
-                images = self.apply(uri, convert_from_path)
-                logger.info(f"Successfully converted {len(images)} pages to images using convert_from_path")
-                return images
-            else:
-                # Fallback to convert_from_bytes if no URI provided
-                from pdf2image import convert_from_bytes
-                raw_bytes = pdf_data.get('raw_bytes')
-                if raw_bytes:
-                    logger.info(f"Converting PDF pages to images using pdf2image convert_from_bytes for {file_name}")
-                    images = convert_from_bytes(raw_bytes)
-                    logger.info(f"Successfully converted {len(images)} pages to images using convert_from_bytes")
-                    return images
-        except ImportError:
-            logger.warning("pdf2image not available, falling back to fitz rendering")
-            pdf2image_failed = True
-        except Exception as e:
-            logger.warning(f"pdf2image conversion failed: {e}, falling back to fitz rendering")
-            pdf2image_failed = True
-        
-        # Fallback to fitz rendering
-        try:
-            import fitz
-            
-            raw_bytes = pdf_data.get('raw_bytes')
-            if raw_bytes:
-                logger.info(f"Converting PDF pages to images using fitz for {file_name}")
-                pdf_document = fitz.open(stream=raw_bytes, filetype="pdf")
-                images = []
-                
-                for page_num in range(pdf_document.page_count):
-                    page = pdf_document.load_page(page_num)
-                    # Render page as image (default DPI is 72, increase for better quality)
-                    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x scale for better quality
-                    img_data = pix.tobytes("png")
-                    image = Image.open(io.BytesIO(img_data))
-                    images.append(image)
-                
-                pdf_document.close()
-                logger.info(f"Successfully converted {len(images)} pages to images using fitz")
-                return images
-        except ImportError:
-            logger.error("fitz (PyMuPDF) not available for PDF page rendering")
-            fitz_failed = True
-        except Exception as e:
-            logger.error(f"Fitz PDF page conversion failed: {e}")
-            fitz_failed = True
-        
-        # If both methods failed, raise an exception in extended mode
-        if pdf2image_failed and fitz_failed:
-            raise Exception(
-                f"Failed to convert PDF pages to images for '{file_name}'. "
-                "Both pdf2image and fitz (PyMuPDF) conversion methods failed. "
-                "Extended PDF processing requires successful page-to-image conversion. "
-                "Please ensure poppler-utils and/or PyMuPDF are properly installed."
-            )
-        
-        # This should not be reached, but just in case
-        return []
+        # Delegate to the improved PDFHandler implementation
+        return get_pdf_handler().convert_pdf_to_images(pdf_data, uri)
     
     def _extract_simple_content(self, file_data: Any, file_type: str) -> str:
-        """Extract simple text content from file data."""
-        if file_type == 'pdf':
-            # PDF data - combine text pages
-            text_pages = file_data.get('text_pages', [])
-            return '\n'.join(text_pages)
-        elif file_type == 'text':
-            # Already a string
-            return file_data if isinstance(file_data, str) else str(file_data)
-        elif file_type == 'csv':
-            # CSV data - convert to simple text format
-            if isinstance(file_data, dict) and 'data' in file_data:
-                rows = file_data['data']
-                if not rows:
-                    return ""
-                # Create simple text representation
-                lines = []
-                for row in rows:
-                    line = ', '.join(str(cell) for cell in row.values())
-                    lines.append(line)
-                return '\n'.join(lines)
-            else:
-                # Polars DataFrame
-                return str(file_data)
-        elif file_type in ['image']:
-            # For images, we can't extract simple text
-            return f"[Image file: {file_type}]"
+        """
+        Extract simple text content from file data.
+        
+        Note: This method is kept for backward compatibility. 
+        New code should use ResourceChunker handlers directly.
+        """
+        # Create a temporary chunker with appropriate handlers
+        from percolate.utils.parsing.ResourceChunker import (
+            ResourceHandler, PDFResourceHandler, TextResourceHandler,
+            CSVResourceHandler, ExcelResourceHandler, DocxResourceHandler,
+            PPTXResourceHandler, ImageResourceHandler, AudioResourceHandler
+        )
+        
+        # Create handlers
+        handlers = [
+            PDFResourceHandler(),
+            TextResourceHandler(),
+            CSVResourceHandler(),
+            ExcelResourceHandler(),
+            DocxResourceHandler(),
+            PPTXResourceHandler(),
+            ImageResourceHandler(),
+            AudioResourceHandler()
+        ]
+        
+        # Find appropriate handler
+        handler = None
+        for h in handlers:
+            if h.can_handle(file_type):
+                handler = h
+                break
+        
+        # Use handler if found, otherwise use default text handling
+        if handler:
+            return handler.extract_content(file_data, file_type, mode="simple")
         else:
-            # Try to convert to string
-            if isinstance(file_data, dict):
-                # Other structured data - convert to simple string representation
+            # Default handling for unknown types
+            if isinstance(file_data, str):
+                return file_data
+            elif isinstance(file_data, dict):
+                # Try to convert to JSON
                 import json
                 return json.dumps(file_data, indent=2, default=str)
-        
-        # Unknown format - convert to string
-        return str(file_data)
+            else:
+                # Convert to string
+                return str(file_data)
     
     def read_chunks(self, path: str, mode: str = 'simple', target_model=None, **kwargs):
         """
-        Read a file and yield chunked Resources using the integrated ResourceChunker.
+        Read a file and yield chunked Resources using the ResourceChunker.
         
         This is a convenient method that combines file reading and chunking in one call.
         
@@ -1205,22 +1231,22 @@ FULL CONTENT:
         # Use custom model or default to Resources
         model_class = target_model or Resources
         
-        # Use the integrated ResourceChunker
-        chunker = ResourceChunker(self)
-        
-        # Create chunked resources using the integrated ResourceChunker to avoid circular calls
         try:
-            # Always use ResourceChunker directly to avoid circular dependency with Resources.chunked_resource
-            chunker = ResourceChunker(self)
+            # Get file data first for passing to the ResourceChunker
+            file_data = self.read(path)
             
-            # Create chunks directly using the ResourceChunker
+            # Create a ResourceChunker specifically for this FileSystemService
+            chunker = create_resource_chunker(fs=self)
+            
+            # Create chunks directly using the ResourceChunker with pre-loaded data
             chunks = chunker.chunk_resource_from_uri(
                 uri=path,
                 parsing_mode=mode,
                 chunk_size=kwargs.get('chunk_size', 1000),
                 chunk_overlap=kwargs.get('chunk_overlap', 200),
                 user_id=kwargs.get('userid'),
-                metadata=kwargs.get('metadata')
+                metadata=kwargs.get('metadata'),
+                file_data=file_data  # Pass the pre-loaded file data
             )
             
             # Override any additional properties if provided and the model supports them
@@ -1260,701 +1286,3 @@ FULL CONTENT:
         except Exception as e:
             logger.error(f"Error chunking file {path}: {str(e)}")
             raise
-
-
-class ResourceChunker:
-    """
-    Service for creating chunked resources from files using FileSystemService.
-    Supports both simple and extended parsing modes.
-    """
-    
-    def __init__(self, fs: Optional[FileSystemService] = None):
-        """Initialize the resource chunker."""
-        self.fs = fs or FileSystemService()
-        self._transcription_service = None
-        
-    def _get_transcription_service(self):
-        """Lazy load transcription service to avoid circular imports."""
-        if self._transcription_service is None:
-            from percolate.services.llm.TranscriptionService import get_transcription_service
-            self._transcription_service = get_transcription_service()
-        return self._transcription_service
-        
-    def chunk_resource_from_uri(
-        self,
-        uri: str,
-        parsing_mode: Literal["simple", "extended"] = "simple",
-        chunk_size: int = 1000,
-        chunk_overlap: int = 200,
-        user_id: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None
-    ) -> List["Resources"]:
-        """
-        Create chunked resources from a file URI.
-        
-        Args:
-            uri: File URI (local file://, S3 s3://, or HTTP/HTTPS URL)
-            parsing_mode: "simple" for basic text extraction, "extended" for LLM-enhanced parsing
-            chunk_size: Number of characters per chunk
-            chunk_overlap: Number of characters to overlap between chunks
-            user_id: Optional user ID to associate with resources
-            metadata: Optional metadata to include with resources
-            
-        Returns:
-            List of Resources representing the chunks
-            
-        Raises:
-            ValueError: If file type is not supported or transcription is required
-            Exception: If parsing fails
-        """
-        from percolate.utils import make_uuid
-        from percolate.models.p8.types import Resources
-        
-        logger.info(f"Chunking resource from URI: {uri} (mode: {parsing_mode})")
-        
-        # Extract file info from URI
-        file_info = self._extract_file_info(uri)
-        file_type = file_info['type']
-        file_name = file_info['name']
-        
-        # Check if this is audio/video and handle accordingly
-        if file_type in ['audio', 'video']:
-            return self._chunk_media_resource(
-                uri, file_type, parsing_mode, user_id, metadata
-            )
-        
-        # For other file types, use FileSystemService to read content
-        try:
-            # Read the file using FileSystemService
-            file_data = self.fs.read(uri)
-            
-            if parsing_mode == "simple":
-                content = self._extract_simple_content(file_data, file_type)
-            else:  # extended
-                content = self._extract_extended_content(file_data, file_type, file_name, uri)
-            
-            # Create chunks from the content
-            chunks = self._create_text_chunks(
-                content, chunk_size, chunk_overlap
-            )
-            
-            # Create Resource objects for each chunk
-            resources = []
-            for i, chunk_text in enumerate(chunks):
-                resource_id = make_uuid(f"{uri}_chunk_{i}")
-                
-                resource = Resources(
-                    id=resource_id,
-                    name=f"{file_name}_chunk_{i+1}",
-                    category=f"{file_type}_chunk",
-                    content=chunk_text,
-                    uri=uri,
-                    metadata={
-                        **(metadata or {}),
-                        "source_file": file_name,
-                        "parsing_mode": parsing_mode,
-                        "chunk_index": i,
-                        "total_chunks": len(chunks),
-                        "chunk_size": chunk_size,
-                        "chunk_overlap": chunk_overlap,
-                        "file_type": file_type,
-                        "original_uri": uri
-                    },
-                    userid=user_id,
-                    resource_timestamp=datetime.now(timezone.utc)
-                )
-                resources.append(resource)
-            
-            logger.info(f"Created {len(resources)} chunks from {file_name}")
-            return resources
-            
-        except Exception as e:
-            logger.error(f"Error chunking resource from {uri}: {str(e)}")
-            raise
-    
-    def _extract_file_info(self, uri: str) -> Dict[str, str]:
-        """Extract file information from URI."""
-        # Get filename from URI
-        if uri.startswith('http'):
-            file_name = uri.split('/')[-1].split('?')[0]  # Remove query params
-        else:
-            file_name = os.path.basename(uri.replace('file://', '').replace('s3://', ''))
-        
-        # Determine file type from extension
-        ext = Path(file_name).suffix.lower()
-        
-        if ext in ['.txt', '.md', '.markdown']:
-            file_type = 'text'
-        elif ext in ['.pdf']:
-            file_type = 'pdf'
-        elif ext in ['.docx', '.doc']:
-            file_type = 'docx'
-        elif ext in ['.pptx', '.ppt']:
-            file_type = 'pptx'
-        elif ext in ['.csv']:
-            file_type = 'csv'
-        elif ext in ['.xlsx', '.xls']:
-            file_type = 'xlsx'
-        elif ext in ['.json']:
-            file_type = 'json'
-        elif ext in ['.html', '.htm']:
-            file_type = 'html'
-        elif ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff']:
-            file_type = 'image'
-        elif ext in ['.wav', '.mp3', '.m4a', '.flac', '.ogg']:
-            file_type = 'audio'
-        elif ext in ['.mp4', '.mov', '.avi', '.mkv']:
-            file_type = 'video'
-        else:
-            file_type = 'unknown'
-        
-        return {
-            'name': file_name,
-            'type': file_type,
-            'extension': ext
-        }
-    
-    def _chunk_media_resource(
-        self,
-        uri: str,
-        file_type: str,
-        parsing_mode: str,
-        user_id: Optional[str],
-        metadata: Optional[Dict[str, Any]]
-    ) -> List["Resources"]:
-        """Handle audio/video files that require transcription with intelligent chunking."""
-        if parsing_mode == "simple":
-            raise ValueError(
-                f"Simple parsing mode not supported for {file_type} files. "
-                "Transcription is required. Use extended mode or process through audio pipeline."
-            )
-        
-        # For extended mode, we need transcription
-        transcription_service = self._get_transcription_service()
-        if not transcription_service.is_available():
-            raise ValueError(
-                "OpenAI API key not available for transcription. "
-                "Cannot process audio/video files in extended mode."
-            )
-        
-        # Parameters for audio chunking and transcription
-        max_transcription_size = 25 * 1024 * 1024  # 25MB limit for OpenAI API
-        chunk_duration_seconds = 10 * 60  # 10 minutes per chunk (safe for most audio)
-        
-        logger.info(f"Processing {file_type} file: {uri}")
-        
-        # Download and analyze the file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uri).suffix) as temp_file:
-            temp_path = temp_file.name
-            
-        try:
-            # Use FileSystemService to download the file
-            file_data = self.fs.read_bytes(uri)  # Get raw bytes for audio files
-            
-            with open(temp_path, 'wb') as f:
-                f.write(file_data)
-            
-            file_size = len(file_data)
-            logger.info(f"Audio file size: {file_size / (1024*1024):.1f}MB")
-            
-            # Check if file type is supported by transcription service
-            if not transcription_service.supports_file_type(temp_path):
-                raise ValueError(f"File type {Path(uri).suffix} not supported for transcription")
-            
-            # Determine if we need to chunk the audio file
-            if file_size <= max_transcription_size:
-                logger.info("File size within transcription limits, processing as single file")
-                audio_chunks = [(temp_path, 0, None)]  # (path, start_time, end_time)
-            else:
-                logger.info(f"File size ({file_size / (1024*1024):.1f}MB) exceeds limit, chunking audio")
-                audio_chunks = self._chunk_large_audio_file(
-                    temp_path, max_transcription_size, chunk_duration_seconds
-                )
-            
-            # Transcribe all audio chunks
-            all_transcriptions = []
-            total_duration = 0
-            
-            for i, (chunk_path, start_time, end_time) in enumerate(audio_chunks):
-                logger.info(f"Transcribing audio chunk {i+1}/{len(audio_chunks)}")
-                
-                try:
-                    # TranscriptionService.transcribe_file is now synchronous
-                    transcription, confidence = transcription_service.transcribe_file(chunk_path)
-                    
-                    # Create timestamped transcription entry
-                    if start_time is not None and end_time is not None:
-                        duration = end_time - start_time
-                        timestamp_text = f"[{start_time:.1f}s - {end_time:.1f}s]: {transcription}"
-                        total_duration = max(total_duration, end_time)
-                    else:
-                        timestamp_text = transcription
-                        duration = None
-                    
-                    all_transcriptions.append({
-                        'text': transcription,
-                        'timestamped_text': timestamp_text,
-                        'start_time': start_time,
-                        'end_time': end_time,
-                        'duration': duration,
-                        'confidence': confidence,
-                        'chunk_index': i
-                    })
-                    
-                    logger.info(f"Chunk {i+1} transcribed: {len(transcription)} characters")
-                    
-                except Exception as e:
-                    logger.error(f"Failed to transcribe chunk {i+1}: {e}")
-                    # Continue with other chunks rather than failing completely
-                    continue
-                finally:
-                    # Clean up temporary chunk file (if different from original)
-                    if chunk_path != temp_path and os.path.exists(chunk_path):
-                        os.unlink(chunk_path)
-            
-            # Combine all transcriptions into full text
-            full_transcription = "\n\n".join([t['timestamped_text'] for t in all_transcriptions])
-            average_confidence = sum(t['confidence'] for t in all_transcriptions) / len(all_transcriptions)
-            
-            logger.info(f"Complete transcription: {len(full_transcription)} characters from {len(audio_chunks)} chunks")
-            
-            # Now chunk the transcription into resources based on text chunk size
-            # This handles cases where transcription might be very long
-            from percolate.utils import make_uuid
-            from percolate.models.p8.types import Resources
-            
-            # Use the regular text chunking for the transcription
-            text_chunks = self._create_text_chunks(
-                full_transcription,
-                chunk_size=1000,  # Default text chunk size
-                chunk_overlap=200  # Default overlap
-            )
-            
-            file_info = self._extract_file_info(uri)
-            resources = []
-            
-            for i, chunk_text in enumerate(text_chunks):
-                resource_id = make_uuid(f"{uri}_transcription_chunk_{i}")
-                
-                resource = Resources(
-                    id=resource_id,
-                    name=f"{file_info['name']}_transcription_chunk_{i+1}",
-                    category=f"{file_type}_transcription",
-                    content=chunk_text,
-                    uri=uri,
-                    metadata={
-                        **(metadata or {}),
-                        "source_file": file_info['name'],
-                        "parsing_mode": parsing_mode,
-                        "file_type": file_type,
-                        "transcription_confidence": average_confidence,
-                        "original_uri": uri,
-                        "transcription_service": "openai_whisper",
-                        "audio_chunks_processed": len(audio_chunks),
-                        "total_audio_duration_seconds": total_duration,
-                        "chunk_index": i,
-                        "total_chunks": len(text_chunks),
-                        "audio_file_size_mb": file_size / (1024*1024),
-                        "transcription_chunks": [
-                            {
-                                "start_time": t["start_time"],
-                                "end_time": t["end_time"], 
-                                "confidence": t["confidence"]
-                            } for t in all_transcriptions
-                        ]
-                    },
-                    userid=user_id,
-                    resource_timestamp=datetime.now(timezone.utc)
-                )
-                resources.append(resource)
-            
-            logger.info(f"Created {len(resources)} transcription resources for {file_info['name']}")
-            return resources
-            
-        finally:
-            # Clean up main temp file
-            if os.path.exists(temp_path):
-                os.unlink(temp_path)
-    
-    def _chunk_large_audio_file(
-        self,
-        audio_path: str,
-        max_size_bytes: int,
-        chunk_duration_seconds: int
-    ) -> List[tuple]:
-        """
-        Chunk a large audio file into smaller pieces for transcription.
-        
-        Args:
-            audio_path: Path to the audio file
-            max_size_bytes: Maximum size per chunk in bytes
-            chunk_duration_seconds: Maximum duration per chunk in seconds
-            
-        Returns:
-            List of (chunk_path, start_time, end_time) tuples
-        """
-        try:
-            # Try to use pydub for audio processing
-            from pydub import AudioSegment
-            
-            logger.info(f"Loading audio file for chunking: {audio_path}")
-            audio = AudioSegment.from_file(audio_path)
-            
-            # Get audio properties
-            duration_seconds = len(audio) / 1000.0
-            file_size = os.path.getsize(audio_path)
-            
-            logger.info(f"Audio duration: {duration_seconds:.1f}s, file size: {file_size / (1024*1024):.1f}MB")
-            
-            # Calculate number of chunks needed
-            # Use the more restrictive of size or time limits
-            chunks_by_size = max(1, file_size // max_size_bytes + (1 if file_size % max_size_bytes else 0))
-            chunks_by_duration = max(1, int(duration_seconds // chunk_duration_seconds) + (1 if duration_seconds % chunk_duration_seconds else 0))
-            
-            num_chunks = max(chunks_by_size, chunks_by_duration)
-            chunk_duration_ms = len(audio) // num_chunks
-            
-            logger.info(f"Splitting into {num_chunks} chunks of ~{chunk_duration_ms/1000:.1f}s each")
-            
-            chunks = []
-            chunk_dir = tempfile.mkdtemp(prefix="audio_chunks_")
-            
-            for i in range(num_chunks):
-                start_ms = i * chunk_duration_ms
-                end_ms = min((i + 1) * chunk_duration_ms, len(audio))
-                
-                # Extract chunk
-                chunk_audio = audio[start_ms:end_ms]
-                
-                # Save chunk to temporary file
-                chunk_filename = f"chunk_{i+1}.wav"
-                chunk_path = os.path.join(chunk_dir, chunk_filename)
-                
-                # Export as WAV for best transcription compatibility
-                chunk_audio.export(chunk_path, format="wav")
-                
-                start_time = start_ms / 1000.0
-                end_time = end_ms / 1000.0
-                
-                chunks.append((chunk_path, start_time, end_time))
-                
-                logger.info(f"Created chunk {i+1}: {start_time:.1f}s - {end_time:.1f}s ({os.path.getsize(chunk_path) / (1024*1024):.1f}MB)")
-            
-            return chunks
-            
-        except ImportError:
-            logger.error("pydub is required for audio chunking but not available")
-            raise ImportError("pydub library is required for large audio file processing")
-        
-        except Exception as e:
-            logger.error(f"Error chunking audio file: {e}")
-            raise Exception(f"Failed to chunk audio file: {e}")
-    
-    def _extract_simple_content(self, file_data: Any, file_type: str) -> str:
-        """Extract content using simple parsing (no LLM)."""
-        if isinstance(file_data, str):
-            # Already parsed as text
-            return file_data
-        elif isinstance(file_data, dict):
-            # Structured data (JSON, CSV as dict, Excel sheets, etc.)
-            if file_type == 'csv' and 'data' in file_data:
-                # CSV data - convert to simple text format
-                rows = file_data['data']
-                if not rows:
-                    return ""
-                
-                # Create simple text representation
-                lines = []
-                if len(rows) > 0:
-                    # Add header if available
-                    headers = list(rows[0].keys())
-                    lines.append(" | ".join(headers))
-                    lines.append("-" * len(" | ".join(headers)))
-                    
-                    # Add data rows
-                    for row in rows:
-                        values = [str(row.get(h, "")) for h in headers]
-                        lines.append(" | ".join(values))
-                
-                return "\n".join(lines)
-            elif file_type in ['xlsx', 'xls'] or any(k for k in file_data.keys() if hasattr(file_data[k], 'shape')):
-                # Excel data - convert sheets to text format
-                lines = []
-                for sheet_name, df in file_data.items():
-                    lines.append(f"=== SHEET: {sheet_name} ===")
-                    try:
-                        if hasattr(df, 'to_pandas'):
-                            # Polars DataFrame
-                            pandas_df = df.to_pandas()
-                            lines.append(pandas_df.to_string(index=False, max_rows=100))
-                        elif hasattr(df, 'to_string'):
-                            # Pandas DataFrame
-                            lines.append(df.to_string(index=False, max_rows=100))
-                        elif hasattr(df, 'shape'):
-                            # Other DataFrame-like object
-                            lines.append(str(df))
-                        else:
-                            lines.append(str(df))
-                    except Exception as e:
-                        logger.warning(f"Error converting sheet '{sheet_name}' to string: {e}")
-                        lines.append(f"[Error displaying sheet data: {e}]")
-                    lines.append("")  # Add blank line between sheets
-                
-                return "\n".join(lines)
-            else:
-                # Other structured data - convert to simple string representation
-                import json
-                return json.dumps(file_data, indent=2, default=str)
-        else:
-            # Unknown format - convert to string
-            return str(file_data)
-    
-    def _extract_extended_content(self, file_data: Any, file_type: str, file_name: str, uri: str = None) -> str:
-        """Extract content using extended parsing (with LLM if needed)."""
-        
-        if file_type == 'pdf':
-            return self._extract_extended_pdf_content(file_data, file_name, uri)
-        elif file_type == 'image':
-            return self._extract_extended_image_content(file_data, file_name)
-        elif file_type == 'pptx':
-            return self._extract_extended_pptx_content(file_data, file_name, uri)
-        else:
-            # For other file types, use simple content extraction for now
-            simple_content = self._extract_simple_content(file_data, file_type)
-            logger.info(f"Extended parsing not yet implemented for {file_type}, using simple parsing")
-            return simple_content
-    
-    def _extract_extended_pdf_content(self, pdf_data: Dict[str, Any], file_name: str, uri: str = None) -> str:
-        """Extract content from PDF using LLM vision analysis of page images."""
-        try:
-            # Get image interpreter service
-            from percolate.services.llm.ImageInterpreter import get_image_interpreter
-            interpreter = get_image_interpreter()
-            
-            if not interpreter.is_available():
-                logger.warning("Image interpreter not available, falling back to simple PDF parsing")
-                return self._extract_simple_content(pdf_data, 'pdf')
-            
-            # Convert PDF pages to images for LLM analysis
-            page_images = self.fs._convert_pdf_pages_to_images(pdf_data, file_name, uri)
-            
-            if not page_images:
-                logger.warning("No page images generated, falling back to simple PDF parsing")
-                return self._extract_simple_content(pdf_data, 'pdf')
-            
-            logger.info(f"Analyzing {len(page_images)} PDF pages with LLM vision")
-            
-            # Analyze each page with LLM
-            analyzed_pages = []
-            for i, page_image in enumerate(page_images):
-                try:
-                    prompt = """
-                    Analyze this PDF page image in detail. Extract and describe:
-                    1. All text content (transcribe exactly what you see)
-                    2. Any tables, charts, or structured data
-                    3. Images, diagrams, or visual elements 
-                    4. Layout and formatting structure
-                    5. Any important visual information not captured in plain text
-                    
-                    Provide a comprehensive description that captures both the textual content and visual elements.
-                    """
-                    
-                    result = interpreter.describe_images(
-                        images=page_image,
-                        prompt=prompt,
-                        context=f"PDF page {i+1} from document '{file_name}'",
-                        max_tokens=2000
-                    )
-                    
-                    if result["success"]:
-                        page_content = f"=== PAGE {i+1} ===\n{result['content']}\n"
-                        analyzed_pages.append(page_content)
-                        logger.info(f"Successfully analyzed page {i+1}")
-                    else:
-                        logger.warning(f"Failed to analyze page {i+1}: {result.get('error', 'Unknown error')}")
-                        # Fallback to simple text for this page
-                        if i < len(pdf_data.get('text_pages', [])):
-                            simple_text = pdf_data['text_pages'][i]
-                            page_content = f"=== PAGE {i+1} (TEXT ONLY) ===\n{simple_text}\n"
-                            analyzed_pages.append(page_content)
-                
-                except Exception as e:
-                    logger.error(f"Error analyzing page {i+1}: {str(e)}")
-                    # Fallback to simple text for this page
-                    if i < len(pdf_data.get('text_pages', [])):
-                        simple_text = pdf_data['text_pages'][i]
-                        page_content = f"=== PAGE {i+1} (TEXT ONLY) ===\n{simple_text}\n"
-                        analyzed_pages.append(page_content)
-            
-            # Combine all analyzed pages
-            full_content = "\n".join(analyzed_pages)
-            
-            # Add summary information
-            summary = f"""
-DOCUMENT ANALYSIS SUMMARY:
-- Document: {file_name}
-- Total Pages: {len(page_images)}
-- Analysis Method: LLM Vision + Text Extraction
-- Pages Successfully Analyzed: {len([p for p in analyzed_pages if 'TEXT ONLY' not in p])}
-
-FULL CONTENT:
-{full_content}
-"""
-            
-            logger.info(f"Extended PDF analysis complete: {len(full_content)} characters")
-            return summary
-            
-        except Exception as e:
-            logger.error(f"Error in extended PDF processing: {str(e)}")
-            logger.info("Falling back to simple PDF parsing")
-            return self._extract_simple_content(pdf_data, 'pdf')
-    
-    def _extract_extended_image_content(self, image_data: Image.Image, file_name: str) -> str:
-        """Extract content from images using LLM vision analysis."""
-        try:
-            from percolate.services.llm.ImageInterpreter import get_image_interpreter
-            interpreter = get_image_interpreter()
-            
-            if not interpreter.is_available():
-                logger.warning("Image interpreter not available for image analysis")
-                return f"Image file: {file_name} (analysis not available)"
-            
-            prompt = """
-            Analyze this image in detail and provide:
-            1. A comprehensive description of what you see
-            2. Any text content visible in the image (OCR)
-            3. Objects, people, scenes, or subjects present
-            4. Colors, composition, and visual style
-            5. Any technical diagrams, charts, or structured information
-            6. Context clues about the purpose or meaning of the image
-            
-            Provide a thorough analysis that would be useful for document processing and search.
-            """
-            
-            result = interpreter.describe_images(
-                images=image_data,
-                prompt=prompt,
-                context=f"Image file: {file_name}",
-                max_tokens=1500
-            )
-            
-            if result["success"]:
-                content = f"""
-IMAGE ANALYSIS: {file_name}
-
-{result['content']}
-
-Analysis provided by: {result['provider']} ({result.get('model', 'unknown model')})
-"""
-                logger.info(f"Successfully analyzed image {file_name}")
-                return content
-            else:
-                logger.warning(f"Failed to analyze image {file_name}: {result.get('error', 'Unknown error')}")
-                return f"Image file: {file_name} (analysis failed: {result.get('error', 'Unknown error')})"
-        
-        except Exception as e:
-            logger.error(f"Error in extended image processing: {str(e)}")
-            return f"Image file: {file_name} (analysis error: {str(e)})"
-    
-    def _extract_extended_pptx_content(self, pptx_data: Dict[str, Any], file_name: str, uri: str = None) -> str:
-        """Extract content from PPTX using enhanced parsing with LLM image analysis."""
-        try:
-            # The pptx_data already contains the results from our PPTXHandler
-            # which includes image analysis if available
-            
-            if isinstance(pptx_data, dict) and 'text_content' in pptx_data:
-                # Check if our enhanced parsing already included image analysis
-                if pptx_data.get('has_image_analysis', False):
-                    logger.info(f"PPTX {file_name} already includes image analysis from enhanced provider")
-                    return pptx_data['text_content']
-                else:
-                    # No image analysis was done, but we have the structured data
-                    # Let's try to trigger image analysis if the LLM is available
-                    logger.info(f"Attempting additional image analysis for PPTX {file_name}")
-                    
-                    # Re-read the file with enriched mode to get image analysis
-                    if uri:
-                        try:
-                            # Use the FileSystemService to re-read with enriched mode
-                            temp_fs = FileSystemService(self.s3_service if hasattr(self, 's3_service') else None)
-                            enhanced_result = temp_fs.read(uri, mode='enriched', max_images=50)
-                            if isinstance(enhanced_result, dict) and enhanced_result.get('has_image_analysis', False):
-                                return enhanced_result['text_content']
-                        except Exception as e:
-                            logger.warning(f"Failed to get enhanced PPTX analysis: {e}")
-                    
-                    # Fallback to existing content
-                    return pptx_data['text_content']
-            else:
-                # Fallback for non-dict data
-                return str(pptx_data)
-                
-        except Exception as e:
-            logger.error(f"Error in extended PPTX processing: {str(e)}")
-            return f"PPTX file: {file_name} (extended analysis error: {str(e)})"
-    
-    def _create_text_chunks(
-        self,
-        text: str,
-        chunk_size: int,
-        chunk_overlap: int
-    ) -> List[str]:
-        """Create text chunks with overlap."""
-        if not text or len(text) <= chunk_size:
-            return [text] if text else []
-        
-        chunks = []
-        start = 0
-        
-        while start < len(text):
-            end = start + chunk_size
-            
-            # If this isn't the last chunk, try to break at word boundaries
-            if end < len(text):
-                # Look for the last space within the chunk
-                last_space = text.rfind(' ', start, end)
-                if last_space > start:
-                    end = last_space
-            
-            chunk = text[start:end].strip()
-            if chunk:
-                chunks.append(chunk)
-            
-            # Move start position considering overlap
-            if end >= len(text):
-                break
-            start = end - chunk_overlap
-            
-            # Ensure we don't go backwards
-            if len(chunks) > 0 and start <= len(''.join(chunks)) - len(chunks[-1]):
-                start = len(''.join(chunks)) - chunk_overlap
-        
-        return chunks
-    
-    def save_chunks_to_database(self, resources: List["Resources"]) -> bool:
-        """Save chunked resources to the database."""
-        try:
-            if not resources:
-                logger.warning("No resources to save")
-                return True
-            
-            logger.info(f"Saving {len(resources)} chunked resources to database")
-            import percolate as p8
-            p8.repository(type(resources[0])).update_records(resources)
-            logger.info("Successfully saved all chunked resources")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error saving chunked resources: {str(e)}")
-            return False
-
-
-# Global resource chunker instance
-_resource_chunker = None
-
-def get_resource_chunker() -> ResourceChunker:
-    """Get a global resource chunker instance."""
-    global _resource_chunker
-    if _resource_chunker is None:
-        _resource_chunker = ResourceChunker()
-    return _resource_chunker

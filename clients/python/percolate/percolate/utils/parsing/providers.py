@@ -8,7 +8,10 @@ from abc import ABC, abstractmethod
 from urllib.parse import urlparse
 import requests
 import fitz  # PyMuPDF
-from percolate import logger
+import logging
+
+# Use standard logging instead of percolate logger to avoid circular imports
+logger = logging.getLogger("percolate.parsing.providers")
 
 # Try importing docx libraries
 try:
@@ -303,25 +306,36 @@ class XLSXContentProvider(BaseContentProvider):
             return f"Error reading XLSX file: {e}"
 
 
-class WAVContentProvider(BaseContentProvider):
+class AudioContentProvider(BaseContentProvider):
+    """Content provider for audio files (WAV, MP3, etc.)."""
+    
     def extract_text(self, uri: str, enriched: bool = False) -> str:
         path = resolve_path_or_download(uri)
+        suffix = path.suffix.lower()
         
         if not enriched:
             # Raw mode: basic file info
             try:
-                import wave
-                with wave.open(str(path), 'rb') as wav_file:
-                    frames = wav_file.getnframes()
-                    sample_rate = wav_file.getframerate()
-                    duration = frames / sample_rate
-                    return f"Audio file: {path.name}\nDuration: {duration:.2f} seconds\nSample rate: {sample_rate} Hz\nFrames: {frames}"
+                # Handle WAV files - we can get detailed info
+                if suffix == '.wav':
+                    import wave
+                    with wave.open(str(path), 'rb') as wav_file:
+                        frames = wav_file.getnframes()
+                        sample_rate = wav_file.getframerate()
+                        duration = frames / sample_rate
+                        return f"Audio file: {path.name}\nDuration: {duration:.2f} seconds\nSample rate: {sample_rate} Hz\nFrames: {frames}"
+                
+                # For other audio types, just provide basic file info
+                else:
+                    file_size = os.path.getsize(path)
+                    return f"Audio file: {path.name}\nSize: {file_size/1024:.1f} KB\nFormat: {suffix[1:]}"
+                    
             except Exception as e:
                 return f"Audio file: {path.name}\nError reading file: {e}"
         else:
-            # Enriched mode: TODO - speech-to-text transcription
-            logger.warning("WAV enriched mode (speech-to-text) not yet implemented, falling back to raw")
-            return self.extract_text(uri, enriched=False)
+            # Enriched mode: Audio files should be processed through ResourceChunker's media processing pipeline
+            logger.warning(f"Audio file {path.name} should be processed through ResourceChunker's media processing pipeline")
+            return f"Audio file: {path.name}\nTranscription requires ResourceChunker media processing pipeline"
 
 
 class PPTXContentProvider(BaseContentProvider):
@@ -475,7 +489,11 @@ content_providers = {
     ".markdown": MarkdownContentProvider(),
     ".xlsx": XLSXContentProvider(),
     ".xls": XLSXContentProvider(),
-    ".wav": WAVContentProvider(),
+    ".wav": AudioContentProvider(),
+    ".mp3": AudioContentProvider(),
+    ".m4a": AudioContentProvider(),
+    ".flac": AudioContentProvider(),
+    ".ogg": AudioContentProvider(),
     ".pptx": PPTXContentProvider(),
     ".ppt": PPTXContentProvider(),
 }

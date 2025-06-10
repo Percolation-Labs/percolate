@@ -20,9 +20,9 @@ import mimetypes
 
 
 
-async def create_resources_from_upload(upload_id: str) -> List[Resources]:
+async def create_resources_from_upload(upload_id: str, save_resources: bool=True) -> List[Resources]:
     """
-    Create resources from a TUS upload based on file type.
+    Create resources from a TUS upload using FileSystemService for all file types.
     
     Args:
         upload_id: The TUS upload ID
@@ -33,32 +33,102 @@ async def create_resources_from_upload(upload_id: str) -> List[Resources]:
     logger.info(f"Creating resources for upload: {upload_id}")
     
     try:
-        # Get the upload record
-        upload = p8.repository(TusFileUpload).get_by_id(str(upload_id),as_model=True)
+        # Get the upload record - use the expiration-ignoring function for S3 resources
+        from .tus import get_upload_info_ignore_expiration
+        try:
+            # First try to get the upload using the function that ignores expiration
+            upload = await get_upload_info_ignore_expiration(str(upload_id))
+        except Exception as e:
+            # If that fails, fall back to direct repository access
+            logger.warning(f"Error using get_upload_info_ignore_expiration: {str(e)}, falling back to direct access")
+            upload = p8.repository(TusFileUpload).get_by_id(str(upload_id), as_model=True)
+            
         if not upload:
             logger.error(f"Upload not found: {upload_id}")
             return []
             
         # Get file details
         filename = upload.filename
-        content_type = upload.content_type or mimetypes.guess_type(filename)[0]
         s3_uri = upload.s3_uri
-        user_id = upload.user_id
+        user_id = upload.userid
         
         if not s3_uri:
             logger.warning(f"No S3 URI for upload {upload_id}, skipping resource creation")
             return []
         
+        # Try to detect content type if not set
+        content_type = upload.content_type
+        if not content_type:
+            # Try to determine content type from filename
+            content_type = mimetypes.guess_type(filename)[0]
+            logger.info(f"Detected content type from filename: {content_type}")
+        
         logger.info(f"Processing file: {filename} (type: {content_type}) for user: {user_id}")
         
-        # Route based on content type
-        if content_type and content_type.startswith('audio/'):
-            return await create_audio_resources(upload, s3_uri, user_id)
-        elif filename.lower().endswith(('.pdf', '.txt', '.docx', '.doc')):
-            return await create_document_resources(upload, s3_uri, user_id)
+        # Initialize FileSystemService
+        from percolate.services.FileSystemService import FileSystemService
+        fs = FileSystemService()
+        
+        # Get file extension
+        ext = Path(filename).suffix.lower()
+        
+
+        # Determine appropriate chunk size based on file type
+        ext = Path(filename).suffix.lower()
+        is_audio = ext in ['.wav', '.mp3', '.m4a', '.flac', '.ogg']
+        
+        # Use larger chunks for audio to reduce fragmentation
+        chunk_size = 2000 if is_audio else 1000
+        chunk_overlap = 200
+        
+        logger.info(f"Using chunk_size={chunk_size}, overlap={chunk_overlap} for {filename} (is_audio={is_audio})")
+        
+        mode = 'extended'
+        
+        """extended is useful for odf but we need an adaptive way to do it so just get text for now"""
+        if ext in ['.pdf', 'txt']:
+            mode = 'simple'
+            
+        # Always use extended mode for better parsing
+        # Note: save_to_db parameter is ignored by read_chunks, so we handle saving explicitly
+        chunks = list(fs.read_chunks(
+            path=s3_uri,
+            mode=mode,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            userid=user_id,
+            name=filename,
+            metadata={
+                "tus_upload_id": str(upload_id),
+                "content_type": content_type,
+                "filename": filename,
+                "file_extension": ext,
+                "upload_size": upload.total_size,
+                "upload_date": upload.created_at.isoformat() if upload.created_at else None,
+                "project_name": upload.project_name
+            }
+        ))
+        
+        if chunks:
+            logger.info(f"Created {len(chunks)} resource chunks for {filename}")
+            
+            # Explicitly save resources to the database
+            if save_resources:
+                logger.info(f"Saving {len(chunks)} resources to database")
+                from percolate.models.p8.types import Resources
+                p8.repository(Resources).update_records(chunks)
+            
+            # Update the upload record to link it to the first resource
+            upload.resource_id = str(chunks[0].id)
+            upload.upload_metadata['resource_ids'] = [str(c.id) for c in chunks]
+            upload.upload_metadata['resource_count'] = len(chunks)
+            p8.repository(TusFileUpload).update_records([upload])
+            
+            return chunks
         else:
-            logger.warning(f"Unsupported file type for resource creation: {content_type} ({filename})")
+            logger.warning(f"No resource chunks created for {filename}")
             return []
+
             
     except Exception as e:
         logger.error(f"Error creating resources from upload {upload_id}: {str(e)}")
@@ -91,11 +161,10 @@ async def create_audio_resources(upload: TusFileUpload, s3_uri: str, user_id: Op
             s3_uri=s3_uri,
             file_size=upload.total_size or 0,
             content_type=upload.content_type or 'audio/x-wav',
-            user_id=str(user_id),  # Database requires user_id as text
-            userid=user_id,  # Model field
+            userid=user_id,  # Use only userid field
             project_name=upload.project_name or 'default',
             status=AudioProcessingStatus.UPLOADED,
-            upload_date=datetime.now(timezone.utc),  # Fixed: was uploaded_at
+            upload_date=datetime.now(timezone.utc),
             metadata={
                 'tus_upload_id': str(upload.id),
                 'source': 'tus_upload',
