@@ -5,6 +5,7 @@
 FROM python:3.10-slim AS requirements-stage
 
 # Install minimal dependencies for poetry
+#
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && apt-get clean \
@@ -25,8 +26,9 @@ RUN poetry export -f requirements.txt --output requirements.txt --without-hashes
 FROM python:3.10-slim
 
 # Install only essential system dependencies and clean up in a single layer
+#RUN apt-get update && apt-get install -y poppler-utils graphviz
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg \
+    ffmpeg poppler-utils \
     libsndfile1 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* \
@@ -51,6 +53,8 @@ RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt \
     "httpx>=0.24.0" \
     "silero-vad>=5.1.2" \
     "onnxruntime>=1.16.1" \
+    "pypdf>=5.6.0" \
+    "pymupdf>=1.22.5" \
     && rm -rf /code/requirements.txt
 
 ENV PYTORCH_JIT=0
