@@ -27,7 +27,7 @@ class TusFileUpload(AbstractModel):
     model_config = {'namespace': 'public'}
     
     id: Union[str, uuid.UUID] = Field(default_factory=uuid.uuid4, description="Unique ID for the file upload")
-    user_id: Optional[Union[str, uuid.UUID]] = Field(default=None, description="The user id if known")
+    userid: Optional[Union[str, uuid.UUID]] = Field(default=None, description="The user id if known")
     filename: str = Field(description="Original filename provided by client")
     content_type: Optional[str] = Field(default=None, description="MIME type of the file")
     total_size: int = Field(description="Total size of the file in bytes")
@@ -60,11 +60,11 @@ class TusFileUpload(AbstractModel):
                 # Keep as string if it's not a valid UUID
                 pass
             
-        if values.get('user_id'):
-            if isinstance(values['user_id'], str) and not values['user_id'].startswith('{') and not values['user_id'].startswith('urn:'):
+        if values.get('userid'):
+            if isinstance(values['userid'], str) and not values['userid'].startswith('{') and not values['userid'].startswith('urn:'):
                 try:
-                    uuid_obj = uuid.UUID(values['user_id'])
-                    values['user_id'] = str(uuid_obj)
+                    uuid_obj = uuid.UUID(values['userid'])
+                    values['userid'] = str(uuid_obj)
                 except ValueError:
                     pass
             

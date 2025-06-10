@@ -9,6 +9,7 @@ Extensions: creation, expiration, termination, creation-with-upload
 import os
 import uuid
 import base64
+import asyncio
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Request, Response, Header, Depends, BackgroundTasks, Query, Path
@@ -16,6 +17,7 @@ from fastapi.responses import JSONResponse
 from datetime import timezone
 import percolate as p8
 from percolate.api.controllers import tus as tus_controller
+from percolate.api.controllers.tus import list_pending_s3_resources
 from percolate.models.media.tus import (
     TusFileUpload,
     TusFileChunk,
@@ -151,7 +153,7 @@ async def tus_create_upload(
     # Parse metadata
     metadata = await tus_controller.parse_metadata(upload_metadata or "")
     
-    # Get filename from metadata
+    # Get filename from metadata (already base64 decoded by parse_metadata)
     filename = metadata.get("filename", f"upload-{uuid.uuid4()}")
     
     # Extract tags from metadata if available
@@ -183,7 +185,7 @@ async def tus_create_upload(
         filename=filename,
         file_size=upload_length or 0,
         metadata=metadata,
-        user_id=user_id,
+        userid=user_id,  # Pass as userid to match the model field
         project_name=project_name,
         content_type=content_type,
         expires_in=expires_in,
@@ -376,6 +378,54 @@ async def tus_delete_upload(
 # Additional endpoints beyond Tus protocol spec
 
 @router.get(
+    "/pending-resources",
+    include_in_schema=True,
+)
+async def get_pending_resources(
+    response: Response,
+    limit: int = Query(20, gt=0, le=100),
+):
+    """
+    List pending uploads that have been uploaded to S3 but not yet processed into resources.
+    
+    This endpoint is useful for monitoring and debugging the resource creation process.
+    """
+    logger.info(f"Listing pending uploads that need resource creation (limit: {limit})")
+    
+    # Get pending uploads
+    pending_uploads = await list_pending_s3_resources(limit=limit)
+    
+    # Convert to response format
+    results = []
+    for upload in pending_uploads:
+        # Format timestamps
+        created_at = upload['created_at'].isoformat() if upload['created_at'] else None
+        updated_at = upload['updated_at'].isoformat() if upload['updated_at'] else None
+        
+        results.append({
+            "id": str(upload['id']),
+            "filename": upload['filename'],
+            "content_type": upload['content_type'],
+            "total_size": upload['total_size'],
+            "s3_uri": upload['s3_uri'],
+            "project_name": upload['project_name'],
+            "userid": str(upload['userid']) if upload['userid'] else None,
+            "created_at": created_at,
+            "updated_at": updated_at
+        })
+    
+    # Return the results
+    return {
+        "pending_uploads": results,
+        "count": len(results),
+        "limit": limit
+    }
+
+# We no longer create schedules at startup as this is not idempotent
+# Instead, admins should use the /create-schedule endpoint to create schedules manually
+# and the scheduler will load them from the database
+
+@router.get(
     "/",
     include_in_schema=True,
 )
@@ -428,6 +478,26 @@ async def list_uploads(
     }
 
 @router.post(
+    "/process-pending",
+    include_in_schema=True,
+)
+async def process_pending_resources_endpoint(
+    response: Response,
+    limit: int = Query(20, gt=0, le=100),
+):
+    """
+    Process pending uploads that have been uploaded to S3 but not yet processed into resources.
+    
+    This endpoint manually triggers the processing of pending uploads.
+    """
+    logger.info(f"Processing pending uploads (limit: {limit})")
+    
+    # Process pending uploads
+    result = await tus_controller.process_pending_s3_resources(limit=limit)
+    
+    return result
+
+@router.post(
     "/{upload_id}/finalize",
     include_in_schema=True,
 )
@@ -443,7 +513,57 @@ async def finalize_upload(
     """
     logger.info(f"Finalize upload request for: {upload_id}")
     
-    # Finalize the upload with background S3 upload
+    # Check if upload is already finalized
+    try:
+        upload = await tus_controller.get_upload_info(upload_id)
+        
+        # If the upload is already fully processed with S3 URI, return that info
+        if (hasattr(upload, 's3_uri') and upload.s3_uri) or upload.upload_metadata.get("s3_uri"):
+            logger.info(f"Upload {upload_id} already finalized with S3 URI")
+            
+            # Return the existing S3 information
+            return {
+                "upload_id": str(upload.id),
+                "filename": upload.filename,
+                "size": upload.total_size,
+                "content_type": upload.content_type,
+                "status": upload.status,
+                "s3_uri": upload.s3_uri if hasattr(upload, 's3_uri') and upload.s3_uri else upload.upload_metadata.get("s3_uri", ""),
+                "s3_bucket": upload.s3_bucket if hasattr(upload, 's3_bucket') else None,
+                "s3_key": upload.s3_key if hasattr(upload, 's3_key') else None,
+                "local_path": upload.upload_metadata.get("local_path", "")
+            }
+            
+        # Check if it's marked as locally assembled but pending S3 upload
+        if upload.upload_metadata.get("assembly_complete") and upload.upload_metadata.get("needs_s3_upload"):
+            logger.info(f"Upload {upload_id} already assembled locally, forcing S3 upload")
+            
+            # Get the local path
+            local_path = upload.upload_metadata.get("local_path")
+            if local_path and os.path.exists(local_path):
+                # Trigger S3 upload with the background task
+                background_tasks.add_task(
+                    tus_controller.upload_to_s3_background, 
+                    str(upload.id), 
+                    local_path
+                )
+                
+                # Return the current state while S3 upload happens in background
+                return {
+                    "upload_id": str(upload.id),
+                    "filename": upload.filename,
+                    "size": upload.total_size,
+                    "content_type": upload.content_type,
+                    "status": upload.status,
+                    "local_path": local_path,
+                    "s3_status": "processing"
+                }
+    except Exception as check_error:
+        logger.error(f"Error checking upload state: {str(check_error)}")
+        # Continue with normal finalization
+    
+    # Standard finalization process if not already finalized
+    logger.info(f"Proceeding with finalization for upload: {upload_id}")
     final_path = await tus_controller.finalize_upload(upload_id, background_tasks)
     
     # Set Tus response headers for consistency
@@ -623,7 +743,7 @@ async def update_upload_tags(
         # Check if user is authorized to modify this upload
         # Bearer token auth allows updates to any upload (admin access)
         # Session auth requires ownership
-        if user_id and upload.user_id and str(upload.user_id) != user_id:
+        if user_id and upload.userid and str(upload.userid) != user_id:
             response.status_code = 403
             return {"error": "Not authorized to modify this upload"}
         
@@ -700,6 +820,31 @@ async def semantic_search(
         "note": "This is a placeholder for semantic search. Currently using basic text matching."
     }
 
+
+@router.post(
+    "/create-schedule",
+    include_in_schema=True,
+)
+async def create_flush_schedule_endpoint(
+    response: Response,
+    interval_hours: int = Query(1, gt=0, le=24),
+    user_id: Optional[str] = Depends(hybrid_auth),  # Optional - None for bearer auth
+):
+    """
+    Create a scheduled job to periodically process pending uploads.
+    
+    This endpoint creates a scheduled job that will automatically run
+    process_pending_s3_resources at the specified interval.
+    """
+    logger.info(f"Creating schedule to process pending uploads every {interval_hours} hour(s)")
+    
+    # Create the schedule
+    result = await tus_controller.create_flush_pending_resources_schedule(
+        interval_hours=interval_hours,
+        user_id=user_id
+    )
+    
+    return result
 
 @router.post(
     "/user/uploads/search",
