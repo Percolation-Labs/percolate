@@ -208,9 +208,13 @@ class PostgresService:
             
         # Apply context to database session using the p8.set_user_context function
         cursor = self.conn.cursor()
+        
+    
         try:
             # If we have a user_id, use the p8.set_user_context function to set all session variables
             if self.user_id:
+                if self.user_id == SYSTEM_USER_ID:
+                    return
                 # The set_user_context function will:
                 # 1. Set percolate.user_id session variable
                 # 2. Set percolate.role_level session variable (loading from DB if not provided)
