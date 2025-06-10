@@ -2,28 +2,32 @@
 -- register entity (p8.User)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."User" (
-graph_paths TEXT[],
-    twitter TEXT,
-    last_session_at TIMESTAMP,
-    email_subscription_active BOOLEAN,
-    id UUID PRIMARY KEY ,
-    session_id TEXT,
-    interesting_entity_keys JSON,
-    slack_id TEXT,
-    token TEXT,
-    recent_threads JSON,
+session_id TEXT,
     token_expiry TIMESTAMP,
+    interesting_entity_keys JSON,
+    email_subscription_active BOOLEAN,
+    last_session_at TIMESTAMP,
     userid UUID,
-    linkedin TEXT,
     last_ai_response TEXT,
+    required_access_level INTEGER DEFAULT 1,
     name TEXT,
+    twitter TEXT,
+    linkedin TEXT,
+    role_level INTEGER,
     email TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    id UUID PRIMARY KEY ,
+    recent_threads JSON,
+    groups TEXT[],
     metadata JSON,
+    slack_id TEXT,
+    roles TEXT[],
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     description TEXT,
-    roles TEXT[]
+    groupid TEXT,
+    graph_paths TEXT[],
+    token TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."User";
 CREATE   TRIGGER update_updated_at_trigger
@@ -34,22 +38,27 @@ EXECUTE FUNCTION update_updated_at_column();
         
 SELECT attach_notify_trigger_to_table('p8', 'User');
             
+-- Apply row-level security policy
+SELECT p8.attach_rls_policy('p8', 'User');
+            
 -- ------------------
 
 -- register entity (p8.Project)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."Project" (
-name TEXT,
-    description TEXT NOT NULL,
+required_access_level INTEGER DEFAULT 100,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    id UUID PRIMARY KEY ,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     target_date TIMESTAMP,
-    userid UUID,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     status TEXT,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    id UUID PRIMARY KEY ,
+    collaborator_ids UUID[] NOT NULL,
     priority INTEGER,
-    collaborator_ids UUID[] NOT NULL
+    description TEXT NOT NULL,
+    groupid TEXT,
+    userid UUID,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    name TEXT
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."Project";
 CREATE   TRIGGER update_updated_at_trigger
@@ -60,21 +69,26 @@ EXECUTE FUNCTION update_updated_at_column();
         
 SELECT attach_notify_trigger_to_table('p8', 'Project');
             
+-- Apply row-level security policy
+SELECT p8.attach_rls_policy('p8', 'Project');
+            
 -- ------------------
 
 -- register entity (p8.Agent)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."Agent" (
-category TEXT,
-    name TEXT,
-    description TEXT NOT NULL,
+required_access_level INTEGER DEFAULT 100,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    functions JSON,
-    id UUID PRIMARY KEY ,
     deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    id UUID PRIMARY KEY ,
+    description TEXT NOT NULL,
+    groupid TEXT,
     spec JSON NOT NULL,
     userid UUID,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    functions JSON,
+    category TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    name TEXT
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."Agent";
 CREATE   TRIGGER update_updated_at_trigger
@@ -85,22 +99,27 @@ EXECUTE FUNCTION update_updated_at_column();
         
 SELECT attach_notify_trigger_to_table('p8', 'Agent');
             
+-- Apply row-level security policy
+SELECT p8.attach_rls_policy('p8', 'Agent');
+            
 -- ------------------
 
 -- register entity (p8.ModelField)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."ModelField" (
-name TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    id UUID PRIMARY KEY ,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    embedding_provider TEXT,
-    is_key BOOLEAN,
-    userid UUID,
+required_access_level INTEGER DEFAULT 100,
     description TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_key BOOLEAN,
+    id UUID PRIMARY KEY ,
+    embedding_provider TEXT,
+    field_type TEXT NOT NULL,
+    groupid TEXT,
+    userid UUID,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    entity_name TEXT NOT NULL,
-    field_type TEXT NOT NULL
+    name TEXT,
+    entity_name TEXT NOT NULL
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."ModelField";
 CREATE   TRIGGER update_updated_at_trigger
@@ -111,22 +130,27 @@ EXECUTE FUNCTION update_updated_at_column();
         
 SELECT attach_notify_trigger_to_table('p8', 'ModelField');
             
+-- Apply row-level security policy
+SELECT p8.attach_rls_policy('p8', 'ModelField');
+            
 -- ------------------
 
 -- register entity (p8.LanguageModelApi)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."LanguageModelApi" (
-scheme TEXT,
-    model TEXT,
-    name TEXT,
+required_access_level INTEGER DEFAULT 100,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    token_env_key TEXT,
-    id UUID PRIMARY KEY ,
+    model TEXT,
     deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    token TEXT,
+    scheme TEXT,
+    id UUID PRIMARY KEY ,
+    groupid TEXT,
+    completions_uri TEXT NOT NULL,
     userid UUID,
+    token TEXT,
+    token_env_key TEXT,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    completions_uri TEXT NOT NULL
+    name TEXT
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."LanguageModelApi";
 CREATE   TRIGGER update_updated_at_trigger
@@ -137,23 +161,28 @@ EXECUTE FUNCTION update_updated_at_column();
         
 SELECT attach_notify_trigger_to_table('p8', 'LanguageModelApi');
             
+-- Apply row-level security policy
+SELECT p8.attach_rls_policy('p8', 'LanguageModelApi');
+            
 -- ------------------
 
 -- register entity (p8.Function)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."Function" (
-proxy_uri TEXT NOT NULL,
-    name TEXT,
-    description TEXT NOT NULL,
+required_access_level INTEGER DEFAULT 100,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    id UUID PRIMARY KEY ,
     deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    key TEXT,
+    id UUID PRIMARY KEY ,
     function_spec JSON NOT NULL,
-    endpoint TEXT,
+    key TEXT,
+    verb TEXT,
+    description TEXT NOT NULL,
+    groupid TEXT,
     userid UUID,
+    proxy_uri TEXT NOT NULL,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    verb TEXT
+    name TEXT,
+    endpoint TEXT
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."Function";
 CREATE   TRIGGER update_updated_at_trigger
@@ -164,28 +193,33 @@ EXECUTE FUNCTION update_updated_at_column();
         
 SELECT attach_notify_trigger_to_table('p8', 'Function');
             
+-- Apply row-level security policy
+SELECT p8.attach_rls_policy('p8', 'Function');
+            
 -- ------------------
 
 -- register entity (p8.Session)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."Session" (
-channel_id TEXT,
-    name TEXT,
-    agent TEXT NOT NULL,
+agent TEXT NOT NULL,
+    query TEXT,
     thread_id TEXT,
-    session_completed_at TIMESTAMP,
+    session_type TEXT,
+    userid UUID,
+    channel_type TEXT,
+    required_access_level INTEGER DEFAULT 1,
+    name TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     id UUID PRIMARY KEY ,
-    graph_paths TEXT[],
-    channel_type TEXT,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    channel_id TEXT,
     metadata JSON,
-    session_type TEXT,
     deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    userid UUID,
-    query TEXT,
+    groupid TEXT,
     parent_session_id UUID,
-    user_rating REAL
+    graph_paths TEXT[],
+    user_rating REAL,
+    session_completed_at TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."Session";
 CREATE   TRIGGER update_updated_at_trigger
@@ -196,19 +230,24 @@ EXECUTE FUNCTION update_updated_at_column();
         
 SELECT attach_notify_trigger_to_table('p8', 'Session');
             
+-- Apply row-level security policy
+SELECT p8.attach_rls_policy('p8', 'Session');
+            
 -- ------------------
 
 -- register entity (p8.SessionEvaluation)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."SessionEvaluation" (
-created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+required_access_level INTEGER DEFAULT 100,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     id UUID PRIMARY KEY ,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    groupid TEXT,
     userid UUID,
     rating REAL NOT NULL,
     comments TEXT,
-    session_id UUID NOT NULL
+    session_id UUID NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."SessionEvaluation";
 CREATE   TRIGGER update_updated_at_trigger
@@ -217,29 +256,34 @@ FOR EACH ROW
 EXECUTE FUNCTION update_updated_at_column();
 
         
+-- Apply row-level security policy
+SELECT p8.attach_rls_policy('p8', 'SessionEvaluation');
+            
 -- ------------------
 
 -- register entity (p8.AIResponse)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."AIResponse" (
-model_name TEXT NOT NULL,
-    session_id UUID,
+tokens_in INTEGER,
     role TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    function_stack TEXT[],
-    verbatim JSON,
-    id UUID PRIMARY KEY ,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    tokens_out INTEGER,
+    tokens INTEGER,
     userid UUID,
+    required_access_level INTEGER DEFAULT 1,
+    tool_eval_data JSON,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     tokens_other INTEGER,
     status TEXT,
+    id UUID PRIMARY KEY ,
+    session_id UUID,
+    tokens_out INTEGER,
     tool_calls JSON,
-    tool_eval_data JSON,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    tokens_in INTEGER,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    verbatim JSON,
     content TEXT NOT NULL,
-    tokens INTEGER
+    function_stack TEXT[],
+    groupid TEXT,
+    model_name TEXT NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."AIResponse";
 CREATE   TRIGGER update_updated_at_trigger
@@ -250,19 +294,24 @@ EXECUTE FUNCTION update_updated_at_column();
         
 SELECT attach_notify_trigger_to_table('p8', 'AIResponse');
             
+-- Apply row-level security policy
+SELECT p8.attach_rls_policy('p8', 'AIResponse');
+            
 -- ------------------
 
 -- register entity (p8.ApiProxy)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."ApiProxy" (
-proxy_uri TEXT NOT NULL,
-    name TEXT,
+required_access_level INTEGER DEFAULT 100,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    id UUID PRIMARY KEY ,
     deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    token TEXT,
+    id UUID PRIMARY KEY ,
+    groupid TEXT,
     userid UUID,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    proxy_uri TEXT NOT NULL,
+    token TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    name TEXT
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."ApiProxy";
 CREATE   TRIGGER update_updated_at_trigger
@@ -273,22 +322,27 @@ EXECUTE FUNCTION update_updated_at_column();
         
 SELECT attach_notify_trigger_to_table('p8', 'ApiProxy');
             
+-- Apply row-level security policy
+SELECT p8.attach_rls_policy('p8', 'ApiProxy');
+            
 -- ------------------
 
 -- register entity (p8.PlanModel)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."PlanModel" (
-questions TEXT[],
-    plan_description TEXT NOT NULL,
-    name TEXT,
+required_access_level INTEGER DEFAULT 100,
+    extra_arguments JSON,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    functions JSON,
-    id UUID PRIMARY KEY ,
-    depends JSON,
     deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    id UUID PRIMARY KEY ,
+    groupid TEXT,
+    plan_description TEXT NOT NULL,
+    questions TEXT[],
     userid TEXT,
-    extra_arguments JSON
+    functions JSON,
+    depends JSON,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    name TEXT
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."PlanModel";
 CREATE   TRIGGER update_updated_at_trigger
@@ -299,18 +353,23 @@ EXECUTE FUNCTION update_updated_at_column();
         
 SELECT attach_notify_trigger_to_table('p8', 'PlanModel');
             
+-- Apply row-level security policy
+SELECT p8.attach_rls_policy('p8', 'PlanModel');
+            
 -- ------------------
 
 -- register entity (p8.Settings)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."Settings" (
-value TEXT NOT NULL,
+required_access_level INTEGER DEFAULT 100,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     id UUID PRIMARY KEY ,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     key TEXT,
+    groupid TEXT,
     userid UUID,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    value TEXT NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."Settings";
 CREATE   TRIGGER update_updated_at_trigger
@@ -319,25 +378,30 @@ FOR EACH ROW
 EXECUTE FUNCTION update_updated_at_column();
 
         
+-- Apply row-level security policy
+SELECT p8.attach_rls_policy('p8', 'Settings');
+            
 -- ------------------
 
 -- register entity (p8.PercolateAgent)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."PercolateAgent" (
-ordinal INTEGER NOT NULL,
-    category TEXT,
-    summary TEXT,
-    name TEXT,
+required_access_level INTEGER DEFAULT 100,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     uri TEXT NOT NULL,
     id UUID PRIMARY KEY ,
-    graph_paths TEXT[],
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    metadata JSON,
-    userid UUID,
+    content TEXT NOT NULL,
     resource_timestamp TIMESTAMP,
+    metadata JSON,
+    graph_paths TEXT[],
+    ordinal INTEGER NOT NULL,
+    userid UUID,
+    groupid TEXT,
+    category TEXT,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    content TEXT NOT NULL
+    name TEXT,
+    summary TEXT
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."PercolateAgent";
 CREATE   TRIGGER update_updated_at_trigger
@@ -348,25 +412,30 @@ EXECUTE FUNCTION update_updated_at_column();
         
 SELECT attach_notify_trigger_to_table('p8', 'PercolateAgent');
             
+-- Apply row-level security policy
+SELECT p8.attach_rls_policy('p8', 'PercolateAgent');
+            
 -- ------------------
 
 -- register entity (p8.IndexAudit)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."IndexAudit" (
-entity_full_name TEXT NOT NULL,
-    model_name TEXT NOT NULL,
-    session_id UUID,
-    message TEXT,
+required_access_level INTEGER DEFAULT 100,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    id UUID PRIMARY KEY ,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    tokens_out INTEGER,
-    status TEXT NOT NULL,
-    metrics JSON,
-    userid UUID,
     tokens_other INTEGER,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    metrics JSON,
+    id UUID PRIMARY KEY ,
+    status TEXT NOT NULL,
+    message TEXT,
+    entity_full_name TEXT NOT NULL,
+    groupid TEXT,
+    session_id UUID,
+    userid UUID,
+    model_name TEXT NOT NULL,
     tokens_in INTEGER,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    tokens_out INTEGER,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     tokens INTEGER
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."IndexAudit";
@@ -376,25 +445,30 @@ FOR EACH ROW
 EXECUTE FUNCTION update_updated_at_column();
 
         
+-- Apply row-level security policy
+SELECT p8.attach_rls_policy('p8', 'IndexAudit');
+            
 -- ------------------
 
 -- register entity (p8.Task)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."Task" (
-name TEXT,
-    description TEXT NOT NULL,
+required_access_level INTEGER DEFAULT 100,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    id UUID PRIMARY KEY ,
-    progress REAL,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    project_name TEXT,
     target_date TIMESTAMP,
-    userid UUID,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     status TEXT,
-    estimated_effort REAL,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    id UUID PRIMARY KEY ,
+    collaborator_ids UUID[] NOT NULL,
     priority INTEGER,
-    collaborator_ids UUID[] NOT NULL
+    description TEXT NOT NULL,
+    groupid TEXT,
+    userid UUID,
+    estimated_effort REAL,
+    progress REAL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    name TEXT,
+    project_name TEXT
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."Task";
 CREATE   TRIGGER update_updated_at_trigger
@@ -405,20 +479,25 @@ EXECUTE FUNCTION update_updated_at_column();
         
 SELECT attach_notify_trigger_to_table('p8', 'Task');
             
+-- Apply row-level security policy
+SELECT p8.attach_rls_policy('p8', 'Task');
+            
 -- ------------------
 
 -- register entity (p8.TaskResources)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."TaskResources" (
-created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+required_access_level INTEGER DEFAULT 100,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    resource_id UUID NOT NULL,
+    relevance_score REAL,
     id UUID PRIMARY KEY ,
     user_metadata JSON,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    relevance_score REAL,
+    groupid TEXT,
     userid UUID,
-    resource_id UUID NOT NULL,
+    session_id UUID NOT NULL,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    session_id UUID NOT NULL
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."TaskResources";
 CREATE   TRIGGER update_updated_at_trigger
@@ -427,21 +506,26 @@ FOR EACH ROW
 EXECUTE FUNCTION update_updated_at_column();
 
         
+-- Apply row-level security policy
+SELECT p8.attach_rls_policy('p8', 'TaskResources');
+            
 -- ------------------
 
 -- register entity (p8.ResearchIteration)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."ResearchIteration" (
-created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+required_access_level INTEGER DEFAULT 100,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     task_id UUID,
     id UUID PRIMARY KEY ,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    iteration INTEGER NOT NULL,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    userid UUID,
     question_set JSON NOT NULL,
+    groupid TEXT,
+    userid UUID,
+    content TEXT,
     conceptual_diagram TEXT,
-    content TEXT
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    iteration INTEGER NOT NULL
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."ResearchIteration";
 CREATE   TRIGGER update_updated_at_trigger
@@ -452,25 +536,30 @@ EXECUTE FUNCTION update_updated_at_column();
         
 SELECT attach_notify_trigger_to_table('p8', 'ResearchIteration');
             
+-- Apply row-level security policy
+SELECT p8.attach_rls_policy('p8', 'ResearchIteration');
+            
 -- ------------------
 
 -- register entity (p8.Resources)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."Resources" (
-ordinal INTEGER NOT NULL,
-    category TEXT,
-    summary TEXT,
-    name TEXT,
+required_access_level INTEGER DEFAULT 100,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     uri TEXT NOT NULL,
     id UUID PRIMARY KEY ,
-    graph_paths TEXT[],
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    metadata JSON,
-    userid UUID,
+    content TEXT NOT NULL,
     resource_timestamp TIMESTAMP,
+    metadata JSON,
+    graph_paths TEXT[],
+    ordinal INTEGER NOT NULL,
+    userid UUID,
+    groupid TEXT,
+    category TEXT,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    content TEXT NOT NULL
+    name TEXT,
+    summary TEXT
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."Resources";
 CREATE   TRIGGER update_updated_at_trigger
@@ -481,19 +570,24 @@ EXECUTE FUNCTION update_updated_at_column();
         
 SELECT attach_notify_trigger_to_table('p8', 'Resources');
             
+-- Apply row-level security policy
+SELECT p8.attach_rls_policy('p8', 'Resources');
+            
 -- ------------------
 
 -- register entity (p8.SessionResources)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."SessionResources" (
-created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    id UUID PRIMARY KEY ,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    userid UUID,
+required_access_level INTEGER DEFAULT 100,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     resource_id UUID NOT NULL,
+    id UUID PRIMARY KEY ,
+    groupid TEXT,
     count INTEGER,
-    session_id UUID NOT NULL
+    userid UUID,
+    session_id UUID NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."SessionResources";
 CREATE   TRIGGER update_updated_at_trigger
@@ -502,20 +596,25 @@ FOR EACH ROW
 EXECUTE FUNCTION update_updated_at_column();
 
         
+-- Apply row-level security policy
+SELECT p8.attach_rls_policy('p8', 'SessionResources');
+            
 -- ------------------
 
 -- register entity (p8.Schedule)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."Schedule" (
-name TEXT,
+required_access_level INTEGER DEFAULT 100,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    id UUID PRIMARY KEY ,
     schedule TEXT NOT NULL,
     deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    id UUID PRIMARY KEY ,
+    groupid TEXT,
     spec JSON NOT NULL,
     userid UUID,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     disabled_at TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    name TEXT
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."Schedule";
 CREATE   TRIGGER update_updated_at_trigger
@@ -526,19 +625,24 @@ EXECUTE FUNCTION update_updated_at_column();
         
 SELECT attach_notify_trigger_to_table('p8', 'Schedule');
             
+-- Apply row-level security policy
+SELECT p8.attach_rls_policy('p8', 'Schedule');
+            
 -- ------------------
 
 -- register entity (p8.Audit)------
 -- ------------------
 CREATE TABLE  IF NOT EXISTS  p8."Audit" (
-created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+required_access_level INTEGER DEFAULT 100,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     id UUID PRIMARY KEY ,
-    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    error_trace TEXT,
-    userid UUID,
     caller TEXT NOT NULL,
-    status_payload JSON,
+    groupid TEXT,
+    userid UUID,
+    error_trace TEXT,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status_payload JSON,
     status TEXT NOT NULL
 );
 DROP TRIGGER IF EXISTS update_updated_at_trigger ON p8."Audit";
@@ -548,4 +652,7 @@ FOR EACH ROW
 EXECUTE FUNCTION update_updated_at_column();
 
         
+-- Apply row-level security policy
+SELECT p8.attach_rls_policy('p8', 'Audit');
+            
 -- ------------------

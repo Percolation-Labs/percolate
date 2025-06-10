@@ -182,7 +182,14 @@ class PostgresService:
             
             # Parse values
             role_level = int(role_level) if role_level else None
-            parsed_groups = [g for g in user_groups.strip(',').split(',') if g] if user_groups else []
+            
+            # Handle empty or None user_groups
+            if user_groups is None:
+                user_groups = ''
+                parsed_groups = []
+            else:
+                # Strip leading/trailing commas and split
+                parsed_groups = [g for g in user_groups.strip(',').split(',') if g]
             
             # Update context with session values
             context.update({
@@ -240,13 +247,16 @@ class PostgresService:
                         self.role_level = result[0]
             
             # Apply user_groups separately for now (will be integrated into set_user_context later)
-            if self.user_groups and len(self.user_groups) > 0:
-                # For position matching in RLS policy, use comma-separated string with leading/trailing commas
-                if isinstance(self.user_groups, list):
+            # For position matching in RLS policy, use comma-separated string with leading/trailing commas
+            if isinstance(self.user_groups, list):
+                if self.user_groups and len(self.user_groups) > 0:
                     groups_string = ',' + ','.join([str(g) for g in self.user_groups]) + ','
                     cursor.execute("SET percolate.user_groups = %s", (groups_string,))
+                else:
+                    # Set empty string if empty list
+                    cursor.execute("SET percolate.user_groups = ''")
             else:
-                # Set empty string if no groups
+                # Handle case where user_groups is None or not a list
                 cursor.execute("SET percolate.user_groups = ''")
             
             # Commit changes
