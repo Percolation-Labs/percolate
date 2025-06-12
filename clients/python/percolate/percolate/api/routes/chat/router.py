@@ -213,10 +213,10 @@ def handle_openai_request(request: CompletionsRequestOpenApiFormat, params: Opti
     # Extract metadata from request or params
     metadata = params or {}#extract_metadata(request, params)
     
-    is_audio = False
-    if is_audio:= metadata.get('is_audio'):
+    is_audio = metadata.get('is_audio') or False
+    if is_audio:
         """TODO: we only support this on the open ai handler for now as its experimental - not sure how we want to deal with transcription inline"""
-        logger.info(f"is_audio set so we will assume ALL user content is based 64 audio")
+        logger.info(f"is_audio set so we will assume ALL user content is based 64 audio. {metadata=}")
      
     # Create a language model instance
     model_name = request.model
