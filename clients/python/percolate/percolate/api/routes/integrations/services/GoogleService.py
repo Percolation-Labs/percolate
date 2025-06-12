@@ -159,7 +159,9 @@ class GmailService(GoogleServiceBase):
         url = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
 
         try:
-            async with httpx.AsyncClient() as client:
+            # Use reasonable timeout for API requests
+            timeout = httpx.Timeout(connect=30.0, read=60.0, write=60.0, pool=30.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.get(url, headers=headers, params=params)
 
                 if response.status_code != 200:
@@ -214,7 +216,9 @@ class DriveService(GoogleServiceBase):
         self.token = await self.ensure_valid_token()
         headers = {"Authorization": f"Bearer {self.token['access_token']}"}
         
-        async with httpx.AsyncClient() as client:
+        # Use reasonable timeout for API requests
+        timeout = httpx.Timeout(connect=30.0, read=60.0, write=60.0, pool=30.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             # Test user info
             user_response = await client.get(
                 "https://www.googleapis.com/oauth2/v2/userinfo", 
@@ -259,7 +263,9 @@ class DriveService(GoogleServiceBase):
             
         all_files = []
         
-        async with httpx.AsyncClient() as client:
+        # Use reasonable timeout for API requests
+        timeout = httpx.Timeout(connect=30.0, read=60.0, write=60.0, pool=30.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             # First get this folder's files
             page_token = None
             while True:
@@ -310,7 +316,9 @@ class DriveService(GoogleServiceBase):
         
         all_drives = []
         
-        async with httpx.AsyncClient() as client:
+        # Use reasonable timeout for API requests
+        timeout = httpx.Timeout(connect=30.0, read=60.0, write=60.0, pool=30.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             page_token = None
             while True:
                 params = {
@@ -354,7 +362,15 @@ class DriveService(GoogleServiceBase):
         self.token = await self.ensure_valid_token()
         headers = {"Authorization": f"Bearer {self.token['access_token']}"}
         
-        async with httpx.AsyncClient() as client:
+        # Use longer timeout for file downloads (10 minutes for large files)
+        timeout = httpx.Timeout(
+            connect=30.0,      # 30 seconds to establish connection
+            read=600.0,        # 10 minutes to read the response
+            write=600.0,       # 10 minutes to write (for uploads)
+            pool=30.0          # 30 seconds to acquire connection from pool
+        )
+        
+        async with httpx.AsyncClient(timeout=timeout) as client:
             # First get file metadata to determine type
             response = await client.get(
                 f"{self.GOOGLE_DRIVE_API}/files/{file_id}?fields=mimeType,name", 
