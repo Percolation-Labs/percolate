@@ -483,14 +483,12 @@ async def session_info(request: Request, user_id: typing.Optional[str] = Depends
                     sync_creds = p8.repository(SyncCredential).select(userid=user_id)
                     if sync_creds:
                         cred = SyncCredential(**sync_creds[0])
-                        if cred.credentials:
-                            cred_data = json.loads(cred.credentials) if isinstance(cred.credentials, str) else cred.credentials
-                            response_data["sync_credentials"] = {
-                                "access_token": cred_data.get("access_token"),
-                                "refresh_token": cred_data.get("refresh_token"),
-                                "expires_at": cred_data.get("expires_at"),
-                                "provider": cred.provider
-                            }
+                        response_data["sync_credentials"] = {
+                            "access_token": cred.access_token,
+                            "refresh_token": cred.refresh_token,
+                            "expires_at": cred.token_expiry.isoformat() if cred.token_expiry else None,
+                            "provider": cred.provider
+                        }
                 except Exception as e:
                     logger.debug(f"No sync credentials found: {e}")
         except Exception as e:
