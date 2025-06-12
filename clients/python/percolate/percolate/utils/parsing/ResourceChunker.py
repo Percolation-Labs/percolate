@@ -800,11 +800,11 @@ class ResourceChunker:
                 chunk_audio = audio[start_ms:end_ms]
                 
                 # Save chunk to temporary file
-                chunk_filename = f"chunk_{i+1}.mp3"
+                chunk_filename = f"chunk_{i+1}.wav"
                 chunk_path = os.path.join(chunk_dir, chunk_filename)
                 
-                # Export as MP3 to reduce file size (uses less memory)
-                chunk_audio.export(chunk_path, format="mp3", bitrate="128k")
+                # Export as WAV
+                chunk_audio.export(chunk_path, format="wav")
                 
                 start_time = start_ms / 1000.0
                 end_time = end_ms / 1000.0
