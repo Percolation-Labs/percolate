@@ -874,19 +874,19 @@ class FileSync:
                             # If we're not in an event loop, log and note that audio will need manual processing
                             logger.warning(f"Could not create async task: {str(loop_error)}. Audio will need manual processing.")
                             # Store the error but don't fail the sync
-                            if not sync_file.metadata:
-                                sync_file.metadata = {}
-                            sync_file.metadata["audio_processing_pending"] = True
-                            sync_file.metadata["audio_processing_note"] = "Async task creation failed - will need manual processing"
+                            if not sync_file.remote_metadata:
+                                sync_file.remote_metadata = {}
+                            sync_file.remote_metadata["audio_processing_pending"] = True
+                            sync_file.remote_metadata["audio_processing_note"] = "Async task creation failed - will need manual processing"
                         
                         # Mark as ingested since it's being handled by the audio pipeline
                         sync_file.ingested = True
                         sync_file.resource_id = audio_file_id
                         
                         # Add metadata about the audio processing
-                        if not sync_file.metadata:
-                            sync_file.metadata = {}
-                        sync_file.metadata["audio_processing"] = {
+                        if not sync_file.remote_metadata:
+                            sync_file.remote_metadata = {}
+                        sync_file.remote_metadata["audio_processing"] = {
                             "audio_file_id": audio_file_id,
                             "status": "processing",
                             "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -897,9 +897,9 @@ class FileSync:
                         logger.error(f"Error scheduling audio transcription: {str(e)}")
                         # Don't mark as ingested if there was an error
                         sync_file.ingested = False
-                        if not sync_file.metadata:
-                            sync_file.metadata = {}
-                        sync_file.metadata["audio_processing_error"] = str(e)
+                        if not sync_file.remote_metadata:
+                            sync_file.remote_metadata = {}
+                        sync_file.remote_metadata["audio_processing_error"] = str(e)
             
             # Update sync file
             p8.repository(SyncFile).update_records(sync_file)
