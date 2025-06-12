@@ -492,8 +492,8 @@ class ResourceChunker:
         self._validate_media_processing_requirements(file_type, parsing_mode)
         
         # Parameters for audio chunking and transcription
-        max_transcription_size = 25 * 1024 * 1024  # 25MB limit for OpenAI API
-        chunk_duration_seconds = 10 * 60  # 10 minutes per chunk (safe for most audio)
+        max_transcription_size = 10 * 1024 * 1024  # 10MB limit (reduced for memory efficiency)
+        chunk_duration_seconds = 5 * 60  # 5 minutes per chunk (reduced for memory efficiency)
         
         logger.info(f"Processing {file_type} file: {uri}")
         
@@ -625,10 +625,25 @@ class ResourceChunker:
                 # Continue with other chunks rather than failing completely
                 continue
             finally:
-                # Clean up temporary chunk file (if different from original)
+                # Clean up temporary chunk file immediately to free memory
                 if chunk_path != original_path and os.path.exists(chunk_path):
-                    os.unlink(chunk_path)
+                    try:
+                        os.unlink(chunk_path)
+                        logger.debug(f"Deleted chunk file: {chunk_path}")
+                    except Exception as e:
+                        logger.warning(f"Failed to delete chunk file {chunk_path}: {e}")
                     
+        # Clean up the chunk directory if all chunks have been processed
+        if len(audio_chunks) > 0 and audio_chunks[0][0] != original_path:
+            chunk_dir = os.path.dirname(audio_chunks[0][0])
+            if os.path.exists(chunk_dir) and chunk_dir.startswith(tempfile.gettempdir()):
+                try:
+                    import shutil
+                    shutil.rmtree(chunk_dir)
+                    logger.info(f"Cleaned up chunk directory: {chunk_dir}")
+                except Exception as e:
+                    logger.warning(f"Failed to clean up chunk directory {chunk_dir}: {e}")
+        
         return all_transcriptions, total_duration
     
     def _create_transcription_resources(
@@ -775,6 +790,7 @@ class ResourceChunker:
             
             chunks = []
             chunk_dir = tempfile.mkdtemp(prefix="audio_chunks_")
+            logger.info(f"Created temporary chunk directory: {chunk_dir}")
             
             for i in range(num_chunks):
                 start_ms = i * chunk_duration_ms
@@ -784,11 +800,11 @@ class ResourceChunker:
                 chunk_audio = audio[start_ms:end_ms]
                 
                 # Save chunk to temporary file
-                chunk_filename = f"chunk_{i+1}.wav"
+                chunk_filename = f"chunk_{i+1}.mp3"
                 chunk_path = os.path.join(chunk_dir, chunk_filename)
                 
-                # Export as WAV for best transcription compatibility
-                chunk_audio.export(chunk_path, format="wav")
+                # Export as MP3 to reduce file size (uses less memory)
+                chunk_audio.export(chunk_path, format="mp3", bitrate="128k")
                 
                 start_time = start_ms / 1000.0
                 end_time = end_ms / 1000.0
@@ -796,6 +812,9 @@ class ResourceChunker:
                 chunks.append((chunk_path, start_time, end_time))
                 
                 logger.info(f"Created chunk {i+1}: {start_time:.1f}s - {end_time:.1f}s ({os.path.getsize(chunk_path) / (1024*1024):.1f}MB)")
+                
+                # Free memory from the chunk audio segment
+                del chunk_audio
             
             return chunks
             

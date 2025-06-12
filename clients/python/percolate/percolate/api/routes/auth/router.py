@@ -38,6 +38,7 @@ SCOPES = [
     'email',
     'profile',
     'https://www.googleapis.com/auth/gmail.readonly',
+    'https://www.googleapis.com/auth/calendar.readonly',
     'https://www.googleapis.com/auth/drive.readonly',
     'https://www.googleapis.com/auth/documents.readonly'
 ]
@@ -465,6 +466,33 @@ async def session_info(request: Request, user_id: typing.Optional[str] = Depends
                         "scopes": token_data.get('scope', '').split() if 'scope' in token_data else []
                     }
                 })
+                
+                # Include Google OAuth tokens if available
+                if token_data:
+                    response_data["google_tokens"] = {
+                        "access_token": token_data.get("access_token"),
+                        "refresh_token": token_data.get("refresh_token"),
+                        "expires_in": token_data.get("expires_in"),
+                        "expires_at": token_data.get("expires_at"),
+                        "token_type": token_data.get("token_type", "Bearer")
+                    }
+                
+                # Also check if we have stored sync credentials
+                try:
+                    from percolate.models.sync import SyncCredential
+                    sync_creds = p8.repository(SyncCredential).select(userid=user_id)
+                    if sync_creds:
+                        cred = SyncCredential(**sync_creds[0])
+                        if cred.credentials:
+                            cred_data = json.loads(cred.credentials) if isinstance(cred.credentials, str) else cred.credentials
+                            response_data["sync_credentials"] = {
+                                "access_token": cred_data.get("access_token"),
+                                "refresh_token": cred_data.get("refresh_token"),
+                                "expires_at": cred_data.get("expires_at"),
+                                "provider": cred.provider
+                            }
+                except Exception as e:
+                    logger.debug(f"No sync credentials found: {e}")
         except Exception as e:
             logger.error(f"Error fetching user info: {str(e)}")
     
