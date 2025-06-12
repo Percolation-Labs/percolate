@@ -865,7 +865,7 @@ async def get_user_files(user_id: Union[str, uuid.UUID], limit: int = 100, offse
         # Query for user's files
         query = """
             SELECT * FROM p8."TusFileUpload" 
-            WHERE user_id = %s
+            WHERE userid = %s
             ORDER BY created_at DESC
             LIMIT %s OFFSET %s
         """

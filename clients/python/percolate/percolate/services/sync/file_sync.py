@@ -299,7 +299,7 @@ class FileSync:
         # Group by user_id
         user_configs = {}
         for config in configs:
-            user_id = str(config["user_id"])
+            user_id = str(config["userid"])
             if user_id not in user_configs:
                 user_configs[user_id] = []
             user_configs[user_id].append(config)
@@ -562,11 +562,67 @@ class FileSync:
         existing_files = sync_file_repo.select(config_id=config.id)
         
         # Create a map of remote_id -> SyncFile for quick lookups
-        # Make sure to handle any records that might be missing the remote_id attribute
-        existing_file_map = {
-            f.remote_id: f for f in existing_files 
-            if hasattr(f, 'remote_id') and f.remote_id
-        }
+        # Handle both dict and object returns from select()
+        existing_file_map = {}
+        for f in existing_files:
+            if isinstance(f, dict):
+                if 'remote_id' in f and f['remote_id']:
+                    existing_file_map[f['remote_id']] = f
+            else:
+                if hasattr(f, 'remote_id') and f.remote_id:
+                    existing_file_map[f.remote_id] = f
+        
+        # Pre-filter files to skip those that are already synced and up-to-date
+        files_to_process = []
+        skipped_count = 0
+        
+        for file in filtered_files:
+            # Skip folders
+            if file.get("mimeType") == "application/vnd.google-apps.folder":
+                continue
+                
+            file_id = file.get("id")
+            file_name = file.get("name")
+            modified_time = datetime.datetime.fromisoformat(
+                file.get("modifiedTime").replace("Z", "+00:00")
+            ) if "modifiedTime" in file else None
+            
+            existing_file = existing_file_map.get(file_id)
+            
+            # Skip if file is already synced and hasn't been modified
+            if existing_file:
+                # Handle both dict and object types
+                status = existing_file.get('status') if isinstance(existing_file, dict) else existing_file.status
+                remote_modified = existing_file.get('remote_modified_at') if isinstance(existing_file, dict) else existing_file.remote_modified_at
+                
+                if status == "synced":
+                    if not modified_time or not remote_modified:
+                        # Can't compare times, include the file to be safe
+                        files_to_process.append(file)
+                    else:
+                        # Make sure both datetimes are timezone-aware for comparison
+                        if remote_modified.tzinfo is None:
+                            remote_modified = remote_modified.replace(tzinfo=datetime.timezone.utc)
+                        if modified_time.tzinfo is None:
+                            modified_time = modified_time.replace(tzinfo=datetime.timezone.utc)
+                            
+                        if modified_time <= remote_modified:
+                            # File hasn't been modified since last sync
+                            logger.debug(f"Skipping already synced file: {file_name}")
+                            skipped_count += 1
+                            continue
+                        else:
+                            # File has been modified, need to re-sync
+                            files_to_process.append(file)
+                else:
+                    # Not synced yet, process it
+                    files_to_process.append(file)
+            else:
+                # New file, process it
+                files_to_process.append(file)
+        
+        logger.info(f"Processing {len(files_to_process)} files, skipped {skipped_count} already synced files")
+        filtered_files = files_to_process
         
         # Process each file
         synced = 0
@@ -587,49 +643,80 @@ class FileSync:
                 ) if "modifiedTime" in file else None
                 
                 # Check if we already have this file
-                if file_id in existing_file_map:
-                    sync_file = existing_file_map[file_id]
-                    
-                    # If modified time is newer than last sync, or if the sync was unsuccessful,
-                    # sync again
-                    if (modified_time and (
-                            not sync_file.remote_modified_at or
-                            modified_time > sync_file.remote_modified_at or
-                            sync_file.status != "synced"  # Use string literal instead of SyncFileStatus.SYNCED
-                        )):
-                        sync_result = await self._sync_google_drive_file(
-                            drive_service,
-                            config,
-                            file,
-                            sync_file
-                        )
-                        
-                        if sync_result["success"]:
-                            synced += 1
-                        else:
-                            failed += 1
-                        
-                        logs.append(sync_result["log"])
+                # Always create a SyncFile object - it will have deterministic ID
+                sync_file = SyncFile(
+                    config_id=config.id,
+                    userid=config.userid,
+                    remote_id=file_id,
+                    remote_path=self._get_file_path(file),
+                    remote_name=file_name,
+                    remote_type=file_type,
+                    remote_size=file.get("size"),
+                    remote_modified_at=modified_time,
+                    remote_created_at=datetime.datetime.fromisoformat(
+                        file.get("createdTime").replace("Z", "+00:00")
+                    ) if "createdTime" in file else None,
+                    remote_metadata={
+                        "webViewLink": file.get("webViewLink"),
+                        "md5Checksum": file.get("md5Checksum")
+                    },
+                    status="pending"  # Default status for new files
+                )
+                
+                # Check if we need to sync this file
+                existing_file = existing_file_map.get(file_id)
+                should_sync = False
+                
+                if not existing_file:
+                    # New file, always sync
+                    should_sync = True
+                    logger.info(f"New file detected: {file_name}")
                 else:
-                    # Create a new sync file record
-                    sync_file = SyncFile(
-                        config_id=config.id,
-                        userid=config.userid,
-                        remote_id=file_id,
-                        remote_path=self._get_file_path(file),
-                        remote_name=file_name,
-                        remote_type=file_type,
-                        remote_size=file.get("size"),
-                        remote_modified_at=modified_time,
-                        remote_created_at=datetime.datetime.fromisoformat(
-                            file.get("createdTime").replace("Z", "+00:00")
-                        ) if "createdTime" in file else None,
-                        remote_metadata={
-                            "webViewLink": file.get("webViewLink"),
-                            "md5Checksum": file.get("md5Checksum")
-                        },
-                        status="pending"  # Use string literal instead of SyncFileStatus.PENDING
-                    )
+                    # Handle both dict and object types
+                    status = existing_file.get('status') if isinstance(existing_file, dict) else existing_file.status
+                    remote_modified = existing_file.get('remote_modified_at') if isinstance(existing_file, dict) else existing_file.remote_modified_at
+                    
+                    if status != "synced":
+                        # File exists but not successfully synced
+                        should_sync = True
+                        logger.info(f"Re-syncing incomplete file: {file_name} (status: {status})")
+                    elif modified_time and remote_modified:
+                        # Make sure both datetimes are timezone-aware for comparison
+                        if remote_modified.tzinfo is None:
+                            remote_modified = remote_modified.replace(tzinfo=datetime.timezone.utc)
+                        if modified_time.tzinfo is None:
+                            modified_time = modified_time.replace(tzinfo=datetime.timezone.utc)
+                            
+                        if modified_time > remote_modified:
+                            # File has been modified since last sync
+                            should_sync = True
+                            logger.info(f"File modified since last sync: {file_name}")
+                        else:
+                            # File is up to date
+                            logger.debug(f"File already synced and up to date: {file_name}")
+                    else:
+                        # File is up to date
+                        logger.debug(f"File already synced and up to date: {file_name}")
+                
+                if should_sync:
+                    # Update sync_file with existing data if available
+                    if existing_file:
+                        if isinstance(existing_file, dict):
+                            sync_file.status = existing_file.get('status', 'pending')
+                            sync_file.s3_uri = existing_file.get('s3_uri')
+                            sync_file.ingested = existing_file.get('ingested', False)
+                            sync_file.resource_id = existing_file.get('resource_id')
+                            sync_file.last_sync_at = existing_file.get('last_sync_at')
+                            sync_file.sync_attempts = existing_file.get('sync_attempts', 0)
+                            sync_file.error_message = existing_file.get('error_message')
+                        else:
+                            sync_file.status = existing_file.status
+                            sync_file.s3_uri = existing_file.s3_uri
+                            sync_file.ingested = existing_file.ingested
+                            sync_file.resource_id = existing_file.resource_id
+                            sync_file.last_sync_at = existing_file.last_sync_at
+                            sync_file.sync_attempts = existing_file.sync_attempts
+                            sync_file.error_message = existing_file.error_message
                     
                     sync_result = await self._sync_google_drive_file(
                         drive_service,
@@ -702,7 +789,15 @@ class FileSync:
                     export_format = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
             
             # Download file content
-            content, content_type = await drive_service.get_file_content(file_id, export_format)
+            logger.debug(f"Downloading {file_name} (ID: {file_id}, Type: {mime_type}, Export: {export_format})")
+            try:
+                content, content_type = await drive_service.get_file_content(file_id, export_format)
+                logger.debug(f"Downloaded {file_name}: {len(content)} bytes, content_type={content_type}")
+            except Exception as download_error:
+                error_type = type(download_error).__name__
+                error_msg = str(download_error) if str(download_error) else f"{error_type} (no message)"
+                logger.error(f"Failed to download {file_name}: {error_type}: {error_msg}")
+                raise
             
             # Generate S3 path
             s3_path = f"file_sync/{config.userid}/{file_id}"
@@ -720,14 +815,23 @@ class FileSync:
                 # Build the S3 URI
                 s3_uri = f"s3://{self.s3_service.default_bucket}/percolate/{s3_path}"
                 
+                logger.debug(f"Uploading {file_name} to S3: {s3_uri} ({len(content)} bytes)")
+                
                 # Use direct bytes upload since we have the content in memory
                 s3_result = self.s3_service.upload_filebytes_to_uri(
                     s3_uri=s3_uri,
                     file_content=content,
                     content_type=content_type
                 )
+                
+                logger.debug(f"Successfully uploaded {file_name} to S3: {s3_result.get('uri')}")
             except Exception as e:
-                logger.error(f"Error uploading file to S3: {str(e)}")
+                error_type = type(e).__name__
+                error_msg = str(e) if str(e) else f"{error_type} (no message)"
+                logger.error(f"Error uploading {file_name} to S3: {error_type}: {error_msg}")
+                # Log traceback for S3 errors
+                import traceback
+                logger.debug(f"S3 upload error traceback:\n{traceback.format_exc()}")
                 raise
             
             # Update sync file record with success
@@ -894,12 +998,19 @@ class FileSync:
                         
                         logger.info(f"Audio file {file_name} sent for transcription with ID {audio_file_id}")
                     except Exception as e:
-                        logger.error(f"Error scheduling audio transcription: {str(e)}")
+                        error_type = type(e).__name__
+                        error_msg = str(e) if str(e) else f"{error_type} (no message)"
+                        logger.error(f"Error scheduling audio transcription for {file_name}: {error_type}: {error_msg}")
+                        
+                        # Log traceback for debugging
+                        import traceback
+                        logger.debug(f"Audio processing error traceback:\n{traceback.format_exc()}")
+                        
                         # Don't mark as ingested if there was an error
                         sync_file.ingested = False
                         if not sync_file.remote_metadata:
                             sync_file.remote_metadata = {}
-                        sync_file.remote_metadata["audio_processing_error"] = str(e)
+                        sync_file.remote_metadata["audio_processing_error"] = f"{error_type}: {error_msg}"
             
             # Update sync file
             p8.repository(SyncFile).update_records(sync_file)
@@ -916,11 +1027,20 @@ class FileSync:
             }
         
         except Exception as e:
-            logger.error(f"Error syncing file {file_name}: {str(e)}")
+            # Get more detailed error information
+            error_type = type(e).__name__
+            error_msg = str(e) if str(e) else f"{error_type} (no message)"
+            
+            # Log with more detail including traceback
+            logger.error(f"Error syncing file {file_name}: {error_type}: {error_msg}")
+            
+            # Log the full traceback for debugging
+            import traceback
+            logger.debug(f"Full traceback for {file_name}:\n{traceback.format_exc()}")
             
             # Update sync file record with failure
             sync_file.status = "failed" # Use string literal instead of SyncFileStatus.FAILED
-            sync_file.error_message = str(e)
+            sync_file.error_message = f"{error_type}: {error_msg}"
             p8.repository(SyncFile).update_records(sync_file)
             
             return {
