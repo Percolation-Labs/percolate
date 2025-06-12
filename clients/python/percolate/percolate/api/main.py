@@ -116,8 +116,16 @@ app = FastAPI(
 session_key = get_stable_session_key()
 
 logger.info('Percolate api app started with stable session key')
- 
-app.add_middleware(SessionMiddleware, secret_key=session_key)
+
+# Add session middleware with better cookie settings
+app.add_middleware(
+    SessionMiddleware, 
+    secret_key=session_key,
+    max_age=86400,  # 1 day in seconds
+    same_site="none",  # Allow cross-site cookies (needed for OAuth redirects)
+    https_only=False,  # Set to True in production with HTTPS
+    session_cookie="session"  # Ensure consistent cookie name
+)
 #app.add_middleware(PayloadLoggerMiddleware)
 
 
