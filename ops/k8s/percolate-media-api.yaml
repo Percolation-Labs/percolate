@@ -17,7 +17,7 @@ metadata:
   name: percolate-media-api
   namespace: eepis
 spec:
-  replicas: 3
+  replicas: 5
   selector:
     matchLabels:
       app: percolate-media-api
@@ -41,10 +41,10 @@ spec:
         resources:
           limits:
             cpu: 2000m
-            memory: 5Gi
+            memory: 2Gi
           requests:
             cpu: 1000m
-            memory: 4Gi
+            memory: 2Gi
         envFrom:
         - configMapRef:
             name: percolate-env
