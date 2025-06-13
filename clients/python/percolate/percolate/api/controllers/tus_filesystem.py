@@ -400,16 +400,31 @@ async def finalize_upload(upload_id: Union[str, uuid.UUID]) -> str:
         # Save the upload record
         p8.repository(TusFileUpload).update_records([upload])
         
-        # Create resources from the file
-        # Note: Resource creation expects files to be accessible via S3 URI
-        # Since we're in filesystem-only mode, we'll skip resource creation for now
-        # In production, you would either:
-        # 1. Upload to S3 before resource creation, or
-        # 2. Modify resource_creator to support local file paths
-        logger.info(f"Skipping resource creation in filesystem-only mode for upload: {upload_id}")
-        upload.upload_metadata["resource_creation_skipped"] = True
-        upload.upload_metadata["resource_creation_note"] = "Filesystem-only mode - resources not created"
-        p8.repository(TusFileUpload).update_records([upload])
+        # Create resources from the uploaded file
+        # In filesystem-only mode, we need to temporarily update the upload record
+        # to point to the local file so resource creation can read it
+        original_s3_uri = upload.s3_uri
+        try:
+            # Temporarily set the s3_uri to the local path for resource creation
+            upload.s3_uri = f"file://{final_path}"
+            p8.repository(TusFileUpload).update_records([upload])
+            
+            logger.info(f"Creating resources for upload: {upload_id} from local file: {final_path}")
+            resources = await create_resources_from_upload(upload_id)
+            logger.info(f"Created {len(resources)} resources for upload: {upload_id}")
+            
+            # Restore the original S3 URI
+            upload.s3_uri = original_s3_uri
+            upload.upload_metadata["resources_created"] = True
+            upload.upload_metadata["resource_count"] = len(resources)
+            p8.repository(TusFileUpload).update_records([upload])
+        except Exception as resource_error:
+            logger.error(f"Error creating resources: {str(resource_error)}")
+            # Restore the original S3 URI
+            upload.s3_uri = original_s3_uri
+            # Don't fail the finalization, just log the error
+            upload.upload_metadata["resource_creation_error"] = str(resource_error)
+            p8.repository(TusFileUpload).update_records([upload])
         
         # Return the S3 URI (even though we didn't actually upload)
         return upload.s3_uri or ""
