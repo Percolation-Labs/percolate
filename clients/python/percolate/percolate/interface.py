@@ -26,8 +26,13 @@ def set_custom_model_provider(fn):
 def settings(key, default=None):
     return SETTINGS.get(key,default)
 
-def try_load_model(name):
-    """load the model in different ways"""
+def try_load_model(name, allow_abstract: bool = False):
+    """load the model in different ways
+    
+    Args:
+        name: The model name (can be namespace.name format)
+        allow_abstract: If True, create an abstract model if not found
+    """
     M = custom_load_model(name)
     if not M:
         try:
@@ -36,11 +41,18 @@ def try_load_model(name):
             pass
         
     """last resort create custom which can be used from db but we need a strong sense of loading a model from database with schema and functions TODO:"""
-    if not M:
-        namespace, name = name.split('.')
-        M = AbstractModel.create_model(name=name, 
-                                       namespace=namespace,
-                                       description="Please use the search facility to answer the users question")
+    if not M and allow_abstract:
+        if '.' in name:
+            namespace, model_name = name.split('.', 1)
+        else:
+            namespace = 'public'
+            model_name = name
+            
+        M = AbstractModel.create_model(
+            name=model_name, 
+            namespace=namespace,
+            description="Please use the search facility to answer the users question"
+        )
         
     return M
 

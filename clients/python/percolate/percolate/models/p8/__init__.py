@@ -2,7 +2,7 @@
 
 from .types import Function
 from .types import *
-from .PlanModel import PlanModel
+from .PlanModel import PlanModel,ConcisePlanner
 
 sample_models = [
     LanguageModelApi(id = make_uuid('gpt-4o-2024-08-06'), name = 'gpt-4o-2024-08-06', scheme='openai', completions_uri='https://api.openai.com/v1/chat/completions', token_env_key='OPENAI_API_KEY'),
