@@ -659,6 +659,12 @@ class Resources(AbstractModel):
     If someone asks about resources, content, files, general information etc. it may be worth doing a search on the Resources.
     If a user expresses interests or preferences or trivia about themselves - you can save it in the background but response naturally in conversation about it.
     If the user asks information about themselves you can also try to search for user facts if you dont have the answer.
+    You may want to look at recent "top n" resources for a user or do a semantic search or a combination if the user is interested in deeper analysis.
+    
+    When responding try to make the format pretty when relevant. For quick answer it does not matter but for larger content using pretty Markdown structures like
+    fenced codeblocks, headings, lits, tables, links etc.
+    
+    
     """
     id: typing.Optional[uuid.UUID| str] = Field("The id is generated as a hash of the required uri and ordinal")  
     name: typing.Optional[str] = Field(None, description="A short content name - non unique - for example a friendly label for a chunked pdf document or web page title")
@@ -830,7 +836,8 @@ class Resources(AbstractModel):
                 import percolate as p8
                 p8.repository(cls).update_records(resources)
                 from percolate.utils import logger
-                logger.info(f"Saved {len(resources)} chunked resources to database for URI: {uri}")
+                userid = resources[0].userid if resources else None
+                logger.info(f"Saved {len(resources)} chunked resources to database for URI: {uri} with userid: {userid}")
             
             return resources
             
@@ -838,6 +845,38 @@ class Resources(AbstractModel):
             from percolate.utils import logger
             logger.error(f"Error creating chunked resources from {uri}: {str(e)}")
             raise
+    
+    @classmethod
+    def get_recent_uploads_by_user(
+        cls,
+        user_id: str,
+        limit: int = 10
+    ) -> typing.List[typing.Dict[str, typing.Any]]:
+        """
+        Get the most recent resource uploads for a specific user.
+        
+        Args:
+            user_id: The user ID to filter resources by
+            limit: Maximum number of resources to return (default: 10)
+            
+        Returns:
+            List of resource records as dictionaries, ordered by created_at descending
+        """
+        from percolate.services import PostgresService
+        
+        # Create a repository for the Resources model
+        pg = PostgresService(model=cls)
+        
+        # Build and execute the query
+        query = f"""
+            SELECT * 
+            FROM {pg.helper.table_name}
+            WHERE userid = %s
+            ORDER BY created_at DESC
+            LIMIT %s
+        """
+        
+        return pg.execute(query, data=(user_id, limit))
 
 class TaskResources(AbstractModel):
     """(Deprecate)A link between tasks and resources since resources can be shared between tasks"""

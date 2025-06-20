@@ -99,33 +99,62 @@ def get_user_from_session(request: Request) -> typing.Optional[str]:
         The user ID if available, None otherwise
     """
     try:
-        session =  request.session
-      
-        # Try to get user info from the session
+        session = request.session
+        
+        # First check if we have a user_id directly in the session
+        if 'user_id' in session:
+            logger.debug(f"Found user_id directly in session: {session['user_id']}")
+            return str(session['user_id'])
+        
+        # Check if we have email in the session
+        if 'email' in session:
+            email = session['email']
+            logger.debug(f"Found email in session: {email}")
+            user = get_user_from_email(email)
+            if user:
+                logger.debug(f"Found user ID from email: {user['id']}")
+                return str(user['id'])
+        
+        # Try to get user info from the token in session
         if 'token' in session:
             token = session['token']
             logger.debug("Token found in session")
-        else:
-            token = request.cookies.get('session')
-            logger.debug(f"treating session as token - will try extract from cookie as token")
-         
-        user_id, email, username = extract_user_info_from_token(token)
-        logger.debug(f"Extracted: user_id={user_id}, email={email}, username={username}")
+            user_id, email, username = extract_user_info_from_token(token)
+            logger.debug(f"Extracted from token: user_id={user_id}, email={email}, username={username}")
+            
+            if email:
+                # Look up the user by email to get the percolate user ID
+                user = get_user_from_email(email)
+                if user:
+                    logger.debug(f"Found user ID from token: {user['id']} for email: {email}")
+                    return str(user['id'])
+                else:
+                    logger.debug(f"No user found for email: {email}")
         
-        if email:
-            # Look up the user by email to get the percolate user ID
-            user = get_user_from_email(email)
-            if user:
-                logger.debug(f"Found user ID in session: {user['id']} for email: {email}")
-                return str(user['id'])
-            else:
-                logger.debug(f"No user found for email: {email}")
+        # Check if we have a session_id to look up the user
+        session_cookie = request.cookies.get('session')
+        if session_cookie:
+            logger.debug(f"Checking session cookie: {session_cookie[:10]}...")
+            # Look up user by session_id in the database
+            from percolate.services import PostgresService
+            pg = PostgresService()
+            query = """
+                SELECT id, email FROM p8."User"
+                WHERE session_id = %s
+                LIMIT 1
+            """
+            result = pg.execute(query, data=(session_cookie,))
+            if result and len(result) > 0:
+                user_id = result[0]['id']
+                logger.debug(f"Found user ID from session_id lookup: {user_id}")
+                return str(user_id)
+        
     except Exception as e:
         logger.error(f"Error getting user from session: {str(e)}")
     
     return None
 
-def get_user_id(
+async def get_user_id(
     request: Request,
     authorization: typing.Optional[HTTPAuthorizationCredentials] = Depends(bearer)
 ) -> typing.Optional[str]:
@@ -139,10 +168,41 @@ def get_user_id(
     Returns:
         The user ID if available, None otherwise
     """
+    logger.debug(f"get_user_id called - authorization present: {bool(authorization)}")
+    if authorization:
+        logger.debug(f"get_user_id: Authorization scheme={authorization.scheme}, credentials={authorization.credentials[:10]}...")
+    
     # First try to get from session
     user_id = get_user_from_session(request)
     if user_id:
+        logger.debug(f"get_user_id: Found user_id from session: {user_id}")
         return user_id
+    
+    # If bearer token is provided, check for user context in headers
+    if authorization:
+        try:
+            logger.debug("get_user_id: Validating bearer token...")
+            # Validate the bearer token using get_api_key
+            await get_api_key(authorization)
+            
+            # Check for email in headers (same logic as HybridAuth)
+            user_email = (request.headers.get('X-User-Email') or 
+                         request.headers.get('x-user-email') or 
+                         request.headers.get('X-OpenWebUI-User-Email') or 
+                         request.headers.get('x-openwebui-user-email'))
+            if user_email:
+                logger.debug(f"get_user_id: Found email header: {user_email}")
+                # Look up user by email
+                user = get_user_from_email(user_email)
+                if user and user.get('id'):
+                    logger.debug(f"get_user_id: Resolved user_id from email: {user.get('id')}")
+                    return str(user.get('id'))
+                else:
+                    logger.warning(f"get_user_id: Could not resolve user from email: {user_email}")
+        except HTTPException as e:
+            logger.debug(f"get_user_id: Bearer token validation failed - {e.detail}")
+        except Exception as e:
+            logger.error(f"get_user_id: Unexpected error: {type(e).__name__}: {e}")
     
     # Return None if no user ID could be determined
     return None
