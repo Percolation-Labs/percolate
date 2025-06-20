@@ -193,6 +193,8 @@ class AbstractModel(BaseModel, ABC, AbstractModelMixin):
         description: str = None,
         functions: dict = None,
         fields=None,
+        access_level=None,
+        inherit_config: bool = True,
         **kwargs,
     ):
         """
@@ -204,18 +206,55 @@ class AbstractModel(BaseModel, ABC, AbstractModelMixin):
             namespace: namespace for the model - types take python models or we can use public as default
             description: a markdown description of the model e.g. system prompt
             functions: a map of function ids and how they are to be used on context
+            access_level: access level for row-level security (AccessLevel enum or int)
+            inherit_config: whether to inherit parent model config (default: True)
+            **kwargs: additional config parameters to merge
         """
         if not fields:
             fields = {}
         namespace = namespace or cls.get_model_namespace()
         model = create_model(name, **fields, __module__=namespace, __base__=cls)
-        """add the config object which is used in interface"""
-        model.model_config = {
-            'name':name,
-            'namespace':namespace,
-            'description':description,
-            'functions':functions or [],
+        
+        # Start with base config
+        base_config = {
+            'name': name,
+            'namespace': namespace,
+            'description': description,
+            'functions': functions or [],
         }
+        
+        # If inherit_config is True, inherit parent's model_config
+        if inherit_config and hasattr(cls, 'model_config'):
+            # Get parent config
+            parent_config = getattr(cls, 'model_config', {})
+            if isinstance(parent_config, dict):
+                # Start with parent config as base
+                model_config = parent_config.copy()
+                # Update with new values (upsert)
+                model_config.update(base_config)
+            else:
+                # If parent config is not a dict, just use base config
+                model_config = base_config
+        else:
+            # No inheritance, just use base config
+            model_config = base_config
+        
+        # Add access_level if provided
+        if access_level is not None:
+            # Handle both enum and int values
+            if hasattr(access_level, 'value'):
+                model_config['access_level'] = access_level.value
+            else:
+                model_config['access_level'] = access_level
+        
+        # Merge any additional kwargs into config
+        for key, value in kwargs.items():
+            if key not in ['fields', '__module__', '__base__']:  # Skip special args
+                model_config[key] = value
+        
+        # Set the final config on the model
+        model.model_config = model_config
+        
         return model
 
     def Abstracted(model: BaseModel)->BaseModel:

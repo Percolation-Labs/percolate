@@ -13,6 +13,7 @@ from percolate.utils.env import (
     SYSTEM_USER_ID,
     SYSTEM_USER_ROLE_LEVEL,
 )
+import os
 import psycopg2.extras
 from psycopg2 import sql
 from psycopg2.errors import DuplicateTable
@@ -305,6 +306,42 @@ class PostgresService:
             **kwargs
         )
 
+    def is_semantic_search_only(self, model: BaseModel = None) -> bool:
+        """
+        Determine if a model should use semantic search only.
+        
+        Args:
+            model: The model to check (defaults to self.model)
+            
+        Returns:
+            bool: True if model should use semantic search only
+        """
+        
+        check_model = model or self.model
+        if not check_model:
+            return False
+        
+        if hasattr(check_model, 'model_config'):
+            model_config = check_model.model_config
+            if isinstance(model_config, dict) and 'is_semantic_only' in model_config:
+                return bool(model_config['is_semantic_only'])
+            
+        env_override = os.getenv('P8_RESOURCES_SEMANTIC_ONLY')
+        if env_override is not None:
+            return env_override.lower() in ('true', '1', 'yes', 'on')
+        
+        try:
+            from percolate.models.p8.types import Resources
+            if check_model is Resources:
+                return True
+                
+            if isinstance(check_model, type) and issubclass(check_model, Resources):
+                return True
+        except:
+            pass
+            
+        return False
+    
     def get_entities(self, keys: str | typing.List[str], userid: str = None, allow_fuzzy_match: bool = False, similarity_threshold: float = 0.3):
         """
         use the get_entities or get_fuzzy_entities database function to lookup entities, with optional user_id for access control
@@ -354,16 +391,20 @@ class PostgresService:
 
         Args:
             question: detailed natural language question
+            user_id: optional user ID for access control
         """
 
         """in future we should pardo multiple questions"""
         if isinstance(question, list):
             question = "\n".join(question)
 
-        Q = f"""select * from p8.query_entity(%s,%s, %s) """
+        # Determine if we should use semantic search only
+        semantic_only = self.is_semantic_search_only()
+
+        Q = f"""select * from p8.query_entity(%s,%s, %s, %s) """
 
         result = self.execute(
-            Q, data=(question, self.model.get_model_full_name(), user_id)
+            Q, data=(question, self.model.get_model_full_name(), user_id, semantic_only)
         )
 
         try:
