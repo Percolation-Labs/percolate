@@ -144,7 +144,7 @@ async def create_upload(
     # Create the upload record
     upload = TusFileUpload(
         id=upload_id,
-        user_id=effective_user_id,
+        userid=effective_user_id,
         filename=filename,
         content_type=content_type,
         total_size=file_size,
@@ -667,7 +667,7 @@ async def list_uploads(
             try:
                 # Validate UUID
                 uuid_obj = uuid.UUID(user_id)
-                filters["user_id"] = str(uuid_obj)
+                filters["userid"] = str(uuid_obj)
             except (ValueError, TypeError):
                 logger.warning(f"Invalid user ID for filtering: {user_id}")
                 
@@ -749,7 +749,7 @@ async def get_user_files(user_id: Union[str, uuid.UUID], limit: int = 100, offse
         # Query for user's files
         query = """
             SELECT * FROM p8."TusFileUpload" 
-            WHERE user_id = %s
+            WHERE userid = %s
             ORDER BY created_at DESC
             LIMIT %s OFFSET %s
         """

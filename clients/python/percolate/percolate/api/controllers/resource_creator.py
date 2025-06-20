@@ -114,7 +114,8 @@ async def create_resources_from_upload(upload_id: str, save_resources: bool=True
             
             # Explicitly save resources to the database
             if save_resources:
-                logger.info(f"Saving {len(chunks)} resources to database")
+                userid = chunks[0].userid if chunks else None
+                logger.info(f"Saving {len(chunks)} resources to database with userid: {userid}")
                 from percolate.models.p8.types import Resources
                 p8.repository(Resources).update_records(chunks)
             

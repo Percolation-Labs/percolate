@@ -31,6 +31,61 @@ class TaskManager:
         
  
         
+        # Check if this is a file sync task
+        if schedule.spec and schedule.spec.get("task_type") == "file_sync":
+            """Handle file sync task"""
+            try:
+                sync_config_id = schedule.spec.get("sync_config_id")
+                user_id = schedule.spec.get("user_id")
+                
+                if not sync_config_id or not user_id:
+                    logger.error(f"Missing sync_config_id or user_id in schedule spec: {schedule.spec}")
+                    return
+                
+                # Import async sync service
+                from percolate.services.sync.file_sync import FileSync
+                import asyncio
+                
+                # Create sync service
+                sync_service = FileSync()
+                
+                # Run the sync in an event loop
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+                try:
+                    result = loop.run_until_complete(
+                        sync_service.sync_user_content(user_id=user_id, force=False)
+                    )
+                    logger.info(f"File sync completed for user {user_id}: {result}")
+                    
+                    # Audit the sync
+                    status_payload = {
+                        'user_id': user_id,
+                        'sync_config_id': sync_config_id,
+                        'files_synced': result.files_synced,
+                        'files_failed': result.files_failed,
+                        'success': result.success
+                    }
+                    a.audit(FileSync, AuditStatus.Success if result.success else AuditStatus.Fail, status_payload)
+                    
+                except Exception as e:
+                    logger.error(f"File sync failed for user {user_id}: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    status_payload = {
+                        'user_id': user_id,
+                        'sync_config_id': sync_config_id,
+                        'error': str(e)
+                    }
+                    a.audit(FileSync, AuditStatus.Fail, status_payload, traceback.format_exc())
+                finally:
+                    loop.close()
+                    
+            except Exception as e:
+                logger.error(f"Error in file sync task: {str(e)}")
+                logger.error(traceback.format_exc())
+            return
+        
         if schedule.name == "Daily Digest" or schedule.name == "Weekly Digest":
             """
             TODO: This is a temporary hack to make sure the memories are ready - it should be a separate task
