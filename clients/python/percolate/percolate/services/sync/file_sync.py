@@ -65,6 +65,54 @@ class FileSync:
         """
         self.s3_service = s3_service or S3Service()
     
+    def _get_target_model(self, config: SyncConfig):
+        """
+        Get the target model for a sync configuration.
+        Creates an Abstract model if needed.
+        
+        Args:
+            config: Sync configuration
+            
+        Returns:
+            The target model class (Resources or a dynamically created model)
+        """
+        from percolate.models.p8.types import Resources
+        from percolate.models.AbstractModel import AbstractModel
+        from percolate.models.p8.db_types import AccessLevel
+        
+        # Get target model info from config metadata
+        metadata = config.provider_metadata or {}
+        target_namespace = metadata.get("target_namespace", "p8")
+        target_model_name = metadata.get("target_model_name", "Resources")
+        access_level_value = metadata.get("access_level", AccessLevel.PUBLIC.value)
+        
+        # Convert access level value to enum if needed
+        if isinstance(access_level_value, int):
+            access_level = AccessLevel(access_level_value)
+        else:
+            access_level = AccessLevel.PUBLIC
+        
+        # If using default Resources model, return it directly
+        if target_namespace == "p8" and target_model_name == "Resources":
+            return Resources
+        
+        # Create Abstract model that inherits from Resources
+        logger.info(f"Creating dynamic model: {target_namespace}.{target_model_name}")
+        
+        # Create the model dynamically
+        target_model = AbstractModel.create_model(
+            name=target_model_name,
+            namespace=target_namespace,
+            description=f"Synced content from {config.provider.value}",
+            fields={},  # No additional fields, inherits from Resources
+            __base__=Resources  # Inherit from Resources
+        )
+        
+        # Set the access level in model config
+        target_model.model_config['access_level'] = access_level
+        
+        return target_model
+    
     @staticmethod
     async def store_oauth_credentials(token: dict, user_email: str = None) -> bool:
         """
@@ -464,7 +512,26 @@ class FileSync:
         files_failed = 0
         detailed_log = []
         
-        if provider_config.include_my_drive:
+        # Check if we have a specific folder_id in the config metadata
+        folder_id = config.provider_metadata.get("folder_id") if config.provider_metadata else None
+        
+        if folder_id:
+            # Sync specific folder from metadata
+            folder_result = await self._sync_google_drive_folder(
+                drive_service, 
+                config,
+                folder_id,
+                include_folders=config.include_folders,
+                exclude_folders=config.exclude_folders,
+                include_file_types=config.include_file_types,
+                exclude_file_types=config.exclude_file_types
+            )
+            
+            files_synced += folder_result["synced"]
+            files_failed += folder_result["failed"]
+            detailed_log.extend(folder_result["logs"])
+        elif provider_config.include_my_drive:
+            # Fallback to default behavior if no specific folder
             my_drive_result = await self._sync_google_drive_folder(
                 drive_service, 
                 config,
@@ -843,28 +910,40 @@ class FileSync:
             
             # If not already ingested, trigger ingestion
             if not sync_file.ingested:
-                # Create Resource from the content
-                from percolate.models.p8.types import Resources
+                # Get the target model for this sync configuration
+                target_model = self._get_target_model(config)
                 
                 # Handle different content types
                 if content_type.startswith("text/"):
                     # For text content, pass directly
                     text_content = content.decode("utf-8")
-                    resources = Resources.chunked_resource_from_text(
-                        text=text_content,
-                        uri=sync_file.s3_uri,
-                        name=file_name,
-                        userid=config.userid
-                    )
                     
-                    # Update resources (using smart upsert)
+                    # Use the target model's chunked_resource_from_text if available
+                    if hasattr(target_model, 'chunked_resource_from_text'):
+                        resources = target_model.chunked_resource_from_text(
+                            text=text_content,
+                            uri=sync_file.s3_uri,
+                            name=file_name,
+                            userid=config.userid
+                        )
+                    else:
+                        # Fallback to creating instances directly
+                        from percolate.models.p8.types import Resources
+                        resources = Resources.chunked_resource_from_text(
+                            text=text_content,
+                            uri=sync_file.s3_uri,
+                            name=file_name,
+                            userid=config.userid
+                        )
+                    
+                    # Update resources (using smart upsert) with the target model's repository
                     for resource in resources:
-                        p8.repository(Resources).update_records(resource)
+                        p8.repository(target_model).update_records(resource)
                     
                     # Mark as ingested
                     sync_file.ingested = True
                     sync_file.resource_id = resources[0].id if resources else None
-                    logger.info(f"Created {len(resources)} text resources for {file_name}")
+                    logger.info(f"Created {len(resources)} {target_model.get_model_full_name()} resources for {file_name}")
                 
                 # Handle PDF files - create resource
                 elif content_type == "application/pdf" or file_name.lower().endswith(".pdf"):
@@ -874,7 +953,7 @@ class FileSync:
                     
                     # For PDFs, we create a placeholder resource for now
                     # In a real implementation, we'd extract text from PDF
-                    resource = Resources(
+                    resource = target_model(
                         id=resource_id,
                         name=file_name,
                         category="document",
@@ -888,12 +967,12 @@ class FileSync:
                         userid=config.userid
                     )
                     
-                    p8.repository(Resources).update_records(resource)
+                    p8.repository(target_model).update_records(resource)
                     
                     # Mark as ingested
                     sync_file.ingested = True
                     sync_file.resource_id = resource_id
-                    logger.info(f"Created resource for PDF file: {file_name} with ID {resource_id}")
+                    logger.info(f"Created {target_model.get_model_full_name()} resource for PDF file: {file_name} with ID {resource_id}")
                 
                 # Handle Office documents (DOCX, XLSX, PPTX)
                 elif file_name.lower().endswith((".docx", ".xlsx", ".pptx")) or content_type in [
@@ -905,7 +984,7 @@ class FileSync:
                     resource_id = str(uuid.uuid4())
                     
                     # Create a resource for the document
-                    resource = Resources(
+                    resource = target_model(
                         id=resource_id,
                         name=file_name,
                         category="document",
@@ -919,12 +998,12 @@ class FileSync:
                         userid=config.userid
                     )
                     
-                    p8.repository(Resources).update_records(resource)
+                    p8.repository(target_model).update_records(resource)
                     
                     # Mark as ingested
                     sync_file.ingested = True
                     sync_file.resource_id = resource_id
-                    logger.info(f"Created resource for Office document: {file_name} with ID {resource_id}")
+                    logger.info(f"Created {target_model.get_model_full_name()} resource for Office document: {file_name} with ID {resource_id}")
                 
                 # Handle audio files (.wav, .mp3) - trigger transcription
                 elif content_type in ["audio/wav", "audio/x-wav", "audio/mp3", "audio/mpeg"] or \
@@ -1199,19 +1278,33 @@ class FileSync:
                 # Get the user ID from sync_file or config
                 userid = sync_file.userid or (config.userid if config else None)
                 
+                # Get the target model for this sync configuration
+                target_model = self._get_target_model(config) if config else Resources
+                
                 if content_type.startswith("text/") or file_name.lower().endswith((".txt", ".md", ".html")):
                     # Handle text files
                     text_content = file_content.decode("utf-8")
-                    resources = Resources.chunked_resource_from_text(
-                        text=text_content,
-                        uri=s3_uri,
-                        name=file_name,
-                        userid=userid
-                    )
                     
-                    # Update resources
+                    # Use the target model's chunked_resource_from_text if available
+                    if hasattr(target_model, 'chunked_resource_from_text'):
+                        resources = target_model.chunked_resource_from_text(
+                            text=text_content,
+                            uri=s3_uri,
+                            name=file_name,
+                            userid=userid
+                        )
+                    else:
+                        # Fallback to Resources
+                        resources = Resources.chunked_resource_from_text(
+                            text=text_content,
+                            uri=s3_uri,
+                            name=file_name,
+                            userid=userid
+                        )
+                    
+                    # Update resources with target model repository
                     for resource in resources:
-                        p8.repository(Resources).update_records(resource)
+                        p8.repository(target_model).update_records(resource)
                     
                     # Mark as ingested
                     sync_file.ingested = True
@@ -1219,14 +1312,14 @@ class FileSync:
                     p8.repository(SyncFile).update_records(sync_file)
                     
                     successful += 1
-                    logger.info(f"Flushed text file {file_name} to resources")
+                    logger.info(f"Flushed text file {file_name} to {target_model.get_model_full_name()}")
                     
                 elif content_type == "application/pdf" or file_name.lower().endswith(".pdf"):
                     # Handle PDF files
                     resource_id = str(uuid.uuid4())
                     
                     # Create a resource for the PDF
-                    resource = Resources(
+                    resource = target_model(
                         id=resource_id,
                         name=file_name,
                         category="document",
@@ -1240,7 +1333,7 @@ class FileSync:
                         userid=userid
                     )
                     
-                    p8.repository(Resources).update_records(resource)
+                    p8.repository(target_model).update_records(resource)
                     
                     # Mark as ingested
                     sync_file.ingested = True
@@ -1248,7 +1341,7 @@ class FileSync:
                     p8.repository(SyncFile).update_records(sync_file)
                     
                     successful += 1
-                    logger.info(f"Flushed PDF file {file_name} to resources")
+                    logger.info(f"Flushed PDF file {file_name} to {target_model.get_model_full_name()}")
                     
                 elif file_name.lower().endswith((".docx", ".xlsx", ".pptx")) or content_type in [
                     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -1259,7 +1352,7 @@ class FileSync:
                     resource_id = str(uuid.uuid4())
                     
                     # Create a resource for the document
-                    resource = Resources(
+                    resource = target_model(
                         id=resource_id,
                         name=file_name,
                         category="document",
@@ -1273,7 +1366,7 @@ class FileSync:
                         userid=userid
                     )
                     
-                    p8.repository(Resources).update_records(resource)
+                    p8.repository(target_model).update_records(resource)
                     
                     # Mark as ingested
                     sync_file.ingested = True
@@ -1281,7 +1374,7 @@ class FileSync:
                     p8.repository(SyncFile).update_records(sync_file)
                     
                     successful += 1
-                    logger.info(f"Flushed document file {file_name} to resources")
+                    logger.info(f"Flushed document file {file_name} to {target_model.get_model_full_name()}")
                     
                 elif content_type in ["audio/wav", "audio/x-wav", "audio/mp3", "audio/mpeg"] or \
                      file_name.lower().endswith((".wav", ".mp3")):

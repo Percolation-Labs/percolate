@@ -144,7 +144,7 @@ async def create_upload(
     # Create the upload record
     upload = TusFileUpload(
         id=upload_id,
-        user_id=effective_user_id,
+        userid=effective_user_id,
         filename=filename,
         content_type=content_type,
         total_size=file_size,
@@ -411,7 +411,8 @@ async def finalize_upload(upload_id: Union[str, uuid.UUID]) -> str:
             
             logger.info(f"Creating resources for upload: {upload_id} from local file: {final_path}")
             resources = await create_resources_from_upload(upload_id)
-            logger.info(f"Created {len(resources)} resources for upload: {upload_id}")
+            userid = resources[0].userid if resources else None
+            logger.info(f"Created {len(resources)} resources for upload: {upload_id} with userid: {userid}")
             
             # Restore the original S3 URI
             upload.s3_uri = original_s3_uri
@@ -502,7 +503,7 @@ async def list_uploads(
             upload = TusFileUpload(**row)
             
             # Apply filters
-            if user_id and upload.user_id != user_id:
+            if user_id and upload.userid != user_id:
                 continue
             if project_name and upload.project_name != project_name:
                 continue

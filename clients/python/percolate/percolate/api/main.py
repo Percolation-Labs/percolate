@@ -138,7 +138,10 @@ origins = [
     "http://127.0.0.1:5008",
     "http://127.0.0.1:8000",
     "http://127.0.0.1:5000",
-    "https://vault.percolationlabs.ai"
+    "http://localhost:1420",# (Tauri dev server)
+    "http://tauri.localhost",# (Tauri production origin)
+    "https://tauri.localhost" #(Tauri production origin with https)
+    "https://vault.percolationlabs.ai",
 ]
 
 app.add_middleware(

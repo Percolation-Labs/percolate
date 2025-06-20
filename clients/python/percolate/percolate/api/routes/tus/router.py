@@ -26,7 +26,10 @@ from percolate.models.media.tus import (
 )
 from percolate.utils import logger
 from pydantic import BaseModel
-from ..auth import get_user_id
+from ..auth import get_user_id, HybridAuth
+
+# Create an instance of HybridAuth
+hybrid_auth = HybridAuth()
 from . import get_project_name
 
 # Constants for Tus protocol
@@ -107,14 +110,13 @@ async def tus_create_upload(
     request: Request,
     response: Response,
     background_tasks: BackgroundTasks,
-    user_id: Optional[str] = Depends(get_user_id),
+    user_id: Optional[str] = Depends(hybrid_auth),
     project_name: str = Depends(get_project_name),
     upload_metadata: Optional[str] = Header(None),
     upload_length: Optional[int] = Header(None),
     upload_defer_length: Optional[int] = Header(None),
     content_type: Optional[str] = Header(None),
-    content_length: Optional[int] = Header(None),
-    x_user_id: Optional[str] = Header(None)  # Custom header for user ID
+    content_length: Optional[int] = Header(None)
 ):
     """
     Handle POST request - Create a new upload
@@ -164,10 +166,8 @@ async def tus_create_upload(
     # Calculate expiration
     expires_in = timedelta(seconds=DEFAULT_EXPIRATION)
     
-    # Use X-User-ID header if provided (takes precedence over Depends(get_user_id))
-    effective_user_id = x_user_id or user_id
-    if effective_user_id:
-        logger.info(f"Using user ID: {effective_user_id}")
+    # Log the authenticated user
+    logger.info(f"TUS create_upload - authenticated user_id: {user_id}")
     
     # Create the upload
     upload_response = await tus_controller.create_upload(
@@ -175,7 +175,7 @@ async def tus_create_upload(
         filename=filename,
         file_size=upload_length or 0,
         metadata=metadata,
-        user_id=effective_user_id,
+        user_id=user_id,
         project_name=project_name,
         content_type=content_type,
         expires_in=expires_in,
@@ -379,7 +379,7 @@ async def tus_delete_upload(
 )
 async def list_uploads(
     response: Response,
-    user_id: Optional[str] = Depends(get_user_id),
+    user_id: Optional[str] = Depends(hybrid_auth),
     project_name: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     tags: Optional[List[str]] = Query(None),
@@ -551,7 +551,7 @@ async def get_user_files_by_id(
 )
 async def get_recent_user_uploads(
     response: Response,
-    user_id: str = Depends(get_user_id),
+    user_id: str = Depends(hybrid_auth),
     limit: int = Query(10, gt=0, le=100),
     project_name: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
@@ -609,8 +609,7 @@ async def update_upload_tags(
     response: Response,
     upload_id: str = Path(...),
     tags: List[str] = Query(..., max_items=3),
-    user_id: Optional[str] = Depends(get_user_id),
-    x_user_id: Optional[str] = Header(None)  # Custom header for user ID
+    user_id: Optional[str] = Depends(hybrid_auth)
 ):
     """
     Update the tags for an upload
@@ -619,13 +618,11 @@ async def update_upload_tags(
     """
     logger.info(f"Update tags for upload: {upload_id}, tags: {tags}")
     
-    # Use X-User-ID header if provided (takes precedence over Depends(get_user_id))
-    effective_user_id = x_user_id or user_id
-    if effective_user_id:
-        logger.info(f"Using user ID: {effective_user_id}")
+    # Log the authenticated user
+    logger.info(f"Update tags - authenticated user_id: {user_id}")
     
-    # Validate user is authenticated if authentication is required
-    if not effective_user_id:
+    # Validate user is authenticated
+    if not user_id:
         response.status_code = 401
         return {"error": "Authentication required"}
     
@@ -634,7 +631,7 @@ async def update_upload_tags(
         upload = await tus_controller.get_upload_info(upload_id)
         
         # Check if user is authorized to modify this upload
-        if upload.user_id and str(upload.user_id) != effective_user_id:
+        if upload.userid and str(upload.userid) != user_id:
             response.status_code = 403
             return {"error": "Not authorized to modify this upload"}
         
@@ -674,7 +671,7 @@ async def update_upload_tags(
 async def semantic_search(
     response: Response,
     query: str = Query(..., min_length=3),
-    user_id: Optional[str] = Depends(get_user_id),
+    user_id: Optional[str] = Depends(hybrid_auth),
     project_name: Optional[str] = Query(None),
     tags: Optional[List[str]] = Query(None),
     limit: int = Query(10, gt=0, le=100),

@@ -22,6 +22,8 @@ import datetime
 from percolate.models.p8.types import Schedule
 from percolate.utils import try_parse_base64_dict
 import time
+from percolate.models.sync import SyncProvider, SyncConfig
+from percolate.models.p8.db_types import AccessLevel
 
 
 class ScheduleCreate(BaseModel):
@@ -651,3 +653,225 @@ async def disable_schedule(schedule_id: str, user: dict = Depends(get_api_key)):
     except Exception:
         logger.warning(f"Job {schedule_id} not found in scheduler or failed to remove")
     return updated
+
+class SyncScheduleRequest(BaseModel):
+    """Request model for creating a scheduled sync configuration."""
+    provider: SyncProvider = Field(..., description="Sync provider (google_drive, box, dropbox, onedrive)")
+    folder_id: str = Field(..., description="Remote folder ID to sync from")
+    target_namespace: str = Field(default="p8", description="Target model namespace (default: p8)")
+    target_model_name: str = Field(default="Resources", description="Target model name (default: Resources)")
+    access_level: AccessLevel = Field(default=AccessLevel.PUBLIC, description="Access level for synced content")
+    include_folders: typing.Optional[typing.List[str]] = Field(None, description="List of folder names to include")
+    exclude_folders: typing.Optional[typing.List[str]] = Field(None, description="List of folder names to exclude")
+    include_file_types: typing.Optional[typing.List[str]] = Field(None, description="List of file extensions to include")
+    exclude_file_types: typing.Optional[typing.List[str]] = Field(None, description="List of file extensions to exclude")
+    sync_interval_hours: int = Field(default=24, description="Sync interval in hours (default: 24)")
+    enabled: bool = Field(default=True, description="Whether sync is enabled")
+
+@router.post("/sync/schedule", response_model=dict)
+async def create_sync_schedule(
+    request: SyncScheduleRequest,
+    background_tasks: BackgroundTasks,
+    user: dict = Depends(get_api_key)
+):
+    """
+    Create a new scheduled sync configuration to sync files from external providers
+    to a specific target table. This endpoint:
+    
+    1. Creates or validates the target model (can be Abstract model)
+    2. Creates a sync configuration
+    3. Schedules the sync to run on the specified interval
+    
+    Args:
+        request: Sync schedule configuration
+        user: Authenticated admin user
+        
+    Returns:
+        Dictionary with sync config ID and schedule information
+    """
+    try:
+        from percolate.models.AbstractModel import AbstractModel
+        from percolate.models.p8.types import Resources
+        from percolate.services.sync.file_sync import FileSync
+        
+        # Get user ID from authenticated user
+        user_id = user.get('user_id') or user.get('id')
+        if not user_id:
+            raise HTTPException(status_code=400, detail="User ID not found in authentication")
+            
+        # Validate that we have sync credentials for this provider and user
+        from percolate.models.sync import SyncCredential
+        creds = p8.repository(SyncCredential).select(userid=user_id, provider=request.provider.value)
+        if not creds:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"No sync credentials found for provider {request.provider.value}. Please authenticate first."
+            )
+        
+        # Check if target model exists or create Abstract model
+        target_model = None
+        full_model_name = f"{request.target_namespace}.{request.target_model_name}"
+        
+        # Special handling for the default Resources model
+        if request.target_namespace == "p8" and request.target_model_name == "Resources":
+            target_model = Resources
+            logger.info(f"Using existing Resources model")
+        else:
+            # Try to get existing model from registry first
+            try:
+                # Check if model exists in database
+                model_check = p8.repository(Resources).execute(
+                    """SELECT EXISTS(
+                        SELECT FROM information_schema.tables 
+                        WHERE table_schema = %s 
+                        AND table_name = %s
+                    )""",
+                    data=(request.target_namespace, request.target_model_name)
+                )
+                
+                model_exists = model_check[0]['exists'] if model_check else False
+                
+                if not model_exists:
+                    # Create Abstract model that inherits from Resources
+                    logger.info(f"Creating new Abstract model: {full_model_name}")
+                    
+                    # Create the model dynamically
+                    target_model = AbstractModel.create_model(
+                        name=request.target_model_name,
+                        namespace=request.target_namespace,
+                        description=f"Synced content from {request.provider.value} folder {request.folder_id}",
+                        fields={},  # No additional fields, inherits from Resources
+                        __base__=Resources  # Inherit from Resources
+                    )
+                    
+                    # Set the access level in model config
+                    target_model.model_config['access_level'] = request.access_level
+                    
+                    # Create the table using SqlModelHelper
+                    sql_helper = target_model.to_sql_model_helper()
+                    create_sql = sql_helper.create_table_sql()
+                    
+                    # Execute table creation
+                    repo = p8.repository(Resources)  # Use Resources repo for execution
+                    repo.execute(create_sql)
+                    
+                    logger.info(f"Created table for model {full_model_name}")
+                else:
+                    logger.info(f"Model {full_model_name} already exists")
+                    # For existing models, we'll use Resources as the base
+                    target_model = Resources
+                    
+            except Exception as e:
+                logger.error(f"Error checking/creating model: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"Failed to create target model: {str(e)}")
+        
+        # Create sync configuration
+        sync_config = SyncConfig(
+            userid=user_id,
+            provider=request.provider,
+            enabled=request.enabled,
+            include_folders=request.include_folders,
+            exclude_folders=request.exclude_folders,
+            include_file_types=request.include_file_types,
+            exclude_file_types=request.exclude_file_types,
+            sync_interval_hours=request.sync_interval_hours,
+            provider_metadata={
+                "folder_id": request.folder_id,
+                "target_namespace": request.target_namespace,
+                "target_model_name": request.target_model_name,
+                "access_level": request.access_level.value
+            }
+        )
+        
+        # Save sync configuration
+        saved_configs = p8.repository(SyncConfig).update_records(sync_config)
+        saved_config = saved_configs[0] if saved_configs else sync_config
+        
+        # Create a schedule for the sync task
+        schedule_spec = {
+            "task_type": "file_sync",
+            "sync_config_id": str(saved_config.id),
+            "user_id": user_id,
+            "provider": request.provider.value,
+            "target_model": full_model_name
+        }
+        
+        # Convert sync interval to cron expression
+        # For hourly intervals, use "0 */N * * *" format
+        if request.sync_interval_hours == 24:
+            cron_schedule = "0 0 * * *"  # Daily at midnight
+        elif request.sync_interval_hours == 12:
+            cron_schedule = "0 */12 * * *"  # Every 12 hours
+        elif request.sync_interval_hours == 6:
+            cron_schedule = "0 */6 * * *"  # Every 6 hours
+        elif request.sync_interval_hours == 1:
+            cron_schedule = "0 * * * *"  # Every hour
+        else:
+            # For other intervals, run every N hours
+            cron_schedule = f"0 */{request.sync_interval_hours} * * *"
+        
+        schedule = Schedule(
+            id=str(uuid.uuid4()),
+            userid=user_id,
+            name=f"Sync {request.provider.value} to {full_model_name}",
+            spec=schedule_spec,
+            schedule=cron_schedule
+        )
+        
+        # Save schedule
+        saved_schedules = p8.repository(Schedule).update_records(schedule)
+        saved_schedule = saved_schedules[0] if saved_schedules else schedule
+        
+        # Schedule the job immediately
+        try:
+            from percolate.api.main import scheduler, run_scheduled_job
+            from apscheduler.triggers.cron import CronTrigger
+            
+            trigger = CronTrigger.from_crontab(cron_schedule)
+            scheduler.add_job(
+                run_scheduled_job,
+                trigger,
+                args=[saved_schedule],
+                id=str(saved_schedule.id)
+            )
+            logger.info(f"Scheduled sync job {saved_schedule.id}")
+        except Exception as e:
+            logger.warning(f"Failed to add job to scheduler: {e}")
+        
+        # Optionally trigger an immediate sync in the background
+        def run_initial_sync():
+            try:
+                import asyncio
+                sync_service = FileSync()
+                # Run the sync
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                result = loop.run_until_complete(
+                    sync_service.sync_user_content(user_id=user_id, force=True)
+                )
+                logger.info(f"Initial sync completed: {result}")
+            except Exception as e:
+                logger.error(f"Initial sync failed: {str(e)}")
+        
+        # Add initial sync as background task
+        background_tasks.add_task(run_initial_sync)
+        
+        return {
+            "sync_config_id": str(saved_config.id),
+            "schedule_id": str(saved_schedule.id),
+            "provider": request.provider.value,
+            "folder_id": request.folder_id,
+            "target_model": full_model_name,
+            "access_level": request.access_level.name,
+            "sync_interval_hours": request.sync_interval_hours,
+            "cron_schedule": cron_schedule,
+            "enabled": request.enabled,
+            "message": "Sync schedule created successfully. Initial sync started in background."
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to create sync schedule: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to create sync schedule: {str(e)}")
