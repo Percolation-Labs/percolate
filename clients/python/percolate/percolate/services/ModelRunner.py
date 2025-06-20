@@ -48,8 +48,20 @@ class ModelRunner:
         self._function_manager = FunctionManager()
         """the help option links in to the function manager planner"""
         self._allow_help = allow_help
+        
+        # Get user context for row-level security
+        self.user_id = kwargs.get('user_id')
+        self.user_groups = kwargs.get('user_groups')
+        self.role_level = kwargs.get('role_level')
+        
         """the repository provides the Percolate database instance"""
-        self.repo = p8.repository(self.agent_model)
+        self.repo = p8.repository(
+            self.agent_model,
+            user_id=self.user_id,
+            user_groups=self.user_groups,
+            role_level=self.role_level
+        )
+        
         """initialize activates the agent model e.g. functions and prompt for use"""
         self.initialize()
         """the messages stack is the most important control element for llm agent sessions"""
@@ -91,9 +103,15 @@ class ModelRunner:
             questions: ask one or more questions to search the data store
             user_id: optional user identifier (email or UUID) for access control
         """
-        # If no user_id provided, try to get from context
-        if user_id is None and self._context and self._context.username:
-            user_id = self._context.username
+        # If no user_id provided, try to get from:
+        # 1. Explicitly passed user_id parameter
+        # 2. Context username
+        # 3. ModelRunner's stored user_id
+        if user_id is None:
+            if self._context and self._context.username:
+                user_id = self._context.username
+            else:
+                user_id = self.user_id
         
         # Coerce to string for database
         if user_id:
@@ -181,6 +199,10 @@ class ModelRunner:
         
     def invoke(self, function_call: FunctionCall):
         """Invoke function(s) and parse results into messages
+        
+        Test calling a function:>
+ 
+        .invoke(FunctionCall(id='test', name='some_functions', arguments={'arg': 'value'}))
 
         Args:
             function_call (FunctionCall): the payload send from an LLM to call a function
@@ -231,12 +253,12 @@ class ModelRunner:
         return [f.function_spec for _,f  in self._function_manager.functions.items()]
 
     def __call__(
-        self, question: str, context: CallingContext = None, limit: int = None,data: typing.List[dict] = None, language_model:str=None
+        self, question: str, context: CallingContext = None, limit: int = None,data: typing.List[dict] = None, language_model:str=None, audit:bool=False,
     ):
         """
         Ask a question to kick of the agent loop
         """
-        return self.run(question, context, data=data, limit=limit,language_model=language_model)
+        return self.run(question, context, data=data, limit=limit,language_model=language_model,audit=audit)
 
     def stream(self, question: str, context: CallingContext = None, limit: int = None,
                    data: typing.List[dict] = None, language_model: str = None, audit: bool = True):
@@ -266,7 +288,10 @@ class ModelRunner:
             ctx = context.in_streaming_mode(model=language_model)
         else:
             ctx = CallingContext.with_model(language_model).in_streaming_mode()
+        
+        # Store the context
         self._context = ctx
+        
         lm_client = LanguageModel.from_context(ctx)
         # The streaming generator will yield AIResponse objects for auditing directly
         
@@ -281,7 +306,7 @@ class ModelRunner:
             """
             
             """we can add a users system prompt to the generic and then merge an agents prompt after that"""
-            sys_prompt = GENERIC_P8_PROMPT if not context.plan else  f"{GENERIC_P8_PROMPT}\n\n{context.plan}"
+            sys_prompt = GENERIC_P8_PROMPT if not ctx.plan else  f"{GENERIC_P8_PROMPT}\n\n{context.plan}"
             # Initialize message stack as in run()
             payload = data if data is not None else self._init_data
             self.messages = self.agent_model.build_message_stack(
@@ -313,6 +338,28 @@ class ModelRunner:
                 the decisions is simply around if the raw content line should be sent in the open ai or other scheme - here its the raw 'line' that is relayed in one scheme or another                
                 """
                 for line, chunk in sse_openai_compatible_stream_with_tool_call_collapse(raw_response):
+                    # Handle special messages from the stream_utils
+                    if isinstance(chunk, dict) and (chunk.get('status') or chunk.get('content')):
+                        # If it's a content message, we want to forward it
+                        if chunk.get('content'):
+                            # The content is already in the line as a properly formatted SSE message
+                            if isinstance(line, str):
+                                yield line.encode('utf-8')
+                            else:
+                                yield line
+                            continue
+                            
+                        # Status messages are now commented out but this stays for backward compatibility
+                        status_type = chunk.get('status')
+                        if status_type == 'flush':
+                            # Just send a newline to flush buffers
+                            yield b'\n'
+                            continue
+                            
+                        elif status_type == 'function_call_started':
+                            # Skip status messages - we're using content deltas instead
+                            continue
+                    
                     #print(chunk)
                     choice = chunk['choices'][0] if chunk.get('choices') else {}
                     finish = choice.get('finish_reason')
@@ -326,9 +373,20 @@ class ModelRunner:
                         tool_call_evals = {}
                         for tc in choice['delta'].get('tool_calls', []):
                             fc = FunctionCall(id=tc['id'], **tc['function'], scheme='openai')
-                            yield f"event: im calling {fc.name}...\n\n"
+                            # We already sent "Preparing to call" message earlier, now send "executing" message
+                            executing_msg = f"event: executing {fc.name}...\n\n"
+                            yield executing_msg.encode('utf-8')
                             self.messages.add(fc.to_assistant_message())
-                            tool_call_evals[fc.id] = self.invoke(fc)
+                            
+                            # Safely invoke the function, catching any exceptions that might occur
+                            try:
+                                tool_call_evals[fc.id] = self.invoke(fc)
+                            except Exception as e:
+                                logger.error(f"Error executing function {fc.name}: {str(e)}")
+                                # Add error to the evaluations to avoid breaking the stream
+                                tool_call_evals[fc.id] = {
+                                    "error": f"Error executing function: {str(e)}"
+                                }
                             
                         last_ai_response = {
                             'tool_calls': choice['delta'].get('tool_calls', []),
@@ -359,7 +417,7 @@ class ModelRunner:
                 """break out of the agentic loop"""
                 if saw_stop: break
                      
-        return lm_client.get_stream_iterator(_generator, context=ctx)
+        return lm_client.get_stream_iterator(_generator, context=ctx, user_query=question, audit_on_flush=audit)
                 
 
     def run(self, question: str, context: CallingContext = None, limit: int = None, data: typing.List[dict] = None, language_model:str=None, audit:bool=True):
@@ -383,7 +441,9 @@ class ModelRunner:
            we add p8 preamble in percolate - in future this could be disabled per model
         """
         self.messages = self.agent_model.build_message_stack(question=question, functions=self.functions.keys(),
-                                                             data=data, system_prompt_preamble=GENERIC_P8_PROMPT)
+                                                             data=data, system_prompt_preamble=GENERIC_P8_PROMPT,
+                                                                      user_memory = self._context.get_user_memory()
+                                                             )
 
         """run the agent loop to completion"""
         for _ in range(limit or self._context.max_iterations):

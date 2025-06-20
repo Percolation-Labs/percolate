@@ -1,13 +1,14 @@
 """
-Pydantic models for LLM API requests and streaming responses.
+Pydantic models for LLM API requests and both streaming and non-streaming responses.
 
 This module defines the data models used for:
 1. Request payload structures for different LLM providers (OpenAI, Anthropic, Google)
 2. Streaming delta formats for each provider
-3. Conversion utilities between different formats
+3. Non-streaming complete response formats for each provider
+4. Conversion utilities between different formats
 
 These models support the unified interface for making LLM API calls and handling
-streaming responses across different providers.
+responses across different providers, in both streaming and non-streaming modes.
 """
 
 from pydantic import BaseModel, Field, model_validator, root_validator
@@ -993,3 +994,428 @@ class AnthropicStreamDelta(StreamDelta):
         # Then use OpenAIStreamDelta to convert to Google format
         openai_delta = OpenAIStreamDelta(**openai_format)
         return openai_delta.to_google_format()
+
+
+# Non-streaming response models for different providers
+
+class LLMResponse(BaseModel):
+    """Base class for complete (non-streaming) LLM responses"""
+    model: str
+    
+    def to_openai_format(self) -> Dict[str, Any]:
+        """Convert to OpenAI response format"""
+        raise NotImplementedError("Subclasses must implement this method")
+    
+    def to_anthropic_format(self) -> Dict[str, Any]:
+        """Convert to Anthropic response format"""
+        raise NotImplementedError("Subclasses must implement this method")
+    
+    def to_google_format(self) -> Dict[str, Any]:
+        """Convert to Google response format"""
+        raise NotImplementedError("Subclasses must implement this method")
+
+
+class OpenAIResponse(LLMResponse):
+    """
+    OpenAI complete response format
+    
+    Example:
+    {
+        "id": "chatcmpl-123",
+        "object": "chat.completion",
+        "created": 1677858242,
+        "model": "gpt-4",
+        "usage": {
+            "prompt_tokens": 56,
+            "completion_tokens": 31,
+            "total_tokens": 87
+        },
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello! How can I help you today?",
+                    "tool_calls": [
+                        {
+                            "id": "call_abc123",
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": "{\"location\":\"San Francisco\",\"unit\":\"celsius\"}"
+                            }
+                        }
+                    ]
+                },
+                "finish_reason": "stop",
+                "index": 0
+            }
+        ]
+    }
+    """
+    id: str
+    object: str = "chat.completion"
+    created: int
+    usage: Dict[str, int]
+    choices: List[Dict[str, Any]]
+    
+    def to_openai_format(self) -> Dict[str, Any]:
+        """Return self as dict, as we're already in OpenAI format"""
+        return self.model_dump(exclude_none=True)
+    
+    def to_anthropic_format(self) -> Dict[str, Any]:
+        """Convert to Anthropic response format"""
+        if not self.choices:
+            return {}
+        
+        choice = self.choices[0]
+        message = choice.get("message", {})
+        
+        # Create base structure
+        result = {
+            "id": self.id,
+            "type": "message",
+            "role": message.get("role", "assistant"),
+            "model": self.model,
+            "stop_reason": choice.get("finish_reason", "stop"),
+            "stop_sequence": None,
+            "usage": {
+                "input_tokens": self.usage.get("prompt_tokens", 0),
+                "output_tokens": self.usage.get("completion_tokens", 0)
+            }
+        }
+        
+        # Add content blocks
+        content_blocks = []
+        
+        # Add text block if content exists
+        if "content" in message and message["content"]:
+            content_blocks.append({
+                "type": "text",
+                "text": message["content"]
+            })
+        
+        # Add tool use blocks if tool calls exist
+        if "tool_calls" in message and message["tool_calls"]:
+            for tool_call in message["tool_calls"]:
+                if tool_call.get("type") == "function" and "function" in tool_call:
+                    function = tool_call["function"]
+                    # Parse the arguments string to create a proper JSON object
+                    try:
+                        args = json.loads(function.get("arguments", "{}"))
+                    except json.JSONDecodeError:
+                        args = {}
+                    
+                    content_blocks.append({
+                        "type": "tool_use",
+                        "id": tool_call.get("id", f"toolu_{str(uuid.uuid4())[:16]}"),
+                        "name": function.get("name", ""),
+                        "input": args
+                    })
+        
+        result["content"] = content_blocks
+        
+        return result
+    
+    def to_google_format(self) -> Dict[str, Any]:
+        """Convert to Google response format"""
+        if not self.choices:
+            return {}
+        
+        choice = self.choices[0]
+        message = choice.get("message", {})
+        
+        # Create base structure
+        result = {
+            "candidates": []
+        }
+        
+        # Create the candidate structure
+        candidate = {
+            "content": {
+                "role": "model",
+                "parts": []
+            },
+            "finishReason": choice.get("finish_reason", "STOP").upper()
+        }
+        
+        # Add text content if exists
+        if "content" in message and message["content"]:
+            candidate["content"]["parts"].append({
+                "text": message["content"]
+            })
+        
+        # Add function calls if they exist
+        if "tool_calls" in message and message["tool_calls"]:
+            for tool_call in message["tool_calls"]:
+                if tool_call.get("type") == "function" and "function" in tool_call:
+                    function = tool_call["function"]
+                    # Parse the arguments string to create a proper object
+                    try:
+                        args = json.loads(function.get("arguments", "{}"))
+                    except json.JSONDecodeError:
+                        args = {}
+                    
+                    candidate["content"]["parts"].append({
+                        "functionCall": {
+                            "name": function.get("name", ""),
+                            "args": args
+                        }
+                    })
+        
+        result["candidates"].append(candidate)
+        
+        # Add usage data
+        if self.usage:
+            result["usageMetadata"] = {
+                "promptTokenCount": self.usage.get("prompt_tokens", 0),
+                "candidatesTokenCount": self.usage.get("completion_tokens", 0),
+                "totalTokenCount": self.usage.get("total_tokens", 0)
+            }
+        
+        return result
+
+
+class AnthropicResponse(LLMResponse):
+    """
+    Anthropic complete response format
+    
+    Example:
+    {
+        "id": "msg_0123456789abcdef",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+            {
+                "type": "text",
+                "text": "Hello! How can I help you today?"
+            },
+            {
+                "type": "tool_use",
+                "id": "toolu_01abcdef1234567890",
+                "name": "get_weather",
+                "input": {
+                    "location": "San Francisco",
+                    "unit": "celsius"
+                }
+            }
+        ],
+        "model": "claude-3-5-sonnet-20241022",
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "usage": {
+            "input_tokens": 56,
+            "output_tokens": 31
+        }
+    }
+    """
+    id: str
+    type: str = "message"
+    role: str = "assistant"
+    content: List[Dict[str, Any]]
+    stop_reason: Optional[str] = None
+    stop_sequence: Optional[str] = None
+    usage: Dict[str, int]
+    
+    def to_anthropic_format(self) -> Dict[str, Any]:
+        """Return self as dict, as we're already in Anthropic format"""
+        return self.model_dump(exclude_none=True)
+    
+    def to_openai_format(self) -> Dict[str, Any]:
+        """Convert to OpenAI response format"""
+        # Extract text content and tool calls
+        text_content = ""
+        tool_calls = []
+        
+        for block in self.content:
+            block_type = block.get("type")
+            
+            if block_type == "text":
+                text_content += block.get("text", "")
+            
+            elif block_type == "tool_use":
+                tool_id = block.get("id", f"call_{str(uuid.uuid4())[:16]}")
+                tool_name = block.get("name", "")
+                tool_input = block.get("input", {})
+                
+                tool_calls.append({
+                    "id": tool_id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": json.dumps(tool_input)
+                    }
+                })
+        
+        # Create the OpenAI response structure
+        result = {
+            "id": self.id,
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": self.model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": self.role,
+                        "content": text_content
+                    },
+                    "finish_reason": self.stop_reason or "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": self.usage.get("input_tokens", 0),
+                "completion_tokens": self.usage.get("output_tokens", 0),
+                "total_tokens": self.usage.get("input_tokens", 0) + self.usage.get("output_tokens", 0)
+            }
+        }
+        
+        # Add tool calls if present
+        if tool_calls:
+            result["choices"][0]["message"]["tool_calls"] = tool_calls
+            
+            # Update finish reason if appropriate
+            if result["choices"][0]["finish_reason"] == "end_turn":
+                result["choices"][0]["finish_reason"] = "tool_calls" if tool_calls else "stop"
+        
+        return result
+    
+    def to_google_format(self) -> Dict[str, Any]:
+        """Convert to Google response format"""
+        # First convert to OpenAI format
+        openai_format = self.to_openai_format()
+        
+        # Then use OpenAIResponse to convert to Google format
+        openai_response = OpenAIResponse(**openai_format)
+        return openai_response.to_google_format()
+
+
+class GoogleResponse(LLMResponse):
+    """
+    Google complete response format
+    
+    Example:
+    {
+        "candidates": [
+            {
+                "content": {
+                    "role": "model",
+                    "parts": [
+                        {
+                            "text": "Hello! How can I help you today?"
+                        },
+                        {
+                            "functionCall": {
+                                "name": "get_weather",
+                                "args": {
+                                    "location": "San Francisco",
+                                    "unit": "celsius"
+                                }
+                            }
+                        }
+                    ]
+                },
+                "finishReason": "STOP"
+            }
+        ],
+        "usageMetadata": {
+            "promptTokenCount": 56,
+            "candidatesTokenCount": 31,
+            "totalTokenCount": 87
+        }
+    }
+    """
+    candidates: List[Dict[str, Any]]
+    usageMetadata: Optional[Dict[str, int]] = None
+    
+    def to_google_format(self) -> Dict[str, Any]:
+        """Return self as dict, as we're already in Google format"""
+        return self.model_dump(exclude_none=True)
+    
+    def to_openai_format(self) -> Dict[str, Any]:
+        """Convert to OpenAI response format"""
+        if not self.candidates:
+            return {
+                "id": f"chatcmpl-{int(time.time())}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": self.model,
+                "choices": [],
+                "usage": {}
+            }
+        
+        candidate = self.candidates[0]
+        
+        # Extract role, text content, and function calls
+        content = candidate.get("content", {})
+        role = content.get("role", "assistant")
+        parts = content.get("parts", [])
+        
+        text_content = ""
+        tool_calls = []
+        
+        for i, part in enumerate(parts):
+            if "text" in part:
+                text_content += part["text"]
+            
+            elif "functionCall" in part:
+                func_call = part["functionCall"]
+                tool_calls.append({
+                    "id": f"call_{str(uuid.uuid4())[:16]}",
+                    "type": "function",
+                    "function": {
+                        "name": func_call.get("name", ""),
+                        "arguments": json.dumps(func_call.get("args", {}))
+                    }
+                })
+        
+        # Determine finish reason
+        finish_reason = candidate.get("finishReason", "STOP")
+        openai_finish_reason = "stop"
+        if finish_reason == "FUNCTION_CALL":
+            openai_finish_reason = "tool_calls"
+        elif finish_reason == "MAX_TOKENS":
+            openai_finish_reason = "length"
+        elif finish_reason == "SAFETY":
+            openai_finish_reason = "content_filter"
+        
+        # Create OpenAI response structure
+        result = {
+            "id": f"chatcmpl-{int(time.time())}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": self.model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant" if role == "model" else role,
+                        "content": text_content
+                    },
+                    "finish_reason": openai_finish_reason
+                }
+            ],
+            "usage": {}
+        }
+        
+        # Add tool calls if present
+        if tool_calls:
+            result["choices"][0]["message"]["tool_calls"] = tool_calls
+        
+        # Add usage data if available
+        if self.usageMetadata:
+            result["usage"] = {
+                "prompt_tokens": self.usageMetadata.get("promptTokenCount", 0),
+                "completion_tokens": self.usageMetadata.get("candidatesTokenCount", 0),
+                "total_tokens": self.usageMetadata.get("totalTokenCount", 0)
+            }
+        
+        return result
+    
+    def to_anthropic_format(self) -> Dict[str, Any]:
+        """Convert to Anthropic response format"""
+        # First convert to OpenAI format
+        openai_format = self.to_openai_format()
+        
+        # Then use OpenAIResponse to convert to Anthropic format
+        openai_response = OpenAIResponse(**openai_format)
+        return openai_response.to_anthropic_format()

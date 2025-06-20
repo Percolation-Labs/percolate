@@ -14,56 +14,15 @@ from percolate.models.p8.types import Resources
 from percolate.models.media.tus import TusFileUpload
 from percolate.models.media.audio import AudioFile
 from percolate.services.media.audio.processor import AudioProcessor
-from percolate.utils.parsing.providers import get_content_provider_for_uri
 from percolate.services.S3Service import S3Service
 import mimetypes
 
 
-def chunk_text(text: str, chunk_size: int = 2000, overlap: int = 200) -> List[str]:
-    """
-    Split text into chunks with overlap.
-    
-    Args:
-        text: The text to chunk
-        chunk_size: Size of each chunk in characters
-        overlap: Number of characters to overlap between chunks
-        
-    Returns:
-        List of text chunks
-    """
-    if not text:
-        return []
-        
-    chunks = []
-    start = 0
-    text_length = len(text)
-    
-    while start < text_length:
-        end = start + chunk_size
-        
-        # If this is not the last chunk, try to break at a sentence or word boundary
-        if end < text_length:
-            # Look for sentence boundaries
-            for sep in ['. ', '! ', '? ', '\n\n', '\n']:
-                last_sep = text.rfind(sep, start, end)
-                if last_sep > start + chunk_size // 2:  # Only use if it's in the second half
-                    end = last_sep + len(sep)
-                    break
-            else:
-                # If no sentence boundary, try to break at a word
-                last_space = text.rfind(' ', start, end)
-                if last_space > start:
-                    end = last_space + 1
-        
-        chunks.append(text[start:min(end, text_length)].strip())
-        start = end - overlap if end < text_length else text_length
-        
-    return chunks
 
 
-async def create_resources_from_upload(upload_id: str) -> List[Resources]:
+async def create_resources_from_upload(upload_id: str, save_resources: bool=True) -> List[Resources]:
     """
-    Create resources from a TUS upload based on file type.
+    Create resources from a TUS upload using FileSystemService for all file types.
     
     Args:
         upload_id: The TUS upload ID
@@ -74,32 +33,103 @@ async def create_resources_from_upload(upload_id: str) -> List[Resources]:
     logger.info(f"Creating resources for upload: {upload_id}")
     
     try:
-        # Get the upload record
-        upload = p8.repository(TusFileUpload).get_by_id(str(upload_id),as_model=True)
+        # Get the upload record - use the expiration-ignoring function for S3 resources
+        from .tus import get_upload_info_ignore_expiration
+        try:
+            # First try to get the upload using the function that ignores expiration
+            upload = await get_upload_info_ignore_expiration(str(upload_id))
+        except Exception as e:
+            # If that fails, fall back to direct repository access
+            logger.warning(f"Error using get_upload_info_ignore_expiration: {str(e)}, falling back to direct access")
+            upload = p8.repository(TusFileUpload).get_by_id(str(upload_id), as_model=True)
+            
         if not upload:
             logger.error(f"Upload not found: {upload_id}")
             return []
             
         # Get file details
         filename = upload.filename
-        content_type = upload.content_type or mimetypes.guess_type(filename)[0]
         s3_uri = upload.s3_uri
-        user_id = upload.user_id
+        user_id = upload.userid
         
         if not s3_uri:
             logger.warning(f"No S3 URI for upload {upload_id}, skipping resource creation")
             return []
         
+        # Try to detect content type if not set
+        content_type = upload.content_type
+        if not content_type:
+            # Try to determine content type from filename
+            content_type = mimetypes.guess_type(filename)[0]
+            logger.info(f"Detected content type from filename: {content_type}")
+        
         logger.info(f"Processing file: {filename} (type: {content_type}) for user: {user_id}")
         
-        # Route based on content type
-        if content_type and content_type.startswith('audio/'):
-            return await create_audio_resources(upload, s3_uri, user_id)
-        elif filename.lower().endswith(('.pdf', '.txt', '.docx', '.doc')):
-            return await create_document_resources(upload, s3_uri, user_id)
+        # Initialize FileSystemService
+        from percolate.services.FileSystemService import FileSystemService
+        fs = FileSystemService()
+        
+        # Get file extension
+        ext = Path(filename).suffix.lower()
+        
+
+        # Determine appropriate chunk size based on file type
+        ext = Path(filename).suffix.lower()
+        is_audio = ext in ['.wav', '.mp3', '.m4a', '.flac', '.ogg']
+        
+        # Use larger chunks for audio to reduce fragmentation
+        chunk_size = 2000 if is_audio else 1000
+        chunk_overlap = 200
+        
+        logger.info(f"Using chunk_size={chunk_size}, overlap={chunk_overlap} for {filename} (is_audio={is_audio})")
+        
+        mode = 'extended'
+        
+        """extended is useful for odf but we need an adaptive way to do it so just get text for now"""
+        if ext in ['.pdf', 'txt']:
+            mode = 'simple'
+            
+        # Always use extended mode for better parsing
+        # Note: save_to_db parameter is ignored by read_chunks, so we handle saving explicitly
+        chunks = list(fs.read_chunks(
+            path=s3_uri,
+            mode=mode,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            userid=user_id,
+            name=filename,
+            metadata={
+                "tus_upload_id": str(upload_id),
+                "content_type": content_type,
+                "filename": filename,
+                "file_extension": ext,
+                "upload_size": upload.total_size,
+                "upload_date": upload.created_at.isoformat() if upload.created_at else None,
+                "project_name": upload.project_name
+            }
+        ))
+        
+        if chunks:
+            logger.info(f"Created {len(chunks)} resource chunks for {filename}")
+            
+            # Explicitly save resources to the database
+            if save_resources:
+                userid = chunks[0].userid if chunks else None
+                logger.info(f"Saving {len(chunks)} resources to database with userid: {userid}")
+                from percolate.models.p8.types import Resources
+                p8.repository(Resources).update_records(chunks)
+            
+            # Update the upload record to link it to the first resource
+            upload.resource_id = str(chunks[0].id)
+            upload.upload_metadata['resource_ids'] = [str(c.id) for c in chunks]
+            upload.upload_metadata['resource_count'] = len(chunks)
+            p8.repository(TusFileUpload).update_records([upload])
+            
+            return chunks
         else:
-            logger.warning(f"Unsupported file type for resource creation: {content_type} ({filename})")
+            logger.warning(f"No resource chunks created for {filename}")
             return []
+
             
     except Exception as e:
         logger.error(f"Error creating resources from upload {upload_id}: {str(e)}")
@@ -132,11 +162,10 @@ async def create_audio_resources(upload: TusFileUpload, s3_uri: str, user_id: Op
             s3_uri=s3_uri,
             file_size=upload.total_size or 0,
             content_type=upload.content_type or 'audio/x-wav',
-            user_id=str(user_id),  # Database requires user_id as text
-            userid=user_id,  # Model field
+            userid=user_id,  # Use only userid field
             project_name=upload.project_name or 'default',
             status=AudioProcessingStatus.UPLOADED,
-            upload_date=datetime.now(timezone.utc),  # Fixed: was uploaded_at
+            upload_date=datetime.now(timezone.utc),
             metadata={
                 'tus_upload_id': str(upload.id),
                 'source': 'tus_upload',
@@ -252,7 +281,7 @@ async def create_audio_resources(upload: TusFileUpload, s3_uri: str, user_id: Op
 
 async def create_document_resources(upload: TusFileUpload, s3_uri: str, user_id: Optional[str]) -> List[Resources]:
     """
-    Create resources from document files (PDF, TXT, DOCX).
+    Create resources from document files (PDF, TXT, DOCX) using FileSystemService.
     
     Args:
         upload: The TUS upload record
@@ -266,48 +295,41 @@ async def create_document_resources(upload: TusFileUpload, s3_uri: str, user_id:
     resources = []
     
     try:
-        # Get appropriate content provider
-        provider = get_content_provider_for_uri(upload.filename)
+        # Use FileSystemService for unified chunking like admin router
+        from percolate.services.FileSystemService import FileSystemService
         
-        # Extract text from document
-        # For S3 files, we need to download first or use signed URL
-        s3_service = S3Service()
+        fs = FileSystemService()
         
-        # Download file temporarily for processing
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix=Path(upload.filename).suffix) as tmp_file:
-            # Download from S3 using the URI directly
-            result = s3_service.download_file_from_uri(s3_uri, tmp_file.name)
-            
-            # Extract text
-            text_content = provider.extract_text(tmp_file.name)
+        # Default to extended mode for all document processing
+        parsing_mode = "extended"
         
-        # Chunk the text for better searchability
-        chunks = chunk_text(text_content, chunk_size=2000, overlap=200)
+        # Generate chunks using FileSystemService
+        chunk_generator = fs.read_chunks(
+            path=s3_uri,
+            mode=parsing_mode,
+            chunk_size=2000,
+            chunk_overlap=200,
+            userid=user_id,
+            name=upload.filename,
+            save_to_db=False  # We'll handle resource creation manually
+        )
         
-        # Create resources from chunks
-        for idx, chunk in enumerate(chunks):
-            resource = Resources(
-                name=f"{upload.filename} - Part {idx + 1}",
-                category="document",
-                content=chunk,
-                summary=f"Content chunk {idx + 1} from {upload.filename}",
-                ordinal=idx,
-                uri=s3_uri,
-                metadata={
-                    'source_type': 'document',
-                    'original_filename': upload.filename,
-                    'file_type': Path(upload.filename).suffix,
-                    'chunk_index': idx,
-                    'total_chunks': len(chunks),
-                    'tus_upload_id': str(upload.id)
-                },
-                userid=user_id,
-                resource_timestamp=datetime.now(timezone.utc)
-            )
-            resources.append(resource)
-            
-        # Save all resources
+        # Convert generator to list and create resources
+        resources = list(chunk_generator)
+        
+        # Update resource metadata to include TUS upload info
+        for resource in resources:
+            if not resource.metadata:
+                resource.metadata = {}
+            resource.metadata.update({
+                'tus_upload_id': str(upload.id),
+                'source': 'tus_upload',
+                'original_filename': upload.filename,
+                's3_bucket': upload.s3_bucket,
+                's3_key': upload.s3_key
+            })
+        
+        # Save all resources to database
         if resources:
             p8.repository(Resources).update_records(resources)
         
@@ -317,9 +339,10 @@ async def create_document_resources(upload: TusFileUpload, s3_uri: str, user_id:
         upload.upload_metadata['resource_ids'] = resource_ids
         upload.upload_metadata['resource_count'] = len(resources)
         upload.upload_metadata['content_extracted'] = True
+        upload.upload_metadata['parsing_mode'] = parsing_mode
         p8.repository(TusFileUpload).update_records([upload])
         
-        logger.info(f"Created {len(resources)} document resources for upload {upload.id}")
+        logger.info(f"Created {len(resources)} document resources for upload {upload.id} using {parsing_mode} mode")
         
     except Exception as e:
         logger.error(f"Error creating document resources: {str(e)}")

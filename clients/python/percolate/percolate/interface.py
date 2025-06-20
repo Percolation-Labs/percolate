@@ -26,6 +26,36 @@ def set_custom_model_provider(fn):
 def settings(key, default=None):
     return SETTINGS.get(key,default)
 
+def try_load_model(name, allow_abstract: bool = False):
+    """load the model in different ways
+    
+    Args:
+        name: The model name (can be namespace.name format)
+        allow_abstract: If True, create an abstract model if not found
+    """
+    M = custom_load_model(name)
+    if not M:
+        try:
+            M = load_model(name)
+        except:
+            pass
+        
+    """last resort create custom which can be used from db but we need a strong sense of loading a model from database with schema and functions TODO:"""
+    if not M and allow_abstract:
+        if '.' in name:
+            namespace, model_name = name.split('.', 1)
+        else:
+            namespace = 'public'
+            model_name = name
+            
+        M = AbstractModel.create_model(
+            name=model_name, 
+            namespace=namespace,
+            description="Please use the search facility to answer the users question"
+        )
+        
+    return M
+
 def custom_load_model(name):
     """if the custom model loader is specified we can do this"""
     loader = CUSTOM_PROVIDER.get('data')
@@ -107,33 +137,58 @@ def summarize(data:str,context:str):
     return request_openai(stack,None)
     
 
-def get_entities(keys: str | typing.List)->typing.List[dict]:
+def get_entities(keys: str | typing.List, user_id=None, allow_fuzzy_match: bool = False, similarity_threshold: float = 0.3)->typing.List[dict]:
     """
     get entities from their keys in the database
     
     **Args:
         keys: one or more keys 
+        user_id: User ID for row-level security
+        allow_fuzzy_match: if True, uses fuzzy matching to find similar entity names
+        similarity_threshold: threshold for fuzzy matching (default 0.3, lower values are more permissive)
     """
 
-    data =  PostgresService().get_entities(keys)
+    data = PostgresService(user_id=user_id).get_entities(
+        keys, 
+        userid=user_id,
+        allow_fuzzy_match=allow_fuzzy_match, 
+        similarity_threshold=similarity_threshold
+    )
  
     return data
 
-def repository(model:AbstractModel|BaseModel):
+def repository(model:AbstractModel|BaseModel, user_id=None, user_groups=None, role_level=None):
     """gets a repository for the model. 
     This provides postgres services in the context of the type
     
     Args:
         model: a Pydantic base model or AbstractModel
+        user_id: optional user ID for row-level security
+        user_groups: optional list of user group IDs for row-level security
+        role_level: optional role level for row-level security (0=god, 1=admin, 5=internal, 10=partner, 100=public)
     """
-    return PostgresService(model)
+    return PostgresService(model=model, user_id=user_id, user_groups=user_groups, role_level=role_level)
 
-def Agent(model:AbstractModel|BaseModel, allow_help:bool=True, **kwargs)->ModelRunner:
+def Agent(model:AbstractModel|BaseModel, allow_help:bool=True, user_id=None, user_groups=None, role_level=None, **kwargs)->ModelRunner:
     """get the model runner in the context of the agent for running reasoning chains
     
     The Allow help is important to consider because it can lead to cascades percolating to far. a depth parameter might be interesting
+    
+    Args:
+        model: The model to use for the agent
+        allow_help: Whether to allow the agent to use the help function
+        user_id: User ID for row-level security
+        user_groups: User group IDs for row-level security
+        role_level: Role level for row-level security (0=god, 1=admin, 5=internal, 10=partner, 100=public)
     """
-    return ModelRunner(model, allow_help=allow_help, **kwargs)
+    return ModelRunner(
+        model, 
+        allow_help=allow_help, 
+        user_id=user_id,
+        user_groups=user_groups,
+        role_level=role_level,
+        **kwargs
+    )
 
 def resume(session: AskResponse|str) ->AskResponse:
     """
@@ -219,12 +274,25 @@ def get_proxy(proxy_uri:str):
                          but typically the should just be added at run time _as_ callables since 
                          we can recover Functions from callables - {proxy_uri}""")
     
-def get_planner()->typing.Callable:
+def get_planner(user_id=None, user_groups=None, role_level=None)->typing.Callable:
     """retrieves a wrapper to the planner agent which takes a question for planning
     
+    Args:
+        user_id: User ID for row-level security
+        user_groups: User group IDs for row-level security
+        role_level: Role level for row-level security
     """
     from percolate.models.p8 import Function,PlanModel
     from functools import partial
-    a = Agent(PlanModel,allow_help=False, init_data =repository(Function).select())
+    
+    # Pass user context to both repository and agent
+    a = Agent(
+        PlanModel,
+        allow_help=False, 
+        user_id=user_id,
+        user_groups=user_groups,
+        role_level=role_level,
+        init_data=repository(Function, user_id=user_id, user_groups=user_groups, role_level=role_level).select()
+    )
     return a
 

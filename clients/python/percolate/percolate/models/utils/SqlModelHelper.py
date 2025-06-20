@@ -112,6 +112,19 @@ class SqlModelHelper:
                 columns.append(f"{dcol} TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
         if "userid" not in mapping.keys():
             columns.append("userid UUID")
+            
+        if "groupid" not in mapping.keys():
+            columns.append("groupid TEXT")  
+            
+        # Get access_level from model_config or default to 100 (public)
+        # Use AccessLevel enum if available, otherwise use numeric value
+        access_level = cls.model.model_config.get("access_level", 100)
+        # Handle both enum and direct int value
+        if hasattr(access_level, "value"):
+            access_level = access_level.value
+            
+        if "required_access_level" not in mapping.keys():
+            columns.append(f"required_access_level INTEGER DEFAULT {access_level}")
 
         if_not_exists_flag = "" if not if_not_exists else " IF NOT EXISTS "
         columns_str = ",\n    ".join(list(set(columns)))
@@ -126,11 +139,16 @@ EXECUTE FUNCTION update_updated_at_column();
 
         """
 
-        # in some case we will attach the notify by calling this function attach_notify_trigger_to_table(schema_name TEXT, table_name TEXT)
-
+        # Attach notification trigger if needed
         if cls.should_model_notify_index_update:
             create_table_script += f"""
 SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls.model.get_model_name()}');
+            """
+            
+        # Attach row-level security policy
+        create_table_script += f"""
+-- Apply row-level security policy
+SELECT p8.attach_rls_policy('{cls.model.get_model_namespace()}', '{cls.model.get_model_name()}');
             """
 
         return create_table_script
@@ -414,7 +432,12 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
                 return pg_type
             return f"{pg_type}{type_mapping[list]}"
 
-        if origin in {dict, typing.Dict}:
+        # Handle dict types more robustly - covers dict, typing.Dict, Dict[str, Any], etc.
+        if origin in {dict, typing.Dict} or (hasattr(typing, 'Dict') and origin is typing.Dict):
+            return type_mapping[dict]
+        
+        # Fallback: check if the type string contains 'dict' for edge cases
+        if 'dict' in str(py_type).lower() or 'Dict' in str(py_type):
             return type_mapping[dict]
 
         if hasattr(py_type, "model_dump"):
@@ -452,9 +475,10 @@ SELECT attach_notify_trigger_to_table('{cls.model.get_model_namespace()}', '{cls
                 return item.replace("'", "''")
             if isinstance(item, uuid.UUID):
                 return str(item)
-            if isinstance(item, dict):
+            # Handle dict-like objects more robustly
+            if isinstance(item, dict) or hasattr(item, 'keys'):
                 return json.dumps(item, default=str)
-            if isinstance(item, list) and len(item) and isinstance(item[0], dict):
+            if isinstance(item, list) and len(item) and (isinstance(item[0], dict) or hasattr(item[0], 'keys')):
                 return json.dumps(item, default=str)
             return item
 

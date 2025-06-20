@@ -15,6 +15,8 @@ from typing import List, Dict, Any, Optional, BinaryIO, Union
 from botocore.exceptions import ClientError
 from percolate.utils import logger
 import typing
+from io import BytesIO
+from datetime import datetime
 
 
 def _resolve_aws_env() -> Dict[str, Optional[str]]:
@@ -110,6 +112,28 @@ def _get_s3_config(use_aws: bool) -> Dict[str, Any]:
         if endpoint_url and not endpoint_url.startswith("http"):
             endpoint_url = f"https://{endpoint_url}"
         
+        # For custom S3 providers, try to add checksum calculation settings
+        # These are important for non-AWS providers but may not be supported in all boto3 versions
+        boto3_config_kwargs = {
+            'signature_version': 's3v4',
+            's3': {'addressing_style': 'path'}
+        }
+        
+        # Try to add checksum settings for custom S3 providers (Hetzner, MinIO, etc.)
+        try:
+            boto3_config_kwargs.update({
+                'request_checksum_calculation': "when_required", 
+                'response_checksum_validation': "when_required"
+            })
+            boto3_config = boto3.session.Config(**boto3_config_kwargs)
+        except TypeError:
+            # Fallback for older boto3 versions that don't support these parameters
+            logger.warning("boto3 version doesn't support checksum calculation parameters, using basic config")
+            boto3_config = boto3.session.Config(
+                signature_version='s3v4',
+                s3={'addressing_style': 'path'}
+            )
+        
         config = {
             'credentials': {
                 'access_key': env_config['access_key'],
@@ -117,16 +141,155 @@ def _get_s3_config(use_aws: bool) -> Dict[str, Any]:
             },
             'endpoint_url': endpoint_url,
             'bucket': env_config['bucket'],
-            'boto3_config': boto3.session.Config(
-                signature_version='s3v4',
-                s3={'addressing_style': 'path'},
-                request_checksum_calculation="when_required", 
-                response_checksum_validation="when_required"
-            ),
+            'boto3_config': boto3_config,
             'provider_type': 'custom'
         }
     
     return config
+
+class FileLikeWritable:
+    """
+    A file-like object wrapper for S3 uploads.
+    
+    This class provides a file-like interface for writing to S3 objects.
+    It accumulates the data in memory and then uploads it to S3 when closed.
+    
+    Usage:
+    ```
+    with s3_service.open("s3://bucket/key", "wb") as f:
+        f.write(b"Hello, World!")
+    ```
+    """
+    
+    def __init__(self, s3_client, bucket: str, key: str):
+        """
+        Initialize a file-like object for writing to S3.
+        
+        Args:
+            s3_client: The boto3 S3 client
+            bucket: The S3 bucket name
+            key: The S3 object key
+        """
+        self.s3_client = s3_client
+        self.bucket = bucket
+        self.key = key
+        self.buffer = BytesIO()
+        self.closed = False
+        self.name = key.split('/')[-1] if '/' in key else key
+        self.mode = 'wb'
+        self.uri = f"s3://{bucket}/{key}"
+        
+    def write(self, data: Union[bytes, str]) -> int:
+        """
+        Write data to the buffer.
+        
+        Args:
+            data: The data to write (bytes or string)
+            
+        Returns:
+            Number of bytes written
+        """
+        if self.closed:
+            raise ValueError("I/O operation on closed file")
+            
+        if isinstance(data, str):
+            data = data.encode('utf-8')
+            
+        return self.buffer.write(data)
+    
+    def seek(self, offset: int, whence: int = 0) -> int:
+        """
+        Change the stream position to the given offset.
+        
+        Args:
+            offset: The offset relative to the position indicated by whence
+            whence: How to interpret the offset (0=start, 1=current, 2=end)
+            
+        Returns:
+            The new absolute position
+        """
+        if self.closed:
+            raise ValueError("I/O operation on closed file")
+        return self.buffer.seek(offset, whence)
+    
+    def tell(self) -> int:
+        """
+        Return the current stream position.
+        
+        Returns:
+            The current position
+        """
+        if self.closed:
+            raise ValueError("I/O operation on closed file")
+        return self.buffer.tell()
+    
+    def read(self, size: int = -1) -> bytes:
+        """
+        Read data from the buffer (dummy implementation for compatibility).
+        
+        Args:
+            size: The number of bytes to read
+            
+        Returns:
+            Empty bytes object - this is a write-only stream
+            
+        Raises:
+            ValueError: Always raised - this is a write-only stream
+        """
+        raise ValueError("File not open for reading")
+        
+    def close(self) -> None:
+        """
+        Close the file-like object and upload the data to S3.
+        """
+        if self.closed:
+            return
+            
+        self.buffer.seek(0)
+        
+        try:
+            # Upload the data to S3
+            self.s3_client.put_object(
+                Bucket=self.bucket,
+                Key=self.key,
+                Body=self.buffer.read()
+            )
+            logger.info(f"Successfully uploaded data to s3://{self.bucket}/{self.key}")
+        except Exception as e:
+            logger.error(f"Error uploading data to s3://{self.bucket}/{self.key}: {e}")
+            raise
+        finally:
+            self.buffer.close()
+            self.closed = True
+    
+    def flush(self) -> None:
+        """
+        Flush the write buffer (no-op for in-memory buffer).
+        """
+        if self.closed:
+            raise ValueError("I/O operation on closed file")
+        self.buffer.flush()
+        
+    def readable(self) -> bool:
+        """Check if the stream is readable."""
+        return False
+    
+    def writable(self) -> bool:
+        """Check if the stream is writable."""
+        return not self.closed
+    
+    def seekable(self) -> bool:
+        """Check if the stream is seekable."""
+        return not self.closed
+        
+    def __enter__(self):
+        """Support for context manager protocol."""
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Support for context manager protocol."""
+        self.close()
+
 
 class S3Service:
     """
@@ -155,8 +318,7 @@ class S3Service:
     def __init__(self, 
                  access_key: str = None, 
                  secret_key: str = None, 
-                 endpoint_url: str = None,
-                 use_aws: bool = None
+                 endpoint_url: str = None
                  ):
         """
         Initialize the S3 service with simplified configuration.
@@ -165,14 +327,10 @@ class S3Service:
             access_key: S3 access key (optional - will use environment)
             secret_key: S3 secret key (optional - will use environment)
             endpoint_url: S3 endpoint URL (optional - will use environment)
-            use_aws: Force AWS mode (optional - will auto-detect from environment)
         """
         
-        # Determine if we should use AWS
-        if use_aws is None:
-            self.use_aws = _should_use_aws()
-        else:
-            self.use_aws = use_aws
+        # Determine if we should use AWS based on environment
+        self.use_aws = _should_use_aws()
         
         logger.trace(f"Initializing S3Service: {'AWS' if self.use_aws else 'Custom S3'} mode")
         
@@ -1097,6 +1255,206 @@ class S3Service:
         except ClientError as e:
             logger.error(f"Error deleting object {bucket_name}/{object_key}: {str(e)}")
             raise
+            
+    def open(self, uri: str, mode: str = "rb", version_id: str = None):
+        """
+        Open a file-like object for the given S3 URI that's compatible with libraries like PyPDF2.
+        
+        Args:
+            uri: The S3 URI (s3://bucket/key)
+            mode: File mode - 'r', 'rb', 'w', 'wb'
+            version_id: Optional S3 version ID for reading specific versions
+            
+        Returns:
+            A file-like object for reading or writing
+            
+        Usage:
+            # Reading a file
+            with s3.open("s3://bucket/key", "rb") as f:
+                data = f.read()
+                
+            # Writing a file
+            with s3.open("s3://bucket/key", "wb") as f:
+                f.write(b"Hello, World!")
+        """
+        if not mode or mode[0] not in ('r', 'w'):
+            raise ValueError(f"Invalid mode: {mode}. Must start with 'r' or 'w'")
+            
+        if mode[0] == "r":
+            # Reading mode
+            # Get the full content into a BytesIO object to ensure compatibility with libraries like PyPDF2
+            body = self.get_streaming_body(uri, version_id=version_id)
+            content = body.read()
+            
+            # Create a standard BytesIO object
+            buffer = BytesIO(content)
+            
+            # Add common attributes that libraries might expect
+            buffer.name = uri.split('/')[-1] if '/' in uri else uri
+            buffer.mode = mode
+            buffer.seek(0)  # Ensure we're at the beginning of the stream
+            
+            return buffer
+        else:
+            # Writing mode
+            bucket, key = self._split_bucket_and_blob_from_path(uri)
+            return FileLikeWritable(self.s3_client, bucket, key)
+    
+    def get_streaming_body(self, uri: str, version_id: str = None, 
+                           before: str = None, after: str = None, at: str = None, **kwargs):
+        """
+        Get a streaming body for an S3 object.
+        
+        Args:
+            uri: The S3 URI (s3://bucket/key)
+            version_id: Optional S3 version ID for reading specific versions
+            before: Optional timestamp to get version before this time
+            after: Optional timestamp to get version after this time
+            at: Optional timestamp to get version at specific time
+            **kwargs: Additional arguments for get_object
+            
+        Returns:
+            Streaming body object from S3 client
+            
+        Raises:
+            Exception: If the S3 object cannot be retrieved
+        """
+        try:
+            c = self.s3_client
+            bucket, prefix = self._split_bucket_and_blob_from_path(uri)
+            
+            # Add detailed debugging
+            logger.info(f"Getting streaming body for s3://{bucket}/{prefix}")
+            
+            # Try head_object first to verify the object exists
+            try:
+                head = c.head_object(Bucket=bucket, Key=prefix)
+                logger.info(f"Object exists: size={head.get('ContentLength', 'unknown')}, type={head.get('ContentType', 'unknown')}")
+            except Exception as head_err:
+                logger.warning(f"Head request failed: {str(head_err)}")
+            
+            if version_id or before or after or at:
+                logger.info(f"Reading versioned object: version_id={version_id}, before={before}, after={after}, at={at}")
+                response = self.read_version(
+                    uri, version_id=version_id, before=before, after=after, at=at
+                )
+            else:
+                logger.info(f"Getting object: bucket={bucket}, key={prefix}")
+                try:
+                    response = c.get_object(Bucket=bucket, Key=prefix, **kwargs)
+                    logger.info(f"Got object response: {response.get('ContentLength', 'unknown')} bytes")
+                    response = response["Body"]
+                except Exception as get_err:
+                    logger.error(f"Error in get_object: {str(get_err)}")
+                    
+                    # Try an alternate approach with encoding the key
+                    import urllib.parse
+                    encoded_key = urllib.parse.quote(prefix)
+                    if encoded_key != prefix:
+                        logger.info(f"Trying with URL-encoded key: {encoded_key}")
+                        try:
+                            response = c.get_object(Bucket=bucket, Key=encoded_key, **kwargs)["Body"]
+                            logger.info("Success with URL-encoded key")
+                        except Exception as encoded_err:
+                            logger.error(f"Error with encoded key: {str(encoded_err)}")
+                            raise get_err  # Re-raise the original error
+                    else:
+                        raise
+                
+            return response
+        except Exception as ex:
+            logger.error(f"Failed to get streaming body: {str(ex)}")
+            raise ex
+            
+    def _split_bucket_and_blob_from_path(self, uri: str) -> tuple:
+        """
+        Split S3 URI into bucket and key components.
+        
+        Args:
+            uri: The S3 URI (s3://bucket/key)
+            
+        Returns:
+            Tuple of (bucket, key)
+        """
+        parsed = self.parse_s3_uri(uri)
+        return parsed["bucket"], parsed["key"]
+    
+    def read_version(self, uri: str, version_id: str = None, 
+                    before: str = None, after: str = None, at: str = None) -> Any:
+        """
+        Read a specific version of an S3 object based on version ID or timestamp.
+        
+        Args:
+            uri: The S3 URI (s3://bucket/key)
+            version_id: Optional S3 version ID
+            before: Optional timestamp to get version before this time
+            after: Optional timestamp to get version after this time
+            at: Optional timestamp to get version at specific time
+            
+        Returns:
+            Streaming body from the versioned object
+            
+        Raises:
+            ValueError: If conflicting version parameters are provided
+            Exception: If the versioned object cannot be retrieved
+        """
+        bucket, key = self._split_bucket_and_blob_from_path(uri)
+        
+        # Check for conflicting parameters
+        if sum(x is not None for x in [version_id, before, after, at]) > 1:
+            raise ValueError("Only one of version_id, before, after, or at should be specified")
+            
+        if version_id:
+            # Use specific version ID
+            return self.s3_client.get_object(
+                Bucket=bucket, 
+                Key=key,
+                VersionId=version_id
+            )["Body"]
+        elif before or after or at:
+            # Get version based on timestamp
+            # First, list object versions
+            versions = self.s3_client.list_object_versions(
+                Bucket=bucket,
+                Prefix=key
+            ).get('Versions', [])
+            
+            if not versions:
+                raise ValueError(f"No versions found for {uri}")
+                
+            # Sort versions by LastModified
+            versions.sort(key=lambda x: x['LastModified'])
+            
+            if before:
+                # Get the latest version before the specified time
+                target_dt = before if isinstance(before, datetime) else datetime.fromisoformat(before)
+                valid_versions = [v for v in versions if v['LastModified'] < target_dt]
+                if not valid_versions:
+                    raise ValueError(f"No versions found before {before}")
+                version_id = valid_versions[-1]['VersionId']
+            elif after:
+                # Get the earliest version after the specified time
+                target_dt = after if isinstance(after, datetime) else datetime.fromisoformat(after)
+                valid_versions = [v for v in versions if v['LastModified'] > target_dt]
+                if not valid_versions:
+                    raise ValueError(f"No versions found after {after}")
+                version_id = valid_versions[0]['VersionId']
+            elif at:
+                # Get the version closest to the specified time
+                target_dt = at if isinstance(at, datetime) else datetime.fromisoformat(at)
+                valid_versions = sorted(versions, 
+                                       key=lambda x: abs((x['LastModified'] - target_dt).total_seconds()))
+                version_id = valid_versions[0]['VersionId']
+            
+            # Get the object with the determined version ID
+            return self.s3_client.get_object(
+                Bucket=bucket, 
+                Key=key,
+                VersionId=version_id
+            )["Body"]
+        else:
+            # This should never be reached due to the logic at the start of the function
+            raise ValueError("No version parameters specified")
             
     def get_presigned_url_for_uri(self,
                                   s3_uri: str,

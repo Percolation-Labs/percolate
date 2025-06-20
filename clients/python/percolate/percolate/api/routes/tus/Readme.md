@@ -55,7 +55,7 @@ The following environment variables can be used to configure the Tus server:
 
 - `TUS_STORAGE_PATH`: Path for storing uploads (default: system temp directory)
 - `TUS_USE_S3`: Whether to use S3 for storage (default: true)
-- `TUS_S3_BUCKET`: S3 bucket for storing finalized uploads (default: "percolate-uploads")
+- `TUS_S3_BUCKET`: S3 bucket for storing finalized uploads (default: "percolate")
 - `TUS_MAX_SIZE`: Maximum allowed upload size in bytes (default: 5GB)
 - `TUS_DEFAULT_EXPIRATION`: Default upload expiration in seconds (default: 86400 - 24 hours)
 

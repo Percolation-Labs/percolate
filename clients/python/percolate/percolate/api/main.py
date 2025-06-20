@@ -23,34 +23,72 @@ from percolate.api.routes.auth.utils import get_stable_session_key
 scheduler = BackgroundScheduler()
 
 def run_scheduled_job(schedule_record):
-    """Placeholder job runner for scheduled tasks."""
-    logger.info(f"Running scheduled task {schedule_record} ")
+    """Run a scheduled job based on its specification."""
+    logger.info(f"Running scheduled task: {schedule_record.name}")
+    
+    # Handle different task types
+    try:
+        if schedule_record.spec and "task" in schedule_record.spec:
+            task_name = schedule_record.spec["task"]
+            logger.info(f"Executing task: {task_name}")
+            
+            # Process pending TUS uploads task
+            if task_name == "process_pending_s3_resources":
+                from percolate.api.controllers.tus import process_pending_s3_resources
+                import asyncio
+                
+                # Create an event loop for the async task
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+                try:
+                    # Run the async function in the event loop
+                    result = loop.run_until_complete(process_pending_s3_resources())
+                    logger.info(f"Scheduled task result: {result}")
+                finally:
+                    loop.close()
+        else:
+            logger.warning(f"No task specified in schedule record: {schedule_record.id}")
+    except Exception as e:
+        logger.error(f"Error running scheduled task {schedule_record.id}: {str(e)}")
+        # Don't propagate exceptions to prevent scheduler from failing
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Application lifespan: start and shutdown scheduler."""
+# @asynccontextmanager
+# async def lifespan(app: FastAPI):
+#     """Application lifespan: start and shutdown scheduler."""
     
-    repo = p8.repository(Schedule)
-    table = Schedule.get_model_table_name()  
+#     repo = p8.repository(Schedule)
+#     table = Schedule.get_model_table_name()  
    
-    try:
-        data = repo.execute(f"SELECT * FROM {table} WHERE disabled_at IS NULL")
-        for d in data:
-            try:
-                record = Schedule(**d)
-                trigger = CronTrigger.from_crontab(record.schedule)
-                scheduler.add_job(run_scheduled_job, trigger, args=[record], id=str(record.id))
-            except Exception as e:
-                logger.warning(f"Failed to schedule job for record {d.get('id')}: {e}")
-    except Exception as ex:
-        logger.warning(f"Failed to load scheduler data {ex}")
+#     try:
+#         data = repo.execute(f"SELECT * FROM {table} WHERE disabled_at IS NULL")
+#         for d in data:
+#             try:
+#                 record = Schedule(**d)
+#                 trigger = CronTrigger.from_crontab(record.schedule)
+#                 scheduler.add_job(run_scheduled_job, trigger, args=[record], id=str(record.id))
+#             except Exception as e:
+#                 logger.warning(f"Failed to schedule job for record {d.get('id')}: {e}")
+#     except Exception as ex:
+#         logger.warning(f"Failed to load scheduler data {ex}")
     
-    scheduler.start()
-    logger.info(f"Scheduler started with jobs: {[j.id for j in scheduler.get_jobs()]}")
-    try:
-        yield
-    finally:
-        scheduler.shutdown()
+#     scheduler.start()
+#     logger.info(f"Scheduler started with jobs: {[j.id for j in scheduler.get_jobs()]}")
+    
+#     # Check if we need to process pending TUS uploads (we don't create schedules at startup)
+#     try:
+#         from percolate.api.controllers.tus import process_pending_s3_resources
+#         import asyncio
+#         # Process any pending uploads at startup, but don't create a schedule
+#         asyncio.create_task(process_pending_s3_resources())
+#         logger.info("Triggered initial TUS processing at startup")
+#     except Exception as e:
+#         logger.error(f"Failed to trigger initial TUS processing: {e}")
+    
+#     try:
+#         yield
+#     finally:
+#         scheduler.shutdown()
 
 
 app = FastAPI(
@@ -71,15 +109,23 @@ app = FastAPI(
     },
     docs_url="/swagger",
     redoc_url=f"/docs",
-    lifespan=lifespan,
+   # lifespan=lifespan,
 )
 
 # Use stable session key for session persistence across restarts
 session_key = get_stable_session_key()
 
 logger.info('Percolate api app started with stable session key')
- 
-app.add_middleware(SessionMiddleware, secret_key=session_key)
+
+# Add session middleware with better cookie settings
+app.add_middleware(
+    SessionMiddleware, 
+    secret_key=session_key,
+    max_age=86400,  # 1 day in seconds
+    same_site="none",  # Allow cross-site cookies (needed for OAuth redirects)
+    https_only=False,  # Set to True in production with HTTPS
+    session_cookie="session"  # Ensure consistent cookie name
+)
 #app.add_middleware(PayloadLoggerMiddleware)
 
 
@@ -92,7 +138,10 @@ origins = [
     "http://127.0.0.1:5008",
     "http://127.0.0.1:8000",
     "http://127.0.0.1:5000",
-    "https://vault.percolationlabs.ai"
+    "http://localhost:1420",# (Tauri dev server)
+    "http://tauri.localhost",# (Tauri production origin)
+    "https://tauri.localhost" #(Tauri production origin with https)
+    "https://vault.percolationlabs.ai",
 ]
 
 app.add_middleware(

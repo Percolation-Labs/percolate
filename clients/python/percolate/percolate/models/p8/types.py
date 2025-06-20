@@ -18,6 +18,7 @@ import json
 from percolate.utils import get_iso_timestamp
 import hashlib
 from enum import Enum
+from .db_types import AccessLevel
 #we shouldnt really need a logger her but we have temp functions being exported to apis
 from percolate.utils import logger 
 class Function(AbstractEntityModel):
@@ -332,7 +333,10 @@ class AIResponse(TokenUsage):
     We generate questions with sessions and then that triggers an exchange. 
     Normally the Dialogue is round trip transaction.
     """
-    model_config = {'protected_namespaces': ()}
+    model_config = {
+        'protected_namespaces': (),
+        'access_level': AccessLevel.ADMIN  # Admin access level
+    }
     id: uuid.UUID| str  
     role: str = Field(description="The role of the user/agent in the conversation")
     content: str = DefaultEmbeddingField(description="The content for this part of the conversation") #TODO we may not want to automatically generate embeddings for this table
@@ -376,6 +380,9 @@ class Session(AbstractModel):
     
     Sessions model user intent.
     """
+    model_config = {
+        'access_level': AccessLevel.ADMIN  # Admin access level
+    }
     id: uuid.UUID| str  
     """i should maybe deprecate the name here as this is a dense audit but then maybe we should just archive?"""
     name: typing.Optional[str] = Field(None, description="The name is a pseudo name to make sessions node-compatible")
@@ -526,6 +533,9 @@ If the user asks to look for existing plans, you should ask the research agent t
     
 class User(AbstractEntityModel):
     """A model of a logged in user"""
+    model_config = {
+        'access_level': AccessLevel.ADMIN  # Admin access
+    }
     id: uuid.UUID| str  
     name: typing.Optional[str] = Field(None,description="A display name for a user")
     email: typing.Optional[str] = KeyField(None,description="email of the user if we know it - the key must be something unique like this")
@@ -543,9 +553,24 @@ class User(AbstractEntityModel):
     session_id: typing.Optional[str] = Field(None, description="Last session ID for the user")
     last_session_at: typing.Optional[datetime.datetime] = Field(None, description="Last session activity timestamp")
     roles: typing.Optional[typing.List[str]] = Field(default_factory=list, description="A list of roles the user is a member of")
+    
+    # Security fields for row-level security
+    role_level: typing.Optional[int] = Field(AccessLevel.PUBLIC, description="User's role level for security (0=God, 1=Admin, 5=Internal, 10=Partner, 100=Public)")
+    groups: typing.Optional[typing.List[str]] = Field(default_factory=list, description="List of groups the user belongs to")
+    
     graph_paths: typing.Optional[typing.List[str]] = Field(None, description="Track all paths extracted by an agent as used to build the KG")
     metadata: typing.Optional[dict] = Field(default_factory=dict, description="Arbitrary user metadata")
     email_subscription_active: typing.Optional[bool] = Field(False, description="Users can opt in and out of emails")
+    userid: typing.Optional[uuid.UUID| str] = Field(None, description="Allow setting user id by default")
+      
+    @model_validator(mode='before')
+    @classmethod
+    def _ids(cls,values):
+        
+        """special case for user owning their own record"""
+        values['userid'] = values.get('userid') or values.get('id')
+        
+        return values
     
     @staticmethod
     def id_from_email(email):
@@ -571,9 +596,8 @@ class User(AbstractEntityModel):
             'Info': "You can use the users context - observe the current chat thread which may be empty when deciding if the user is referring to something they discussed recently or a new context."
                     "When you do use this context do not explain that to the user as it would be jarring for them. Freely use this context if its relevant or necessary to understand the user context."
                     "The last AI Response from the previous interaction is added for extra context and can be used if the user asks a follow up question in reference to previous response only. But dont ask them for confirmation."
-                    "If entity keys are provided you can use the get-entities lookup function to load and inspect them.",
-                    "some tools may accept a user id and you can use the user id here for those tool calls e.g. to do user specific searches"
-                    
+                    "If entity keys are provided you can use the get-entities lookup function to load and inspect them."
+                    "some tools may accept a user id and you can use the user id here for those tool calls e.g. to do user specific searches",
             'recent_threads': self.recent_threads,
             'last_ai_response': self.last_ai_response,
             'interesting_entity_keys': self.interesting_entity_keys,
@@ -635,6 +659,14 @@ class Resources(AbstractModel):
     If someone asks about resources, content, files, general information etc. it may be worth doing a search on the Resources.
     If a user expresses interests or preferences or trivia about themselves - you can save it in the background but response naturally in conversation about it.
     If the user asks information about themselves you can also try to search for user facts if you dont have the answer.
+    You may want to look at recent "top n" resources for a user or do a semantic search or a combination if the user is interested in deeper analysis.
+    
+    When responding try to make the format pretty when relevant. For quick answer it does not matter but for larger content using pretty Markdown structures like
+    fenced codeblocks, headings, lits, tables, links etc.
+    
+    
+    If you do not find data when you search please call the help function to find other functions to help the user.
+    
     """
     id: typing.Optional[uuid.UUID| str] = Field("The id is generated as a hash of the required uri and ordinal")  
     name: typing.Optional[str] = Field(None, description="A short content name - non unique - for example a friendly label for a chunked pdf document or web page title")
@@ -721,47 +753,7 @@ class Resources(AbstractModel):
         return resources
         
         
-    @classmethod
-    def chunked_resource_old(
-        cls,
-        uri: str,
-        chunk_size: int = 1000,
-        category: typing.Optional[str] = None,
-        name: typing.Optional[str] = None,
-        userid: typing.Optional[str] = None,
-        try_markdown: bool = False,
-        enriched: bool = False
-    ) -> typing.List["Resources"]:
-        """read file contents from web or file and chunks them by some chunk size - sensible defaults are used
-        
-        the uri is used as the id but we excluded parameters from the uri
-        """
-        
-        from percolate.utils.parsing import get_content_provider_for_uri
-        from pathlib import Path
-        
-        def sanitize_text(text: str) -> str:
-            """this is a dump serializer for now as we work out the data model"""
-            import html2text    
-            t =  text.replace("\x00", "")  # or use a placeholder like "�"
-            if try_markdown:
-                try:
-                     t = html2text.html2text(t)
-                except Exception as ex:
-                    #print("HTMLPARSE", ex)
-                    pass
-            return t
-           
-        """TODO add an S3 provider that understands signing""" 
-        provider = get_content_provider_for_uri(uri)
-        text = sanitize_text(provider.extract_text(uri, enriched=enriched))
-        
-        return cls.chunked_resource_from_text(text, 
-                                              uri, 
-                                              chunk_size=chunk_size,
-                                              name=name,
-                                              userid=userid, 
-                                              category=category)
+    # chunked_resource_old has been removed - use chunked_resource instead
     
     @classmethod
     def chunked_resource(
@@ -777,7 +769,10 @@ class Resources(AbstractModel):
         save_to_db: bool = True
     ) -> typing.List["Resources"]:
         """
-        Create chunked resources using the new FileSystemService-based approach.
+        Create chunked resources using the FileSystemService unified approach.
+        
+        This method delegates to FileSystemService.read_chunks to ensure consistent
+        behavior across all file processing workflows.
         
         Args:
             uri: File URI (local file://, S3 s3://, or HTTP/HTTPS URL)
@@ -797,13 +792,26 @@ class Resources(AbstractModel):
             ValueError: If file type is not supported or transcription is required for audio/video in simple mode
             Exception: If parsing fails
         """
-        from percolate.services.FileSystemService import get_resource_chunker
+        from percolate.services.FileSystemService import FileSystemService
         
-        # Get the resource chunker
-        chunker = get_resource_chunker()
+        # Use FileSystemService directly to avoid circular dependencies
+        fs = FileSystemService()
         
-        # Create chunks using the new system
         try:
+            # Use read_chunks with ResourceChunker directly to avoid the circular call
+            # We call the ResourceChunker directly since read_chunks would call back to this method
+            # Use the new location of ResourceChunker in parsing directory
+            chunker = None
+            if hasattr(fs, '_get_resource_chunker'):
+                try:
+                    chunker = fs._get_resource_chunker()
+                except:
+                    chunker = None
+            if not chunker:
+                # Fallback: import ResourceChunker directly
+                from percolate.utils.parsing.ResourceChunker import ResourceChunker
+                chunker = ResourceChunker(fs)
+            
             resources = chunker.chunk_resource_from_uri(
                 uri=uri,
                 parsing_mode=parsing_mode,
@@ -827,10 +835,11 @@ class Resources(AbstractModel):
             
             # Save to database if requested
             if save_to_db:
-                success = chunker.save_chunks_to_database(resources)
-                if not success:
-                    from percolate.utils import logger
-                    logger.warning(f"Failed to save some chunks to database for URI: {uri}")
+                import percolate as p8
+                p8.repository(cls).update_records(resources)
+                from percolate.utils import logger
+                userid = resources[0].userid if resources else None
+                logger.info(f"Saved {len(resources)} chunked resources to database for URI: {uri} with userid: {userid}")
             
             return resources
             
@@ -838,6 +847,38 @@ class Resources(AbstractModel):
             from percolate.utils import logger
             logger.error(f"Error creating chunked resources from {uri}: {str(e)}")
             raise
+    
+    @classmethod
+    def get_recent_uploads_by_user(
+        cls,
+        user_id: str,
+        limit: int = 10
+    ) -> typing.List[typing.Dict[str, typing.Any]]:
+        """
+        Get the most recent resource uploads for a specific user.
+        
+        Args:
+            user_id: The user ID to filter resources by
+            limit: Maximum number of resources to return (default: 10)
+            
+        Returns:
+            List of resource records as dictionaries, ordered by created_at descending
+        """
+        from percolate.services import PostgresService
+        
+        # Create a repository for the Resources model
+        pg = PostgresService(model=cls)
+        
+        # Build and execute the query
+        query = f"""
+            SELECT * 
+            FROM {pg.helper.table_name}
+            WHERE userid = %s
+            ORDER BY created_at DESC
+            LIMIT %s
+        """
+        
+        return pg.execute(query, data=(user_id, limit))
 
 class TaskResources(AbstractModel):
     """(Deprecate)A link between tasks and resources since resources can be shared between tasks"""

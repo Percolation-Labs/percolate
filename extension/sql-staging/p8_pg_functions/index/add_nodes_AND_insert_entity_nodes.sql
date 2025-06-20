@@ -18,6 +18,8 @@ DECLARE
     sql TEXT;
     schema_name TEXT;
     pure_table_name TEXT;
+    view_name TEXT;
+    view_exists BOOLEAN;
     nodes_created_count INTEGER := 0;  
 BEGIN
 
@@ -28,15 +30,30 @@ BEGIN
     --we always need this when using AGE from postgres 
     LOAD  'age'; SET search_path = ag_catalog, "$user", public; 
 
-    cypher_query := 'CREATE ';
     schema_name := lower(split_part(table_name, '.', 1));
     pure_table_name := split_part(table_name, '.', 2);
+    view_name := format('p8."vw_%s_%s"', schema_name, pure_table_name);
+    
+    -- Check if the view exists before attempting to query it
+    EXECUTE format('
+        SELECT EXISTS (
+            SELECT FROM information_schema.views 
+            WHERE table_schema = ''p8'' 
+            AND table_name = ''vw_%s_%s''
+        )', schema_name, pure_table_name) 
+    INTO view_exists;
+    
+    -- If view doesn't exist, log a message and return 0
+    IF NOT view_exists THEN
+        RAISE NOTICE 'View % does not exist - skipping node creation', view_name;
+        RETURN 0;
+    END IF;
+
+    cypher_query := 'CREATE ';
 
     -- Loop through each row in the table  
     FOR row IN
-        EXECUTE format('SELECT uid, key, userid FROM p8."vw_%s_%s" WHERE gid IS NULL LIMIT 1660',
-            schema_name, pure_table_name
-        )
+        EXECUTE format('SELECT uid, key, userid FROM %s WHERE gid IS NULL LIMIT 1660', view_name)
     LOOP
         -- Append Cypher node creation for each row (include user_id only when present)
         IF row.userid IS NULL THEN
