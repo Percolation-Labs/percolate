@@ -51,6 +51,14 @@ class PlanFunctions(AbstractModel):
         description="a rating from 0 to 100 for how useful this function should be in context"
     )
 
+class ConcisePlanner(AbstractModel):
+    """You are given access to a user question and a range of functions.
+    Choose a small set of functions that are required or useful to answer the users question.
+    Respond in a json format with the fully qualified function name, ranking (with respect to question) and short comment 
+    You should bot provide preamble or discussion and be as brief as possible.
+    The user can activate the functions by name to learn more.
+    """
+    pass
 
 class PlanModel(AbstractModel):
     """

@@ -735,17 +735,16 @@ async def create_sync_schedule(
                     # Create Abstract model that inherits from Resources
                     logger.info(f"Creating new Abstract model: {full_model_name}")
                     
-                    # Create the model dynamically
+                    # Create the model dynamically with access_level
                     target_model = AbstractModel.create_model(
                         name=request.target_model_name,
                         namespace=request.target_namespace,
                         description=f"Synced content from {request.provider.value} folder {request.folder_id}",
                         fields={},  # No additional fields, inherits from Resources
+                        access_level=request.access_level,  # Pass access level directly
+                        inherit_config=True,  # Inherit config from Resources parent
                         __base__=Resources  # Inherit from Resources
                     )
-                    
-                    # Set the access level in model config
-                    target_model.model_config['access_level'] = request.access_level
                     
                     # Create the table using SqlModelHelper
                     sql_helper = target_model.to_sql_model_helper()

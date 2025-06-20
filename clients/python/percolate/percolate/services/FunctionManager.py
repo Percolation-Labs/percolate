@@ -1,5 +1,5 @@
 import typing
-from percolate.models.p8 import Function, PlanModel
+from percolate.models.p8 import Function, PlanModel, ConcisePlanner
 from percolate.models import AbstractModel
 import percolate as p8
 from percolate.utils import logger
@@ -15,10 +15,14 @@ class _RuntimeFunction(Function):
         return self.fn(**kwargs)
     
 class FunctionManager:
-    def __init__(cls):
+    def __init__(cls, use_concise_plan:bool=True, custom_planner=None):
         cls._functions= {}
         cls.repo = p8.repository(Function)
-        cls.planner = None
+        
+        cls.use_concise_plan=use_concise_plan
+        cls.planner = custom_planner
+        if cls.use_concise_plan:
+            cls.planner =  p8.Agent(ConcisePlanner,allow_help=False)
         
     def __getitem__(cls, key):
         """unsafely gets the function"""
