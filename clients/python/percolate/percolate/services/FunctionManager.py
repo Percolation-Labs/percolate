@@ -21,8 +21,6 @@ class FunctionManager:
         
         cls.use_concise_plan=use_concise_plan
         cls.planner = custom_planner
-        if cls.use_concise_plan:
-            cls.planner =  p8.Agent(ConcisePlanner,allow_help=False)
         
     def __getitem__(cls, key):
         """unsafely gets the function"""
@@ -99,6 +97,9 @@ class FunctionManager:
         in the database we need a Plan model that also can search agents and return a plan
         but in python we can just select the data into the planner agent and fetch the plan
         """
+        
+        if cls.use_concise_plan:
+            cls.planner = p8.Agent(ConcisePlanner,allow_help=False)
         if not cls.planner:
             """lazy load once"""
             cls.planner = p8.Agent(PlanModel,allow_help=False)

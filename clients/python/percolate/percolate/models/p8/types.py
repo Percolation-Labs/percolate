@@ -665,6 +665,8 @@ class Resources(AbstractModel):
     fenced codeblocks, headings, lits, tables, links etc.
     
     
+    If you do not find data when you search please call the help function to find other functions to help the user.
+    
     """
     id: typing.Optional[uuid.UUID| str] = Field("The id is generated as a hash of the required uri and ordinal")  
     name: typing.Optional[str] = Field(None, description="A short content name - non unique - for example a friendly label for a chunked pdf document or web page title")

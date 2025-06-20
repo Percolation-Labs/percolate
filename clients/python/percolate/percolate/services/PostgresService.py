@@ -70,9 +70,9 @@ class PostgresService:
                 self.model = None
                 
             self.conn = psycopg2.connect(self._connection_string)
-            
             # Apply user context when connection is established
             if self.conn:
+                print('applying user context')
                 self._apply_user_context()
 
         except:
@@ -401,6 +401,9 @@ class PostgresService:
         # Determine if we should use semantic search only
         semantic_only = self.is_semantic_search_only()
 
+        if user_id and not len(user_id):
+            user_id = None
+            
         Q = f"""select * from p8.query_entity(%s,%s, %s, %s) """
 
         result = self.execute(
