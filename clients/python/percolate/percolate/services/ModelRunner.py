@@ -441,7 +441,9 @@ class ModelRunner:
            we add p8 preamble in percolate - in future this could be disabled per model
         """
         self.messages = self.agent_model.build_message_stack(question=question, functions=self.functions.keys(),
-                                                             data=data, system_prompt_preamble=GENERIC_P8_PROMPT)
+                                                             data=data, system_prompt_preamble=GENERIC_P8_PROMPT,
+                                                                      user_memory = self._context.get_user_memory()
+                                                             )
 
         """run the agent loop to completion"""
         for _ in range(limit or self._context.max_iterations):

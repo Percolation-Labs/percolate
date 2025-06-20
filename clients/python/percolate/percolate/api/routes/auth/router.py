@@ -344,14 +344,27 @@ async def google_auth_callback(request: Request, token:str=None):
             except Exception as e:
                 logger.error(f"Error storing sync credentials: {str(e)}")
         
-        # Create a unique session ID and store it in the session
-        session_id = str(uuid.uuid4())
-        request.session['session_id'] = session_id
-        logger.info(f"Created new session with ID: {session_id}")
+        # Get the actual session cookie value to use as session_id for database lookups
+        # This ensures we can find the user by their session cookie
+        session_cookie = request.cookies.get('session')
+        if session_cookie:
+            # The session cookie is the actual session identifier used by SessionMiddleware
+            session_id = session_cookie
+            logger.info(f"Using session cookie as session_id: {session_id[:10]}...")
+        else:
+            # Fallback to creating a new ID if no session cookie exists
+            session_id = str(uuid.uuid4())
+            logger.info(f"No session cookie found, created new session_id: {session_id}")
         
         # Store the user with token and session
         user = store_user_with_token(token_data, session_id)
         logger.info(f"Stored user: {user.email} with session: {session_id}")
+        
+        # Store user information in the session for easy retrieval
+        request.session['user_id'] = str(user.id)
+        request.session['email'] = user.email
+        request.session['name'] = user.name
+        logger.info(f"Stored user info in session: user_id={user.id}, email={user.email}")
         
         id_token = token_data.get("id_token")
         if not id_token:
