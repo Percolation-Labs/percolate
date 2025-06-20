@@ -155,3 +155,26 @@ EMAIL_SMTP_PORT = int(os.environ.get('EMAIL_SMTP_PORT', 587))
 EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'true').lower() in ('true', '1', 'yes', 'y')
 EMAIL_USERNAME = os.environ.get('EMAIL_USERNAME', 'eepis.development@gmail.com')
 EMAIL_PASSWORD = os.environ.get('EMAIL_PASSWORD', '')
+
+# System user for row-level security when no user context is provided
+def get_system_user_id():
+    """
+    Get the system user ID for operations without explicit user context.
+    System user has admin privileges (access_level = 1) by default.
+    
+    Returns:
+        The system user UUID as a string
+    """
+    # First check environment variable
+    system_user_id = os.environ.get('P8_SYSTEM_USER_ID')
+    if system_user_id:
+        return system_user_id
+    
+    # Otherwise generate deterministic UUID from "system-user" string
+    # Use uuid5 directly to avoid circular imports with make_uuid
+    import uuid
+    return str(uuid.uuid5(uuid.NAMESPACE_DNS, "system-user"))
+
+# System user constants
+SYSTEM_USER_ID = get_system_user_id()
+SYSTEM_USER_ROLE_LEVEL = 1  # Admin level by default

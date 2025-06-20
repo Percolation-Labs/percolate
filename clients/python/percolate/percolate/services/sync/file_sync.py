@@ -65,6 +65,53 @@ class FileSync:
         """
         self.s3_service = s3_service or S3Service()
     
+    def _get_target_model(self, config: SyncConfig):
+        """
+        Get the target model for a sync configuration.
+        Creates an Abstract model if needed.
+        
+        Args:
+            config: Sync configuration
+            
+        Returns:
+            The target model class (Resources or a dynamically created model)
+        """
+        from percolate.models.p8.types import Resources
+        from percolate.models.AbstractModel import AbstractModel
+        from percolate.models.p8.db_types import AccessLevel
+        
+        # Get target model info from config metadata
+        metadata = config.provider_metadata or {}
+        target_namespace = metadata.get("target_namespace", "p8")
+        target_model_name = metadata.get("target_model_name", "Resources")
+        access_level_value = metadata.get("access_level", AccessLevel.PUBLIC.value)
+        
+        # Convert access level value to enum if needed
+        if isinstance(access_level_value, int):
+            access_level = AccessLevel(access_level_value)
+        else:
+            access_level = AccessLevel.PUBLIC
+        
+        # If using default Resources model, return it directly
+        if target_namespace == "p8" and target_model_name == "Resources":
+            return Resources
+        
+        # Create Abstract model that inherits from Resources
+        logger.info(f"Creating dynamic model: {target_namespace}.{target_model_name}")
+        
+        # Create the model dynamically with access_level
+        target_model = AbstractModel.create_model(
+            name=target_model_name,
+            namespace=target_namespace,
+            description=f"Synced content from {config.provider.value}",
+            fields={},  # No additional fields, inherits from Resources
+            access_level=access_level,  # Pass access level directly
+            inherit_config=True,  # Inherit config from Resources parent
+            __base__=Resources  # Inherit from Resources
+        )
+        
+        return target_model
+    
     @staticmethod
     async def store_oauth_credentials(token: dict, user_email: str = None) -> bool:
         """
@@ -299,7 +346,7 @@ class FileSync:
         # Group by user_id
         user_configs = {}
         for config in configs:
-            user_id = str(config["user_id"])
+            user_id = str(config["userid"])
             if user_id not in user_configs:
                 user_configs[user_id] = []
             user_configs[user_id].append(config)
@@ -464,7 +511,26 @@ class FileSync:
         files_failed = 0
         detailed_log = []
         
-        if provider_config.include_my_drive:
+        # Check if we have a specific folder_id in the config metadata
+        folder_id = config.provider_metadata.get("folder_id") if config.provider_metadata else None
+        
+        if folder_id:
+            # Sync specific folder from metadata
+            folder_result = await self._sync_google_drive_folder(
+                drive_service, 
+                config,
+                folder_id,
+                include_folders=config.include_folders,
+                exclude_folders=config.exclude_folders,
+                include_file_types=config.include_file_types,
+                exclude_file_types=config.exclude_file_types
+            )
+            
+            files_synced += folder_result["synced"]
+            files_failed += folder_result["failed"]
+            detailed_log.extend(folder_result["logs"])
+        elif provider_config.include_my_drive:
+            # Fallback to default behavior if no specific folder
             my_drive_result = await self._sync_google_drive_folder(
                 drive_service, 
                 config,
@@ -562,11 +628,67 @@ class FileSync:
         existing_files = sync_file_repo.select(config_id=config.id)
         
         # Create a map of remote_id -> SyncFile for quick lookups
-        # Make sure to handle any records that might be missing the remote_id attribute
-        existing_file_map = {
-            f.remote_id: f for f in existing_files 
-            if hasattr(f, 'remote_id') and f.remote_id
-        }
+        # Handle both dict and object returns from select()
+        existing_file_map = {}
+        for f in existing_files:
+            if isinstance(f, dict):
+                if 'remote_id' in f and f['remote_id']:
+                    existing_file_map[f['remote_id']] = f
+            else:
+                if hasattr(f, 'remote_id') and f.remote_id:
+                    existing_file_map[f.remote_id] = f
+        
+        # Pre-filter files to skip those that are already synced and up-to-date
+        files_to_process = []
+        skipped_count = 0
+        
+        for file in filtered_files:
+            # Skip folders
+            if file.get("mimeType") == "application/vnd.google-apps.folder":
+                continue
+                
+            file_id = file.get("id")
+            file_name = file.get("name")
+            modified_time = datetime.datetime.fromisoformat(
+                file.get("modifiedTime").replace("Z", "+00:00")
+            ) if "modifiedTime" in file else None
+            
+            existing_file = existing_file_map.get(file_id)
+            
+            # Skip if file is already synced and hasn't been modified
+            if existing_file:
+                # Handle both dict and object types
+                status = existing_file.get('status') if isinstance(existing_file, dict) else existing_file.status
+                remote_modified = existing_file.get('remote_modified_at') if isinstance(existing_file, dict) else existing_file.remote_modified_at
+                
+                if status == "synced":
+                    if not modified_time or not remote_modified:
+                        # Can't compare times, include the file to be safe
+                        files_to_process.append(file)
+                    else:
+                        # Make sure both datetimes are timezone-aware for comparison
+                        if remote_modified.tzinfo is None:
+                            remote_modified = remote_modified.replace(tzinfo=datetime.timezone.utc)
+                        if modified_time.tzinfo is None:
+                            modified_time = modified_time.replace(tzinfo=datetime.timezone.utc)
+                            
+                        if modified_time <= remote_modified:
+                            # File hasn't been modified since last sync
+                            logger.debug(f"Skipping already synced file: {file_name}")
+                            skipped_count += 1
+                            continue
+                        else:
+                            # File has been modified, need to re-sync
+                            files_to_process.append(file)
+                else:
+                    # Not synced yet, process it
+                    files_to_process.append(file)
+            else:
+                # New file, process it
+                files_to_process.append(file)
+        
+        logger.info(f"Processing {len(files_to_process)} files, skipped {skipped_count} already synced files")
+        filtered_files = files_to_process
         
         # Process each file
         synced = 0
@@ -587,49 +709,80 @@ class FileSync:
                 ) if "modifiedTime" in file else None
                 
                 # Check if we already have this file
-                if file_id in existing_file_map:
-                    sync_file = existing_file_map[file_id]
-                    
-                    # If modified time is newer than last sync, or if the sync was unsuccessful,
-                    # sync again
-                    if (modified_time and (
-                            not sync_file.remote_modified_at or
-                            modified_time > sync_file.remote_modified_at or
-                            sync_file.status != "synced"  # Use string literal instead of SyncFileStatus.SYNCED
-                        )):
-                        sync_result = await self._sync_google_drive_file(
-                            drive_service,
-                            config,
-                            file,
-                            sync_file
-                        )
-                        
-                        if sync_result["success"]:
-                            synced += 1
-                        else:
-                            failed += 1
-                        
-                        logs.append(sync_result["log"])
+                # Always create a SyncFile object - it will have deterministic ID
+                sync_file = SyncFile(
+                    config_id=config.id,
+                    userid=config.userid,
+                    remote_id=file_id,
+                    remote_path=self._get_file_path(file),
+                    remote_name=file_name,
+                    remote_type=file_type,
+                    remote_size=file.get("size"),
+                    remote_modified_at=modified_time,
+                    remote_created_at=datetime.datetime.fromisoformat(
+                        file.get("createdTime").replace("Z", "+00:00")
+                    ) if "createdTime" in file else None,
+                    remote_metadata={
+                        "webViewLink": file.get("webViewLink"),
+                        "md5Checksum": file.get("md5Checksum")
+                    },
+                    status="pending"  # Default status for new files
+                )
+                
+                # Check if we need to sync this file
+                existing_file = existing_file_map.get(file_id)
+                should_sync = False
+                
+                if not existing_file:
+                    # New file, always sync
+                    should_sync = True
+                    logger.info(f"New file detected: {file_name}")
                 else:
-                    # Create a new sync file record
-                    sync_file = SyncFile(
-                        config_id=config.id,
-                        userid=config.userid,
-                        remote_id=file_id,
-                        remote_path=self._get_file_path(file),
-                        remote_name=file_name,
-                        remote_type=file_type,
-                        remote_size=file.get("size"),
-                        remote_modified_at=modified_time,
-                        remote_created_at=datetime.datetime.fromisoformat(
-                            file.get("createdTime").replace("Z", "+00:00")
-                        ) if "createdTime" in file else None,
-                        remote_metadata={
-                            "webViewLink": file.get("webViewLink"),
-                            "md5Checksum": file.get("md5Checksum")
-                        },
-                        status="pending"  # Use string literal instead of SyncFileStatus.PENDING
-                    )
+                    # Handle both dict and object types
+                    status = existing_file.get('status') if isinstance(existing_file, dict) else existing_file.status
+                    remote_modified = existing_file.get('remote_modified_at') if isinstance(existing_file, dict) else existing_file.remote_modified_at
+                    
+                    if status != "synced":
+                        # File exists but not successfully synced
+                        should_sync = True
+                        logger.info(f"Re-syncing incomplete file: {file_name} (status: {status})")
+                    elif modified_time and remote_modified:
+                        # Make sure both datetimes are timezone-aware for comparison
+                        if remote_modified.tzinfo is None:
+                            remote_modified = remote_modified.replace(tzinfo=datetime.timezone.utc)
+                        if modified_time.tzinfo is None:
+                            modified_time = modified_time.replace(tzinfo=datetime.timezone.utc)
+                            
+                        if modified_time > remote_modified:
+                            # File has been modified since last sync
+                            should_sync = True
+                            logger.info(f"File modified since last sync: {file_name}")
+                        else:
+                            # File is up to date
+                            logger.debug(f"File already synced and up to date: {file_name}")
+                    else:
+                        # File is up to date
+                        logger.debug(f"File already synced and up to date: {file_name}")
+                
+                if should_sync:
+                    # Update sync_file with existing data if available
+                    if existing_file:
+                        if isinstance(existing_file, dict):
+                            sync_file.status = existing_file.get('status', 'pending')
+                            sync_file.s3_uri = existing_file.get('s3_uri')
+                            sync_file.ingested = existing_file.get('ingested', False)
+                            sync_file.resource_id = existing_file.get('resource_id')
+                            sync_file.last_sync_at = existing_file.get('last_sync_at')
+                            sync_file.sync_attempts = existing_file.get('sync_attempts', 0)
+                            sync_file.error_message = existing_file.get('error_message')
+                        else:
+                            sync_file.status = existing_file.status
+                            sync_file.s3_uri = existing_file.s3_uri
+                            sync_file.ingested = existing_file.ingested
+                            sync_file.resource_id = existing_file.resource_id
+                            sync_file.last_sync_at = existing_file.last_sync_at
+                            sync_file.sync_attempts = existing_file.sync_attempts
+                            sync_file.error_message = existing_file.error_message
                     
                     sync_result = await self._sync_google_drive_file(
                         drive_service,
@@ -702,7 +855,15 @@ class FileSync:
                     export_format = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
             
             # Download file content
-            content, content_type = await drive_service.get_file_content(file_id, export_format)
+            logger.debug(f"Downloading {file_name} (ID: {file_id}, Type: {mime_type}, Export: {export_format})")
+            try:
+                content, content_type = await drive_service.get_file_content(file_id, export_format)
+                logger.debug(f"Downloaded {file_name}: {len(content)} bytes, content_type={content_type}")
+            except Exception as download_error:
+                error_type = type(download_error).__name__
+                error_msg = str(download_error) if str(download_error) else f"{error_type} (no message)"
+                logger.error(f"Failed to download {file_name}: {error_type}: {error_msg}")
+                raise
             
             # Generate S3 path
             s3_path = f"file_sync/{config.userid}/{file_id}"
@@ -720,14 +881,23 @@ class FileSync:
                 # Build the S3 URI
                 s3_uri = f"s3://{self.s3_service.default_bucket}/percolate/{s3_path}"
                 
+                logger.debug(f"Uploading {file_name} to S3: {s3_uri} ({len(content)} bytes)")
+                
                 # Use direct bytes upload since we have the content in memory
                 s3_result = self.s3_service.upload_filebytes_to_uri(
                     s3_uri=s3_uri,
                     file_content=content,
                     content_type=content_type
                 )
+                
+                logger.debug(f"Successfully uploaded {file_name} to S3: {s3_result.get('uri')}")
             except Exception as e:
-                logger.error(f"Error uploading file to S3: {str(e)}")
+                error_type = type(e).__name__
+                error_msg = str(e) if str(e) else f"{error_type} (no message)"
+                logger.error(f"Error uploading {file_name} to S3: {error_type}: {error_msg}")
+                # Log traceback for S3 errors
+                import traceback
+                logger.debug(f"S3 upload error traceback:\n{traceback.format_exc()}")
                 raise
             
             # Update sync file record with success
@@ -739,28 +909,40 @@ class FileSync:
             
             # If not already ingested, trigger ingestion
             if not sync_file.ingested:
-                # Create Resource from the content
-                from percolate.models.p8.types import Resources
+                # Get the target model for this sync configuration
+                target_model = self._get_target_model(config)
                 
                 # Handle different content types
                 if content_type.startswith("text/"):
                     # For text content, pass directly
                     text_content = content.decode("utf-8")
-                    resources = Resources.chunked_resource_from_text(
-                        text=text_content,
-                        uri=sync_file.s3_uri,
-                        name=file_name,
-                        userid=config.userid
-                    )
                     
-                    # Update resources (using smart upsert)
+                    # Use the target model's chunked_resource_from_text if available
+                    if hasattr(target_model, 'chunked_resource_from_text'):
+                        resources = target_model.chunked_resource_from_text(
+                            text=text_content,
+                            uri=sync_file.s3_uri,
+                            name=file_name,
+                            userid=config.userid
+                        )
+                    else:
+                        # Fallback to creating instances directly
+                        from percolate.models.p8.types import Resources
+                        resources = Resources.chunked_resource_from_text(
+                            text=text_content,
+                            uri=sync_file.s3_uri,
+                            name=file_name,
+                            userid=config.userid
+                        )
+                    
+                    # Update resources (using smart upsert) with the target model's repository
                     for resource in resources:
-                        p8.repository(Resources).update_records(resource)
+                        p8.repository(target_model).update_records(resource)
                     
                     # Mark as ingested
                     sync_file.ingested = True
                     sync_file.resource_id = resources[0].id if resources else None
-                    logger.info(f"Created {len(resources)} text resources for {file_name}")
+                    logger.info(f"Created {len(resources)} {target_model.get_model_full_name()} resources for {file_name}")
                 
                 # Handle PDF files - create resource
                 elif content_type == "application/pdf" or file_name.lower().endswith(".pdf"):
@@ -770,7 +952,7 @@ class FileSync:
                     
                     # For PDFs, we create a placeholder resource for now
                     # In a real implementation, we'd extract text from PDF
-                    resource = Resources(
+                    resource = target_model(
                         id=resource_id,
                         name=file_name,
                         category="document",
@@ -784,12 +966,12 @@ class FileSync:
                         userid=config.userid
                     )
                     
-                    p8.repository(Resources).update_records(resource)
+                    p8.repository(target_model).update_records(resource)
                     
                     # Mark as ingested
                     sync_file.ingested = True
                     sync_file.resource_id = resource_id
-                    logger.info(f"Created resource for PDF file: {file_name} with ID {resource_id}")
+                    logger.info(f"Created {target_model.get_model_full_name()} resource for PDF file: {file_name} with ID {resource_id}")
                 
                 # Handle Office documents (DOCX, XLSX, PPTX)
                 elif file_name.lower().endswith((".docx", ".xlsx", ".pptx")) or content_type in [
@@ -801,7 +983,7 @@ class FileSync:
                     resource_id = str(uuid.uuid4())
                     
                     # Create a resource for the document
-                    resource = Resources(
+                    resource = target_model(
                         id=resource_id,
                         name=file_name,
                         category="document",
@@ -815,12 +997,12 @@ class FileSync:
                         userid=config.userid
                     )
                     
-                    p8.repository(Resources).update_records(resource)
+                    p8.repository(target_model).update_records(resource)
                     
                     # Mark as ingested
                     sync_file.ingested = True
                     sync_file.resource_id = resource_id
-                    logger.info(f"Created resource for Office document: {file_name} with ID {resource_id}")
+                    logger.info(f"Created {target_model.get_model_full_name()} resource for Office document: {file_name} with ID {resource_id}")
                 
                 # Handle audio files (.wav, .mp3) - trigger transcription
                 elif content_type in ["audio/wav", "audio/x-wav", "audio/mp3", "audio/mpeg"] or \
@@ -874,19 +1056,19 @@ class FileSync:
                             # If we're not in an event loop, log and note that audio will need manual processing
                             logger.warning(f"Could not create async task: {str(loop_error)}. Audio will need manual processing.")
                             # Store the error but don't fail the sync
-                            if not sync_file.metadata:
-                                sync_file.metadata = {}
-                            sync_file.metadata["audio_processing_pending"] = True
-                            sync_file.metadata["audio_processing_note"] = "Async task creation failed - will need manual processing"
+                            if not sync_file.remote_metadata:
+                                sync_file.remote_metadata = {}
+                            sync_file.remote_metadata["audio_processing_pending"] = True
+                            sync_file.remote_metadata["audio_processing_note"] = "Async task creation failed - will need manual processing"
                         
                         # Mark as ingested since it's being handled by the audio pipeline
                         sync_file.ingested = True
                         sync_file.resource_id = audio_file_id
                         
                         # Add metadata about the audio processing
-                        if not sync_file.metadata:
-                            sync_file.metadata = {}
-                        sync_file.metadata["audio_processing"] = {
+                        if not sync_file.remote_metadata:
+                            sync_file.remote_metadata = {}
+                        sync_file.remote_metadata["audio_processing"] = {
                             "audio_file_id": audio_file_id,
                             "status": "processing",
                             "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -894,12 +1076,19 @@ class FileSync:
                         
                         logger.info(f"Audio file {file_name} sent for transcription with ID {audio_file_id}")
                     except Exception as e:
-                        logger.error(f"Error scheduling audio transcription: {str(e)}")
+                        error_type = type(e).__name__
+                        error_msg = str(e) if str(e) else f"{error_type} (no message)"
+                        logger.error(f"Error scheduling audio transcription for {file_name}: {error_type}: {error_msg}")
+                        
+                        # Log traceback for debugging
+                        import traceback
+                        logger.debug(f"Audio processing error traceback:\n{traceback.format_exc()}")
+                        
                         # Don't mark as ingested if there was an error
                         sync_file.ingested = False
-                        if not sync_file.metadata:
-                            sync_file.metadata = {}
-                        sync_file.metadata["audio_processing_error"] = str(e)
+                        if not sync_file.remote_metadata:
+                            sync_file.remote_metadata = {}
+                        sync_file.remote_metadata["audio_processing_error"] = f"{error_type}: {error_msg}"
             
             # Update sync file
             p8.repository(SyncFile).update_records(sync_file)
@@ -916,11 +1105,20 @@ class FileSync:
             }
         
         except Exception as e:
-            logger.error(f"Error syncing file {file_name}: {str(e)}")
+            # Get more detailed error information
+            error_type = type(e).__name__
+            error_msg = str(e) if str(e) else f"{error_type} (no message)"
+            
+            # Log with more detail including traceback
+            logger.error(f"Error syncing file {file_name}: {error_type}: {error_msg}")
+            
+            # Log the full traceback for debugging
+            import traceback
+            logger.debug(f"Full traceback for {file_name}:\n{traceback.format_exc()}")
             
             # Update sync file record with failure
             sync_file.status = "failed" # Use string literal instead of SyncFileStatus.FAILED
-            sync_file.error_message = str(e)
+            sync_file.error_message = f"{error_type}: {error_msg}"
             p8.repository(SyncFile).update_records(sync_file)
             
             return {
@@ -1079,19 +1277,33 @@ class FileSync:
                 # Get the user ID from sync_file or config
                 userid = sync_file.userid or (config.userid if config else None)
                 
+                # Get the target model for this sync configuration
+                target_model = self._get_target_model(config) if config else Resources
+                
                 if content_type.startswith("text/") or file_name.lower().endswith((".txt", ".md", ".html")):
                     # Handle text files
                     text_content = file_content.decode("utf-8")
-                    resources = Resources.chunked_resource_from_text(
-                        text=text_content,
-                        uri=s3_uri,
-                        name=file_name,
-                        userid=userid
-                    )
                     
-                    # Update resources
+                    # Use the target model's chunked_resource_from_text if available
+                    if hasattr(target_model, 'chunked_resource_from_text'):
+                        resources = target_model.chunked_resource_from_text(
+                            text=text_content,
+                            uri=s3_uri,
+                            name=file_name,
+                            userid=userid
+                        )
+                    else:
+                        # Fallback to Resources
+                        resources = Resources.chunked_resource_from_text(
+                            text=text_content,
+                            uri=s3_uri,
+                            name=file_name,
+                            userid=userid
+                        )
+                    
+                    # Update resources with target model repository
                     for resource in resources:
-                        p8.repository(Resources).update_records(resource)
+                        p8.repository(target_model).update_records(resource)
                     
                     # Mark as ingested
                     sync_file.ingested = True
@@ -1099,14 +1311,14 @@ class FileSync:
                     p8.repository(SyncFile).update_records(sync_file)
                     
                     successful += 1
-                    logger.info(f"Flushed text file {file_name} to resources")
+                    logger.info(f"Flushed text file {file_name} to {target_model.get_model_full_name()}")
                     
                 elif content_type == "application/pdf" or file_name.lower().endswith(".pdf"):
                     # Handle PDF files
                     resource_id = str(uuid.uuid4())
                     
                     # Create a resource for the PDF
-                    resource = Resources(
+                    resource = target_model(
                         id=resource_id,
                         name=file_name,
                         category="document",
@@ -1120,7 +1332,7 @@ class FileSync:
                         userid=userid
                     )
                     
-                    p8.repository(Resources).update_records(resource)
+                    p8.repository(target_model).update_records(resource)
                     
                     # Mark as ingested
                     sync_file.ingested = True
@@ -1128,7 +1340,7 @@ class FileSync:
                     p8.repository(SyncFile).update_records(sync_file)
                     
                     successful += 1
-                    logger.info(f"Flushed PDF file {file_name} to resources")
+                    logger.info(f"Flushed PDF file {file_name} to {target_model.get_model_full_name()}")
                     
                 elif file_name.lower().endswith((".docx", ".xlsx", ".pptx")) or content_type in [
                     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -1139,7 +1351,7 @@ class FileSync:
                     resource_id = str(uuid.uuid4())
                     
                     # Create a resource for the document
-                    resource = Resources(
+                    resource = target_model(
                         id=resource_id,
                         name=file_name,
                         category="document",
@@ -1153,7 +1365,7 @@ class FileSync:
                         userid=userid
                     )
                     
-                    p8.repository(Resources).update_records(resource)
+                    p8.repository(target_model).update_records(resource)
                     
                     # Mark as ingested
                     sync_file.ingested = True
@@ -1161,7 +1373,7 @@ class FileSync:
                     p8.repository(SyncFile).update_records(sync_file)
                     
                     successful += 1
-                    logger.info(f"Flushed document file {file_name} to resources")
+                    logger.info(f"Flushed document file {file_name} to {target_model.get_model_full_name()}")
                     
                 elif content_type in ["audio/wav", "audio/x-wav", "audio/mp3", "audio/mpeg"] or \
                      file_name.lower().endswith((".wav", ".mp3")):

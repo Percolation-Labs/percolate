@@ -107,6 +107,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  #kubectl logs -n p8 -l $(kubectl get svc percolate-api -n p8 -o json | jq -r '.spec.selector | to_entries | map("\(.key)=\(.value)") | join(",")') --tail=100 -f
   name: percolate-api
   namespace: p8
 spec:

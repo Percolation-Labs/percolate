@@ -26,6 +26,9 @@ from percolate.models.media.audio import (
     AudioResource
 )
 
+# Specify field names to ensure schema compatibility
+AUDIO_FILE_FIELDS = "id, userid, project_name, filename, file_size, content_type, duration, upload_date, status, s3_uri, metadata"
+
 # Get the S3 bucket from environment or use default
 S3_AUDIO_BUCKET = os.environ.get("S3_AUDIO_BUCKET", "percolate-audio")
 
@@ -78,7 +81,7 @@ async def upload_audio_file(
         # Initialize with uploading status first
         audio_file = AudioFile(
             id=file_id,
-            user_id=user_id,
+            userid=user_id,
             project_name=project_name,
             filename=file.filename,
             file_size=file_size,
@@ -221,14 +224,14 @@ async def process_audio_file(file_id: str, user_id: Optional[str] = None, use_s3
         return
     
     # If no user_id is provided, try to use the one from the audio file (validating it's a UUID)
-    if not user_id and hasattr(audio_file, 'user_id') and audio_file.user_id:
+    if not user_id and hasattr(audio_file, 'userid') and audio_file.userid:
         try:
             # Validate the UUID from the audio file
-            uuid_obj = uuid.UUID(audio_file.user_id)
+            uuid_obj = uuid.UUID(str(audio_file.userid))
             user_id = str(uuid_obj)
-            logger.info(f"Using user_id from audio file: {user_id}")
+            logger.info(f"Using userid from audio file: {user_id}")
         except (ValueError, TypeError):
-            logger.warning(f"Invalid user_id in audio file: {audio_file.user_id} - will not associate chunks with a user")
+            logger.warning(f"Invalid userid in audio file: {audio_file.userid} - will not associate chunks with a user")
             user_id = None
     
     # Update status to processing
@@ -445,10 +448,15 @@ async def list_project_audio_files(project_name: str, user_id: Optional[str] = N
     # Build query based on provided parameters
     query = {"project_name": project_name}
     if user_id:
-        query["user_id"] = user_id
+        # Use explicit SQL query to ensure we're using the right field based on DB schema
+        files = p8.repository(AudioFile).execute(
+            f"SELECT {AUDIO_FILE_FIELDS} FROM public.\"AudioFile\" WHERE project_name = %s AND userid = %s ORDER BY upload_date DESC",
+            data=(project_name, user_id)
+        )
+        return [AudioFile(**file) for file in files]
         
-    # Include order by created_at desc to show newest first
-    files = p8.repository(AudioFile).select(**query, order_by="-created_at")
+    # Include order by upload_date desc to show newest first
+    files = p8.repository(AudioFile).select(**query, order_by="-upload_date")
     
     logger.info(f"Found {len(files)} audio files")
     return files

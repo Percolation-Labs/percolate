@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "percolate-db"
-version = "0.1.871"
+version = "0.2.7"
 description = "A client for working with the [Percolate database](https://github.com/Percolation-Labs/percolate)"
 authors = ["mr-saoirse <amartey@gmail.com>"]
 license = "MIT"
@@ -26,9 +26,8 @@ fastapi = ">=0.110.1"
 minio = ">=7.2.15"
 python-multipart = ">0"
 html2text = "^2024.2.26"
-authlib = "^1.5.2"
+# authlib dependency removed as we now use custom implementation
 itsdangerous = "^2.2.0"
-pymupdf = "^1.25.5"
 duckdb = "^0.10.0"
 polars = "^0.20.5"
 kuzu = "^0.0.11"
@@ -39,8 +38,8 @@ aiohttp = "^3.8"
 mammoth = "^1.9.0"
 markdown = "^3.8"
 pyjwt = "^2.10.1"
-fitz = "^0.0.1.dev2"
-pdf2image = "^1.17.0"
+pymupdf = "1.24.13"
+pdf2image = "*"
 
 [tool.poetry.group.iceberg]
 optional = true

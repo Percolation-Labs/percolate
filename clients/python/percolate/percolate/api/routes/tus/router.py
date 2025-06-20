@@ -11,25 +11,26 @@ import uuid
 import base64
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
-from fastapi import APIRouter, Request, Response, Header, Depends, BackgroundTasks, Query, Path
+from fastapi import APIRouter, Request, Response, Header, Depends, BackgroundTasks, Query, Path, HTTPException
 from fastapi.responses import JSONResponse
 from datetime import timezone
 import percolate as p8
-from percolate.api.controllers import tus as tus_controller
+from percolate.api.controllers import tus_filesystem as tus_controller
 from percolate.models.media.tus import (
     TusFileUpload,
     TusFileChunk,
     TusUploadStatus,
     TusUploadMetadata,
     TusUploadPatchResponse,
-    TusUploadCreationResponse,
-    UserUploadSearchRequest,
-    UserUploadSearchResult
+    TusUploadCreationResponse
 )
 from percolate.utils import logger
 from pydantic import BaseModel
+from ..auth import get_user_id, HybridAuth
+
+# Create an instance of HybridAuth
+hybrid_auth = HybridAuth()
 from . import get_project_name
-from percolate.api.routes.auth import hybrid_auth, require_user_auth
 
 # Constants for Tus protocol
 TUS_VERSION = "1.0.0"
@@ -39,11 +40,8 @@ TUS_API_VERSION = os.environ.get("TUS_API_VERSION", "v1")
 TUS_API_PATH = os.environ.get("TUS_API_PATH", "/tus")
 DEFAULT_EXPIRATION = int(os.environ.get("TUS_DEFAULT_EXPIRATION", "86400"))  # 24 hours in seconds
 
-# Create the router with hybrid authentication required for all endpoints
-# This supports both bearer tokens (for testing/API access) and session auth (for users)
-router = APIRouter(
-    dependencies=[Depends(hybrid_auth)]
-)
+# Create the router
+router = APIRouter()
 
 # Helper functions
 
@@ -66,18 +64,14 @@ def log_model(model: BaseModel, prefix: str = "") -> None:
     except Exception as e:
         logger.error(f"Error logging model: {str(e)}")
 
-def tus_response_headers(response: Response, upload_id: Optional[str] = None, upload_offset: Optional[int] = None, expiry: Optional[datetime] = None, location: Optional[str] = None):
+def tus_response_headers(response: Response, upload_id: Optional[str] = None, upload_offset: Optional[int] = None, expiry: Optional[datetime] = None):
     """Add standard Tus response headers to a response"""
     response.headers["Tus-Resumable"] = TUS_VERSION
     response.headers["Tus-Version"] = TUS_VERSION
     response.headers["Tus-Extension"] = TUS_EXTENSIONS
     response.headers["Tus-Max-Size"] = str(TUS_MAX_SIZE)
     
-    if upload_id and location:
-        # Use the absolute URL if provided
-        response.headers["Location"] = location
-    elif upload_id:
-        # Fall back to relative path if no absolute URL provided
+    if upload_id:
         location = f"{TUS_API_PATH}/{upload_id}"
         response.headers["Location"] = location
         
@@ -116,13 +110,13 @@ async def tus_create_upload(
     request: Request,
     response: Response,
     background_tasks: BackgroundTasks,
-    user_id: Optional[str] = Depends(hybrid_auth),  # Optional - None for bearer auth
+    user_id: Optional[str] = Depends(hybrid_auth),
     project_name: str = Depends(get_project_name),
     upload_metadata: Optional[str] = Header(None),
     upload_length: Optional[int] = Header(None),
     upload_defer_length: Optional[int] = Header(None),
     content_type: Optional[str] = Header(None),
-    content_length: Optional[int] = Header(None),
+    content_length: Optional[int] = Header(None)
 ):
     """
     Handle POST request - Create a new upload
@@ -172,10 +166,8 @@ async def tus_create_upload(
     # Calculate expiration
     expires_in = timedelta(seconds=DEFAULT_EXPIRATION)
     
-    if user_id:
-        logger.info(f"Using user ID from session: {user_id}")
-    else:
-        logger.info("Using bearer token authentication (no user context)")
+    # Log the authenticated user
+    logger.info(f"TUS create_upload - authenticated user_id: {user_id}")
     
     # Create the upload
     upload_response = await tus_controller.create_upload(
@@ -197,8 +189,7 @@ async def tus_create_upload(
     tus_response_headers(
         response=response, 
         upload_id=str(upload_response.upload_id),
-        expiry=upload_response.expires_at,
-        location=upload_response.location
+        expiry=upload_response.expires_at
     )
     
     # Add Upload-Expires header
@@ -322,25 +313,32 @@ async def tus_upload_chunk(
         tus_response_headers(response)
         return {"error": "Content-Length does not match actual data length"}
     
-    # Process the chunk
-    patch_response = await tus_controller.process_chunk(
-        upload_id=upload_id,
-        chunk_data=chunk_data,
-        content_length=content_length,
-        offset=upload_offset,
-        background_tasks=background_tasks
-    )
-    
-    # Set Tus response headers
-    tus_response_headers(
-        response=response,
-        upload_id=str(patch_response.upload_id),
-        upload_offset=patch_response.offset,
-        expiry=patch_response.expires_at
-    )
-    
-    response.status_code = 204
-    return response
+    try:
+        # Process the chunk
+        patch_response = await tus_controller.process_chunk(
+            upload_id=upload_id,
+            chunk_data=chunk_data,
+            content_length=content_length,
+            offset=upload_offset,
+            background_tasks=background_tasks
+        )
+        
+        # Set Tus response headers
+        tus_response_headers(
+            response=response,
+            upload_id=str(patch_response.upload_id),
+            upload_offset=patch_response.offset,
+            expiry=patch_response.expires_at
+        )
+        
+        response.status_code = 204
+        return response
+    except HTTPException as e:
+        # Re-raise HTTP exceptions as they already have proper status codes
+        raise
+    except Exception as e:
+        logger.error(f"Error processing chunk for upload {upload_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing chunk: {str(e)}")
 
 @router.delete(
     "/{upload_id}",
@@ -381,7 +379,7 @@ async def tus_delete_upload(
 )
 async def list_uploads(
     response: Response,
-    user_id: Optional[str] = Depends(hybrid_auth),  # Optional - None for bearer auth
+    user_id: Optional[str] = Depends(hybrid_auth),
     project_name: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     tags: Optional[List[str]] = Query(None),
@@ -443,8 +441,8 @@ async def finalize_upload(
     """
     logger.info(f"Finalize upload request for: {upload_id}")
     
-    # Finalize the upload with background S3 upload
-    final_path = await tus_controller.finalize_upload(upload_id, background_tasks)
+    # Finalize the upload
+    result = await tus_controller.finalize_upload(upload_id)
     
     # Set Tus response headers for consistency
     tus_response_headers(response)
@@ -458,10 +456,13 @@ async def finalize_upload(
     # Log detailed S3 info
     if hasattr(upload, 's3_uri') and upload.s3_uri:
         logger.info(f"File stored in S3 at: Bucket={upload.s3_bucket}, Key={upload.s3_key}, URI={upload.s3_uri}")
+        final_location = upload.s3_uri
     elif upload.upload_metadata.get("s3_uri"):
         logger.info(f"File stored in S3 at: URI={upload.upload_metadata.get('s3_uri')}")
+        final_location = upload.upload_metadata.get("s3_uri")
     else:
-        logger.info(f"File stored locally at: {final_path}")
+        logger.info(f"File stored locally at: {result}")
+        final_location = result
     
     # Return success with file information
     return {
@@ -470,10 +471,11 @@ async def finalize_upload(
         "size": upload.total_size,
         "content_type": upload.content_type,
         "status": upload.status,
-        "s3_uri": upload.s3_uri if hasattr(upload, 's3_uri') and upload.s3_uri else upload.upload_metadata.get("s3_uri", ""),
+        "s3_uri": upload.s3_uri if hasattr(upload, 's3_uri') else None,
         "s3_bucket": upload.s3_bucket if hasattr(upload, 's3_bucket') else None,
         "s3_key": upload.s3_key if hasattr(upload, 's3_key') else None,
-        "local_path": final_path
+        "location": final_location,
+        "storage_type": upload.upload_metadata.get("storage_type", "unknown")
     }
 
 @router.post(
@@ -549,7 +551,7 @@ async def get_user_files_by_id(
 )
 async def get_recent_user_uploads(
     response: Response,
-    user_id: str = Depends(require_user_auth),  # Must have user context
+    user_id: str = Depends(hybrid_auth),
     limit: int = Query(10, gt=0, le=100),
     project_name: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
@@ -564,6 +566,10 @@ async def get_recent_user_uploads(
     """
     logger.info(f"Get recent uploads for user: {user_id}, tags: {tags}, search: {search}")
     
+    # Validate user is authenticated
+    if not user_id:
+        response.status_code = 401
+        return {"error": "Authentication required"}
     
     # Convert status string to enum if provided
     status_enum = None
@@ -603,7 +609,7 @@ async def update_upload_tags(
     response: Response,
     upload_id: str = Path(...),
     tags: List[str] = Query(..., max_items=3),
-    user_id: Optional[str] = Depends(hybrid_auth),  # Optional - None for bearer auth
+    user_id: Optional[str] = Depends(hybrid_auth)
 ):
     """
     Update the tags for an upload
@@ -611,19 +617,21 @@ async def update_upload_tags(
     This endpoint allows setting up to 3 tags on an upload for categorization and searching
     """
     logger.info(f"Update tags for upload: {upload_id}, tags: {tags}")
-    if user_id:
-        logger.info(f"Using user ID: {user_id}")
-    else:
-        logger.info("Using bearer token authentication (admin access)")
+    
+    # Log the authenticated user
+    logger.info(f"Update tags - authenticated user_id: {user_id}")
+    
+    # Validate user is authenticated
+    if not user_id:
+        response.status_code = 401
+        return {"error": "Authentication required"}
     
     try:
         # Get the upload
         upload = await tus_controller.get_upload_info(upload_id)
         
         # Check if user is authorized to modify this upload
-        # Bearer token auth allows updates to any upload (admin access)
-        # Session auth requires ownership
-        if user_id and upload.user_id and str(upload.user_id) != user_id:
+        if upload.userid and str(upload.userid) != user_id:
             response.status_code = 403
             return {"error": "Not authorized to modify this upload"}
         
@@ -663,7 +671,7 @@ async def update_upload_tags(
 async def semantic_search(
     response: Response,
     query: str = Query(..., min_length=3),
-    user_id: Optional[str] = Depends(hybrid_auth),  # Optional - None for bearer auth
+    user_id: Optional[str] = Depends(hybrid_auth),
     project_name: Optional[str] = Query(None),
     tags: Optional[List[str]] = Query(None),
     limit: int = Query(10, gt=0, le=100),
@@ -699,139 +707,3 @@ async def semantic_search(
         "implementation": "placeholder_text_search",
         "note": "This is a placeholder for semantic search. Currently using basic text matching."
     }
-
-
-@router.post(
-    "/user/uploads/search",
-    response_model=List[UserUploadSearchResult],
-    include_in_schema=True,
-)
-async def search_user_uploads(
-    request: UserUploadSearchRequest,
-    response: Response,
-    user_id: str = Depends(require_user_auth),  # Must have user context
-):
-    """
-    Search user uploads with semantic search and tag filtering
-    
-    This endpoint allows users to search their uploads using:
-    - Semantic search: Find files based on content similarity
-    - Tag filtering: Filter by assigned tags
-    - Combined search: Use both semantic search and tags together
-    
-    Returns the top N files based on the search criteria
-    """
-    logger.info(f"User upload search request: user={user_id}, query={request.query_text}, tags={request.tags}, limit={request.limit}")
-    
-    # Get PostgreSQL service
-    from percolate.services import PostgresService
-    pg = PostgresService()
-    
-    # Call the SQL function using PostgresService
-    query = """
-        SELECT * FROM p8.file_upload_search(
-            p_user_id := %s,
-            p_query_text := %s,
-            p_tags := %s,
-            p_limit := %s
-        )
-    """
-    
-    params = [
-        user_id,
-        request.query_text,
-        request.tags if request.tags else None,  # Pass None if no tags
-        request.limit
-    ]
-    
-    try:
-        # Execute the query
-        results = pg.execute(query, params)
-        
-        # Convert results to UserUploadSearchResult objects
-        search_results = []
-        for row in results:
-            # Handle both dict and tuple results from PostgreSQL
-            if isinstance(row, dict):
-                data = row
-            else:
-                # If tuple, convert to dict using column names
-                columns = ['upload_id', 'filename', 'content_type', 'total_size', 'uploaded_size',
-                          'status', 'created_at', 'updated_at', 's3_uri', 'tags', 'resource_id',
-                          'resource_uri', 'resource_name', 'chunk_count', 'resource_size', 
-                          'indexed_at', 'semantic_score']
-                data = dict(zip(columns, row))
-            
-            result = UserUploadSearchResult(
-                upload_id=data['upload_id'],
-                filename=data['filename'],
-                content_type=data['content_type'],
-                total_size=data['total_size'],
-                uploaded_size=data['uploaded_size'],
-                status=data['status'],
-                created_at=data['created_at'],
-                updated_at=data['updated_at'],
-                s3_uri=data['s3_uri'],
-                tags=data['tags'] if data['tags'] else [],
-                resource_id=data['resource_id'],
-                # Resource fields (may be None)
-                resource_uri=data.get('resource_uri'),
-                resource_name=data.get('resource_name'),
-                chunk_count=data.get('chunk_count'),
-                resource_size=data.get('resource_size'),
-                indexed_at=data.get('indexed_at'),
-                semantic_score=data.get('semantic_score')
-            )
-            search_results.append(result)
-        
-        # Log search summary
-        if request.query_text and any(r.semantic_score for r in search_results):
-            logger.info(f"Semantic search completed: {len(search_results)} results with scores")
-        else:
-            logger.info(f"Standard search completed: {len(search_results)} results")
-        
-        # Set Tus response headers for consistency
-        tus_response_headers(response)
-        
-        return search_results
-        
-    except Exception as e:
-        logger.error(f"Error searching uploads: {str(e)}")
-        response.status_code = 500
-        # Return empty array instead of error object to match response_model
-        return []
-
-
-@router.get(
-    "/user/uploads",
-    response_model=List[UserUploadSearchResult],
-    include_in_schema=True,
-)
-async def get_user_uploads(
-    response: Response,
-    user_id: str = Depends(require_user_auth),  # Must have user context
-    query: Optional[str] = Query(None, description="Semantic search query"),
-    tags: Optional[List[str]] = Query(None, description="Filter by tags"),
-    limit: int = Query(20, gt=0, le=100, description="Maximum results to return"),
-):
-    """
-    Get user uploads with optional search and filtering (GET version)
-    
-    This is a GET endpoint version of the search functionality for convenience.
-    Supports the same search capabilities as the POST endpoint:
-    - Semantic search: Find files based on content similarity
-    - Tag filtering: Filter by assigned tags
-    - Combined search: Use both semantic search and tags together
-    """
-  
-    # Create request object and delegate to POST endpoint
-    search_request = UserUploadSearchRequest(
-        query_text=query,
-        tags=tags,
-        limit=limit
-    )
-    
-    logger.info(f"Requesting user uploads {user_id=} {search_request=}")
-    
-    
-    return await search_user_uploads(search_request, response, user_id)

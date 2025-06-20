@@ -2,7 +2,8 @@
 Stream generators for adapting LLM response streams.
 
 This module implements stream generators that buffer function calls and usage data
-while adapting the raw events between different provider formats.
+while adapting the raw events between different provider formats. It also provides
+functions for converting streaming responses to non-streaming responses.
 """
 
 import json
@@ -15,7 +16,8 @@ from requests.models import Response
 from percolate.services.llm.CallingContext import CallingContext
 from percolate.services.llm.proxy.models import (
     OpenAIStreamDelta, AnthropicStreamDelta, GoogleStreamDelta,
-    OpenAIRequest, AnthropicRequest, GoogleRequest, LLMApiRequest
+    OpenAIRequest, AnthropicRequest, GoogleRequest, LLMApiRequest,
+    OpenAIResponse, AnthropicResponse, GoogleResponse, LLMResponse
 )
 from percolate.services.llm.proxy.utils import (
     BackgroundAudit, parse_sse_line, create_sse_line, format_tool_calls_for_openai
@@ -198,7 +200,10 @@ def flush_ai_response_audit(
     usage: typing.Dict[str, int]
 ) -> None:
     """
-    Flush AI response data to audit storage using the background worker.
+    [DEPRECATED] This function has been replaced by audit_response_for_user.
+    
+    Use audit_response_for_user with LLMStreamIterator.audit_on_flush=True instead.
+    This function remains for backward compatibility but only logs a warning.
     
     Args:
         content: The text content
@@ -206,9 +211,11 @@ def flush_ai_response_audit(
         tool_responses: Dictionary of tool responses by tool call ID
         usage: Token usage information
     """
-    # Use the background auditor instance method
-    auditor = BackgroundAudit()
-    auditor.flush_ai_response_audit(content, tool_calls, tool_responses, usage)
+    logger.warning(
+        "flush_ai_response_audit is deprecated. "
+        "Use LLMStreamIterator with audit_on_flush=True instead, "
+        "which will call audit_response_for_user at the end of the stream."
+    )
 
 
 def request_stream_from_model(
@@ -319,4 +326,282 @@ def request_stream_from_model(
         def error_generator():
             yield f"data: {json.dumps(error_chunk)}\n\n", error_chunk
         return error_generator()
+
+
+def collect_stream_to_response(
+    stream_iterator: typing.Union[typing.Generator[typing.Tuple[str, dict], None, None], 'LLMStreamIterator'],
+    source_scheme: str = 'openai',
+    target_scheme: str = 'openai',
+    model: str = 'unknown'
+) -> LLMResponse:
+    """
+    Collect a streaming response into a single non-streaming response object.
+    
+    This function processes all chunks from a streaming response and aggregates them
+    into a complete response in the requested format. It handles:
+    1. Content aggregation from text deltas
+    2. Tool call buffering and completion
+    3. Usage data collection
+    
+    Args:
+        stream_iterator: Either a Generator yielding tuples of (raw_line, chunk_in_openai_format)
+                         or an LLMStreamIterator object
+        source_scheme: The source provider scheme ('openai', 'anthropic', 'google')
+        target_scheme: The target provider scheme for the result ('openai', 'anthropic', 'google')
+        model: The model name to include in the response
+        
+    Returns:
+        A complete LLMResponse object in the target format
+    """
+    # Check if we have an LLMStreamIterator
+    from percolate.services.llm.utils.stream_utils import LLMStreamIterator
+    if isinstance(stream_iterator, LLMStreamIterator):
+        # Consume the iterator if not already consumed
+        if not stream_iterator._is_consumed:
+            try:
+                # Consume all lines, which will populate the content and usage
+                list(stream_iterator.iter_lines())
+            except Exception as e:
+                # If there's an error in consuming the stream, return a simplified response
+                logger.warning(f"Error consuming stream: {e}")
+                return {
+                    'skipped': 'p8.AIResponse', 
+                    'tokens': 0,
+                    'error': str(e)
+                }
+            
+        # Extract the aggregated content and tool calls from the iterator
+        content = getattr(stream_iterator, 'content', '')
+        tool_calls = []
+        # Extract any tool calls from ai_responses
+        ai_responses = getattr(stream_iterator, 'ai_responses', [])
+        for ai_response in ai_responses:
+            if hasattr(ai_response, 'tool_calls') and ai_response.tool_calls:
+                for tool_call in ai_response.tool_calls:
+                    if isinstance(tool_call, dict):
+                        tool_calls.append(tool_call)
+        
+        # Extract usage information
+        usage = getattr(stream_iterator, '_usage', None) or {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0
+        }
+        
+        # Use the model from the iterator if available
+        if hasattr(stream_iterator, 'model') and stream_iterator.model:
+            model = stream_iterator.model
+    else:
+        # Initialize variables to collect data
+        content = ""
+        tool_calls = []
+        usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0
+        }
+        
+        # Track tool call aggregation state
+        tool_call_map = {}  # Map of tool call index to complete tool call data
+        
+        # Process all chunks in the stream
+        for _, chunk in stream_iterator:
+            # Skip special events like [DONE]
+            if isinstance(chunk, dict) and chunk.get("type") == "done":
+                continue
+                
+            # Handle error responses
+            if "error" in chunk:
+                # Create error response in OpenAI format first
+                error_response = {
+                    "id": f"err_{int(time.time())}",
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": f"Error: {chunk['error'].get('message', 'Unknown error')}"
+                            },
+                            "finish_reason": "error"
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0
+                    }
+                }
+                
+                # Convert to target scheme
+                if target_scheme == 'anthropic':
+                    return AnthropicResponse(
+                        id=error_response["id"],
+                        model=model,
+                        role="assistant",
+                        content=[{"type": "text", "text": error_response["choices"][0]["message"]["content"]}],
+                        stop_reason="error",
+                        usage={"input_tokens": 0, "output_tokens": 0}
+                    )
+                elif target_scheme == 'google':
+                    return GoogleResponse(
+                        model=model,
+                        candidates=[{
+                            "content": {
+                                "role": "model",
+                                "parts": [{"text": error_response["choices"][0]["message"]["content"]}]
+                            },
+                            "finishReason": "ERROR"
+                        }],
+                        usageMetadata={"promptTokenCount": 0, "candidatesTokenCount": 0, "totalTokenCount": 0}
+                    )
+                else:
+                    return OpenAIResponse(**error_response)
+            
+            # Handle usage data
+            if "usage" in chunk:
+                usage.update(chunk["usage"])
+                continue
+                
+            # Process standard content chunks
+            if "choices" in chunk and chunk["choices"]:
+                choice = chunk["choices"][0]
+                delta = choice.get("delta", {})
+                
+                # Aggregate text content
+                if "content" in delta:
+                    content += delta["content"]
+                
+                # Collect tool calls
+                if "tool_calls" in delta:
+                    for tool_delta in delta["tool_calls"]:
+                        if "id" in tool_delta:
+                            # Track this tool call by index
+                            tool_call_map[tool_delta["index"]] = tool_delta
+                        elif "index" in tool_delta:
+                            # Update existing tool call arguments
+                            t = tool_call_map.get(tool_delta["index"])
+                            if t and "function" in t and "function" in tool_delta:
+                                args = tool_delta["function"].get("arguments", "")
+                                t["function"]["arguments"] += args
+                
+                # Check for finish reason to determine when we're done
+                if choice.get("finish_reason") in ["stop", "tool_calls"]:
+                    # For tool_calls finish reason, add the completed tool calls to our list
+                    if choice.get("finish_reason") == "tool_calls":
+                        tool_calls = list(tool_call_map.values())
+    
+    # If we got a dictionary returned earlier (error case), just return it
+    if isinstance(content, dict) and ('skipped' in content or 'error' in content):
+        # Make sure we're not trying to use this as a response directly
+        # Add a type hint to indicate this is a special case
+        content['_response_type'] = 'error_dict'
+        return content
+    
+    # Also handle the case where the entire iterator is already a dict with skipped
+    if isinstance(stream_iterator, dict) and ('skipped' in stream_iterator or 'error' in stream_iterator):
+        stream_iterator['_response_type'] = 'error_dict'
+        return stream_iterator
+        
+    # Build the final response in OpenAI format first
+    try:
+        openai_response = {
+            "id": f"chatcmpl-{int(time.time())}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": content
+                    },
+                    # Determine finish reason based on whether we have tool calls
+                    "finish_reason": "tool_calls" if tool_calls else "stop"
+                }
+            ],
+            "usage": usage
+        }
+    except Exception as e:
+        # If there's an error constructing the response, return a simple error dict
+        return {
+            'skipped': 'p8.AIResponse',
+            'tokens': 0,
+            'error': str(e),
+            '_response_type': 'error_dict'
+        }
+    
+    # Add tool calls if present
+    if tool_calls:
+        openai_response["choices"][0]["message"]["tool_calls"] = tool_calls
+    
+    # Convert to target format
+    if target_scheme == 'anthropic':
+        # First convert to OpenAI response
+        openai_resp = OpenAIResponse(**openai_response)
+        # Then convert to Anthropic
+        return AnthropicResponse(
+            id=openai_resp.id,
+            model=model,
+            content=openai_resp.to_anthropic_format().get("content", []),
+            stop_reason=openai_resp.choices[0].get("finish_reason", "stop"),
+            usage={
+                "input_tokens": usage.get("prompt_tokens", 0),
+                "output_tokens": usage.get("completion_tokens", 0)
+            }
+        )
+    elif target_scheme == 'google':
+        # First convert to OpenAI response
+        openai_resp = OpenAIResponse(**openai_response)
+        # Then convert to Google
+        google_format = openai_resp.to_google_format()
+        return GoogleResponse(
+            model=model,
+            candidates=google_format.get("candidates", []),
+            usageMetadata=google_format.get("usageMetadata", {})
+        )
+    else:
+        # Return OpenAI format
+        return OpenAIResponse(**openai_response)
+
+
+def request_non_streaming_response(
+    request: LLMApiRequest,
+    context: CallingContext,
+    target_scheme: str = 'openai',
+    **kwargs
+) -> LLMResponse:
+    """
+    Make a request to an LLM API and collect the streaming response into a single response object.
+    
+    This function is similar to request_stream_from_model but collects the entire
+    stream and returns a complete response object instead of a generator.
+    
+    Args:
+        request: The API request to send
+        context: The calling context with API credentials and session info
+        target_scheme: The target scheme for the response ('openai', 'anthropic', 'google')
+        **kwargs: Additional options to pass to the stream_with_buffered_functions
+        
+    Returns:
+        A complete LLMResponse object in the target format
+    """
+    # Get a streaming response
+    stream_gen = request_stream_from_model(
+        request, 
+        context, 
+        target_scheme=target_scheme,
+        **kwargs
+    )
+    
+    # Collect the stream into a complete response
+    return collect_stream_to_response(
+        stream_gen,
+        source_scheme='openai',  # We always get OpenAI format from request_stream_from_model
+        target_scheme=target_scheme,
+        model=request.model
+    )
 

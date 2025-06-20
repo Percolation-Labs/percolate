@@ -10,7 +10,10 @@ from percolate.utils.env import (
     POSTGRES_DB,
     POSTGRES_SERVER,
     DEFAULT_CONNECTION_TIMEOUT,
+    SYSTEM_USER_ID,
+    SYSTEM_USER_ROLE_LEVEL,
 )
+import os
 import psycopg2.extras
 from psycopg2 import sql
 from psycopg2.errors import DuplicateTable
@@ -30,19 +33,47 @@ class PostgresService:
         model: BaseModel = None,
         connection_string=None,
         on_connect_error: str = None,
+        user_id=None,
+        user_groups=None,
+        role_level=None,
     ):
         try:
             self._connection_string = connection_string or POSTGRES_CONNECTION_STRING
             self.conn = None
             self._graph = PercolateGraph(self)
             self.helper = SqlModelHelper(AbstractModel)
+            
+            # Store user context for row-level security
+            # If no user ID is provided, use the system user ID
+            self.user_id = user_id if user_id is not None else SYSTEM_USER_ID
+            self.user_groups = user_groups or []
+            
+            # Set initial role_level (may be updated during user context loading)
+            if role_level is not None:
+                self.role_level = role_level
+            elif self.user_id == SYSTEM_USER_ID:
+                self.role_level = SYSTEM_USER_ROLE_LEVEL
+            else:
+                # For non-system users, we'll load from the database
+                self.role_level = 100  # Default to public until we load from database
+            
+            # Flag to track if we need to load user context from database
+            self._need_user_context = (user_id is not None and 
+                                       user_id != SYSTEM_USER_ID and 
+                                       (role_level is None or not user_groups))
+            
             if model:
                 """we do this because its easy for user to assume the instance is what we want instead of the type"""
                 self.model = AbstractModel.Abstracted(ensure_model_not_instance(model))
                 self.helper: SqlModelHelper = SqlModelHelper(model)
             else:
                 self.model = None
+                
             self.conn = psycopg2.connect(self._connection_string)
+            # Apply user context when connection is established
+            if self.conn:
+                print('applying user context')
+                self._apply_user_context()
 
         except:
             if on_connect_error != "ignore":
@@ -93,15 +124,156 @@ class PostgresService:
             return psycopg2.connect(conn_string, connect_timeout=5)
 
         try:
-            if self.conn is None:
-                self.conn = open_connection_with_retry(self._connection_string)
+            # First ensure any existing connection is closed properly
+            if self.conn is not None:
+                try:
+                    self.conn.close()
+                except:
+                    pass  # Ignore errors when closing existing connection
+                self.conn = None
+                
+            # Open a new connection
+            self.conn = open_connection_with_retry(self._connection_string)
+            # Apply user context after reopening
+            self._apply_user_context()
             self.conn.poll()
         except psycopg2.InterfaceError as error:
+            if self.conn is not None:
+                try:
+                    self.conn.close()
+                except:
+                    pass
             self.conn = None  # until we can open it, lets not trust it
             self.conn = open_connection_with_retry(self._connection_string)
+            # Apply user context after reopening
+            self._apply_user_context()
 
+    
+    def get_user_context(self):
+        """
+        Get the current PostgreSQL session variables related to user context.
+        
+        Returns:
+            dict: A dictionary with user context information (user_id, role_level, user_groups)
+        """
+        # Default context values from local state
+        context = {
+            "user_id": str(self.user_id) if self.user_id else None,
+            "role_level": self.role_level,
+            "user_groups": self.user_groups,
+            "source": "local (no connection)"
+        }
+        
+        # Return local values if no connection
+        if not self.conn:
+            return context
+            
+        # Try to get values from database session
+        cursor = None
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                SELECT 
+                    current_setting('percolate.user_id', true) as user_id,
+                    current_setting('percolate.role_level', true) as role_level,
+                    current_setting('percolate.user_groups', true) as user_groups
+            """)
+            
+            user_id, role_level, user_groups = cursor.fetchone() or (None, None, '')
+            
+            # Parse values
+            role_level = int(role_level) if role_level else None
+            
+            # Handle empty or None user_groups
+            if user_groups is None:
+                user_groups = ''
+                parsed_groups = []
+            else:
+                # Strip leading/trailing commas and split
+                parsed_groups = [g for g in user_groups.strip(',').split(',') if g]
+            
+            # Update context with session values
+            context.update({
+                "user_id": user_id,
+                "role_level": role_level,
+                "user_groups": parsed_groups,
+                "user_groups_raw": user_groups,
+                "source": "database session"
+            })
+        except Exception as e:
+            context["error"] = str(e)
+            context["source"] = "local (error querying session)"
+        finally:
+            if cursor:
+                cursor.close()
+                
+        return context
+    
+    def _apply_user_context(self):
+        """Apply user context to the PostgreSQL session for row-level security"""
+        if not self.conn:
+            return
+            
+        # Apply context to database session using the p8.set_user_context function
+        cursor = self.conn.cursor()
+        
+    
+        try:
+            # If we have a user_id, use the p8.set_user_context function to set all session variables
+            if self.user_id:
+                if self.user_id == SYSTEM_USER_ID:
+                    return
+                # The set_user_context function will:
+                # 1. Set percolate.user_id session variable
+                # 2. Set percolate.role_level session variable (loading from DB if not provided)
+                # 3. Set percolate.user_groups in the future when implemented
+                
+                # Only provide role_level if explicitly set in the constructor
+                if self.role_level is not None and self.role_level != 100:
+                    # Call with explicit role_level
+                    cursor.execute(
+                        f"SELECT p8.set_user_context('{str(self.user_id)}'::UUID, {str(self.role_level)});"
+                    )
+                else:
+                    # Let the function auto-load role_level from the database
+                    cursor.execute(
+                        f"SELECT p8.set_user_context('{str(self.user_id)}'::UUID);"
+                    )
+                
+                # If role_level wasn't explicitly provided, query it back so our local state matches
+                if self.role_level is None or self.role_level == 100:
+                    cursor.execute("SELECT current_setting('percolate.role_level')::INTEGER AS role_level;")
+                    result = cursor.fetchone()
+                    if result:
+                        self.role_level = result[0]
+            
+            # Apply user_groups separately for now (will be integrated into set_user_context later)
+            # For position matching in RLS policy, use comma-separated string with leading/trailing commas
+            if isinstance(self.user_groups, list):
+                if self.user_groups and len(self.user_groups) > 0:
+                    groups_string = ',' + ','.join([str(g) for g in self.user_groups]) + ','
+                    cursor.execute("SET percolate.user_groups = %s", (groups_string,))
+                else:
+                    # Set empty string if empty list
+                    cursor.execute("SET percolate.user_groups = ''")
+            else:
+                # Handle case where user_groups is None or not a list
+                cursor.execute("SET percolate.user_groups = ''")
+            
+            # Commit changes
+            self.conn.commit()
+            
+            # Don't need to fetch context again unless connection is reset
+            self._need_user_context = False
+        except Exception as e:
+            logger.warning(f"Error applying user security context: {str(e)}")
+            # If the function failed, fall back to the old approach or just continue without security
+        finally:
+            cursor.close()
+    
     def _connect(self):
         self.conn = psycopg2.connect(self._connection_string)
+        self._apply_user_context()
         return self.conn
 
     @property
@@ -124,11 +296,53 @@ class PostgresService:
 
     def repository(self, model: BaseModel, **kwargs) -> "PostgresService":
         """a connection in the context of the abstract model for crud support"""
+        # Pass through user context to new repository unless overridden in kwargs
         return PostgresService(
-            model=model, connection_string=self._connection_string, **kwargs
+            model=model, 
+            connection_string=self._connection_string, 
+            user_id=kwargs.pop("user_id", self.user_id),
+            user_groups=kwargs.pop("user_groups", self.user_groups),
+            role_level=kwargs.pop("role_level", self.role_level),
+            **kwargs
         )
 
-    def get_entities(self, keys: str | typing.List[str], userid: str = None, allow_fuzzy_match: bool = False):
+    def is_semantic_search_only(self, model: BaseModel = None) -> bool:
+        """
+        Determine if a model should use semantic search only.
+        
+        Args:
+            model: The model to check (defaults to self.model)
+            
+        Returns:
+            bool: True if model should use semantic search only
+        """
+        
+        check_model = model or self.model
+        if not check_model:
+            return False
+        
+        if hasattr(check_model, 'model_config'):
+            model_config = check_model.model_config
+            if isinstance(model_config, dict) and 'is_semantic_only' in model_config:
+                return bool(model_config['is_semantic_only'])
+            
+        env_override = os.getenv('P8_RESOURCES_SEMANTIC_ONLY')
+        if env_override is not None:
+            return env_override.lower() in ('true', '1', 'yes', 'on')
+        
+        try:
+            from percolate.models.p8.types import Resources
+            if check_model is Resources:
+                return True
+                
+            if isinstance(check_model, type) and issubclass(check_model, Resources):
+                return True
+        except:
+            pass
+            
+        return False
+    
+    def get_entities(self, keys: str | typing.List[str], userid: str = None, allow_fuzzy_match: bool = False, similarity_threshold: float = 0.3):
         """
         use the get_entities or get_fuzzy_entities database function to lookup entities, with optional user_id for access control
 
@@ -136,6 +350,7 @@ class PostgresService:
             keys: one or more business keys (list of entity names) to fetch
             userid: optional user identifier to include private entities owned by this user
             allow_fuzzy_match: if True, uses get_fuzzy_entities instead of get_entities for fuzzy matching
+            similarity_threshold: threshold for fuzzy matching (default 0.3, lower values are more permissive)
         """
         if keys:
             if not isinstance(keys, list):
@@ -145,7 +360,7 @@ class PostgresService:
         if allow_fuzzy_match:
             data = (
                 self.execute(
-                    """SELECT * FROM p8.get_fuzzy_entities(%s, %s)""", data=(keys, userid)
+                    """SELECT * FROM p8.get_fuzzy_entities(%s, %s, %s)""", data=(keys, userid, similarity_threshold)
                 )
                 if keys
                 else None
@@ -176,16 +391,23 @@ class PostgresService:
 
         Args:
             question: detailed natural language question
+            user_id: optional user ID for access control
         """
 
         """in future we should pardo multiple questions"""
         if isinstance(question, list):
             question = "\n".join(question)
 
-        Q = f"""select * from p8.query_entity(%s,%s, %s) """
+        # Determine if we should use semantic search only
+        semantic_only = self.is_semantic_search_only()
+
+        if user_id and not len(user_id):
+            user_id = None
+            
+        Q = f"""select * from p8.query_entity(%s,%s, %s, %s) """
 
         result = self.execute(
-            Q, data=(question, self.model.get_model_full_name(), user_id)
+            Q, data=(question, self.model.get_model_full_name(), user_id, semantic_only)
         )
 
         try:
@@ -374,8 +596,21 @@ class PostgresService:
         try:
             """we can reopen the connection if needed"""
             try:
-                c = cls.conn.cursor()
+                # Try to get a cursor or detect if connection is closed
+                if cls.conn is None:
+                    cls._reopen_connection()
+                    c = cls.conn.cursor()
+                else:
+                    # Test if connection is still valid
+                    try:
+                        cls.conn.poll()
+                        c = cls.conn.cursor()
+                    except (psycopg2.InterfaceError, psycopg2.OperationalError):
+                        # Connection was closed or invalid, reopen it
+                        cls._reopen_connection()
+                        c = cls.conn.cursor()
             except:
+                # Something went wrong, try one more time with a fresh connection
                 cls._reopen_connection()
                 c = cls.conn.cursor()
 
@@ -405,8 +640,10 @@ class PostgresService:
             cls.conn.rollback()
             raise
         finally:
-            cls.conn.close()
-            cls.conn = None
+            # Close connection and set to None - will be reopened with context on next query
+            if cls.conn:
+                cls.conn.close()
+                cls.conn = None
 
     def select(self, fields: typing.List[str] = None, **kwargs):
         """
@@ -516,7 +753,7 @@ class PostgresService:
     def update_records(
         self,
         records: typing.List[BaseModel],
-        batch_size: int = 1000,
+        batch_size: int = 100,
         index_entities: bool = False,
     ):
         """records are updated using typed object relational mapping."""
@@ -560,11 +797,16 @@ class PostgresService:
         else:
             logger.warning(f"Nothing to do - records is empty {records}")
 
-    def index_entity_by_name(self, entity_name: str, id: uuid.UUID = None):
+    def index_entity_by_name(self, entity_name: str, id: uuid.UUID = None, sleep_seconds:int=0):
         """
         index entities - a session id can be passed in for the audit callback
         this is very much WIP - it may be this moves into background workers in the database
         """
+        import time
+        if sleep_seconds:
+            """sometimes we want to wait for database things"""
+            logger.debug(f"Handling index request {sleep_seconds=}")
+            time.sleep(sleep_seconds)
 
         assert (
             self.model is not None
