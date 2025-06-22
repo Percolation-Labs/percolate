@@ -72,7 +72,7 @@ class PostgresService:
             self.conn = psycopg2.connect(self._connection_string)
             # Apply user context when connection is established
             if self.conn:
-                print('applying user context')
+                #print('applying user context')
                 self._apply_user_context()
 
         except:

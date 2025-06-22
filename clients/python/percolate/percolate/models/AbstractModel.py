@@ -110,11 +110,39 @@ class AbstractModelMixin:
         return cls(**values)
     
     @classmethod
+    def _on_load(cls):
+        """this can be called by models to inject custom data into agent prompt
+        if overridden in python, anything can be used as a loader.
+        if a query is defined in the database, it will be run here 
+        """
+        
+        if hasattr(cls, 'model_config') and  cls.model_config.get( 'on_load_query'):
+            """assume a query - we could also support a function in future"""
+            query = cls.model_config['on_load_query']
+            from percolate.services import PostgresService
+            from percolate.utils import logger
+            logger.debug(f"Onload model prompt - running {query=}")
+            pg = PostgresService()
+            return {
+                'on_load_query': query,
+                'on_load_data':
+                pg.execute(query)
+            }
+        
+        if hasattr(cls, 'model_config') and cls.model_config.get( 'on_load_function'):
+             raise NotImplementedError("We have not implemented the case of loading functions on load")
+        return None
+    
+    @classmethod
     def build_message_stack(cls, question:str, data: typing.List[dict] = None, user_memory=None, **kwargs) -> MessageStack | typing.List[dict ]:
         """Generate a message stack using a list of messages.
         These messages are in the list of content/role generalized LLM messages.
         This is added here so that BaseModel's can override but by default we just use the MessageStack utility
         """
+        
+        """if the data can be loaded from the agent we do it here but only if data are not overridden"""
+        data = data or cls._on_load()
+        
         return MessageStack.build_message_stack(cls, question, data=data,user_memory=user_memory, **kwargs)
 
     @classmethod
@@ -139,6 +167,21 @@ class AbstractModelMixin:
         return pydantic_to_arrow_schema(
             cls
         )
+    
+    @classmethod
+    def fields_from_json_schema(cls, json_schema: dict) -> typing.Dict[str, typing.Tuple[typing.Any, Field]]:
+        """
+        Convert a JSON Schema to Pydantic field definitions
+        
+        Args:
+            json_schema: Standard JSON Schema dict
+            
+        Returns:
+            Dict mapping field names to (type, Field) tuples for create_model
+        """
+        from percolate.utils.types.pydantic import JsonSchemaConverter
+        
+        return JsonSchemaConverter.fields_from_json_schema(json_schema, parent_model=cls)
     
 class AbstractModel(BaseModel, ABC, AbstractModelMixin):
     """Percolate's abstract model type with mixing methods"""
@@ -220,7 +263,7 @@ class AbstractModel(BaseModel, ABC, AbstractModelMixin):
             'name': name,
             'namespace': namespace,
             'description': description,
-            'functions': functions or [],
+            'functions': functions,
         }
         
         # If inherit_config is True, inherit parent's model_config
