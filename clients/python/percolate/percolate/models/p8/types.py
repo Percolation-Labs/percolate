@@ -894,8 +894,8 @@ class Resources(AbstractModel):
                     chunker = None
             if not chunker:
                 # Fallback: import ResourceChunker directly
-                from percolate.utils.parsing.ResourceChunker import ResourceChunker
-                chunker = ResourceChunker(fs)
+                from percolate.utils.parsing.ResourceChunker import create_resource_chunker
+                chunker = create_resource_chunker(fs)
             
             resources = chunker.chunk_resource_from_uri(
                 uri=uri,
