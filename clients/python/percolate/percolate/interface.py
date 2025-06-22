@@ -33,14 +33,26 @@ def try_load_model(name, allow_abstract: bool = False):
         name: The model name (can be namespace.name format)
         allow_abstract: If True, create an abstract model if not found
     """
+    # 1. First try custom loader to allow custom modules to override
     M = custom_load_model(name)
+    
+    # 2. Try loading from percolate (core)
     if not M:
         try:
             M = load_model(name)
         except:
             pass
         
-    """last resort create custom which can be used from db but we need a strong sense of loading a model from database with schema and functions TODO:"""
+    # 3. Try loading from database using Agent.load()
+    if not M:
+        try:
+            from .models.p8.types import Agent
+            M = Agent.load(name)
+        except Exception:
+            # If database load fails, continue to other methods
+            pass
+        
+    # 4. Last resort: create abstract model if allowed - this can be used simply to bind models to database queries without other config
     if not M and allow_abstract:
         if '.' in name:
             namespace, model_name = name.split('.', 1)
@@ -249,9 +261,7 @@ def get_proxy(proxy_uri:str):
             def __init__(self, entity_name):
                
                 """in percolate we load models by inspection but you can specify a custom loader at module level"""
-                M = custom_load_model(entity_name)
-                if M is None:
-                    M = load_model(entity_name)
+                M = try_load_model(entity_name)
                 """TODO: consider if we want to not allow help at depth!!!!!!"""
                 self.agent = Agent(M,allow_help=False)
                 

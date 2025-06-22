@@ -393,6 +393,154 @@ def get_type(type_str: str) -> typing.Any:
     return type_mappings.get(type_str) or  eval(type_str)
 
  
+class JsonSchemaConverter:
+    """Converts JSON Schema to Pydantic fields"""
+    
+    @staticmethod
+    def json_type_to_python_type(json_type: str, format: str = None, items: dict = None) -> typing.Any:
+        """Convert JSON Schema type to Python type annotation"""
+        if json_type == "string":
+            if format == "date":
+                return date
+            elif format == "date-time":
+                return datetime
+            elif format == "uuid":
+                return str  # Could use UUID type but str is more flexible
+            return str
+        elif json_type == "number":
+            return float
+        elif json_type == "integer":
+            return int
+        elif json_type == "boolean":
+            return bool
+        elif json_type == "array":
+            if items:
+                item_type = JsonSchemaConverter.json_type_to_python_type(
+                    items.get("type", "string"),
+                    items.get("format"),
+                    items.get("items")
+                )
+                return typing.List[item_type]
+            return typing.List[typing.Any]
+        elif json_type == "object":
+            # For nested objects, we could create a nested model
+            # For now, return dict
+            return dict
+        elif json_type == "null":
+            return type(None)
+        else:
+            return typing.Any
+    
+    @staticmethod
+    def fields_from_json_schema(
+        json_schema: dict, 
+        parent_model: pydantic.BaseModel = None
+    ) -> typing.Dict[str, typing.Tuple[typing.Any, pydantic.Field]]:
+        """
+        Convert a standard JSON Schema to Pydantic field definitions
+        
+        Args:
+            json_schema: Standard JSON Schema dict with type, properties, etc.
+            parent_model: Optional parent model to inherit field extras from
+            
+        Returns:
+            Dict mapping field names to (type, Field) tuples for create_model
+        """
+        fields = {}
+        
+        # Handle the standard JSON Schema structure
+        if json_schema.get("type") == "object" and "properties" in json_schema:
+            properties = json_schema["properties"]
+            required_fields = set(json_schema.get("required", []))
+            
+            # Get parent field extras if available
+            field_extra_info = {}
+            if parent_model:
+                # Access model_fields from the class, not instance
+                model_class = parent_model if inspect.isclass(parent_model) else parent_model.__class__
+                for k, v in model_class.model_fields.items():
+                    if hasattr(v, 'json_schema_extra'):
+                        field_extra_info[k] = v.json_schema_extra
+            
+            for field_name, field_schema in properties.items():
+                # Handle anyOf/oneOf unions
+                if "anyOf" in field_schema:
+                    types = []
+                    for option in field_schema["anyOf"]:
+                        if option.get("type") == "null":
+                            continue  # Handle null separately
+                        opt_type = JsonSchemaConverter.json_type_to_python_type(
+                            option.get("type", "string"),
+                            option.get("format"),
+                            option.get("items")
+                        )
+                        types.append(opt_type)
+                    
+                    # Check if null is one of the options
+                    has_null = any(opt.get("type") == "null" for opt in field_schema["anyOf"])
+                    
+                    if len(types) == 1:
+                        field_type = types[0]
+                        if has_null or field_name not in required_fields:
+                            field_type = typing.Optional[field_type]
+                    elif len(types) > 1:
+                        # Create a Union type
+                        field_type = typing.Union[tuple(types)]
+                        if has_null:
+                            field_type = typing.Optional[field_type]
+                    else:
+                        # All options were null
+                        field_type = type(None)
+                else:
+                    # Regular type handling
+                    field_type = JsonSchemaConverter.json_type_to_python_type(
+                        field_schema.get("type", "string"),
+                        field_schema.get("format"),
+                        field_schema.get("items")
+                    )
+                    
+                    # Handle nullable/optional types
+                    if field_name not in required_fields:
+                        field_type = typing.Optional[field_type]
+                
+                # Extract field metadata
+                description = field_schema.get("description", "")
+                default = field_schema.get("default", ... if field_name in required_fields else None)
+                
+                # Handle additional constraints
+                field_kwargs = {"description": description}
+                
+                # Add constraints from JSON Schema
+                if "minimum" in field_schema:
+                    field_kwargs["ge"] = field_schema["minimum"]
+                if "maximum" in field_schema:
+                    field_kwargs["le"] = field_schema["maximum"]
+                if "minLength" in field_schema:
+                    field_kwargs["min_length"] = field_schema["minLength"]
+                if "maxLength" in field_schema:
+                    field_kwargs["max_length"] = field_schema["maxLength"]
+                if "pattern" in field_schema:
+                    field_kwargs["pattern"] = field_schema["pattern"]
+                if "enum" in field_schema:
+                    # For enums, we could create a proper Enum type
+                    # For now, use Literal
+                    from typing import Literal
+                    field_type = Literal[tuple(field_schema["enum"])]
+                
+                # Include parent extras if available
+                extra_fields = field_extra_info.get(field_name, {})
+                field_kwargs.update(extra_fields)
+                
+                # Create the field
+                fields[field_name] = (field_type, pydantic.Field(default, **field_kwargs))
+        
+        # Also support the simplified format (backward compatibility)
+        elif all(isinstance(v, dict) and "type" in v for v in json_schema.values()):
+            return get_field_annotations_from_json(json_schema, parent_model)
+        
+        return fields
+
+
 def get_field_annotations_from_json(json_schema:dict, parent_model:pydantic.BaseModel=None) -> typing.Dict[str, typing.Any]:
     """provide name mapped to type and description attributes
       types are assumed to be the python type annotations in string format for now. defaults can also be added and we should play with enums
@@ -403,8 +551,9 @@ def get_field_annotations_from_json(json_schema:dict, parent_model:pydantic.Base
     try:
         field_extra_info = {}
         if parent_model:
-            field_extra = parent_model.model_fields.items()
-            for k,v in field_extra:
+            # Access model_fields from the class, not instance
+            model_class = parent_model if inspect.isclass(parent_model) else parent_model.__class__
+            for k,v in model_class.model_fields.items():
                 if hasattr(v, 'json_schema_extra'):
                     field_extra_info[k] = v.json_schema_extra
             

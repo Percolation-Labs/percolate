@@ -213,7 +213,8 @@ class Agent(AbstractEntityModel):
     description: str = DefaultEmbeddingField(description="The system prompt as markdown")
     spec: dict = Field(description="The model json schema")
     functions: typing.Optional[dict] = Field(description="The function that agent can call",default_factory=dict)
-    
+    metadata: typing.Optional[dict] = Field(description="Custom metadata added to the agent",default_factory=dict)
+
     @model_validator(mode='before')
     @classmethod
     def _f(cls, values):
@@ -232,6 +233,88 @@ class Agent(AbstractEntityModel):
                      functions=cls.get_model_functions(),
                      spec = cls.model_json_schema(),
                      description=cls.get_model_description())
+    
+    @classmethod
+    def _create_model_from_data(cls, agent_data: dict) -> AbstractModel:
+        """
+        Create a model from agent data dictionary
+        
+        Args:
+            agent_data: Dictionary with agent data (as returned by repository)
+            
+        Returns:
+            A dynamically created model with all fields, config, and functions
+        """
+        # Extract namespace and name from the full name
+        if '.' in agent_data['name']:
+            namespace, model_name = agent_data['name'].rsplit('.', 1)
+        else:
+            namespace = 'public'
+            model_name = agent_data['name']
+        
+        # Convert the JSON Schema spec to Pydantic fields
+        fields = AbstractModel.fields_from_json_schema(agent_data['spec'])
+        
+        # Create the model with fields
+        model = AbstractModel.create_model(
+            name=model_name,
+            namespace=namespace,
+            description=agent_data.get('description', ''),
+            functions=agent_data.get('functions'),
+            fields=fields,
+            inherit_config=False  # Don't inherit AbstractModel's config
+        )
+        
+        # Update model_config with metadata if present
+        if agent_data.get('metadata'):
+            if hasattr(model, 'model_config') and isinstance(model.model_config, dict):
+                model.model_config.update(agent_data['metadata'])
+            else:
+                # If model_config doesn't exist or isn't a dict, create it
+                model.model_config = {
+                    'name': model_name,
+                    'namespace': namespace,
+                    'description': agent_data.get('description', ''),
+                    'functions': agent_data.get('functions'),
+                    **agent_data['metadata']
+                }
+        
+        # Store the original agent ID for reference
+        model.model_config['agent_id'] = str(agent_data['id'])
+        
+        return model
+    
+    @classmethod
+    def load(cls, name: str) -> AbstractModel:
+        """
+        Load an agent from the database and reconstruct it as a proper model
+        
+        Args:
+            name: The agent name (can be namespace.name or just name)
+            
+        Returns:
+            A dynamically created model with all fields, config, and functions
+            
+        Raises:
+            ValueError: If agent not found or multiple agents found
+        """
+        try:
+            # Query the database for the agent
+            agents = p8.repository(Agent).select(name=name)
+            
+            if not agents:
+                raise ValueError(f"Agent '{name}' not found in database")
+            if len(agents) > 1:
+                raise ValueError(f"Multiple agents found with name '{name}'. Please use fully qualified name.")
+            
+            # Repository returns dicts, not objects
+            agent_data = agents[0]
+            
+            return cls._create_model_from_data(agent_data)
+            
+        except Exception as e:
+            logger.error(f"Failed to load agent '{name}': {str(e)}")
+            raise
 
 class ModelField(AbstractEntityModel):
     """Fields are each field in any saved model/agent. 
