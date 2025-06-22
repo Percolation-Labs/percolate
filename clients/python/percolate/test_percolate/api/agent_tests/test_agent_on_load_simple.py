@@ -8,8 +8,9 @@ import json
 import uuid
 from percolate.models.p8.types import Agent
 from percolate import p8
+import pytest
 
-
+@pytest.mark.slow
 def test_agent_on_load_concept():
     """Test creating an agent with on_load metadata and verify it's stored"""
     
