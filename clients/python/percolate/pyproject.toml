@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "percolate-db"
-version = "0.2.15"
+version = "0.2.16"
 description = "A client for working with the [Percolate database](https://github.com/Percolation-Labs/percolate)"
 authors = ["mr-saoirse <amartey@gmail.com>"]
 license = "MIT"
