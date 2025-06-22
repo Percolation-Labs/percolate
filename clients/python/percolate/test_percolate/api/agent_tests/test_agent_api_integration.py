@@ -10,8 +10,9 @@ import uuid
 from datetime import datetime
 from percolate.models.p8.types import Agent
 from percolate.models import AbstractModel
+import pytest
 
-
+@pytest.mark.slow
 def test_agent_api_lifecycle():
     """Test creating agent via API and loading it back"""
     
