@@ -764,6 +764,7 @@ class Resources(AbstractModel):
     graph_paths: typing.Optional[typing.List[str]] = Field(None, description="Track all paths extracted by an agent as used to build the KG")
     resource_timestamp: typing.Optional[datetime.datetime] = Field(None,description= 'the database will add a default date but sometimes we want to control when the resource is relevant for - for example a daily log')
     userid:  typing.Optional[uuid.UUID| str] = Field(None, description="The user id is a system field but if we need to control the user context this is how we do it")  
+    groupid:  typing.Optional[uuid.UUID| str] = Field(None, description="The group id is a system field but if we need to control the user context this is how we do it - this is for role based access")  
     
     @model_validator(mode='before')
     @classmethod

@@ -281,6 +281,7 @@ async def upload_file(background_tasks: BackgroundTasks,
                       device_info:str = Form(None),
                       namespace: str = Form("public"),
                       entity_name: str = Form("Resources"),
+                      groupid: typing.Optional[str] = Form(None),
                       auth_user_id: typing.Optional[str] = Depends(optional_hybrid_auth)):
     """
     Uploads a file to S3 storage and optionally stores it as a file resource which is indexed.
@@ -294,6 +295,7 @@ async def upload_file(background_tasks: BackgroundTasks,
         entity_name: The entity name to use for storing resources (default: "Resources")
         user_id: Optional user ID override
         device_info: Optional device information as base64 encoded JSON
+        groupid: Optional group ID to associate with the resource
         auth_user_id: The authenticated user ID from auth (injected by dependency)
     
     Returns:
@@ -329,7 +331,7 @@ async def upload_file(background_tasks: BackgroundTasks,
             detail=f"Failed to load model for entity '{full_entity_name}'"
         )
                  
-    def index_resource(file_upload_result:dict,task_id:str=None):
+    def index_resource(file_upload_result:dict,task_id:str=None,groupid:str=None):
         """given a file upload result which provides e.g. the key, index the resource"""
         
         try:         
@@ -359,8 +361,31 @@ async def upload_file(background_tasks: BackgroundTasks,
                 chunk_overlap=200,  # Standard overlap
                 userid=effective_user_id,
                 name=file.filename,
+                groupid=groupid,  # Pass groupid as a kwarg like userid
                 save_to_db=False  # We'll save manually for better control
             ))
+            
+            if resources and groupid:
+                # Since read_chunks may not handle groupid automatically,
+                # we need to ensure it's set on each resource
+                # Convert resources to dicts, add groupid, and recreate with the model
+                updated_resources = []
+                for resource in resources:
+                    # Get the resource data as a dict
+                    if hasattr(resource, 'model_dump'):
+                        resource_dict = resource.model_dump()
+                    elif hasattr(resource, 'dict'):
+                        resource_dict = resource.dict()
+                    else:
+                        resource_dict = resource.__dict__.copy()
+                    
+                    # Ensure groupid is set
+                    resource_dict['groupid'] = groupid
+                    
+                    # Create new instance with the target model
+                    updated_resource = ResourceModel(**resource_dict)
+                    updated_resources.append(updated_resource)
+                resources = updated_resources
             
             if resources:
                 # Save all chunks to database using the dynamic model
@@ -404,7 +429,7 @@ async def upload_file(background_tasks: BackgroundTasks,
         result["presigned_url"] = s3_service.get_presigned_url_for_uri(s3_uri)
         
         if add_resource:
-            background_tasks.add_task(index_resource, file_upload_result=result,task_id=task_id)
+            background_tasks.add_task(index_resource, file_upload_result=result,task_id=task_id,groupid=groupid)
         
         logger.info(f"Uploaded file {result['name']} to S3 successfully")
         
