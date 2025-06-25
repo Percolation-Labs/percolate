@@ -9,8 +9,9 @@ import uuid
 from datetime import datetime
 from percolate.models.p8.types import Agent, Function
 from percolate import p8
+import pytest
 
-
+@pytest.mark.slow
 def test_agent_discoverability():
     """Test creating an agent with make_discoverable=True"""
     
@@ -161,7 +162,7 @@ def test_agent_discoverability():
     
     return True
 
-
+@pytest.mark.slow
 def test_agent_without_discoverability():
     """Test creating an agent with make_discoverable=False (default)"""
     

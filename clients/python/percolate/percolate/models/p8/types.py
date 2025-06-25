@@ -635,7 +635,7 @@ class User(AbstractEntityModel):
     token_expiry: typing.Optional[datetime.datetime] = Field(None, description="Token expiry datetime for user authentication")
     session_id: typing.Optional[str] = Field(None, description="Last session ID for the user")
     last_session_at: typing.Optional[datetime.datetime] = Field(None, description="Last session activity timestamp")
-    roles: typing.Optional[typing.List[str]] = Field(default_factory=list, description="A list of roles the user is a member of")
+    roles: typing.Optional[typing.List[str]] = Field(default_factory=list, description="A list of roles the user is a member of - DEPRECATED! use groups instead")
     
     # Security fields for row-level security
     role_level: typing.Optional[int] = Field(AccessLevel.PUBLIC, description="User's role level for security (0=God, 1=Admin, 5=Internal, 10=Partner, 100=Public)")
@@ -749,6 +749,8 @@ class Resources(AbstractModel):
     
     
     If you do not find data when you search please call the help function to find other functions to help the user.
+    
+    the Metadata in the Resource may provide a clickable link to original documents which you can display for the user's convenience.
     
     """
     id: typing.Optional[uuid.UUID| str] = Field("The id is generated as a hash of the required uri and ordinal")  
@@ -892,8 +894,8 @@ class Resources(AbstractModel):
                     chunker = None
             if not chunker:
                 # Fallback: import ResourceChunker directly
-                from percolate.utils.parsing.ResourceChunker import ResourceChunker
-                chunker = ResourceChunker(fs)
+                from percolate.utils.parsing.ResourceChunker import create_resource_chunker
+                chunker = create_resource_chunker(fs)
             
             resources = chunker.chunk_resource_from_uri(
                 uri=uri,

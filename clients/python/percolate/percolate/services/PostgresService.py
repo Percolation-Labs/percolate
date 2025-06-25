@@ -286,10 +286,27 @@ class PostgresService:
         """sanity check for tets"""
 
         assert self.model, "trying to check exists when model is null is not allowed"
-        Q = """SELECT EXISTS (    SELECT FROM information_schema.tables    WHERE table_schema = %s AND table_name = %s   )"""
-        result = self.execute(
-            Q, data=(self.model.get_model_namespace(), self.model.get_model_name())
+        return self.check_entity_exists_by_name(
+            self.model.get_model_namespace(), 
+            self.model.get_model_name()
         )
+    
+    def check_entity_exists_by_name(self, namespace: str, entity_name: str) -> bool:
+        """
+        Check if an entity (table) exists by namespace and entity name.
+        
+        Args:
+            namespace: The schema/namespace name (e.g. 'public', 'p8')
+            entity_name: The entity/table name
+            
+        Returns:
+            bool: True if the table exists, False otherwise
+        """
+        Q = """SELECT EXISTS (
+            SELECT FROM information_schema.tables 
+            WHERE table_schema = %s AND table_name = %s
+        )"""
+        result = self.execute(Q, data=(namespace, entity_name))
         if result:
             return result[0]["exists"]
         return False

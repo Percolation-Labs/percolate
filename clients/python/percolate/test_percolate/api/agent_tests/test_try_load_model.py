@@ -6,7 +6,7 @@ from percolate.models.AbstractModel import AbstractModel
 from percolate.models.p8 import types as p8_types
 import uuid
 
-
+@pytest.mark.slow
 class TestTryLoadModel:
     """Test try_load_model function with all loading methods"""
     

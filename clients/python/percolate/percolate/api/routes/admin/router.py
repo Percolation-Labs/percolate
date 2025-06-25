@@ -279,6 +279,8 @@ async def upload_file(background_tasks: BackgroundTasks,
                       add_resource: bool = Form(True), 
                       user_id:str = Form(None), 
                       device_info:str = Form(None),
+                      namespace: str = Form("public"),
+                      entity_name: str = Form("Resources"),
                       auth_user_id: typing.Optional[str] = Depends(optional_hybrid_auth)):
     """
     Uploads a file to S3 storage and optionally stores it as a file resource which is indexed.
@@ -288,7 +290,11 @@ async def upload_file(background_tasks: BackgroundTasks,
         file: The file to upload
         task_id: The task ID to associate with the file, defaults to "default"
         add_resource: Whether to add the file as a database resource for content indexing
-        user: The authenticated user (injected by dependency)
+        namespace: The namespace for the entity (default: "public")
+        entity_name: The entity name to use for storing resources (default: "Resources")
+        user_id: Optional user ID override
+        device_info: Optional device information as base64 encoded JSON
+        auth_user_id: The authenticated user ID from auth (injected by dependency)
     
     Returns:
         JSON with the filename and status message
@@ -300,6 +306,28 @@ async def upload_file(background_tasks: BackgroundTasks,
     effective_user_id = user_id if user_id else auth_user_id
     logger.info(f"Using user_id: {effective_user_id} (param: {user_id}, auth: {auth_user_id})")
     logger.info(f"Received task_id: {task_id}")
+    logger.info(f"Using entity: {namespace}.{entity_name}")
+    
+    # Construct full entity name
+    full_entity_name = f"{namespace}.{entity_name}"
+    
+    # Check if the entity exists in the database
+    pg_service = PostgresService()
+    if not pg_service.check_entity_exists_by_name(namespace, entity_name):
+        raise HTTPException(
+            status_code=404, 
+            detail=f"Entity '{full_entity_name}' not found. Please ensure the entity exists before uploading."
+        )
+    
+    # Try to load the model for the entity
+    from percolate.interface import try_load_model
+    ResourceModel = try_load_model(full_entity_name, allow_abstract=True)
+    
+    if not ResourceModel:
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to load model for entity '{full_entity_name}'"
+        )
                  
     def index_resource(file_upload_result:dict,task_id:str=None):
         """given a file upload result which provides e.g. the key, index the resource"""
@@ -335,8 +363,8 @@ async def upload_file(background_tasks: BackgroundTasks,
             ))
             
             if resources:
-                # Save all chunks to database
-                _ = p8.repository(Resources).update_records(resources)
+                # Save all chunks to database using the dynamic model
+                _ = p8.repository(ResourceModel).update_records(resources)
                 """resources can be stored as chunked but we store a ref to the head only"""
                 tr = SessionResources(resource_id=resources[0].id, session_id=task_id,count=len(resources))
                 """for now we insert seps but in future we will have a function for this"""
