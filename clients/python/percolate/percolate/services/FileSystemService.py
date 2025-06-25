@@ -759,6 +759,69 @@ class FileSystemService:
                 return handler
         return None
     
+    def _infer_file_type(self, content: bytes) -> str:
+        """
+        Infer file type from content by examining file signatures/magic bytes.
+        Returns a file extension (with dot) that can be used for handler selection.
+        """
+        # Check for common file signatures
+        if content.startswith(b'%PDF'):
+            return '.pdf'
+        elif content.startswith(b'\x89PNG\r\n\x1a\n'):
+            return '.png'
+        elif content.startswith(b'\xff\xd8\xff'):
+            return '.jpg'
+        elif content.startswith(b'GIF87a') or content.startswith(b'GIF89a'):
+            return '.gif'
+        elif content.startswith(b'BM'):
+            return '.bmp'
+        elif content.startswith(b'RIFF') and content[8:12] == b'WEBP':
+            return '.webp'
+        elif content.startswith(b'PK\x03\x04'):
+            # ZIP-based formats - need further inspection
+            if b'word/' in content[:1000]:
+                return '.docx'
+            elif b'xl/' in content[:1000]:
+                return '.xlsx'
+            elif b'ppt/' in content[:1000]:
+                return '.pptx'
+            else:
+                return '.zip'
+        elif content.startswith(b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1'):
+            # Old Microsoft Office format
+            return '.xls'  # Could also be .doc, but Excel is more common for data
+        elif content.startswith(b'ID3') or content.startswith(b'\xff\xfb'):
+            return '.mp3'
+        elif content.startswith(b'RIFF') and content[8:12] == b'WAVE':
+            return '.wav'
+        elif content.startswith(b'fLaC'):
+            return '.flac'
+        elif content.startswith(b'OggS'):
+            return '.ogg'
+        elif content.startswith(b'ftypM4A'):
+            return '.m4a'
+        elif content.startswith((b'<!DOCTYPE', b'<!doctype', b'<html', b'<HTML')):
+            return '.html'
+        elif content.startswith((b'<?xml', b'<?XML')):
+            return '.xml'
+        elif content.startswith(b'{') or content.startswith(b'['):
+            # Likely JSON, but let's check if it's valid
+            try:
+                content_str = content.decode('utf-8', errors='ignore')[:1000]
+                import json
+                json.loads(content_str)
+                return '.json'
+            except:
+                pass
+        
+        # Try to detect text files by checking if content is valid UTF-8
+        try:
+            content.decode('utf-8')
+            return '.txt'  # Default to text if UTF-8 decodable
+        except:
+            # Not valid UTF-8, return empty to indicate binary
+            return ''
+    
     def exists(self, path: str) -> bool:
         """Check if a file exists"""
         provider = self._get_provider(path)
@@ -879,8 +942,47 @@ class FileSystemService:
                 logger.info(f"No specific handler for audio file {path}. Returning raw bytes.")
                 return provider.read_bytes(path)
             else:
-                # For other file types, raise an exception
-                raise Exception(f"No specific handler for {path}. Returning raw bytes.")
+                # No handler found - use type inference
+                logger.info(f"No specific handler for {path}. Using type inference.")
+                
+                # Read a small sample to infer type
+                sample_size = 4096  # Read first 4KB for type detection
+                try:
+                    with provider.open(path, 'rb') as f:
+                        sample = f.read(sample_size)
+                except Exception as e:
+                    logger.error(f"Failed to read sample from {path}: {e}")
+                    return provider.read_bytes(path)
+                
+                # Infer the file type
+                inferred_ext = self._infer_file_type(sample)
+                logger.info(f"Inferred file type for {path}: {inferred_ext or 'binary'}")
+                
+                if inferred_ext:
+                    # Try to find a handler for the inferred type
+                    pseudo_path = path + inferred_ext if not path.endswith(inferred_ext) else path
+                    inferred_handler = self._get_handler(pseudo_path)
+                    
+                    if inferred_handler:
+                        try:
+                            logger.info(f"Using {inferred_handler.__class__.__name__} for inferred type {inferred_ext}")
+                            return inferred_handler.read(provider, path, **kwargs)
+                        except Exception as e:
+                            logger.warning(f"Handler failed for inferred type {inferred_ext}: {e}")
+                
+                # If no handler found or handler failed, fall back to text/bytes
+                if inferred_ext == '.txt':
+                    try:
+                        text_content = provider.read_text(path, encoding='utf-8')
+                        logger.info(f"Successfully read {path} as text file ({len(text_content)} characters)")
+                        return text_content
+                    except Exception as text_error:
+                        logger.warning(f"Failed to read {path} as text: {text_error}. Returning raw bytes.")
+                        return provider.read_bytes(path)
+                else:
+                    # Return raw bytes for binary files
+                    logger.info(f"Returning raw bytes for {path}")
+                    return provider.read_bytes(path)
             
     
     def write(self, path: str, data: Any, **kwargs) -> None:

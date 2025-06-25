@@ -104,15 +104,26 @@ class TestJsonSchemaConverter:
         
         fields = JsonSchemaConverter.fields_from_json_schema(json_schema)
         
-        # Check constraints
+        # Check constraints - in Pydantic v2, constraints are stored in metadata
         username_field = fields["username"][1]
-        assert username_field.min_length == 3
-        assert username_field.max_length == 20
-        assert username_field.regex == "^[a-zA-Z0-9_]+$"
+        # Extract constraint values from metadata
+        username_metadata = username_field.metadata if hasattr(username_field, 'metadata') else []
+        min_len = next((m.min_length for m in username_metadata if hasattr(m, 'min_length')), None)
+        max_len = next((m.max_length for m in username_metadata if hasattr(m, 'max_length')), None)
+        pattern = next((m.pattern for m in username_metadata if hasattr(m, 'pattern')), None)
+        
+        assert min_len == 3
+        assert max_len == 20
+        assert pattern == "^[a-zA-Z0-9_]+$"
         
         age_field = fields["age"][1]
-        assert age_field.ge == 0
-        assert age_field.le == 150
+        # For numeric constraints
+        age_metadata = age_field.metadata if hasattr(age_field, 'metadata') else []
+        ge_val = next((m.ge for m in age_metadata if hasattr(m, 'ge')), None)
+        le_val = next((m.le for m in age_metadata if hasattr(m, 'le')), None)
+        
+        assert ge_val == 0
+        assert le_val == 150
     
     def test_enum_types(self):
         """Test enum conversion"""
