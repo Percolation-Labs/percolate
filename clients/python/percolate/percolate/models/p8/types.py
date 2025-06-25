@@ -635,7 +635,7 @@ class User(AbstractEntityModel):
     token_expiry: typing.Optional[datetime.datetime] = Field(None, description="Token expiry datetime for user authentication")
     session_id: typing.Optional[str] = Field(None, description="Last session ID for the user")
     last_session_at: typing.Optional[datetime.datetime] = Field(None, description="Last session activity timestamp")
-    roles: typing.Optional[typing.List[str]] = Field(default_factory=list, description="A list of roles the user is a member of")
+    roles: typing.Optional[typing.List[str]] = Field(default_factory=list, description="A list of roles the user is a member of - DEPRECATED! use groups instead")
     
     # Security fields for row-level security
     role_level: typing.Optional[int] = Field(AccessLevel.PUBLIC, description="User's role level for security (0=God, 1=Admin, 5=Internal, 10=Partner, 100=Public)")
