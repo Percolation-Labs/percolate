@@ -26,6 +26,9 @@ from datetime import datetime, timezone
 import polars as pl
 from PIL import Image
 
+# Percolate imports
+from percolate.utils import make_uuid
+
 # Optional dependencies - gracefully handle imports
 # PDF handling is now imported from parsing.pdf_handler
 from percolate.utils.parsing.pdf_handler import get_pdf_handler, HAS_PYPDF as HAS_PDF
@@ -945,14 +948,13 @@ class FileSystemService:
                 # No handler found - use type inference
                 logger.info(f"No specific handler for {path}. Using type inference.")
                 
-                # Read a small sample to infer type
-                sample_size = 4096  # Read first 4KB for type detection
-                try:
-                    with provider.open(path, 'rb') as f:
-                        sample = f.read(sample_size)
-                except Exception as e:
-                    logger.error(f"Failed to read sample from {path}: {e}")
-                    return provider.read_bytes(path)
+                # For better performance, read the entire file once instead of reading twice
+                # This is especially important for S3 files
+                file_bytes = provider.read_bytes(path)
+                
+                # Get sample for type inference
+                sample_size = min(4096, len(file_bytes))  # Read first 4KB for type detection
+                sample = file_bytes[:sample_size]
                 
                 # Infer the file type
                 inferred_ext = self._infer_file_type(sample)
@@ -963,26 +965,39 @@ class FileSystemService:
                     pseudo_path = path + inferred_ext if not path.endswith(inferred_ext) else path
                     inferred_handler = self._get_handler(pseudo_path)
                     
-                    if inferred_handler:
+                    if inferred_handler and inferred_ext == '.pdf':
+                        # Special handling for PDF to avoid re-downloading
+                        try:
+                            logger.info(f"Using {inferred_handler.__class__.__name__} for inferred type {inferred_ext}")
+                            # For read_chunks, we should return the bytes and let the handler process them
+                            # This allows the PDF handler to use its optimized chunking
+                            return file_bytes
+                        except Exception as e:
+                            logger.warning(f"PDF handler failed: {e}")
+                            return file_bytes
+                    elif inferred_handler:
+                        # For other handlers, we still need to use the provider interface
+                        # but at least we've already verified the file type
                         try:
                             logger.info(f"Using {inferred_handler.__class__.__name__} for inferred type {inferred_ext}")
                             return inferred_handler.read(provider, path, **kwargs)
                         except Exception as e:
                             logger.warning(f"Handler failed for inferred type {inferred_ext}: {e}")
+                            return file_bytes
                 
                 # If no handler found or handler failed, fall back to text/bytes
                 if inferred_ext == '.txt':
                     try:
-                        text_content = provider.read_text(path, encoding='utf-8')
-                        logger.info(f"Successfully read {path} as text file ({len(text_content)} characters)")
+                        text_content = file_bytes.decode('utf-8')
+                        logger.info(f"Successfully decoded as text file ({len(text_content)} characters)")
                         return text_content
                     except Exception as text_error:
-                        logger.warning(f"Failed to read {path} as text: {text_error}. Returning raw bytes.")
-                        return provider.read_bytes(path)
+                        logger.warning(f"Failed to decode as text: {text_error}. Returning raw bytes.")
+                        return file_bytes
                 else:
                     # Return raw bytes for binary files
                     logger.info(f"Returning raw bytes for {path}")
-                    return provider.read_bytes(path)
+                    return file_bytes
             
     
     def write(self, path: str, data: Any, **kwargs) -> None:
@@ -1334,22 +1349,80 @@ class FileSystemService:
         model_class = target_model or Resources
         
         try:
-            # Get file data first for passing to the ResourceChunker
-            file_data = self.read(path)
+            # Check if this is a PDF file (with or without extension)
+            is_pdf = False
+            if path.lower().endswith('.pdf'):
+                is_pdf = True
+            else:
+                # For files without extension, check if it's a PDF by reading a small sample
+                provider = self._get_provider(path)
+                try:
+                    with provider.open(path, 'rb') as f:
+                        sample = f.read(8)  # PDF files start with %PDF
+                        if sample.startswith(b'%PDF'):
+                            is_pdf = True
+                except:
+                    pass
             
-            # Create a ResourceChunker specifically for this FileSystemService
-            chunker = create_resource_chunker(fs=self)
+            # Use direct PDF handler for PDF files
+            if is_pdf:
+                logger.info(f"Using direct PDF handler for chunking: {path}")
+                from percolate.utils.parsing.pdf_handler import get_pdf_handler
+                pdf_handler = get_pdf_handler()
+                
+                # Generate chunks directly from the PDF handler
+                raw_chunks = list(pdf_handler.read_chunks(
+                    path,
+                    mode=mode,
+                    chunk_size=kwargs.get('chunk_size', 1000),
+                    chunk_overlap=kwargs.get('chunk_overlap', 200)
+                ))
+                
+                # Convert to Resource objects
+                chunks = []
+                for i, chunk_text in enumerate(raw_chunks):
+                    resource_id = make_uuid(f"{path}_chunk_{i}")
+                    
+                    resource = model_class(
+                        id=resource_id,
+                        name=f"{os.path.basename(path)}_chunk_{i+1}",
+                        category=kwargs.get('category', 'pdf_chunk'),
+                        content=chunk_text,
+                        uri=path,
+                        metadata={
+                            **(kwargs.get('metadata', {})),
+                            "parsing_mode": mode,
+                            "chunk_index": i,
+                            "total_chunks": len(raw_chunks),
+                            "chunk_size": kwargs.get('chunk_size', 1000),
+                            "chunk_overlap": kwargs.get('chunk_overlap', 200),
+                            "file_type": "pdf",
+                            "original_uri": path
+                        },
+                        userid=kwargs.get('userid'),
+                        resource_timestamp=datetime.now(timezone.utc)
+                    )
+                    chunks.append(resource)
+                
+                logger.info(f"Created {len(chunks)} chunks using direct PDF handler")
             
-            # Create chunks directly using the ResourceChunker with pre-loaded data
-            chunks = chunker.chunk_resource_from_uri(
-                uri=path,
-                parsing_mode=mode,
-                chunk_size=kwargs.get('chunk_size', 1000),
-                chunk_overlap=kwargs.get('chunk_overlap', 200),
-                user_id=kwargs.get('userid'),
-                metadata=kwargs.get('metadata'),
-                file_data=file_data  # Pass the pre-loaded file data
-            )
+            else:
+                # For non-PDF files, use the original approach
+                file_data = self.read(path)
+                
+                # Create a ResourceChunker specifically for this FileSystemService
+                chunker = create_resource_chunker(fs=self)
+                
+                # Create chunks directly using the ResourceChunker with pre-loaded data
+                chunks = chunker.chunk_resource_from_uri(
+                    uri=path,
+                    parsing_mode=mode,
+                    chunk_size=kwargs.get('chunk_size', 1000),
+                    chunk_overlap=kwargs.get('chunk_overlap', 200),
+                    user_id=kwargs.get('userid'),
+                    metadata=kwargs.get('metadata'),
+                    file_data=file_data  # Pass the pre-loaded file data
+                )
             
             # Override any additional properties if provided and the model supports them
             if chunks:

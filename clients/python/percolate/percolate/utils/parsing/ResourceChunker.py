@@ -46,6 +46,58 @@ class PDFResourceHandler(ResourceHandler):
             file_name = kwargs.get('file_name', 'document.pdf')
             uri = kwargs.get('uri')
             return pdf_handler.extract_extended_content(file_data, file_name, uri)
+    
+    def read_chunks(self, file_data: Any, mode: str = "simple", chunk_size: int = 1000, chunk_overlap: int = 200, **kwargs):
+        """
+        Generator that yields chunks of content from PDF.
+        
+        Args:
+            file_data: PDF data (bytes, file-like object, dict, or string path/URL)
+            mode: "simple" or "extended" parsing mode
+            chunk_size: Maximum size of each chunk
+            chunk_overlap: Overlap between chunks
+            **kwargs: Additional arguments (file_name, uri, etc.)
+            
+        Yields:
+            Chunks of text content
+        """
+        pdf_handler = get_pdf_handler()
+        
+        # The PDF handler now supports all input types including paths/URLs
+        yield from pdf_handler.read_chunks(file_data, mode=mode, chunk_size=chunk_size, chunk_overlap=chunk_overlap, **kwargs)
+    
+    def _create_text_chunks(self, text: str, chunk_size: int, chunk_overlap: int) -> List[str]:
+        """Create text chunks with overlap."""
+        if not text or len(text) <= chunk_size:
+            return [text] if text else []
+        
+        chunks = []
+        start = 0
+        
+        while start < len(text):
+            end = start + chunk_size
+            
+            # If this isn't the last chunk, try to break at word boundaries
+            if end < len(text):
+                # Look for the last space within the chunk
+                last_space = text.rfind(' ', start, end)
+                if last_space > start:
+                    end = last_space
+            
+            chunk = text[start:end].strip()
+            if chunk:
+                chunks.append(chunk)
+            
+            # Move start position considering overlap
+            if end >= len(text):
+                break
+            start = end - chunk_overlap
+            
+            # Ensure we don't go backwards
+            if len(chunks) > 0 and start <= len(''.join(chunks)) - len(chunks[-1]):
+                start = len(''.join(chunks)) - chunk_overlap
+        
+        return chunks
 
 class TextResourceHandler(ResourceHandler):
     """Handler for text files."""
@@ -382,27 +434,40 @@ class ResourceChunker:
             # Use the appropriate handler to extract content
             handler = self._get_handler(file_type)
             
-            if parsing_mode == "simple":
-                content = handler.extract_content(
-                    file_data, 
-                    file_type, 
-                    mode="simple", 
-                    file_name=file_name, 
+            # Check if handler supports read_chunks method
+            if hasattr(handler, 'read_chunks'):
+                # Use the read_chunks generator for more efficient chunking
+                chunks = list(handler.read_chunks(
+                    file_data,
+                    mode=parsing_mode,
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                    file_name=file_name,
                     uri=uri
+                ))
+            else:
+                # Fallback to extract_content method
+                if parsing_mode == "simple":
+                    content = handler.extract_content(
+                        file_data, 
+                        file_type, 
+                        mode="simple", 
+                        file_name=file_name, 
+                        uri=uri
+                    )
+                else:  # extended
+                    content = handler.extract_content(
+                        file_data, 
+                        file_type, 
+                        mode="extended", 
+                        file_name=file_name, 
+                        uri=uri
+                    )
+                
+                # Create chunks from the content
+                chunks = self._create_text_chunks(
+                    content, chunk_size, chunk_overlap
                 )
-            else:  # extended
-                content = handler.extract_content(
-                    file_data, 
-                    file_type, 
-                    mode="extended", 
-                    file_name=file_name, 
-                    uri=uri
-                )
-            
-            # Create chunks from the content
-            chunks = self._create_text_chunks(
-                content, chunk_size, chunk_overlap
-            )
             
             # Create Resource objects for each chunk
             resources = []
