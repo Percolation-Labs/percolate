@@ -658,7 +658,7 @@ class ResourceChunker:
                     id=resource_id,
                     name=f"{file_name}_chunk_{i+1}",
                     category=f"{file_type}_chunk",
-                    content=chunk_text,
+                    content=chunk_text.replace('\x00', ''),  # Remove null characters for PostgreSQL compatibility
                     uri=uri,
                     metadata={
                         **(metadata or {}),
@@ -966,7 +966,7 @@ class ResourceChunker:
             id=resource_id,
             name=f"{file_info['name']}_transcription_chunk_{chunk_index+1}",
             category=f"{file_type}_transcription",
-            content=chunk_text,
+            content=chunk_text.replace('\x00', ''),  # Remove null characters for PostgreSQL compatibility
             uri=uri,
             metadata={
                 **(metadata or {}),
