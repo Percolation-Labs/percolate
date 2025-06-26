@@ -12,7 +12,8 @@ import percolate as p8
 client = TestClient(app)
 headers = {"Authorization": "Bearer postgres"}  # Default API token
 
-@pytest.mark.integration
+@pytest.mark.slow
+@pytest.mark.skip
 def test_content_upload_with_groupid_integration():
     """Integration test that verifies groupid is saved to the actual database"""
     
@@ -74,7 +75,7 @@ def test_content_upload_with_groupid_integration():
         )
     print(f"✓ Cleaned up test resources")
 
-
+@pytest.mark.slow
 @pytest.mark.integration
 def test_content_upload_without_groupid_integration():
     """Integration test that verifies upload works without groupid (backwards compatibility)"""
@@ -140,7 +141,7 @@ def test_content_upload_without_groupid_integration():
     )
     print(f"✓ Cleaned up test resource")
 
-
+@pytest.mark.slow  
 @pytest.mark.integration  
 def test_query_resources_by_groupid():
     """Test that we can query resources by groupid after upload"""

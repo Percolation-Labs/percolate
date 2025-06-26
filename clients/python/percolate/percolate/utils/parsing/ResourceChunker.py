@@ -27,6 +27,39 @@ class ResourceHandler:
     def extract_content(self, file_data: Any, file_type: str, mode: str = "simple", **kwargs) -> str:
         """Extract content from the file data."""
         return ""
+    
+    def _create_text_chunks(self, text: str, chunk_size: int, chunk_overlap: int) -> List[str]:
+        """Create text chunks with overlap."""
+        if not text or len(text) <= chunk_size:
+            return [text] if text else []
+        
+        chunks = []
+        start = 0
+        
+        while start < len(text):
+            end = start + chunk_size
+            
+            # If this isn't the last chunk, try to break at word boundaries
+            if end < len(text):
+                # Look for the last space within the chunk
+                last_space = text.rfind(' ', start, end)
+                if last_space > start:
+                    end = last_space
+            
+            chunk = text[start:end].strip()
+            if chunk:
+                chunks.append(chunk)
+            
+            # Move start position considering overlap
+            if end >= len(text):
+                break
+            start = end - chunk_overlap
+            
+            # Ensure we don't go backwards
+            if len(chunks) > 0 and start <= len(''.join(chunks)) - len(chunks[-1]):
+                start = len(''.join(chunks)) - chunk_overlap
+        
+        return chunks
 
 class PDFResourceHandler(ResourceHandler):
     """Handler for PDF files."""
@@ -65,39 +98,6 @@ class PDFResourceHandler(ResourceHandler):
         
         # The PDF handler now supports all input types including paths/URLs
         yield from pdf_handler.read_chunks(file_data, mode=mode, chunk_size=chunk_size, chunk_overlap=chunk_overlap, **kwargs)
-    
-    def _create_text_chunks(self, text: str, chunk_size: int, chunk_overlap: int) -> List[str]:
-        """Create text chunks with overlap."""
-        if not text or len(text) <= chunk_size:
-            return [text] if text else []
-        
-        chunks = []
-        start = 0
-        
-        while start < len(text):
-            end = start + chunk_size
-            
-            # If this isn't the last chunk, try to break at word boundaries
-            if end < len(text):
-                # Look for the last space within the chunk
-                last_space = text.rfind(' ', start, end)
-                if last_space > start:
-                    end = last_space
-            
-            chunk = text[start:end].strip()
-            if chunk:
-                chunks.append(chunk)
-            
-            # Move start position considering overlap
-            if end >= len(text):
-                break
-            start = end - chunk_overlap
-            
-            # Ensure we don't go backwards
-            if len(chunks) > 0 and start <= len(''.join(chunks)) - len(chunks[-1]):
-                start = len(''.join(chunks)) - chunk_overlap
-        
-        return chunks
 
 class TextResourceHandler(ResourceHandler):
     """Handler for text files."""
@@ -220,6 +220,91 @@ class DocxResourceHandler(ResourceHandler):
         else:
             # Attempt to convert to string
             return str(file_data)
+    
+    def read_chunks(self, file_input: Union[str, BinaryIO, bytes, Dict[str, Any]], mode: str = "simple", chunk_size: int = 1000, chunk_overlap: int = 200, **kwargs):
+        """
+        Generator that yields chunks of content from DOCX.
+        
+        Args:
+            file_input: File path/URL (str), file-like object, bytes, or dict containing the DOCX data
+            mode: "simple" for text only, "extended" for enhanced processing
+            chunk_size: Maximum size of each chunk
+            chunk_overlap: Overlap between chunks
+            **kwargs: Additional arguments
+            
+        Yields:
+            Chunks of text content
+        """
+        # Check if we received a file path/URL (string)
+        if isinstance(file_input, str):
+            logger.debug(f"read_chunks: Reading DOCX from path/URL: {file_input}")
+            
+            # Use the DOCXContentProvider for extraction
+            try:
+                from percolate.utils.parsing.providers import DOCXContentProvider
+                provider = DOCXContentProvider()
+                
+                # Extract text content
+                text_content = provider.extract_text(file_input, enriched=(mode == "extended"))
+                
+                # Chunk the extracted text
+                for chunk in self._create_text_chunks(text_content, chunk_size, chunk_overlap):
+                    yield chunk
+            except ImportError:
+                # Fallback if providers not available
+                logger.warning("DOCXContentProvider not available, using FileSystemService")
+                from percolate.services.FileSystemService import FileSystemService
+                fs = FileSystemService()
+                file_data = fs.read(file_input)
+                
+                # Extract content and chunk
+                content = self.extract_content(file_data, 'docx', mode=mode, **kwargs)
+                for chunk in self._create_text_chunks(content, chunk_size, chunk_overlap):
+                    yield chunk
+        
+        # Check if we received already-processed DOCX data (dict)
+        elif isinstance(file_input, dict):
+            logger.debug("read_chunks: Received pre-processed DOCX data (dict)")
+            
+            # Extract content and chunk
+            content = self.extract_content(file_input, 'docx', mode=mode, **kwargs)
+            for chunk in self._create_text_chunks(content, chunk_size, chunk_overlap):
+                yield chunk
+        
+        # Handle bytes and file-like objects
+        else:
+            # For bytes/streams, we need to use FileSystemService or save to temp file
+            logger.debug("read_chunks: Processing DOCX from bytes/stream")
+            
+            # Save to temporary file and process
+            import tempfile
+            import os
+            
+            with tempfile.NamedTemporaryFile(suffix='.docx', delete=False) as tmp_file:
+                tmp_path = tmp_file.name
+                
+                if isinstance(file_input, bytes):
+                    tmp_file.write(file_input)
+                else:
+                    # File-like object
+                    if hasattr(file_input, 'seek'):
+                        file_input.seek(0)
+                    tmp_file.write(file_input.read())
+            
+            try:
+                # Process the temp file
+                from percolate.utils.parsing.providers import DOCXContentProvider
+                provider = DOCXContentProvider()
+                
+                text_content = provider.extract_text(tmp_path, enriched=(mode == "extended"))
+                
+                # Chunk the extracted text
+                for chunk in self._create_text_chunks(text_content, chunk_size, chunk_overlap):
+                    yield chunk
+            finally:
+                # Clean up temp file
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
 
 class PPTXResourceHandler(ResourceHandler):
     """Handler for PPTX files."""
@@ -259,6 +344,101 @@ class PPTXResourceHandler(ResourceHandler):
         else:
             # Attempt to convert to string
             return str(file_data)
+    
+    def read_chunks(self, file_input: Union[str, BinaryIO, bytes, Dict[str, Any]], mode: str = "simple", chunk_size: int = 1000, chunk_overlap: int = 200, **kwargs):
+        """
+        Generator that yields chunks of content from PPTX.
+        
+        Args:
+            file_input: File path/URL (str), file-like object, bytes, or dict containing the PPTX data
+            mode: "simple" for text only, "extended" for text + image analysis
+            chunk_size: Maximum size of each chunk
+            chunk_overlap: Overlap between chunks
+            **kwargs: Additional arguments including max_images
+            
+        Yields:
+            Chunks of text content
+        """
+        # Check if we received a file path/URL (string)
+        if isinstance(file_input, str):
+            logger.debug(f"read_chunks: Reading PPTX from path/URL: {file_input}")
+            
+            # Use the PPTXContentProvider for extraction
+            try:
+                from percolate.utils.parsing.providers import PPTXContentProvider
+                provider = PPTXContentProvider()
+                
+                # Extract text content with optional image analysis
+                max_images = kwargs.get('max_images', 50)
+                text_content = provider.extract_text(
+                    file_input, 
+                    enriched=(mode == "extended"),
+                    max_images=max_images
+                )
+                
+                # Chunk the extracted text
+                for chunk in self._create_text_chunks(text_content, chunk_size, chunk_overlap):
+                    yield chunk
+            except ImportError:
+                # Fallback if providers not available
+                logger.warning("PPTXContentProvider not available, using FileSystemService")
+                from percolate.services.FileSystemService import FileSystemService
+                fs = FileSystemService()
+                file_data = fs.read(file_input)
+                
+                # Extract content and chunk
+                content = self.extract_content(file_data, 'pptx', mode=mode, **kwargs)
+                for chunk in self._create_text_chunks(content, chunk_size, chunk_overlap):
+                    yield chunk
+        
+        # Check if we received already-processed PPTX data (dict)
+        elif isinstance(file_input, dict):
+            logger.debug("read_chunks: Received pre-processed PPTX data (dict)")
+            
+            # Extract content and chunk
+            content = self.extract_content(file_input, 'pptx', mode=mode, **kwargs)
+            for chunk in self._create_text_chunks(content, chunk_size, chunk_overlap):
+                yield chunk
+        
+        # Handle bytes and file-like objects
+        else:
+            # For bytes/streams, we need to use FileSystemService or save to temp file
+            logger.debug("read_chunks: Processing PPTX from bytes/stream")
+            
+            # Save to temporary file and process
+            import tempfile
+            import os
+            
+            with tempfile.NamedTemporaryFile(suffix='.pptx', delete=False) as tmp_file:
+                tmp_path = tmp_file.name
+                
+                if isinstance(file_input, bytes):
+                    tmp_file.write(file_input)
+                else:
+                    # File-like object
+                    if hasattr(file_input, 'seek'):
+                        file_input.seek(0)
+                    tmp_file.write(file_input.read())
+            
+            try:
+                # Process the temp file
+                from percolate.utils.parsing.providers import PPTXContentProvider
+                provider = PPTXContentProvider()
+                
+                max_images = kwargs.get('max_images', 50)
+                text_content = provider.extract_text(
+                    tmp_path, 
+                    enriched=(mode == "extended"),
+                    max_images=max_images
+                )
+                
+                # Chunk the extracted text
+                for chunk in self._create_text_chunks(text_content, chunk_size, chunk_overlap):
+                    yield chunk
+            finally:
+                # Clean up temp file
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
 
 class ImageResourceHandler(ResourceHandler):
     """Handler for image files."""
