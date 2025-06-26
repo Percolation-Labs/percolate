@@ -1387,7 +1387,7 @@ class FileSystemService:
                         id=resource_id,
                         name=f"{os.path.basename(path)}_chunk_{i+1}",
                         category=kwargs.get('category', 'pdf_chunk'),
-                        content=chunk_text,
+                        content=chunk_text.replace('\x00', ''),  # Remove null characters for PostgreSQL compatibility
                         uri=path,
                         metadata={
                             **(kwargs.get('metadata', {})),
