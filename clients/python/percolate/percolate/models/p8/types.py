@@ -966,6 +966,51 @@ class Resources(AbstractModel):
         
         return pg.execute(query, data=(user_id, limit))
 
+class IntervalResource(AbstractModel):
+    """
+    Interval Resources can be created from other resources as summaries.
+    Graph paths are topic's Specific-Item/General-Topic that can be woven into the graph. When generating interval resources we can extend the knowledge graph.
+    
+    To create moments look for recent uploads to some limit and then return a collection of resource chunks that describe periods of time where the user was interested
+    in one or more things. Each moment can have a title and a unique id such as the hash of the title and date.
+    
+    Depending on the resources, you should create 1-5 interval/moments per day with a density of about 5-10 resources for interval/moment
+    
+    """
+    end_date: typing.Optional[datetime.datetime] = Field(description="Interval resources are conceptual resources that span time")
+    
+    @classmethod
+    def get_recent_user_uploads(cls, user_id:str, limit: int = 20):
+        """
+        Loads recent uploads for the user so that we can build a model of their interests
+        """
+        
+        return p8.repository(Resources).execute(f""""
+                                    SELECT name, content, created_at, category 
+                                    from p8."Resources"
+                                    where userid = %s 
+                                    order by created_at desc
+                                    limit %s     
+                                         """,
+                                         data=(user_id,limit))
+        
+    @classmethod
+    def save_interval_resources(cls, records: typing.List[dict]):
+        """use the model schema for Interval Resources to create a collection for saving
+        include graph_paths, content, name, userid
+        """ 
+        
+        try:
+            records = p8.repository(IntervalResource).update_records(records)
+            return {
+                "status": "updated",
+                "record_count": len(records)
+            }
+        except:
+            import traceback
+            logger.warning(f"{traceback.format_exc()}")
+            raise
+        
 class TaskResources(AbstractModel):
     """(Deprecate)A link between tasks and resources since resources can be shared between tasks"""
     id: typing.Optional[uuid.UUID| str] = Field(None, description="unique id for rel" )  
@@ -1198,7 +1243,7 @@ class Engram(AbstractModel):
     """
 
     @classmethod
-    def _add_memory_from_user_sessions(cls, since_days_ago:int=1,limit:int=200):
+    def _add_memory_from_user_sessions(cls, since_days_ago:int=1, limit:int=200, user_email:str=None):
         """
         A helper method to read the data from the sessions and generate memories
         
@@ -1206,7 +1251,7 @@ class Engram(AbstractModel):
             since_days_ago: how far back in days to look for updated session records
             limit: primarily not to overload models, limit the records. 
             Users are unlikely to have more than 100 sessions but file uploads count as sessions
-            TODO: note this is currently for all users so we need to think about scale
+            user_email: optional email filter to only process sessions for a specific user
         """
         
         from percolate.utils import get_days_ago_iso_timestamp 
@@ -1216,13 +1261,24 @@ class Engram(AbstractModel):
         #in this case this filters things that are not based on user comments
         session_type ='conversation'
         
-        data = p8.repository(Session).execute(f""" SELECT a.query, a.created_at, a.userid, a.updated_at, email, u.name
-                                        FROM p8."Session" a
-                                         join p8."User" u on a.userid = u.id 
-                                        where a.updated_at > %s 
-                                        and session_type = %s
-                                        order by a.updated_at desc 
-                                        limit {limit}""", data=(dt,session_type))
+        # Build the query with optional email filter
+        if user_email:
+            data = p8.repository(Session).execute(f""" SELECT a.query, a.created_at, a.userid, a.updated_at, email, u.name
+                                            FROM p8."Session" a
+                                             join p8."User" u on a.userid = u.id 
+                                            where a.updated_at > %s 
+                                            and session_type = %s
+                                            and u.email = %s
+                                            order by a.updated_at desc 
+                                            limit {limit}""", data=(dt, session_type, user_email))
+        else:
+            data = p8.repository(Session).execute(f""" SELECT a.query, a.created_at, a.userid, a.updated_at, email, u.name
+                                            FROM p8."Session" a
+                                             join p8."User" u on a.userid = u.id 
+                                            where a.updated_at > %s 
+                                            and session_type = %s
+                                            order by a.updated_at desc 
+                                            limit {limit}""", data=(dt, session_type))
         
         logger.debug(f"Fetched {len(data)} records to convert to memories")
         
@@ -1307,14 +1363,51 @@ class DigestAgent(AbstractModel):
     6. Call out an logical or factual inaccuracies or any conflicts or contradictions that they may want to
     7. Suggest any tasks they may want to keep an eye to get closer to their goals and any new tasks they may want to initiate (you may need access to their full task list)
     8. If you have access to their calendar (disabled for now) list any appointments coming up in the following day or two
+    
+    IMPORTANT: When upload_analytics is provided in the content:
+    - Create an "Upload Activity Summary" section showing:
+      - Total files uploaded in last 24 hours
+      - How many successfully created resources
+      - Total data volume uploaded (use the human-readable format)
+      - List the specific files uploaded if available
+      - Highlight any failed uploads that need attention
+    - Connect uploaded resources to the user's goals when relevant
+    - If resource categories are available, group uploads by category
+    
+    IMPORTANT: When recent_resources_summary is provided:
+    - Show the total number of resources created
+    - List the categories of resources
+    - Show a sample of recent resource names (not all of them)
+    - Keep the summary concise and focused on insights
+    
+    ## Using User Engrams
+    - refer to the user by name if you can instead of email
+    User engrams are added for your context but dont play this back as a summary but use it to understand recent activity.
+    When generating content for the user, in the digest only comment on things that have time stamps for the period and not on summary data.
+    Engrams can aggregate over all time so we do not want to repeat this information to the user while new sessions and resources are worth mentioning.
+    
+    # Tone
+    - done not placate the user or add generic commentary - state facts but in an interesting way with suggestions on what to work on
+    - comment if something is rare or interesting or noteworthy if it really is i.e. sparingly
+    - you are the uer's thinking partner and you want them to think smarter over time. you dont need to tell them this.
+    - you can be sparing with adjectives which can often be overused and dilute overall messaging.
+    
+    
     """
     @classmethod
-    def get_daily_digest(cls,name:str, user_name:str,**kwargs):
+    def get_daily_digest(cls, name:str, user_name:str, user_engram=None, **kwargs):
         """
         The daily digest will be a combination of data feeds which could be pushed into the data tier
         It should be resource uploaded in the last N hours and the users profile
+        Returns formatted HTML content for the digest
+        
+        Args:
+            name: The digest type (e.g., 'Daily Digest')
+            user_name: The user's email address
+            user_engram: The user's engram/memory data from _add_memory_from_user_sessions
         """
         from percolate.utils import get_days_ago_iso_timestamp
+        from datetime import datetime
         
         #fetch by the user name which is the email address
         user = p8.repository(User).execute(""" SELECT * FROM p8."User" where email = %s """, data=(user_name,))
@@ -1324,27 +1417,979 @@ class DigestAgent(AbstractModel):
             user = user[0]
         user_id = user['id']
         
-        #TODO we will unify user and p8 user
-        q= f""" 'MATCH p = (u:User {{name: ''{user_name}''}})-[r*1..2]->(c:Concept)
-                   RETURN u.name,  c.name as concept, relationships(p) as relationships  ',
-                    'name agtype,  concept agtype, relationships agtype'"""
-                                                    
-        user_graph = p8.repository(User).execute(f"""   select * from cypher_query({q})  """)
-        #TODO compact the graph
+        # Get user's knowledge graph summary - top concepts and relationships
+        try:
+            graph_summary = p8.repository(User).execute("""
+                WITH graph_data AS (
+                    SELECT * FROM cypher_query(
+                        'MATCH (u:User {name: ''' || %s || '''})-[r]->(c:Concept)
+                         RETURN c.name as concept, type(r) as relationship, count(*) as strength
+                         ORDER BY count(*) DESC
+                         LIMIT 10',
+                        'concept agtype, relationship agtype, strength agtype'
+                    )
+                )
+                SELECT 
+                    concept::text as concept,
+                    relationship::text as relationship_type,
+                    strength::int as connection_strength
+                FROM graph_data
+            """, data=(user_name,))
+        except:
+            # Graph functionality may not be available
+            graph_summary = []
         
-        """if would be good to render the graph as an image and make it available
-           the caller can select the user_graph and do that if they wish or the agent can just build a summary from it
-        """
+        # Get session details - simplified without Engram join
+        try:
+            recent_sessions = p8.repository(Session).execute("""
+                SELECT 
+                    s.id,
+                    s.agent,
+                    s.created_at,
+                    s.updated_at,
+                    EXTRACT(EPOCH FROM (s.updated_at - s.created_at))/60 as duration_minutes
+                FROM p8."Session" s
+                WHERE s.userid = %s AND s.created_at >= %s
+                ORDER BY s.created_at DESC
+                LIMIT 10
+            """, data=(user_id, get_days_ago_iso_timestamp(n=1)))
+        except:
+            recent_sessions = []
         
-        recent_resources_summarized = p8.repository(Resources).execute(""" SELECT * FROM p8."Resources" where userid=%s and updated_at >= %s  """,
-                                                                            data=(user_id, get_days_ago_iso_timestamp(n=1)))
+        # Get resource creation patterns
+        resource_patterns = p8.repository(Resources).execute("""
+            SELECT 
+                DATE_TRUNC('hour', created_at) as hour,
+                COUNT(*) as resources_created,
+                COUNT(DISTINCT category) as unique_categories,
+                ARRAY_AGG(DISTINCT category) FILTER (WHERE category IS NOT NULL) as categories
+            FROM p8."Resources"
+            WHERE userid = %s AND created_at >= %s
+            GROUP BY DATE_TRUNC('hour', created_at)
+            ORDER BY hour DESC
+        """, data=(user_id, get_days_ago_iso_timestamp(n=1)))
         
-        """do a check on the context length for now and summarize if there is too much"""
+        # Get resource summary with more details - filter by created_at
+        recent_resources_summary = p8.repository(Resources).execute(""" 
+            SELECT 
+                COUNT(*) as total_resources,
+                COUNT(DISTINCT category) as unique_categories,
+                ARRAY_AGG(DISTINCT category) FILTER (WHERE category IS NOT NULL) as categories,
+                ARRAY_AGG(name ORDER BY created_at DESC) as recent_resource_names,
+                SUM(LENGTH(content)) as total_content_size
+            FROM (
+                SELECT name, category, content, created_at 
+                FROM p8."Resources" 
+                WHERE userid=%s AND created_at >= %s
+                ORDER BY created_at DESC
+                LIMIT 20
+            ) recent
+        """, data=(user_id, get_days_ago_iso_timestamp(n=1)))
+        
+        # Get detailed recent resources with content preview - filter by created_at
+        recent_resources_sample = p8.repository(Resources).execute(""" 
+            SELECT 
+                id, 
+                name, 
+                category, 
+                uri, 
+                created_at,
+                LEFT(content, 500) as content_preview,
+                LENGTH(content) as content_length
+            FROM p8."Resources" 
+            WHERE userid=%s AND created_at >= %s 
+            ORDER BY created_at DESC 
+            LIMIT 10
+        """, data=(user_id, get_days_ago_iso_timestamp(n=1)))
+        
+        # Get recent engrams/messages for context
+        try:
+            recent_engrams = p8.repository(Engram).execute("""
+                SELECT 
+                    e.role,
+                    LEFT(e.content, 100) as content_preview,
+                    e.created_at,
+                    s.agent
+                FROM p8."Engram" e
+                JOIN p8."Session" s ON s.id = e.sessionid
+                WHERE s.userid = %s AND e.created_at >= %s
+                AND e.role = 'user'
+                ORDER BY e.created_at DESC
+                LIMIT 5
+            """, data=(user_id, get_days_ago_iso_timestamp(n=1)))
+        except:
+            recent_engrams = []
+        
+        session_count_value = len(recent_sessions) if recent_sessions else 0
+        
+        # Generate agentic summary based on user's activity and goals
+        agentic_summary = None
+        if recent_resources_sample or recent_engrams or graph_summary:
+            try:
+                # Prepare data for the agent - limit content to avoid token limits
+                resources_for_agent = []
+                for r in recent_resources_sample[:5]:  # Top 5 resources
+                    resources_for_agent.append({
+                        'name': r.get('name', ''),
+                        'category': r.get('category', ''),
+                        'content_preview': r.get('content_preview', '')[:300],  # Limit content
+                        'created_at': str(r.get('created_at', ''))
+                    })
+                
+                engrams_for_agent = []
+                for e in recent_engrams[:5]:  # Top 5 engrams
+                    engrams_for_agent.append({
+                        'content': e.get('content_preview', ''),
+                        'agent': e.get('agent', ''),
+                        'created_at': str(e.get('created_at', ''))
+                    })
+                
+                agent_data = {
+                    'user_name': user_name,
+                    'user_email': user['email'],
+                    'resources': resources_for_agent,
+                    'engrams': engrams_for_agent,
+                    'graph_concepts': [g.get('concept', '') for g in graph_summary[:5]] if graph_summary else [],
+                    'total_resources': recent_resources_summary[0].get('total_resources', 0) if recent_resources_summary else 0,
+                    'categories': recent_resources_summary[0].get('categories', []) if recent_resources_summary else [],
+                    'user_engram_insights': user_engram  # Include the user's engram/memory data
+                }
+                
+                agentic_response = p8.Agent(DigestAgent).run(f"""
+                    Generate a personalized, narrative summary for {user_name}'s daily digest.
+                    Focus on their recent activities, goals, and progress based on the following data:
+                    
+                    ```json
+                    {json.dumps(agent_data, default=str)}
+                    ```
+                    
+                    Your response must be a JSON object with the following structure:
+                    {{
+                        "narrative_summary": "2-3 paragraph narrative that highlights key themes from their recent uploads and conversations, connects their activities to potential goals or interests, incorporates insights from user_engram_insights if available, and provides encouragement about their knowledge building journey. Be specific about content they engaged with, but keep it concise and engaging. Write in a warm, professional tone.",
+                        "extracted_tasks": [
+                            {{
+                                "task": "Clear action item or task mentioned in their content",
+                                "source": "Brief note about where this was found (e.g., 'from audio recording X' or 'mentioned in document Y')",
+                                "priority": "high|medium|low"
+                            }}
+                        ]
+                    }}
+                    
+                    IMPORTANT: Carefully analyze all content for any mentions of:
+                    - Things they need to do or want to do
+                    - Goals they've mentioned
+                    - Action items or next steps discussed
+                    - Reminders they've set for themselves
+                    - Projects they're working on
+                    - Deadlines or time-sensitive items
+                    
+                    If no tasks are found, return an empty array for extracted_tasks.
+                    Ensure your response is valid JSON.
+                """)
+                
+                # Parse the JSON response
+                try:
+                    import json as json_module
+                    parsed_response = json_module.loads(agentic_response)
+                    agentic_summary = parsed_response.get('narrative_summary', '')
+                    extracted_tasks = parsed_response.get('extracted_tasks', [])
+                except:
+                    # Fallback if response is not JSON
+                    agentic_summary = agentic_response
+                    extracted_tasks = []
+                
+                logger.info(f"Generated agentic summary for {user_name} with {len(extracted_tasks)} tasks")
+            except Exception as e:
+                logger.warning(f"Failed to generate agentic summary: {str(e)}")
+                agentic_summary = None
+                extracted_tasks = []
         
         return {
             'user_last_session': user['updated_at'],
             'digest_scope': name,
             'user': user,
-            'user_graph': user_graph,
-            'recent_resources_upload': recent_resources_summarized            
+            'graph_summary': graph_summary,
+            'recent_sessions': recent_sessions,
+            'resource_patterns': resource_patterns,
+            'recent_resources_summary': recent_resources_summary[0] if recent_resources_summary else {},
+            'recent_resources_sample': recent_resources_sample,
+            'recent_engrams': recent_engrams,
+            'session_count': session_count_value,
+            'agentic_summary': agentic_summary,
+            'extracted_tasks': extracted_tasks if 'extracted_tasks' in locals() else [],
+            'user_engram': user_engram  # Include the user engram data passed in
         }
+    
+    @classmethod
+    def format_daily_digest_html(cls, digest_data: dict, upload_analytics: dict = None) -> str:
+        """
+        Format the digest data into beautiful HTML email content
+        """
+        from datetime import datetime
+        import json
+        
+        # Debug logging
+        logger.info("="*80)
+        logger.info("DIGEST DATA DEBUG:")
+        logger.info(f"Resources Summary: {json.dumps(digest_data.get('recent_resources_summary', {}), default=str)}")
+        logger.info(f"Resources Sample Count: {len(digest_data.get('recent_resources_sample', []))}")
+        logger.info(f"Sessions Count: {digest_data.get('session_count', 0)}")
+        logger.info(f"Upload Analytics: {json.dumps(upload_analytics, default=str) if upload_analytics else 'None'}")
+        logger.info("="*80)
+        
+        # Extract data
+        user = digest_data.get('user', {})
+        user_email = user.get('email', 'User')
+        user_name = user.get('name', user_email)  # Use actual name if available
+        # Extract first name for greeting
+        first_name = user_name.split()[0] if user_name and ' ' in user_name else user_name
+        
+        digest_scope = digest_data.get('digest_scope', 'Daily Digest')
+        session_count = digest_data.get('session_count', 0)
+        resources_summary = digest_data.get('recent_resources_summary', {})
+        resources_sample = digest_data.get('recent_resources_sample', [])
+        graph_summary = digest_data.get('graph_summary', [])
+        recent_sessions = digest_data.get('recent_sessions', [])
+        resource_patterns = digest_data.get('resource_patterns', [])
+        recent_engrams = digest_data.get('recent_engrams', [])
+        
+        # Start building HTML
+        html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{digest_scope}</title>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background-color: #f5f5f5;
+            margin: 0;
+            padding: 0;
+        }}
+        .container {{
+            max-width: 600px;
+            margin: 0 auto;
+            background-color: #ffffff;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }}
+        .header {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 40px 30px;
+            text-align: center;
+        }}
+        .header h1 {{
+            margin: 0;
+            font-size: 28px;
+            font-weight: 600;
+        }}
+        .header p {{
+            margin: 10px 0 0 0;
+            opacity: 0.9;
+            font-size: 16px;
+        }}
+        .content {{
+            padding: 30px;
+        }}
+        .section {{
+            margin-bottom: 30px;
+        }}
+        .section-title {{
+            font-size: 20px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 15px;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 8px;
+        }}
+        .metric-grid {{
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+            margin-bottom: 30px;
+        }}
+        .metric-card {{
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+            border: 1px solid #e9ecef;
+        }}
+        .metric-value {{
+            font-size: 36px;
+            font-weight: 700;
+            color: #667eea;
+            margin: 0;
+        }}
+        .metric-label {{
+            font-size: 14px;
+            color: #6c757d;
+            margin: 5px 0 0 0;
+        }}
+        .table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+        }}
+        .table th {{
+            background-color: #f8f9fa;
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+            border-bottom: 2px solid #dee2e6;
+            color: #495057;
+        }}
+        .table td {{
+            padding: 12px;
+            border-bottom: 1px solid #dee2e6;
+        }}
+        .table tr:hover {{
+            background-color: #f8f9fa;
+        }}
+        .status-badge {{
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+        }}
+        .status-completed {{
+            background-color: #d4edda;
+            color: #155724;
+        }}
+        .status-failed {{
+            background-color: #f8d7da;
+            color: #721c24;
+        }}
+        .status-pending {{
+            background-color: #fff3cd;
+            color: #856404;
+        }}
+        .category-tag {{
+            display: inline-block;
+            background-color: #e9ecef;
+            color: #495057;
+            padding: 3px 10px;
+            border-radius: 15px;
+            font-size: 12px;
+            margin-right: 5px;
+        }}
+        .footer {{
+            background-color: #f8f9fa;
+            padding: 20px 30px;
+            text-align: center;
+            color: #6c757d;
+            font-size: 14px;
+        }}
+        .no-data {{
+            text-align: center;
+            color: #6c757d;
+            padding: 20px;
+            font-style: italic;
+        }}
+        @media (max-width: 600px) {{
+            .metric-grid {{
+                grid-template-columns: 1fr;
+            }}
+            .container {{
+                box-shadow: none;
+            }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Your {digest_scope}</h1>
+            <p>{datetime.now().strftime('%B %d, %Y')}</p>
+        </div>
+        
+        <div class="content">
+"""
+        
+        # Prepare data for summary
+        total_resources = resources_summary.get('total_resources', 0)
+        total_uploads = upload_analytics.get('total_uploads_24h', 0) if upload_analytics else 0
+        completed_uploads = upload_analytics.get('completed_uploads_24h', 0) if upload_analytics else 0
+        total_size = upload_analytics.get('total_size_human_readable', '0 B') if upload_analytics else '0 B'
+        categories = resources_summary.get('categories', [])
+        
+        # Opening greeting
+        current_hour = datetime.now().hour
+        if current_hour < 12:
+            greeting = "Good morning"
+        elif current_hour < 17:
+            greeting = "Good afternoon"
+        else:
+            greeting = "Good evening"
+        
+        html += f"""
+            <div class="section">
+                <p style="font-size: 18px; line-height: 1.8; margin-bottom: 30px;">
+                    {greeting}, <strong>{first_name}</strong>.
+                </p>
+        """
+        
+        # Check if we have an agentic summary to use
+        agentic_summary = digest_data.get('agentic_summary')
+        
+        if agentic_summary:
+            # Use the AI-generated personalized summary
+            # Format the agentic summary for HTML
+            formatted_summary = agentic_summary.replace('\n\n', '</p><p style="margin-bottom: 15px;">')
+            html += f"""
+                <div style="background: #f0f4ff; padding: 25px; border-radius: 10px; margin-bottom: 30px; border-left: 4px solid #667eea;">
+                    <h3 style="font-size: 20px; color: #333; margin-bottom: 15px; font-weight: 600;">Your Personalized Insights</h3>
+                    <div style="font-size: 16px; line-height: 1.8; color: #444;">
+                        <p style="margin-bottom: 15px;">{formatted_summary}</p>
+                    </div>
+                </div>
+            """
+        
+        # Three-paragraph summary based on actual content (fallback if no agentic summary)
+        if not agentic_summary and (total_resources > 0 or total_uploads > 0):
+            # Analyze content for summary
+            audio_transcripts = []
+            documents_processed = []
+            key_themes = []
+            
+            # Extract meaningful content from resources
+            for resource in resources_sample:
+                category = resource.get('category', '')
+                content = resource.get('content_preview', '')
+                name = resource.get('name', '')
+                
+                if category == 'audio_transcription' and content:
+                    audio_transcripts.append({
+                        'name': name,
+                        'content': content.strip()
+                    })
+                elif category == 'pdf_chunk' and content:
+                    doc_name = name.split('(')[0].strip() if '(' in name else name
+                    if doc_name not in [d['name'] for d in documents_processed]:
+                        documents_processed.append({
+                            'name': doc_name,
+                            'content': content.strip()[:200]
+                        })
+            
+            # Paragraph 1: Overall activity summary
+            html += f"""
+                <p style="font-size: 16px; line-height: 1.8; margin-bottom: 20px;">
+                    Over the past 24 hours, you've been actively building your knowledge base with 
+                    <strong>{total_uploads} uploads</strong> totaling <strong>{total_size}</strong> of data. 
+                    These materials were successfully processed into <strong>{total_resources} searchable resources</strong>
+                    {f' across {len(categories)} categories: {", ".join(categories)}' if categories else ''}.
+                    This consistent activity demonstrates your commitment to organizing and preserving important information.
+                </p>
+            """
+            
+            # Paragraph 2: Content insights
+            if audio_transcripts:
+                # Summarize audio content themes
+                audio_topics = []
+                for transcript in audio_transcripts[:3]:
+                    content_snippet = transcript['content'][:200]
+                    if 'BrainBridge' in content_snippet:
+                        audio_topics.append("BrainBridge device capabilities")
+                    if 'memory' in content_snippet.lower():
+                        audio_topics.append("memory module functionality")
+                    if 'email digest' in content_snippet.lower():
+                        audio_topics.append("digest system development")
+                    if 'backend' in content_snippet.lower() or 'upload' in content_snippet.lower():
+                        audio_topics.append("technical infrastructure")
+                
+                topics_text = " and ".join(set(audio_topics[:3])) if audio_topics else "various technical topics"
+                
+                html += f"""
+                <p style="font-size: 16px; line-height: 1.8; margin-bottom: 20px;">
+                    Your audio recordings reveal focused work on {topics_text}. 
+                    The transcribed conversations show thoughtful consideration of system architecture and user experience, 
+                    particularly around how to track and present information effectively. 
+                    {'You also processed several PDF documents, creating a comprehensive searchable archive.' if documents_processed else ''}
+                </p>
+                """
+            elif documents_processed:
+                html += f"""
+                <p style="font-size: 16px; line-height: 1.8; margin-bottom: 20px;">
+                    Your document processing focused on {len(documents_processed)} key files, including 
+                    {', '.join([d['name'] for d in documents_processed[:2]])}. 
+                    Each document was intelligently chunked for optimal searchability, ensuring you can quickly 
+                    locate specific information when needed.
+                </p>
+                """
+            else:
+                html += f"""
+                <p style="font-size: 16px; line-height: 1.8; margin-bottom: 20px;">
+                    The processed materials span {', '.join(categories[:3]) if categories else 'multiple categories'}, 
+                    creating a diverse knowledge repository. This variety ensures comprehensive coverage 
+                    of your areas of interest and work.
+                </p>
+                """
+            
+            # Paragraph 3: Looking forward
+            html += f"""
+                <p style="font-size: 16px; line-height: 1.8; margin-bottom: 20px;">
+                    {'Your ' + str(session_count) + ' active sessions show sustained engagement with the platform. ' if session_count > 0 else ''}
+                    As your knowledge base grows, these resources become increasingly valuable for future reference 
+                    and insight generation. The system continues to learn from your usage patterns to provide 
+                    better organization and retrieval capabilities.
+                </p>
+            """
+        else:
+            # Quiet day summary
+            html += f"""
+                <p style="font-size: 16px; line-height: 1.8; margin-bottom: 20px;">
+                    It's been a quiet day in your Dreaming Bridge workspace. Sometimes the most productive 
+                    days are those spent reflecting on previously gathered knowledge rather than adding new content.
+                </p>
+                
+                <p style="font-size: 16px; line-height: 1.8; margin-bottom: 20px;">
+                    Your knowledge base remains ready whenever you need it, with all your previous uploads 
+                    organized and searchable. The system continues to maintain and optimize your resources 
+                    in the background.
+                </p>
+                
+                <p style="font-size: 16px; line-height: 1.8; margin-bottom: 20px;">
+                    When you're ready to add new content, simply upload your files and they'll be processed 
+                    and integrated into your growing repository of knowledge.
+                </p>
+            """
+        
+        html += """
+            </div>
+            
+            <!-- Invitation to Chat Section -->
+            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 12px; margin: 30px 0; text-align: center; box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);">
+                <h2 style="color: white; font-size: 28px; margin-bottom: 15px; font-weight: 600;">
+                    💬 Chat with Your Knowledge Base! 🚀
+                </h2>
+                <p style="color: rgba(255, 255, 255, 0.9); font-size: 18px; line-height: 1.6; margin-bottom: 20px; max-width: 600px; margin-left: auto; margin-right: auto;">
+                    Your entire knowledge repository is now conversational. Ask questions, explore insights, and discover connections across all your uploaded content.
+                </p>
+                <a href="https://vault.percolationlabs.ai" style="display: inline-block; background: white; color: #667eea; padding: 15px 40px; border-radius: 30px; text-decoration: none; font-weight: 600; font-size: 18px; box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1); transition: all 0.3s ease;">
+                    🎯 Start Chatting Now
+                </a>
+                <p style="color: rgba(255, 255, 255, 0.8); font-size: 14px; margin-top: 15px; margin-bottom: 0;">
+                    Access your personalized AI assistant at <strong>vault.percolationlabs.ai</strong>
+                </p>
+            </div>
+            
+            <hr style="border: none; border-top: 1px solid #e9ecef; margin: 40px 0;">
+        """
+        
+        # Add extracted tasks section if available
+        extracted_tasks = digest_data.get('extracted_tasks', [])
+        if extracted_tasks:
+            html += """
+            <div style="background: #fff3cd; border: 1px solid #ffeaa7; padding: 25px; border-radius: 10px; margin-bottom: 30px;">
+                <h2 style="color: #856404; font-size: 22px; margin-bottom: 20px; display: flex; align-items: center;">
+                    📋 Tasks & Action Items Identified
+                </h2>
+            """
+            
+            # Group tasks by priority
+            high_priority = [t for t in extracted_tasks if t.get('priority') == 'high']
+            medium_priority = [t for t in extracted_tasks if t.get('priority') == 'medium']
+            low_priority = [t for t in extracted_tasks if t.get('priority') == 'low']
+            
+            # Display high priority tasks
+            if high_priority:
+                html += """
+                <div style="margin-bottom: 20px;">
+                    <h3 style="color: #dc3545; font-size: 16px; margin-bottom: 10px;">🔴 High Priority</h3>
+                """
+                for task in high_priority:
+                    html += f"""
+                    <div style="background: white; padding: 12px; border-radius: 6px; margin-bottom: 8px; border-left: 4px solid #dc3545;">
+                        <p style="margin: 0; color: #333; font-weight: 500;">{task.get('task', '')}</p>
+                        <p style="margin: 4px 0 0 0; font-size: 12px; color: #6c757d; font-style: italic;">
+                            Source: {task.get('source', 'Unknown')}
+                        </p>
+                    </div>
+                    """
+                html += "</div>"
+            
+            # Display medium priority tasks
+            if medium_priority:
+                html += """
+                <div style="margin-bottom: 20px;">
+                    <h3 style="color: #fd7e14; font-size: 16px; margin-bottom: 10px;">🟡 Medium Priority</h3>
+                """
+                for task in medium_priority:
+                    html += f"""
+                    <div style="background: white; padding: 12px; border-radius: 6px; margin-bottom: 8px; border-left: 4px solid #fd7e14;">
+                        <p style="margin: 0; color: #333; font-weight: 500;">{task.get('task', '')}</p>
+                        <p style="margin: 4px 0 0 0; font-size: 12px; color: #6c757d; font-style: italic;">
+                            Source: {task.get('source', 'Unknown')}
+                        </p>
+                    </div>
+                    """
+                html += "</div>"
+            
+            # Display low priority tasks
+            if low_priority:
+                html += """
+                <div style="margin-bottom: 0;">
+                    <h3 style="color: #28a745; font-size: 16px; margin-bottom: 10px;">🟢 Low Priority</h3>
+                """
+                for task in low_priority:
+                    html += f"""
+                    <div style="background: white; padding: 12px; border-radius: 6px; margin-bottom: 8px; border-left: 4px solid #28a745;">
+                        <p style="margin: 0; color: #333; font-weight: 500;">{task.get('task', '')}</p>
+                        <p style="margin: 4px 0 0 0; font-size: 12px; color: #6c757d; font-style: italic;">
+                            Source: {task.get('source', 'Unknown')}
+                        </p>
+                    </div>
+                    """
+                html += "</div>"
+            
+            html += """
+            </div>
+            """
+        
+        # Detail sections (moved down from top)
+        if total_uploads > 0 or total_resources > 0:
+                # Analyze content to extract topics and themes
+                audio_insights = []
+                document_insights = []
+                
+                for r in resources_sample[:10]:
+                    name = r.get('name', '')
+                    category = r.get('category', '')
+                    content = r.get('content_preview', '')
+                    
+                    if category == 'audio_transcription' and content:
+                        # Extract key phrases from audio transcription
+                        clean_content = content.strip()[:300]
+                        if clean_content and len(clean_content) > 50:
+                            audio_insights.append({
+                                'name': name,
+                                'content': clean_content
+                            })
+                    elif category == 'pdf_chunk' and content:
+                        # Extract document topic
+                        doc_name = name.split('(')[0].strip() if '(' in name else name
+                        if doc_name not in [d['name'] for d in document_insights]:
+                            document_insights.append({
+                                'name': doc_name,
+                                'content': content.strip()[:200]
+                            })
+                
+                # Build insights narrative
+                if audio_insights or document_insights:
+                    html += f"""
+                    <div style="background: #e9ecef; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
+                        <h3 style="font-size: 18px; color: #333; margin-bottom: 15px;">💡 Content Insights</h3>
+                    """
+                    
+                    # Audio insights
+                    if audio_insights:
+                        html += """
+                        <div style="margin-bottom: 15px;">
+                            <h4 style="font-size: 16px; color: #495057; margin-bottom: 10px;">🎙️ From your audio recordings:</h4>
+                        """
+                        for insight in audio_insights[:2]:
+                            # Extract meaningful snippet
+                            content_snippet = insight['content'][:150]
+                            if len(insight['content']) > 150:
+                                # Try to end at a word boundary
+                                last_space = content_snippet.rfind(' ')
+                                if last_space > 100:
+                                    content_snippet = content_snippet[:last_space]
+                                content_snippet += "..."
+                            
+                            html += f"""
+                            <div style="margin-bottom: 10px; padding: 10px; background: white; border-radius: 6px;">
+                                <p style="margin: 0; font-style: italic; color: #495057; line-height: 1.6;">
+                                    "{content_snippet}"
+                                </p>
+                                <p style="margin: 5px 0 0 0; font-size: 12px; color: #6c757d;">
+                                    — from {insight['name']}
+                                </p>
+                            </div>
+                            """
+                        html += """
+                        </div>
+                        """
+                    
+                    # Document insights
+                    if document_insights:
+                        html += """
+                        <div>
+                            <h4 style="font-size: 16px; color: #495057; margin-bottom: 10px;">📄 From your documents:</h4>
+                            <p style="margin: 0; line-height: 1.8;">
+                        """
+                        doc_names = [d['name'] for d in document_insights[:3]]
+                        html += f"""
+                                You've been working with documents including <strong>{', '.join(doc_names)}</strong>, 
+                                building your knowledge base with diverse content.
+                            </p>
+                        </div>
+                        """
+                    
+                    html += """
+                    </div>
+                    """
+        else:
+            # Quiet day narrative
+            html += f"""
+                <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
+                    <p style="margin-bottom: 0; line-height: 1.8; text-align: center; color: #6c757d;">
+                        It's been a quiet day in your Dreaming Bridge workspace. 
+                        Ready to start uploading and creating new resources?
+                    </p>
+                </div>
+            """
+        
+        html += """
+            </div>
+        """
+        
+        
+        
+        # Upload Story Section
+        if upload_analytics and upload_analytics.get('recent_upload_details'):
+            recent_uploads = upload_analytics.get('recent_upload_details', [])
+            
+            # Group uploads by type
+            processed_uploads = []
+            failed_uploads = []
+            pending_uploads = []
+            
+            for upload in recent_uploads[:10]:
+                status_summary = upload.get('status_summary', '')
+                if 'processed' in status_summary.lower():
+                    processed_uploads.append(upload)
+                elif 'failed' in status_summary.lower():
+                    failed_uploads.append(upload)
+                else:
+                    pending_uploads.append(upload)
+            
+            html += """
+            <div class="section">
+                <h2 class="section-title">📤 Your Upload Journey</h2>
+            """
+            
+            # Success stories
+            if processed_uploads:
+                html += """
+                <div style="margin-bottom: 25px;">
+                    <h3 style="font-size: 16px; color: #155724; margin-bottom: 10px;">✅ Successfully Processed</h3>
+                """
+                
+                # For audio files, we'll look up their content in resources
+                audio_contents = {}
+                if resources_sample:
+                    for resource in resources_sample:
+                        if resource.get('category') == 'audio_transcription':
+                            # Extract base filename from resource name
+                            res_name = resource.get('name', '')
+                            content = resource.get('content_preview', '')
+                            if res_name and content:
+                                audio_contents[res_name] = content
+                
+                for upload in processed_uploads[:3]:
+                    filename = upload.get('filename', 'Unknown')
+                    resource_count = upload.get('resource_count', 0)
+                    categories = upload.get('categories', [])
+                    size = upload.get('total_size', 0)
+                    size_mb = size / (1024 * 1024) if size else 0
+                    
+                    # Build narrative based on file type
+                    if filename.endswith('.wav') and filename in audio_contents:
+                        # Audio file with transcription
+                        transcript = audio_contents[filename][:200].strip()
+                        if transcript:
+                            html += f"""
+                            <div style="margin-bottom: 20px; padding-left: 20px; border-left: 3px solid #28a745;">
+                                <p style="margin-bottom: 8px;">
+                                    <strong>{filename}</strong> ({size_mb:.1f} MB) - Audio transcription captured
+                                </p>
+                                <p style="margin: 0; padding: 10px; background: #f8f9fa; border-radius: 6px; font-style: italic; color: #495057;">
+                                    "{transcript}..."
+                                </p>
+                            </div>
+                            """
+                        else:
+                            html += f"""
+                            <p style="margin-bottom: 10px; padding-left: 20px; border-left: 3px solid #28a745;">
+                                <strong>{filename}</strong> ({size_mb:.1f} MB) - Audio file successfully transcribed
+                            </p>
+                            """
+                    elif filename.endswith('.pdf'):
+                        # PDF file
+                        chunk_info = f"split into {resource_count} searchable chunks" if resource_count > 1 else "processed"
+                        html += f"""
+                        <p style="margin-bottom: 10px; padding-left: 20px; border-left: 3px solid #28a745;">
+                            <strong>{filename}</strong> ({size_mb:.1f} MB) - PDF document {chunk_info}
+                        </p>
+                        """
+                    else:
+                        # Other files
+                        category_text = ""
+                        if categories and categories[0]:
+                            category_text = f" as <em>{categories[0][0]}</em>"
+                        
+                        html += f"""
+                        <p style="margin-bottom: 10px; padding-left: 20px; border-left: 3px solid #28a745;">
+                            <strong>{filename}</strong> ({size_mb:.1f} MB) was successfully processed{category_text}
+                        </p>
+                        """
+                
+                html += """
+                </div>
+                """
+            
+            # Failed uploads
+            if failed_uploads:
+                html += """
+                <div style="margin-bottom: 25px;">
+                    <h3 style="font-size: 16px; color: #721c24; margin-bottom: 10px;">⚠️ Need Attention</h3>
+                """
+                
+                for upload in failed_uploads[:3]:
+                    filename = upload.get('filename', 'Unknown')
+                    html += f"""
+                    <p style="margin-bottom: 10px; padding-left: 20px; border-left: 3px solid #dc3545;">
+                        <strong>{filename}</strong> failed to upload. You may want to try uploading this file again.
+                    </p>
+                    """
+                
+                html += """
+                </div>
+                """
+            
+            # Summary
+            if len(recent_uploads) > 5:
+                html += f"""
+                <p style="color: #6c757d; font-style: italic; font-size: 14px;">
+                    ...and {len(recent_uploads) - 5} more uploads in the last 24 hours.
+                </p>
+                """
+            
+            html += """
+            </div>
+            """
+        
+        # Resources Created Section
+        if resources_sample:
+            html += """
+            <div class="section">
+                <h2 class="section-title">📚 Your Knowledge Base Growth</h2>
+            """
+            
+            # Group resources by type
+            resource_groups = {}
+            for resource in resources_sample:
+                category = resource.get('category', 'Other')
+                if category not in resource_groups:
+                    resource_groups[category] = []
+                resource_groups[category].append(resource)
+            
+            # Tell the story of each category
+            for category, resources in resource_groups.items():
+                if category and resources:
+                    html += f"""
+                    <div style="margin-bottom: 20px;">
+                        <h3 style="font-size: 16px; color: #495057; margin-bottom: 10px;">
+                            {category.replace('_', ' ').title()} Resources
+                        </h3>
+                    """
+                    
+                    for resource in resources[:2]:  # Show top 2 per category
+                        name = resource.get('name', 'Unnamed')
+                        content_preview = resource.get('content_preview', '')
+                        
+                        # Clean up name
+                        if '(' in name and ')' in name:  # Remove chunk indicators
+                            base_name = name.split('(')[0].strip()
+                        else:
+                            base_name = name
+                        
+                        # Clean up preview
+                        if content_preview:
+                            preview = content_preview.strip()[:150]
+                            if len(content_preview) > 150:
+                                preview += "..."
+                        else:
+                            preview = ""
+                        
+                        html += f"""
+                        <div style="margin-bottom: 15px; padding: 15px; background: #f8f9fa; border-radius: 8px;">
+                            <p style="margin: 0 0 8px 0; font-weight: 600;">{base_name}</p>
+                            {f'<p style="margin: 0; color: #6c757d; font-size: 14px; line-height: 1.6;">{preview}</p>' if preview else ''}
+                        </div>
+                        """
+                    
+                    html += """
+                    </div>
+                    """
+            
+            # Activity timeline
+            if resource_patterns and any(p.get('resources_created', 0) > 0 for p in resource_patterns):
+                html += """
+                <div style="margin-top: 25px; padding: 20px; background: #e9ecef; border-radius: 8px;">
+                    <h3 style="font-size: 16px; color: #333; margin-bottom: 15px;">⏰ Your Activity Timeline</h3>
+                    <p style="margin-bottom: 15px; color: #495057;">Here's when you were most active creating resources:</p>
+                """
+                
+                active_hours = []
+                for pattern in resource_patterns[:8]:
+                    count = pattern.get('resources_created', 0)
+                    if count > 0:
+                        hour = pattern.get('hour', '')
+                        if hour:
+                            try:
+                                if isinstance(hour, str):
+                                    hour_dt = datetime.fromisoformat(hour.replace('Z', '+00:00'))
+                                else:
+                                    hour_dt = hour
+                                hour_str = hour_dt.strftime('%I %p').lstrip('0')
+                                active_hours.append(f"<strong>{hour_str}</strong> ({count} items)")
+                            except:
+                                pass
+                
+                if active_hours:
+                    html += f"""
+                    <p style="margin: 0; line-height: 1.8;">
+                        Peak activity at: {', '.join(active_hours[:3])}
+                        {' and more' if len(active_hours) > 3 else ''}
+                    </p>
+                    """
+                
+                html += """
+                </div>
+                """
+            
+            html += """
+            </div>
+            """
+        
+        # Closing thoughts
+        html += """
+            <div class="section" style="text-align: center; margin-top: 40px;">
+                <p style="color: #6c757d; font-style: italic;">
+                    Keep building your knowledge base. Every upload enriches your digital workspace.
+                </p>
+            </div>
+        """
+        
+        html += """
+        </div>
+        
+        <div class="footer">
+            <p>Your {digest_scope} from Dreaming Bridge</p>
+            <p style="margin-top: 10px; font-size: 12px; color: #999;">
+                Sent with ❤️ to help you stay informed about your knowledge workspace
+            </p>
+        </div>
+    </div>
+</body>
+</html>
+""".format(digest_scope=digest_scope)
+        
+        return html

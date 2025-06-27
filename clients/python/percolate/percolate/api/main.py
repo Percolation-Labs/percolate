@@ -19,76 +19,168 @@ from apscheduler.triggers.cron import CronTrigger
 import percolate as p8
 from percolate.models.p8.types import Schedule
 from percolate.api.routes.auth.utils import get_stable_session_key
+import asyncio
 # Global scheduler instance
 scheduler = BackgroundScheduler()
 
+def acquire_task_lock(process_id, task_name, timeout_seconds=300):
+    """Try to acquire a lock for running a specific task."""
+    import time
+    import json
+    from percolate.models.p8.types import Settings
+    
+    lock_key = f"task_lock:{task_name}"
+    
+    try:
+        settings_repo = p8.repository(Settings)
+        current_time = time.time()
+        
+        # Use a transaction-like approach with immediate re-check
+        # First, check if lock exists and is valid
+        existing_lock = settings_repo.select(key=lock_key)
+        if existing_lock:
+            lock_data = json.loads(existing_lock[0]['value'])
+            if current_time < lock_data.get('expires_at', 0):
+                # Lock is held by another process
+                logger.debug(f"Task {task_name} already running on {lock_data['process_id']}")
+                return False
+        
+        # Try to acquire lock with our process ID
+        lock_value = json.dumps({
+            'process_id': process_id,
+            'acquired_at': current_time,
+            'expires_at': current_time + timeout_seconds
+        })
+        
+        lock_setting = Settings(key=lock_key, value=lock_value)
+        settings_repo.update_records(lock_setting)
+        
+        # CRITICAL: Re-check that we actually got the lock
+        # This handles race conditions where multiple pods try simultaneously
+        verification = settings_repo.select(key=lock_key)
+        if verification:
+            verified_data = json.loads(verification[0]['value'])
+            if verified_data.get('process_id') == process_id:
+                logger.info(f"Acquired lock for task: {task_name}")
+                return True
+            else:
+                # Another process beat us to it
+                logger.debug(f"Lost race for task {task_name} to {verified_data.get('process_id')}")
+                return False
+        
+        # Shouldn't happen, but handle gracefully
+        logger.error(f"Lock verification failed for task {task_name}")
+        return False
+        
+    except Exception as e:
+        logger.error(f"Failed to acquire task lock: {e}")
+        return False
+
+def release_task_lock(process_id, task_name):
+    """Release the lock for a task."""
+    import time
+    import json
+    from percolate.models.p8.types import Settings
+    
+    lock_key = f"task_lock:{task_name}"
+    
+    try:
+        settings_repo = p8.repository(Settings)
+        release_value = json.dumps({
+            'released_by': process_id,
+            'released_at': time.time()
+        })
+        
+        lock_setting = Settings(key=lock_key, value=release_value)
+        settings_repo.update_records(lock_setting)
+        
+        logger.debug(f"Released lock for task: {task_name}")
+        
+    except Exception as e:
+        logger.error(f"Failed to release task lock: {e}")
+
 def run_scheduled_job(schedule_record):
     """Run a scheduled job based on its specification."""
-    logger.info(f"Running scheduled task: {schedule_record.name}")
+    import uuid,socket
     
-    # Handle different task types
+    # Generate unique process ID for this execution
+    process_id = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    task_name = f"{schedule_record.name}:{schedule_record.id}"
+    
+    # Try to acquire lock for this task
+    if not acquire_task_lock(process_id, task_name):
+        logger.debug(f"Skipping {task_name} - already running on another pod")
+        return
+    
     try:
-        if schedule_record.spec and "task" in schedule_record.spec:
+        logger.info(f"Running scheduled task: {schedule_record.name}")
+        
+        # Handle different task types
+        if schedule_record.name and schedule_record.name.lower() == "daily-digest":
+            logger.info(f"Executing Daily Digest task for user: {schedule_record.userid}")
+            from percolate.services.tasks.TaskManager import TaskManager
+            task_manager = TaskManager()
+            task_manager.dispatch_task(schedule_record)
+        elif schedule_record.spec and "task_type" in schedule_record.spec:
+            task_type = schedule_record.spec["task_type"]
+            logger.info(f"Executing task type: {task_type}")
+            
+            if task_type == "digest":
+                # Handle digest tasks
+                from percolate.services.tasks.TaskManager import TaskManager
+                task_manager = TaskManager()
+                task_manager.dispatch_task(schedule_record)
+            elif task_type == "file_sync":
+                # Handle file sync tasks
+                logger.info(f"Running file sync task: {schedule_record.spec}")
+                # File sync logic would go here
+            else:
+                logger.warning(f"Unknown task type: {task_type}")
+        elif schedule_record.spec and "task" in schedule_record.spec:
             task_name = schedule_record.spec["task"]
             logger.info(f"Executing task: {task_name}")
-            
-            # Process pending TUS uploads task
-            if task_name == "process_pending_s3_resources":
-                from percolate.api.controllers.tus import process_pending_s3_resources
-                import asyncio
-                
-                # Create an event loop for the async task
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                
-                try:
-                    # Run the async function in the event loop
-                    result = loop.run_until_complete(process_pending_s3_resources())
-                    logger.info(f"Scheduled task result: {result}")
-                finally:
-                    loop.close()
         else:
             logger.warning(f"No task specified in schedule record: {schedule_record.id}")
+            
     except Exception as e:
         logger.error(f"Error running scheduled task {schedule_record.id}: {str(e)}")
-        # Don't propagate exceptions to prevent scheduler from failing
+    finally:
+        # Always release the lock
+        release_task_lock(process_id, task_name)
 
-# @asynccontextmanager
-# async def lifespan(app: FastAPI):
-#     """Application lifespan: start and shutdown scheduler."""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan: all pods run schedulers with per-task locking."""
+    import socket
     
-#     repo = p8.repository(Schedule)
-#     table = Schedule.get_model_table_name()  
+    # Create a unique identifier for this pod
+    pod_id = f"{socket.gethostname()}-{os.getpid()}"
+    
+    # Load and start schedules - ALL pods do this
+    repo = p8.repository(Schedule)
+    table = Schedule.get_model_table_name()  
    
-#     try:
-#         data = repo.execute(f"SELECT * FROM {table} WHERE disabled_at IS NULL")
-#         for d in data:
-#             try:
-#                 record = Schedule(**d)
-#                 trigger = CronTrigger.from_crontab(record.schedule)
-#                 scheduler.add_job(run_scheduled_job, trigger, args=[record], id=str(record.id))
-#             except Exception as e:
-#                 logger.warning(f"Failed to schedule job for record {d.get('id')}: {e}")
-#     except Exception as ex:
-#         logger.warning(f"Failed to load scheduler data {ex}")
+    try:
+        data = repo.execute(f"SELECT * FROM {table} WHERE disabled_at IS NULL")
+        for d in data:
+            try:
+                record = Schedule(**d)
+                trigger = CronTrigger.from_crontab(record.schedule)
+                scheduler.add_job(run_scheduled_job, trigger, args=[record], id=str(record.id))
+            except Exception as e:
+                logger.warning(f"Failed to schedule job for record {d.get('id')}: {e}")
+    except Exception as ex:
+        logger.warning(f"Failed to load scheduler data {ex}")
     
-#     scheduler.start()
-#     logger.info(f"Scheduler started with jobs: {[j.id for j in scheduler.get_jobs()]}")
+    scheduler.start()
+    logger.info(f"✓ Scheduler started on pod {pod_id} with jobs: {[j.id for j in scheduler.get_jobs()]}")
     
-#     # Check if we need to process pending TUS uploads (we don't create schedules at startup)
-#     try:
-#         from percolate.api.controllers.tus import process_pending_s3_resources
-#         import asyncio
-#         # Process any pending uploads at startup, but don't create a schedule
-#         asyncio.create_task(process_pending_s3_resources())
-#         logger.info("Triggered initial TUS processing at startup")
-#     except Exception as e:
-#         logger.error(f"Failed to trigger initial TUS processing: {e}")
-    
-#     try:
-#         yield
-#     finally:
-#         scheduler.shutdown()
+    try:
+        yield
+    finally:
+        # Shutdown scheduler
+        scheduler.shutdown()
+        logger.info(f"Scheduler shutdown complete on pod {pod_id}")
 
 
 app = FastAPI(
@@ -109,7 +201,7 @@ app = FastAPI(
     },
     docs_url="/swagger",
     redoc_url=f"/docs",
-   # lifespan=lifespan,
+    lifespan=lifespan,
 )
 
 # Use stable session key for session persistence across restarts
@@ -140,7 +232,7 @@ origins = [
     "http://127.0.0.1:5000",
     "http://localhost:1420",# (Tauri dev server)
     "http://tauri.localhost",# (Tauri production origin)
-    "https://tauri.localhost" #(Tauri production origin with https)
+    "https://tauri.localhost", #(Tauri production origin with https)
     "https://vault.percolationlabs.ai",
 ]
 

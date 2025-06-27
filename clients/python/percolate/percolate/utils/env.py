@@ -153,7 +153,7 @@ EMAIL_PROVIDER = os.environ.get('EMAIL_PROVIDER', 'gmail')
 EMAIL_SMTP_SERVER = os.environ.get('EMAIL_SMTP_SERVER', 'smtp.gmail.com')
 EMAIL_SMTP_PORT = int(os.environ.get('EMAIL_SMTP_PORT', 587))
 EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'true').lower() in ('true', '1', 'yes', 'y')
-EMAIL_USERNAME = os.environ.get('EMAIL_USERNAME', 'eepis.development@gmail.com')
+EMAIL_USERNAME = os.environ.get('EMAIL_USERNAME', 'saoirse@dreamingbridge.io')
 EMAIL_PASSWORD = os.environ.get('EMAIL_PASSWORD', '')
 
 # System user for row-level security when no user context is provided

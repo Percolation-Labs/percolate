@@ -123,7 +123,9 @@ async def create_resources_from_upload(upload_id: str, save_resources: bool=True
             upload.resource_id = str(chunks[0].id)
             upload.upload_metadata['resource_ids'] = [str(c.id) for c in chunks]
             upload.upload_metadata['resource_count'] = len(chunks)
+            logger.info(f"Setting resource_id={upload.resource_id} on TusFileUpload id={upload.id}")
             p8.repository(TusFileUpload).update_records([upload])
+            logger.info(f"Successfully updated TusFileUpload with resource_id")
             
             return chunks
         else:

@@ -522,6 +522,18 @@ async def finalize_upload(upload_id: Union[str, uuid.UUID]) -> str:
                     logger.info(f"Creating resources for upload: {upload_id}")
                     resources = await create_resources_from_upload(upload_id)
                     logger.info(f"Created {len(resources)} resources for upload: {upload_id}")
+                    
+                    # Refresh the upload object to get the updated resource_id
+                    upload = await get_upload_info_ignore_expiration(upload_id)
+                    logger.info(f"After refresh: upload.resource_id = {upload.resource_id if hasattr(upload, 'resource_id') else 'NOT SET'}")
+                    
+                    # Update metadata to indicate successful resource creation
+                    upload.upload_metadata["resources_created"] = True
+                    upload.upload_metadata["resource_count"] = len(resources)
+                    # Keep the resource_id that was set by create_resources_from_upload
+                    if hasattr(upload, 'resource_id') and upload.resource_id:
+                        logger.info(f"Preserving resource_id={upload.resource_id} in final update")
+                    p8.repository(TusFileUpload).update_records([upload])
                 except Exception as resource_error:
                     logger.error(f"Error creating resources: {str(resource_error)}")
                     # Don't fail the finalization, just log the error
