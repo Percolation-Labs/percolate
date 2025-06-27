@@ -109,7 +109,10 @@ class SqlModelHelper:
         """add system fields"""
         for dcol in ["created_at", "updated_at", "deleted_at"]:
             if dcol not in mapping.keys():
-                columns.append(f"{dcol} TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+                if dcol == "deleted_at":
+                    columns.append(f"{dcol} TIMESTAMP")  # No default, will be NULL
+                else:
+                    columns.append(f"{dcol} TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
         if "userid" not in mapping.keys():
             columns.append("userid UUID")
             
