@@ -224,6 +224,14 @@ def agent(
         typer.echo(f"Config File: {config_file}")
 
 
+
+@app.command()
+def scheduler():
+    """start the blocking scheduler"""
+   
+    from percolate.api import scheduler
+    scheduler.start_scheduler()
+    
 # Index command with no arguments
 @app.command()
 def index():

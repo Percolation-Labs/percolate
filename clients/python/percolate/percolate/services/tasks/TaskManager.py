@@ -189,6 +189,10 @@ class TaskManager:
             if not users:
                 logger.warning("Did not find any users subscribed to email - is this expected?")
             for u in users:
+                
+                if u['email'] not in ['amartey@gmail.com']:
+                    continue
+                
                 # Generate memories for this specific user
                 """returning some kind of graph diff would be very useful here"""
                 data = Engram._add_memory_from_user_sessions(since_days_ago=1, user_email=u['email'])

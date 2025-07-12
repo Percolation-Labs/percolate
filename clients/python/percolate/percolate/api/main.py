@@ -172,8 +172,8 @@ async def lifespan(app: FastAPI):
     except Exception as ex:
         logger.warning(f"Failed to load scheduler data {ex}")
     
-    scheduler.start()
-    logger.info(f"✓ Scheduler started on pod {pod_id} with jobs: {[j.id for j in scheduler.get_jobs()]}")
+    #scheduler.start()
+    #logger.info(f"✓ Scheduler started on pod {pod_id} with jobs: {[j.id for j in scheduler.get_jobs()]}")
     
     try:
         yield

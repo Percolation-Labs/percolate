@@ -153,14 +153,22 @@ def store_user_with_token(token: typing.Union[str, dict], session_id:str, token_
     
     repo = p8.repository(User)
     
-    user = User(
-        id=user_id,
-        email=email,
-        session_id=session_id,
-        name=username,  # User model uses 'name' not 'username'
-        token=token_to_store,
-        token_expiry=token_expiry
-    )
+    exists = repo.select(email=email)
+    if exists:
+        user_data = exists[0]
+        user_data['session_id'] = session_id
+        user_data['token'] = token_to_store
+        user_data['token_expiry'] = token_expiry
+        user = User(**user_data)
+    else:
+        user = User(
+            id=user_id,
+            email=email,
+            session_id=session_id,
+            name=username,  # User model uses 'name' not 'username'
+            token=token_to_store,
+            token_expiry=token_expiry
+        )
     
     repo.update_records(user)
     

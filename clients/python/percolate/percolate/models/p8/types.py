@@ -1241,6 +1241,8 @@ class Engram(AbstractModel):
     - `reports-to`
     - 'observed'
     """
+    
+    name: str = Field(None, description="Item name")
 
     @classmethod
     def _add_memory_from_user_sessions(cls, since_days_ago:int=1, limit:int=200, user_email:str=None):

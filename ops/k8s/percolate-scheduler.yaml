@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: percolate-scheduler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: "percolate-scheduler"
+  template:
+    metadata:
+      labels:
+        app: percolate-scheduler
+    spec:
+      containers:
+        - name: percolate-scheduler
+          image: percolationlabs/percolate-api:latest
+          imagePullPolicy: Always
+          command: ["python", "-m", "percolate.cli", "scheduler"]
+          env:
+            - name: P8_PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: p8-app-super-creds
+                  key: password
+          envFrom:
+            - configMapRef:
+                name: percolate-env
+          resources:
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+            requests:
+              cpu: "250m"
+              memory: "256Mi"

@@ -48,6 +48,9 @@ class PostgresService:
             self.user_id = user_id if user_id is not None else SYSTEM_USER_ID
             self.user_groups = user_groups or []
             
+            # Store the original role_level provided to constructor
+            self._original_role_level = role_level
+            
             # Set initial role_level (may be updated during user context loading)
             if role_level is not None:
                 self.role_level = role_level
@@ -61,6 +64,9 @@ class PostgresService:
             self._need_user_context = (user_id is not None and 
                                        user_id != SYSTEM_USER_ID and 
                                        (role_level is None or not user_groups))
+            
+            # Track if we've loaded role_level from database
+            self._role_level_loaded = False
             
             if model:
                 """we do this because its easy for user to assume the instance is what we want instead of the type"""
@@ -228,9 +234,15 @@ class PostgresService:
                 # 2. Set percolate.role_level session variable (loading from DB if not provided)
                 # 3. Set percolate.user_groups in the future when implemented
                 
-                # Only provide role_level if explicitly set in the constructor
-                if self.role_level is not None and self.role_level != 100:
-                    # Call with explicit role_level
+                # Determine which role_level to use
+                if self._original_role_level is not None:
+                    # Use the explicitly provided role_level from constructor
+                    cursor.execute(
+                        f"SELECT p8.set_user_context('{str(self.user_id)}'::UUID, {str(self._original_role_level)});"
+                    )
+                    self.role_level = self._original_role_level
+                elif self._role_level_loaded and self.role_level is not None:
+                    # We've previously loaded the role_level, reuse it
                     cursor.execute(
                         f"SELECT p8.set_user_context('{str(self.user_id)}'::UUID, {str(self.role_level)});"
                     )
@@ -239,13 +251,19 @@ class PostgresService:
                     cursor.execute(
                         f"SELECT p8.set_user_context('{str(self.user_id)}'::UUID);"
                     )
-                
-                # If role_level wasn't explicitly provided, query it back so our local state matches
-                if self.role_level is None or self.role_level == 100:
-                    cursor.execute("SELECT current_setting('percolate.role_level')::INTEGER AS role_level;")
-                    result = cursor.fetchone()
-                    if result:
-                        self.role_level = result[0]
+                    
+                    # Only try to read back the role_level if we're in the initial connection
+                    # and we haven't loaded it yet
+                    if not self._role_level_loaded:
+                        try:
+                            cursor.execute("SELECT current_setting('percolate.role_level', true)::INTEGER AS role_level;")
+                            result = cursor.fetchone()
+                            if result and result[0] is not None:
+                                self.role_level = result[0]
+                                self._role_level_loaded = True
+                        except Exception as e:
+                            # If we can't read it, just continue with the default
+                            logger.debug(f"Could not read role_level from session: {e}")
             
             # Apply user_groups separately for now (will be integrated into set_user_context later)
             # For position matching in RLS policy, use comma-separated string with leading/trailing commas
@@ -267,6 +285,9 @@ class PostgresService:
             self._need_user_context = False
         except Exception as e:
             logger.warning(f"Error applying user security context: {str(e)}")
+            # Log the full traceback for debugging
+            import traceback
+            logger.warning(f"Full traceback: {traceback.format_exc()}")
             # If the function failed, fall back to the old approach or just continue without security
         finally:
             cursor.close()
