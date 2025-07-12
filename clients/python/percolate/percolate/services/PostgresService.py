@@ -170,8 +170,8 @@ class PostgresService:
             "source": "local (no connection)"
         }
         
-        # Return local values if no connection
-        if not self.conn:
+        # Return local values if no connection or if system user
+        if not self.conn or self.user_id == SYSTEM_USER_ID:
             return context
             
         # Try to get values from database session
@@ -220,6 +220,10 @@ class PostgresService:
         if not self.conn:
             return
             
+        # Skip applying context for system user
+        if self.user_id == SYSTEM_USER_ID:
+            return
+            
         # Apply context to database session using the p8.set_user_context function
         cursor = self.conn.cursor()
         
@@ -227,8 +231,6 @@ class PostgresService:
         try:
             # If we have a user_id, use the p8.set_user_context function to set all session variables
             if self.user_id:
-                if self.user_id == SYSTEM_USER_ID:
-                    return
                 # The set_user_context function will:
                 # 1. Set percolate.user_id session variable
                 # 2. Set percolate.role_level session variable (loading from DB if not provided)

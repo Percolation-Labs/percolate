@@ -151,3 +151,7 @@ END $$;
 -----------------------------------------
 
  
+
+ALTER DATABASE app SET percolate.user_id = '00000000-0000-0000-0000-000000000000';
+ALTER DATABASE app SET percolate.role_level = 1;
+ALTER DATABASE app SET percolate.user_groups = '{}';

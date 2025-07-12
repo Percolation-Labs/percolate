@@ -49,6 +49,7 @@ class ModelRunner:
         More generally the model can provide a structured response format.
         see TODO: for guidance.
         """
+        self._context = None
         self.depth = depth  # TODO consider ways to control depth
         self._init_data = kwargs.get("init_data")
         """the agent model is any Pydantic Base model or Abstract model that implements the agent interface"""
@@ -64,18 +65,24 @@ class ModelRunner:
         self.role_level = kwargs.get("role_level")
 
         """the repository provides the Percolate database instance"""
-        self.repo = p8.repository(
-            self.agent_model,
-            user_id=self.user_id,
-            user_groups=self.user_groups,
-            role_level=self.role_level,
-        )
+        self.repo = self.get_repo()
 
         """initialize activates the agent model e.g. functions and prompt for use"""
         self.initialize()
         """the messages stack is the most important control element for llm agent sessions"""
         self.messages = MessageStack(None)
         logger.info(f"******Constructed agent {self.name}******")
+
+    def get_repo(self):
+        """
+        get the repo and use the user context of its given
+        """
+
+        return p8.repository(
+            self.agent_model,
+            user_id=self._context.user_id if self._context is not None else None,
+            role_level=self.role_level,
+        )
 
     def __repr__(self):
         return f"Runner({self.name})"
@@ -121,19 +128,7 @@ class ModelRunner:
             else:
                 user_id = self.user_id
 
-        # Coerce to string for database
-        if user_id:
-            if isinstance(user_id, uuid.UUID):
-                user_id = str(user_id)
-            elif isinstance(user_id, str):
-                try:
-                    # Try to parse as UUID to validate format
-                    uuid.UUID(user_id)
-                except ValueError:
-                    # Not a UUID, could be email - let database handle it
-                    pass
-
-        return self.repo.search(questions, user_id=user_id)
+        return self.get_repo().search(questions, user_id=str(user_id))
 
     def activate_functions_by_name(self, function_names: typing.List[str], **kwargs):
         """Provide a list of function names to load.
@@ -180,7 +175,9 @@ class ModelRunner:
         logger.debug(f"get_entities/{keys=}, {allow_fuzzy_match=}")
 
         """the function manager can load context and we can also adorn entities with extra metadata"""
-        entities = self.repo.get_entities(keys, allow_fuzzy_match=allow_fuzzy_match)
+        entities = self.get_repo().get_entities(
+            keys, allow_fuzzy_match=allow_fuzzy_match
+        )
 
         return entities
 
