@@ -35,7 +35,7 @@ COPY  --from=builder /usr/share/postgresql/16/extension/age--1.5.0.sql /usr/shar
 # Copy HTTP extension files
 COPY --from=builder /usr/lib/postgresql/16/lib/http.so /usr/lib/postgresql/16/lib/
 COPY --from=builder /usr/share/postgresql/16/extension/http.control /usr/share/postgresql/16/extension/
-COPY --from=builder /tmp/pgsql-http/http--1.6.sql /usr/share/postgresql/16/extension/
+COPY --from=builder /usr/share/postgresql/16/extension/http--1.7.sql /usr/share/postgresql/16/extension/
 
 # add pg vector too
 RUN set -xe; \
@@ -47,6 +47,11 @@ RUN set -xe; \
 
 # libcurl4 
 RUN apt update && apt install libcurl4-openssl-dev -y ;
+
+# Create symlinks for AGE to allow non-superuser access per AGE documentation
+# This allows non-superuser roles to access AGE extension functions
+RUN mkdir -p /usr/lib/postgresql/16/lib/plugins && \
+    ln -s /usr/lib/postgresql/16/lib/age.so /usr/lib/postgresql/16/lib/plugins/age.so || true
 
 # Change the uid of postgres to 26
 RUN usermod -u 26 postgres
