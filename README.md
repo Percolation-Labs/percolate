@@ -39,7 +39,7 @@ select * from percolate('briefly describe percolate',
 
 
 When you interact with language models in Percolate, conversations are logged in your instance for audit, analysis and optimization.
-We create new `Session` records with user questions and track each `AIResponse`, which may include tool calls and evaluations. One of the ways Percolate is useful is for _resuming_ and replaying sessions or getting a better understanding of the payloads that are sent to LLM Apis.
+We create new `Session` records with user questions and track each `AIResponse`, which may include tool calls and evaluations. One of the ways Percolate is useful is for _resuming_ and replaying sessions or getting a better understanding of the payloads that are sent to LLM Apis
 
 **Outside the database, use your preferred language**
 
