@@ -400,15 +400,16 @@ class PostgresService:
         if allow_fuzzy_match:
             data = (
                 self.execute(
-                    """SELECT * FROM p8.get_fuzzy_entities(%s, %s, %s)""", data=(keys, userid, similarity_threshold)
+                    """SELECT * FROM p8.get_fuzzy_entities(%s, %s)""", data=(keys, similarity_threshold)
                 )
                 if keys
                 else None
             )
         else:
+            # Call get_entities directly now that app user has AGE permissions
             data = (
                 self.execute(
-                    """SELECT * FROM p8.get_entities(%s, %s)""", data=(keys, userid)
+                    """SELECT * FROM p8.get_entities(%s)""", data=(keys,)
                 )
                 if keys
                 else None

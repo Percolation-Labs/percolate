@@ -155,3 +155,16 @@ END $$;
 ALTER DATABASE app SET percolate.user_id = '00000000-0000-0000-0000-000000000000';
 ALTER DATABASE app SET percolate.role_level = 1;
 ALTER DATABASE app SET percolate.user_groups = '{}';
+
+------Grant AGE extension permissions to app user---------
+-- Grant access to AGE catalog schema and functions
+GRANT USAGE ON SCHEMA ag_catalog TO app;
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA ag_catalog TO app;
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA ag_catalog TO app;
+GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA ag_catalog TO app;
+
+-- Grant access to percolate graph schema
+GRANT USAGE ON SCHEMA percolate TO app;
+GRANT ALL PRIVILEGES ON SCHEMA percolate TO app;
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA percolate TO app;
+---------------------------------------------------------
