@@ -269,16 +269,25 @@ class PostgresService:
             
             # Apply user_groups separately for now (will be integrated into set_user_context later)
             # For position matching in RLS policy, use comma-separated string with leading/trailing commas
-            if isinstance(self.user_groups, list):
-                if self.user_groups and len(self.user_groups) > 0:
-                    groups_string = ',' + ','.join([str(g) for g in self.user_groups]) + ','
-                    cursor.execute("SET percolate.user_groups = %s", (groups_string,))
+            # Only override if p8.set_user_context didn't already set groups
+            try:
+                cursor.execute("SELECT current_setting('percolate.user_groups', true);")
+                current_groups = cursor.fetchone()[0]
+            except:
+                current_groups = None
+                
+            # Only set user_groups manually if p8.set_user_context didn't set them
+            if not current_groups or current_groups == '':
+                if isinstance(self.user_groups, list):
+                    if self.user_groups and len(self.user_groups) > 0:
+                        groups_string = ',' + ','.join([str(g) for g in self.user_groups]) + ','
+                        cursor.execute("SET percolate.user_groups = %s", (groups_string,))
+                    else:
+                        # Set empty string if empty list
+                        cursor.execute("SET percolate.user_groups = ''")
                 else:
-                    # Set empty string if empty list
+                    # Handle case where user_groups is None or not a list
                     cursor.execute("SET percolate.user_groups = ''")
-            else:
-                # Handle case where user_groups is None or not a list
-                cursor.execute("SET percolate.user_groups = ''")
             
             # Commit changes
             self.conn.commit()
