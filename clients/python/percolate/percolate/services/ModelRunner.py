@@ -78,11 +78,18 @@ class ModelRunner:
         get the repo and use the user context of its given
         """
 
-        return p8.repository(
+        repo = p8.repository(
             self.agent_model,
             user_id=self._context.user_id if self._context is not None else None,
             role_level=self.role_level,
         )
+
+        ui_context = self._context.user_id if self._context is not None else None
+        logger.info(
+            f"[[{ui_context}]]] got repo for user {ui_context} with roles {repo.user_groups} and {repo.role_level=}"
+        )
+
+        return repo
 
     def __repr__(self):
         return f"Runner({self.name})"

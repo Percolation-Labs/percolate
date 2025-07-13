@@ -4,7 +4,7 @@ CREATE OR REPLACE FUNCTION p8.set_user_context(
     p_user_id UUID, 
     p_role_level INTEGER = NULL
 )
-RETURNS VOID AS $$
+RETURNS TABLE(user_id UUID, role_level INTEGER, groups TEXT[]) AS $$
 DECLARE
     v_role_level INTEGER;
     v_user_record RECORD;
@@ -61,12 +61,15 @@ BEGIN
     -- Return the role level as a message for debugging
     RAISE NOTICE 'Set user context: user_id=%, role_level=%, groups=%', 
                  p_user_id, v_role_level, v_groups;
+    
+    -- Return the user context information
+    RETURN QUERY SELECT p_user_id, v_role_level, v_groups;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
 -- Documentation
 COMMENT ON FUNCTION p8.set_user_context(UUID, INTEGER) IS 
-'Sets PostgreSQL session variables for row-level security:
+'Sets PostgreSQL session variables for row-level security and returns user context:
 - percolate.user_id: UUID of the current user
 - percolate.role_level: Access level of the user (0=GOD, 1=ADMIN, 5=INTERNAL, 10=PARTNER, 100=PUBLIC)
 - percolate.user_groups: Comma-separated list of groups the user belongs to
@@ -75,7 +78,12 @@ Arguments:
 - p_user_id: The user ID to set in the session
 - p_role_level: Optional role level to override the user''s default level
 
+Returns:
+- user_id: The user ID that was set
+- role_level: The role level that was set
+- groups: Array of groups the user belongs to
+
 Examples:
-SELECT p8.set_user_context(''4114f279-f345-511b-b375-1953089e078f'');
-SELECT p8.set_user_context(''4114f279-f345-511b-b375-1953089e078f'', 1);
+SELECT * FROM p8.set_user_context(''4114f279-f345-511b-b375-1953089e078f'');
+SELECT * FROM p8.set_user_context(''4114f279-f345-511b-b375-1953089e078f'', 1);
 ';
