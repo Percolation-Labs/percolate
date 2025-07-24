@@ -357,3 +357,6 @@ def get_optional_session_user_id(request: Request) -> typing.Optional[str]:
 
 
 from .router import router
+
+# Import OAuth routes - they will be automatically included via router
+from . import oauth

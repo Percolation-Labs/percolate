@@ -1,0 +1,53 @@
+{
+  "dxt_version": "0.1",
+  "name": "percolate-mcp",
+  "description": "Percolate MCP Server - Access entities, search, and evaluate functions",
+  "author": {
+    "name": "Percolation Labs",
+    "email": "support@percolationlabs.ai"
+  },
+  "version": "0.1.0",
+  "server": {
+    "type": "python",
+    "entry_point": "server/mcp_server/server.py",
+    "mcp_config": {
+      "command": "python",
+      "args": ["-m", "mcp_server.server"],
+      "env": {
+        "PYTHONPATH": "${__dirname}/server:${__dirname}/server/lib:${PYTHONPATH}",
+        "P8_API_ENDPOINT": "${user_config.api_endpoint}",
+        "P8_API_KEY": "${user_config.api_key}",
+        "P8_OAUTH_TOKEN": "${user_config.oauth_token}",
+        "X_User_Email": "${user_config.user_email}",
+        "P8_MCP_DESKTOP_EXT": "true"
+      }
+    }
+  },
+  "user_config": {
+    "api_endpoint": {
+      "type": "string",
+      "title": "Percolate API Endpoint",
+      "description": "URL of the Percolate API server",
+      "default": "https://api.percolationlabs.ai",
+      "required": true
+    },
+    "api_key": {
+      "type": "string",
+      "title": "API Key (Bearer Token)",
+      "description": "Your Percolate API key for bearer token authentication",
+      "required": false
+    },
+    "oauth_token": {
+      "type": "string",
+      "title": "OAuth Access Token",
+      "description": "OAuth access token (alternative to API key)",
+      "required": false
+    },
+    "user_email": {
+      "type": "string",
+      "title": "User Email",
+      "description": "Your email address (required when using API key)",
+      "required": false
+    }
+  }
+}

@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, Query
 from percolate.api.routes.auth import hybrid_auth
 from pydantic import BaseModel, Field
 from percolate.services import PostgresService
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 import uuid
 from percolate.models.p8 import Agent, Function
 
@@ -105,10 +105,78 @@ async def delete_agent(agent_name: str, user_id: Optional[str] = Depends(hybrid_
     return {"message": f"Agent '{agent_name}' deleted successfully"}
 
 
+class EntitySearch(BaseModel):
+    query: str = Field(..., description="Search query")
+    filters: Optional[Dict[str, Any]] = Field(None, description="Optional filters")
+    limit: int = Field(10, description="Maximum results to return", ge=1, le=100)
+
+
 @router.post("/search")
-async def agentic_search(query: str, agent_name: str, user_id: Optional[str] = Depends(hybrid_auth)):
-    """Perform an agent-based search."""
-    return {"query": query, "agent": agent_name, "results": ["AI-generated result 1"]}
+async def search_entities(
+    search: EntitySearch, 
+    user_id: Optional[str] = Depends(hybrid_auth)
+):
+    """Search for entities using semantic search."""
+    import percolate as p8
+    from percolate.models import Agent, Resources, Function, User
+    from percolate.models.p8.types import Project, Task, PercolateAgent
+    
+    try:
+        # Determine entity type to search
+        entity_type = "Agent"  # Default to Agent
+        if search.filters and "entity_type" in search.filters:
+            entity_type = search.filters["entity_type"]
+        elif search.filters and "type" in search.filters:
+            entity_type = search.filters["type"]
+        
+        # Map entity type to model class
+        entity_map = {
+            "Agent": Agent,
+            "Resources": Resources,
+            "Resource": Resources,
+            "Function": Function,
+            "Project": Project,
+            "Task": Task,
+            "User": User,
+            "PercolateAgent": PercolateAgent
+        }
+        
+        # Get the model class, default to Agent if not found
+        model_class = entity_map.get(entity_type, Agent)
+        
+        # Use repository search method
+        repo = p8.repository(model_class, user_id=user_id)
+        results = repo.search(search.query)
+        
+        # Extract and format results
+        all_results = []
+        
+        if results and isinstance(results, list) and len(results) > 0:
+            first_result = results[0]
+            
+            # Check for vector results
+            if isinstance(first_result, dict) and 'vector_result' in first_result:
+                vector_results = first_result.get('vector_result')
+                if vector_results and isinstance(vector_results, list):
+                    # Apply filters if provided
+                    if search.filters:
+                        filtered = []
+                        for item in vector_results:
+                            if all(item.get(k) == v for k, v in search.filters.items() if k not in ['entity_type', 'type']):
+                                filtered.append(item)
+                        all_results.extend(filtered)
+                    else:
+                        all_results.extend(vector_results)
+            
+            # Also include relational results if no vector results
+            if not all_results and isinstance(first_result, dict) and 'relational_result' in first_result:
+                relational_results = first_result.get('relational_result')
+                if relational_results and isinstance(relational_results, list):
+                    all_results.extend(relational_results)
+        
+        return all_results[:search.limit]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
  

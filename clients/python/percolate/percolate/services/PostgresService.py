@@ -219,9 +219,21 @@ class PostgresService:
                 cursor.execute(
                     f"SELECT * from p8.set_user_context('{str(self.user_id)}'::UUID);"
                 )
-                r = cursor.fetchall()[0]
-                self.role_level = r[1]
-                self.user_groups = r[2]
+                result = cursor.fetchall()
+                if result and len(result) > 0:
+                    r = result[0]
+                    # Handle different return formats from set_user_context
+                    if isinstance(r, tuple) and len(r) >= 3:
+                        # Expected format: (user_id, role_level, user_groups)
+                        self.role_level = r[1]
+                        self.user_groups = r[2]
+                    elif isinstance(r, tuple) and len(r) == 1:
+                        # Function might just return user_id or success indicator
+                        logger.debug(f"set_user_context returned single value: {r[0]}")
+                    else:
+                        logger.debug(f"set_user_context returned unexpected format: {r}")
+                else:
+                    logger.debug("set_user_context returned no results")
                 # Commit changes
                 self.conn.commit()
 
