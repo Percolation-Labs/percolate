@@ -26,7 +26,7 @@ async def test_get_entity_success(mock_mcp, mock_client_manager):
     
     # Execute tool
     with patch("percolate_mcp.tools.entity_tools.get_client_manager", return_value=mock_client_manager):
-        result = await get_entity_tool(entity_id="entity-123", entity_type="Model")
+        result = await get_entity_tool(entity_name="entity-123", entity_type="Model")
     
     # Verify
     assert "Entity Found" in result
@@ -45,7 +45,7 @@ async def test_get_entity_not_found(mock_mcp, mock_client_manager):
     get_entity_tool = tools[0].function
     
     with patch("percolate_mcp.tools.entity_tools.get_client_manager", return_value=mock_client_manager):
-        result = await get_entity_tool(entity_id="not-found")
+        result = await get_entity_tool(entity_name="not-found")
     
     assert "❌ Error:" in result
     assert "Entity not-found not found" in result

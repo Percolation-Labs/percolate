@@ -41,8 +41,8 @@ async def mcp_env(test_config):
 
 
 @pytest.fixture
-async def test_entity_id():
-    """Return p8.Agent UUID as a test entity ID"""
+async def test_entity_name():
+    """Return p8.Agent UUID as a test entity name"""
     return "96d1a2ff-045b-55cc-a7de-543d1d3cccf8"  # p8.Agent UUID
 
 
@@ -151,7 +151,7 @@ class TestEntityToolsStdio:
                 assert entity["type"] == "Model"
     
     @pytest.mark.asyncio
-    async def test_get_entity_stdio(self, mcp_env, test_entity_id):
+    async def test_get_entity_stdio(self, mcp_env, test_entity_name):
         """Test getting a specific entity"""
         from fastmcp.client import Client, PythonStdioTransport
         
@@ -169,7 +169,7 @@ class TestEntityToolsStdio:
                 "get_entity",
                 {
                     "params": {
-                        "entity_id": test_entity_id
+                        "entity_name": test_entity_name
                     }
                 }
             )
@@ -181,7 +181,7 @@ class TestEntityToolsStdio:
             # Should either find entity or return error
             if "error" not in data:
                 assert "id" in data
-                assert data["id"] == test_entity_id
+                assert data["id"] == test_entity_name
                 print(f"✓ Successfully retrieved entity: {data['id']}")
             else:
                 print(f"Entity not found: {data['error']}")
@@ -193,7 +193,7 @@ class TestEntityToolsStdio:
             "get_entity",
             {
                 "params": {
-                    "entity_id": "test-model-001",
+                    "entity_name": "test-model-001",
                     "entity_type": "Model"
                 }
             }

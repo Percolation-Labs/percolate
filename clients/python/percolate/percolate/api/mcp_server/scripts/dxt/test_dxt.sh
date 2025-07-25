@@ -59,7 +59,7 @@ try:
     import mcp_server.server
     import mcp_server.config
     import mcp_server.auth
-    import mcp_server.repository
+    import mcp_server.repository_factory
     print('✅ Core MCP server imports successful')
     
     # Test dependencies

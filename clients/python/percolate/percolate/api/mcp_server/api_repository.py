@@ -73,11 +73,11 @@ class APIProxyRepository(BaseMCPRepository):
             logger.error(f"Request failed: {str(e)}")
             return {"error": str(e)}
     
-    async def get_entity(self, entity_id: str, entity_type: Optional[str] = None) -> Dict[str, Any]:
-        """Get entity by ID via API"""
+    async def get_entity(self, entity_name: str, entity_type: Optional[str] = None) -> Dict[str, Any]:
+        """Get entity by name via API"""
         try:
             # Try the entities endpoint first
-            response = await self.client.get(f"/entities/{entity_id}")
+            response = await self.client.get(f"/entities/{entity_name}")
             data = await self._handle_response(response)
             
             if "error" not in data:
@@ -93,7 +93,7 @@ class APIProxyRepository(BaseMCPRepository):
                 
                 if entity_type in type_endpoints:
                     endpoint = type_endpoints[entity_type]
-                    response = await self.client.get(f"{endpoint}/{entity_id}")
+                    response = await self.client.get(f"{endpoint}/{entity_name}")
                     return await self._handle_response(response)
             
             return data

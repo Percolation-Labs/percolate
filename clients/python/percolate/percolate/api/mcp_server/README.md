@@ -50,7 +50,7 @@ The MCP server supports two authentication methods:
 
 ### Method 2: JWT Token
 - **JWT Token**: Contains embedded user context (user ID, email, groups, role level)
-- **Storage**: Stored in `P8_OAUTH_TOKEN` environment variable
+- **Storage**: When using OAuth authentication, the system uses `P8_PG_PASSWORD` as the token
 - **Usage**: Self-contained authentication without additional headers
 
 ### MCP Client Integration
@@ -58,9 +58,8 @@ The MCP server supports two authentication methods:
 For MCP clients like Claude Desktop or Claude Code:
 
 1. **Environment Variables Available**: 
-   - `P8_PG_PASSWORD`: Bearer token for API key authentication
-   - `P8_OAUTH_TOKEN`: JWT token for OAuth authentication
-   - `X_User_Email`: User email (required with bearer token)
+   - `P8_PG_PASSWORD`: Bearer token for authentication (used for both API key and OAuth tokens)
+   - `X_User_Email`: User email (required with API key authentication)
    - `P8_API_ENDPOINT`: Percolate API endpoint URL
 
 2. **Authentication Flow**:
@@ -79,10 +78,10 @@ For MCP clients like Claude Desktop or Claude Code:
 ### 1. Entity Tools (`entity_tools.py`)
 
 #### `get_entity`
-Retrieves a specific entity by ID from the Percolate knowledge base.
+Retrieves a specific entity by name from the Percolate knowledge base.
 
 **Parameters:**
-- `entity_id`: The unique identifier of the entity
+- `entity_name`: The name of the entity (e.g., 'MyModel', 'DataProcessor', 'AnalysisAgent')
 - `entity_type`: Type of entity (optional, for type-specific retrieval)
 
 #### `entity_search`
@@ -140,10 +139,9 @@ The HTTP server:
 ## Configuration
 
 Environment variables:
-- `P8_PG_PASSWORD`: Bearer token for API key authentication
-- `P8_OAUTH_TOKEN`: JWT token for OAuth authentication  
-- `X_User_Email`: User email address (required with bearer token)
-- `P8_API_ENDPOINT`: Percolate API endpoint (default: https://api.percolationlabs.ai)
+- `P8_PG_PASSWORD`: Bearer token for authentication (used for both API key and OAuth tokens)
+- `X_User_Email`: User email address (required with API key authentication)
+- `P8_API_ENDPOINT`: Percolate API endpoint (default: http://localhost:5008)
 - `P8_MCP_PORT`: HTTP server port (default: 8001)
 - `P8_LOG_LEVEL`: Logging level (default: INFO)
 - `P8_USE_API_MODE`: Use API mode vs direct database (default: true)

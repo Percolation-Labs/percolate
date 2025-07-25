@@ -62,8 +62,8 @@ class DatabaseRepository(BaseMCPRepository):
             "role_level": self.role_level
         }
     
-    async def get_entity(self, entity_id: str, entity_type: Optional[str] = None) -> Dict[str, Any]:
-        """Get entity by ID"""
+    async def get_entity(self, entity_name: str, entity_type: Optional[str] = None) -> Dict[str, Any]:
+        """Get entity by name"""
         try:
             # Map string types to actual model classes
             type_map = {
@@ -81,7 +81,12 @@ class DatabaseRepository(BaseMCPRepository):
                     user_groups=self.user_groups,
                     role_level=self.role_level
                 )
-                entity = repo.get_by_id(entity_id, as_model=True)
+                # Try to get by name first, then fall back to ID if it looks like a UUID
+                try:
+                    entity = repo.get_by_name(entity_name, as_model=True)
+                except AttributeError:
+                    # If get_by_name doesn't exist, try get_by_id
+                    entity = repo.get_by_id(entity_name, as_model=True)
             else:
                 # Try common types
                 entity = None
@@ -93,7 +98,11 @@ class DatabaseRepository(BaseMCPRepository):
                             user_groups=self.user_groups,
                             role_level=self.role_level
                         )
-                        entity = repo.get_by_id(entity_id, as_model=True)
+                        # Try to get by name first, then fall back to ID
+                        try:
+                            entity = repo.get_by_name(entity_name, as_model=True)
+                        except AttributeError:
+                            entity = repo.get_by_id(entity_name, as_model=True)
                         if entity:
                             break
                     except Exception:
@@ -102,7 +111,7 @@ class DatabaseRepository(BaseMCPRepository):
             if entity:
                 return entity.model_dump()
             else:
-                return {"error": f"Entity {entity_id} not found"}
+                return {"error": f"Entity {entity_name} not found"}
         except Exception as e:
             return {"error": str(e)}
     

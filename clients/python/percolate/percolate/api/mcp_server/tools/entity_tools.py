@@ -8,9 +8,9 @@ from ..base_repository import BaseMCPRepository
 
 class GetEntityParams(BaseModel):
     """Parameters for get_entity tool"""
-    entity_id: str = Field(
+    entity_name: str = Field(
         ...,
-        description="The unique identifier of the entity to retrieve"
+        description="The name of the entity to retrieve (e.g., 'MyModel', 'DataProcessor', 'AnalysisAgent')"
     )
     entity_type: Optional[str] = Field(
         None,
@@ -41,15 +41,15 @@ def create_entity_tools(mcp: FastMCP, repository: BaseMCPRepository):
     
     @mcp.tool(
         name="get_entity",
-        description="Retrieve a specific entity by ID from the Percolate knowledge base",
+        description="Retrieve a specific entity by name from the Percolate knowledge base",
         annotations={
             "hint": {"readOnlyHint": True, "idempotentHint": True},
             "tags": ["entity", "retrieve", "knowledge-base"]
         }
     )
     async def get_entity(params: GetEntityParams) -> Dict[str, Any]:
-        """Get entity by ID and return raw result"""
-        return await repository.get_entity(params.entity_id, params.entity_type)
+        """Get entity by name and return raw result"""
+        return await repository.get_entity(params.entity_name, params.entity_type)
     
     @mcp.tool(
         name="entity_search",

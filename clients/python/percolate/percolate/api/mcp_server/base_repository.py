@@ -13,11 +13,11 @@ class BaseMCPRepository(ABC):
     """
     
     @abstractmethod
-    async def get_entity(self, entity_id: str, entity_type: Optional[str] = None) -> Dict[str, Any]:
-        """Get entity by ID.
+    async def get_entity(self, entity_name: str, entity_type: Optional[str] = None) -> Dict[str, Any]:
+        """Get entity by name.
         
         Args:
-            entity_id: UUID of the entity
+            entity_name: Name of the entity
             entity_type: Optional type hint (Agent, PercolateAgent, Resources, Function)
             
         Returns:

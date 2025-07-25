@@ -53,7 +53,7 @@ class TestEntityToolsIntegration:
         
         # Try to get a known entity (adjust ID based on your test data)
         # This assumes you have at least one entity in your test environment
-        result = await get_entity(entity_id="test-entity-1")
+        result = await get_entity(entity_name="test-entity-1")
         
         # Basic validation - should either find entity or return proper error
         assert isinstance(result, str)
@@ -214,10 +214,10 @@ class TestEndToEndScenarios:
             lines = search_result.split('\n')
             for line in lines:
                 if "ID:" in line:
-                    entity_id = line.split("ID:")[-1].strip()
-                    if entity_id and entity_id != "N/A":
+                    entity_name = line.split("ID:")[-1].strip()
+                    if entity_name and entity_name != "N/A":
                         # Try to get this specific entity
-                        get_result = await get_tool(entity_id=entity_id)
+                        get_result = await get_tool(entity_name=entity_name)
                         assert "Entity Found" in get_result or "Error" in get_result
                         break
     
