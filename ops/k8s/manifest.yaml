@@ -31,6 +31,10 @@ spec:
   instances: 3
   storage:
     size: 100Gi
+  # PostgreSQL configuration for AGE extension support
+  postgresql:
+    parameters:
+      session_preload_libraries: "age"
   #if you want the super user access supply this
   #
   # 2. kubectl create secret generic p8-su-cred -n p8  --type=kubernetes.io/basic-auth  --from-literal=username=postgres  --from-literal=password="$(openssl rand -base64 32)"

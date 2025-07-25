@@ -41,7 +41,7 @@ BEGIN
     */
     
     -- Load AGE extension and set search path
-    LOAD 'age';
+    -- AGE extension is preloaded at session level
     SET search_path = ag_catalog, "$user", public;
 
     -- Extract the schema and table names for the source node

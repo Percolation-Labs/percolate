@@ -28,7 +28,7 @@ BEGIN
 	*/
 
     -- Load necessary extensions and set search path
-    LOAD 'age';
+    -- AGE extension is preloaded at session level
     SET search_path = ag_catalog, "$user", public;
 
     schema_name := split_part(table_entity_name, '.', 1);

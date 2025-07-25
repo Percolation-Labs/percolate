@@ -55,8 +55,8 @@ BEGIN
         args := '{}';
     END IF;
 
-	--temp savefty
-	LOAD  'age'; SET search_path = ag_catalog, "$user", public;
+	--AGE extension is preloaded at session level
+	SET search_path = ag_catalog, "$user", public;
 	
     -- Lookup endpoint metadata
     SELECT endpoint, proxy_uri, verb

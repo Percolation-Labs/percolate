@@ -20,18 +20,44 @@ BEGIN
     schema_name := lower(split_part(table_name, '.', 1));
     pure_table_name := split_part(table_name, '.', 2);
 
-    -- Construct the dynamic query to select records from the specified table
-    query := format('SELECT jsonb_agg(to_jsonb(t)) FROM %I."%s" t WHERE t.%I::TEXT = ANY($1)', schema_name, pure_table_name, key_column);
-
-    -- Execute the dynamic query with the provided key_list as parameter
-    EXECUTE query USING key_list INTO result;
+    -- Check if key_list is empty, null, or contains only empty strings
+    IF key_list IS NULL OR array_length(key_list, 1) IS NULL OR array_length(key_list, 1) = 0 THEN
+        result := '[]'::jsonb;
+    ELSE
+        -- Filter out empty strings and null values from key_list
+        key_list := array_remove(array_remove(key_list, ''), NULL);
+        
+        -- Check again after filtering
+        IF array_length(key_list, 1) IS NULL OR array_length(key_list, 1) = 0 THEN
+            result := '[]'::jsonb;
+        ELSE
+            -- Construct the dynamic query to select records from the specified table
+            query := format('SELECT jsonb_agg(to_jsonb(t)) FROM %I."%s" t WHERE t.%I::TEXT = ANY($1)', schema_name, pure_table_name, key_column);
+            
+            -- Execute the dynamic query with the provided key_list as parameter
+            EXECUTE query USING key_list INTO result;
+        END IF;
+    END IF;
     
     -- Fetch metadata if include_entity_metadata is TRUE
     IF include_entity_metadata THEN
-        SELECT jsonb_build_object('description', a.description, 'functions', a.functions)
-        INTO metadata
-        FROM p8."Agent" a
-        WHERE a.name = table_name;
+        -- Initialize metadata to NULL first
+        metadata := NULL;
+        
+        -- Try to fetch metadata from Agent table
+        BEGIN
+            SELECT jsonb_build_object(
+                'description', COALESCE(a.description, ''),
+                'functions', a.functions
+            )
+            INTO metadata
+            FROM p8."Agent" a
+            WHERE a.name = table_name;
+        EXCEPTION 
+            WHEN OTHERS THEN
+                -- If any error occurs (including JSON casting errors), set metadata to NULL
+                metadata := NULL;
+        END;
     ELSE
         metadata := NULL;
     END IF;

@@ -38,6 +38,11 @@ DO UPDATE SET
     token = EXCLUDED.token;
 ----------
 
+-- Configure PostgreSQL to preload AGE extension for proper functionality
+-- This matches the CloudNative configuration: session_preload_libraries: "age"
+ALTER SYSTEM SET session_preload_libraries = 'age';
+SELECT pg_reload_conf();
+
 -- we dont want to rely too heavily on this but certainly for testing we should set this
 -- this allows language models to be called and are given a time to generate
 -- if generation is too long we should be switching to the client streaming

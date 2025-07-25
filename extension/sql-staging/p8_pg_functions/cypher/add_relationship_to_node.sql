@@ -55,7 +55,7 @@ DECLARE
     result_data      jsonb;
 BEGIN
     -- 1) Load AGE extension and set search_path
-    LOAD 'age';
+    -- AGE extension is preloaded at session level
     SET search_path = ag_catalog, "$user", public;
 
 	target_label:= COALESCE(target_label,'Concept');

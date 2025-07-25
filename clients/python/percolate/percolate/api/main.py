@@ -19,8 +19,14 @@ from apscheduler.triggers.cron import CronTrigger
 import percolate as p8
 from percolate.models.p8.types import Schedule
 from percolate.api.routes.auth.utils import get_stable_session_key
+from percolate.auth.server import OAuthServer
+from percolate.auth.middleware import AuthMiddleware
+
 # Global scheduler instance
 scheduler = BackgroundScheduler()
+
+# Initialize OAuth server
+oauth_server = OAuthServer(os.getenv("PERCOLATE_BASE_URL", "http://localhost:8000"))
 
 def run_scheduled_job(schedule_record):
     """Run a scheduled job based on its specification."""
@@ -126,6 +132,12 @@ app.add_middleware(
     https_only=False,  # Set to True in production with HTTPS
     session_cookie="session"  # Ensure consistent cookie name
 )
+
+# Add OAuth server to app state
+app.state.oauth_server = oauth_server
+
+# Removed OAuth middleware - HybridAuth handles authentication at the route level
+
 #app.add_middleware(PayloadLoggerMiddleware)
 
 
@@ -165,6 +177,7 @@ app.add_middleware(
 
 
 @app.get("/", include_in_schema=False)
+@app.get("/health", include_in_schema=False)
 @app.get("/healthcheck", include_in_schema=False)
 async def healthcheck():
     return {"status": "ok"}
@@ -205,6 +218,24 @@ async def serve_apple_app_site_association():
     
 app.include_router(api_router)
 set_routes(app)
+
+# Add OAuth well-known endpoints at root level
+from percolate.api.utils.oauth import oauth_metadata, mcp_oauth_metadata
+
+@app.get("/.well-known/oauth-authorization-server", include_in_schema=False)
+async def well_known_oauth_server():
+    return await oauth_metadata(oauth_server)
+
+@app.get("/.well-known/oauth-protected-resource", include_in_schema=False) 
+async def well_known_oauth_protected():
+    return await mcp_oauth_metadata(oauth_server)
+
+# Mount MCP server if configured
+try:
+    from .mcp_server import mount_mcp_server
+    mount_mcp_server(app, path="/mcp")
+except Exception as e:
+    logger.warning(f"MCP server not available: {e}")
 
 @app.get("/models")
 def get_models():

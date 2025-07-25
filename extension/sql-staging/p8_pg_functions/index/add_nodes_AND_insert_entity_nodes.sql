@@ -27,8 +27,8 @@ BEGIN
     Adding nodes uses a contractual view over age nodes
     we keep track of any Percolate entity in the graph with a graph id, label (key) and user id if given
     */
-    --we always need this when using AGE from postgres 
-    LOAD  'age'; SET search_path = ag_catalog, "$user", public; 
+    --AGE extension is preloaded at session level
+    SET search_path = ag_catalog, "$user", public; 
 
     schema_name := lower(split_part(table_name, '.', 1));
     pure_table_name := split_part(table_name, '.', 2);

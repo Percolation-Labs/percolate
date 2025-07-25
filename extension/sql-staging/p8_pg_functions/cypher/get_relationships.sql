@@ -55,7 +55,7 @@ DECLARE
     where_clause TEXT := '';
 BEGIN
     -- Load AGE extension
-    LOAD 'age';
+    -- AGE extension is preloaded at session level
     SET search_path = ag_catalog, "$user", public;
     
     -- Check if graph exists
