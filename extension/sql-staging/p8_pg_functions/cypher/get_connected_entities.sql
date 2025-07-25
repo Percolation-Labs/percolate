@@ -15,7 +15,7 @@ BEGIN
 	--use a target node 
 	SELECT * FROM p8.get_connected_entities('Physical Endurance');
 	*/
-	LOAD 'age'; SET search_path = ag_catalog, "$user", public;
+	SET search_path = ag_catalog, "$user", public;
 	
  	cypher_query := format(
         'WITH gdata AS (

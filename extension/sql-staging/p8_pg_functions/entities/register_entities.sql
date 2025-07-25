@@ -39,7 +39,6 @@ BEGIN
     -- Create the LOAD and Cypher script
     load_and_cypher_script := format(
         $CY$
-        LOAD 'age';
         SET search_path = ag_catalog, "$user", public;
         SELECT * 
         FROM cypher('%s', $$

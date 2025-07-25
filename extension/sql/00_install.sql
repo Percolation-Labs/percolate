@@ -1,3 +1,16 @@
+---------create app user-----------------
+-- Create app user if it doesn't exist
+DO $$ 
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app') THEN
+        CREATE USER app;
+    END IF;
+END $$;
+
+-- Grant privileges to app user
+GRANT ALL PRIVILEGES ON DATABASE app TO app;
+GRANT ALL PRIVILEGES ON SCHEMA public TO app;
+
 ---------extensions----------------------
 CREATE EXTENSION IF NOT EXISTS HTTP;
 CREATE EXTENSION IF NOT EXISTS vector;

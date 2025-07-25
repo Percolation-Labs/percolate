@@ -11,7 +11,7 @@ DECLARE
     sql TEXT;
 	keys_string TEXT;
 BEGIN
-	LOAD  'age'; SET search_path = ag_catalog, "$user", public; 
+	SET search_path = ag_catalog, "$user", public; 
 	
 	SELECT string_agg(format('''%s''', k), ', ') INTO keys_string
 	FROM unnest(keys) AS k;

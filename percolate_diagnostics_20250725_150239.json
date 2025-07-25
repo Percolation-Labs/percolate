@@ -1,0 +1,607 @@
+{
+  "timestamp": "2025-07-25T15:02:39.567246",
+  "database_config": {
+    "host": "localhost",
+    "port": 5438,
+    "database": "app",
+    "user": "postgres"
+  },
+  "test_results": [
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "database",
+      "test": "connectivity",
+      "success": true,
+      "message": "Connected as postgres to app",
+      "details": {
+        "version": "PostgreSQL 16.4 (Debian 16.4-1.pgdg110+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 10.2.1-6) 10.2.1 20210110, 64-bit"
+      },
+      "execution_time": 0.17341184616088867
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "database",
+      "test": "extensions",
+      "success": true,
+      "message": "All 4 extensions installed",
+      "details": {
+        "extensions": {
+          "http": "1.7",
+          "vector": "0.8.0",
+          "age": "1.5.0",
+          "pg_trgm": "1.6"
+        }
+      },
+      "execution_time": 0.04081892967224121
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "schema",
+      "test": "model_tables",
+      "success": false,
+      "message": "Missing 2 tables",
+      "details": {
+        "existing": [
+          "p8.\"Agent\"",
+          "p8.\"Function\"",
+          "p8.\"Session\"",
+          "p8.\"AIResponse\"",
+          "p8.\"LanguageModelApi\"",
+          "p8.\"ModelField\"",
+          "p8.\"User\"",
+          "p8.\"ApiProxy\"",
+          "p8.\"Resources\""
+        ],
+        "missing": [
+          "p8.\"TaskResource\"",
+          "p8.\"Entity\""
+        ]
+      },
+      "execution_time": 0.08709073066711426
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "core",
+      "test": "public.percolate",
+      "success": true,
+      "message": "Function exists (6 args)",
+      "details": {},
+      "execution_time": 0.00579524040222168
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "core",
+      "test": "public.percolate_signature",
+      "success": true,
+      "message": "Signature verified",
+      "details": {
+        "args": "text text, model character varying DEFAULT 'gpt-4.1-mini'::character varying, tool_names_in text[] DEFAULT NULL::text[], system_prompt text DEFAULT 'Respond to the users query using tools and functions as required'::text, token_override text DEFAULT NULL::text, temperature double precision DEFAULT 0.01",
+        "returns": "TABLE(message_response text, tool_calls jsonb, tool_call_result jsonb, session_id_out uuid, status text)"
+      },
+      "execution_time": null
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "core",
+      "test": "public.percolate_with_agent",
+      "success": true,
+      "message": "Function exists (8 args)",
+      "details": {},
+      "execution_time": 0.0008718967437744141
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "core",
+      "test": "public.plan",
+      "success": true,
+      "message": "Function exists (4 args)",
+      "details": {},
+      "execution_time": 0.0007841587066650391
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "core",
+      "test": "public.run",
+      "success": true,
+      "message": "Function exists (4 args)",
+      "details": {},
+      "execution_time": 0.0004839897155761719
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "entities",
+      "test": "p8.get_entities",
+      "success": true,
+      "message": "Function exists (2 args)",
+      "details": {},
+      "execution_time": 0.0017688274383544922
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "entities",
+      "test": "p8.get_entities_signature",
+      "success": true,
+      "message": "Signature verified",
+      "details": {
+        "args": "keys text[], userid text DEFAULT NULL::text",
+        "returns": "jsonb"
+      },
+      "execution_time": null
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "entities",
+      "test": "p8.register_entities",
+      "success": true,
+      "message": "Function exists (3 args)",
+      "details": {},
+      "execution_time": 0.0011990070343017578
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "entities",
+      "test": "p8.query_entity",
+      "success": true,
+      "message": "Function exists (6 args)",
+      "details": {},
+      "execution_time": 0.0014338493347167969
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "entities",
+      "test": "p8.vector_search_entity",
+      "success": true,
+      "message": "Function exists (4 args)",
+      "details": {},
+      "execution_time": 0.0009338855743408203
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "entities",
+      "test": "p8.get_entity_ids_by_description",
+      "success": true,
+      "message": "Function exists (3 args)",
+      "details": {},
+      "execution_time": 0.0004911422729492188
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "entities",
+      "test": "p8.generate_markdown_prompt",
+      "success": true,
+      "message": "Function exists (2 args)",
+      "details": {},
+      "execution_time": 0.0007350444793701172
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "cypher",
+      "test": "p8.add_relationship_to_node",
+      "success": true,
+      "message": "Function exists (9 args)",
+      "details": {},
+      "execution_time": 0.00055694580078125
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "cypher",
+      "test": "p8.get_connected_entities",
+      "success": true,
+      "message": "Function exists (1 args)",
+      "details": {},
+      "execution_time": 0.0010349750518798828
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "cypher",
+      "test": "p8.get_paths",
+      "success": true,
+      "message": "Function exists (3 args)",
+      "details": {},
+      "execution_time": 0.0005278587341308594
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "cypher",
+      "test": "p8.get_relationships",
+      "success": true,
+      "message": "Function exists (8 args)",
+      "details": {},
+      "execution_time": 0.0007309913635253906
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "cypher",
+      "test": "public.cypher_query",
+      "success": true,
+      "message": "Function exists (3 args)",
+      "details": {},
+      "execution_time": 0.00035190582275390625
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "search",
+      "test": "p8.deep_search",
+      "success": true,
+      "message": "Function exists (3 args)",
+      "details": {},
+      "execution_time": 0.001024007797241211
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "search",
+      "test": "p8.fuzzy_match_node_key",
+      "success": true,
+      "message": "Function exists (2 args)",
+      "details": {},
+      "execution_time": 0.00046515464782714844
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "search",
+      "test": "p8.parallel_search",
+      "success": true,
+      "message": "Function exists (6 args)",
+      "details": {},
+      "execution_time": 0.0007097721099853516
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "search",
+      "test": "p8.query_entity_fast",
+      "success": true,
+      "message": "Function exists (7 args)",
+      "details": {},
+      "execution_time": 0.0004279613494873047
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "search",
+      "test": "p8.merge_search_results",
+      "success": true,
+      "message": "Function exists (7 args)",
+      "details": {},
+      "execution_time": 0.0008490085601806641
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "indexing",
+      "test": "p8.build_graph_index",
+      "success": true,
+      "message": "Function exists (2 args)",
+      "details": {},
+      "execution_time": 0.000946044921875
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "indexing",
+      "test": "p8.get_embedding_for_text",
+      "success": true,
+      "message": "Function exists (2 args)",
+      "details": {},
+      "execution_time": 0.0006608963012695312
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "indexing",
+      "test": "p8.insert_entity_embeddings",
+      "success": true,
+      "message": "Function exists (2 args)",
+      "details": {},
+      "execution_time": 0.00044798851013183594
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "indexing",
+      "test": "p8.generate_and_fetch_embeddings",
+      "success": true,
+      "message": "Function exists (5 args)",
+      "details": {},
+      "execution_time": 0.0004627704620361328
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "requests",
+      "test": "p8.ask",
+      "success": true,
+      "message": "Function exists (6 args)",
+      "details": {},
+      "execution_time": 0.0007219314575195312
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "requests",
+      "test": "p8.ask_signature",
+      "success": true,
+      "message": "Signature verified",
+      "details": {
+        "args": "message_payload json, session_id uuid DEFAULT NULL::uuid, functions_names text[] DEFAULT NULL::text[], model_name text DEFAULT 'gpt-4o-mini'::text, token_override text DEFAULT NULL::text, user_id uuid DEFAULT NULL::uuid",
+        "returns": "TABLE(message_response text, tool_calls jsonb, tool_call_result jsonb, session_id_out uuid, status text)"
+      },
+      "execution_time": null
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "requests",
+      "test": "p8.get_canonical_messages",
+      "success": true,
+      "message": "Function exists (3 args)",
+      "details": {},
+      "execution_time": 0.0006768703460693359
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "requests",
+      "test": "p8.nl2sql",
+      "success": true,
+      "message": "Function exists (5 args)",
+      "details": {},
+      "execution_time": 0.001104116439819336
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "requests",
+      "test": "p8.request_openai",
+      "success": true,
+      "message": "Function exists (5 args)",
+      "details": {},
+      "execution_time": 0.0005838871002197266
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "requests",
+      "test": "p8.request_anthropic",
+      "success": true,
+      "message": "Function exists (5 args)",
+      "details": {},
+      "execution_time": 0.0033490657806396484
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "requests",
+      "test": "p8.request_google",
+      "success": true,
+      "message": "Function exists (5 args)",
+      "details": {},
+      "execution_time": 0.0004961490631103516
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "tools",
+      "test": "p8.get_tools_by_name",
+      "success": true,
+      "message": "Function exists (2 args)",
+      "details": {},
+      "execution_time": 0.0007848739624023438
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "tools",
+      "test": "p8.eval_function_call",
+      "success": true,
+      "message": "Function exists (2 args)",
+      "details": {},
+      "execution_time": 0.0006890296936035156
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "tools",
+      "test": "p8.activate_functions_by_name",
+      "success": true,
+      "message": "Function exists (2 args)",
+      "details": {},
+      "execution_time": 0.0006358623504638672
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "tools",
+      "test": "p8.get_session_functions",
+      "success": true,
+      "message": "Function exists (3 args)",
+      "details": {},
+      "execution_time": 0.0005743503570556641
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "utils",
+      "test": "p8.create_session",
+      "success": true,
+      "message": "Function exists (4 args)",
+      "details": {},
+      "execution_time": 0.0008730888366699219
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "utils",
+      "test": "p8.create_and_update_session",
+      "success": false,
+      "message": "Function does not exist",
+      "details": {},
+      "execution_time": 0.0011403560638427734
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "utils",
+      "test": "p8.ping_api",
+      "success": true,
+      "message": "Function exists (0 args)",
+      "details": {},
+      "execution_time": 0.0005710124969482422
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "execution",
+      "test": "version_check",
+      "success": true,
+      "message": "Executed successfully",
+      "details": {
+        "result_type": "str"
+      },
+      "execution_time": 0.00040912628173828125
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "execution",
+      "test": "current_time",
+      "success": true,
+      "message": "Executed successfully",
+      "details": {
+        "result_type": "datetime"
+      },
+      "execution_time": 0.001154184341430664
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "execution",
+      "test": "p8_create_session",
+      "success": true,
+      "message": "Executed successfully",
+      "details": {
+        "result_type": "str"
+      },
+      "execution_time": 0.34964489936828613
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "graph",
+      "test": "ag_graph_access",
+      "success": false,
+      "message": "Graph functionality test failed",
+      "details": {
+        "error": "relation \"ag_graph\" does not exist\nLINE 1: SELECT * FROM ag_graph LIMIT 1\n                      ^\n"
+      },
+      "execution_time": 0.003565073013305664
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "apis",
+      "test": "language_model_config",
+      "success": true,
+      "message": "Found 17 configured APIs",
+      "details": {
+        "apis": [
+          "gpt-4o-2024-08-06",
+          "gpt-4o-mini",
+          "cerebras-llama3.1-8b",
+          "groq-llama-3.3-70b-versatile",
+          "claude-3-5-sonnet-20241022",
+          "claude-3-7-sonnet-20250219",
+          "gemini-1.5-flash",
+          "gemini-2.0-flash",
+          "gemini-2.0-flash-thinking-exp-01-21",
+          "gemini-2.0-pro-exp-02-05",
+          "deepseek-chat",
+          "grok-2-latest",
+          "mercury-coder-small",
+          "gpt-4.1",
+          "gpt-4.1-mini",
+          "gpt-4.1-nano",
+          "gpt-4.1-2025-04-14"
+        ]
+      },
+      "execution_time": 0.0007619857788085938
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "apis",
+      "test": "openai_request_function",
+      "success": true,
+      "message": "Request function exists for openai",
+      "details": {},
+      "execution_time": null
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "apis",
+      "test": "google_request_function",
+      "success": true,
+      "message": "Request function exists for google",
+      "details": {},
+      "execution_time": null
+    },
+    {
+      "timestamp": "2025-07-25 15:02:39",
+      "category": "apis",
+      "test": "anthropic_request_function",
+      "success": true,
+      "message": "Request function exists for anthropic",
+      "details": {},
+      "execution_time": null
+    }
+  ],
+  "summary": {
+    "total_tests": 51,
+    "passed": 48,
+    "failed": 3,
+    "categories": [
+      "graph",
+      "tools",
+      "requests",
+      "indexing",
+      "apis",
+      "database",
+      "schema",
+      "cypher",
+      "utils",
+      "core",
+      "entities",
+      "search",
+      "execution"
+    ],
+    "function_categories": {
+      "core": [
+        "public.percolate",
+        "public.percolate_with_agent",
+        "public.plan",
+        "public.run"
+      ],
+      "entities": [
+        "p8.get_entities",
+        "p8.register_entities",
+        "p8.query_entity",
+        "p8.vector_search_entity",
+        "p8.get_entity_ids_by_description",
+        "p8.generate_markdown_prompt"
+      ],
+      "cypher": [
+        "p8.add_relationship_to_node",
+        "p8.get_connected_entities",
+        "p8.get_paths",
+        "p8.get_relationships",
+        "public.cypher_query"
+      ],
+      "search": [
+        "p8.deep_search",
+        "p8.fuzzy_match_node_key",
+        "p8.parallel_search",
+        "p8.query_entity_fast",
+        "p8.merge_search_results"
+      ],
+      "indexing": [
+        "p8.build_graph_index",
+        "p8.get_embedding_for_text",
+        "p8.insert_entity_embeddings",
+        "p8.generate_and_fetch_embeddings"
+      ],
+      "requests": [
+        "p8.ask",
+        "p8.get_canonical_messages",
+        "p8.nl2sql",
+        "p8.request_openai",
+        "p8.request_anthropic",
+        "p8.request_google"
+      ],
+      "tools": [
+        "p8.get_tools_by_name",
+        "p8.eval_function_call",
+        "p8.activate_functions_by_name",
+        "p8.get_session_functions"
+      ],
+      "utils": [
+        "p8.create_session",
+        "p8.create_and_update_session",
+        "p8.ping_api"
+      ]
+    }
+  }
+}

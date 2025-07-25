@@ -21,14 +21,29 @@ services:
       - minio_data:/data
     command: server /data --console-address ":9090"
   percolate-api:
-    image: percolationlabs/percolate-api
+    image: percolate-api-local:latest
     container_name: percolate-api
     ports:
       - "5008:5008"
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      CEREBRAS_API_KEY: ${CEREBRAS_API_KEY}
       P8_PG_HOST: percolate #docker service that has postgres on it
       P8_PG_PORT: 5432 #this is what we do b default - we will change it on k8s
+      P8_PG_DATABASE: app
+      P8_PG_USER: postgres
+      P8_PG_PASSWORD: postgres
+      POLARS_SKIP_CPU_CHECK: 1
+      PYTHONUNBUFFERED: 1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    command: ["uvicorn", "percolate.api.main:app", "--host", "0.0.0.0", "--port", "5008"]
   postgres:
     image: percolationlabs/postgres-base:16
     container_name: percolate
@@ -43,6 +58,11 @@ services:
       - percolate_data:/var/lib/postgresql/percolate
       - ./extension/sql:/docker-entrypoint-initdb.d
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "PGPASSWORD=postgres psql -U postgres -d app -c \"SELECT 1\" && exit 0 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 volumes:
   percolate_data:
   minio_data:

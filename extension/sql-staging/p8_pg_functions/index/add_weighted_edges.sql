@@ -55,7 +55,7 @@ BEGIN
 
     */
 
-    LOAD 'age';
+    -- AGE extension is preloaded at session level
     SET search_path = ag_catalog, "$user", public;
 
     -- Loop through each node in the "node_data" JSON array

@@ -20,7 +20,7 @@ BEGIN
 
 	*/
 	
-	LOAD  'age'; SET search_path = ag_catalog, "$user", public;
+	SET search_path = ag_catalog, "$user", public;
 
 	schema_name := lower(split_part(node_type, '.', 1));
     pure_table_name := split_part(node_type, '.', 2);

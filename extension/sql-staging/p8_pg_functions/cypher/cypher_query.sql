@@ -20,7 +20,6 @@ BEGIN
  	select * from public.cypher_query('MATCH (v) RETURN v');
 	*/
 
-    LOAD 'age';
     SET search_path = ag_catalog, "$user", public;
 
     -- Use the dynamic graph_name in the query
