@@ -111,6 +111,33 @@ class EntitySearch(BaseModel):
     limit: int = Field(10, description="Maximum results to return", ge=1, le=100)
 
 
+class GetEntitiesRequest(BaseModel):
+    keys: List[str] = Field(..., description="List of entity keys to retrieve")
+    allow_fuzzy_match: bool = Field(True, description="Enable fuzzy matching for entity names")
+    similarity_threshold: float = Field(0.3, description="Similarity threshold for fuzzy matching (0-1, lower is more permissive)")
+
+
+@router.post("/get")
+async def get_entities(
+    request: GetEntitiesRequest,
+    user_id: Optional[str] = Depends(hybrid_auth)
+):
+    """Get entities by their keys with optional fuzzy matching."""
+    import percolate as p8
+    
+    try:
+        # Use the interface function that handles fuzzy matching
+        results = p8.get_entities(
+            keys=request.keys,
+            user_id=user_id,
+            allow_fuzzy_match=request.allow_fuzzy_match,
+            similarity_threshold=request.similarity_threshold
+        )
+        return results
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/search")
 async def search_entities(
     search: EntitySearch, 
@@ -123,26 +150,43 @@ async def search_entities(
     
     try:
         # Determine entity type to search
-        entity_type = "Agent"  # Default to Agent
-        if search.filters and "entity_type" in search.filters:
+        entity_type = None
+        if search.filters and "entity_name" in search.filters:
+            entity_type = search.filters["entity_name"]
+        elif search.filters and "entity_type" in search.filters:
             entity_type = search.filters["entity_type"]
         elif search.filters and "type" in search.filters:
             entity_type = search.filters["type"]
         
-        # Map entity type to model class
-        entity_map = {
-            "Agent": Agent,
-            "Resources": Resources,
-            "Resource": Resources,
-            "Function": Function,
-            "Project": Project,
-            "Task": Task,
-            "User": User,
-            "PercolateAgent": PercolateAgent
-        }
+        # If entity_type is a fully qualified name (e.g., "public.Tasks", "p8.Agent"),
+        # try to load it directly as a model
+        model_class = None
+        if entity_type and '.' in entity_type:
+            try:
+                # Try to load the entity as a model
+                model_class = p8.models.load(entity_type)
+            except:
+                # If loading fails, try without namespace
+                simple_name = entity_type.split('.')[-1]
+                entity_type = simple_name
         
-        # Get the model class, default to Agent if not found
-        model_class = entity_map.get(entity_type, Agent)
+        # If we don't have a model class yet, use the mapping
+        if not model_class:
+            # Map entity type to model class
+            entity_map = {
+                "Agent": Agent,
+                "Resources": Resources,
+                "Resource": Resources,
+                "Function": Function,
+                "Project": Project,
+                "Task": Task,
+                "Tasks": Task,  # Also support plural
+                "User": User,
+                "PercolateAgent": PercolateAgent
+            }
+            
+            # Get the model class, default to Agent if not found
+            model_class = entity_map.get(entity_type, Agent)
         
         # Use repository search method
         repo = p8.repository(model_class, user_id=user_id)
@@ -162,7 +206,7 @@ async def search_entities(
                     if search.filters:
                         filtered = []
                         for item in vector_results:
-                            if all(item.get(k) == v for k, v in search.filters.items() if k not in ['entity_type', 'type']):
+                            if all(item.get(k) == v for k, v in search.filters.items() if k not in ['entity_type', 'type', 'entity_name']):
                                 filtered.append(item)
                         all_results.extend(filtered)
                     else:

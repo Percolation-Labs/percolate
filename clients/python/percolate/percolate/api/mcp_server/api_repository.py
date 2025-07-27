@@ -75,30 +75,101 @@ class APIProxyRepository(BaseMCPRepository):
             logger.error(f"Request failed: {str(e)}")
             return {"error": str(e)}
     
-    async def get_entity(self, entity_name: str, entity_type: Optional[str] = None) -> Dict[str, Any]:
-        """Get entity by name via API"""
+    async def get_entity(self, entity_name: str, entity_type: Optional[str] = None, allow_fuzzy_match: bool = True, similarity_threshold: float = 0.3) -> Dict[str, Any]:
+        """Get entity by name via API - uses the /entities/get endpoint"""
         try:
-            # Try the entities endpoint first
-            response = await self.client.get(f"/entities/{entity_name}")
-            data = await self._handle_response(response)
+            # Use the new /entities/get endpoint
+            logger.debug(f"Getting entity {entity_name} via /entities/get (fuzzy: {allow_fuzzy_match})")
+            payload = {
+                "keys": [entity_name],
+                "allow_fuzzy_match": allow_fuzzy_match,
+                "similarity_threshold": similarity_threshold
+            }
             
-            if "error" not in data:
-                return data
+            response = await self.client.post(f"{self.api_endpoint}/entities/get", json=payload)
+            result = await self._handle_response(response)
             
-            # If not found and we have a type, try type-specific endpoint
-            if entity_type:
-                type_endpoints = {
-                    "Agent": "/entities",
-                    "Function": "/tools",
-                    "Resources": "/admin/content/files"
-                }
+            # Return the result directly - it should contain get_entities or get_fuzzy_entities
+            if isinstance(result, dict):
+                return result
+            
+            # Fallback to old eval format if needed
+            if isinstance(result, list) and len(result) > 0:
+                eval_result = result[0].get('eval_function_call', {})
                 
-                if entity_type in type_endpoints:
-                    endpoint = type_endpoints[entity_type]
-                    response = await self.client.get(f"{endpoint}/{entity_name}")
-                    return await self._handle_response(response)
+                # The result can contain multiple entity types, find the first non-empty one
+                for entity_type_key, entity_data in eval_result.items():
+                    if isinstance(entity_data, dict) and entity_data.get('data'):
+                        entities = entity_data['data']
+                        if entities and len(entities) > 0:
+                            # Return the first matching entity
+                            entity = entities[0]
+                            logger.debug(f"Found entity {entity_name} as {entity_type_key}")
+                            return entity
             
-            return data
+            # If get_entities didn't work, fall back to type-specific endpoints
+            logger.debug(f"get_entities didn't find {entity_name}, trying type-specific endpoints")
+            
+            type_endpoints = {
+                "Agent": "/entities",
+                "PercolateAgent": "/entities", 
+                "Function": "/tools",
+                "Resources": "/memory",
+                "Memory": "/memory"
+            }
+            
+            # If entity_type is specified, try that endpoint first
+            if entity_type and entity_type in type_endpoints:
+                endpoint = type_endpoints[entity_type]
+                try:
+                    if entity_type in ["Agent", "PercolateAgent"]:
+                        response = await self.client.get(f"{endpoint}/{entity_name}")
+                    elif entity_type == "Function":
+                        response = await self.client.get(f"{endpoint}/{entity_name}")
+                    elif entity_type in ["Resources", "Memory"]:
+                        response = await self.client.get(f"{endpoint}/get/{entity_name}")
+                    else:
+                        response = await self.client.get(f"{endpoint}/{entity_name}")
+                    
+                    data = await self._handle_response(response)
+                    if "error" not in data:
+                        return data
+                except Exception as e:
+                    logger.debug(f"Failed to get {entity_type} {entity_name}: {e}")
+            
+            # Try all common types
+            for api_type, endpoint in type_endpoints.items():
+                try:
+                    if api_type in ["Agent", "PercolateAgent"]:
+                        response = await self.client.get(f"{endpoint}/{entity_name}")
+                    elif api_type == "Function":
+                        response = await self.client.get(f"{endpoint}/{entity_name}")
+                    elif api_type in ["Resources", "Memory"]:
+                        response = await self.client.get(f"{endpoint}/get/{entity_name}")
+                    else:
+                        response = await self.client.get(f"{endpoint}/{entity_name}")
+                    
+                    data = await self._handle_response(response)
+                    if "error" not in data:
+                        logger.debug(f"Found entity {entity_name} as {api_type}")
+                        return data
+                except Exception as e:
+                    logger.debug(f"Failed to get {api_type} {entity_name}: {e}")
+                    continue
+            
+            # Final fallback to search
+            logger.debug(f"Entity {entity_name} not found in specific endpoints, trying search")
+            search_results = await self.search_entities(entity_name, limit=1)
+            if search_results and len(search_results) > 0:
+                # Check if any result has exact name match
+                for result in search_results:
+                    if result.get("name") == entity_name:
+                        return result
+                
+                # Return first result if no exact match
+                return search_results[0]
+            
+            return {"error": f"Entity {entity_name} not found"}
         except Exception as e:
             logger.error(f"Error getting entity: {e}")
             return {"error": str(e)}
@@ -446,7 +517,7 @@ class APIProxyRepository(BaseMCPRepository):
                 params["session_id"] = str(uuid.uuid4())
             
             # Use the agent-specific endpoint
-            endpoint = f"/agent/{agent}/completions"
+            endpoint = f"/chat/agent/{agent}/completions"
             
             if stream:
                 # Return async iterator for streaming
