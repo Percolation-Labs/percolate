@@ -265,6 +265,16 @@ SELECT p8.attach_rls_policy('{cls.model.get_model_namespace()}', '{cls.model.get
 
         return f"""SELECT { fields } FROM {self.table_name} {predicate}"""
 
+    def delete_query(self, **kwargs):
+        """
+        Generate a DELETE query with WHERE clause based on kwargs
+        """
+        if not kwargs:
+            raise ValueError("delete_query requires at least one condition in kwargs")
+        
+        predicate = SqlModelHelper.construct_where_clause(**kwargs)
+        return f"""DELETE FROM {self.table_name} {predicate}"""
+
     @classmethod
     def construct_where_clause(cls, since_date_modified: str = None, **kwargs) -> str:
         """

@@ -25,6 +25,7 @@ class AuthProvider(str, Enum):
     """Authentication providers"""
     BEARER = "bearer"
     GOOGLE = "google"
+    PERCOLATE = "percolate"
 
 
 class AuthRequest(BaseModel):

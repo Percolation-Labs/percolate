@@ -13,17 +13,10 @@
 
 ## Overview
 
-Percolate extends PostgreSQL with AI capabilities, allowing you to run sophisticated queries directly in SQL. This guide covers both direct SQL usage and Python client approaches.
+Percolate extends PostgreSQL with AI capabilities, allowing you to run queries directly in SQL. This guide covers both direct SQL usage and Python client approaches.
 
 ## Direct SQL vs Python Client
 
-### When to Use Direct SQL
-
-**Use Cases:**
-- Database migrations and ETL
-- Reporting and analytics
-- Administrative tasks
-- Quick prototyping
 
 **Example:**
 ```sql
@@ -34,14 +27,9 @@ SELECT * FROM percolate('Summarize our Q4 sales performance');
 SELECT * FROM percolate_with_agent('Analyze this data', 'p8.PercolateAgent');
 ```
 
-### When to Use Python Client
+### Python Client
 
-**Use Cases:**
-- Web applications
-- Complex workflows
-- Multi-step processes
-- User interfaces
-
+ 
 **Example:**
 ```python
 import percolate as p8
@@ -49,7 +37,7 @@ import percolate as p8
 # Use repository pattern
 from percolate.models import User
 repo = p8.repository(User)
-users = repo.select(email__ilike="%@example.com")
+users = repo.select(email="user@example.com")
 
 # Run AI queries
 response = p8.query("SELECT * FROM percolate('What can you help with?')")
@@ -98,7 +86,7 @@ SELECT * FROM run(
 
 ```sql
 -- Register an entity type with supporting views
-SELECT p8.register_entities('myapp.Customer');
+SELECT p8.register_entities(SomeModel);
 ```
 
 ### Get Entities
@@ -123,9 +111,7 @@ SELECT * FROM p8.get_connected_entities('customer');
 -- Entity-specific search
 SELECT * FROM p8.query_entity(
     'Find recent purchases',
-    'Customer',
-    '123e4567-e89b-12d3-a456-426614174000'::uuid,  -- user_id
-    false  -- semantic_only
+    'public.Orders'
 );
 ```
 
@@ -142,17 +128,6 @@ SELECT p8.set_user_context('123e4567-e89b-12d3-a456-426614174000'::uuid);
 -- All subsequent queries will respect user's permissions
 ```
 
-### Create App User
-
-```sql
--- Create a new application user
-SELECT p8.create_app_user(
-    p_name := 'John Doe',
-    p_email := 'john@example.com',
-    p_password := 'secure_password',
-    p_role_level := 10  -- 0=GOD, 1=ADMIN, 5=INTERNAL, 10=PARTNER, 100=PUBLIC
-);
-```
 
 ### Row-Level Security
 
@@ -241,7 +216,7 @@ results = p8.repository(Resources).select(
 )
 ```
 
-## Advanced Patterns
+## More
 
 ### Function Evaluation
 
@@ -282,45 +257,6 @@ SELECT * FROM p8.get_agent_tools(
 );
 ```
 
-## Best Practices
-
-1. **Always Set User Context** - Use `p8.set_user_context()` for secure operations
-2. **Use Appropriate Functions** - Choose between `percolate()`, `percolate_with_agent()`, and `run()` based on your needs
-3. **Batch Operations** - Use array parameters for bulk operations
-4. **Handle Errors** - Check the status field in responses
-5. **Index Entities** - Use `register_entities()` for better performance
-6. **Use Transactions** - Wrap complex operations in transactions
-
-### Example: Complete Workflow
-
-```sql
-BEGIN;
-
--- Set user context
-SELECT p8.set_user_context('123e4567-e89b-12d3-a456-426614174000'::uuid);
-
--- Register entity if needed
-SELECT p8.register_entities('myapp.Order');
-
--- Query with AI
-SELECT * FROM percolate_with_agent(
-    'Analyze orders from last week and identify trends',
-    'p8.PercolateAgent'
-);
-
--- Store results as needed
-INSERT INTO analysis_results (user_id, analysis, created_at)
-SELECT 
-    '123e4567-e89b-12d3-a456-426614174000'::uuid,
-    message_response,
-    NOW()
-FROM percolate_with_agent(
-    'Summarize the key findings',
-    'p8.PercolateAgent'
-);
-
-COMMIT;
-```
 
 ## Python Repository Pattern
 
@@ -340,10 +276,9 @@ if not repo.entity_exists:
 # CRUD operations
 records = repo.select(field="value")
 repo.update_records([record1, record2])
-repo.delete(id=record_id)
 
 # Direct SQL
-results = p8.query("SELECT * FROM your_table WHERE condition = %s", ["value"])
+results = repo.execute("SELECT * FROM your_table WHERE condition = %s", ["value"])
 ```
 
 This approach provides type safety while maintaining the flexibility of SQL when needed.

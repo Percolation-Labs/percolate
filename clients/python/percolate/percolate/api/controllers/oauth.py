@@ -7,8 +7,8 @@ import os
 import secrets
 from urllib.parse import urlencode
 
-from ...auth.server import OAuthServer
-from ...auth.models import (
+from ..auth.server import OAuthServer
+from ..auth.models import (
     AuthRequest,
     AuthResponse,
     TokenRequest,

@@ -8,8 +8,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from .router import router
 from ...controllers.oauth import OAuthController
-from ....auth.models import AuthRequest, TokenRequest, GrantType, AuthError
-from ....utils import logger
+from percolate.api.auth.models import AuthRequest, TokenRequest, GrantType, AuthError
+from percolate.utils import logger
 
 
 # Get OAuth server from app state
@@ -39,6 +39,11 @@ async def authorize_get(
     Handles the authorization request and returns appropriate response
     """
     controller = get_oauth_controller(request)
+    
+    # Check for X_USER_EMAIL env var if header not provided
+    if not x_user_email:
+        import os
+        x_user_email = os.environ.get("X_USER_EMAIL")
     
     try:
         # Build auth request

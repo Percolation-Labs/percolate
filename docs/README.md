@@ -113,47 +113,23 @@ from percolate.models import Resources
 
 # Search resources
 repo = p8.repository(Resources)
-results = repo.select(name__ilike="%machine learning%")
+results = repo.query_entity("%machine learning%")
 
 # Execute SQL queries
-results = p8.query("""
+results = p8.execute("""
     SELECT customer_id, 
            percolate('Summarize behavior: ' || activity_log) as summary
     FROM customer_activity
     WHERE date > CURRENT_DATE - INTERVAL '7 days'
 """)
+
+# get entities 
+results = repo.get_entities(["Task123"])
 ```
 
-## Use Cases
-
-### 🏢 Enterprise Applications
-
-- **Customer Service**: AI-powered support agents with access to your knowledge base
-- **Business Intelligence**: Natural language queries over complex datasets
-- **Content Management**: Semantic search and automatic categorization
-- **Compliance**: Automated document analysis and reporting
-
-### 🚀 Developer Tools
-
-- **Code Analysis**: AI-powered code review and documentation
-- **DevOps**: Intelligent monitoring and incident response
-- **API Integration**: Unified interface for multiple services
-- **Testing**: Automated test generation and validation
-
-### 🔬 Research & Analytics
-
-- **Data Science**: Combined SQL and AI analysis workflows
-- **Knowledge Graphs**: Entity extraction and relationship mapping
-- **Document Processing**: Automatic summarization and insights
-- **Real-time Analytics**: Streaming AI analysis of events
 
 ## Getting Started
 
-### Prerequisites
-
-- PostgreSQL 16+ or Docker
-- Python 3.8+
-- 8GB RAM minimum (16GB+ recommended for production)
 
 ### Installation Options
 
@@ -167,8 +143,7 @@ cd percolate
 # Start with Docker Compose
 docker-compose up -d
 
-# Initialize the database
-docker-compose exec postgres psql -U postgres -d percolate -f /init.sql
+#run the init to populate some data
 ```
 
 #### Option 2: Python Package
@@ -248,38 +223,3 @@ graph TB
     J --> M
 ```
 
-## Community & Support
-
-### 🌟 Get Involved
-
-- **GitHub**: [github.com/percolate-ai/percolate](https://github.com/percolate-ai/percolate)
-- **Discord**: [Join our community](https://discord.gg/percolate)
-- **Twitter**: [@percolate_ai](https://twitter.com/percolate_ai)
-
-### 📖 Resources
-
-- **Blog**: [blog.percolate.ai](https://blog.percolate.ai)
-- **Examples**: [github.com/percolate-ai/examples](https://github.com/percolate-ai/examples)
-- **Video Tutorials**: [YouTube Channel](https://youtube.com/@percolate-ai)
-
-### 🤝 Contributing
-
-We welcome contributions! Please see our [Contributing Guide](../CONTRIBUTING.md) for details.
-
-### 📄 License
-
-Percolate is licensed under the [Apache License 2.0](../LICENSE).
-
-## Next Steps
-
-1. **[Follow the Quickstart](./01-architecture.md#quick-start)** - Get up and running in minutes
-2. **[Build Your First Agent](./05-building-agents.md#your-first-agent)** - Create an AI agent
-3. **[Explore the API](./02-api-reference.md)** - Integrate with your applications
-4. **[Deploy to Production](./04-deployment.md)** - Scale your deployment
-
----
-
-<p align="center">
-  <strong>Percolate - Where Data Meets Intelligence</strong><br>
-  Built with ❤️ by the Percolate Team
-</p>

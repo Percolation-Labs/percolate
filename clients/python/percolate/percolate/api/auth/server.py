@@ -6,7 +6,8 @@ from typing import Dict, Optional, Any
 import os
 from urllib.parse import urlencode, urlparse
 
-from .providers import AuthProvider, BearerTokenProvider, GoogleOAuthProvider
+from .providers import AuthProvider, BearerTokenProvider, GoogleOAuthProvider, GoogleOAuthRelayProvider
+from .jwt_provider import PercolateJWTProvider
 from .models import (
     AuthRequest,
     AuthResponse,
@@ -45,20 +46,38 @@ class OAuthServer:
     
     def _init_default_providers(self):
         """Initialize default authentication providers"""
-        # Always add bearer token provider
+        auth_mode = os.getenv("AUTH_MODE", "legacy")
+        auth_provider = os.getenv("AUTH_PROVIDER")
+        
+        # Mode 1: Always add bearer token provider for legacy mode
         self.providers["bearer"] = BearerTokenProvider()
         
-        # Add Google OAuth if configured
+        # Mode 2: Add JWT provider if AUTH_MODE=percolate
+        if auth_mode == "percolate":
+            self.providers["percolate"] = PercolateJWTProvider()
+            # Override bearer to use JWT provider for unified handling
+            self.providers["bearer"] = PercolateJWTProvider()
+        
+        # Mode 3: Add external OAuth providers
         google_client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID")
         google_client_secret = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET")
         google_redirect_uri = os.getenv("GOOGLE_OAUTH_REDIRECT_URI", f"{self.base_url}/auth/google/callback")
         
         if google_client_id and google_client_secret:
-            self.providers["google"] = GoogleOAuthProvider(
-                client_id=google_client_id,
-                client_secret=google_client_secret,
-                redirect_uri=google_redirect_uri
-            )
+            # Use relay mode if AUTH_PROVIDER=google
+            if auth_provider == "google":
+                self.providers["google"] = GoogleOAuthRelayProvider(
+                    client_id=google_client_id,
+                    client_secret=google_client_secret,
+                    redirect_uri=google_redirect_uri
+                )
+            else:
+                # Default mode - stores tokens
+                self.providers["google"] = GoogleOAuthProvider(
+                    client_id=google_client_id,
+                    client_secret=google_client_secret,
+                    redirect_uri=google_redirect_uri
+                )
     
     def register_provider(self, name: str, provider: AuthProvider):
         """Register a new authentication provider"""

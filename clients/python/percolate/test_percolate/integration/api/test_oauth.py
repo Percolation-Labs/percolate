@@ -9,7 +9,7 @@ import hashlib
 import base64
 from unittest.mock import Mock, patch, AsyncMock
 
-from percolate.auth import (
+from percolate.api.auth import (
     OAuthServer,
     BearerTokenProvider,
     GoogleOAuthProvider,
@@ -18,7 +18,7 @@ from percolate.auth import (
     AuthError,
     AuthContext
 )
-from percolate.auth.middleware import get_auth, require_auth
+from percolate.api.auth.middleware import get_auth, require_auth
 from percolate.models.p8.types import User
 from percolate.utils import make_uuid
 

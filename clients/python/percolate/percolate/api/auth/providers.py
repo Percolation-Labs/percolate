@@ -11,9 +11,9 @@ import httpx
 import jwt
 from datetime import datetime, timedelta
 
-from ..models.p8.types import User
-from ..utils import make_uuid
-from ..api.routes.auth.utils import (
+from percolate.models.p8.types import User
+from percolate.utils import make_uuid
+from .utils import (
     decode_jwt_token,
     extract_token_expiry,
     extract_user_info_from_token,
@@ -219,10 +219,10 @@ class GoogleOAuthProvider(AuthProvider):
         self.redirect_uri = redirect_uri
         self.auth_codes: Dict[str, Dict[str, Any]] = {}
         
-        # Google OAuth endpoints
+        # Google OAuth endpoints (from https://accounts.google.com/.well-known/openid-configuration)
         self.auth_endpoint = "https://accounts.google.com/o/oauth2/v2/auth"
         self.token_endpoint = "https://oauth2.googleapis.com/token"
-        self.userinfo_endpoint = "https://www.googleapis.com/oauth2/v1/userinfo"
+        self.userinfo_endpoint = "https://openidconnect.googleapis.com/v1/userinfo"
         self.jwks_uri = "https://www.googleapis.com/oauth2/v3/certs"
     
     async def authorize(self, request: AuthRequest) -> AuthResponse:
@@ -413,3 +413,146 @@ class GoogleOAuthProvider(AuthProvider):
             )
             
             return response.status_code == 200
+
+
+class GoogleOAuthRelayProvider(GoogleOAuthProvider):
+    """
+    Google OAuth provider in relay mode - doesn't store tokens
+    Only registers user email for identification
+    """
+    
+    def __init__(self, client_id: str, client_secret: str, redirect_uri: str):
+        super().__init__(client_id, client_secret, redirect_uri)
+        self.relay_mode = True
+    
+    async def token(self, request: TokenRequest) -> TokenResponse:
+        """
+        Exchange Google authorization code for tokens
+        In relay mode, we don't store tokens, only register the user
+        """
+        if request.grant_type == "authorization_code":
+            # Exchange code with Google
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    self.token_endpoint,
+                    data={
+                        "code": request.code,
+                        "client_id": self.client_id,
+                        "client_secret": self.client_secret,
+                        "redirect_uri": request.redirect_uri or self.redirect_uri,
+                        "grant_type": "authorization_code",
+                        "code_verifier": request.code_verifier
+                    }
+                )
+                
+                if response.status_code != 200:
+                    error_data = response.json()
+                    raise AuthError(
+                        error_data.get("error", "invalid_grant"),
+                        error_data.get("error_description", "Failed to exchange code")
+                    )
+                
+                token_data = response.json()
+                
+                # Get user info
+                userinfo_response = await client.get(
+                    self.userinfo_endpoint,
+                    headers={"Authorization": f"Bearer {token_data['access_token']}"}
+                )
+                
+                if userinfo_response.status_code != 200:
+                    raise AuthError("invalid_grant", "Failed to get user info")
+                
+                userinfo = userinfo_response.json()
+                
+                # In relay mode: only register user email, don't store tokens
+                user_email = userinfo["email"]
+                user_name = userinfo.get("name", user_email)
+                
+                # Register user if not exists
+                user_repo = p8.repository(User)
+                users = user_repo.select(email=user_email)
+                
+                if not users:
+                    # Create user without token
+                    user_id = make_uuid(user_email)
+                    user = User(
+                        id=user_id,
+                        name=user_name,
+                        email=user_email,
+                        role_level=100,  # Default public level
+                        groups=["oauth_users"]
+                    )
+                    user_repo.upsert_records(user)
+                
+                # Return tokens directly from Google (not storing them)
+                return TokenResponse(
+                    access_token=token_data["access_token"],
+                    token_type="Bearer",
+                    expires_in=token_data.get("expires_in", 3600),
+                    refresh_token=token_data.get("refresh_token"),
+                    id_token=token_data.get("id_token"),
+                    scope=token_data.get("scope", "openid email profile")
+                )
+        
+        elif request.grant_type == "refresh_token":
+            return await self.refresh(request.refresh_token)
+        
+        else:
+            raise AuthError("unsupported_grant_type", f"Grant type {request.grant_type} not supported")
+    
+    async def validate(self, token: str) -> TokenInfo:
+        """
+        Validate Google access token against Google's servers
+        In relay mode, we always check with Google, not local DB
+        """
+        # Always validate against Google
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"https://oauth2.googleapis.com/tokeninfo?access_token={token}"
+            )
+            
+            if response.status_code != 200:
+                # Token expired or invalid
+                error_data = response.json()
+                if "error" in error_data and error_data["error"] == "invalid_token":
+                    # Check if it's specifically an expired token
+                    if "error_description" in error_data and "expired" in error_data["error_description"].lower():
+                        raise TokenExpiredError("Token has expired")
+                raise InvalidTokenError("Invalid Google token")
+            
+            token_info = response.json()
+            
+            # Get user from database by email
+            user_email = token_info.get("email")
+            if user_email:
+                user_repo = p8.repository(User)
+                users = user_repo.select(email=user_email)
+                
+                if users:
+                    user = User(**users[0])
+                    return TokenInfo(
+                        active=True,
+                        email=user_email,
+                        sub=str(user.id),
+                        client_id=token_info.get("azp"),
+                        scope=token_info.get("scope"),
+                        exp=int(token_info.get("exp", 0)),
+                        provider="google",
+                        metadata={
+                            "user_id": str(user.id),
+                            "role_level": user.role_level,
+                            "groups": user.groups or []
+                        }
+                    )
+            
+            # Return basic token info even if user not in DB
+            return TokenInfo(
+                active=True,
+                email=user_email,
+                sub=token_info.get("sub"),
+                client_id=token_info.get("azp"),
+                scope=token_info.get("scope"),
+                exp=int(token_info.get("exp", 0)),
+                provider="google"
+            )

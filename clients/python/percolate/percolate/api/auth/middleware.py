@@ -11,8 +11,8 @@ from starlette.responses import JSONResponse
 
 from .server import OAuthServer
 from .models import AuthContext, AuthError, TokenExpiredError, InsufficientScopeError
-from ..models.p8.types import User
-from ..utils import logger
+from percolate.models.p8.types import User
+from percolate.utils import logger
 import percolate as p8
 
 
@@ -59,7 +59,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
             token = auth_header[7:]
         
         # Check X-User-Email header for bearer token auth
+        # Also check X_USER_EMAIL from environment if header not present
         user_email = request.headers.get("X-User-Email")
+        if not user_email:
+            # Check for environment variable with underscore format
+            import os
+            user_email = os.environ.get("X_USER_EMAIL")
         
         # If no token, return 401
         if not token:
@@ -181,6 +186,11 @@ async def get_auth(
     # Check if already authenticated by middleware
     if hasattr(request.state, "auth"):
         return request.state.auth
+    
+    # Check for X_USER_EMAIL env var if header not provided
+    if not x_user_email:
+        import os
+        x_user_email = os.environ.get("X_USER_EMAIL")
     
     # Manual authentication for routes not covered by middleware
     if not credentials:

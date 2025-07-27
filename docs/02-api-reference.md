@@ -21,7 +21,7 @@ The Percolate API provides a comprehensive interface for building AI-powered app
 ### Base URL
 ```
 http://localhost:5008  # Development
-https://api.percolate.ai  # Production
+https://api.percolationlabs.ai  # Production
 ```
 
 ### Content Types
