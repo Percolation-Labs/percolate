@@ -26,12 +26,13 @@ def get_p8_models():
     return get_classes(package="percolate.models.p8")
 
 
-from .p8 import * 
+from .p8 import *
+from .p8.types import UserMemory 
 
 
 """For now we whitelist the models that are installed in the database"""
 CORE_INSTALL_MODELS= [ User, Project, Agent, ModelField, LanguageModelApi, Function, Session, SessionEvaluation, AIResponse, ApiProxy, PlanModel,
-               Settings, PercolateAgent, IndexAudit, Task, TaskResources, ResearchIteration , Resources,SessionResources, Schedule, Audit]
+               Settings, PercolateAgent, IndexAudit, Task, TaskResources, ResearchIteration , Resources,SessionResources, Schedule, Audit, UserMemory]
    
 def migrate_core_models():
     """apply schema changes"""

@@ -1105,6 +1105,50 @@ class PercolateAgent(Resources):
         return values
 
 
+class UserMemory(Resources):
+    """User-specific memories and facts that can be searched and retrieved.
+    
+    This type stores personal information, preferences, and contextual data
+    about users that can be used to personalize interactions and maintain
+    conversational context across sessions.
+    """
+    
+    class Config:
+        description = """User-specific memories and facts storage for personalization 
+        and context management. Each memory is uniquely identified and timestamped."""
+    
+    @model_validator(mode='before')
+    @classmethod
+    def _generate_unique_name(cls, values):
+        """Generate a unique name with customer prefix and timestamp if not provided"""
+        if not values.get('name'):
+            # Extract username from userid email if available
+            userid = values.get('userid', 'unknown')
+            if '@' in str(userid):
+                username = str(userid).split('@')[0]
+            else:
+                username = str(userid)
+            
+            # Create timestamp
+            timestamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S_%f')[:-3]
+            
+            # Generate unique name
+            values['name'] = f"{username}_{timestamp}"
+        
+        # Ensure ID is generated
+        if not values.get('id'):
+            values['id'] = make_uuid({
+                'uri': values.get('uri', f"memory://{values.get('name', 'unknown')}"),
+                'ordinal': values.get('ordinal', 0)
+            })
+        
+        # Set default category if not provided
+        if not values.get('category'):
+            values['category'] = 'user_memory'
+            
+        return values
+
+
 class Settings(AbstractModel):
     """settings are key value pairs for percolate admin"""
     id: typing.Optional[uuid.UUID| str] = Field("The id is generated as a hash of the required key and ordinal. The id must be in a UUID format or can be left blank")  

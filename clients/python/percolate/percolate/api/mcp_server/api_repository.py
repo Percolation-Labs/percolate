@@ -1,6 +1,6 @@
 """API proxy repository implementation for MCP tools"""
 
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Union, AsyncIterator
 import httpx
 from percolate.utils import logger
 from .base_repository import BaseMCPRepository
@@ -242,6 +242,9 @@ class APIProxyRepository(BaseMCPRepository):
     async def upload_file(
         self,
         file_path: str,
+        namespace: Optional[str] = None,
+        entity_name: Optional[str] = None,
+        task_id: Optional[str] = None,
         description: Optional[str] = None,
         tags: Optional[List[str]] = None
     ) -> Dict[str, Any]:
@@ -262,13 +265,15 @@ class APIProxyRepository(BaseMCPRepository):
                 files = {"file": (Path(file_path).name, f, content_type)}
                 data = {
                     "add_resource": "true",
-                    "namespace": "p8",  # Default namespace
-                    "entity_name": "Resources"  # Default entity that should exist
+                    "namespace": namespace or "p8",
+                    "entity_name": entity_name or "Resources"
                 }
                 
                 # Add optional parameters
-                if description:
-                    data["task_id"] = description  # Use description as task_id
+                if task_id:
+                    data["task_id"] = task_id
+                elif description:
+                    data["task_id"] = description  # Use description as task_id fallback
                     
                 # Use admin upload endpoint
                 response = await self.client.post(
@@ -298,6 +303,74 @@ class APIProxyRepository(BaseMCPRepository):
                 "success": False,
                 "error": str(e),
                 "file_path": file_path
+            }
+    
+    async def upload_file_content(
+        self,
+        file_content: str,
+        filename: str,
+        namespace: Optional[str] = None,
+        entity_name: Optional[str] = None,
+        task_id: Optional[str] = None,
+        description: Optional[str] = None,
+        tags: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """Upload file content directly via API"""
+        try:
+            import io
+            import mimetypes
+            
+            # Detect content type from filename
+            content_type, _ = mimetypes.guess_type(filename)
+            if not content_type:
+                content_type = "text/plain" if filename.endswith(('.txt', '.md')) else "application/octet-stream"
+            
+            # Convert string content to bytes
+            file_bytes = file_content.encode('utf-8')
+            file_like = io.BytesIO(file_bytes)
+            
+            # Prepare multipart upload
+            files = {"file": (filename, file_like, content_type)}
+            data = {
+                "add_resource": "true",
+                "namespace": namespace or "p8",
+                "entity_name": entity_name or "Resources"
+            }
+            
+            # Add optional parameters
+            if task_id:
+                data["task_id"] = task_id
+            elif description:
+                data["task_id"] = description  # Use description as task_id fallback
+                
+            # Use admin upload endpoint
+            response = await self.client.post(
+                "/admin/content/upload",
+                files=files,
+                data=data
+            )
+            
+            result = await self._handle_response(response)
+            
+            if "error" not in result:
+                return {
+                    "success": True,
+                    "file_name": filename,
+                    "file_size": len(file_bytes),
+                    **result
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": result.get("error", "Upload failed"),
+                    "filename": filename
+                }
+        except Exception as e:
+            logger.error(f"Error uploading file content: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "filename": filename
             }
     
     async def search_resources(
@@ -341,6 +414,77 @@ class APIProxyRepository(BaseMCPRepository):
         except Exception as e:
             logger.error(f"Ping failed: {str(e)}")
             return {"error": str(e)}
+    
+    async def stream_chat(
+        self,
+        query: str,
+        agent: str,
+        model: str,
+        session_id: Optional[str] = None,
+        stream: bool = True
+    ) -> Union[str, AsyncIterator[str]]:
+        """Stream chat response from agent via API"""
+        try:
+            import uuid
+            
+            # Build the chat completions request
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "user", "content": query}
+                ],
+                "stream": stream
+            }
+            
+            # Add session ID if provided
+            params = {}
+            if session_id:
+                params["session_id"] = session_id
+            else:
+                params["session_id"] = str(uuid.uuid4())
+            
+            # Use the agent-specific endpoint
+            endpoint = f"/agent/{agent}/completions"
+            
+            if stream:
+                # Return async iterator for streaming
+                async def stream_generator():
+                    async with self.client.stream(
+                        "POST",
+                        endpoint,
+                        json=payload,
+                        params=params,
+                        timeout=60.0
+                    ) as response:
+                        response.raise_for_status()
+                        async for line in response.aiter_lines():
+                            if line:
+                                yield line
+                
+                return stream_generator()
+            else:
+                # Return complete response for non-streaming
+                response = await self.client.post(
+                    endpoint,
+                    json=payload,
+                    params=params
+                )
+                data = await self._handle_response(response)
+                
+                # Extract content from response
+                if isinstance(data, dict) and "choices" in data:
+                    content = data["choices"][0].get("message", {}).get("content", "")
+                    return content
+                else:
+                    return str(data)
+                    
+        except Exception as e:
+            logger.error(f"Error in stream_chat: {e}")
+            # Return error as async iterator for consistency
+            async def error_generator():
+                yield f"data: {{\"error\": \"{str(e)}\"}}\n\n"
+                yield "data: [DONE]\n\n"
+            return error_generator() if stream else f"Error: {str(e)}"
     
     async def close(self):
         """Close the HTTP client"""

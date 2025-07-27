@@ -1,7 +1,7 @@
 """Abstract base class for MCP repository pattern"""
 
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Union, AsyncIterator
 
 
 class BaseMCPRepository(ABC):
@@ -101,13 +101,46 @@ class BaseMCPRepository(ABC):
     async def upload_file(
         self,
         file_path: str,
+        namespace: Optional[str] = None,
+        entity_name: Optional[str] = None,
+        task_id: Optional[str] = None,
         description: Optional[str] = None,
         tags: Optional[List[str]] = None
     ) -> Dict[str, Any]:
-        """Upload file to storage.
+        """Upload file from filesystem to storage.
         
         Args:
             file_path: Local path to file
+            namespace: Target namespace (uses default if not provided)
+            entity_name: Target entity (uses default if not provided)
+            task_id: Optional task ID for tracking
+            description: Optional file description
+            tags: Optional tags for categorization
+            
+        Returns:
+            Upload result with file metadata
+        """
+        pass
+    
+    @abstractmethod
+    async def upload_file_content(
+        self,
+        file_content: str,
+        filename: str,
+        namespace: Optional[str] = None,
+        entity_name: Optional[str] = None,
+        task_id: Optional[str] = None,
+        description: Optional[str] = None,
+        tags: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """Upload file content directly to storage.
+        
+        Args:
+            file_content: Content to upload
+            filename: Name for the file
+            namespace: Target namespace (uses default if not provided)
+            entity_name: Target entity (uses default if not provided)
+            task_id: Optional task ID for tracking
             description: Optional file description
             tags: Optional tags for categorization
             
@@ -132,5 +165,28 @@ class BaseMCPRepository(ABC):
             
         Returns:
             List of matching resources
+        """
+        pass
+    
+    @abstractmethod
+    async def stream_chat(
+        self,
+        query: str,
+        agent: str,
+        model: str,
+        session_id: Optional[str] = None,
+        stream: bool = True
+    ) -> Union[str, AsyncIterator[str]]:
+        """Stream chat response from agent.
+        
+        Args:
+            query: User query/prompt
+            agent: Agent name to use
+            model: LLM model to use
+            session_id: Optional session ID for conversation continuity
+            stream: Whether to stream the response
+            
+        Returns:
+            Either a complete response string or an async iterator of SSE lines
         """
         pass

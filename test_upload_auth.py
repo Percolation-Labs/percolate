@@ -25,9 +25,9 @@ else:
     os.environ.setdefault('S3_DEFAULT_BUCKET', 'percolate')
 
 # Configuration
-BASE_URL = os.environ.get("P8_API_ENDPOINT", "http://localhost:5008")
-API_KEY = "postgres"  # Use postgres as the test API key
-USER_EMAIL = os.environ.get("X_USER_EMAIL", "test@example.com")
+BASE_URL = os.environ.get("P8_TEST_DOMAIN", os.environ.get("P8_API_ENDPOINT", "http://localhost:5008"))
+API_KEY = os.environ.get("P8_TEST_BEARER_TOKEN", "postgres")  # Use test bearer token
+USER_EMAIL = os.environ.get("X_USER_EMAIL", "amartey@gmail.com")
 
 async def test_bearer_token_upload():
     """Test file upload with Bearer token + X-User-Email header (Mode 1)"""

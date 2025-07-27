@@ -5,7 +5,7 @@ from fastmcp import FastMCP
 from .config import get_mcp_settings
 from .auth import get_auth_handler
 from .repository_factory import create_repository
-from .tools import create_entity_tools, create_function_tools, create_help_tools, create_file_tools
+from .tools import create_entity_tools, create_function_tools, create_help_tools, create_file_tools, create_chat_tools, create_memory_tools
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,8 @@ def create_mcp_server() -> FastMCP:
     create_function_tools(mcp, repository)
     create_help_tools(mcp, repository)
     create_file_tools(mcp, repository)
+    create_chat_tools(mcp, repository)
+    create_memory_tools(mcp, repository)
     
     logger.info(f"Created MCP server: {settings.mcp_server_name} v{settings.mcp_server_version}")
     if auth_handler:

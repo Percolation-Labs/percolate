@@ -105,10 +105,31 @@ class MCPSettings(BaseSettings):
         description="User role level for access control (1=admin, higher numbers = more restricted)"
     )
     
+    # Default resource configuration
+    default_agent: str = Field(
+        default_factory=lambda: from_env_or_project('P8_DEFAULT_AGENT', 'p8.Resources'),
+        description="Default agent for chat/operations (e.g., 'executive-ExecutiveResources')"
+    )
+    
+    default_namespace: str = Field(
+        default_factory=lambda: from_env_or_project('P8_DEFAULT_NAMESPACE', 'p8'),
+        description="Default namespace for file uploads and resource operations"
+    )
+    
+    default_entity: str = Field(
+        default_factory=lambda: from_env_or_project('P8_DEFAULT_ENTITY', 'Resources'),
+        description="Default entity for resource operations"
+    )
+    
     # Model configuration
     default_model: str = Field(
         default_factory=lambda: from_env_or_project('P8_DEFAULT_MODEL', 'gpt-4o-mini'),
         description="Default language model to use for agent operations"
+    )
+    
+    default_vision_model: str = Field(
+        default_factory=lambda: from_env_or_project('P8_DEFAULT_VISION_MODEL', 'gpt-4o'),
+        description="Default vision model for image processing"
     )
     
     # Server configuration
