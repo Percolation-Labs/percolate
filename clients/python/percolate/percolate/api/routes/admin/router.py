@@ -852,7 +852,7 @@ class SyncScheduleRequest(BaseModel):
 async def create_sync_schedule(
     request: SyncScheduleRequest,
     background_tasks: BackgroundTasks,
-    user: dict = Depends(get_api_key),
+    auth_user_id: Optional[str] = Depends(hybrid_auth),
 ):
     """
     Create a new scheduled sync configuration to sync files from external providers
@@ -864,7 +864,7 @@ async def create_sync_schedule(
 
     Args:
         request: Sync schedule configuration
-        user: Authenticated admin user
+        auth_user_id: Authenticated user ID
 
     Returns:
         Dictionary with sync config ID and schedule information
@@ -875,7 +875,7 @@ async def create_sync_schedule(
         from percolate.services.sync.file_sync import FileSync
 
         # Get user ID from authenticated user
-        user_id = user.get("user_id") or user.get("id")
+        user_id = auth_user_id
         if not user_id:
             raise HTTPException(
                 status_code=400, detail="User ID not found in authentication"

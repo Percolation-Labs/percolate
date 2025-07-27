@@ -194,9 +194,9 @@ async def get_user_id(
                 logger.debug(f"get_user_id: Found email header: {user_email}")
                 # Look up user by email
                 user = get_user_from_email(user_email)
-                if user and user.get('id'):
-                    logger.debug(f"get_user_id: Resolved user_id from email: {user.get('id')}")
-                    return str(user.get('id'))
+                if user and user.id:
+                    logger.debug(f"get_user_id: Resolved user_id from email: {user.id}")
+                    return str(user.id)
                 else:
                     logger.warning(f"get_user_id: Could not resolve user from email: {user_email}")
         except HTTPException as e:
@@ -271,9 +271,9 @@ class HybridAuth:
                     logger.debug(f"Trying to resolve user_id from email header: {user_email}")
                     # Look up user by email
                     user = get_user_from_email(user_email)
-                    if user and user.get('id'):
-                        logger.debug(f"Resolved user_id from email: {user.get('id')}")
-                        return str(user.get('id'))
+                    if user and user.id:
+                        logger.debug(f"Resolved user_id from email: {user.id}")
+                        return str(user.id)
                     else:
                         logger.warning(f"Could not resolve user from email: {user_email}")
                         # Return the raw email if we can't resolve to a user_id
