@@ -5,7 +5,9 @@ from pydantic import BaseModel, Field
 from fastmcp import FastMCP
 from ..base_repository import BaseMCPRepository
 import json
-from percolate.utils import logger
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class AskOneParams(BaseModel):

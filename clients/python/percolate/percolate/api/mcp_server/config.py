@@ -8,11 +8,15 @@ try:
 except ImportError:
     from pydantic import BaseSettings
 
-from percolate.utils.env import (
-    SYSTEM_USER_ID, 
-    SYSTEM_USER_ROLE_LEVEL,
-    from_env_or_project
-)
+
+# Standalone environment utilities for DXT compatibility
+def from_env_or_project(env_var: str, default: str = None) -> str:
+    """Get value from environment variable with fallback to default"""
+    return os.getenv(env_var, default)
+
+# System user constants for DXT compatibility
+SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000000"
+SYSTEM_USER_ROLE_LEVEL = 1
 
 
 class MCPSettings(BaseSettings):
@@ -40,7 +44,7 @@ class MCPSettings(BaseSettings):
     
     # API endpoint configuration
     api_endpoint: str = Field(
-        default_factory=lambda: from_env_or_project('P8_API_ENDPOINT', 'https://api.percolationlabs.ai'),
+        default_factory=lambda: from_env_or_project('P8_API_ENDPOINT', from_env_or_project('P8_TEST_DOMAIN', 'https://api.percolationlabs.ai')),
         description="Percolate API endpoint URL"
     )
     
@@ -72,15 +76,10 @@ class MCPSettings(BaseSettings):
         description="Use API mode (default: true). Set to false for direct database access."
     )
     
-    # Authentication - supports bearer token or OAuth
+    # Authentication - supports bearer token
     api_key: Optional[str] = Field(
-        default_factory=lambda: from_env_or_project('P8_API_KEY', None),
-        description="API key for bearer token authentication. Uses P8_API_KEY from environment or account settings."
-    )
-    
-    oauth_token: Optional[str] = Field(
-        default_factory=lambda: from_env_or_project('P8_OAUTH_TOKEN', None),
-        description="OAuth access token as alternative to API key"
+        default_factory=lambda: from_env_or_project('P8_API_KEY', from_env_or_project('P8_TEST_BEARER_TOKEN', None)),
+        description="API key for bearer token authentication. Uses P8_API_KEY or P8_TEST_BEARER_TOKEN from environment or account settings."
     )
     
     # User identification

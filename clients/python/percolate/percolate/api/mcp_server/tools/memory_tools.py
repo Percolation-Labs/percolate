@@ -4,11 +4,20 @@ from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field
 from fastmcp import FastMCP
 from ..base_repository import BaseMCPRepository
-from percolate.models.p8.types import UserMemory
-from percolate.api.controllers.memory import user_memory_controller
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Try to import memory dependencies, fall back gracefully if not available
+try:
+    from percolate.models.p8.types import UserMemory
+    from percolate.api.controllers.memory import user_memory_controller
+    MEMORY_AVAILABLE = True
+except ImportError:
+    logger.warning("Memory tools dependencies not available - memory features disabled")
+    MEMORY_AVAILABLE = False
+    UserMemory = None
+    user_memory_controller = None
 
 
 class AddMemoryParams(BaseModel):
@@ -90,6 +99,10 @@ class SearchMemoriesParams(BaseModel):
 
 def create_memory_tools(mcp: FastMCP, repository: BaseMCPRepository):
     """Create memory-related MCP tools"""
+    
+    if not MEMORY_AVAILABLE:
+        logger.info("Memory tools not available - skipping memory tool registration")
+        return
     
     @mcp.tool(
         name="add_memory",

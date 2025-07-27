@@ -2,11 +2,13 @@
 
 from typing import Optional, Dict, Any, List, Union, AsyncIterator
 import httpx
-from percolate.utils import logger
+import logging
 from .base_repository import BaseMCPRepository
 import os
 import json
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class APIProxyRepository(BaseMCPRepository):

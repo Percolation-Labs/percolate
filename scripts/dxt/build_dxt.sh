@@ -8,8 +8,8 @@ set -e
 echo "🔧 Building Percolate MCP Desktop Extension..."
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-PERCOLATE_ROOT="$(cd "$SCRIPT_DIR/../../../../../.." && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../clients/python/percolate/percolate/api/mcp_server" && pwd)"
+PERCOLATE_ROOT="$(cd "$SCRIPT_DIR/../../clients/python/percolate" && pwd)"
 
 # Create a temporary dxt directory for building
 TEMP_DXT_DIR="$SCRIPT_DIR/build/temp_dxt"
@@ -19,9 +19,35 @@ mkdir -p $TEMP_DXT_DIR
 rm -rf $TEMP_DXT_DIR/server
 rm -f "$SCRIPT_DIR/build/release/*.dxt"
 
-# Copy manifest to temp directory
+# Copy manifest to temp directory and inject environment defaults
 echo "📄 Copying manifest..."
 cp "$SCRIPT_DIR/manifest.json" $TEMP_DXT_DIR/
+
+# Inject current environment values as defaults (if available)
+API_ENDPOINT_DEFAULT="${P8_TEST_DOMAIN:-${P8_API_ENDPOINT:-https://api.percolationlabs.ai}}"
+API_KEY_DEFAULT="${P8_TEST_BEARER_TOKEN:-${P8_API_KEY:-}}"
+
+echo "🔧 Injecting environment defaults..."
+echo "  API Endpoint: $API_ENDPOINT_DEFAULT"
+echo "  API Key: ${API_KEY_DEFAULT:0:20}..."
+
+# Update manifest with current environment defaults using python
+python3 -c "
+import json
+import os
+
+with open('$TEMP_DXT_DIR/manifest.json', 'r') as f:
+    manifest = json.load(f)
+
+# Update defaults
+manifest['user_config']['api_endpoint']['default'] = '$API_ENDPOINT_DEFAULT'
+manifest['user_config']['api_endpoint']['description'] = 'URL of the Percolate API server (current env: $API_ENDPOINT_DEFAULT)'
+manifest['user_config']['api_key']['default'] = '$API_KEY_DEFAULT'  
+manifest['user_config']['api_key']['description'] = 'Your Percolate API key for bearer token authentication (current env: ${API_KEY_DEFAULT:0:20}...)'
+
+with open('$TEMP_DXT_DIR/manifest.json', 'w') as f:
+    json.dump(manifest, f, indent=2)
+"
 
 # Create server directory
 echo "📂 Setting up server directory..."
@@ -30,10 +56,20 @@ mkdir -p $TEMP_DXT_DIR/server
 # Copy the entire MCP server module to maintain proper Python package structure
 echo "📦 Copying MCP server source..."
 cp -r "$PROJECT_ROOT" $TEMP_DXT_DIR/server/mcp_server
+# Remove build artifacts and test directories from mcp_server to reduce size
+rm -rf $TEMP_DXT_DIR/server/mcp_server/scripts/dxt/build 2>/dev/null || true
+rm -rf $TEMP_DXT_DIR/server/mcp_server/tests 2>/dev/null || true
 
-# Copy the main percolate package for dependencies
+# Copy the main percolate package for dependencies (excluding the nested mcp_server)
 echo "📚 Copying percolate package..."
 cp -r "$PERCOLATE_ROOT/percolate" $TEMP_DXT_DIR/server/
+# Remove the nested mcp_server and other unnecessary files to avoid conflicts and reduce size
+rm -rf $TEMP_DXT_DIR/server/percolate/api/mcp_server
+# Remove test files, build artifacts, and other unnecessary files
+find $TEMP_DXT_DIR/server/percolate -name "test_*" -delete 2>/dev/null || true
+find $TEMP_DXT_DIR/server/percolate -name "*.ipynb" -delete 2>/dev/null || true
+find $TEMP_DXT_DIR/server/percolate -name "poetry.lock" -delete 2>/dev/null || true
+find $TEMP_DXT_DIR/server/percolate -name "*.md" -delete 2>/dev/null || true
 
 # Verify that all MCP components are included
 echo "🔍 Verifying MCP components..."
