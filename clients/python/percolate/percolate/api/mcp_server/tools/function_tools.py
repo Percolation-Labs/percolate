@@ -4,7 +4,9 @@ from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field
 from fastmcp import FastMCP
 from ..base_repository import BaseMCPRepository
-from percolate.utils import logger
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class FunctionSearchParams(BaseModel):

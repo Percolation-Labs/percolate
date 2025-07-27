@@ -135,6 +135,16 @@ Requires both an API key and user email for proper context:
 # Environment variables
 export P8_API_KEY="your-api-key"
 export P8_USER_EMAIL="user@example.com"
+
+# For testing with specific deployment
+export P8_TEST_DOMAIN="https://p8.resmagic.io"  # or http://localhost:5008 for local
+export P8_TEST_BEARER_TOKEN="p8-HsByeefq3unTFJDuf6cRh6GDQpo3laj0AMoyc2Etfqma6Coz73TdBPDfek_LQIMv"
+export X_User_Email="amartey@gmail.com"
+
+# Default agent and resource configuration
+export P8_DEFAULT_AGENT="executive-ExecutiveResources"
+export P8_DEFAULT_NAMESPACE="executive"
+export P8_DEFAULT_ENTITY="ExecutiveResources"
 ```
 
 HTTP Request:
@@ -142,6 +152,26 @@ HTTP Request:
 Authorization: Bearer your-api-key
 X-User-Email: user@example.com
 ```
+
+### Testing Configuration
+
+For testing against a specific Percolate deployment:
+
+**Local Testing:**
+```bash
+export P8_API_ENDPOINT="http://localhost:5008"
+export P8_API_KEY="postgres"
+export X_User_Email="amartey@gmail.com"
+```
+
+**Remote Testing:**
+```bash
+export P8_API_ENDPOINT="${P8_TEST_DOMAIN}"
+export P8_API_KEY="${P8_TEST_BEARER_TOKEN}"
+export X_User_Email="amartey@gmail.com"
+```
+
+The MCP server will use these environment variables to authenticate with the Percolate API and provide the proper user context for all operations. The default agent `executive-ExecutiveResources` will be used for chat completions, and uploads will default to the `executive` namespace and `ExecutiveResources` entity.
 
 ### OAuth Token Authentication
 Uses tokens from Percolate's OAuth flow:
@@ -389,19 +419,72 @@ The MCP server respects the main API's authentication middleware:
 
 ## Desktop Extension (DXT)
 
-### Building the Extension
+### Quick Start
+
+The Desktop Extension (DXT) allows Claude Desktop to connect directly to your Percolate instance. Most users only need to configure a few environment variables:
 
 ```bash
-cd percolate/api/mcp_server/scripts/dxt
-./build_dxt.sh
+# Minimum required configuration
+P8_API_KEY="your-api-key"
+X_User_Email="user@example.com"
+
+# Optional: Override API endpoint (defaults to https://api.percolationlabs.ai)
+P8_API_ENDPOINT="https://your-percolate-instance.com"
+
+# Optional: Override default agent (defaults to p8.Resources)
+P8_DEFAULT_AGENT="executive-ExecutiveResources"
 ```
 
-The build script:
-1. Creates temporary build directory
-2. Copies MCP server code
-3. Installs dependencies to `lib/`
-4. Packages with `npx @anthropic-ai/dxt pack`
-5. Outputs `.dxt` file for installation
+### Building the Extension
+
+1. **Prerequisites**:
+   - Python 3.8+ with pip
+   - Node.js 16+ with npm
+   - Access to Percolate codebase
+
+2. **Build Process**:
+   ```bash
+   cd percolate/api/mcp_server/scripts/dxt
+   ./build_dxt.sh
+   ```
+
+   The build script:
+   - Creates temporary build directory
+   - Copies MCP server code
+   - Installs Python dependencies to `lib/`
+   - Packages with `npx @anthropic-ai/dxt pack`
+   - Outputs `percolate-mcp.dxt` file
+
+3. **Installation**:
+   - Open Claude Desktop
+   - Go to Settings → Extensions
+   - Click "Install Extension"
+   - Select the generated `.dxt` file
+   - Configure required settings (API key and email)
+
+### Configuration
+
+When installing the DXT, you'll be prompted for configuration. Most fields have sensible defaults:
+
+| Setting | Required | Default | Description |
+|---------|----------|---------|-------------|
+| API Endpoint | Yes | `https://api.percolationlabs.ai` | Your Percolate instance URL |
+| API Key | Yes* | - | Bearer token for authentication |
+| OAuth Token | Yes* | - | Alternative to API key |
+| User Email | Yes** | - | Your email (required with API key) |
+
+*Either API Key or OAuth Token is required
+**Only required when using API Key authentication
+
+### Environment Variable Defaults
+
+The DXT respects all Percolate environment variables. Key defaults include:
+
+- `P8_DEFAULT_AGENT`: `p8.Resources` (fallback agent for chat operations)
+- `P8_DEFAULT_NAMESPACE`: `p8` (for file uploads)
+- `P8_DEFAULT_ENTITY`: `Resources` (for resource operations)
+- `P8_DEFAULT_MODEL`: `gpt-4o-mini` (language model)
+- `P8_MCP_DESKTOP_EXT`: Automatically set to `"true"` by DXT
 
 ### DXT Manifest Configuration
 
@@ -685,6 +768,46 @@ curl -X POST http://localhost:8080/mcp/tools/entity_search \
 - **Updates**: API can evolve independently
 
 Choose the mode that best fits your deployment scenario and security requirements.
+
+## Environment Variables Reference
+
+The MCP server supports the following environment variables for authentication and configuration:
+
+### Core Authentication Variables
+
+- **`P8_API_KEY`** (required): Bearer token for API authentication
+- **`X_User_Email`** or **`P8_USER_EMAIL`** (required with API key): User email for identification
+- **`P8_OAUTH_TOKEN`** (optional): OAuth token as alternative to API key
+- **`P8_API_ENDPOINT`**: Percolate API URL (default: `https://api.percolationlabs.ai`)
+
+### User Context Variables
+
+- **`P8_USER_ID`**: Override default user ID for row-level security
+- **`P8_USER_GROUPS`**: Comma-separated list of user groups
+- **`P8_ROLE_LEVEL`**: User role level (1=admin, higher=more restricted)
+
+### Default Resource Configuration
+
+- **`P8_DEFAULT_AGENT`**: Default agent for operations (default: `p8.Resources`)
+- **`P8_DEFAULT_NAMESPACE`**: Default namespace for resources
+- **`P8_DEFAULT_ENTITY`**: Default entity for operations
+
+### Server Configuration
+
+- **`P8_DEFAULT_MODEL`**: Default language model (default: `gpt-4o-mini`)
+- **`P8_DEFAULT_VISION_MODEL`**: Default vision model (default: `gpt-4o`)
+- **`P8_MCP_DESKTOP_EXT`**: Set to `"true"` for desktop extension mode
+- **`P8_MCP_PORT`**: HTTP server port (default: 8001)
+- **`P8_LOG_LEVEL`**: Logging level (default: INFO)
+
+### Database Configuration (Direct Mode Only)
+
+- **`P8_USE_API_MODE`**: Use API proxy mode (default: `true`)
+- **`P8_PG_HOST`**: PostgreSQL host
+- **`P8_PG_PORT`**: PostgreSQL port (default: 5432)
+- **`P8_PG_DATABASE`**: Database name
+- **`P8_PG_USER`**: Database user
+- **`P8_PG_PASSWORD`**: Database password
 
 ## Resources
 

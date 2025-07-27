@@ -18,9 +18,9 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import percolate as p8
 from percolate.models.p8.types import Schedule
-from percolate.api.routes.auth.utils import get_stable_session_key
-from percolate.auth.server import OAuthServer
-from percolate.auth.middleware import AuthMiddleware
+from percolate.api.auth.utils import get_stable_session_key
+from percolate.api.auth.server import OAuthServer
+from percolate.api.auth.middleware import AuthMiddleware
 
 # Global scheduler instance
 scheduler = BackgroundScheduler()
@@ -143,7 +143,8 @@ app.state.oauth_server = oauth_server
 
 api_router = APIRouter()
 
-origins = [
+# Default CORS origins for development
+default_origins = [
     "http://localhost:5008",
     "http://localhost:8000",
     "http://localhost:5000",
@@ -152,9 +153,32 @@ origins = [
     "http://127.0.0.1:5000",
     "http://localhost:1420",# (Tauri dev server)
     "http://tauri.localhost",# (Tauri production origin)
-    "https://tauri.localhost" #(Tauri production origin with https)
+    "https://tauri.localhost", #(Tauri production origin with https)
     "https://vault.percolationlabs.ai",
 ]
+
+# Get custom CORS origins from environment variable
+from percolate.utils.env import P8_CORS_ORIGINS
+
+# Start with default origins
+origins = default_origins.copy()
+
+# Add custom origins if provided
+if P8_CORS_ORIGINS:
+    # Parse comma-separated origins and strip whitespace
+    custom_origins = [origin.strip() for origin in P8_CORS_ORIGINS.split(',') if origin.strip()]
+    # Extend the origins list with custom origins (avoiding duplicates)
+    added_origins = []
+    for origin in custom_origins:
+        if origin not in origins:
+            origins.append(origin)
+            added_origins.append(origin)
+    
+    if added_origins:
+        logger.info(f"Added custom CORS origins: {', '.join(added_origins)}")
+        logger.info(f"Total CORS origins enabled: {len(origins)}")
+else:
+    logger.info(f"Using default CORS origins only. Total: {len(origins)}")
 
 app.add_middleware(
     CORSMiddleware,

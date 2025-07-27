@@ -11,7 +11,7 @@
 
 ## Overview
 
-Percolate is a revolutionary approach to building AI-powered applications that pushes intelligence into the database tier. By combining relational, vector, graph, and key-value capabilities in a single PostgreSQL-based system, Percolate enables developers to build sophisticated agentic systems with minimal application code.
+Percolate is an approach to building AI-powered applications that pushes intelligence into the database tier. By combining relational, vector, graph, and key-value capabilities in a single PostgreSQL-based system, Percolate enables developers to build sophisticated agentic systems with minimal application code.
 
 ```mermaid
 graph TB
@@ -66,11 +66,7 @@ graph TB
 ## Core Design Philosophy
 
 ### 1. **Intelligence in the Database**
-Traditional AI applications separate data storage from intelligence, leading to complex architectures. Percolate embeds AI capabilities directly in PostgreSQL, enabling:
-- Direct SQL queries that invoke AI models
-- Automatic context management
-- Unified security model
-- Reduced latency and complexity
+Traditional AI applications separate data storage from intelligence, leading to complex architectures. Percolate embeds AI capabilities directly in PostgreSQL.
 
 ### 2. **Multi-Modal Data Platform**
 Percolate treats all data types as first-class citizens:
@@ -113,45 +109,6 @@ graph LR
     E --> F
     F --> G
     G --> H
-```
-
-### Deployment Architecture
-
-```mermaid
-graph TB
-    subgraph "Client Applications"
-        A[Python SDK]
-        B[CLI Tool]
-        C[Custom Apps]
-    end
-    
-    subgraph "API Gateway"
-        D[Load Balancer]
-        E[FastAPI Instances]
-    end
-    
-    subgraph "Database Cluster"
-        F[Primary PostgreSQL]
-        G[Read Replicas]
-        H[pgBouncer Pool]
-    end
-    
-    subgraph "Supporting Services"
-        I[MinIO<br/>Object Storage]
-        J[Ollama<br/>Local Models]
-        K[Redis<br/>Cache]
-    end
-    
-    A --> D
-    B --> D
-    C --> D
-    D --> E
-    E --> H
-    H --> F
-    H --> G
-    E --> I
-    E --> J
-    E --> K
 ```
 
 ## Component Architecture

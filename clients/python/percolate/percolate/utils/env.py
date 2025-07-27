@@ -178,3 +178,8 @@ def get_system_user_id():
 # System user constants
 SYSTEM_USER_ID = get_system_user_id()
 SYSTEM_USER_ROLE_LEVEL = 1  # Admin level by default
+
+# CORS configuration
+# Comma-separated list of allowed origins for CORS
+# Example: P8_CORS_ORIGINS="https://app.percolate.ai,https://staging.percolate.ai"
+P8_CORS_ORIGINS = os.environ.get('P8_CORS_ORIGINS', '')

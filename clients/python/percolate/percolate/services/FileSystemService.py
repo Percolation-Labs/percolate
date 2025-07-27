@@ -22,13 +22,24 @@ import typing
 import mimetypes
 from datetime import datetime, timezone
 
-# Core dependencies
-import polars as pl
-from PIL import Image
+# Core dependencies - Polars disabled due to ARM64 compatibility issues
+HAS_POLARS = False
+pl = None
+
+try:
+    from PIL import Image
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
+    Image = None
 
 # Optional dependencies - gracefully handle imports
 # PDF handling is now imported from parsing.pdf_handler
-from percolate.utils.parsing.pdf_handler import get_pdf_handler, HAS_PYPDF as HAS_PDF
+try:
+    from percolate.utils.parsing.pdf_handler import get_pdf_handler, HAS_PYPDF as HAS_PDF
+except ImportError:
+    HAS_PDF = False
+    get_pdf_handler = None
 
 try:
     import librosa
@@ -66,7 +77,13 @@ from percolate.services.S3Service import S3Service
 from percolate.utils import logger
 
 # Import ResourceChunker factory function instead of direct instantiation
-from percolate.utils.parsing.ResourceChunker import create_resource_chunker, get_resource_chunker
+try:
+    from percolate.utils.parsing.ResourceChunker import create_resource_chunker, get_resource_chunker
+    HAS_RESOURCE_CHUNKER = True
+except ImportError:
+    HAS_RESOURCE_CHUNKER = False
+    create_resource_chunker = None
+    get_resource_chunker = None
 
 
 class FileSystemProvider(ABC):
@@ -227,13 +244,17 @@ class ImageHandler(FileTypeHandler):
     SUPPORTED_FORMATS = {'.png', '.jpg', '.jpeg', '.tiff', '.tif', '.bmp', '.gif', '.webp'}
     
     def can_handle(self, file_path: str) -> bool:
-        return Path(file_path).suffix.lower() in self.SUPPORTED_FORMATS
+        return Path(file_path).suffix.lower() in self.SUPPORTED_FORMATS and HAS_PIL
     
-    def read(self, provider: FileSystemProvider, file_path: str, **kwargs) -> Image.Image:
+    def read(self, provider: FileSystemProvider, file_path: str, **kwargs):
+        if not HAS_PIL:
+            raise ImportError("PIL is required for image handling but not available")
         data = provider.read_bytes(file_path)
         return Image.open(io.BytesIO(data))
     
-    def write(self, provider: FileSystemProvider, file_path: str, data: Image.Image, **kwargs) -> None:
+    def write(self, provider: FileSystemProvider, file_path: str, data, **kwargs) -> None:
+        if not HAS_PIL:
+            raise ImportError("PIL is required for image handling but not available")
         buffer = io.BytesIO()
         format_type = kwargs.get('format', Path(file_path).suffix[1:].upper())
         if format_type.upper() == 'JPG':
@@ -263,13 +284,17 @@ class CSVHandler(FileTypeHandler):
     """Handler for CSV files using Polars"""
     
     def can_handle(self, file_path: str) -> bool:
-        return Path(file_path).suffix.lower() == '.csv'
+        return Path(file_path).suffix.lower() == '.csv' and HAS_POLARS
     
-    def read(self, provider: FileSystemProvider, file_path: str, **kwargs) -> pl.DataFrame:
+    def read(self, provider: FileSystemProvider, file_path: str, **kwargs):
+        if not HAS_POLARS:
+            raise ImportError("polars is required for CSV handling but not available")
         data = provider.read_bytes(file_path)
         return pl.read_csv(io.BytesIO(data), **kwargs)
     
-    def write(self, provider: FileSystemProvider, file_path: str, data: pl.DataFrame, **kwargs) -> None:
+    def write(self, provider: FileSystemProvider, file_path: str, data, **kwargs) -> None:
+        if not HAS_POLARS:
+            raise ImportError("polars is required for CSV handling but not available")
         buffer = io.BytesIO()
         data.write_csv(buffer, **kwargs)
         provider.write_bytes(file_path, buffer.getvalue())
@@ -279,13 +304,17 @@ class ParquetHandler(FileTypeHandler):
     """Handler for Parquet files using Polars"""
     
     def can_handle(self, file_path: str) -> bool:
-        return Path(file_path).suffix.lower() == '.parquet'
+        return Path(file_path).suffix.lower() == '.parquet' and HAS_POLARS
     
-    def read(self, provider: FileSystemProvider, file_path: str, **kwargs) -> pl.DataFrame:
+    def read(self, provider: FileSystemProvider, file_path: str, **kwargs):
+        if not HAS_POLARS:
+            raise ImportError("polars is required for Parquet handling but not available")
         data = provider.read_bytes(file_path)
         return pl.read_parquet(io.BytesIO(data), **kwargs)
     
-    def write(self, provider: FileSystemProvider, file_path: str, data: pl.DataFrame, **kwargs) -> None:
+    def write(self, provider: FileSystemProvider, file_path: str, data, **kwargs) -> None:
+        if not HAS_POLARS:
+            raise ImportError("polars is required for Parquet handling but not available")
         buffer = io.BytesIO()
         data.write_parquet(buffer, **kwargs)
         provider.write_bytes(file_path, buffer.getvalue())
@@ -296,7 +325,7 @@ class PDFHandler(FileTypeHandler):
     
     def can_handle(self, file_path: str) -> bool:
         """Check if this handler can process the file."""
-        return get_pdf_handler().can_handle(file_path)
+        return HAS_PDF and get_pdf_handler() and get_pdf_handler().can_handle(file_path)
     
     def read(self, provider: FileSystemProvider, file_path: str, **kwargs) -> Dict[str, Any]:
         """
@@ -384,12 +413,14 @@ class ExcelHandler(FileTypeHandler):
     SUPPORTED_FORMATS = {'.xls', '.xlsx'}
     
     def can_handle(self, file_path: str) -> bool:
-        return Path(file_path).suffix.lower() in self.SUPPORTED_FORMATS and HAS_EXCEL
+        return Path(file_path).suffix.lower() in self.SUPPORTED_FORMATS and HAS_EXCEL and HAS_POLARS
     
-    def read(self, provider: FileSystemProvider, file_path: str, **kwargs) -> Dict[str, pl.DataFrame]:
+    def read(self, provider: FileSystemProvider, file_path: str, **kwargs):
         """Read Excel file and return dictionary of sheet name -> DataFrame"""
         if not HAS_EXCEL:
             raise ImportError("Excel support requires openpyxl: pip install openpyxl")
+        if not HAS_POLARS:
+            raise ImportError("polars is required for Excel handling but not available")
         
         data = provider.read_bytes(file_path)
         
@@ -463,8 +494,10 @@ class ExcelHandler(FileTypeHandler):
         finally:
             os.unlink(tmp_path)
     
-    def write(self, provider: FileSystemProvider, file_path: str, data: Dict[str, pl.DataFrame], **kwargs) -> None:
+    def write(self, provider: FileSystemProvider, file_path: str, data, **kwargs) -> None:
         """Write dictionary of DataFrames to Excel sheets"""
+        if not HAS_POLARS:
+            raise ImportError("polars is required for Excel handling but not available")
         import tempfile
         
         with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp_file:
@@ -1234,7 +1267,7 @@ class FileSystemService:
             logger.info("Falling back to simple PDF parsing")
             return self._extract_simple_content(pdf_data, 'pdf')
     
-    def _convert_pdf_pages_to_images(self, pdf_data: Dict[str, Any], file_name: str, uri: str = None) -> List[Image.Image]:
+    def _convert_pdf_pages_to_images(self, pdf_data: Dict[str, Any], file_name: str, uri: str = None) -> List[Any]:
         """Convert PDF pages to PIL Images for LLM analysis"""
         # Delegate to the improved PDFHandler implementation
         return get_pdf_handler().convert_pdf_to_images(pdf_data, uri)
@@ -1338,6 +1371,8 @@ class FileSystemService:
             file_data = self.read(path)
             
             # Create a ResourceChunker specifically for this FileSystemService
+            if not HAS_RESOURCE_CHUNKER:
+                raise ImportError("ResourceChunker is not available due to missing dependencies")
             chunker = create_resource_chunker(fs=self)
             
             # Create chunks directly using the ResourceChunker with pre-loaded data

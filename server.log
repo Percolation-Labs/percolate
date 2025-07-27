@@ -1,0 +1,32 @@
+python-docx not installed, DOCX support limited
+pypdf not available, PDF text extraction will be limited
+/Users/sirsh/Library/Caches/pypoetry/virtualenvs/percolate-db-oAZq7fEJ-py3.11/lib/python3.11/site-packages/pydantic/_internal/_config.py:323: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.11/migration/
+  warnings.warn(DEPRECATION_MESSAGE, DeprecationWarning)
+2025-07-27 16:41:08.598 | INFO     | percolate.api.mcp_server.repository_factory:create_repository:50 - Using API proxy mode with endpoint: https://api.percolationlabs.ai
+
+
+╭─ FastMCP 2.0 ──────────────────────────────────────────────────────────────╮
+│                                                                            │
+│        _ __ ___ ______           __  __  _____________    ____    ____     │
+│       _ __ ___ / ____/___ ______/ /_/  |/  / ____/ __ \  |___ \  / __ \    │
+│      _ __ ___ / /_  / __ `/ ___/ __/ /|_/ / /   / /_/ /  ___/ / / / / /    │
+│     _ __ ___ / __/ / /_/ (__  ) /_/ /  / / /___/ ____/  /  __/_/ /_/ /     │
+│    _ __ ___ /_/    \__,_/____/\__/_/  /_/\____/_/      /_____(_)____/      │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+│    🖥️  Server name:     percolate-mcp                                       │
+│    📦 Transport:       STDIO                                               │
+│                                                                            │
+│    📚 Docs:            https://gofastmcp.com                               │
+│    🚀 Deploy:          https://fastmcp.cloud                               │
+│                                                                            │
+│    🏎️  FastMCP version: 2.10.6                                              │
+│    🤝 MCP version:     1.12.1                                              │
+│                                                                            │
+╰────────────────────────────────────────────────────────────────────────────╯
+
+
+[07/27/25 16:41:08] INFO     Starting MCP server 'percolate-mcp'  server.py:1371
+                             with transport 'stdio'                             
+sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute

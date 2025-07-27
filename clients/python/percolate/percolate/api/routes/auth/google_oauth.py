@@ -12,10 +12,10 @@ from typing import Dict, Optional, Any
 from urllib.parse import urlencode
 from datetime import datetime, timezone, timedelta
 
-# Google OAuth endpoints
-GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/auth"
+# Google OAuth endpoints (from https://accounts.google.com/.well-known/openid-configuration)
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
-GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
+GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
 
 # Logger for OAuth operations
 logger = logging.getLogger("google_oauth")

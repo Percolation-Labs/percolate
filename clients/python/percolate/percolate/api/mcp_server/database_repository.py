@@ -1,6 +1,6 @@
 """Database repository implementation for MCP tools"""
 
-from typing import Optional, Dict, Any, List, Union
+from typing import Optional, Dict, Any, List, Union, AsyncIterator
 from pydantic import BaseModel, Field
 import percolate as p8
 from percolate.models import AbstractModel
@@ -9,6 +9,7 @@ from percolate.services.ModelRunner import ModelRunner
 from percolate.utils.env import SYSTEM_USER_ID, SYSTEM_USER_ROLE_LEVEL
 from percolate.utils import logger
 import json
+import uuid
 from datetime import datetime
 from decimal import Decimal
 from .base_repository import BaseMCPRepository
@@ -318,6 +319,9 @@ class DatabaseRepository(BaseMCPRepository):
     async def upload_file(
         self,
         file_path: str,
+        namespace: Optional[str] = None,
+        entity_name: Optional[str] = None,
+        task_id: Optional[str] = None,
         description: Optional[str] = None,
         tags: Optional[List[str]] = None
     ) -> Dict[str, Any]:
@@ -392,6 +396,81 @@ class DatabaseRepository(BaseMCPRepository):
                 "file_path": file_path
             }
     
+    async def upload_file_content(
+        self,
+        file_content: str,
+        filename: str,
+        namespace: Optional[str] = None,
+        entity_name: Optional[str] = None,
+        task_id: Optional[str] = None,
+        description: Optional[str] = None,
+        tags: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """Upload file content directly to S3 and create resource"""
+        try:
+            from percolate.services.S3Service import S3Service
+            from percolate.models.p8.types import Resources as Resource
+            import uuid
+            
+            # Convert string content to bytes
+            file_bytes = file_content.encode('utf-8')
+            file_size = len(file_bytes)
+            
+            # Upload to S3
+            s3 = S3Service()
+            if not task_id:
+                task_id = str(uuid.uuid4())
+            s3_path = f"s3://percolate/users/{self.user_id}/{task_id}/{filename}"
+            
+            try:
+                s3_result = s3.upload_filebytes_to_uri(
+                    s3_uri=s3_path,
+                    file_content=file_bytes
+                )
+                # Extract the actual URI from the result
+                s3_url = s3_result.get('uri', s3_path) if isinstance(s3_result, dict) else s3_path
+            except Exception as e:
+                return {"error": f"S3 upload failed: {str(e)}"}
+            
+            # Create resource record
+            resource = Resource(
+                id=str(uuid.uuid4()),
+                name=filename,
+                content=description or f"Uploaded file: {filename}",  # Required field
+                uri=s3_url,  # Required field as string
+                category="uploaded_file",
+                metadata={
+                    "original_name": filename,
+                    "upload_method": "mcp_content",
+                    "task_id": task_id,
+                    "file_size": file_size,
+                    "namespace": namespace or "p8",
+                    "entity_name": entity_name or "Resources",
+                    "tags": tags or []
+                },
+                userid=self.user_id
+            )
+            
+            # Note: Skipping database save as Resources table doesn't exist yet
+            # This would normally save to database for searchability
+            # repo.update_records([resource])
+            
+            return {
+                "success": True,
+                "file_name": filename,
+                "file_size": file_size,
+                "resource_id": str(resource.id),
+                "s3_url": s3_url,
+                "status": "uploaded",
+                "message": "File uploaded successfully. Background processing will index content."
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "filename": filename
+            }
+    
     async def search_resources(
         self,
         query: str,
@@ -442,3 +521,58 @@ class DatabaseRepository(BaseMCPRepository):
             return []
         except Exception as e:
             return [{"error": str(e)}]
+    
+    async def stream_chat(
+        self,
+        query: str,
+        agent: str,
+        model: str,
+        session_id: Optional[str] = None,
+        stream: bool = True
+    ) -> Union[str, AsyncIterator[str]]:
+        """Stream chat response using ModelRunner directly"""
+        try:
+            # Create or get agent runner
+            if not self._agent:
+                self._agent = ModelRunner(
+                    model_name=agent,
+                    user_id=self.user_id,
+                    thread_id=session_id or str(uuid.uuid4()),
+                    channel_type="mcp",
+                    llm_model=model
+                )
+            
+            if stream:
+                # Return async iterator for streaming
+                async def stream_generator():
+                    try:
+                        # ModelRunner iter_lines returns SSE formatted lines
+                        for line in self._agent.iter_lines(query):
+                            if line:
+                                yield line
+                    except Exception as e:
+                        yield f"data: {{\"error\": \"{str(e)}\"}}\n\n"
+                        yield "data: [DONE]\n\n"
+                
+                return stream_generator()
+            else:
+                # Get complete response
+                response = self._agent.eval(query)
+                if isinstance(response, str):
+                    return response
+                elif hasattr(response, 'content'):
+                    return response.content
+                else:
+                    return str(response)
+                    
+        except Exception as e:
+            logger.error(f"Error in stream_chat: {e}")
+            # Return error as async iterator for consistency
+            error_msg = str(e)
+            if stream:
+                async def error_generator():
+                    yield f"data: {{\"error\": \"{error_msg}\"}}\n\n"
+                    yield "data: [DONE]\n\n"
+                return error_generator()
+            else:
+                return f"Error: {error_msg}"

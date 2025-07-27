@@ -1112,7 +1112,7 @@ async def agent_completions(
 async def anthropic_completions(
     request: AnthropicCompletionsRequest,
     background_tasks: BackgroundTasks,
-    user: dict = Depends(get_current_token)
+    auth_user_id: Optional[str] = Depends(hybrid_auth)
 ):
     """
     Use Anthropic's API format to call any model provider.
@@ -1136,13 +1136,13 @@ async def anthropic_completions(
     )
     
     # Use the standard completions endpoint to handle it
-    return await completions(openai_request, background_tasks, user=user)
+    return await completions(openai_request, background_tasks, auth_user_id=auth_user_id)
 
 @router.post("/google/completions")
 async def google_completions(
     request: GoogleCompletionsRequest,
     background_tasks: BackgroundTasks,
-    user: dict = Depends(get_current_token)
+    auth_user_id: Optional[str] = Depends(hybrid_auth)
 ):
     """
     Use Google's API format to call any model provider.
@@ -1166,7 +1166,7 @@ async def google_completions(
     )
     
     # Use the standard completions endpoint to handle it
-    return await completions(openai_request, background_tasks, user=user)
+    return await completions(openai_request, background_tasks, auth_user_id=auth_user_id)
 
  
 
@@ -1198,7 +1198,7 @@ class SimpleAskRequest(BaseModel):
 async def ask(
     request: SimpleAskRequest,
     background_tasks: BackgroundTasks,
-    user: dict = Depends(get_current_token)
+    auth_user_id: Optional[str] = Depends(hybrid_auth)
 ):
     """
     A simple ask request using any percolate agent and language model.

@@ -796,6 +796,55 @@ class PostgresService:
         else:
             logger.warning(f"Nothing to do - records is empty {records}")
 
+    def upsert_records(
+        self,
+        records: typing.List[BaseModel],
+        batch_size: int = 100,
+        index_entities: bool = False,
+    ):
+        """Alias for update_records since update_records already does upsert operations."""
+        return self.update_records(records, batch_size, index_entities)
+
+    def delete_records(
+        self,
+        records: typing.Union[BaseModel, typing.List[BaseModel]],
+    ):
+        """Delete records by their ID or key fields."""
+        
+        if records is None:
+            return []
+
+        if not isinstance(records, list):
+            records = [records]
+
+        if self.model is None:
+            """we encourage explicitly construct repository but we will infer"""
+            return self.repository(records[0]).delete_records(records=records)
+
+        results = []
+        for record in records:
+            # Extract ID or key fields for deletion
+            if hasattr(record, 'id') and record.id:
+                delete_kwargs = {"id": record.id}
+                query = self.helper.delete_query(**delete_kwargs)
+                data = tuple(delete_kwargs.values())
+                result = self.execute(query, data=data)
+                results.append(result)
+            else:
+                # If no ID, try to delete by all non-None fields
+                # This is more dangerous but may be needed for some test scenarios
+                record_dict = record.model_dump()
+                filter_dict = {k: v for k, v in record_dict.items() if v is not None}
+                if filter_dict:
+                    query = self.helper.delete_query(**filter_dict)
+                    data = tuple(filter_dict.values())
+                    result = self.execute(query, data=data)
+                    results.append(result)
+                else:
+                    logger.warning(f"Cannot delete record - no identifying fields: {record}")
+        
+        return results
+
     def index_entity_by_name(
         self, entity_name: str, id: uuid.UUID = None, sleep_seconds: int = 0
     ):

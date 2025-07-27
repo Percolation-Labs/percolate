@@ -2,10 +2,11 @@
 
 from typing import Optional, Dict, Any
 from .base_repository import BaseMCPRepository
-from .database_repository import DatabaseRepository
 from .api_repository import APIProxyRepository
 from .config import settings
-from percolate.utils import logger
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def create_repository(
@@ -55,11 +56,39 @@ def create_repository(
             additional_headers=headers
         )
     else:
-        # Database mode - use provided kwargs or defaults from settings
-        logger.info("Using direct database mode")
-        return DatabaseRepository(
-            user_id=kwargs.get("user_id", settings.user_id),
-            user_groups=kwargs.get("user_groups", settings.user_groups),
-            role_level=kwargs.get("role_level", settings.role_level),
-            user_email=kwargs.get("user_email", settings.user_email)
-        )
+        # Database mode - lazy import to avoid dependency issues in DXT
+        try:
+            from .database_repository import DatabaseRepository
+            logger.info("Using direct database mode")
+            return DatabaseRepository(
+                user_id=kwargs.get("user_id", settings.user_id),
+                user_groups=kwargs.get("user_groups", settings.user_groups),
+                role_level=kwargs.get("role_level", settings.role_level),
+                user_email=kwargs.get("user_email", settings.user_email)
+            )
+        except ImportError as e:
+            logger.warning(f"Database mode requested but dependencies not available: {e}")
+            logger.info("Falling back to API proxy mode")
+            # Fallback to API mode
+            token = None
+            user_email = None
+            headers = {}
+            
+            if auth_context:
+                token = auth_context.get("token")
+                headers = auth_context.get("headers", {})
+                user_email = headers.get("X-User-Email")
+            
+            if not token:
+                import os
+                token = os.getenv("P8_API_KEY") or os.getenv("P8_PG_PASSWORD", "postgres")
+                
+            if not user_email:
+                user_email = settings.user_email
+            
+            return APIProxyRepository(
+                api_endpoint=settings.api_endpoint,
+                api_key=token,
+                user_email=user_email,
+                additional_headers=headers
+            )
