@@ -1,49 +1,120 @@
 {
   "dxt_version": "0.1",
   "name": "percolate-mcp",
-  "description": "Percolate MCP Server - Access entities, search, and evaluate functions",
+  "display_name": "Percolate MCP Server",
+  "description": "Access Percolate entities, functions, and memory through MCP",
+  "long_description": "This extension provides comprehensive access to the Percolate platform through the Model Context Protocol (MCP). It enables entity search and retrieval, function discovery and execution, memory management, file operations, and chat completions with Percolate agents.",
   "author": {
     "name": "Percolation Labs",
-    "email": "support@percolationlabs.ai"
+    "email": "saoirse@percolationlabs.ai"
   },
   "version": "0.1.0",
+  "license": "MIT",
+  "keywords": ["percolate", "mcp", "entities", "functions", "memory", "ai", "resonance"],
   "server": {
     "type": "python",
-    "entry_point": "server/mcp_server/server.py",
+    "entry_point": "mcp_launcher.py",
     "mcp_config": {
       "command": "python",
-      "args": ["-m", "mcp_server.server"],
+      "args": ["${__dirname}/mcp_launcher.py"],
       "env": {
-        "PYTHONPATH": "${__dirname}/server:${__dirname}/server/lib:${PYTHONPATH}",
-        "P8_API_ENDPOINT": "${user_config.api_endpoint}",
-        "P8_API_KEY": "${user_config.api_key}",
+        "PYTHONPATH": "${__dirname}/build:${PYTHONPATH}",
         "X_User_Email": "${user_config.user_email}",
+        "P8_USER_EMAIL": "${user_config.user_email}",
+        "P8_MCP_ABOUT": "${user_config.about_section}",
+        "P8_BASE_URI": "${user_config.api_endpoint}",
+        "P8_TEST_BEARER_TOKEN": "${user_config.bearer_token}",
         "P8_USE_API_MODE": "true",
         "P8_MCP_DESKTOP_EXT": "true"
       }
     }
   },
   "user_config": {
-    "api_endpoint": {
-      "type": "string",
-      "title": "Percolate API Endpoint",
-      "description": "URL of the Percolate API server",
-      "default": "https://api.percolationlabs.ai",
-      "required": true
-    },
-    "api_key": {
-      "type": "string",
-      "title": "API Key (Bearer Token)",
-      "description": "Your Percolate API key for bearer token authentication",
-      "default": "",
-      "required": false
-    },
     "user_email": {
       "type": "string",
       "title": "User Email",
-      "description": "Your email address (required when using API key)",
-      "default": "amartey@gmail.com",
+      "description": "Your email address for identification (required)",
+      "default": "",
+      "required": true
+    },
+    "about_section": {
+      "type": "string",
+      "title": "About Section",
+      "description": "Additional context/preamble to prepend to MCP server instructions (optional)",
+      "default": "",
       "required": false
+    },
+    "api_endpoint": {
+      "type": "string",
+      "title": "API Endpoint",
+      "description": "The Percolate API endpoint URL",
+      "default": "https://p8.resm",
+      "required": true
+    },
+    "bearer_token": {
+      "type": "string",
+      "title": "API Bearer Token",
+      "description": "Your P8 API bearer token (required for authentication). You can find this in your Percolate account settings.",
+      "default": "",
+      "sensitive": true,
+      "required": true
     }
-  }
+  },
+  "compatibility": {
+    "runtimes": {
+      "python": ">=3.8"
+    },
+    "platforms": ["darwin", "win32", "linux"],
+    "claude_desktop": ">=0.10.0"
+  },
+  "tools": [
+    {
+      "name": "get_entity",
+      "description": "Get a specific entity by name, supporting fuzzy matching"
+    },
+    {
+      "name": "entity_search",
+      "description": "Search for entities using advanced query options"
+    },
+    {
+      "name": "function_search",
+      "description": "Search for available functions in the system"
+    },
+    {
+      "name": "function_eval",
+      "description": "Execute a function with provided arguments"
+    },
+    {
+      "name": "help",
+      "description": "Get contextual help and discover available functions"
+    },
+    {
+      "name": "file_upload",
+      "description": "Upload files to the Percolate platform"
+    },
+    {
+      "name": "resource_search",
+      "description": "Search for uploaded resources and files"
+    },
+    {
+      "name": "ask_the_agent",
+      "description": "Ask questions to a Percolate agent and get responses"
+    },
+    {
+      "name": "add_memory",
+      "description": "Store information in your personal memory"
+    },
+    {
+      "name": "list_memories",
+      "description": "List all stored memories"
+    },
+    {
+      "name": "get_memory",
+      "description": "Retrieve a specific memory by name"
+    },
+    {
+      "name": "search_memories",
+      "description": "Search through your stored memories"
+    }
+  ]
 }

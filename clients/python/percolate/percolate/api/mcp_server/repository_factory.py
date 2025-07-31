@@ -42,17 +42,19 @@ def create_repository(
         # Fallback to environment variables
         if not token:
             import os
-            # Try P8_API_KEY first, then P8_PG_PASSWORD
-            token = os.getenv("P8_API_KEY") or os.getenv("P8_PG_PASSWORD", "postgres")
+            # Try P8_TEST_BEARER_TOKEN first, then P8_API_KEY, then P8_PG_PASSWORD
+            token = os.getenv("P8_TEST_BEARER_TOKEN") or os.getenv("P8_API_KEY") or os.getenv("P8_PG_PASSWORD", "postgres")
             
         if not user_email:
             user_email = settings.user_email
         
-        logger.info(f"Using API proxy mode with endpoint: {settings.api_endpoint}")
+        # Don't pass api_endpoint if we want to use environment variables
+        # Only pass token if we found one (don't pass empty string)
+        logger.info(f"Using API proxy mode")
         return APIProxyRepository(
-            api_endpoint=settings.api_endpoint,
-            api_key=token,
-            user_email=user_email,
+            api_endpoint=None,  # Let APIProxyRepository read from environment
+            api_key=token if token else None,  # Only pass if we have a value
+            user_email=user_email if user_email else None,
             additional_headers=headers
         )
     else:
@@ -81,7 +83,7 @@ def create_repository(
             
             if not token:
                 import os
-                token = os.getenv("P8_API_KEY") or os.getenv("P8_PG_PASSWORD", "postgres")
+                token = os.getenv("P8_TEST_BEARER_TOKEN") or os.getenv("P8_API_KEY") or os.getenv("P8_PG_PASSWORD", "postgres")
                 
             if not user_email:
                 user_email = settings.user_email

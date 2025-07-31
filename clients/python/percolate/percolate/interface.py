@@ -149,7 +149,7 @@ def summarize(data:str,context:str):
     return request_openai(stack,None)
     
 
-def get_entities(keys: str | typing.List, user_id=None, allow_fuzzy_match: bool = False, similarity_threshold: float = 0.3)->typing.List[dict]:
+def get_entities(keys: str | typing.List, user_id=None, allow_fuzzy_match: bool = True, similarity_threshold: float = 0.3)->typing.List[dict]:
     """
     get entities from their keys in the database
     

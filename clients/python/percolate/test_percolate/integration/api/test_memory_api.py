@@ -10,7 +10,7 @@ import os
 
 # Get API endpoint from environment
 API_ENDPOINT = os.getenv("P8_API_ENDPOINT", "http://localhost:5008")
-API_KEY = os.getenv("P8_API_KEY", "postgres")  # Default test bearer token
+API_KEY = os.getenv("P8_TEST_BEARER_TOKEN", os.getenv("P8_API_KEY", "postgres"))  # Use test bearer token
 
 # Test users
 TEST_USERS = ["amartey@gmail.com"]
@@ -24,7 +24,8 @@ class TestMemoryAPIIntegration:
         """Get headers with bearer token"""
         return {
             "Authorization": f"Bearer {API_KEY}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "X-User-Email": "amartey@gmail.com"
         }
     
     @pytest.fixture

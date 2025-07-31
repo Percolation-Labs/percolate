@@ -231,7 +231,9 @@ class PostgresService:
                         # Function might just return user_id or success indicator
                         logger.debug(f"set_user_context returned single value: {r[0]}")
                     else:
-                        logger.debug(f"set_user_context returned unexpected format: {r}")
+                        logger.debug(
+                            f"set_user_context returned unexpected format: {r}"
+                        )
                 else:
                     logger.debug("set_user_context returned no results")
                 # Commit changes
@@ -357,10 +359,13 @@ class PostgresService:
 
         # Choose which database function to call based on allow_fuzzy_match
         if allow_fuzzy_match:
+            # Note: deployed DB has different parameter order than local
+            # deployed: (search_terms, similarity_threshold, userid, max_matches_per_term)
+            # local: (search_terms, userid, similarity_threshold, max_matches_per_term)
             data = (
                 self.execute(
-                    """SELECT * FROM p8.get_fuzzy_entities(%s, %s)""",
-                    data=(keys, similarity_threshold),
+                    """SELECT * FROM p8.get_fuzzy_entities(%s, %s, %s)""",
+                    data=(keys, similarity_threshold, userid),
                 )
                 if keys
                 else None
@@ -390,24 +395,16 @@ class PostgresService:
 
         Args:
             question: detailed natural language question
-            user_id: optional user ID for access control
+            user_id deprecated
         """
 
         """in future we should pardo multiple questions"""
         if isinstance(question, list):
             question = "\n".join(question)
 
-        # Determine if we should use semantic search only
-        semantic_only = self.is_semantic_search_only()
+        Q = f"""select * from p8.query_entity(%s,%s) """
 
-        if user_id and not len(user_id):
-            user_id = None
-
-        Q = f"""select * from p8.query_entity(%s,%s, %s, %s) """
-
-        result = self.execute(
-            Q, data=(question, self.model.get_model_full_name(), user_id, semantic_only)
-        )
+        result = self.execute(Q, data=(question, self.model.get_model_full_name()))
 
         try:
             if result:
@@ -810,7 +807,7 @@ class PostgresService:
         records: typing.Union[BaseModel, typing.List[BaseModel]],
     ):
         """Delete records by their ID or key fields."""
-        
+
         if records is None:
             return []
 
@@ -824,7 +821,7 @@ class PostgresService:
         results = []
         for record in records:
             # Extract ID or key fields for deletion
-            if hasattr(record, 'id') and record.id:
+            if hasattr(record, "id") and record.id:
                 delete_kwargs = {"id": record.id}
                 query = self.helper.delete_query(**delete_kwargs)
                 data = tuple(delete_kwargs.values())
@@ -841,8 +838,10 @@ class PostgresService:
                     result = self.execute(query, data=data)
                     results.append(result)
                 else:
-                    logger.warning(f"Cannot delete record - no identifying fields: {record}")
-        
+                    logger.warning(
+                        f"Cannot delete record - no identifying fields: {record}"
+                    )
+
         return results
 
     def index_entity_by_name(

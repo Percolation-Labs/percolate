@@ -13,7 +13,7 @@ async def test_remaining_tools():
     env = os.environ.copy()
     
     # Create transport
-    runner_script = Path("percolate/api/mcp_server/tests/run_server.py")
+    runner_script = Path("test_percolate/integration/mcp/run_server.py")
     transport = PythonStdioTransport(
         script_path=runner_script,
         env=env

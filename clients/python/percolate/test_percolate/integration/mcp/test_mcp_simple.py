@@ -26,35 +26,36 @@ async def test_mcp_get_agent():
     """Test MCP server to get p8.Agent entity"""
     from fastmcp.client import Client, PythonStdioTransport
     
-    # Create transport
+    # Create transport using the run_server.py script
+    runner_script = Path(__file__).parent / "run_server.py"
     transport = PythonStdioTransport(
-        script_path="-m",
-        args=["percolate.api.mcp_server"],
+        script_path=str(runner_script),
         env=os.environ.copy()
     )
     
-    # Create MCP client
-    client = Client(transport=transport)
-    
-    try:
-        # Connect to server
-        print("Connecting to MCP server...")
-        await client.connect()
+    # Create and connect client using context manager
+    async with Client(transport=transport) as client:
         print("✓ Connected to MCP server")
         
         # List available tools
         tools = await client.list_tools()
-        print(f"\n✓ Available tools: {[t['name'] for t in tools]}")
+        print(f"\n✓ Available tools: {[t.name if hasattr(t, 'name') else t.get('name', str(t)) for t in tools]}")
         
         # Test get_entity for p8.Agent
         print("\nTesting get_entity for p8.Agent...")
         result = await client.call_tool(
             "get_entity",
             {
-                "entity_id": "p8.Agent",
-                "entity_type": "Model"
+                "params": {
+                    "entity_name": "p8.Agent",
+                    "entity_type": "Agent"
+                }
             }
         )
+        
+        # Extract the actual result from the MCP response
+        from percolate.api.mcp_server.utils import extract_tool_result
+        result = extract_tool_result(result)
         
         if isinstance(result, dict):
             if "error" in result:
@@ -74,10 +75,15 @@ async def test_mcp_get_agent():
         search_result = await client.call_tool(
             "entity_search",
             {
-                "query": "Agent",
-                "limit": 3
+                "params": {
+                    "query": "Agent",
+                    "limit": 3
+                }
             }
         )
+        
+        # Extract the result
+        search_result = extract_tool_result(search_result)
         
         if isinstance(search_result, list):
             print(f"✓ Found {len(search_result)} entities")
@@ -85,13 +91,7 @@ async def test_mcp_get_agent():
                 if isinstance(entity, dict) and "error" not in entity:
                     print(f"  {i+1}. {entity.get('name', 'Unknown')} (ID: {entity.get('id')})")
         
-    except Exception as e:
-        print(f"\n✗ Error: {e}")
-        import traceback
-        traceback.print_exc()
-    finally:
-        await client.disconnect()
-        print("\n✓ Disconnected from MCP server")
+        print("\n✓ Test completed successfully")
 
 if __name__ == "__main__":
     asyncio.run(test_mcp_get_agent())

@@ -4,6 +4,7 @@ from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field
 from fastmcp import FastMCP
 from ..base_repository import BaseMCPRepository
+from ..utils import format_error_response, validate_tool_params
 
 
 class FileUploadParams(BaseModel):
@@ -104,7 +105,7 @@ def create_file_tools(mcp: FastMCP, repository: BaseMCPRepository):
                 tags=params.tags
             )
         else:
-            result = {"error": "Either file_content with filename or file_path must be provided"}
+            result = format_error_response("Either file_content with filename or file_path must be provided", code=-32602)
         
         # Format result as text for MCP
         if result.get("success"):

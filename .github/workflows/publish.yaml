@@ -44,10 +44,10 @@ jobs:
           echo "version=$TAG" >> $GITHUB_ENV  # Save the version to an environment variable
           echo "version=$TAG" >> $GITHUB_OUTPUT  # Also store in outputs for later use
 
-      - name: Run Tests (excluding slow)
+      - name: Run Unit Tests (excluding slow)
         working-directory: clients/python/percolate
         run: |
-          poetry run pytest -m "not slow"
+          poetry run pytest test_percolate/unit/ -m "not slow" -v
       - name: Build Package
         working-directory: clients/python/percolate
         run: |

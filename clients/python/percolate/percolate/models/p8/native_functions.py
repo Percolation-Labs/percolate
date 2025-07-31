@@ -7,11 +7,14 @@ We endeavour to have a small number of system functions that are used with all a
 
 import typing
 
-def get_entities(keys: typing.List[str]):
+def get_entities(keys: typing.List[str], allow_fuzzy_match: bool = True, similarity_threshold: float = 0.3):
     """Provide a list of one or more keys to lookup entities by keys in the database
     Entity lookup uses identifiers like struct codes, identifiers, keys, names and codes for entities registered in the database
+    
     Args:
         keys: List[str] a list of one or more keys to lookup
+        allow_fuzzy_match: bool if True, uses fuzzy matching for similar entity names (default: True)
+        similarity_threshold: float threshold for fuzzy matching, lower values are more permissive (default: 0.3)
     """
     pass
 

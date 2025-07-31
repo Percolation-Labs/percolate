@@ -198,7 +198,12 @@ async def get_user_id(
                     logger.debug(f"get_user_id: Resolved user_id from email: {user.id}")
                     return str(user.id)
                 else:
-                    logger.warning(f"get_user_id: Could not resolve user from email: {user_email}")
+                    logger.error(f"get_user_id: User {user_email} does not exist in the system")
+                    raise HTTPException(
+                        status_code=401,
+                        detail=f"User {user_email} does not exist. Please ensure the user is registered before using bearer token authentication.",
+                        headers={"WWW-Authenticate": "Bearer"}
+                    )
         except HTTPException as e:
             logger.debug(f"get_user_id: Bearer token validation failed - {e.detail}")
         except Exception as e:
@@ -275,17 +280,20 @@ class HybridAuth:
                         logger.debug(f"Resolved user_id from email: {user.id}")
                         return str(user.id)
                     else:
-                        logger.warning(f"Could not resolve user from email: {user_email}")
-                        # Return the raw email if we can't resolve to a user_id
-                        # This helps with testing and fallback scenarios
-                        return make_uuid(user_email)
+                        logger.error(f"User {user_email} does not exist in the system")
+                        raise HTTPException(
+                            status_code=401,
+                            detail=f"User {user_email} does not exist. Please ensure the user is registered before using bearer token authentication.",
+                            headers={"WWW-Authenticate": "Bearer"}
+                        )
                 
                 # If we get here, no user context was found
                 logger.debug("Bearer token auth with no user context")
                 return None  # Valid bearer token but no user context
                     
-            except HTTPException:
-                logger.debug("Bearer token validation failed")
+            except HTTPException as e:
+                logger.debug(f"Bearer token validation failed: {e.detail}")
+                raise  # Re-raise the HTTPException
         
         # If both methods fail, raise 401
         raise HTTPException(

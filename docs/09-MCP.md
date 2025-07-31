@@ -65,30 +65,33 @@ graph LR
 
 ### Directory Structure
 ```
-percolate/api/mcp_server/
-├── __init__.py              # Package initialization and exports
-├── server.py                # FastMCP server creation and configuration
-├── app.py                   # FastAPI app for standalone HTTP mode
-├── config.py                # Configuration management using pydantic
-├── auth.py                  # Authentication provider implementation
-├── base_repository.py       # Abstract base class for repository pattern
-├── database_repository.py   # Direct database implementation
-├── api_repository.py        # API proxy implementation
-├── repository_factory.py    # Factory for creating repository instances
-├── integration.py           # API mounting helper functions
-├── tools/                   # MCP tool implementations
-│   ├── __init__.py
-│   ├── entity_tools.py      # Entity CRUD operations
-│   ├── function_tools.py    # Function search and evaluation
-│   ├── help_tools.py        # AI-powered help using PercolateAgent
-│   └── file_tools.py        # File upload and resource search
-├── tests/                   # Test suite
-│   ├── test_integration.py  # Real backend integration tests
-│   └── ...                  # Unit tests for each component
+percolate/
+├── clients/python/percolate/percolate/api/mcp_server/
+│   ├── __init__.py              # Package initialization and exports
+│   ├── server.py                # FastMCP server creation and configuration
+│   ├── app.py                   # FastAPI app for standalone HTTP mode
+│   ├── config.py                # Configuration management (standalone, no external deps)
+│   ├── auth.py                  # Authentication provider implementation
+│   ├── base_repository.py       # Abstract base class for repository pattern
+│   ├── database_repository.py   # Direct database implementation
+│   ├── api_repository.py        # API proxy implementation
+│   ├── repository_factory.py    # Factory for creating repository instances
+│   ├── integration.py           # API mounting helper functions
+│   ├── tools/                   # MCP tool implementations
+│   │   ├── __init__.py
+│   │   ├── entity_tools.py      # Entity CRUD operations
+│   │   ├── function_tools.py    # Function search and evaluation
+│   │   ├── help_tools.py        # AI-powered help using PercolateAgent
+│   │   └── file_tools.py        # File upload and resource search
+│   └── tests/                   # Test suite
+│       ├── test_integration.py  # Real backend integration tests
+│       └── ...                  # Unit tests for each component
 └── scripts/
-    └── dxt/                 # Desktop extension build scripts
-        ├── manifest.json    # DXT configuration
-        └── build_dxt.sh     # Build script
+    └── dxt/                     # Desktop extension build scripts (top-level location)
+        ├── manifest.json        # DXT configuration (simplified)
+        ├── build_dxt.sh         # Build script (optimized for size)
+        └── build/               # Build artifacts
+            └── release/         # Final DXT files (~18MB)
 ```
 
 ### Core Components
@@ -421,10 +424,10 @@ The MCP server respects the main API's authentication middleware:
 
 ### Quick Start
 
-The Desktop Extension (DXT) allows Claude Desktop to connect directly to your Percolate instance. Most users only need to configure a few environment variables:
+The Desktop Extension (DXT) allows Claude Desktop to connect directly to your Percolate instance. The configuration has been simplified to require only essential settings:
 
 ```bash
-# Minimum required configuration
+# Required configuration
 P8_API_KEY="your-api-key"
 X_User_Email="user@example.com"
 
@@ -435,7 +438,13 @@ P8_API_ENDPOINT="https://your-percolate-instance.com"
 P8_DEFAULT_AGENT="executive-ExecutiveResources"
 ```
 
+The DXT automatically uses environment variable fallbacks:
+- `P8_API_KEY` falls back to `P8_TEST_BEARER_TOKEN`
+- `P8_API_ENDPOINT` falls back to `P8_TEST_DOMAIN`
+
 ### Building the Extension
+
+**Important**: The DXT builder is located at the top-level to avoid package size issues.
 
 1. **Prerequisites**:
    - Python 3.8+ with pip
@@ -444,37 +453,36 @@ P8_DEFAULT_AGENT="executive-ExecutiveResources"
 
 2. **Build Process**:
    ```bash
-   cd percolate/api/mcp_server/scripts/dxt
+   cd scripts/dxt
    ./build_dxt.sh
    ```
 
    The build script:
-   - Creates temporary build directory
-   - Copies MCP server code
+   - Creates temporary build directory at `scripts/dxt/build/temp_dxt`
+   - Copies MCP server code without recursive directories
    - Installs Python dependencies to `lib/`
+   - Removes test files and unnecessary artifacts to reduce size
    - Packages with `npx @anthropic-ai/dxt pack`
-   - Outputs `percolate-mcp.dxt` file
+   - Outputs optimized `percolate-mcp-VERSION.dxt` file (~18MB)
 
 3. **Installation**:
    - Open Claude Desktop
    - Go to Settings → Extensions
    - Click "Install Extension"
    - Select the generated `.dxt` file
-   - Configure required settings (API key and email)
+   - Configure required settings (API endpoint and API key)
 
 ### Configuration
 
-When installing the DXT, you'll be prompted for configuration. Most fields have sensible defaults:
+When installing the DXT, you'll be prompted for simplified configuration:
 
 | Setting | Required | Default | Description |
 |---------|----------|---------|-------------|
 | API Endpoint | Yes | `https://api.percolationlabs.ai` | Your Percolate instance URL |
-| API Key | Yes* | - | Bearer token for authentication |
-| OAuth Token | Yes* | - | Alternative to API key |
-| User Email | Yes** | - | Your email (required with API key) |
+| API Key | No | (from P8_TEST_BEARER_TOKEN) | Bearer token for authentication |
+| User Email | No | `amartey@gmail.com` | Your email address |
 
-*Either API Key or OAuth Token is required
-**Only required when using API Key authentication
+The DXT now uses a simplified configuration without OAuth tokens or connection mode selection.
 
 ### Environment Variable Defaults
 
@@ -488,22 +496,32 @@ The DXT respects all Percolate environment variables. Key defaults include:
 
 ### DXT Manifest Configuration
 
+The current manifest configuration with enhanced features:
+
 ```json
 {
   "dxt_version": "0.1",
   "name": "percolate-mcp",
+  "description": "Percolate MCP Server - Access entities, search, and evaluate functions",
+  "author": {
+    "name": "Percolation Labs",
+    "email": "support@percolationlabs.ai"
+  },
+  "version": "0.1.0",
   "server": {
     "type": "python",
-    "entry_point": "server/percolate/api/mcp_server/server.py",
+    "entry_point": "server/mcp_server/server.py",
     "mcp_config": {
       "command": "python",
-      "args": ["-m", "percolate.api.mcp_server"],
+      "args": ["-m", "mcp_server.server"],
       "env": {
-        "PYTHONPATH": "${__dirname}/server:${__dirname}/server/lib",
+        "PYTHONPATH": "${__dirname}/server:${__dirname}/server/lib:${PYTHONPATH}",
         "P8_API_ENDPOINT": "${user_config.api_endpoint}",
         "P8_API_KEY": "${user_config.api_key}",
-        "P8_OAUTH_TOKEN": "${user_config.oauth_token}",
-        "P8_USER_EMAIL": "${user_config.user_email}",
+        "X_User_Email": "${user_config.user_email}",
+        "P8_DEFAULT_AGENT": "${user_config.default_agent}",
+        "P8_MCP_ABOUT": "${user_config.about_section}",
+        "P8_USE_API_MODE": "true",
         "P8_MCP_DESKTOP_EXT": "true"
       }
     }
@@ -512,27 +530,65 @@ The DXT respects all Percolate environment variables. Key defaults include:
     "api_endpoint": {
       "type": "string",
       "title": "Percolate API Endpoint",
+      "description": "URL of the Percolate API server",
       "default": "https://api.percolationlabs.ai",
       "required": true
     },
     "api_key": {
       "type": "string",
       "title": "API Key (Bearer Token)",
-      "secret": true
-    },
-    "oauth_token": {
-      "type": "string", 
-      "title": "OAuth Access Token",
-      "secret": true
+      "description": "Your Percolate API key for bearer token authentication",
+      "default": "",
+      "required": false,
+      "sensitive": true
     },
     "user_email": {
       "type": "string",
       "title": "User Email",
-      "format": "email"
+      "description": "Your email address (required when using API key)",
+      "default": "amartey@gmail.com",
+      "required": false
+    },
+    "default_agent": {
+      "type": "string",
+      "title": "Default Agent",
+      "description": "Default agent for chat completions (e.g., 'p8-PercolateAgent', 'p8.Resources')",
+      "default": "p8.Resources",
+      "required": false
+    },
+    "about_section": {
+      "type": "string",
+      "title": "About Section",
+      "description": "Additional context/preamble to prepend to MCP server instructions (optional)",
+      "default": "",
+      "required": false
     }
   }
 }
 ```
+
+#### DXT Configuration Properties
+
+The DXT manifest supports several configuration properties:
+
+1. **`sensitive`**: Marks fields containing sensitive information (passwords, API keys) that should be hidden in UI displays
+   - Example: `"sensitive": true` for api_key field
+   - The Claude Desktop UI will mask these values with asterisks
+
+2. **`default_agent`**: Configures the default agent for chat operations
+   - Can be set via `P8_DEFAULT_AGENT` environment variable
+   - Common values: `"p8.Resources"`, `"p8-PercolateAgent"`, `"executive-ExecutiveResources"`
+
+3. **`about_section`**: Allows adding custom preamble to MCP server instructions
+   - Set via `P8_MCP_ABOUT` environment variable
+   - Prepended to the server's system instructions shown to clients
+   - Useful for adding organization-specific context or guidance
+
+**Key Changes from Previous Versions:**
+- Removed `oauth_token` configuration option for simplicity
+- Removed connection `mode` parameter - always uses API proxy mode
+- Added fallback defaults that use `P8_TEST_BEARER_TOKEN` and `P8_TEST_DOMAIN` environment variables
+- Simplified user configuration to essential fields only
 
 ### Installation Process
 1. User installs `.dxt` file in their MCP client
@@ -540,6 +596,65 @@ The DXT respects all Percolate environment variables. Key defaults include:
 3. Client spawns Python process with configured environment
 4. MCP server runs in stdio mode
 5. Communication via JSON-RPC over stdin/stdout
+
+### Manual Claude Desktop Configuration
+
+For users who prefer manual configuration instead of the DXT, you can configure Claude Desktop directly:
+
+#### Configuration File Locations
+- **macOS/Linux**: `~/.config/claude/claude_desktop_config.json`
+- **Windows**: `%APPDATA%\claude\claude_desktop_config.json`
+
+#### Configuration Example
+
+```json
+{
+  "mcpServers": {
+    "percolate": {
+      "command": "python",
+      "args": ["-m", "percolate.api.mcp_server"],
+      "cwd": "/path/to/percolate/clients/python/percolate",
+      "env": {
+        "P8_API_ENDPOINT": "https://p8.resmagic.io",
+        "P8_API_KEY": "your-bearer-token-here",
+        "X_User_Email": "your-email@example.com",
+        "P8_USE_API_MODE": "true",
+        "P8_DEFAULT_AGENT": "p8.Resources",
+        "P8_DEFAULT_NAMESPACE": "p8",
+        "P8_DEFAULT_ENTITY": "Resources",
+        "P8_MCP_ABOUT": "Custom context for your organization here",
+        "P8_LOG_LEVEL": "INFO"
+      }
+    }
+  }
+}
+```
+
+#### Testing Claude Desktop Configuration
+
+1. Restart Claude Desktop after updating the configuration
+2. In a new conversation, you should see "percolate" listed as an available MCP server
+3. Try asking Claude to:
+   - "Use the percolate MCP server to search for executive resources"
+   - "Help me understand what's available in the executive namespace"
+   - "Upload this content to ExecutiveResources: [your content]"
+
+#### Troubleshooting Claude Desktop Setup
+
+**MCP Server Not Showing:**
+- Ensure the Python path is correct
+- Verify the percolate package is installed
+- Check the cwd path points to the correct directory
+
+**Authentication Errors:**
+- Verify your bearer token is correct
+- Ensure X_User_Email matches your account
+- Check the API endpoint URL
+
+**Tool Execution Errors:**
+- Review the P8_LOG_LEVEL output
+- Ensure you have permissions for the requested operations
+- Check namespace and entity names are correct
 
 ## Configuration
 
@@ -715,9 +830,10 @@ result = await repo.search_entities("test query")
 
 1. **Authentication Failures**
    - Verify P8_API_KEY is set correctly
-   - Ensure P8_USER_EMAIL is provided with API key
-   - Check token hasn't expired (OAuth)
+   - Ensure X_User_Email is provided with API key
+   - Check token hasn't expired
    - Verify API endpoint is accessible
+   - For DXT: Check that fallback environment variables P8_TEST_BEARER_TOKEN and P8_TEST_DOMAIN are set
 
 2. **Tool Execution Errors**
    - Check user has appropriate permissions
@@ -729,13 +845,21 @@ result = await repo.search_entities("test query")
    - Ensure Python is in PATH
    - Verify all dependencies installed
    - Check manifest.json syntax
-   - Review client logs for spawn errors
+   - Review client logs for spawn errors at `~/Library/Logs/Claude/mcp-server-percolate-mcp.log` (macOS)
+   - **Module Import Errors**: Check that config.py doesn't import percolate.utils (should be standalone)
+   - **Package Size Issues**: Ensure DXT builder is at top-level scripts/dxt to avoid recursive copying
 
 4. **Integration Problems**
    - Verify MCP server is mounted (`/mcp/health`)
    - Check for port conflicts
    - Ensure database is accessible
    - Verify S3 credentials for uploads
+
+5. **DXT Build Issues**
+   - **Large File Size**: Move build scripts to top-level scripts/dxt directory
+   - **Import Errors**: Ensure all MCP components are self-contained without external percolate dependencies
+   - **Missing Dependencies**: Check that all required packages are in requirements.txt and properly installed to lib/
+   - **Configuration Errors**: Verify manifest.json has simplified user_config without oauth_token or mode parameters
 
 ### Debug Commands
 
@@ -799,6 +923,7 @@ The MCP server supports the following environment variables for authentication a
 - **`P8_MCP_DESKTOP_EXT`**: Set to `"true"` for desktop extension mode
 - **`P8_MCP_PORT`**: HTTP server port (default: 8001)
 - **`P8_LOG_LEVEL`**: Logging level (default: INFO)
+- **`P8_MCP_ABOUT`**: Additional context/preamble to prepend to MCP server instructions
 
 ### Database Configuration (Direct Mode Only)
 

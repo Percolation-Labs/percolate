@@ -189,18 +189,30 @@ For API access, testing, and service-to-service communication.
 
 **How It Works:**
 - Client sends API key in Authorization header
-- No user context (user_id is None)
-- Suitable for admin operations and testing
+- Optionally includes X-User-Email header for user context
+- Without email header: No user context (user_id is None), suitable for admin operations
+- With email header: User context if user exists in system
 
 **Valid Tokens:**
 - `postgres` - Default test token
 - Value of `P8_API_KEY` environment variable
 - Any configured API keys
 
-**Example:**
+**User Context with Bearer Tokens (Updated July 2025):**
+- Bearer token + X-User-Email header validates that the user exists in the system
+- Non-existent users receive 401 error: "User {email} does not exist. Please ensure the user is registered before using bearer token authentication."
+- This prevents unauthorized access attempts with arbitrary email addresses
+
+**Examples:**
 ```bash
+# Bearer token only (no user context)
 curl -X GET http://localhost:5000/auth/ping \
   -H "Authorization: Bearer postgres"
+
+# Bearer token with user context (user must exist)
+curl -X GET http://localhost:5000/auth/ping \
+  -H "Authorization: Bearer postgres" \
+  -H "X-User-Email: existing-user@example.com"
 ```
 
 ## User Model
@@ -238,7 +250,10 @@ class HybridAuth:
     ) -> Optional[str]:
         # Try session auth first
         # Fall back to bearer token
-        # Return user_id for sessions, None for bearer tokens
+        # For bearer tokens with X-User-Email:
+        #   - Validates user exists in system
+        #   - Raises 401 if user not found
+        # Return user_id for sessions or bearer+email, None for bearer only
 ```
 
 ### Usage Patterns

@@ -32,7 +32,7 @@ class EntitySearchParams(BaseModel):
     """Parameters for entity_search tool"""
     query: str = Field(
         ...,
-        description="Search query string to find matching entities. Can be a search term, or an entity type name (e.g., 'p8.Agent', 'public.Tasks') to list all instances of that entity"
+        description="A detailed natural language query for semantic search. Be specific and descriptive to get the best results. Examples: 'machine learning models for customer churn prediction', 'data processing pipelines for financial transactions', 'security policies for user authentication'. When searching within a specific entity type via entity_name, use an empty string '' to list all instances."
     )
     entity_name: Optional[str] = Field(
         None,
@@ -72,14 +72,21 @@ def create_entity_tools(mcp: FastMCP, repository: BaseMCPRepository):
     
     @mcp.tool(
         name="entity_search",
-        description="""Search for entities in the Percolate knowledge base. This tool has two main modes:
+        description="""Search for entities in the Percolate knowledge base using powerful semantic search. 
 
-1. **Search across all entities**: Use the 'query' parameter to search across all entity types
-   - Example: query="customer data" finds all entities related to customer data
+**IMPORTANT**: If you're looking for a single specific entity by name or key (e.g., "KT-2011", "MyModel", "DataProcessor"), use the `get_entity` tool instead - it's faster and supports fuzzy matching for variations.
+
+This tool is best for:
+
+1. **Semantic search across all entities**: Use the 'query' parameter with a detailed natural language description
+   - The more specific and descriptive your query, the better the results
+   - Example: query="machine learning models that predict customer behavior using transaction history"
+   - Example: query="data quality validation rules for email addresses and phone numbers"
 
 2. **Search within a specific entity type**: Use 'entity_name' to search instances of a specific entity
-   - Example: entity_name="public.Tasks" finds all task instances
-   - Example: entity_name="p8.Agent" finds all agent definitions
+   - Example: entity_name="public.Tasks" with query="" lists all task instances
+   - Example: entity_name="p8.Agent" with query="" lists all agent definitions
+   - Example: entity_name="p8.Model" with query="classification models for fraud detection"
    
 **Pro tip**: To discover available entity types, search for 'p8.Agent' first. This returns all registered entity types in the system, which you can then use as the entity_name parameter for targeted searches.
 
@@ -89,7 +96,7 @@ def create_entity_tools(mcp: FastMCP, repository: BaseMCPRepository):
 - p8.Model: AI model configurations
 - p8.Function: Available functions/tools
 
-The search supports filters for additional refinement.""",
+The search uses advanced semantic understanding to find relevant entities based on meaning, not just keywords.""",
         annotations={
             "hint": {"readOnlyHint": True, "idempotentHint": True},
             "tags": ["entity", "search", "knowledge-base", "query", "discover"]
@@ -97,7 +104,31 @@ The search supports filters for additional refinement.""",
     )
     async def entity_search(params: EntitySearchParams) -> List[Dict[str, Any]]:
         """Search entities and return raw results"""
-        # If entity_name is provided, add it to filters
+        # Check if query is a single term (no spaces, short) - better suited for get_entity
+        query_stripped = params.query.strip()
+        if (query_stripped and 
+            ' ' not in query_stripped and 
+            len(query_stripped) <= 50 and 
+            not params.entity_name and 
+            not params.filters):
+            # Single term - use get_entity for better fuzzy matching
+            try:
+                entity_result = await repository.get_entity(
+                    entity_name=query_stripped,
+                    entity_type=None,
+                    allow_fuzzy_match=True,
+                    similarity_threshold=0.3
+                )
+                # Return as a list to match expected return type
+                if entity_result:
+                    return [entity_result]
+                else:
+                    return []
+            except:
+                # If get_entity fails, fall back to search
+                pass
+        
+        # Regular semantic search
         filters = params.filters or {}
         if params.entity_name:
             filters['entity_name'] = params.entity_name

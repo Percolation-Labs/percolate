@@ -41,7 +41,7 @@ def mount_mcp_server(app: FastAPI, path: str = "/mcp") -> Optional[FastAPI]:
         app.mount(path, mcp_app)
         
         logger.info(f"MCP server mounted at {path}")
-        logger.info(f"MCP tools available: {[t.name for t in mcp.tools]}")
+        # Note: FastMCP doesn't expose tools list directly, tools are accessible via the MCP protocol
         
         return mcp_app
         

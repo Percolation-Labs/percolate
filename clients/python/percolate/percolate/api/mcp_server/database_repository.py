@@ -2,17 +2,24 @@
 
 from typing import Optional, Dict, Any, List, Union, AsyncIterator
 from pydantic import BaseModel, Field
+import os
 import percolate as p8
 from percolate.models import AbstractModel
 from percolate.models.p8.types import Agent, Function, Resources, PercolateAgent
 from percolate.services.ModelRunner import ModelRunner
-from percolate.utils.env import SYSTEM_USER_ID, SYSTEM_USER_ROLE_LEVEL
-from percolate.utils import logger
+# Local environment variables (no dependency on percolate.utils.env)
+SYSTEM_USER_ID = os.getenv('SYSTEM_USER_ID', 'system')
+SYSTEM_USER_ROLE_LEVEL = int(os.getenv('SYSTEM_USER_ROLE_LEVEL', '10'))
+import logging
+
+logger = logging.getLogger(__name__)
 import json
 import uuid
 from datetime import datetime
 from decimal import Decimal
 from .base_repository import BaseMCPRepository
+from .exceptions import EntityNotFoundError, RepositoryError, FunctionExecutionError, FileOperationError
+from .utils import try_get_entity_by_type
 
 
 def serialize_for_json(obj):
@@ -63,58 +70,50 @@ class DatabaseRepository(BaseMCPRepository):
             "role_level": self.role_level
         }
     
-    async def get_entity(self, entity_name: str, entity_type: Optional[str] = None) -> Dict[str, Any]:
+    async def get_entity(self, entity_name: str, entity_type: Optional[str] = None, allow_fuzzy_match: bool = True, similarity_threshold: float = 0.3) -> Dict[str, Any]:
         """Get entity by name"""
-        try:
-            # Map string types to actual model classes
-            type_map = {
-                "Agent": Agent,
-                "PercolateAgent": PercolateAgent,
-                "Resources": Resources,
-                "Function": Function
-            }
-            
-            if entity_type and entity_type in type_map:
-                # Use specific type - pass context during initialization
+        # Map string types to actual model classes
+        type_map = {
+            "Agent": Agent,
+            "PercolateAgent": PercolateAgent,
+            "Resources": Resources,
+            "Function": Function
+        }
+        
+        context = self._get_context()
+        
+        if entity_type and entity_type in type_map:
+            # Use specific type
+            entity = try_get_entity_by_type(entity_name, type_map[entity_type], context)
+            if entity:
+                return entity.model_dump()
+        else:
+            # Try common types
+            for model_name, model_class in type_map.items():
+                entity = try_get_entity_by_type(entity_name, model_class, context)
+                if entity:
+                    logger.debug(f"Found entity {entity_name} as {model_name}")
+                    return entity.model_dump()
+        
+        # If still not found and fuzzy matching is allowed, try fuzzy search
+        if allow_fuzzy_match:
+            try:
+                # Use the PostgreSQL fuzzy search function
                 repo = p8.repository(
-                    type_map[entity_type],
+                    Agent,
                     user_id=self.user_id,
                     user_groups=self.user_groups,
                     role_level=self.role_level
                 )
-                # Try to get by name first, then fall back to ID if it looks like a UUID
-                try:
-                    entity = repo.get_by_name(entity_name, as_model=True)
-                except AttributeError:
-                    # If get_by_name doesn't exist, try get_by_id
-                    entity = repo.get_by_id(entity_name, as_model=True)
-            else:
-                # Try common types
-                entity = None
-                for model_name, model_class in type_map.items():
-                    try:
-                        repo = p8.repository(
-                            model_class,
-                            user_id=self.user_id,
-                            user_groups=self.user_groups,
-                            role_level=self.role_level
-                        )
-                        # Try to get by name first, then fall back to ID
-                        try:
-                            entity = repo.get_by_name(entity_name, as_model=True)
-                        except AttributeError:
-                            entity = repo.get_by_id(entity_name, as_model=True)
-                        if entity:
-                            break
-                    except Exception:
-                        continue
-            
-            if entity:
-                return entity.model_dump()
-            else:
-                return {"error": f"Entity {entity_name} not found"}
-        except Exception as e:
-            return {"error": str(e)}
+                # This would need to be implemented in the repository
+                # For now, fall back to regular search
+                search_results = await self.search_entities(entity_name, limit=1)
+                if search_results and len(search_results) > 0 and "error" not in search_results[0]:
+                    return search_results[0]
+            except Exception as e:
+                logger.debug(f"Fuzzy search failed: {e}")
+        
+        raise EntityNotFoundError(entity_name, entity_type)
     
     async def search_entities(
         self,
@@ -123,50 +122,123 @@ class DatabaseRepository(BaseMCPRepository):
         limit: int = 10
     ) -> List[Dict[str, Any]]:
         """Search for entities"""
-        try:
-            # Use PercolateAgent repository for general search
+        # Use PercolateAgent repository for general search
+        repo = p8.repository(
+            PercolateAgent,
+            user_id=self.user_id,
+            user_groups=self.user_groups,
+            role_level=self.role_level
+        )
+        
+        # Use the search method which returns raw results
+        results = repo.search(query)
+        
+        # Handle the response - search returns a list with one dict containing query results
+        if results and isinstance(results, list) and len(results) > 0:
+            # Extract the actual results from the response
+            first_result = results[0]
+            
+            # Check if we have vector results
+            if isinstance(first_result, dict) and 'vector_result' in first_result:
+                vector_results = first_result.get('vector_result', [])
+                if vector_results:
+                    # Apply filters if provided
+                    if filters:
+                        filtered = []
+                        for item in vector_results:
+                            if all(item.get(k) == v for k, v in filters.items()):
+                                filtered.append(item)
+                        vector_results = filtered
+                    # Limit and return the vector results
+                    return vector_results[:limit]
+            
+            # Check if we have relational results
+            if isinstance(first_result, dict) and 'relational_result' in first_result:
+                relational_results = first_result.get('relational_result', [])
+                if relational_results:
+                    return relational_results[:limit]
+            
+            # If we got a prompt message about no data
+            if isinstance(first_result, dict) and first_result.get('status') == 'no data':
+                return []
+                
+        return []
+    
+    async def list_entities(
+        self,
+        entity_type: str,
+        limit: int = 100,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """List all entities of a specific type"""
+        # Special handling for p8.Function
+        if entity_type == 'p8.Function':
             repo = p8.repository(
-                PercolateAgent,
+                Function,
                 user_id=self.user_id,
                 user_groups=self.user_groups,
                 role_level=self.role_level
             )
             
-            # Use the search method which returns raw results
-            results = repo.search(query)
+            # Use select to get all functions
+            results = repo.select()
             
-            # Handle the response - search returns a list with one dict containing query results
-            if results and isinstance(results, list) and len(results) > 0:
-                # Extract the actual results from the response
-                first_result = results[0]
-                
-                # Check if we have vector results
-                if isinstance(first_result, dict) and 'vector_result' in first_result:
-                    vector_results = first_result.get('vector_result', [])
-                    if vector_results:
-                        # Apply filters if provided
-                        if filters:
-                            filtered = []
-                            for item in vector_results:
-                                if all(item.get(k) == v for k, v in filters.items()):
-                                    filtered.append(item)
-                            vector_results = filtered
-                        # Limit and return the vector results
-                        return vector_results[:limit]
-                
-                # Check if we have relational results
-                if isinstance(first_result, dict) and 'relational_result' in first_result:
-                    relational_results = first_result.get('relational_result', [])
-                    if relational_results:
-                        return relational_results[:limit]
-                
-                # If we got a prompt message about no data
-                if isinstance(first_result, dict) and first_result.get('status') == 'no data':
-                    return []
-                    
-            return []
-        except Exception as e:
-            return [{"error": str(e)}]
+            # Extract relevant fields for functions
+            function_list = []
+            if results:
+                for func in results[offset:offset+limit]:
+                    function_info = {
+                        'name': func.get('name', ''),
+                        'description': func.get('description', ''),
+                        'parameters': func.get('parameters', {}),
+                        'entity_type': 'p8.Function'
+                    }
+                    function_list.append(function_info)
+            
+            return function_list
+        
+        # For other entity types, use the model repository pattern
+        # Map entity_type to model class
+        entity_map = {
+            'p8.Agent': PercolateAgent,
+            'p8.PercolateAgent': PercolateAgent,
+            'p8.Resources': Resources,
+            'p8.Model': Model,
+            'p8.Dataset': Dataset
+        }
+        
+        model_class = entity_map.get(entity_type)
+        if not model_class:
+            # Try to get from the entity type directly
+            try:
+                # This would need proper dynamic loading in production
+                logger.warning(f"Unknown entity type: {entity_type}")
+                return []
+            except:
+                return []
+        
+        repo = p8.repository(
+            model_class,
+            user_id=self.user_id,
+            user_groups=self.user_groups,
+            role_level=self.role_level
+        )
+        
+        # Use select to get all entities
+        results = repo.select()
+        
+        entity_list = []
+        if results:
+            for entity in results[offset:offset+limit]:
+                entity_info = {
+                    'id': entity.get('id', ''),
+                    'name': entity.get('name', ''),
+                    'entity_type': entity_type,
+                    'data': entity
+                }
+                entity_list.append(entity_info)
+        
+        return entity_list
     
     async def search_functions(
         self,
@@ -174,56 +246,45 @@ class DatabaseRepository(BaseMCPRepository):
         limit: int = 10
     ) -> List[Dict[str, Any]]:
         """Search for functions using the Function model repository"""
-        try:
-            repo = p8.repository(
-                Function,
-                user_id=self.user_id,
-                user_groups=self.user_groups,
-                role_level=self.role_level
-            )
+        repo = p8.repository(
+            Function,
+            user_id=self.user_id,
+            user_groups=self.user_groups,
+            role_level=self.role_level
+        )
+        
+        # Use the search method which returns raw results
+        logger.debug(f"Searching functions with query: {query}")
+        results = repo.search(query)
+        logger.debug(f"Raw search results type: {type(results)}")
+        
+        # Handle the response - search returns a list with one dict containing query results
+        if results and isinstance(results, list) and len(results) > 0:
+            # Extract the actual results from the response
+            first_result = results[0]
             
-            # Use the search method which returns raw results
-            logger.debug(f"Searching functions with query: {query}")
-            results = repo.search(query)
-            logger.debug(f"Raw search results type: {type(results)}")
-            logger.debug(f"Raw search results: {results}")
+            # Check if we have vector results
+            if isinstance(first_result, dict) and 'vector_result' in first_result:
+                vector_results = first_result.get('vector_result', [])
+                if vector_results:
+                    # Serialize and limit the vector results
+                    return serialize_for_json(vector_results[:limit])
             
-            # Handle the response - search returns a list with one dict containing query results
-            if results and isinstance(results, list) and len(results) > 0:
-                # Extract the actual results from the response
-                first_result = results[0]
-                logger.debug(f"First result type: {type(first_result)}")
-                logger.debug(f"First result: {first_result}")
-                
-                # Check if we have vector results
-                if isinstance(first_result, dict) and 'vector_result' in first_result:
-                    vector_results = first_result.get('vector_result', [])
-                    logger.debug(f"Vector results: {vector_results}")
-                    if vector_results:
-                        # Serialize and limit the vector results
-                        serialized_results = serialize_for_json(vector_results[:limit])
-                        logger.debug(f"Serialized results: {serialized_results}")
-                        return serialized_results
-                
-                # Check if we have relational results
-                if isinstance(first_result, dict) and 'relational_result' in first_result:
-                    relational_results = first_result.get('relational_result', [])
-                    logger.debug(f"Relational results: {relational_results}")
-                    if relational_results:
-                        return serialize_for_json(relational_results[:limit])
-                
-                # If we got a prompt message about no data
-                if isinstance(first_result, dict) and first_result.get('status') == 'no data':
-                    logger.debug("Got 'no data' status")
-                    return []
-                
-                # If results is not what we expected, log it
-                logger.warning(f"Unexpected result format: {results}")
-                    
-            return []
-        except Exception as e:
-            logger.error(f"Error in search_functions: {e}")
-            return [{"error": str(e)}]
+            # Check if we have relational results
+            if isinstance(first_result, dict) and 'relational_result' in first_result:
+                relational_results = first_result.get('relational_result', [])
+                if relational_results:
+                    return serialize_for_json(relational_results[:limit])
+            
+            # If we got a prompt message about no data
+            if isinstance(first_result, dict) and first_result.get('status') == 'no data':
+                return []
+            
+            # If results is not what we expected, log it
+            logger.warning(f"Unexpected result format: {results}")
+        
+        # No results found
+        return []
     
     async def evaluate_function(
         self,
@@ -231,42 +292,32 @@ class DatabaseRepository(BaseMCPRepository):
         args: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Evaluate a specific function by name with arguments"""
-        try:
-            # Create a repository to call the database function
-            repo = p8.repository(
-                Function,
-                user_id=self.user_id,
-                user_groups=self.user_groups,
-                role_level=self.role_level
-            )
+        # Create a repository to call the database function
+        repo = p8.repository(
+            Function,
+            user_id=self.user_id,
+            user_groups=self.user_groups,
+            role_level=self.role_level
+        )
+        
+        # Use the database function evaluation
+        result = repo.eval_function_call(function_name, args)
+        
+        # Handle the response
+        if result and isinstance(result, list) and len(result) > 0:
+            eval_result = result[0].get('eval_function_call', {})
             
-            # Use the database function evaluation
-            result = repo.eval_function_call(function_name, args)
-            
-            # Handle the response
-            if result and isinstance(result, list) and len(result) > 0:
-                eval_result = result[0].get('eval_function_call', {})
-                
-                return {
-                    "function": function_name,
-                    "args": args,
-                    "result": eval_result,
-                    "success": True
-                }
-            else:
-                return {
-                    "function": function_name,
-                    "args": args,
-                    "error": "Function evaluation returned no results",
-                    "success": False
-                }
-        except Exception as e:
             return {
                 "function": function_name,
                 "args": args,
-                "error": str(e),
-                "success": False
+                "result": eval_result,
+                "success": True
             }
+        else:
+            raise FunctionExecutionError(
+                function_name,
+                "Function evaluation returned no results"
+            )
     
     async def get_help(
         self,
@@ -274,9 +325,34 @@ class DatabaseRepository(BaseMCPRepository):
         context: Optional[str] = None,
         max_depth: int = 3
     ) -> str:
-        """Get help using PercolateAgent"""
+        """Get help using PercolateAgent with available functions context"""
         try:
-            # For now, use the repository search to find relevant information
+            # First, get all available functions to provide context
+            functions = await self.list_entities('p8.Function', limit=50)
+            
+            # Build function context
+            function_context = []
+            if functions:
+                function_context.append("Available functions in the system:")
+                for func in functions:
+                    name = func.get('name', '')
+                    desc = func.get('description', '')
+                    params = func.get('parameters', {})
+                    if name:
+                        function_context.append(f"- {name}: {desc}")
+                        if params:
+                            function_context.append(f"  Parameters: {params}")
+            
+            # Combine all context
+            full_context = []
+            if function_context:
+                full_context.append("\n".join(function_context))
+            if context:
+                full_context.append(context)
+            
+            combined_context = "\n\n".join(full_context) if full_context else ""
+            
+            # Now search with enhanced context
             repo = p8.repository(
                 PercolateAgent,
                 user_id=self.user_id,
@@ -285,8 +361,8 @@ class DatabaseRepository(BaseMCPRepository):
             )
             
             prompt = query
-            if context:
-                prompt = f"{context}\n\n{query}"
+            if combined_context:
+                prompt = f"{combined_context}\n\n{query}"
             
             # Search for relevant help content
             results = repo.search(prompt)
@@ -309,12 +385,28 @@ class DatabaseRepository(BaseMCPRepository):
                                     help_text.append(f"### {name}\n{content}")
                         
                         if help_text:
-                            return "\n\n".join(help_text)
+                            response_parts = []
+                            
+                            # Add function list if query is about functions
+                            if any(keyword in query.lower() for keyword in ['function', 'functions', 'available', 'what can']):
+                                if function_context:
+                                    response_parts.append("## Available Functions\n" + "\n".join(function_context[1:]))
+                            
+                            # Add search results
+                            response_parts.append("## Related Information")
+                            response_parts.extend(help_text)
+                            
+                            return "\n\n".join(response_parts)
                 
-            return f"I couldn't find specific help for: {query}. Please try rephrasing your question or contact support."
+            # If no results, at least return function list if relevant
+            if any(keyword in query.lower() for keyword in ['function', 'functions', 'available', 'what can', 'help']):
+                if function_context:
+                    return "## Available Functions\n" + "\n".join(function_context[1:])
             
+            return f"I couldn't find specific help for: {query}. Please try rephrasing your question or contact support."
         except Exception as e:
-            return f"Error: {str(e)}"
+            logger.error(f"Error getting help: {e}")
+            return f"Sorry, I encountered an error while searching for help. Error: {str(e)}"
     
     async def upload_file(
         self,
@@ -334,7 +426,7 @@ class DatabaseRepository(BaseMCPRepository):
             
             # Check if file exists
             if not os.path.exists(file_path):
-                return {"error": f"File not found: {file_path}"}
+                raise FileOperationError(f"File not found: {file_path}", file_path)
             
             # Get file info
             file_name = os.path.basename(file_path)
@@ -576,3 +668,163 @@ class DatabaseRepository(BaseMCPRepository):
                 return error_generator()
             else:
                 return f"Error: {error_msg}"
+
+    async def add_memory(
+        self,
+        content: str,
+        name: Optional[str] = None,
+        category: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Add a new memory using the controller"""
+        from percolate.api.controllers.memory import user_memory_controller
+        
+        # Use the user_email from repository context to get user_id
+        user_id = self.user_email or self.user_id
+        if not user_id:
+            raise RepositoryError("No user context available for memory operations", operation="add_memory")
+        
+        memory = await user_memory_controller.add(
+            user_id=user_id,
+            content=content,
+            name=name,
+            category=category,
+            metadata=metadata
+        )
+        
+        return {
+            "id": str(memory.id),
+            "name": memory.name,
+            "content": memory.content,
+            "category": memory.category,
+            "metadata": memory.metadata or {},
+            "userid": memory.userid,
+            "created_at": memory.resource_timestamp.isoformat() if hasattr(memory, 'resource_timestamp') and memory.resource_timestamp else None
+        }
+
+    async def list_memories(
+        self, limit: int = 50, offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """List memories using the controller"""
+        from percolate.api.controllers.memory import user_memory_controller
+        
+        # Use the user_email from repository context to get user_id
+        user_id = self.user_email or self.user_id
+        if not user_id:
+            raise RepositoryError("No user context available for memory operations", operation="list_memories")
+        
+        memories = await user_memory_controller.list_recent(
+            user_id=user_id,
+            limit=limit,
+            offset=offset
+        )
+        
+        result = []
+        for memory in memories:
+            if isinstance(memory, dict):
+                result.append({
+                    "id": str(memory.get('id', '')),
+                    "name": memory.get('name', ''),
+                    "content": memory.get('content', ''),
+                    "category": memory.get('category', ''),
+                    "metadata": memory.get('metadata') or {},
+                    "userid": str(memory.get('userid', '')),
+                    "created_at": memory.get('resource_timestamp').isoformat() if memory.get('resource_timestamp') else None,
+                    "updated_at": memory.get('updated_at').isoformat() if memory.get('updated_at') else None
+                })
+            else:
+                result.append({
+                    "id": str(memory.id),
+                    "name": memory.name,
+                    "content": memory.content,
+                    "category": memory.category,
+                    "metadata": memory.metadata or {},
+                    "userid": memory.userid,
+                    "created_at": memory.resource_timestamp.isoformat() if hasattr(memory, 'resource_timestamp') and memory.resource_timestamp else None,
+                    "updated_at": memory.resource_timestamp.isoformat() if hasattr(memory, 'resource_timestamp') and memory.resource_timestamp else None
+                })
+        return result
+
+    async def get_memory(self, name: str) -> Dict[str, Any]:
+        """Get a specific memory using the controller"""
+        from percolate.api.controllers.memory import user_memory_controller
+        
+        # Use the user_email from repository context to get user_id
+        user_id = self.user_email or self.user_id
+        if not user_id:
+            raise RepositoryError("No user context available for memory operations", operation="get_memory")
+        
+        memory = await user_memory_controller.get(
+            user_id=user_id,
+            name=name
+        )
+        
+        return {
+            "id": str(memory.id),
+            "name": memory.name,
+            "content": memory.content,
+            "category": memory.category,
+            "metadata": memory.metadata or {},
+            "userid": memory.userid,
+            "created_at": memory.resource_timestamp.isoformat() if hasattr(memory, 'resource_timestamp') and memory.resource_timestamp else None,
+            "updated_at": memory.resource_timestamp.isoformat() if hasattr(memory, 'resource_timestamp') and memory.resource_timestamp else None
+        }
+
+    async def search_memories(
+        self,
+        query: Optional[str] = None,
+        category: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Search memories using the controller"""
+        from percolate.api.controllers.memory import user_memory_controller
+        
+        # Use the user_email from repository context to get user_id
+        user_id = self.user_email or self.user_id
+        if not user_id:
+            raise RepositoryError("No user context available for memory operations", operation="search_memories")
+        
+        memories = await user_memory_controller.search(
+            user_id=user_id,
+            query=query,
+            category=category,
+            limit=limit
+        )
+        
+        result = []
+        for memory in memories:
+            if isinstance(memory, dict):
+                result.append({
+                    "id": str(memory.get('id', '')),
+                    "name": memory.get('name', ''),
+                    "content": memory.get('content', ''),
+                    "category": memory.get('category', ''),
+                    "metadata": memory.get('metadata') or {},
+                    "userid": str(memory.get('userid', '')),
+                    "created_at": memory.get('resource_timestamp').isoformat() if memory.get('resource_timestamp') else None,
+                    "updated_at": memory.get('updated_at').isoformat() if memory.get('updated_at') else None
+                })
+            else:
+                result.append({
+                    "id": str(memory.id),
+                    "name": memory.name,
+                    "content": memory.content,
+                    "category": memory.category,
+                    "metadata": memory.metadata or {},
+                    "userid": memory.userid,
+                    "created_at": memory.resource_timestamp.isoformat() if hasattr(memory, 'resource_timestamp') and memory.resource_timestamp else None,
+                    "updated_at": memory.resource_timestamp.isoformat() if hasattr(memory, 'resource_timestamp') and memory.resource_timestamp else None
+                })
+        return result
+
+
+    async def build_memory(self) -> Dict[str, Any]:
+        """Build memory summary using the controller"""
+        from percolate.api.controllers.memory import user_memory_controller
+        
+        # Use the user_email from repository context to get user_id
+        user_id = self.user_email or self.user_id
+        if not user_id:
+            raise RepositoryError("No user context available for memory operations", operation="build_memory")
+        
+        return await user_memory_controller.build(user_id=user_id)

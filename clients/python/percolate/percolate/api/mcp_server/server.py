@@ -2,7 +2,7 @@
 
 import logging
 from fastmcp import FastMCP
-from .config import get_mcp_settings
+from .config import get_mcp_settings, get_server_info
 from .auth import get_auth_handler
 from .repository_factory import create_repository
 from .tools import create_entity_tools, create_function_tools, create_help_tools, create_file_tools, create_chat_tools, create_memory_tools
@@ -20,10 +20,13 @@ def create_mcp_server() -> FastMCP:
     # Create MCP server with optional auth
     auth_handler = get_auth_handler()
     
+    # Get server info with About section prepended to instructions
+    server_info = get_server_info(settings)
+    
     mcp = FastMCP(
-        name=settings.mcp_server_name,
-        version=settings.mcp_server_version,
-        instructions=settings.mcp_server_instructions,
+        name=server_info["name"],
+        version=server_info["version"],
+        instructions=server_info["instructions"],
         auth=auth_handler
     )
     
