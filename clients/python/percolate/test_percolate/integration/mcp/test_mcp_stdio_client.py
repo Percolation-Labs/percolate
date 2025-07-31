@@ -10,7 +10,7 @@ import asyncio
 from pathlib import Path
 
 # Add percolate to path
-sys.path.insert(0, str(Path(__file__).parent / "clients/python/percolate"))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 async def test_percolate_mcp_stdio():
     """Test Percolate MCP server with stdio client"""
@@ -45,7 +45,7 @@ async def test_percolate_mcp_stdio():
         command=sys.executable,
         args=["-m", "percolate.api.mcp_server"],
         env=env,
-        cwd=str(Path(__file__).parent / "clients/python/percolate")
+        cwd=str(Path(__file__).parent.parent.parent.parent)
     )
     
     try:
@@ -192,7 +192,7 @@ async def test_auth_scenarios():
         command=sys.executable,
         args=["-m", "percolate.api.mcp_server"],
         env=env_valid,
-        cwd=str(Path(__file__).parent / "clients/python/percolate")
+        cwd=str(Path(__file__).parent.parent.parent.parent)
     )
     
     try:
@@ -213,7 +213,7 @@ async def test_auth_scenarios():
         command=sys.executable,
         args=["-m", "percolate.api.mcp_server"],
         env=env_invalid,
-        cwd=str(Path(__file__).parent / "clients/python/percolate")
+        cwd=str(Path(__file__).parent.parent.parent.parent)
     )
     
     try:

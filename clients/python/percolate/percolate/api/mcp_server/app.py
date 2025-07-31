@@ -2,7 +2,7 @@
 
 from fastapi import FastAPI
 from .server import create_mcp_server
-from .config import get_mcp_settings
+from .config import get_mcp_settings, get_server_info
 
 
 def create_mcp_http_app() -> FastAPI:
@@ -15,11 +15,14 @@ def create_mcp_http_app() -> FastAPI:
     # Get the HTTP app from MCP with path
     mcp_app = mcp.http_app(path="/mcp")
     
+    # Get server info with About section prepended to instructions
+    server_info = get_server_info(settings)
+    
     # Create FastAPI app with shared lifespan
     app = FastAPI(
-        title=f"{settings.mcp_server_name} HTTP Interface",
-        version=settings.mcp_server_version,
-        description=settings.mcp_server_instructions,
+        title=f"{server_info['name']} HTTP Interface",
+        version=server_info['version'],
+        description=server_info['instructions'],
         lifespan=mcp_app.lifespan  # Share MCP's lifespan
     )
     

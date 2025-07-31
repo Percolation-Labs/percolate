@@ -1,0 +1,71 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+# wheels/ - We need our bundled wheels!
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Poetry
+poetry.lock
+.venv/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# DXT build artifacts
+*.dxt
+build.sh
+build_simple.sh
+
+# Development files
+test_*.py
+tests/
+conftest.py
+run_*.py
+
+# Documentation
+*.md
+!README.md
+
+# Git
+.git/
+.gitignore
+
+# Environment
+.env
+.env.*
+
+# Temporary files
+*.tmp
+*.log
+
+# Don't ignore build directory - it contains our code
+!build/

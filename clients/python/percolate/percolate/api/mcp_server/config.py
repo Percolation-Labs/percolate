@@ -1,7 +1,7 @@
 """MCP Server configuration using existing Percolate environment variables"""
 
 import os
-from typing import Optional, List
+from typing import Optional, List, Dict
 from pydantic import Field
 try:
     from pydantic_settings import BaseSettings
@@ -38,8 +38,38 @@ class MCPSettings(BaseSettings):
     )
     
     mcp_server_instructions: str = Field(
-        default="Access Percolate entities, search capabilities, function evaluation, and knowledge base through MCP tools",
+        default="""Access Percolate through MCP tools:
+
+ENTITY TOOLS:
+- get_entity: Fetch specific nodes by name with fuzzy matching
+- entity_search: Powerful semantic search using detailed natural language queries. Be specific and descriptive! OR find all instances of a type (use entity_name="p8.Agent" to discover all available entity types)
+
+SEARCH & DISCOVERY:
+- function_search: Find available functions/tools
+- resource_search: Search uploaded resources and documents
+- search_memories: Semantic search through stored memories
+
+AI INTERACTION:
+- ask_the_agent: Ask deeper questions about the company/data this MCP server is configured for. Get insights, analysis, and detailed information through the AI agent (uses P8_DEFAULT_AGENT from environment)
+- help: Get AI-powered assistance
+
+EXECUTION & STORAGE:
+- function_eval: Execute discovered functions
+- file_upload: Upload files to Percolate
+- add_memory/list_memories/get_memory: Store and retrieve memories
+
+WORKFLOW:
+1. Start with entity_search using entity_name="p8.Agent" to discover entity types
+2. Search within specific entity types for targeted results
+3. Use ask_the_agent for deeper questions, insights, and analysis about your company data
+4. Combine tools: find functions with search, then execute with function_eval""",
         description="Instructions shown to clients about this MCP server's capabilities"
+    )
+    
+    # Additional About section for custom preamble
+    mcp_about_section: str = Field(
+        default_factory=lambda: from_env_or_project('P8_MCP_ABOUT', ''),
+        description="Additional About section content to prepend to system instructions. Use P8_MCP_ABOUT environment variable to set custom context."
     )
     
     # API endpoint configuration
@@ -79,7 +109,8 @@ class MCPSettings(BaseSettings):
     # Authentication - supports bearer token
     api_key: Optional[str] = Field(
         default_factory=lambda: from_env_or_project('P8_API_KEY', from_env_or_project('P8_TEST_BEARER_TOKEN', None)),
-        description="API key for bearer token authentication. Uses P8_API_KEY or P8_TEST_BEARER_TOKEN from environment or account settings."
+        description="API key for bearer token authentication. Uses P8_API_KEY or P8_TEST_BEARER_TOKEN from environment or account settings.",
+        json_schema_extra={"secret": True}  # Mark as secret for security
     )
     
     # User identification
@@ -107,7 +138,8 @@ class MCPSettings(BaseSettings):
     # Default resource configuration
     default_agent: str = Field(
         default_factory=lambda: from_env_or_project('P8_DEFAULT_AGENT', 'p8.Resources'),
-        description="Default agent for chat/operations (e.g., 'executive-ExecutiveResources')"
+        description="Default agent for chat/operations (e.g., 'executive-ExecutiveResources'). Set P8_DEFAULT_AGENT environment variable during install.",
+        json_schema_extra={"env_var": "P8_DEFAULT_AGENT"}  # Indicate this should be read from environment
     )
     
     default_namespace: str = Field(
@@ -169,6 +201,25 @@ class MCPSettings(BaseSettings):
 def get_mcp_settings() -> MCPSettings:
     """Get the current MCP settings instance"""
     return MCPSettings()
+
+
+def get_server_info(settings: MCPSettings) -> Dict[str, str]:
+    """Get server information with About section prepended to instructions"""
+    instructions_parts = []
+    
+    # Add About section if configured
+    if settings.mcp_about_section:
+        instructions_parts.append(settings.mcp_about_section.strip())
+        instructions_parts.append("")  # Add blank line separator
+    
+    # Add the main MCP server instructions
+    instructions_parts.append(settings.mcp_server_instructions)
+    
+    return {
+        "name": settings.mcp_server_name,
+        "version": settings.mcp_server_version,
+        "instructions": "\n".join(instructions_parts)
+    }
 
 
 # For backward compatibility

@@ -11,7 +11,7 @@ import tempfile
 from pathlib import Path
 
 # Add percolate to path
-sys.path.insert(0, str(Path(__file__).parent / "clients/python/percolate"))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 async def test_mcp_tools_directly():
     """Test MCP tools as direct function calls"""
@@ -168,7 +168,7 @@ async def test_mcp_stdio_mode():
     
     # Start MCP server process
     cmd = [sys.executable, "-m", "percolate.api.mcp_server"]
-    cwd = str(Path(__file__).parent / "clients/python/percolate")
+    cwd = str(Path(__file__).parent.parent.parent.parent)
     
     print(f"Starting MCP server with command: {' '.join(cmd)}")
     print(f"Working directory: {cwd}")

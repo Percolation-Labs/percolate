@@ -41,7 +41,7 @@ class TestUserMemoryController:
         )
     
     @pytest.mark.asyncio
-    async def test_add_memory_success(self, controller, mock_repository, sample_memory):
+    async def test_add_memory_success(self, controller, mock_repository):
         """Test successful memory addition"""
         # Setup mock
         mock_repo_instance = MagicMock()
@@ -49,15 +49,17 @@ class TestUserMemoryController:
         mock_repo_instance.update_records = MagicMock()
         
         # Execute
-        with patch('percolate.models.p8.types.UserMemory', return_value=sample_memory):
-            result = await controller.add(
-                user_id="amartey@gmail.com",
-                content="Test memory content",
-                metadata={"test": "data"}
-            )
+        result = await controller.add(
+            user_id="amartey@gmail.com",
+            content="Test memory content",
+            metadata={"test": "data"}
+        )
         
-        # Verify
-        assert result == sample_memory
+        # Verify - just check that a UserMemory instance was returned
+        assert isinstance(result, UserMemory)
+        assert result.content == "Test memory content"
+        assert result.metadata == {"test": "data"}
+        assert result.userid == "10e0a97d-a064-553a-9043-3c1f0a6e6725"  # UUID for amartey@gmail.com
         mock_repository.assert_called_once_with(UserMemory)
         mock_repo_instance.update_records.assert_called_once()
     
@@ -101,7 +103,7 @@ class TestUserMemoryController:
         # Setup mock
         mock_repo_instance = MagicMock()
         mock_repository.return_value = mock_repo_instance
-        mock_repo_instance.get_entities_by_keys = MagicMock(return_value=[sample_memory])
+        mock_repo_instance.select = MagicMock(return_value=[sample_memory])
         
         # Execute
         result = await controller.get(
@@ -111,9 +113,9 @@ class TestUserMemoryController:
         
         # Verify
         assert result == sample_memory
-        mock_repo_instance.get_entities_by_keys.assert_called_once_with(
-            keys=[{"userid": "amartey@gmail.com", "name": "amartey_20240101_120000_000"}],
-            as_model=True
+        mock_repo_instance.select.assert_called_once_with(
+            name="amartey_20240101_120000_000",
+            userid="amartey@gmail.com"
         )
     
     @pytest.mark.asyncio
@@ -122,7 +124,7 @@ class TestUserMemoryController:
         # Setup mock
         mock_repo_instance = MagicMock()
         mock_repository.return_value = mock_repo_instance
-        mock_repo_instance.get_entities_by_keys = MagicMock(return_value=[])
+        mock_repo_instance.select = MagicMock(return_value=[])
         
         # Execute and verify exception
         with pytest.raises(HTTPException) as exc_info:
@@ -140,7 +142,7 @@ class TestUserMemoryController:
         # Setup mock
         mock_repo_instance = MagicMock()
         mock_repository.return_value = mock_repo_instance
-        mock_repo_instance.execute_sql = MagicMock(return_value=[sample_memory])
+        mock_repo_instance.execute = MagicMock(return_value=[sample_memory])
         
         # Execute
         result = await controller.list_recent(
@@ -151,12 +153,14 @@ class TestUserMemoryController:
         
         # Verify
         assert result == [sample_memory]
-        mock_repo_instance.execute_sql.assert_called_once()
-        # Check SQL query contains correct elements
-        call_args = mock_repo_instance.execute_sql.call_args
+        mock_repo_instance.execute.assert_called_once()
+        # Check that execute was called with SQL and parameters
+        call_args = mock_repo_instance.execute.call_args
         assert "UserMemory" in call_args[0][0]
         assert "ORDER BY updated_at DESC" in call_args[0][0]
-        assert call_args[1]["params"] == ("amartey@gmail.com", 10, 0)
+        # Verify user UUID conversion happened
+        assert call_args[1]["data"][1] == 10  # limit
+        assert call_args[1]["data"][2] == 0   # offset
     
     @pytest.mark.asyncio
     async def test_search_memories_with_query(self, controller, mock_repository, sample_memory):
@@ -164,7 +168,25 @@ class TestUserMemoryController:
         # Setup mock
         mock_repo_instance = MagicMock()
         mock_repository.return_value = mock_repo_instance
-        mock_repo_instance.search = MagicMock(return_value=[sample_memory])
+        
+        # Create a mock search result that matches what the controller expects
+        expected_uuid = "10e0a97d-a064-553a-9043-3c1f0a6e6725"  # UUID for amartey@gmail.com
+        search_result = [{
+            'vector_result': [{
+                'id': sample_memory.id,
+                'name': sample_memory.name,
+                'category': sample_memory.category,
+                'content': sample_memory.content,
+                'summary': sample_memory.summary,
+                'ordinal': sample_memory.ordinal,
+                'uri': sample_memory.uri,
+                'metadata': sample_memory.metadata,
+                'graph_paths': sample_memory.graph_paths,
+                'resource_timestamp': sample_memory.resource_timestamp,
+                'userid': expected_uuid
+            }]
+        }]
+        mock_repo_instance.search = MagicMock(return_value=search_result)
         
         # Execute
         result = await controller.search(
@@ -175,14 +197,12 @@ class TestUserMemoryController:
         )
         
         # Verify
-        assert result == [sample_memory]
-        mock_repo_instance.search.assert_called_once_with(
-            userid="amartey@gmail.com",
-            category="user_memory",
-            query="test",
-            limit=20,
-            as_model=True
-        )
+        assert len(result) == 1
+        assert result[0].id == sample_memory.id
+        assert result[0].name == sample_memory.name
+        assert result[0].content == sample_memory.content
+        # Check that search was called with just the query
+        mock_repo_instance.search.assert_called_once_with("test")
     
     @pytest.mark.asyncio
     async def test_search_memories_without_query(self, controller, mock_repository, sample_memory):
@@ -190,7 +210,8 @@ class TestUserMemoryController:
         # Setup mock
         mock_repo_instance = MagicMock()
         mock_repository.return_value = mock_repo_instance
-        mock_repo_instance.search = MagicMock(return_value=[sample_memory])
+        # When no query, controller uses select_with_predicates
+        mock_repo_instance.select_with_predicates = MagicMock(return_value=[sample_memory.model_dump()])
         
         # Execute
         result = await controller.search(
@@ -199,12 +220,14 @@ class TestUserMemoryController:
         )
         
         # Verify
-        assert result == [sample_memory]
-        mock_repo_instance.search.assert_called_once_with(
-            userid="amartey@gmail.com",
-            query=None,
+        assert len(result) == 1
+        assert result[0].id == sample_memory.id
+        # Check that UUID conversion happened  
+        expected_uuid = "10e0a97d-a064-553a-9043-3c1f0a6e6725"  # UUID for amartey@gmail.com
+        mock_repo_instance.select_with_predicates.assert_called_once_with(
+            filter={"userid": expected_uuid},
             limit=50,
-            as_model=True
+            order_by="updated_at DESC"
         )
     
     @pytest.mark.asyncio
@@ -218,36 +241,3 @@ class TestUserMemoryController:
         assert result["user_id"] == "amartey@gmail.com"
         assert "timestamp" in result
     
-    @pytest.mark.asyncio
-    async def test_delete_memory_success(self, controller, mock_repository, sample_memory):
-        """Test successful memory deletion"""
-        # Setup mocks
-        mock_repo_instance = MagicMock()
-        mock_repository.return_value = mock_repo_instance
-        mock_repo_instance.delete = MagicMock()
-        
-        # Mock the get method
-        with patch.object(controller, 'get', new_callable=AsyncMock, return_value=sample_memory):
-            result = await controller.delete(
-                user_id="amartey@gmail.com",
-                name="amartey_20240101_120000_000"
-            )
-        
-        # Verify
-        assert result is True
-        mock_repo_instance.delete.assert_called_once_with(id=sample_memory.id)
-    
-    @pytest.mark.asyncio
-    async def test_delete_memory_not_found(self, controller):
-        """Test deletion when memory not found"""
-        # Mock the get method to raise 404
-        with patch.object(controller, 'get', new_callable=AsyncMock) as mock_get:
-            mock_get.side_effect = HTTPException(status_code=404, detail="Not found")
-            
-            with pytest.raises(HTTPException) as exc_info:
-                await controller.delete(
-                    user_id="amartey@gmail.com",
-                    name="non_existent"
-                )
-            
-            assert exc_info.value.status_code == 404

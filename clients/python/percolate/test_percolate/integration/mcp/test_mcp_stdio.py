@@ -11,7 +11,7 @@ import asyncio
 from pathlib import Path
 
 # Add percolate to path
-sys.path.insert(0, str(Path(__file__).parent / "clients/python/percolate"))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 def create_json_rpc_message(id, method, params=None):
     """Create a proper JSON-RPC 2.0 message"""
@@ -47,7 +47,7 @@ async def test_mcp_stdio():
     
     # Start MCP server process
     cmd = [sys.executable, "-m", "percolate.api.mcp_server"]
-    cwd = str(Path(__file__).parent / "clients/python/percolate")
+    cwd = str(Path(__file__).parent.parent.parent.parent)
     
     process = subprocess.Popen(
         cmd,

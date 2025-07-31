@@ -13,12 +13,14 @@ class BaseMCPRepository(ABC):
     """
     
     @abstractmethod
-    async def get_entity(self, entity_name: str, entity_type: Optional[str] = None) -> Dict[str, Any]:
+    async def get_entity(self, entity_name: str, entity_type: Optional[str] = None, allow_fuzzy_match: bool = True, similarity_threshold: float = 0.3) -> Dict[str, Any]:
         """Get entity by name.
         
         Args:
             entity_name: Name of the entity
             entity_type: Optional type hint (Agent, PercolateAgent, Resources, Function)
+            allow_fuzzy_match: If True, uses fuzzy matching for similar names
+            similarity_threshold: Threshold for fuzzy matching (0.0-1.0, lower = more permissive)
             
         Returns:
             Entity data as dictionary or error dict
@@ -41,6 +43,25 @@ class BaseMCPRepository(ABC):
             
         Returns:
             List of matching entities
+        """
+        pass
+    
+    @abstractmethod
+    async def list_entities(
+        self,
+        entity_type: str,
+        limit: int = 100,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """List all entities of a specific type.
+        
+        Args:
+            entity_type: Type of entities to list (e.g., 'p8.Function')
+            limit: Maximum number of results
+            offset: Offset for pagination
+            
+        Returns:
+            List of entities with their basic information
         """
         pass
     
@@ -189,4 +210,43 @@ class BaseMCPRepository(ABC):
         Returns:
             Either a complete response string or an async iterator of SSE lines
         """
+        pass
+
+    @abstractmethod
+    async def add_memory(
+        self,
+        content: str,
+        name: Optional[str] = None,
+        category: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Add a new memory for the authenticated user"""
+        pass
+
+    @abstractmethod
+    async def list_memories(
+        self, limit: int = 50, offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """List memories for the authenticated user"""
+        pass
+
+    @abstractmethod
+    async def get_memory(self, name: str) -> Dict[str, Any]:
+        """Get a specific memory by name for the authenticated user"""
+        pass
+
+    @abstractmethod
+    async def search_memories(
+        self,
+        query: Optional[str] = None,
+        category: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Search memories by content or category for the authenticated user"""
+        pass
+
+
+    @abstractmethod
+    async def build_memory(self) -> Dict[str, Any]:
+        """Build memory summary for the authenticated user"""
         pass

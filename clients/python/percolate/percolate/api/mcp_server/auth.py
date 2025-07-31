@@ -44,16 +44,6 @@ async def percolate_auth_handler(request: Request) -> Optional[Dict[str, Any]]:
                 "auth_type": "api_key"
             }
         
-        # Check if it's a configured OAuth token
-        if token == settings.oauth_token:
-            return {
-                "user_id": settings.user_id,
-                "email": user_email or "oauth_user@percolate.local",
-                "user_groups": settings.user_groups,
-                "role_level": settings.role_level,
-                "auth_type": "oauth"
-            }
-        
         return None
     
     # For server mode, validate against Percolate API
@@ -87,6 +77,6 @@ async def percolate_auth_handler(request: Request) -> Optional[Dict[str, Any]]:
 def get_auth_handler() -> Optional[Callable]:
     """Get authentication handler if any auth is configured"""
     settings = get_mcp_settings()
-    if settings.api_key or settings.oauth_token:
+    if settings.api_key:
         return percolate_auth_handler
     return None

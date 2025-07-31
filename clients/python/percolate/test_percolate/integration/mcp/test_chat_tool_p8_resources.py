@@ -16,7 +16,7 @@ from pathlib import Path
 os.environ["P8_DEFAULT_AGENT"] = "p8-Resources"
 
 async def test_chat_tool():
-    """Test the ask_one tool with p8-Resources agent"""
+    """Test the ask_the_agent tool with p8-Resources agent"""
     
     # Configure environment for local API mode
     env = os.environ.copy()
@@ -37,7 +37,7 @@ async def test_chat_tool():
         command=sys.executable,
         args=["-m", "percolate.api.mcp_server"],
         env=env,
-        cwd=str(Path(__file__).parent / "clients/python/percolate")
+        cwd=str(Path(__file__).parent.parent.parent.parent)
     )
     
     async with stdio_client(server_params) as (read, write):
@@ -52,12 +52,12 @@ async def test_chat_tool():
             tools = await session.list_tools()
             print(f"\n📚 Available tools: {[tool.name for tool in tools.tools]}")
             
-            # Find the ask_one tool
-            ask_one_tool = next((t for t in tools.tools if t.name == "ask_one"), None)
-            if ask_one_tool:
-                print(f"✅ Found 'ask_one' tool: {ask_one_tool.description}")
+            # Find the ask_the_agent tool
+            ask_the_agent_tool = next((t for t in tools.tools if t.name == "ask_the_agent"), None)
+            if ask_the_agent_tool:
+                print(f"✅ Found 'ask_the_agent' tool: {ask_the_agent_tool.description}")
             else:
-                print("❌ 'ask_one' tool not found!")
+                print("❌ 'ask_the_agent' tool not found!")
                 return
             
             # Test queries for p8-Resources agent
@@ -86,7 +86,7 @@ async def test_chat_tool():
                 request = CallToolRequest(
                     method="tools/call",
                     params={
-                        "name": "ask_one",
+                        "name": "ask_the_agent",
                         "arguments": {
                             "query": test["query"],
                             "agent": "p8-Resources",  # Explicitly specify the agent
@@ -97,15 +97,13 @@ async def test_chat_tool():
                 
                 try:
                     # Call the tool with proper parameter wrapping
-                    print("⏳ Calling ask_one tool...")
+                    print("⏳ Calling ask_the_agent tool...")
                     result = await session.call_tool(
-                        name="ask_one",
+                        name="ask_the_agent",
                         arguments={
-                            "params": {
-                                "query": test["query"],
-                                "agent": "p8-Resources",
-                                "stream": True
-                            }
+                            "query": test["query"],
+                            "agent": "p8-Resources",
+                            "stream": True
                         }
                     )
                     

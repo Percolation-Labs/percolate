@@ -2,8 +2,8 @@ DROP FUNCTION IF EXISTS p8.get_fuzzy_entities;
 
 CREATE OR REPLACE FUNCTION p8.get_fuzzy_entities(
     search_terms TEXT[],
-    userid TEXT DEFAULT NULL,
     similarity_threshold REAL DEFAULT 0.5,
+    userid TEXT DEFAULT NULL,
     max_matches_per_term INT DEFAULT 5
 )
 RETURNS JSONB
@@ -37,19 +37,22 @@ BEGIN
 
     Parameters:
     - search_terms: Array of strings to search for
-    - userid: Optional user ID for filtering results
     - similarity_threshold: Minimum similarity score (0.0-1.0) to consider a match (default: 0.5)
+    - userid: Optional user ID for filtering results (deprecated, will be removed)
     - max_matches_per_term: Maximum number of matches to return per search term (default: 5)
     
     Example usage:
-    -- Search for multiple terms
+    -- Search for multiple terms (uses default threshold 0.5)
     SELECT p8.get_fuzzy_entities(ARRAY['customer', 'order', 'product']);
     
-    -- Search with user filter and custom threshold
-    SELECT p8.get_fuzzy_entities(ARRAY['customer', 'order'], 'user123', 0.6);
+    -- Search with custom threshold
+    SELECT p8.get_fuzzy_entities(ARRAY['customer', 'order'], 0.6);
+    
+    -- Search with user filter (deprecated, will be removed)
+    SELECT p8.get_fuzzy_entities(ARRAY['customer', 'order'], 0.6, 'user123');
     
     -- Search with all parameters
-    SELECT p8.get_fuzzy_entities(ARRAY['customer', 'order'], 'user123', 0.7, 10);
+    SELECT p8.get_fuzzy_entities(ARRAY['customer', 'order'], 0.7, 'user123', 10);
     
     Returns:
     {
@@ -120,7 +123,7 @@ END;
 $BODY$;
 
 -- Grant execute permission to public
-GRANT EXECUTE ON FUNCTION p8.get_fuzzy_entities(TEXT[], TEXT, REAL, INT) TO public;
+GRANT EXECUTE ON FUNCTION p8.get_fuzzy_entities(TEXT[], REAL, TEXT, INT) TO public;
 
 -- Add comment for documentation
 COMMENT ON FUNCTION p8.get_fuzzy_entities IS 'Optimized fuzzy match for multiple search terms. Returns entities that match any of the provided search terms with a similarity score above the threshold. Uses a single query for efficiency.';

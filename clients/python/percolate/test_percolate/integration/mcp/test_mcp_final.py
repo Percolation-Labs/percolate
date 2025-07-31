@@ -9,7 +9,7 @@ import asyncio
 from pathlib import Path
 
 # Add percolate to path
-sys.path.insert(0, str(Path(__file__).parent / "clients/python/percolate"))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 async def test_mcp_server():
     """Test Percolate MCP server is working"""
@@ -43,7 +43,7 @@ async def test_mcp_server():
         command=sys.executable,
         args=["-m", "percolate.api.mcp_server"],
         env=env,
-        cwd=str(Path(__file__).parent / "clients/python/percolate")
+        cwd=str(Path(__file__).parent.parent.parent.parent)
     )
     
     try:
