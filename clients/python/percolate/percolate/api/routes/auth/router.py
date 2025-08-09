@@ -11,7 +11,7 @@ from percolate.utils import logger
 from datetime import datetime, timezone, timedelta
 from percolate.models import User
 from percolate.utils import make_uuid
-from .utils import extract_user_info_from_token, store_user_with_token, decode_jwt_token, get_stable_session_key
+from .utils import extract_user_info_from_token, store_user_with_token, decode_jwt_token, get_stable_session_key, extract_token_expiry
 import uuid
 import base64
 from .google_oauth import GoogleOAuth, extract_user_info
@@ -356,9 +356,38 @@ async def google_auth_callback(request: Request, token:str=None):
             session_id = str(uuid.uuid4())
             logger.info(f"No session cookie found, created new session_id: {session_id}")
         
-        # Store the user with token and session
-        user = store_user_with_token(token_data, session_id)
-        logger.info(f"Stored user: {user.email} with session: {session_id}")
+        # Extract user email from combined info
+        user_email = combined_info.get('email')
+        if not user_email:
+            return JSONResponse(status_code=400, content={"error": "No email found in token"})
+        
+        # Check if user exists before storing
+        from percolate.api.auth.utils import get_user_from_email
+        existing_user = get_user_from_email(user_email)
+        
+        if not existing_user:
+            # Check if we should allow new users (default: False)
+            allow_new_users = os.getenv("OAUTH_ALLOW_NEW_USERS", "false").lower() == "true"
+            
+            if not allow_new_users:
+                return JSONResponse(
+                    status_code=401,
+                    content={
+                        "error": "unauthorized",
+                        "error_description": f"User {user_email} is not authorized to access this system. "
+                                           "Please contact your administrator to request access."
+                    }
+                )
+        
+        # Store/update the user with token
+        user = store_user_with_token(
+            email=user_email,
+            token=json.dumps(token_data),
+            name=combined_info.get('name', user_email),
+            token_expiry=extract_token_expiry(token_data),
+            oauth_provider='google'
+        )
+        logger.info(f"Stored/updated user: {user.email} with session: {session_id}")
         
         # Store user information in the session for easy retrieval
         request.session['user_id'] = str(user.id)

@@ -302,11 +302,27 @@ class GoogleOAuthProvider(AuthProvider):
                     raise AuthError("invalid_grant", "Failed to get user info")
                 
                 userinfo = userinfo_response.json()
+                user_email = userinfo["email"]
                 
-                # Store user with token
+                # Check if user exists
+                user_repo = p8.repository(User)
+                users = user_repo.select(email=user_email)
+                
+                if not users:
+                    # Check if we should allow new users (default: False)
+                    allow_new_users = os.getenv("OAUTH_ALLOW_NEW_USERS", "false").lower() == "true"
+                    
+                    if not allow_new_users:
+                        raise AuthError(
+                            "unauthorized",
+                            f"User {user_email} is not authorized to access this system. "
+                            "Please contact your administrator to request access."
+                        )
+                
+                # Store user with token (only updates if user exists, or creates if allowed)
                 await store_user_with_token(
-                    email=userinfo["email"],
-                    username=userinfo.get("name", userinfo["email"]),
+                    email=user_email,
+                    username=userinfo.get("name", user_email),
                     token=token_data,
                     session_id=secrets.token_urlsafe(32)
                 )
@@ -469,12 +485,22 @@ class GoogleOAuthRelayProvider(GoogleOAuthProvider):
                 user_email = userinfo["email"]
                 user_name = userinfo.get("name", user_email)
                 
-                # Register user if not exists
+                # Check if user exists
                 user_repo = p8.repository(User)
                 users = user_repo.select(email=user_email)
                 
                 if not users:
-                    # Create user without token
+                    # Check if we should allow new users (default: False)
+                    allow_new_users = os.getenv("OAUTH_ALLOW_NEW_USERS", "false").lower() == "true"
+                    
+                    if not allow_new_users:
+                        raise AuthError(
+                            "unauthorized",
+                            f"User {user_email} is not authorized to access this system. "
+                            "Please contact your administrator to request access."
+                        )
+                    
+                    # Only create user if explicitly allowed
                     user_id = make_uuid(user_email)
                     user = User(
                         id=user_id,

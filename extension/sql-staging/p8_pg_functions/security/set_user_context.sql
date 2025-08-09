@@ -49,14 +49,21 @@ BEGIN
     PERFORM set_config('percolate.user_id', p_user_id::TEXT, false);
     PERFORM set_config('percolate.role_level', v_role_level::TEXT, false);
     
-    -- Set user groups if available
-    IF v_groups IS NOT NULL AND array_length(v_groups, 1) > 0 THEN
-        -- For LIKE pattern matching in the policy, we need commas as separators
-        PERFORM set_config('percolate.user_groups', ',' || array_to_string(v_groups, ',') || ',', false);
-    ELSE
-        -- Set empty string if no groups
-        PERFORM set_config('percolate.user_groups', '', false);
-    END IF;
+    -- TEMPORARILY COMMENTED OUT TO TEST BUG
+    -- Set user groups if available - use proper array format to prevent confusion with SQL parameters
+    -- IF v_groups IS NOT NULL AND array_length(v_groups, 1) > 0 THEN
+    --     -- Store as JSON array to avoid confusion with SQL array literals
+    --     PERFORM set_config('percolate.user_groups_json', array_to_json(v_groups)::TEXT, false);
+    --     -- Also keep comma format for backward compatibility with existing policies
+    --     PERFORM set_config('percolate.user_groups', ',' || array_to_string(v_groups, ',') || ',', false);
+    -- ELSE
+    --     -- Set empty values
+    --     PERFORM set_config('percolate.user_groups_json', '[]', false);
+    --     PERFORM set_config('percolate.user_groups', '', false);
+    -- END IF;
+    
+    -- Set empty user groups to test if this fixes the contamination bug
+    PERFORM set_config('percolate.user_groups', '', false);
     
     -- Return the role level as a message for debugging
     RAISE NOTICE 'Set user context: user_id=%, role_level=%, groups=%', 

@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 from importlib import import_module
 import json
+from typing import Optional
 
 
 def get_repo_root():
@@ -215,3 +216,69 @@ SYSTEM_USER_ROLE_LEVEL = 1  # Admin level by default
 # Comma-separated list of allowed origins for CORS
 # Example: P8_CORS_ORIGINS="https://app.percolate.ai,https://staging.percolate.ai"
 P8_CORS_ORIGINS = os.environ.get("P8_CORS_ORIGINS", "")
+
+
+class _MasterPromptLoader:
+    """Singleton loader for master prompt from database"""
+    _instance = None
+    _master_prompt: Optional[str] = None
+    _loaded = False
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+    
+    def get_prompt(self) -> str:
+        """Get master prompt, loading from DB on first access"""
+        if not self._loaded:
+            self._load_prompt()
+        return self._master_prompt or ""
+    
+    def _load_prompt(self):
+        """Load prompt from database or environment"""
+        self._loaded = True
+        try:
+            # Try environment variable first for override
+            env_prompt = os.getenv('P8_MASTER_PROMPT')
+            if env_prompt:
+                self._master_prompt = env_prompt
+                return
+            
+            # Load from database
+            from percolate.services import PostgresService
+            pg = PostgresService()
+            result = pg.execute(
+                'SELECT value FROM p8."Settings" WHERE key = %s',
+                ['system_prompt']
+            )
+            if result and result[0]['value']:
+                self._master_prompt = result[0]['value']
+                # Use logger if available
+                try:
+                    from percolate.utils import logger
+                    logger.info("Loaded master prompt from database")
+                except:
+                    pass
+            else:
+                self._master_prompt = ""
+                
+        except Exception as e:
+            # Log warning if logger available
+            try:
+                from percolate.utils import logger
+                logger.warning(f"Failed to load master prompt: {e}")
+            except:
+                pass
+            self._master_prompt = ""
+
+
+# Singleton instance
+_loader = _MasterPromptLoader()
+
+# Create a callable that returns the prompt
+def _get_master_prompt():
+    return _loader.get_prompt()
+
+# Export as MASTER_PROMPT that can be called
+MASTER_PROMPT = _get_master_prompt

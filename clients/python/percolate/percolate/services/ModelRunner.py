@@ -81,11 +81,11 @@ class ModelRunner:
         repo = p8.repository(
             self.agent_model,
             user_id=self._context.user_id if self._context is not None else None,
-            role_level=self.role_level,
+            role_level=self._context.role_level if self._context is not None else None,
         )
 
         ui_context = self._context.user_id if self._context is not None else None
-        logger.info(
+        logger.debug(
             f"[[{ui_context}]]] got repo for user {ui_context} with roles {repo.user_groups} and {repo.role_level=}"
         )
 
@@ -267,9 +267,12 @@ class ModelRunner:
 
     @property
     def function_descriptions(self) -> typing.List[dict]:
-        """Provide access to the function manager's function specs to send to language models"""
-
-        return [f.function_spec for _, f in self._function_manager.functions.items()]
+        """Provide function specs filtered by current user's role level"""
+        role_level = self._context.role_level if self._context else None
+        filtered_functions = self._function_manager.get_functions_for_role_level(
+            role_level
+        )
+        return [f.function_spec for _, f in filtered_functions.items()]
 
     def __call__(
         self,
@@ -346,17 +349,22 @@ class ModelRunner:
             We write events using a protocol event:
             """
 
-            """we can add a users system prompt to the generic and then merge an agents prompt after that"""
+            base_prompt = GENERIC_P8_PROMPT
+
             sys_prompt = (
-                GENERIC_P8_PROMPT
-                if not ctx.plan
-                else f"{GENERIC_P8_PROMPT}\n\n{context.plan}"
+                base_prompt if not ctx.plan else f"{base_prompt}\n\n{context.plan}"
             )
             # Initialize message stack as in run()
             payload = data if data is not None else self._init_data
+
+            # Get functions filtered by role level
+            available_functions = self._function_manager.get_functions_for_role_level(
+                ctx.role_level if ctx is not None else None
+            )
+
             self.messages = self.agent_model.build_message_stack(
                 question=question,
-                functions=self.functions.keys(),
+                functions=list(available_functions.keys()),
                 data=payload,
                 system_prompt_preamble=sys_prompt,
                 user_memory=ctx.get_user_memory(),
@@ -505,11 +513,19 @@ class ModelRunner:
         """messages are system prompt etc. agent model's can override how message stack is constructed
            we add p8 preamble in percolate - in future this could be disabled per model
         """
+
+        # restrict for known user role - tools that requires an access level
+        available_functions = self._function_manager.get_functions_for_role_level(
+            context.role_level if context is not None else None
+        )
+
+        system_prompt = GENERIC_P8_PROMPT
+
         self.messages = self.agent_model.build_message_stack(
             question=question,
-            functions=self.functions.keys(),
+            functions=list(available_functions.keys()),
             data=data,
-            system_prompt_preamble=GENERIC_P8_PROMPT,
+            system_prompt_preamble=system_prompt,
             user_memory=self._context.get_user_memory(),
         )
 

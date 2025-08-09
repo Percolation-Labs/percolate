@@ -128,10 +128,13 @@ BEGIN
                 -- 1. User owns the record
                 (current_setting(''percolate.user_id'')::UUID = userid AND userid IS NOT NULL)
                 
-                -- 2. User is member of the record''s group
+                -- 2. User is member of the record''s group (with safer handling)
                 OR (
                     groupid IS NOT NULL AND 
-                    position(groupid IN current_setting(''percolate.user_groups'', ''true'')) > 0
+                    current_setting(''percolate.user_groups'', ''true'') IS NOT NULL AND
+                    current_setting(''percolate.user_groups'', ''true'') != '''' AND
+                    current_setting(''percolate.user_groups'', ''true'') ~ ''^,.*,$'' AND
+                    position('','' || groupid::TEXT || '','' IN current_setting(''percolate.user_groups'', ''true'')) > 0
                 )
             )
         )', 

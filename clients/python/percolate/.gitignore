@@ -175,3 +175,5 @@ cython_debug/
 notebooks
 .claude
 CLAUDE.md
+set_res_env.sh
+update_res_mp.sh

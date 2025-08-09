@@ -2,6 +2,11 @@
 
 ## Test Organization
 
+Set envs to whatever .e.g if you add an env script like below run tests in that env with poetry
+```
+source set_res_env.sh && poetry run python -m pytest
+```
+
 ### Test Directory Structure
 
 All Python tests for the Percolate project MUST be organized in the following structure:

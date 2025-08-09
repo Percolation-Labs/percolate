@@ -40,7 +40,7 @@ from typing import Optional, Dict, Any, List, Callable
 
 # Import Percolate modules
 from percolate.models.p8 import Task
-from percolate.api.routes.auth import get_current_token, hybrid_auth, require_user_auth
+from percolate.api.routes.auth import get_current_token, hybrid_auth, require_user_auth, hybrid_auth_with_role
 import percolate as p8
 from percolate.services import ModelRunner
 from percolate.services.llm import LanguageModel
@@ -184,7 +184,8 @@ def handle_agent_request(request: CompletionsRequestOpenApiFormat, params: Optio
         plan=system_content,
         username=userid, 
         session_id=session_id, 
-        channel_ts=metadata.get('channel_ts') or session_id
+        channel_ts=metadata.get('channel_ts') or session_id,
+        role_level=metadata.get('role_level')  # Include role_level from metadata
     )
     
     for key, value in metadata.items():
@@ -290,7 +291,8 @@ def handle_openai_request(request: CompletionsRequestOpenApiFormat, params: Opti
             model=model_name,
             session_id=session_id,
             username=metadata.get('userid') or metadata.get('user_id'),
-            channel_ts=metadata.get('channel_ts') or session_id
+            channel_ts=metadata.get('channel_ts') or session_id,
+            role_level=metadata.get('role_level')  # Include role_level from metadata
         )
         
         # Add any other metadata fields to the context
@@ -390,7 +392,8 @@ def handle_anthropic_request(request: CompletionsRequestOpenApiFormat, params: O
             model=model_name,
             session_id=session_id,
             username=metadata.get('userid') or metadata.get('user_id'),
-            channel_ts=metadata.get('channel_ts') or session_id
+            channel_ts=metadata.get('channel_ts') or session_id,
+            role_level=metadata.get('role_level')  # Include role_level from metadata
         )
         
         # Add any other metadata fields to the context
@@ -482,7 +485,8 @@ def handle_google_request(request: CompletionsRequestOpenApiFormat, params: Opti
             model=model_name,
             session_id=session_id,
             username=metadata.get('userid') or metadata.get('user_id'),
-            channel_ts=metadata.get('channel_ts') or session_id
+            channel_ts=metadata.get('channel_ts') or session_id,
+            role_level=metadata.get('role_level')  # Include role_level from metadata
         )
         
         # Add any other metadata fields to the context
@@ -856,7 +860,7 @@ async def completions(
     device_info: Optional[str] = Query(None, description="Device info Base64 encoded with arbitrary parameters such as GPS"),
     
     #use_sse: Optional[bool] = Query(False, description="Whether to use Server-Sent Events for streaming"),
-    auth_user_id: Optional[str] = Depends(hybrid_auth)
+    auth_data: tuple[Optional[str], Optional[int]] = Depends(hybrid_auth_with_role)
 ):
     """
     Use any model via an OpenAI API format and get model completions as streaming or non-streaming.
@@ -871,7 +875,8 @@ async def completions(
     """TODO we can add basic memory support for completions if enabled but this is a dumb relay and we use the agent/completions for more sophisticated interactions """
     
     # Check for valid authentication - either session or bearer token
-    # auth_user_id will be None for bearer token auth, or the user ID for session auth
+    # auth_data contains (user_id, role_level)
+    auth_user_id, user_role_level = auth_data
     
     if device_info:
         device_info = try_decode_device_info(device_info)
@@ -881,7 +886,7 @@ async def completions(
     
     # Use auth_user_id from HybridAuth if available, otherwise fall back to query param
     effective_user_id = auth_user_id or user_id
-    logger.info(f"{effective_user_id}, {session_id}, auth method: {'session' if auth_user_id else 'bearer'}")
+    logger.info(f"{effective_user_id}, {session_id}, role_level={user_role_level}, auth method: {'session' if auth_user_id else 'bearer'}")
     
     try:
         # Collect query parameters into a dict for easier handling
@@ -894,7 +899,8 @@ async def completions(
             'is_audio': is_audio,
             'query': request.compile_question(),
             'agent': request.compile_system(),
-            'metadata': device_info
+            'metadata': device_info,
+            'role_level': user_role_level  # Add role_level to params
         }
         
         # Remove None values
@@ -1013,7 +1019,7 @@ async def agent_completions(
     device_info: Optional[str] = Query(None, description="Device info Base64 encoded with arbitrary parameters such as GPS"),
     agent_name: Optional[str] = Path(..., description="Route to a specific agent"),
     #use_sse: Optional[bool] = Query(False, description="Whether to use Server-Sent Events for streaming"),
-    auth_user_id: Optional[str] = Depends(hybrid_auth)
+    auth_data: tuple[Optional[str], Optional[int]] = Depends(hybrid_auth_with_role)
 ):
     """
     Use any model via an OpenAI API format and get model completions as streaming or non-streaming.
@@ -1049,9 +1055,11 @@ async def agent_completions(
     logger.info(f"Session for {user_id=}, {session_id=}")
     
     expected_token = "!p3rc0la8!" #<-this a testing thing
+    # auth_data contains (user_id, role_level)
+    auth_user_id, user_role_level = auth_data
     # Use auth_user_id from HybridAuth if available, otherwise fall back to query param
     effective_user_id = auth_user_id or user_id
-    logger.info(f"{effective_user_id}, {session_id}, auth method: {'session' if auth_user_id else 'bearer'}")
+    logger.info(f"{effective_user_id}, {session_id}, role_level={user_role_level}, auth method: {'session' if auth_user_id else 'bearer'}")
  
     try:
         # Collect query parameters into a dict for easier handling
@@ -1064,7 +1072,8 @@ async def agent_completions(
             'is_audio': is_audio,
             'query': request.compile_question(),
             'agent': request.compile_system(),
-            'metadata': device_info
+            'metadata': device_info,
+            'role_level': user_role_level  # Add role_level to params
         }
         from percolate.models import Resources
         # Remove None values

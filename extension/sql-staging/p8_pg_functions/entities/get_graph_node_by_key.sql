@@ -22,7 +22,7 @@ BEGIN
                     FROM cypher(''percolate'', $$ 
                         MATCH (v)
                         WHERE v.key IN ['
-                 || array_to_string(ARRAY(SELECT quote_literal(k) FROM unnest(keys) AS k), ', ')
+                 || array_to_string(ARRAY(SELECT '"' || replace(replace(k, '\', '\\'), '"', '\"') || '"' FROM unnest(keys) AS k), ', ')
                  || '] 
                         RETURN v, v.uid 
                     $$) AS (v agtype, key agtype)

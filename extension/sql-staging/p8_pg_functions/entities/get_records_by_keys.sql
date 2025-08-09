@@ -16,26 +16,36 @@ DECLARE
     query TEXT;              -- Dynamic query to execute
     schema_name VARCHAR;
     pure_table_name VARCHAR;
+    safe_key_list TEXT[];    -- Safely processed key list
 BEGIN
+    -- Ensure clean search path to avoid session variable interference
+    SET LOCAL search_path = p8, public;
+    
     schema_name := lower(split_part(table_name, '.', 1));
     pure_table_name := split_part(table_name, '.', 2);
+
+    -- Debug: Log what we received
+    RAISE NOTICE 'get_records_by_keys: table=%, input_keys=%, input_type=%', table_name, key_list, pg_typeof(key_list);
 
     -- Check if key_list is empty, null, or contains only empty strings
     IF key_list IS NULL OR array_length(key_list, 1) IS NULL OR array_length(key_list, 1) = 0 THEN
         result := '[]'::jsonb;
     ELSE
         -- Filter out empty strings and null values from key_list
-        key_list := array_remove(array_remove(key_list, ''), NULL);
+        safe_key_list := array_remove(array_remove(key_list, ''), NULL);
         
         -- Check again after filtering
-        IF array_length(key_list, 1) IS NULL OR array_length(key_list, 1) = 0 THEN
+        IF safe_key_list IS NULL OR array_length(safe_key_list, 1) IS NULL OR array_length(safe_key_list, 1) = 0 THEN
             result := '[]'::jsonb;
         ELSE
-            -- Construct the dynamic query to select records from the specified table
-            query := format('SELECT jsonb_agg(to_jsonb(t)) FROM %I."%s" t WHERE t.%I::TEXT = ANY($1)', schema_name, pure_table_name, key_column);
+            -- Debug: Log what we're about to query
+            RAISE NOTICE 'get_records_by_keys: filtered_keys=%, array_length=%', safe_key_list, array_length(safe_key_list, 1);
             
-            -- Execute the dynamic query with the provided key_list as parameter
-            EXECUTE query USING key_list INTO result;
+            -- Use a safer approach: build the query with explicit array handling
+            query := format('SELECT jsonb_agg(to_jsonb(t)) FROM %I."%s" t WHERE t.%I::TEXT = ANY($1::TEXT[])', schema_name, pure_table_name, key_column);
+            
+            -- Execute the dynamic query with the safe key list
+            EXECUTE query USING safe_key_list INTO result;
         END IF;
     END IF;
     

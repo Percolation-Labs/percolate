@@ -106,6 +106,30 @@ def get_user_from_email(email: str) -> Optional[User]:
     return None
 
 
+def get_user_with_role_from_email(email: str) -> Optional[tuple[str, Optional[int]]]:
+    """
+    Get user ID and role_level by email in a single query
+    
+    Args:
+        email: User's email address
+        
+    Returns:
+        Tuple of (user_id, role_level) if user exists, None otherwise
+    """
+    try:
+        # Use direct SQL query to get both id and role_level efficiently
+        query = """SELECT id::TEXT as id, role_level FROM p8."User" WHERE email = %s LIMIT 1"""
+        result = p8.repository(User).execute(query, data=(email,))
+        
+        if result and len(result) > 0:
+            user_data = result[0]
+            return (user_data['id'], user_data.get('role_level'))
+        return None
+    except Exception as e:
+        logger.warning(f"Failed to get user with role from email {email}: {e}")
+        return None
+
+
 def register_or_update_user(email: str, name: Optional[str] = None,
                            token: Optional[str] = None,
                            oauth_provider: Optional[str] = None,
