@@ -1264,7 +1264,7 @@ class Resources(AbstractModel):
         cls, user_id: str, limit: int = 10
     ) -> typing.List[typing.Dict[str, typing.Any]]:
         """
-        Get the most recent resource uploads for a specific user, grouped by source file.
+        Get the most recent resource uploads for a specific user, grouped by source file
 
         This function groups resources by their source file (from metadata) and includes
         chunk entity names that can be used with get_entities() to retrieve specific chunks.
