@@ -20,7 +20,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from percolate.utils.env import load_db_key, POSTGRES_PASSWORD
 from percolate.utils import logger, make_uuid
 import typing
-from .utils import get_user_from_email, is_valid_token_for_user, extract_user_info_from_token
+from .utils import get_user_from_email, is_valid_token_for_user, extract_user_info_from_token, get_user_with_role_from_email
 
 
 bearer = HTTPBearer(auto_error=False)
@@ -53,12 +53,39 @@ async def get_api_key(
     # For production, we validate against real keys
     is_test_token = "test_token" in token
     
-    if not is_test_token and token != key and token != POSTGRES_PASSWORD:
-        logger.warning(f"Failing to connect using token {token[:3]}..{token[-3:]} - expecting either {key[:3]}..{key[-3:]} or {POSTGRES_PASSWORD[:3]}..{POSTGRES_PASSWORD[-3:]}")
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid API KEY in token check.",
-        )
+    # Check if it's a master API key
+    if is_test_token or token == key or token == POSTGRES_PASSWORD:
+        return token
+    
+    # Check if it's a valid JWT token stored in the database
+    # This handles OAuth tokens (e.g., Google JWT tokens) stored in user records
+    try:
+        # Try to find a user with this token
+        from percolate.services import PostgresService
+        pg = PostgresService()
+        query = """
+            SELECT id, email FROM p8."User" 
+            WHERE token = %s 
+               OR (token IS NOT NULL 
+                   AND token::text LIKE '{%%' 
+                   AND token::jsonb->>'access_token' = %s)
+            LIMIT 1
+        """
+        result = pg.execute(query, data=(token, token))
+        
+        if result and len(result) > 0:
+            logger.debug(f"Found user with JWT token: {result[0]['email']}")
+            return token
+            
+    except Exception as e:
+        logger.debug(f"JWT token lookup failed: {e}")
+    
+    # If none of the above, it's invalid
+    logger.warning(f"Failing to connect using token {token[:3]}..{token[-3:]} - not a valid API key or JWT token")
+    raise HTTPException(
+        status_code=401,
+        detail="Invalid API KEY in token check.",
+    )
 
     return token
 
@@ -305,6 +332,123 @@ class HybridAuth:
 
 # Create singleton instances for different use cases
 hybrid_auth = HybridAuth()  # Returns Optional[str] - None for bearer, user_id for session
+
+
+class HybridAuthWithRole:
+    """
+    Dependency class that returns both user_id and role_level.
+    Returns a tuple of (user_id, role_level) or (None, None).
+    """
+    
+    async def __call__(
+        self, 
+        request: Request,
+        credentials: typing.Optional[HTTPAuthorizationCredentials] = Depends(bearer)
+    ) -> typing.Tuple[typing.Optional[str], typing.Optional[int]]:
+        """
+        Returns (user_id, role_level) tuple.
+        """
+        
+        # First, try session authentication
+        try:
+            user_id = get_user_from_session(request)
+            if user_id:
+                # Get role_level for this user
+                query = """SELECT role_level FROM p8."User" WHERE id::TEXT = %s LIMIT 1"""
+                from percolate.services import PostgresService
+                pg = PostgresService()
+                result = pg.execute(query, data=(user_id,))
+                role_level = result[0]['role_level'] if result else None
+                logger.debug(f"Session auth: user_id={user_id}, role_level={role_level}")
+                return (user_id, role_level)
+        except Exception as e:
+            logger.debug(f"Session auth failed: {e}")
+        
+        # If no session, try bearer token
+        if credentials:
+            try:
+                # Validate the bearer token
+                validated_token = await get_api_key(credentials)
+                logger.debug("Authenticated via bearer token")
+                
+                # Check if this is a JWT token (not a master API key)
+                # JWT tokens are longer and contain dots
+                # Google OAuth tokens may have only 1 dot, standard JWTs have 2
+                is_jwt_token = len(validated_token) > 100 and validated_token.count('.') >= 1
+                logger.debug(f"Token validation: length={len(validated_token)}, dots={validated_token.count('.')}, is_jwt={is_jwt_token}")
+                
+                # If it's a JWT token, try to find the user by token
+                if is_jwt_token:
+                    try:
+                        from percolate.services import PostgresService
+                        pg = PostgresService()
+                        query = """
+                            SELECT id::TEXT as id, email, role_level 
+                            FROM p8."User" 
+                            WHERE token = %s 
+                               OR (token IS NOT NULL 
+                                   AND token::text LIKE '{%%' 
+                                   AND token::jsonb->>'access_token' = %s)
+                            LIMIT 1
+                        """
+                        result = pg.execute(query, data=(validated_token, validated_token))
+                        
+                        if result and len(result) > 0:
+                            user_data = result[0]
+                            user_id = user_data['id']
+                            role_level = user_data.get('role_level')
+                            logger.debug(f"JWT token auth: user_id={user_id}, email={user_data['email']}, role_level={role_level}")
+                            return (user_id, role_level)
+                    except Exception as e:
+                        logger.debug(f"JWT token user lookup failed: {e}")
+                
+                # Check if user_id in query params
+                user_id_from_query = request.query_params.get('user_id')
+                if user_id_from_query:
+                    # Get role_level for this user
+                    query = """SELECT role_level FROM p8."User" WHERE id::TEXT = %s LIMIT 1"""
+                    from percolate.services import PostgresService
+                    pg = PostgresService()
+                    result = pg.execute(query, data=(user_id_from_query,))
+                    role_level = result[0]['role_level'] if result else None
+                    logger.debug(f"Bearer token auth with user_id: {user_id_from_query}, role_level={role_level}")
+                    return (user_id_from_query, role_level)
+                
+                # Check for email in header
+                user_email = (request.headers.get('X-User-Email') or 
+                             request.headers.get('x-user-email') or 
+                             request.headers.get('X-OpenWebUI-User-Email') or 
+                             request.headers.get('x-openwebui-user-email'))
+                if user_email:
+                    # Efficiently get both user_id and role_level
+                    user_data = get_user_with_role_from_email(user_email)
+                    if user_data:
+                        user_id, role_level = user_data
+                        logger.debug(f"Resolved from email: user_id={user_id}, role_level={role_level}")
+                        return (user_id, role_level)
+                    else:
+                        logger.error(f"User {user_email} does not exist in the system")
+                        raise HTTPException(
+                            status_code=401,
+                            detail=f"User {user_email} does not exist.",
+                            headers={"WWW-Authenticate": "Bearer"}
+                        )
+                
+                # Valid bearer token but no user context
+                return (None, None)
+                    
+            except HTTPException:
+                raise
+        
+        # If both methods fail, raise 401
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required. Use session login or valid API key.",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+
+
+hybrid_auth_with_role = HybridAuthWithRole()  # Returns (user_id, role_level) tuple
 
 
 class RequireUserAuth(HybridAuth):

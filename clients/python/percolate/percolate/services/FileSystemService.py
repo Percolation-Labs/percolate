@@ -1406,9 +1406,8 @@ class FileSystemService:
                         # Try to create an instance of the custom model with the chunk data
                         try:
                             chunk_dict = chunk.model_dump() if hasattr(chunk, 'model_dump') else chunk.__dict__
-                            # Filter to only include fields that the custom model accepts
-                            filtered_dict = {k: v for k, v in chunk_dict.items() if hasattr(model_class, k)}
-                            custom_chunk = model_class(**filtered_dict)
+                            # Let Pydantic handle field validation and filtering automatically
+                            custom_chunk = model_class(**chunk_dict)
                             chunks[chunks.index(chunk)] = custom_chunk
                         except Exception as e:
                             logger.warning(f"Failed to convert chunk to {model_class.__name__}: {e}")

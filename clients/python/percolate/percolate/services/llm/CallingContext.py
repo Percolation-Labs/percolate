@@ -8,19 +8,21 @@ DEFAULT_MAX_AGENT_LOOPS = 5
 DEFAULT_MODEL_TEMPERATURE = 0.0
 
 
-def get_user_memory(user_id, thread_id:str=None, **kwargs):
+def get_user_memory(user_id, thread_id: str = None, **kwargs):
     """
     lookup a user state by user_id but support looking up by email which is effectively and id in percolate
     """
-   
-    try: 
+
+    try:
         from percolate.models import User
         import percolate as p8
-         
-        query_id_or_email = f"""  SELECT * FROM  p8."User" WHERE id::TEXT = %s or email = %s """
-        
-        user = p8.repository(User).execute(query_id_or_email, data=(user_id,user_id))
-        
+
+        query_id_or_email = (
+            f"""  SELECT * FROM  p8."User" WHERE id::TEXT = %s or email = %s """
+        )
+
+        user = p8.repository(User).execute(query_id_or_email, data=(user_id, user_id))
+
         if user:
             user = User(**user[0])
             return user.as_memory(**kwargs)
@@ -28,17 +30,20 @@ def get_user_memory(user_id, thread_id:str=None, **kwargs):
         logger.warning(f"Failed to get memory for user {user_id}")
         raise
 
+
 class ApiCallingContext(BaseModel):
     """calling context object - all have defaults
     an agent session uses these things to control how to communicate with the user or the LLM Api
     """
 
     session_id: typing.Optional[str] = Field(
-        default=None, description="A goal orientated session id actually maps to thread_id in the database and not session.id"
+        default=None,
+        description="A goal orientated session id actually maps to thread_id in the database and not session.id",
     )
-    
+
     chat_id: typing.Optional[str] = Field(
-        default=None, description="The chat_id from OpenWebUI, if provided - usually used as session_id"
+        default=None,
+        description="The chat_id from OpenWebUI, if provided - usually used as session_id",
     )
 
     session_context: typing.Optional[str] = Field(
@@ -55,8 +60,9 @@ class ApiCallingContext(BaseModel):
     username: typing.Optional[str] = Field(
         default=None, description="The session username"
     )
-    user_id: typing.Optional[str|uuid.UUID] = Field(
-        default=None, description="UUID user id is more accurate if known but we try to resolve"
+    user_id: typing.Optional[str | uuid.UUID] = Field(
+        default=None,
+        description="UUID user id is more accurate if known but we try to resolve",
     )
     channel_context: typing.Optional[str] = Field(
         default=None,
@@ -70,12 +76,12 @@ class ApiCallingContext(BaseModel):
         default=False,
         description="Indicate if a streaming response is preferred with or without a callback",
     )
-    
+
     is_hybrid_streaming: typing.Optional[bool] = Field(
         default=False,
         description="Hybrid Streaming calls functions internally but streams text content",
     )
-      
+
     temperature: typing.Optional[float] = Field(
         default=DEFAULT_MODEL_TEMPERATURE, description="The LLM temperature"
     )
@@ -95,6 +101,11 @@ class ApiCallingContext(BaseModel):
         description="files associated with the context", default_factory=list
     )
 
+    role_level: typing.Optional[int] = Field(
+        default=None,
+        description="User's role level for access control (lower = more access, None = system access)",
+    )
+
     def get_response_format(cls):
         """"""
         if cls.prefer_json:
@@ -112,25 +123,25 @@ class CallingContext(ApiCallingContext):
         default=None,
         description="A callback to send final response e.g a Slack Say method",
     )
-    
+
     def get_user_memory(self):
         """
         given a user context we can lookup the users recents
         """
-        if self.username:
-            return get_user_memory(self.username,self.channel_ts)
+        if self.username or self.user_id:
+            return get_user_memory(self.user_id or self.username, self.channel_ts)
 
     @staticmethod
     def simple_printer(d):
-        print(d,end='')
-    
-    def in_streaming_mode(cls, is_hybrid_streaming:bool=True, model:str=None):
+        print(d, end="")
+
+    def in_streaming_mode(cls, is_hybrid_streaming: bool = True, model: str = None):
         """convert context as is to streaming"""
         data = cls.model_dump()
-        data['prefers_streaming'] = True
-        data['is_hybrid_streaming'] = is_hybrid_streaming
+        data["prefers_streaming"] = True
+        data["is_hybrid_streaming"] = is_hybrid_streaming
         if model:
-            data['model'] = model
+            data["model"] = model
         return CallingContext(**data)
 
     @property
@@ -139,13 +150,47 @@ class CallingContext(ApiCallingContext):
         return cls.prefers_streaming or cls.streaming_callback is not None
 
     @classmethod
-    def with_model(cls, model_name:str):
+    def with_model(cls, model_name: str):
         """
         construct the default model context but with different model
         """
-        
+
         defaults = CallingContext().model_dump()
         if model_name:
-            defaults['model'] = model_name
+            defaults["model"] = model_name
         return CallingContext(**defaults)
-    
+
+    @classmethod
+    def context_with_role_level(
+        cls, context: "CallingContext", user_id: str
+    ) -> "CallingContext":
+        """
+        Augment context with user's role_level from database
+
+        Args:
+            context: Existing CallingContext to augment
+            user_id: User ID to lookup role_level for
+
+        Returns:
+            New CallingContext with role_level set
+        """
+        try:
+            import percolate as p8
+            from percolate.models import User
+
+            # Query user table for role_level
+            query = """SELECT role_level FROM p8."User" WHERE id::TEXT = %s OR email = %s LIMIT 1"""
+            result = p8.repository(User).execute(query, data=(user_id, user_id))
+
+            if result and result[0].get("role_level") is not None:
+                # Create new context with role_level
+                data = context.model_dump()
+                data["role_level"] = result[0]["role_level"]
+                return CallingContext(**data)
+            else:
+                logger.warning(f"No role_level found for user {user_id}")
+                return context
+
+        except Exception as e:
+            logger.warning(f"Failed to get role_level for user {user_id}: {e}")
+            return context

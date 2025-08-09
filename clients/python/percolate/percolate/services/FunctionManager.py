@@ -17,6 +17,7 @@ class _RuntimeFunction(Function):
 class FunctionManager:
     def __init__(cls, use_concise_plan:bool=True, custom_planner=None):
         cls._functions= {}
+        cls._function_access_levels = {}  # New: track access levels
         cls.repo = p8.repository(Function)
         
         cls.use_concise_plan=use_concise_plan
@@ -39,7 +40,30 @@ class FunctionManager:
             """we only add not private methods"""
             if function.name[:1] != '_' and function.name not in EXCLUDED_SYSTEM_FUNCTIONS:
                 cls._functions[function.name] = function
-                logger.debug(f"added function {function.name}")
+                
+                # Check for access level from decorator
+                access_level = None
+                
+                # Check RuntimeFunction wrapper
+                if hasattr(function, 'fn'):
+                    if hasattr(function.fn, '_p8_access_required'):
+                        access_level = function.fn._p8_access_required
+                    elif hasattr(function.fn, '__func__') and hasattr(function.fn.__func__, '_p8_access_required'):
+                        # Class method case
+                        access_level = function.fn.__func__._p8_access_required
+                
+                # Check direct function
+                elif hasattr(function, '_p8_access_required'):
+                    access_level = function._p8_access_required
+                elif hasattr(function, '__func__') and hasattr(function.__func__, '_p8_access_required'):
+                    # Class method case
+                    access_level = function.__func__._p8_access_required
+                
+                if access_level is not None and access_level < 100:
+                    cls._function_access_levels[function.name] = access_level
+                    logger.debug(f"added function {function.name} with access level {access_level}")
+                else:
+                    logger.debug(f"added function {function.name}")
     
     def activate_agent_context(cls, agent_model: AbstractModel):
         """
@@ -105,6 +129,29 @@ class FunctionManager:
             cls.planner = p8.Agent(PlanModel,allow_help=False)
         
         return cls.planner.run(questions, data=cls.repo.select())
+    
+    def get_functions_for_role_level(cls, user_role_level: typing.Optional[int]) -> typing.Dict[str, Function]:
+        """
+        Return functions accessible to the given role level
+        
+        Args:
+            user_role_level: User's role level (lower = more access)
+                            None means system/unrestricted access
+        
+        Returns:
+            Dictionary of accessible functions
+        """
+        if user_role_level is None:
+            # System access - return all functions
+            return cls._functions
+        
+        accessible_functions = {}
+        for name, func in cls._functions.items():
+            required_level = cls._function_access_levels.get(name, 100)
+            if user_role_level <= required_level:
+                accessible_functions[name] = func
+        
+        return accessible_functions
     
     @property
     def functions(cls):

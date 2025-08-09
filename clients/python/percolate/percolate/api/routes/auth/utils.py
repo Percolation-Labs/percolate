@@ -8,6 +8,7 @@ from percolate.api.auth.utils import (
     store_user_with_token,
     is_valid_token_for_user,
     get_user_from_email,
+    get_user_with_role_from_email,
     register_or_update_user,
     get_stable_session_key
 )
