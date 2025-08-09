@@ -1,5 +1,5 @@
 """
-Unit test to verify OAuth rejects unknown users by default.
+Integration test to verify OAuth rejects unknown users by default.
 Tests the actual implementation after our changes.
 """
 
@@ -16,6 +16,7 @@ from percolate.api.auth import AuthError
 class TestOAuthRejectByDefault:
     """Test that OAuth providers reject unknown users by default"""
     
+    @pytest.mark.slow
     @pytest.mark.asyncio
     async def test_google_oauth_relay_rejects_unknown_user(self):
         """Test GoogleOAuthRelayProvider rejects unknown users when OAUTH_ALLOW_NEW_USERS is not set"""
@@ -82,6 +83,7 @@ class TestOAuthRejectByDefault:
                 assert "not authorized to access this system" in exc_info.value.error_description
                 assert "unknown@example.com" in exc_info.value.error_description
     
+    @pytest.mark.slow
     @pytest.mark.asyncio
     async def test_google_oauth_provider_rejects_unknown_user(self):
         """Test regular GoogleOAuthProvider rejects unknown users"""

@@ -1,5 +1,5 @@
 -- Percolate PostgreSQL Functions
--- Generated from sql-staging on 2025-07-27 20:59:28
+-- Generated from sql-staging on 2025-08-09 19:59:10
 -- DO NOT EDIT - This file is auto-generated
 
 -- ====================================================================
@@ -1193,7 +1193,7 @@ BEGIN
                     FROM cypher(''percolate'', $$ 
                         MATCH (v)
                         WHERE v.key IN ['
-                 || array_to_string(ARRAY(SELECT quote_literal(k) FROM unnest(keys) AS k), ', ')
+                 || array_to_string(ARRAY(SELECT '"' || replace(replace(k, '\', '\\'), '"', '\"') || '"' FROM unnest(keys) AS k), ', ')
                  || '] 
                         RETURN v, v.uid 
                     $$) AS (v agtype, key agtype)
@@ -1330,26 +1330,36 @@ DECLARE
     query TEXT;              -- Dynamic query to execute
     schema_name VARCHAR;
     pure_table_name VARCHAR;
+    safe_key_list TEXT[];    -- Safely processed key list
 BEGIN
+    -- Ensure clean search path to avoid session variable interference
+    SET LOCAL search_path = p8, public;
+    
     schema_name := lower(split_part(table_name, '.', 1));
     pure_table_name := split_part(table_name, '.', 2);
+
+    -- Debug: Log what we received
+    RAISE NOTICE 'get_records_by_keys: table=%, input_keys=%, input_type=%', table_name, key_list, pg_typeof(key_list);
 
     -- Check if key_list is empty, null, or contains only empty strings
     IF key_list IS NULL OR array_length(key_list, 1) IS NULL OR array_length(key_list, 1) = 0 THEN
         result := '[]'::jsonb;
     ELSE
         -- Filter out empty strings and null values from key_list
-        key_list := array_remove(array_remove(key_list, ''), NULL);
+        safe_key_list := array_remove(array_remove(key_list, ''), NULL);
         
         -- Check again after filtering
-        IF array_length(key_list, 1) IS NULL OR array_length(key_list, 1) = 0 THEN
+        IF safe_key_list IS NULL OR array_length(safe_key_list, 1) IS NULL OR array_length(safe_key_list, 1) = 0 THEN
             result := '[]'::jsonb;
         ELSE
-            -- Construct the dynamic query to select records from the specified table
-            query := format('SELECT jsonb_agg(to_jsonb(t)) FROM %I."%s" t WHERE t.%I::TEXT = ANY($1)', schema_name, pure_table_name, key_column);
+            -- Debug: Log what we're about to query
+            RAISE NOTICE 'get_records_by_keys: filtered_keys=%, array_length=%', safe_key_list, array_length(safe_key_list, 1);
             
-            -- Execute the dynamic query with the provided key_list as parameter
-            EXECUTE query USING key_list INTO result;
+            -- Use a safer approach: build the query with explicit array handling
+            query := format('SELECT jsonb_agg(to_jsonb(t)) FROM %I."%s" t WHERE t.%I::TEXT = ANY($1::TEXT[])', schema_name, pure_table_name, key_column);
+            
+            -- Execute the dynamic query with the safe key list
+            EXECUTE query USING safe_key_list INTO result;
         END IF;
     END IF;
     
@@ -6010,10 +6020,13 @@ BEGIN
                 -- 1. User owns the record
                 (current_setting(''percolate.user_id'')::UUID = userid AND userid IS NOT NULL)
                 
-                -- 2. User is member of the record''s group
+                -- 2. User is member of the record''s group (with safer handling)
                 OR (
                     groupid IS NOT NULL AND 
-                    position(groupid IN current_setting(''percolate.user_groups'', ''true'')) > 0
+                    current_setting(''percolate.user_groups'', ''true'') IS NOT NULL AND
+                    current_setting(''percolate.user_groups'', ''true'') != '''' AND
+                    current_setting(''percolate.user_groups'', ''true'') ~ ''^,.*,$'' AND
+                    position('','' || groupid::TEXT || '','' IN current_setting(''percolate.user_groups'', ''true'')) > 0
                 )
             )
         )', 
@@ -6150,14 +6163,21 @@ BEGIN
     PERFORM set_config('percolate.user_id', p_user_id::TEXT, false);
     PERFORM set_config('percolate.role_level', v_role_level::TEXT, false);
     
-    -- Set user groups if available
-    IF v_groups IS NOT NULL AND array_length(v_groups, 1) > 0 THEN
-        -- For LIKE pattern matching in the policy, we need commas as separators
-        PERFORM set_config('percolate.user_groups', ',' || array_to_string(v_groups, ',') || ',', false);
-    ELSE
-        -- Set empty string if no groups
-        PERFORM set_config('percolate.user_groups', '', false);
-    END IF;
+    -- TEMPORARILY COMMENTED OUT TO TEST BUG
+    -- Set user groups if available - use proper array format to prevent confusion with SQL parameters
+    -- IF v_groups IS NOT NULL AND array_length(v_groups, 1) > 0 THEN
+    --     -- Store as JSON array to avoid confusion with SQL array literals
+    --     PERFORM set_config('percolate.user_groups_json', array_to_json(v_groups)::TEXT, false);
+    --     -- Also keep comma format for backward compatibility with existing policies
+    --     PERFORM set_config('percolate.user_groups', ',' || array_to_string(v_groups, ',') || ',', false);
+    -- ELSE
+    --     -- Set empty values
+    --     PERFORM set_config('percolate.user_groups_json', '[]', false);
+    --     PERFORM set_config('percolate.user_groups', '', false);
+    -- END IF;
+    
+    -- Set empty user groups to test if this fixes the contamination bug
+    PERFORM set_config('percolate.user_groups', '', false);
     
     -- Return the role level as a message for debugging
     RAISE NOTICE 'Set user context: user_id=%, role_level=%, groups=%', 

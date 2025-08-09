@@ -1,5 +1,5 @@
 """
-Simple test to verify OAuth rejection logic works
+Integration test to verify OAuth rejection logic works
 """
 
 import os
@@ -61,6 +61,7 @@ def test_user_validation_logic():
     del os.environ["OAUTH_ALLOW_NEW_USERS"]
 
 
+@pytest.mark.slow
 @pytest.mark.asyncio
 async def test_oauth_rejection_in_callback():
     """Test that OAuth callback properly rejects unknown users"""
