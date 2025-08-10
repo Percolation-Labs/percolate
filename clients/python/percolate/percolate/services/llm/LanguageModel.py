@@ -230,14 +230,15 @@ class LanguageModel:
         return self.__call__(MessageStack(question,system_prompt=system_prompt), functions=functions, context=context, **kwargs)
         
         
-    def _call_raw(self, messages: MessageStack, functions: typing.List[dict], context: CallingContext=None):
+    def _call_raw(self, messages: MessageStack, functions: typing.List[dict], context: CallingContext=None, wrap_streaming_response: bool = False):
          """the raw api call exists for testing - normally for consistency with the database we use a different interface"""
    
          return self.call_api_simple(messages.question, 
                                     functions=functions,
                                     system_prompt=messages.system_prompt, 
                                     data_content=messages.data,
-                                    is_streaming=(context and context.is_streaming))
+                                    is_streaming=(context and context.is_streaming),
+                                    wrap_streaming_response=wrap_streaming_response)
 
     @classmethod 
     def from_context(cls, context: CallingContext) -> "LanguageModel":
@@ -313,6 +314,7 @@ class LanguageModel:
                         data_content:typing.List[dict]=None,
                         is_streaming:bool = False,
                         temperature: float = 0.0,
+                        wrap_streaming_response: bool = False,
                         **kwargs):
         """
         Simple REST wrapper to use with any language model
@@ -353,9 +355,18 @@ class LanguageModel:
                 #add in any data content into the stack for arbitrary models
                 *data_content
             ],
-            "tools": tools,
-            'temperature': temperature
+            "tools": tools
         }
+        
+        # GPT-5 models have different parameter requirements
+        is_gpt5 = params['model'].startswith('gpt-5')
+        
+        if is_gpt5:
+            # GPT-5 only supports temperature=1.0 (default), remove custom temperature
+            pass  # Don't add temperature parameter
+        else:
+            # Other models support custom temperature
+            data['temperature'] = temperature
         if is_streaming:
             data['stream'] = True
             data["stream_options"] = {"include_usage": True}
@@ -402,14 +413,69 @@ class LanguageModel:
         response =  requests.post(url, headers=headers, data=json.dumps(data), stream=is_streaming)
         
         if response.status_code not in [200,201]:
-            logger.warning(f"failed to submit: {response.status_code=}  {response.content}")
+            logger.error(f"API request failed: {response.status_code=}  {response.content}")
+            
+            # Handle specific error cases
+            if response.status_code == 400:
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get('error', {}).get('message', '')
+                    
+                    # GPT-5 streaming verification error
+                    if 'verified to stream' in error_msg:
+                        raise Exception(f"GPT-5 streaming requires organization verification. Model: {self.model_name}. Error: {error_msg}")
+                    else:
+                        raise Exception(f"Bad request (400) for model {self.model_name}: {error_msg}")
+                except json.JSONDecodeError:
+                    raise Exception(f"Bad request (400) for model {self.model_name}: {response.text}")
+            else:
+                raise Exception(f"API request failed with status {response.status_code} for model {self.model_name}: {response.text}")
+        
         if response.status_code == 429:
             import time
             """TODO: should be a flagged thing"""
             time.sleep(61)
             logger.warning(f"RATE LIMITED - SLEEPING FOR 1 MINUTE")
             response =  requests.post(url, headers=headers, data=json.dumps(data),stream=is_streaming)   
-        return response
+        
+        if is_streaming and wrap_streaming_response:
+            # For streaming when explicitly requested (e.g., from API router), wrap response in our streaming iterator
+            from .utils.stream_utils import LLMStreamIterator
+            from .CallingContext import CallingContext
+            
+            # Create context for streaming
+            ctx = kwargs.get('context') or CallingContext(
+                plan='',
+                username='api_user',
+                session_id='streaming_session',
+                model=self.model_name
+            )
+            
+            # Create generator that uses the new proxy architecture
+            def streaming_generator():
+                # Use the proper streaming architecture with convert_chunk_to_target_scheme
+                from .proxy.stream_generators import stream_with_buffered_functions
+                
+                # Stream with proper source scheme detection
+                source_scheme = params.get('scheme', 'openai')
+                
+                for line_data, chunk_data in stream_with_buffered_functions(
+                    response,
+                    source_scheme=source_scheme,
+                    target_scheme='openai',  # Always output OpenAI format for consistency
+                    relay_usage_events=True
+                ):
+                    yield line_data
+            
+            return LLMStreamIterator(
+                streaming_generator,
+                scheme=params.get('scheme', 'openai'),
+                context=ctx,
+                user_query=question
+            )
+        else:
+            # For non-streaming or internal usage (like ModelRunner), return raw response
+            return response
     
     
     

@@ -4,6 +4,33 @@ Stream generators for adapting LLM response streams.
 This module implements stream generators that buffer function calls and usage data
 while adapting the raw events between different provider formats. It also provides
 functions for converting streaming responses to non-streaming responses.
+
+ARCHITECTURE OVERVIEW FOR ModelRunner USAGE:
+
+The streaming architecture serves two distinct use cases with different requirements:
+
+1. API Router Usage (Direct External API Calls):
+   - API router handlers call LanguageModel._call_raw() with wrap_streaming_response=True
+   - This returns an LLMStreamIterator that wraps stream_with_buffered_functions()
+   - The LLMStreamIterator provides OpenAI-compatible SSE streaming format
+   - Used by: /completions endpoint, external API consumers
+
+2. ModelRunner Usage (Internal Agent Processing):
+   - ModelRunner calls LanguageModel._call_raw() with wrap_streaming_response=False (default)
+   - This returns the raw requests.Response object from the LLM API
+   - ModelRunner uses sse_openai_compatible_stream_with_tool_call_collapse() directly
+   - The raw response is processed for function calls, content aggregation, and agent loops
+   - Used by: UserRoleAgent, internal agent processing
+
+Key Functions:
+- stream_with_buffered_functions(): Converts Claude/Anthropic/Google → OpenAI format with buffering
+- sse_openai_compatible_stream_with_tool_call_collapse(): Processes raw responses for ModelRunner
+- convert_chunk_to_target_scheme(): Format conversion between provider schemes
+
+This dual architecture ensures:
+- API router gets properly formatted streaming responses for external consumption
+- ModelRunner gets raw responses for internal processing without double-wrapping
+- Both paths support Claude/Anthropic/Google → OpenAI format conversion
 """
 
 import json

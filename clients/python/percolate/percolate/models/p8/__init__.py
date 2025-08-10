@@ -5,6 +5,9 @@ from .types import *
 from .PlanModel import PlanModel,ConcisePlanner
 
 sample_models = [
+    LanguageModelApi(id = make_uuid('gpt-5'), name = 'gpt-5', scheme='openai', completions_uri='https://api.openai.com/v1/chat/completions', token_env_key='OPENAI_API_KEY'),
+    LanguageModelApi(id = make_uuid('gpt-5-mini'), name = 'gpt-5-mini', scheme='openai', completions_uri='https://api.openai.com/v1/chat/completions', token_env_key='OPENAI_API_KEY'),
+    LanguageModelApi(id = make_uuid('gpt-5-2025-08-07'), name = 'gpt-5-2025-08-07', scheme='openai', completions_uri='https://api.openai.com/v1/chat/completions', token_env_key='OPENAI_API_KEY'),
     LanguageModelApi(id = make_uuid('gpt-4o-2024-08-06'), name = 'gpt-4o-2024-08-06', scheme='openai', completions_uri='https://api.openai.com/v1/chat/completions', token_env_key='OPENAI_API_KEY'),
     LanguageModelApi(id = make_uuid('gpt-4o-mini'), name = 'gpt-4o-mini', scheme='openai', completions_uri='https://api.openai.com/v1/chat/completions', token_env_key='OPENAI_API_KEY'),
     LanguageModelApi(id = make_uuid('cerebras-llama3.1-8b'), name = 'cerebras-llama3.1-8b', model='llama3.1-8b', scheme='openai', completions_uri='https://api.cerebras.ai/v1/chat/completions', token_env_key='CEREBRAS_API_KEY'),
