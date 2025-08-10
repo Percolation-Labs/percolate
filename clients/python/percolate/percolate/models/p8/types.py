@@ -1955,6 +1955,9 @@ class UserRoleAgent(AbstractModel):
 
         This is a proxy method that calls Resources.get_recent_uploads_by_user()
 
+        If you want to look up one or more chunks you can use a single called to get_entities to do this, provide a list of keys.
+        It can be useful to supply at least a sample to the user and tell them they can ask for more if they wish.
+
         Args:
             user_id: The user ID to filter resources by
             limit: Maximum number of unique files to return (default: 10)
