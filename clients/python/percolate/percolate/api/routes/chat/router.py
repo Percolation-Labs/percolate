@@ -185,7 +185,8 @@ def handle_agent_request(request: CompletionsRequestOpenApiFormat, params: Optio
         username=userid, 
         session_id=session_id, 
         channel_ts=metadata.get('channel_ts') or session_id,
-        role_level=metadata.get('role_level')  # Include role_level from metadata
+        role_level=metadata.get('role_level'),  # Include role_level from metadata
+        model=request.model  # Pass the requested model from the API request
     )
     
     for key, value in metadata.items():
@@ -308,7 +309,8 @@ def handle_openai_request(request: CompletionsRequestOpenApiFormat, params: Opti
         response = llm._call_raw(
             messages=message_stack,
             functions=request.get_tools_as_functions(),
-            context=context
+            context=context,
+            wrap_streaming_response=True  # Wrap streaming response for API router
         )
         return response
     except Exception as e:
@@ -408,7 +410,8 @@ def handle_anthropic_request(request: CompletionsRequestOpenApiFormat, params: O
         response = llm._call_raw(
             messages=message_stack,
             functions=request.get_tools_as_functions(),
-            context=context
+            context=context,
+            wrap_streaming_response=True  # Wrap streaming response for API router
         )
         return response
     except Exception as e:
@@ -501,7 +504,8 @@ def handle_google_request(request: CompletionsRequestOpenApiFormat, params: Opti
         response = llm._call_raw(
             messages=message_stack,
             functions=request.get_tools_as_functions(),
-            context=context
+            context=context,
+            wrap_streaming_response=True  # Wrap streaming response for API router
         )
         return response
     except Exception as e:
@@ -1060,7 +1064,7 @@ async def agent_completions(
     
     # Use auth_user_id from HybridAuth if available, otherwise fall back to query param
     effective_user_id = auth_user_id or user_id
-    logger.info(f"{effective_user_id}, {session_id}, role_level={user_role_level}, auth method: {'session' if auth_user_id else 'bearer'}")
+    logger.info(f"Agent completions request - User: {effective_user_id}, Agent: {agent_name}, Model: {request.model}, Session: {session_id}, Role Level: {user_role_level}, Auth Method: {'session' if auth_user_id else 'bearer'}")
  
     try:
         # Collect query parameters into a dict for easier handling

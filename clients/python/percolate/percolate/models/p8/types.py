@@ -1925,9 +1925,9 @@ class UserRoleAgent(AbstractModel):
     def get_executive_info(cls, question: str, category: str = None):
         """
         Get executive information from executive.ExecutiveResources (admin access required).
+        Use this tool to get deep information about business internals e.g. inner workings of their org, vision, mission etc.
         When you return data note that the original drive id e.g. google drive can be used to construct a link to the document - dont use the s3 link
         For example if the metadata has gdrive_id='abasedfasdfa23342asdf' - construct a markdown link to google drive
-
 
         Args:
             question: Natural language question to search for

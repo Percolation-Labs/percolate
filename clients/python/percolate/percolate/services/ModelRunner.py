@@ -12,7 +12,7 @@ from percolate.services.llm import (
     LanguageModel,
     MessageStackFormatter,
 )
-from percolate.services.llm.utils import LLMStreamIterator
+
 import uuid
 
 GENERIC_P8_PROMPT = """\n# General Advice.
@@ -390,6 +390,7 @@ class ModelRunner:
                 token usage also needs to be adapter and does not need relay;
                 the decisions is simply around if the raw content line should be sent in the open ai or other scheme - here its the raw 'line' that is relayed in one scheme or another                
                 """
+
                 for line, chunk in sse_openai_compatible_stream_with_tool_call_collapse(
                     raw_response
                 ):
