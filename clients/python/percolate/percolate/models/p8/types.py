@@ -1105,7 +1105,7 @@ class Resources(AbstractModel):
         description: str,
         unique_label: str,
         user_id: str,
-        graph_paths: typing.List[str],
+        graph_paths: str | typing.List[str] = "",
     ):
         """save the user fact with a unique label for the information
 
@@ -1115,6 +1115,8 @@ class Resources(AbstractModel):
             user_id: the user id supplied in context- if not known do not try to use this function
             graph_paths: graph paths are tags of the form A/B where A is more specific than B e.g. LLMs/AI
         """
+        if graph_paths == "":
+            graph_paths = None
 
         return UserFact.save_user_fact(
             unique_label,
@@ -1982,12 +1984,12 @@ class UserRoleAgent(AbstractModel):
         return Resources.get_recent_uploads_by_user(user_id, limit)
 
     @classmethod
-    def save_user_fact(
+    def save_user_memory(
         cls,
         label: str,
         description: str,
         user_id: str,
-        graph_paths: typing.List[str] = None,
+        graph_paths: str | typing.List[str] = None,
     ):
         """save the user fact with a unique label for the information
 

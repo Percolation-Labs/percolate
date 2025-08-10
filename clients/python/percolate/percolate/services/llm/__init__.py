@@ -1,51 +1,102 @@
 """although percolate will push the database use case, we can use llms in the app tier"""
 
-
-
 from pydantic import BaseModel, model_validator, Field
 import typing
 import json
+
+
 class FunctionCall(BaseModel):
     name: str
     arguments: str | dict
     id: str
-    scheme: typing.Optional[str] = Field(None, description="information about the scheme for formatting purposes")
+    scheme: typing.Optional[str] = Field(
+        None, description="information about the scheme for formatting purposes"
+    )
+
     def get_tool_role(self):
         """the role for tool use"""
-        if self.scheme == 'anthropic':
-            return 'user'
-        if self.scheme == 'google':
-            return 'user'
+        if self.scheme == "anthropic":
+            return "user"
+        if self.scheme == "google":
+            return "user"
         return "tool"
-    
-    def to_assistant_message(self, scheme:str='openai'):
+
+    def to_assistant_message(self):
         """
         assistant declares function call or rather tool call
         """
-        args_str = self.arguments if isinstance(self.arguments,str) else json.dumps(self.arguments)
-        return { "role": "assistant",
-                "content": '',
-                "tool_calls": [
-                     {
-                        "id": self.id,
-                        "type": "function",
-                        "function": {
-                            "name":self.name,
-                            "arguments": args_str
-                        }
-                    }
-                ]
-            }
-    
-    @model_validator(mode='before')
+        if self.scheme == "anthropic":
+            return self._to_anthropic_format()
+        elif self.scheme == "google":
+            return self._to_google_format()
+        else:  # Default to OpenAI format
+            return self._to_openai_format()
+
+    def _to_openai_format(self):
+        """OpenAI format (default)"""
+        args_str = (
+            self.arguments
+            if isinstance(self.arguments, str)
+            else json.dumps(self.arguments)
+        )
+        return {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": self.id,
+                    "type": "function",
+                    "function": {"name": self.name, "arguments": args_str},
+                }
+            ],
+        }
+
+    def _to_anthropic_format(self):
+        """Anthropic format"""
+        # Ensure arguments are a dict for Anthropic
+        args_dict = (
+            json.loads(self.arguments)
+            if isinstance(self.arguments, str)
+            else self.arguments
+        )
+        return {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": self.id,
+                    "name": self.name,
+                    "input": args_dict,
+                }
+            ],
+        }
+
+    def _to_google_format(self):
+        """Google format"""
+        # Ensure arguments are a dict for Google
+        args_dict = (
+            json.loads(self.arguments)
+            if isinstance(self.arguments, str)
+            else self.arguments
+        )
+        return {
+            "role": "model",
+            "parts": [{"functionCall": {"name": self.name, "args": args_dict}}],
+        }
+
+    @model_validator(mode="before")
     @classmethod
     def _val(cls, values):
-        if isinstance(values['arguments'], str):
-            values['arguments'] = json.loads(values['arguments'])
+        if isinstance(values["arguments"], str):
+            values["arguments"] = json.loads(values["arguments"])
         return values
-  
-      
-def _check_all(question  = "what is the capital of ireland and give me one fun fact too", filter_model_keys:typing.List[str]=None, functions: typing.List[dict]=None):
+
+
+def _check_all(
+    question="what is the capital of ireland and give me one fun fact too",
+    filter_model_keys: typing.List[str] = None,
+    functions: typing.List[dict] = None,
+):
     """this is a simple wrapper to illustrate probing each model with a question
     Args:
         question: any question
@@ -53,16 +104,16 @@ def _check_all(question  = "what is the capital of ireland and give me one fun f
     """
     from percolate import get_language_model_settings
     from percolate.models.p8 import LanguageModelApi
-    
-    if filter_model_keys and not isinstance(filter_model_keys,list):
+
+    if filter_model_keys and not isinstance(filter_model_keys, list):
         filter_model_keys = [filter_model_keys]
     models = [LanguageModelApi(**p) for p in get_language_model_settings()]
     responses = {}
     for m in models:
         if filter_model_keys and m.name not in filter_model_keys:
-                continue
+            continue
         llm = LanguageModel(m.name)
-        responses[m.name] = llm.call_api_simple(question,functions=functions)
+        responses[m.name] = llm.call_api_simple(question, functions=functions)
     return responses
 
 
