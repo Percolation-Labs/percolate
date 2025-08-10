@@ -14,9 +14,7 @@ from percolate.services.llm import (
 )
 
 import uuid
-from percolate.services.llm.proxy.stream_generators import (
-    stream_with_buffered_functions,
-)
+from percolate.services.llm.proxy.unified_stream_adapter import UnifiedStreamAdapter
 
 GENERIC_P8_PROMPT = """\n# General Advice.
 Use whatever functions are available to you and use world knowledge only if prompted 
@@ -326,9 +324,6 @@ class ModelRunner:
             str: SSE-formatted event strings (e.g. "data: ...\n\n").
         """
 
-        from percolate.services.llm.utils import (
-            sse_openai_compatible_stream_with_tool_call_collapse,
-        )
         from percolate.models import AIResponse, User
 
         if context:
@@ -394,28 +389,25 @@ class ModelRunner:
                 the decisions is simply around if the raw content line should be sent in the open ai or other scheme - here its the raw 'line' that is relayed in one scheme or another                
                 """
 
-                for line, chunk in stream_with_buffered_functions(
-                    raw_response, source_scheme=lm_client._scheme
+                # Use unified stream adapter for all providers with function call events enabled
+                adapter = UnifiedStreamAdapter(lm_client._scheme, "openai")
+                for line, chunk in adapter.process_stream(
+                    raw_response, emit_function_announcements=True
                 ):
-                    # print(line)
-                    # Handle special messages from the stream_utils
+                    # ALWAYS yield the SSE line first for the client - this ensures all events are streamed
+                    line_to_yield = (
+                        line.decode("utf-8") if isinstance(line, bytes) else line
+                    )
+                    yield line_to_yield
+
+                    # Handle special messages from the stream_utils for backward compatibility
                     if isinstance(chunk, dict) and (
                         chunk.get("status") or chunk.get("content")
                     ):
-                        # If it's a content message, we want to forward it
-                        if chunk.get("content"):
-                            # The content is already in the line as a properly formatted SSE message
-                            if isinstance(line, str):
-                                yield line.encode("utf-8")
-                            else:
-                                yield line
-                            continue
-
                         # Status messages are now commented out but this stays for backward compatibility
                         status_type = chunk.get("status")
                         if status_type == "flush":
-                            # Just send a newline to flush buffers
-                            yield b"\n"
+                            # Already yielded the line above, just continue
                             continue
 
                         elif status_type == "function_call_started":
@@ -424,25 +416,32 @@ class ModelRunner:
 
                     # print(chunk)
                     choice = chunk["choices"][0] if chunk.get("choices") else {}
+
                     finish = choice.get("finish_reason")
+                    # print("✅*******FINISH DATA********", finish)
 
                     # Handle tool call batch
                     if finish == "tool_calls":
                         # Tool-call turn: capture usage and mark
                         saw_tool_call = True
                         turn_usage = chunk.get("usage", {}) or {}
+
                         # Invoke each buffered function call and build aggregate response data
                         tool_call_evals = {}
                         for tc in choice["delta"].get("tool_calls", []):
+                            """ADD the function call to the message stack in the correct scheme"""
                             fc = FunctionCall(
-                                id=tc["id"], **tc["function"], scheme="openai"
+                                id=tc["id"], **tc["function"], scheme=lm_client._scheme
                             )
                             # We already sent "Preparing to call" message earlier, now send "executing" message
                             executing_msg = f"event: executing {fc.name}...\n\n"
-                            yield executing_msg.encode("utf-8")
+                            yield executing_msg
+
+                            # pair the tool call expectation with a response that will follow in the invoke
+                            # note the SCHEME must be passed into FunctionCall above
                             self.messages.add(fc.to_assistant_message())
 
-                            # Safely invoke the function, catching any exceptions that might occur
+                            # Safely invoke the function, catching any exceptions that might occur -> add invocation in the right dialect
                             try:
                                 tool_call_evals[fc.id] = self.invoke(fc)
                             except Exception as e:
@@ -469,8 +468,7 @@ class ModelRunner:
                             context.streaming_callback(line)
                         # Accumulate content for this turn
                         turn_content += piece
-                        # Yield the SSE-formatted line for client
-                        yield f"{line}\n\n"
+                        # SSE line already yielded above - no need to yield again
 
                     """in this single request loop"""
                     if not saw_tool_call:

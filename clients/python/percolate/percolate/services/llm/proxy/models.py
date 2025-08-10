@@ -909,6 +909,9 @@ class AnthropicStreamDelta(StreamDelta):
     """
     Anthropic streaming delta format
     
+    Example message start:
+    {"type":"message_start","message":{"id":"msg_123","type":"message","role":"assistant","content":[],"model":"claude-3","usage":{"input_tokens":25,"output_tokens":1}}}
+    
     Example text delta:
     {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Hello"}}
     
@@ -919,18 +922,20 @@ class AnthropicStreamDelta(StreamDelta):
     {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"location\":\"Par"}}
     
     Example stop:
-    {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}
+    {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":8}}
     """
     type: str
     index: Optional[int] = 0
     delta: Optional[Dict[str, Any]] = None
     content_block: Optional[Dict[str, Any]] = None
+    message: Optional[Dict[str, Any]] = None
+    usage: Optional[Dict[str, int]] = None
     
     def to_openai_format(self) -> Dict[str, Any]:
         """Convert to OpenAI delta format"""
         # Create base structure
         result = {
-            "id": f"chatcmpl-{int(time.time())}",
+            "id": f"chatcmpl-{int(time.time())}",  # OpenAI format ID
             "object": "chat.completion.chunk",
             "created": int(time.time()),
             "model": "claude",  # Generic placeholder
@@ -941,8 +946,21 @@ class AnthropicStreamDelta(StreamDelta):
             }]
         }
         
+        # Handle message_start event
+        if self.type == "message_start" and self.message:
+            # Extract model and initial usage
+            result["model"] = self.message.get("model", "claude")
+            if "usage" in self.message:
+                result["usage"] = {
+                    "prompt_tokens": self.message["usage"].get("input_tokens", 0),
+                    "completion_tokens": self.message["usage"].get("output_tokens", 0),
+                    "total_tokens": self.message["usage"].get("input_tokens", 0) + self.message["usage"].get("output_tokens", 0)
+                }
+            # Set role in delta
+            result["choices"][0]["delta"]["role"] = self.message.get("role", "assistant")
+        
         # Extract content based on type
-        if self.type == "content_block_delta":
+        elif self.type == "content_block_delta":
             if self.delta and self.delta.get("type") == "text_delta":
                 # Text content
                 result["choices"][0]["delta"]["content"] = self.delta.get("text", "")
@@ -969,9 +987,29 @@ class AnthropicStreamDelta(StreamDelta):
                     }
                 }]
         
-        elif self.type == "message_delta" and self.delta:
-            # Finish reason
-            result["choices"][0]["finish_reason"] = self.delta.get("stop_reason")
+        elif self.type == "message_delta":
+            if self.delta:
+                # Finish reason
+                stop_reason = self.delta.get("stop_reason")
+                if stop_reason == "end_turn":
+                    result["choices"][0]["finish_reason"] = "stop"
+                elif stop_reason == "tool_use":
+                    result["choices"][0]["finish_reason"] = "tool_calls"
+                else:
+                    result["choices"][0]["finish_reason"] = stop_reason
+            
+            # Handle usage in message_delta
+            if self.usage:
+                result["usage"] = {
+                    "prompt_tokens": 0,  # Not provided in delta
+                    "completion_tokens": self.usage.get("output_tokens", 0),
+                    "total_tokens": self.usage.get("output_tokens", 0)
+                }
+        
+        # Skip other event types like content_block_stop, ping, etc.
+        elif self.type in ["content_block_stop", "message_stop", "ping"]:
+            # Return minimal chunk for these events
+            pass
         
         return result
     
