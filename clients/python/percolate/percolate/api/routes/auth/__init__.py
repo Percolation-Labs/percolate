@@ -451,6 +451,45 @@ class HybridAuthWithRole:
 hybrid_auth_with_role = HybridAuthWithRole()  # Returns (user_id, role_level) tuple
 
 
+from pydantic import BaseModel
+
+class AuthUser(BaseModel):
+    """User model for authentication context"""
+    id: typing.Optional[str] = None
+    email: str = "unknown"
+    role_level: typing.Optional[int] = None
+
+
+class AuthUserDependency:
+    """Dependency that returns a complete User model"""
+    
+    async def __call__(
+        self, 
+        request: Request,
+        credentials: typing.Optional[HTTPAuthorizationCredentials] = Depends(bearer)
+    ) -> AuthUser:
+        # Get auth data (user_id, role_level)
+        auth_data = await hybrid_auth_with_role(request, credentials)
+        user_id, role_level = auth_data
+        
+        # Get user email from headers
+        user_email = (request.headers.get('X-User-Email') or 
+                     request.headers.get('x-user-email') or 
+                     request.headers.get('X-OpenWebUI-User-Email') or 
+                     request.headers.get('x-openwebui-user-email') or 
+                     "unknown")
+        
+        return AuthUser(
+            id=user_id,
+            email=user_email,
+            role_level=role_level
+        )
+
+
+# Create singleton instance
+current_user = AuthUserDependency()
+
+
 class RequireUserAuth(HybridAuth):
     """
     Variant that requires user context (session only, no bearer tokens).

@@ -20,6 +20,7 @@ class TestOAuthUnknownUserSimple:
         # Mock the entire flow without importing percolate
         with patch('percolate.repository') as mock_repo:
             mock_repo_instance = Mock()
+            mock_repo_instance.select.return_value = []  # Mock empty result for new user
             mock_repo_instance.upsert_records = Mock()
             mock_repo.return_value = mock_repo_instance
             
@@ -32,12 +33,13 @@ class TestOAuthUnknownUserSimple:
             token = "test-token-123"
             name = "New User"
             
-            # Call the function
+            # Call the function - allow creation of new users for this test
             user = store_user_with_token(
                 email=email,
                 token=token,
                 name=name,
-                oauth_provider="google"
+                oauth_provider="google",
+                require_existing_user=False
             )
             
             # Verify user was created

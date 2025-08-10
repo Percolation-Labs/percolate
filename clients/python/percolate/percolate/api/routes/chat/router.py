@@ -1057,6 +1057,7 @@ async def agent_completions(
     expected_token = "!p3rc0la8!" #<-this a testing thing
     # auth_data contains (user_id, role_level)
     auth_user_id, user_role_level = auth_data
+    
     # Use auth_user_id from HybridAuth if available, otherwise fall back to query param
     effective_user_id = auth_user_id or user_id
     logger.info(f"{effective_user_id}, {session_id}, role_level={user_role_level}, auth method: {'session' if auth_user_id else 'bearer'}")
