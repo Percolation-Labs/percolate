@@ -392,6 +392,136 @@ def request_google(messages, functions):
 
 def sse_openai_compatible_stream_with_tool_call_collapse(
     response,
+    context=None,
+    scheme=None,
+) -> typing.Generator[typing.Tuple[str, dict], None, None]:
+    """
+    Mimics OpenAI's SSE stream format, except we are collapsing tool_call delta fragments
+    into a single delta message once all arguments are collected.
+
+    Streams content-deltas normally, but accumulates tool call fragments
+    into a single tool_call delta message keyed by ID.
+
+    When we first receive a tool_call with id, name, and index, we:
+    Create a full function call structure {id, type, function: {name, arguments: ""}}.
+    Store it in a tool_call_map by id.
+    On subsequent deltas:
+    We look up tool_call_map[tool_call["id"]] and append to function.arguments.
+
+    Args:
+        response: an SSE-style HTTP response using OpenAI's streaming format.
+        raw_openai_format: If True, passes through OpenAI's exact SSE chunk format.
+    """
+
+    tool_call_map: typing.Dict[str, typing.Dict[str, typing.Any]] = {}
+    finished_tool_calls = False
+
+    # this can be any SSE event from any model
+    for line in response.iter_lines(decode_unicode=True):
+
+        if not line or not line.startswith("data: "):
+            continue
+
+        raw_data = line[6:].strip()
+        if raw_data == "[DONE]":
+            break
+
+        try:
+            chunk = json.loads(raw_data)
+        except json.JSONDecodeError:
+            continue  # skip malformed chunk
+
+        """in the end there is just usage so break after yield"""
+
+        if chunk.get("usage"):
+            yield line, chunk
+            continue
+
+        choice = chunk["choices"][0]
+        delta = choice.get("delta", {})
+        finish_reason = choice.get("finish_reason")
+        index = choice.get("index", 0)
+
+        if delta.get("content"):
+            yield line, chunk
+
+        if "tool_calls" in delta:
+            for tool_delta in delta["tool_calls"]:
+                if tool_delta.get("id"):
+                    """first encounter - send status event immediately"""
+                    tool_call_map[tool_delta["index"]] = tool_delta
+
+                    # Get function name for the status message
+                    function_name = tool_delta.get("function", {}).get(
+                        "name", "unknown_function"
+                    )
+
+                    # Instead of status event, send a normal content delta with a message
+                    # This will be visible to the user in OpenWebUI
+                    status_delta = {
+                        "id": str(uuid.uuid4()),
+                        "object": "chat.completion.chunk",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {
+                                    "content": f"\n\n🔍 Using function `{function_name}` to answer your question...\n\n"
+                                },
+                                "finish_reason": None,
+                            }
+                        ],
+                    }
+                    status_event = f"data: {json.dumps(status_delta)}\n\n"
+
+                    # Comment out the original status event code for potential future use
+                    # ---------------------------------------------------------
+                    # # First send a newline to flush any previous data
+                    # yield "\n", {"status": "flush"}
+                    #
+                    # # Then send the actual status message
+                    # status_message = {
+                    #     "status": f"Preparing to call function: {function_name}...",
+                    #     # Add a timestamp to ensure clients recognize this as a new message
+                    #     "timestamp": time.time()
+                    # }
+                    # # Ensure status_event is a properly formatted string (not bytes)
+                    # status_event = f'data: {json.dumps(status_message)}\n\n'
+                    # # Note: We intentionally don't encode here - the caller will handle encoding
+                    # yield status_event, {"status": "function_call_started"}
+                    # ---------------------------------------------------------
+
+                    # Send the content delta instead of status message
+                    yield status_event, {
+                        "content": f"Calling function: {function_name}"
+                    }
+                else:
+                    t = tool_call_map[tool_delta["index"]]
+                    t["function"]["arguments"] += tool_delta["function"]["arguments"]
+
+        elif finish_reason == "tool_calls" and not finished_tool_calls:
+            finished_tool_calls = True
+            full_tool_calls = list(tool_call_map.values())
+
+            # Consolidate all accumulated tool call fragments into one delta
+            consolidated_chunk = {
+                "choices": [
+                    {
+                        "delta": {"tool_calls": full_tool_calls},
+                        "index": index,
+                        "finish_reason": "tool_calls",
+                        "role": "assistant",
+                    }
+                ]
+            }
+
+            yield line, consolidated_chunk
+
+        elif finish_reason == "stop":
+            yield line, chunk
+
+
+def sse_openai_compatible_stream_with_tool_call_collapse_OLD(
+    response,
 ) -> typing.Generator[typing.Tuple[str, dict], None, None]:
     """
     Mimics OpenAI's SSE stream format, except we are collapsing tool_call delta fragments
