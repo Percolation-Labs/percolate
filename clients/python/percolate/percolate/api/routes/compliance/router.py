@@ -11,7 +11,7 @@ import json
 import re
 from typing import Optional
 
-from ..auth import hybrid_auth, require_user_auth
+from ..auth import hybrid_auth, require_user_auth, current_user, AuthUser
 from ..chat.router import completions, agent_completions
 from ..chat.models import CompletionsRequestOpenApiFormat
 from ...utils.models import list_available_models
@@ -188,14 +188,13 @@ async def v1_agent_chat_completions(
     request: CompletionsRequestOpenApiFormat,
     raw_request: Request,  # Add FastAPI Request object to access raw request data
     background_tasks: BackgroundTasks = None,
-    user_id: str = Depends(hybrid_auth),  # Must have user context
+    user: AuthUser = Depends(current_user),  # Get complete user model
     session_id: Optional[str] = Query(None, description="ID for grouping related interactions"),
     channel_id: Optional[str] = Query(None, description="ID of the channel where the interaction happens"),
     channel_type: Optional[str] = Query(None, description="Type of channel (e.g., slack, web, etc.)"),
     api_provider: Optional[str] = Query(None, description="Override the default provider"),
     is_audio: Optional[bool] = Query(False, description="Client asks to decoded base 64 audio using a model"),
-    device_info: Optional[str] = Query(None, description="Device info Base64 encoded with arbitrary parameters such as GPS"),
-    auth_user_id: Optional[str] = Depends(hybrid_auth)
+    device_info: Optional[str] = Query(None, description="Device info Base64 encoded with arbitrary parameters such as GPS")
 ):
     """Agent-specific chat completions endpoint"""
     
@@ -210,19 +209,23 @@ async def v1_agent_chat_completions(
     
     # Get effective chat ID using our helper function
     effective_session_id = try_get_chat_id_by_multiple_methods(request, raw_request, session_id)
-   
+    
+    # Log user info as requested
+    logger.info(f"Agent completions call - user_email: {user.email}, user_id: {user.id}, role_level: {user.role_level}")
+    
+    # Call the actual agent_completions function
     return await agent_completions(
         request=request,
         background_tasks=background_tasks,
-        agent_name=agent_id_or_name,
-        user_id=user_id,
+        user_id=user.id,
         session_id=effective_session_id,
         channel_id=channel_id,
         channel_type=channel_type,
         api_provider=api_provider,
         is_audio=is_audio,
         device_info=device_info,
-        auth_user_id=auth_user_id
+        agent_name=agent_id_or_name,
+        auth_data=(user.id, user.role_level)
     )
 
 # Support for base paths like /v1/ and /v1/agents/{agent_id}/
