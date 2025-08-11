@@ -35,7 +35,7 @@ class FunctionEvalParams(BaseModel):
     )
 
 
-def create_function_tools(mcp: FastMCP, repository: BaseMCPRepository):
+def create_function_tools(mcp: FastMCP, repository_factory):
     """Create function-related MCP tools"""
     
     @mcp.tool(
@@ -48,6 +48,7 @@ def create_function_tools(mcp: FastMCP, repository: BaseMCPRepository):
     )
     async def function_search(params: FunctionSearchParams) -> List[Dict[str, Any]]:
         """Search functions using repository and return raw results"""
+        repository = repository_factory()
         results = await repository.search_functions(params.query, params.limit)
         logger.debug(f"Function search tool returning: {type(results)} - {results}")
         return results
@@ -62,4 +63,5 @@ def create_function_tools(mcp: FastMCP, repository: BaseMCPRepository):
     )
     async def function_eval(params: FunctionEvalParams) -> Dict[str, Any]:
         """Evaluate a function and return raw result"""
+        repository = repository_factory()
         return await repository.evaluate_function(params.function_name, params.args)

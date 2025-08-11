@@ -61,7 +61,7 @@ class ResourceSearchParams(BaseModel):
     )
 
 
-def create_file_tools(mcp: FastMCP, repository: BaseMCPRepository):
+def create_file_tools(mcp: FastMCP, repository_factory):
     """Create file and resource related MCP tools"""
     
     @mcp.tool(
@@ -74,6 +74,7 @@ def create_file_tools(mcp: FastMCP, repository: BaseMCPRepository):
     )
     async def file_upload(params: FileUploadParams) -> str:
         """Upload file using admin controller and trigger ingestion"""
+        repository = repository_factory()
         # Get default configuration
         from ..config import get_mcp_settings
         settings = get_mcp_settings()
@@ -137,6 +138,7 @@ Please check your file and try again."""
     )
     async def resource_search(params: ResourceSearchParams) -> List[Dict[str, Any]]:
         """Search resources and return raw results"""
+        repository = repository_factory()
         return await repository.search_resources(
             params.query,
             params.resource_type,

@@ -108,8 +108,8 @@ WORKFLOW:
     
     # Authentication - supports bearer token
     api_key: Optional[str] = Field(
-        default_factory=lambda: from_env_or_project('P8_API_KEY', from_env_or_project('P8_TEST_BEARER_TOKEN', None)),
-        description="API key for bearer token authentication. Uses P8_API_KEY or P8_TEST_BEARER_TOKEN from environment or account settings.",
+        default_factory=lambda: from_env_or_project('P8_PG_PASSWORD', from_env_or_project('P8_API_KEY', from_env_or_project('P8_TEST_BEARER_TOKEN', None))),
+        description="API key for bearer token authentication. Uses P8_PG_PASSWORD, P8_API_KEY, or P8_TEST_BEARER_TOKEN from environment or account settings.",
         json_schema_extra={"secret": True}  # Mark as secret for security
     )
     
@@ -198,6 +198,39 @@ WORKFLOW:
         env_prefix = "P8_"
 
 
+def _load_master_prompt_from_db() -> Optional[str]:
+    """Load MASTER_PROMPT from database on startup"""
+    try:
+        # Check environment first (for override/fallback)
+        env_prompt = os.getenv('MASTER_PROMPT')
+        if env_prompt:
+            return env_prompt
+            
+        # Try to load from database
+        from percolate.services.PostgresService import PostgresService
+        pg = PostgresService()
+        
+        # Query for MASTER_PROMPT setting/config
+        # This assumes there's a config/settings table with key-value pairs
+        query = """
+        SELECT value FROM app_config WHERE key = 'MASTER_PROMPT' 
+        UNION ALL
+        SELECT value FROM settings WHERE name = 'MASTER_PROMPT'
+        LIMIT 1
+        """
+        
+        result = pg.execute(query)
+        if result and len(result) > 0:
+            return result[0][0]
+            
+    except Exception as e:
+        # Log but don't fail startup
+        import logging
+        logging.getLogger(__name__).warning(f"Could not load MASTER_PROMPT from database: {e}")
+    
+    return None
+
+
 def get_mcp_settings() -> MCPSettings:
     """Get the current MCP settings instance"""
     return MCPSettings()
@@ -206,6 +239,15 @@ def get_mcp_settings() -> MCPSettings:
 def get_server_info(settings: MCPSettings) -> Dict[str, str]:
     """Get server information with About section prepended to instructions"""
     instructions_parts = []
+    
+    # Load MASTER_PROMPT from database first
+    master_prompt = _load_master_prompt_from_db()
+    if master_prompt:
+        instructions_parts.append("# Master Context")
+        instructions_parts.append(master_prompt.strip())
+        instructions_parts.append("")  # Add blank line separator
+        import logging
+        logging.getLogger(__name__).info(f"Loaded MASTER_PROMPT from database ({len(master_prompt)} chars)")
     
     # Add About section if configured
     if settings.mcp_about_section:

@@ -335,6 +335,7 @@ class ModelRunner:
         self._context = ctx
 
         lm_client = LanguageModel.from_context(ctx)
+        adapter = UnifiedStreamAdapter(lm_client._scheme, "openai")
         # The streaming generator will yield AIResponse objects for auditing directly
 
         def _generator():
@@ -390,10 +391,11 @@ class ModelRunner:
                 """
 
                 # Use unified stream adapter for all providers with function call events enabled
-                adapter = UnifiedStreamAdapter(lm_client._scheme, "openai")
+
                 for line, chunk in adapter.process_stream(
                     raw_response, emit_function_announcements=True
                 ):
+
                     # ALWAYS yield the SSE line first for the client - this ensures all events are streamed
                     line_to_yield = (
                         line.decode("utf-8") if isinstance(line, bytes) else line
@@ -418,7 +420,6 @@ class ModelRunner:
                     choice = chunk["choices"][0] if chunk.get("choices") else {}
 
                     finish = choice.get("finish_reason")
-                    # print("✅*******FINISH DATA********", finish)
 
                     # Handle tool call batch
                     if finish == "tool_calls":
@@ -485,7 +486,11 @@ class ModelRunner:
                     break
 
         return lm_client.get_stream_iterator(
-            _generator, context=ctx, user_query=question, audit_on_flush=audit
+            _generator,
+            context=ctx,
+            user_query=question,
+            audit_on_flush=audit,
+            adapter=adapter,
         )
 
     def run(

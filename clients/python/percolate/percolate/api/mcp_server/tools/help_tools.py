@@ -24,7 +24,7 @@ class HelpParams(BaseModel):
     )
 
 
-def create_help_tools(mcp: FastMCP, repository: BaseMCPRepository):
+def create_help_tools(mcp: FastMCP, repository_factory):
     """Create help-related MCP tools"""
     
     @mcp.tool(
@@ -37,6 +37,7 @@ def create_help_tools(mcp: FastMCP, repository: BaseMCPRepository):
     )
     async def help(params: HelpParams) -> str:
         """Get help from PercolateAgent and return raw response"""
+        repository = repository_factory()
         return await repository.get_help(
             params.query,
             params.context,
