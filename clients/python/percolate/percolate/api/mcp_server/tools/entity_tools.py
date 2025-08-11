@@ -50,7 +50,7 @@ class EntitySearchParams(BaseModel):
     )
 
 
-def create_entity_tools(mcp: FastMCP, repository: BaseMCPRepository):
+def create_entity_tools(mcp: FastMCP, repository_factory):
     """Create entity-related MCP tools"""
     
     @mcp.tool(
@@ -63,6 +63,7 @@ def create_entity_tools(mcp: FastMCP, repository: BaseMCPRepository):
     )
     async def get_entity(params: GetEntityParams) -> Dict[str, Any]:
         """Get entity by name and return raw result"""
+        repository = repository_factory()
         return await repository.get_entity(
             params.entity_name, 
             params.entity_type, 
@@ -104,6 +105,8 @@ The search uses advanced semantic understanding to find relevant entities based 
     )
     async def entity_search(params: EntitySearchParams) -> List[Dict[str, Any]]:
         """Search entities and return raw results"""
+        repository = repository_factory()
+        
         # Check if query is a single term (no spaces, short) - better suited for get_entity
         query_stripped = params.query.strip()
         if (query_stripped and 

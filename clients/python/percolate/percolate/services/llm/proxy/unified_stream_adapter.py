@@ -530,7 +530,6 @@ def unified_stream_adapter(
 
 def collect_stream_to_response(
     response,
-    source_scheme: str = "openai",
     request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
@@ -554,5 +553,5 @@ def collect_stream_to_response(
         # Now you have a complete OpenAI-format response with aggregated content
         # and properly buffered tool calls
     """
-    adapter = UnifiedStreamAdapter(source_scheme, "openai")
-    return adapter.collect(response, request_id)
+    # not implemented yet but the Language Stream Iterator can give access to the adapter that created it in principle
+    return response.adapter.collect(response, request_id)

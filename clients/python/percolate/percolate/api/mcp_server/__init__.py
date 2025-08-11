@@ -13,6 +13,9 @@ from .exceptions import (
     FileOperationError
 )
 
+# FastAPI integration
+from .integration import mount_mcp_server
+
 __version__ = "0.1.0"
 __all__ = [
     "MCPException",
@@ -23,7 +26,8 @@ __all__ = [
     "RepositoryError",
     "APIError",
     "FunctionExecutionError",
-    "FileOperationError"
+    "FileOperationError",
+    "mount_mcp_server"
 ]
 
 # FastAPI integration can be imported explicitly when needed:

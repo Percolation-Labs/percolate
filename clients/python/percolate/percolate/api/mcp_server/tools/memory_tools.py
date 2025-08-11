@@ -90,7 +90,7 @@ class BuildMemoryParams(BaseModel):
     pass  # No parameters needed - analyzes all memories for the authenticated user
 
 
-def create_memory_tools(mcp: FastMCP, repository: BaseMCPRepository):
+def create_memory_tools(mcp: FastMCP, repository_factory):
     """Create memory-related MCP tools"""
     
     @mcp.tool(
@@ -99,6 +99,7 @@ def create_memory_tools(mcp: FastMCP, repository: BaseMCPRepository):
     )
     async def add_memory(params: AddMemoryParams) -> Dict[str, Any]:
         """Add a new memory for a user"""
+        repository = repository_factory()
         try:
             result = await repository.add_memory(
                 content=params.content,
@@ -118,6 +119,7 @@ def create_memory_tools(mcp: FastMCP, repository: BaseMCPRepository):
     )
     async def list_memories(params: ListMemoriesParams) -> List[Dict[str, Any]]:
         """List recent memories for a user"""
+        repository = repository_factory()
         try:
             memories = await repository.list_memories(
                 limit=params.limit,
@@ -135,6 +137,7 @@ def create_memory_tools(mcp: FastMCP, repository: BaseMCPRepository):
     )
     async def get_memory(params: GetMemoryParams) -> Dict[str, Any]:
         """Get a specific memory by name"""
+        repository = repository_factory()
         try:
             result = await repository.get_memory(
                 name=params.name
@@ -151,6 +154,7 @@ def create_memory_tools(mcp: FastMCP, repository: BaseMCPRepository):
     )
     async def search_memories(params: SearchMemoriesParams) -> List[Dict[str, Any]]:
         """Search memories by content or category"""
+        repository = repository_factory()
         try:
             memories = await repository.search_memories(
                 query=params.query,
@@ -170,6 +174,7 @@ def create_memory_tools(mcp: FastMCP, repository: BaseMCPRepository):
     )
     async def build_memory(params: BuildMemoryParams) -> Dict[str, Any]:
         """Build memory summary for the authenticated user"""
+        repository = repository_factory()
         try:
             result = await repository.build_memory()
             return result

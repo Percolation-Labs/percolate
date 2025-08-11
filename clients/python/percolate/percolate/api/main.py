@@ -257,9 +257,16 @@ async def well_known_oauth_protected():
 # Mount MCP server if configured
 try:
     from .mcp_server import mount_mcp_server
-    mount_mcp_server(app, path="/mcp")
+    logger.info("Attempting to mount MCP server at /mcp")
+    mcp_app = mount_mcp_server(app, path="/mcp")
+    if mcp_app:
+        logger.info("MCP server successfully mounted at /mcp with HTTP streamable transport")
+    else:
+        logger.warning("MCP server mount returned None - no API key configured")
+except ImportError as e:
+    logger.warning(f"MCP server import failed: {e}")
 except Exception as e:
-    logger.warning(f"MCP server not available: {e}")
+    logger.error(f"MCP server mount failed: {e}", exc_info=True)
 
 @app.get("/models")
 def get_models():

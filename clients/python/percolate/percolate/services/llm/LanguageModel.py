@@ -49,6 +49,7 @@ class OpenAIResponseScheme(AIResponse):
         try:
             if streaming_callback:
                 logger.debug(f"Streaming response")
+                # REMOVEd DEPRECATE
                 response = stream_openai_response(response, printer=streaming_callback)
             else:
                 response = response.json()
@@ -227,6 +228,7 @@ class LanguageModel:
         )
         self._scheme = self.params.get("scheme", "openai")
 
+    # DEPRECATED - DONT SUPPORT
     def parse(
         self,
         response: requests.models.Response | typing.Any,
@@ -273,6 +275,7 @@ class LanguageModel:
             logger.warning(f"failing to parse {response} {traceback.format_exc()}")
             raise
 
+    # deprecate in place of call raw an the streamers
     def __call__(
         self,
         messages: MessageStack,
@@ -742,6 +745,7 @@ class LanguageModel:
         context: CallingContext,
         user_query: str = None,
         audit_on_flush: bool = False,
+        adapter=None,
     ):
         """
         The stream iterator is a wrapper that helps with custom streaming logic, formatting and auditing
@@ -758,4 +762,8 @@ class LanguageModel:
             context=context,
             user_query=user_query,
             audit_on_flush=audit_on_flush,
+            # this is passed in because it knowns about protocols
+            # so if you want to not iterate the stream and just adapter the non streaming
+            # response to any protocol you can just collect in any mode (in theory)
+            adapter=adapter,
         )

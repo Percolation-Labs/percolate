@@ -125,14 +125,15 @@ def print_openai_delta_content(json_data):
     json_data = json_data[json_data.index(":") + 1 :]
     try:
         import json
+
         json_data = json.loads(json_data)
-        
-        if json_data.get('choices') and json_data['choices']:
-            choice = json_data['choices'][0]
-       
+
+        if json_data.get("choices") and json_data["choices"]:
+            choice = json_data["choices"][0]
+
             if "delta" in choice and "content" in choice["delta"]:
                 content = choice["delta"]["content"]
-                print(content, end="", flush=True)  
+                print(content, end="", flush=True)
     except:
         pass
 
@@ -161,6 +162,7 @@ class LLMStreamIterator:
         scheme: str = "openai",
         user_query: str = None,
         audit_on_flush: bool = False,
+        adapter=None,
     ):
         self.g = g
         self.user_query = user_query
@@ -170,6 +172,7 @@ class LLMStreamIterator:
         self.scheme = scheme
         self.context = context
         self.audit_on_flush = audit_on_flush
+        self.adapter = adapter
         # Holds LLM token usage from the final SSE chunk (prompt, completion, total)
         self._usage = {}
         # Tool calls collected during streaming
@@ -284,12 +287,13 @@ class LLMStreamIterator:
                 except Exception:
                     pass
 
-                # Always yield the item - this is the fixed logic
-                if isinstance(item, str):
-                    encoded = item.encode("utf-8")
-                    yield encoded
-                else:
-                    yield item
+                if len(item):
+                    # Always yield the item - this is the fixed logic
+                    if isinstance(item, str):
+                        encoded = item.encode("utf-8")
+                        yield encoded
+                    else:
+                        yield item
 
         except Exception as e:
             import traceback
