@@ -249,7 +249,7 @@ class LanguageModelApi(AbstractEntityModel):
 class Agent(AbstractEntityModel):
     """The agent model is a meta data object to persist agent metadata for search etc"""
 
-    id: uuid.UUID | str
+    id: typing.Optional[uuid.UUID | str] = None
     name: str
     category: typing.Optional[str] = Field(
         None, description="Simple property to filter agents by categories"
@@ -257,7 +257,7 @@ class Agent(AbstractEntityModel):
     description: str = DefaultEmbeddingField(
         description="The system prompt as markdown"
     )
-    spec: dict = Field(description="The model json schema")
+    spec: typing.Optional[dict] = Field(default_factory=dict, description="The model json schema")
     functions: typing.Optional[dict] = Field(
         description="The function that agent can call", default_factory=dict
     )
@@ -271,6 +271,15 @@ class Agent(AbstractEntityModel):
         """we take these from the class and save them"""
         if not values.get("functions") and hasattr(cls, "get_model_functions"):
             values["functions"] = cls.get_model_functions()
+        
+        # Auto-generate id from name if not provided
+        if not values.get("id") and values.get("name"):
+            values["id"] = make_uuid(values["name"])
+        
+        # Set default spec if not provided
+        if not values.get("spec"):
+            values["spec"] = {}
+            
         return values
 
     def from_abstract_model(cls: BaseModel):

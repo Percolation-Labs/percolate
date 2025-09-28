@@ -411,6 +411,10 @@ class UnifiedStreamAdapter:
         Yields:
             Tuple of (formatted_sse_line, canonical_chunk)
         """
+        # Track finish reason states
+        seen_stop_finish_reason = False
+        seen_any_finish_reason = False
+        
         for line in response.iter_lines(decode_unicode=True):
             # Parse the line
             chunk = self.parse_sse_line(line)
@@ -425,9 +429,23 @@ class UnifiedStreamAdapter:
 
             event_type, canonical_chunk = result
 
+            # Check for finish reasons in the chunk
+            if "choices" in canonical_chunk and canonical_chunk["choices"]:
+                choice = canonical_chunk["choices"][0]
+                finish_reason = choice.get("finish_reason")
+                if finish_reason is not None:
+                    seen_any_finish_reason = True
+                    if finish_reason == "stop":
+                        seen_stop_finish_reason = True
+
             # Handle different event types
             if event_type == StreamEventType.DONE:
-                yield "data: [DONE]\n\n", {"type": "done"}
+                # Only yield [DONE] if:
+                # 1. We've seen a stop finish reason (agent is truly done), OR
+                # 2. We never saw any finish reason at all (simple completion without tools)
+                if seen_stop_finish_reason or not seen_any_finish_reason:
+                    yield "data: [DONE]\n\n", {"type": "done"}
+                # Otherwise suppress [DONE] to allow agent loop to continue
                 break
 
             elif event_type == StreamEventType.CONTENT:
@@ -469,6 +487,9 @@ class UnifiedStreamAdapter:
             usage_chunk = self.create_usage_chunk()
             target_chunk = self.convert_to_target_format(usage_chunk)
             yield f"data: {json.dumps(target_chunk)}\n\n", usage_chunk
+        
+        # Note: [DONE] is already emitted above when we see the stop finish reason
+        # No need to emit it again at the end
 
     def collect(self, response, request_id: Optional[str] = None) -> Dict[str, Any]:
         """

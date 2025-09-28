@@ -45,6 +45,7 @@ from percolate.api.routes.auth import (
     hybrid_auth,
     require_user_auth,
     hybrid_auth_with_role,
+    fast_hybrid_auth_with_role,
 )
 import percolate as p8
 from percolate.services import ModelRunner
@@ -185,12 +186,22 @@ def handle_agent_request(
         agent_model_name = agent_model_name.replace("-", ".")
 
     # Get or create a ModelRunner with user context
+    # When a specific agent is requested, don't fall back to Resources
+    fallback_to_resources = not agent_model_name or agent_model_name == "p8.Resources"
+    
     runner = get_runner(
         agent_model_name or "p8.Resources",
         user_id=userid,
         # Add any other user context needed for row-level security
-        fallback_to_resources=True,
+        fallback_to_resources=fallback_to_resources,
     )
+    
+    # Check if the model was found
+    if runner is None and agent_model_name:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Model '{agent_model_name}' not found. The specified agent model does not exist in the system."
+        )
 
     # Log cache stats after access
     logger.info(f"ModelRunnerCache stats after access: {get_runner_cache_stats()}")

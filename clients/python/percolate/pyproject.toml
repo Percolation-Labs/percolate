@@ -45,6 +45,7 @@ python-jose = {extras = ["cryptography"], version = "^3.3.0"}
 pytest-asyncio = "^0.24.0"
 pydantic-settings = "^2.0.0"
 uvicorn = ">=0.17.0"
+pypdf = "^6.1.0"
 
 [tool.poetry.group.iceberg]
 optional = true

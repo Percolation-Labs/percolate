@@ -42,6 +42,148 @@ class ScheduleCreate(BaseModel):
 router = APIRouter()
 
 
+class ResourcesSearchRequest(BaseModel):
+    """Request model for searching resources."""
+    
+    query: str = Field(..., description="Text query to search for in resources")
+    user_id: Optional[str] = Field(None, description="Optional user ID to filter resources by owner")
+    limit: int = Field(10, description="Maximum number of results to return", ge=1, le=100)
+    offset: int = Field(0, description="Number of results to skip for pagination", ge=0)
+
+
+@router.post("/resources/search")
+async def search_resources(
+    request: ResourcesSearchRequest,
+    auth_user_id: Optional[str] = Depends(hybrid_auth),
+):
+    """
+    Search resources by text query and optional user ID filter.
+    
+    This endpoint allows you to search through uploaded resources using a text query.
+    Optionally filter by user_id to see only resources owned by a specific user.
+    
+    Args:
+        request: Search parameters including query text and optional filters
+        auth_user_id: Authenticated user ID (from auth)
+        
+    Returns:
+        List of matching resources with pagination info
+    """
+    from percolate.models.p8 import Resources
+    import percolate as p8
+    
+    try:
+        # Build the search query
+        search_conditions = []
+        params = []
+        
+        # Text search condition - search in content, name, and summary fields
+        search_conditions.append("""
+            (content ILIKE %s OR name ILIKE %s OR summary ILIKE %s)
+        """)
+        search_pattern = f"%{request.query}%"
+        params.extend([search_pattern, search_pattern, search_pattern])
+        
+        # User ID filter if provided
+        if request.user_id:
+            # Validate if it's a valid UUID format
+            try:
+                # Try to parse as UUID to validate format
+                import uuid
+                uuid.UUID(request.user_id)
+                search_conditions.append("userid = %s")
+                params.append(request.user_id)
+            except ValueError:
+                # If not a valid UUID, try to match by email or username pattern
+                logger.warning(f"Invalid UUID format for user_id: {request.user_id}")
+                # You could add alternative lookup logic here if needed
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid user_id format. Must be a valid UUID."
+                )
+        
+        # Build the full query
+        where_clause = " AND ".join(search_conditions)
+        
+        # Count total matching resources
+        count_query = f"""
+            SELECT COUNT(*) as total
+            FROM p8."Resources"
+            WHERE {where_clause}
+        """
+        
+        count_result = p8.repository(Resources).execute(count_query, data=tuple(params))
+        total_count = count_result[0]['total'] if count_result else 0
+        
+        # Search query with pagination
+        search_query = f"""
+            SELECT *
+            FROM p8."Resources"
+            WHERE {where_clause}
+            ORDER BY created_at DESC
+            LIMIT %s OFFSET %s
+        """
+        
+        # Add limit and offset to params
+        params.extend([request.limit, request.offset])
+        
+        # Execute search
+        results = p8.repository(Resources).execute(search_query, data=tuple(params))
+        
+        # Convert results to Resources model instances
+        resources = [Resources(**r) for r in results] if results else []
+        
+        # Calculate pagination info
+        has_more = (request.offset + len(resources)) < total_count
+        
+        return {
+            "resources": resources,
+            "pagination": {
+                "total": total_count,
+                "limit": request.limit,
+                "offset": request.offset,
+                "has_more": has_more,
+                "returned": len(resources)
+            },
+            "query": {
+                "text": request.query,
+                "user_id": request.user_id,
+                "searched_fields": ["content", "name", "summary"]
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Resources search failed: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to search resources: {str(e)}"
+        )
+
+
+@router.get("/resources/search")
+async def search_resources_get(
+    query: str,
+    user_id: Optional[str] = None,
+    limit: int = 10,
+    offset: int = 0,
+    auth_user_id: Optional[str] = Depends(hybrid_auth),
+):
+    """
+    GET version of resources search for easier testing and browser access.
+    
+    Same functionality as POST endpoint but with query parameters.
+    """
+    # Create request object and delegate to POST handler
+    request = ResourcesSearchRequest(
+        query=query,
+        user_id=user_id,
+        limit=limit,
+        offset=offset
+    )
+    return await search_resources(request, auth_user_id)
+
+
 @router.post("/env/sync")
 async def sync_env(auth_user_id: Optional[str] = Depends(hybrid_auth)):
     """sync env adds whatever keys you have in your environment your database instance
@@ -355,6 +497,7 @@ async def upload_file(
     device_info: str = Form(None),
     namespace: str = Form("p8"),
     entity_name: str = Form("Resources"),
+    chunk_size: int = Form(None),
     auth_user_id: typing.Optional[str] = Depends(optional_hybrid_auth),
 ):
     """
@@ -367,6 +510,7 @@ async def upload_file(
         add_resource: Whether to add the file as a database resource for content indexing
         namespace: The namespace for the entity (default: "public")
         entity_name: The entity name to use for storing resources (default: "Resources")
+        chunk_size: Optional chunk size for splitting content (default: 1000 characters)
         user_id: Optional user ID override
         device_info: Optional device information as base64 encoded JSON
         auth_user_id: The authenticated user ID from auth (injected by dependency)
@@ -408,7 +552,7 @@ async def upload_file(
             detail=f"Failed to load model for entity '{full_entity_name}'",
         )
 
-    def index_resource(file_upload_result: dict, task_id: str = None):
+    def index_resource(file_upload_result: dict, task_id: str = None, chunk_size: int = None):
         """given a file upload result which provides e.g. the key, index the resource"""
 
         try:
@@ -437,12 +581,16 @@ async def upload_file(
             # Initialize FileSystemService which auto-configures S3
             fs = FileSystemService()
 
+            # Log the chunk size being used
+            actual_chunk_size = chunk_size or 1000
+            logger.info(f"Using chunk_size={actual_chunk_size} for file: {file.filename}")
+
             # Use the modern read_chunks method with proper S3 URI support
             resources = list(
                 fs.read_chunks(
                     path=uri,
                     mode="simple",  # Use simple mode for faster processing
-                    chunk_size=1000,  # Standard chunk size
+                    chunk_size=actual_chunk_size,  # Use provided chunk_size or default to 1000
                     chunk_overlap=200,  # Standard overlap
                     userid=effective_user_id,
                     name=file.filename,
@@ -499,7 +647,7 @@ async def upload_file(
 
         if add_resource:
             background_tasks.add_task(
-                index_resource, file_upload_result=result, task_id=task_id
+                index_resource, file_upload_result=result, task_id=task_id, chunk_size=chunk_size
             )
 
         logger.info(f"Uploaded file {result['name']} to S3 successfully")
