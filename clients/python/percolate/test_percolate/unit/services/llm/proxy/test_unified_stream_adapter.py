@@ -234,7 +234,8 @@ class TestUnifiedStreamAdapter:
         
         # Should see tool use and usage events
         tool_event_count = sum(1 for _, chunk in events_with_relay 
-                             if "tool_calls" in chunk.get("choices", [{}])[0].get("delta", {}))
+                             if chunk.get("choices") and len(chunk["choices"]) > 0 and
+                             "tool_calls" in chunk["choices"][0].get("delta", {}))
         usage_event_count = sum(1 for _, chunk in events_with_relay 
                               if "usage" in chunk)
         

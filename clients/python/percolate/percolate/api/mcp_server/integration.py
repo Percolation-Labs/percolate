@@ -54,17 +54,23 @@ class MCPAuthMiddleware(BaseHTTPMiddleware):
         # Extract user email from token or use a default approach
         user_email = None
         
-        # Try to get email from X-User-Email header first (for clients that support it)
-        user_email = request.headers.get('X-User-Email')
+        # Try to extract user email from JWT token first (proper OAuth approach)
+        user_email = self._extract_email_from_token(token)
         
-        # If no header, try to extract from JWT token
+        # Fallback: check X-User-Email header (for testing/development)
         if not user_email:
-            user_email = self._extract_email_from_token(token)
-        
+            user_email = request.headers.get('X-User-Email')
+            
+        # Final fallback: use configured email from MCP settings
+        if not user_email:
+            from .config import get_mcp_settings
+            settings = get_mcp_settings()
+            user_email = settings.user_email
+            
         # If still no email, use a placeholder (can be enhanced later)
         if not user_email:
             user_email = "mcp-user@unknown"
-            logger.warning("No user email found in token or headers, using placeholder")
+            logger.warning("No user email found in token, headers, or settings - using placeholder")
         
         # Add user context to request state
         request.state.user_email = user_email
@@ -111,8 +117,20 @@ class MCPAuthMiddleware(BaseHTTPMiddleware):
                 decoded = base64.b64decode(payload)
                 claims = json.loads(decoded)
                 
-                # Try common email claims
-                return claims.get('email') or claims.get('user_email') or claims.get('sub')
+                # Try common email claims in order of preference
+                email_candidates = [
+                    claims.get('email'),
+                    claims.get('user_email'), 
+                    claims.get('preferred_username'),
+                    claims.get('sub') if '@' in str(claims.get('sub', '')) else None
+                ]
+                
+                for email in email_candidates:
+                    if email and isinstance(email, str) and '@' in email:
+                        logger.debug(f"Extracted email from JWT token: {email}")
+                        return email
+                
+                logger.debug(f"No email found in JWT claims: {list(claims.keys())}")
                 
         except Exception as e:
             logger.debug(f"Could not extract email from token: {e}")

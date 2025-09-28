@@ -451,6 +451,103 @@ class HybridAuthWithRole:
 hybrid_auth_with_role = HybridAuthWithRole()  # Returns (user_id, role_level) tuple
 
 
+class FastHybridAuthWithRole:
+    """
+    High-performance version of HybridAuthWithRole with caching.
+    Optimized for agent endpoints where authentication is a bottleneck.
+    """
+    
+    async def __call__(
+        self, 
+        request: Request,
+        credentials: typing.Optional[HTTPAuthorizationCredentials] = Depends(bearer)
+    ) -> typing.Tuple[typing.Optional[str], typing.Optional[int]]:
+        """
+        Returns (user_id, role_level) tuple with fast authentication.
+        """
+        import time
+        start_time = time.time()
+        
+        # First, try session authentication (keep existing logic)
+        try:
+            user_id = get_user_from_session(request)
+            if user_id:
+                # Get role_level for this user
+                query = """SELECT role_level FROM p8."User" WHERE id::TEXT = %s LIMIT 1"""
+                from percolate.services import PostgresService
+                pg = PostgresService()
+                result = pg.execute(query, data=(user_id,))
+                role_level = result[0]['role_level'] if result else None
+                elapsed = (time.time() - start_time) * 1000
+                logger.debug(f"Session auth completed in {elapsed:.1f}ms: user_id={user_id}, role_level={role_level}")
+                return (user_id, role_level)
+        except Exception as e:
+            logger.debug(f"Session auth failed: {e}")
+        
+        # If no session, try fast bearer token authentication
+        if credentials:
+            try:
+                from .fast_auth import validate_token_fast
+                
+                token = credentials.credentials
+                
+                # Get email from headers
+                user_email = (request.headers.get('X-User-Email') or 
+                             request.headers.get('x-user-email') or 
+                             request.headers.get('X-OpenWebUI-User-Email') or 
+                             request.headers.get('x-openwebui-user-email'))
+                
+                # Fast authentication
+                auth_result = validate_token_fast(token, user_email)
+                
+                if auth_result:
+                    user_id, email, role_level = auth_result
+                    elapsed = (time.time() - start_time) * 1000
+                    logger.debug(f"FastAuth completed in {elapsed:.1f}ms: user_id={user_id}, role_level={role_level}")
+                    return (user_id, role_level)
+                else:
+                    # Check if this is a master API key (validate_token_fast returns None for master keys)
+                    from .fast_auth import check_master_api_key
+                    if check_master_api_key(token):
+                        # Master API key - valid authentication but no user context
+                        elapsed = (time.time() - start_time) * 1000
+                        logger.debug(f"Master API key auth in {elapsed:.1f}ms")
+                        return (None, None)
+                    else:
+                        # Invalid token
+                        elapsed = (time.time() - start_time) * 1000
+                        logger.debug(f"Token validation failed in {elapsed:.1f}ms")
+                        raise HTTPException(
+                            status_code=401,
+                            detail="Invalid API KEY in token check.",
+                            headers={"WWW-Authenticate": "Bearer"}
+                        )
+                    
+            except HTTPException:
+                raise
+            except Exception as e:
+                elapsed = (time.time() - start_time) * 1000
+                logger.error(f"FastAuth error in {elapsed:.1f}ms: {e}")
+                raise HTTPException(
+                    status_code=401,
+                    detail="Authentication error.",
+                    headers={"WWW-Authenticate": "Bearer"}
+                )
+        
+        # If both methods fail, raise 401
+        elapsed = (time.time() - start_time) * 1000
+        logger.debug(f"Authentication failed in {elapsed:.1f}ms - no valid credentials")
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required. Use session login or valid API key.",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+
+
+# Fast authentication instance for high-performance endpoints
+fast_hybrid_auth_with_role = FastHybridAuthWithRole()
+
+
 from pydantic import BaseModel
 
 class AuthUser(BaseModel):

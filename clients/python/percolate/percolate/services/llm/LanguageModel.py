@@ -207,10 +207,16 @@ class LanguageModel:
             'select * from p8."LanguageModelApi" where name = %s ', (model_name,)
         )
         if not self.params:
-            raise Exception(
-                f"The model {model_name} does not exist in the Percolate settings"
+            # Try to fetch similar model by prefix
+            self.params = self.fetch_similar_parameters_with_supplied_model_name(
+                model_name
             )
-        self.params = self.params[0]
+            if not self.params:
+                raise Exception(
+                    f"The model {model_name} does not exist in the Percolate settings and no similar model was found by prefix"
+                )
+        else:
+            self.params = self.params[0]
 
         if self.params["token"] is None:
             """if the token is not stored in the database we use whatever token env key to try and load it from environment"""
@@ -227,6 +233,64 @@ class LanguageModel:
             else self.params.get("token")
         )
         self._scheme = self.params.get("scheme", "openai")
+
+    def fetch_similar_parameters_with_supplied_model_name(
+        self, model_name: str
+    ) -> typing.Optional[dict]:
+        """
+        Fetch model parameters by prefix matching.
+
+        For example:
+        - If model_name starts with "gpt", fetch gpt-4 settings
+        - If model_name starts with "claude", fetch claude-3-5-sonnet settings
+        - If model_name starts with "gem", fetch gemini-2.0-flash settings
+
+        The fetched parameters will have their model name replaced with the supplied model_name
+        to trust the user's specified model while using our configured tokens and endpoints.
+
+        Args:
+            model_name: The model name provided by the user
+
+        Returns:
+            Dictionary of model parameters with the model name replaced, or None if no match found
+        """
+        prefix_to_default = {
+            "gpt": "gpt-4.1",  # Default GPT model to fetch settings from
+            "claude": "claude-3-5-sonnet-20241022",  # Default Claude model
+            "gem": "gemini-2.0-flash-latest",  # Default Gemini model
+        }
+
+        # Determine which prefix matches
+        matched_default = None
+        for prefix, default_model in prefix_to_default.items():
+            if model_name.lower().startswith(prefix):
+                matched_default = default_model
+                break
+
+        if not matched_default:
+            return None
+
+        # Fetch the default model parameters
+        try:
+            params = self.db.execute(
+                'select * from p8."LanguageModelApi" where name = %s ',
+                (matched_default,),
+            )
+
+            if params:
+                # Get the first result and make a copy
+                result = params[0].copy()
+                # Replace the model name with the user-supplied one
+                result["model"] = model_name
+                # Keep the original name for reference
+                result["_original_name"] = result["name"]
+                result["name"] = model_name
+                return result
+
+        except Exception as e:
+            logger.warning(f"Error fetching similar model parameters: {e}")
+
+        return None
 
     # DEPRECATED - DONT SUPPORT
     def parse(

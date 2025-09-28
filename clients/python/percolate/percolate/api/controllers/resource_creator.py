@@ -71,23 +71,28 @@ async def create_resources_from_upload(upload_id: str, save_resources: bool=True
         
         # Get file extension
         ext = Path(filename).suffix.lower()
-        
-
-        # Determine appropriate chunk size based on file type
-        ext = Path(filename).suffix.lower()
         is_audio = ext in ['.wav', '.mp3', '.m4a', '.flac', '.ogg']
         
-        # Use larger chunks for audio to reduce fragmentation
-        chunk_size = 2000 if is_audio else 1000
-        chunk_overlap = 200
-        
-        logger.info(f"Using chunk_size={chunk_size}, overlap={chunk_overlap} for {filename} (is_audio={is_audio})")
-        
+        # Determine parsing mode first
+        # Use extended mode by default for better content extraction (includes OCR)
         mode = 'extended'
         
-        """extended is useful for odf but we need an adaptive way to do it so just get text for now"""
-        if ext in ['.pdf', 'txt']:
+        # For very large files or plain text, use simple mode to save processing time
+        if ext in ['.txt'] or upload.total_size > 50_000_000:  # 50MB
             mode = 'simple'
+            logger.info(f"Using simple mode for {filename} (large file or plain text)")
+        
+        # Determine chunk size based on file type and mode
+        # Use larger chunks to reduce fragmentation and stay under 20 chunks
+        if is_audio:
+            chunk_size = 2000
+        elif mode == 'extended':
+            chunk_size = 2000  # Larger chunks for OCR-enriched content
+        else:
+            chunk_size = 1500
+        chunk_overlap = 200
+        
+        logger.info(f"Using mode={mode}, chunk_size={chunk_size}, overlap={chunk_overlap} for {filename}")
             
         # Always use extended mode for better parsing
         # Note: save_to_db parameter is ignored by read_chunks, so we handle saving explicitly
