@@ -119,11 +119,13 @@ class ModelRunner:
         return {"message": "acknowledged", "output_size_estimate": estimated_length}
 
     def search(self, questions: typing.List[str], user_id: str | uuid.UUID = None):
-        """Run a general search on the model that is being used in the current context as per the system prompt
+        """Search INTERNAL knowledge base and user data using RAG (Retrieval Augmented Generation).
+        Use this to search documents, stored knowledge, and internal data - NOT for web searches.
+        For searching the internet, use search_the_web instead.
         If you want to add multiple questions supply a list of strings as an array.
         To find functions use help instead of search. Do not search for functions if there is already a function on the agent that you can activate.
         Args:
-            questions: ask one or more questions to search the data store
+            questions: ask one or more questions to search the internal data store
             user_id: optional user identifier (email or UUID) for access control
         """
         # If no user_id provided, try to get from:
@@ -335,7 +337,6 @@ class ModelRunner:
         self._context = ctx
 
         lm_client = LanguageModel.from_context(ctx)
-        adapter = UnifiedStreamAdapter(lm_client._scheme, "openai")
         # The streaming generator will yield AIResponse objects for auditing directly
 
         def _generator():
@@ -391,7 +392,7 @@ class ModelRunner:
                 """
 
                 # Use unified stream adapter for all providers with function call events enabled
-
+                adapter = UnifiedStreamAdapter(lm_client._scheme, "openai")
                 for line, chunk in adapter.process_stream(
                     raw_response, emit_function_announcements=True
                 ):
@@ -486,11 +487,7 @@ class ModelRunner:
                     break
 
         return lm_client.get_stream_iterator(
-            _generator,
-            context=ctx,
-            user_query=question,
-            audit_on_flush=audit,
-            adapter=adapter,
+            _generator, context=ctx, user_query=question, audit_on_flush=audit
         )
 
     def run(

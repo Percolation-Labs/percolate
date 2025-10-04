@@ -11,6 +11,7 @@ from .audio import router as audio_router
 from .tus import router as tus_router
 from .compliance import router as compliance_router
 from .memory import router as memory_router
+from .test_agent_ui import router as test_ui_router
 
 def set_routes(app: FastAPI):
     app.include_router(auth_router, prefix=f"/auth", tags=["Auth"])
@@ -23,6 +24,7 @@ def set_routes(app: FastAPI):
     app.include_router(audio_router, prefix=f"/audio", tags=["Audio"])
     app.include_router(tus_router, prefix=f"/tus", tags=["Uploads"])
     app.include_router(memory_router, prefix=f"/memory", tags=["Memory"])
-    
+    app.include_router(test_ui_router, tags=["Testing"])
+
     # Add compliance router at /v1 without swagger documentation
     app.include_router(compliance_router, prefix="/v1")

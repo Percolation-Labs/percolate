@@ -230,6 +230,7 @@ class LLMStreamIterator:
         self._is_consumed = False
         done_marker_seen = False
         finish_reason_seen = False
+        last_finish_reason = None
 
         try:
             # Optimization: Just send a single minimal heartbeat
@@ -239,6 +240,7 @@ class LLMStreamIterator:
                 # Check if this is a [DONE] marker
                 if isinstance(item, str) and item.strip() == "data: [DONE]":
                     done_marker_seen = True
+                    logger.info(f"[DONE] marker seen in stream from generator")
 
                 # Collect the tool call responses and emit status messages about them
                 from percolate.models.p8 import AIResponse
@@ -275,6 +277,7 @@ class LLMStreamIterator:
                             # Check if we've seen a finish_reason
                             if choice.get("finish_reason"):
                                 finish_reason_seen = True
+                                last_finish_reason = choice.get("finish_reason")
 
                             if choice.get("finish_reason") == "tool_calls":
                                 delta = choice.get("delta", {})
@@ -331,14 +334,35 @@ class LLMStreamIterator:
 
             # Send finish_reason "stop" if we haven't seen a finish_reason yet
             if not finish_reason_seen:
+                logger.info(f"Adding finish_reason:stop because none was seen")
+                yield f"event: debug_adding_stop\ndata: {{\"reason\": \"no_finish_reason_seen\"}}\n\n".encode("utf-8")
                 finish_chunk = f'data: {{"id":"{uuid.uuid4()}","object":"chat.completion.chunk","choices":[{{"index":0,"delta":{{}},"finish_reason":"stop"}}]}}\n\n'
                 yield finish_chunk.encode("utf-8")
+            else:
+                logger.info(f"NOT adding finish_reason:stop because we saw: {last_finish_reason}")
 
-            # Always send a [DONE] marker at the end if we haven't seen one yet
-            # This ensures OpenWebUI knows the stream is complete
-            if not done_marker_seen:
+            # Only send [DONE] marker if:
+            # 1. We haven't seen one yet, AND
+            # 2. The last finish_reason was NOT "tool_calls" (which means agent loop should continue)
+            # This ensures OpenWebUI knows the stream is complete, but doesn't break agentic loops
+            logger.info(f"LLMStreamIterator finally block: done_marker_seen={done_marker_seen}, last_finish_reason={last_finish_reason}")
+
+            # DEBUG: Send event to client
+            import traceback
+            stack_summary = '->'.join([f.name for f in traceback.extract_stack()[-10:]])
+            debug_event = f"event: debug_finally\ndata: {{\"done_marker_seen\": {str(done_marker_seen).lower()}, \"last_finish_reason\": \"{last_finish_reason}\", \"will_send_done\": {str(not done_marker_seen and last_finish_reason != 'tool_calls').lower()}}}\n\n"
+            yield debug_event.encode("utf-8")
+
+            if not done_marker_seen and last_finish_reason != "tool_calls":
+                logger.info(f"Sending [DONE] marker")
+                debug_event2 = f"event: debug_sending_done\ndata: {{\"reason\": \"condition_passed\"}}\n\n"
+                yield debug_event2.encode("utf-8")
                 done_marker = "data: [DONE]\n\n"
                 yield done_marker.encode("utf-8")
+            else:
+                logger.info(f"Suppressing [DONE] marker to allow agent loop to continue")
+                debug_event3 = f"event: debug_suppressing_done\ndata: {{\"reason\": \"tool_calls_detected\"}}\n\n"
+                yield debug_event3.encode("utf-8")
 
             # Audit the response if audit_on_flush is True
             if self.audit_on_flush:

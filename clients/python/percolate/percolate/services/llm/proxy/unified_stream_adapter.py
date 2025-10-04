@@ -443,8 +443,12 @@ class UnifiedStreamAdapter:
                 # Only yield [DONE] if:
                 # 1. We've seen a stop finish reason (agent is truly done), OR
                 # 2. We never saw any finish reason at all (simple completion without tools)
+                logger.info(f"UnifiedStreamAdapter: [DONE] received. seen_stop={seen_stop_finish_reason}, seen_any={seen_any_finish_reason}")
                 if seen_stop_finish_reason or not seen_any_finish_reason:
+                    logger.info(f"UnifiedStreamAdapter: Yielding [DONE]")
                     yield "data: [DONE]\n\n", {"type": "done"}
+                else:
+                    logger.info(f"UnifiedStreamAdapter: Suppressing [DONE] to allow agent loop to continue")
                 # Otherwise suppress [DONE] to allow agent loop to continue
                 break
 

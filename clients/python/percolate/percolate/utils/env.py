@@ -93,6 +93,9 @@ S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME", S3_DEFAULT_BUCKET)
 #
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
 
+# OpenTelemetry configuration
+OTEL_ENABLED = os.environ.get("OTEL_ENABLED", "false").lower() in ("true", "1", "yes", "y")
+
 GPT_MINI = "gpt-4.1-mini"
 DEFAULT_MODEL = "gpt-4.1"
 P8_BASE_URI = os.environ.get("P8_API_ENDPOINT", os.environ.get("P8_BASE_URI", "https://p8.resmagic.io"))

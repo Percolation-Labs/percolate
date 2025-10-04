@@ -25,6 +25,43 @@ from percolate.utils import logger
 from percolate.utils.decorators import tool as p8_tool
 
 
+class SessionFeedback(AbstractEntityModel):
+    """User feedback on chat sessions for quality tracking and observability.
+
+    This model captures user feedback (thumbs up/down) on chat sessions,
+    which can be used for model quality tracking, cost-benefit analysis,
+    and OpenTelemetry instrumentation.
+    """
+
+    id: uuid.UUID | str = Field(default_factory=uuid.uuid1, description="Unique feedback ID")
+    session_id: str = Field(..., description="Chat session identifier that was rated")
+    approved: bool = Field(..., description="User approval: True=thumbs up, False=thumbs down")
+    note: typing.Optional[str] = Field(None, description="Optional feedback note/comment")
+    tags: typing.Optional[typing.List[str]] = Field(None, description="Optional labels/badges for categorization")
+    created_at: datetime.datetime = Field(default_factory=datetime.datetime.utcnow, description="When feedback was submitted")
+
+    def to_session_evaluation(self, user_id: typing.Optional[str] = None) -> "SessionEvaluation":
+        """Convert SessionFeedback to SessionEvaluation format for observability storage.
+
+        Maps the feedback fields to the SessionEvaluation schema:
+        - approved (bool) -> rating (float): True=1.0, False=0.0
+        - note -> comments (with tags appended if present)
+        - session_id preserved
+        """
+        # Combine note and tags into comments
+        comments = self.note or ""
+        if self.tags:
+            tags_str = ", ".join(self.tags)
+            comments = f"{comments}\nTags: {tags_str}" if comments else f"Tags: {tags_str}"
+
+        return SessionEvaluation(
+            id=self.id,
+            session_id=self.session_id,
+            rating=1.0 if self.approved else 0.0,
+            comments=comments or None,
+        )
+
+
 class Function(AbstractEntityModel):
     """Functions are external tools that agents can use. See field comments for context.
     Functions can be searched and used as LLM tools.
@@ -182,6 +219,8 @@ class Function(AbstractEntityModel):
     @model_validator(mode="before")
     @classmethod
     def _f(cls, values):
+        if values is None:
+            return values
         if not values.get("id"):
             values["id"] = make_uuid(
                 {"key": values["name"], "proxy_uri": values["proxy_uri"]}
@@ -271,15 +310,23 @@ class Agent(AbstractEntityModel):
         """we take these from the class and save them"""
         if not values.get("functions") and hasattr(cls, "get_model_functions"):
             values["functions"] = cls.get_model_functions()
-        
+
         # Auto-generate id from name if not provided
         if not values.get("id") and values.get("name"):
             values["id"] = make_uuid(values["name"])
-        
+
         # Set default spec if not provided
         if not values.get("spec"):
             values["spec"] = {}
-            
+
+        # Ensure metadata exists
+        if not values.get("metadata"):
+            values["metadata"] = {}
+
+        # Ensure version exists in metadata (default to "0")
+        if "version" not in values["metadata"]:
+            values["metadata"]["version"] = "0"
+
         return values
 
     def from_abstract_model(cls: BaseModel):
@@ -326,9 +373,15 @@ class Agent(AbstractEntityModel):
         )
 
         # Update model_config with metadata if present
-        if agent_data.get("metadata"):
+        metadata = agent_data.get("metadata", {})
+
+        # Ensure version exists in metadata (default to "0")
+        if "version" not in metadata:
+            metadata["version"] = "0"
+
+        if metadata:
             if hasattr(model, "model_config") and isinstance(model.model_config, dict):
-                model.model_config.update(agent_data["metadata"])
+                model.model_config.update(metadata)
             else:
                 # If model_config doesn't exist or isn't a dict, create it
                 model.model_config = {
@@ -336,11 +389,15 @@ class Agent(AbstractEntityModel):
                     "namespace": namespace,
                     "description": agent_data.get("description", ""),
                     "functions": agent_data.get("functions"),
-                    **agent_data["metadata"],
+                    **metadata,
                 }
 
         # Store the original agent ID for reference
         model.model_config["agent_id"] = str(agent_data["id"])
+
+        # Ensure version is always in model_config (default to "0")
+        if "version" not in model.model_config:
+            model.model_config["version"] = "0"
 
         return model
 
@@ -735,17 +792,21 @@ class Session(AbstractModel):
 
 
 class SessionEvaluation(AbstractModel):
-    """Tracks groups if session dialogue"""
+    """Tracks session evaluation/feedback for observability and quality metrics.
 
-    id: uuid.UUID | str
-    rating: float = Field(
+    This model stores user feedback on chat sessions and can be used for
+    model quality tracking, A/B testing, and observability dashboards.
+    """
+
+    id: uuid.UUID | str = Field(default_factory=uuid.uuid1, description="Unique evaluation ID")
+    session_id: uuid.UUID | str = Field(..., description="Chat session identifier being evaluated")
+    rating: typing.Optional[float] = Field(
         None,
-        description="A rating from 0 to 1 - binary thumb-up/thumbs-down are 0 or 1",
+        description="A rating from 0 to 1 - binary thumbs-up/thumbs-down are 0 or 1, or fractional for multi-level ratings",
     )
     comments: typing.Optional[str] = Field(
         None, description="Additional feedback comments from the user"
     )
-    session_id: uuid.UUID | str
 
 
 class ModelMatrix(AbstractModel):
@@ -1873,6 +1934,8 @@ from percolate.utils.env import MASTER_PROMPT
 
 class UserRoleAgent(AbstractModel):
     """Demo agent showing role-based function access"""
+
+    model_config = {"allow_search": True, "allow_generate_image": True}
 
     @classmethod
     def get_model_description(cls, *args, **kwargs) -> str:

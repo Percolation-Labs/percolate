@@ -1,42 +1,146 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, Query
-from percolate.api.routes.auth import hybrid_auth
+from percolate.api.routes.auth import hybrid_auth, hybrid_auth_with_role
 from pydantic import BaseModel, Field
 from percolate.services import PostgresService
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 import uuid
 from percolate.models.p8 import Agent, Function
 from percolate.utils import logger
+import percolate as p8
 
 router = APIRouter()
 
 
+class AgentServices(BaseModel):
+    """Services configuration for agents"""
+    allow_web_search: Optional[bool] = Field(None, description="Enable web search capability")
+    allow_generate_image: Optional[bool] = Field(None, description="Enable image generation capability")
+
+
+class AgentCreateRequest(BaseModel):
+    """Extended agent creation request with top-level version and services"""
+    name: str
+    category: Optional[str] = None
+    description: str
+    spec: Optional[dict] = Field(default_factory=dict)
+    functions: Optional[dict] = Field(default_factory=dict)
+    metadata: Optional[dict] = Field(default_factory=dict)
+    version: Optional[str] = Field("0", description="Agent version, defaults to '0'")
+    services: Optional[AgentServices] = Field(None, description="Service configuration (written to metadata)")
+
+    def to_agent(self) -> Agent:
+        """Convert request to Agent model, merging version and services into metadata"""
+        # Start with provided metadata or empty dict
+        merged_metadata = self.metadata.copy() if self.metadata else {}
+
+        # Always set version in metadata (default to "0")
+        merged_metadata["version"] = self.version or "0"
+
+        # Merge services into metadata if provided
+        if self.services:
+            services_dict = self.services.model_dump(exclude_none=True)
+            for key, value in services_dict.items():
+                # Only write from services if not already in metadata
+                if key not in merged_metadata:
+                    merged_metadata[key] = value
+
+        return Agent(
+            name=self.name,
+            category=self.category,
+            description=self.description,
+            spec=self.spec,
+            functions=self.functions,
+            metadata=merged_metadata
+        )
+
+
+def prepare_agent_for_save(agent: Agent, user_id: Optional[str], make_public: bool, role_level: int = 0):
+    """Prepare agent for saving by generating appropriate ID and validating public agent conflicts.
+
+    Args:
+        agent: The agent to prepare
+        user_id: User ID from authentication (None for bearer token)
+        make_public: Whether to create a public agent
+        role_level: User's role level (>1 allows overwriting public agents)
+
+    Returns:
+        Tuple of (prepared_agent, repository)
+
+    Raises:
+        HTTPException: If validation fails
+    """
+    from percolate.utils import make_uuid
+    from percolate import p8
+
+    # Ensure agent name is qualified with namespace
+    if "." not in agent.name:
+        agent.name = f"public.{agent.name}"
+
+    if make_public:
+        # For public agents, ID is just based on name
+        agent.id = make_uuid(agent.name)
+
+        # Check if public agent with same name already exists
+        # Only prevent overwrites if role_level <= 1
+        if role_level <= 1:
+            existing = p8.repository(Agent, user_id=None).select(name=agent.name)
+            if existing and len(existing) > 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Public agent with name '{agent.name}' already exists. Cannot overwrite public agents (requires role level > 1)."
+                )
+
+        # Save without user_id to make it public
+        repo = p8.repository(Agent, user_id=None)
+    else:
+        # For user-bound agents, ID includes user_id
+        if not user_id:
+            raise HTTPException(
+                status_code=401,
+                detail="User authentication required for creating user-bound agents"
+            )
+        agent.id = make_uuid({"name": agent.name, "userid": user_id})
+        repo = p8.repository(Agent, user_id=user_id)
+
+    return agent, repo
+
+
 @router.post("/", response_model=Agent)
 async def create_agent(
-    agent: Agent,
+    request: AgentCreateRequest,
     make_discoverable: bool = Query(
         default=False,
         description="If true, register the agent as a discoverable function",
     ),
-    user_id: Optional[str] = Depends(hybrid_auth),
+    make_public: bool = Query(
+        default=False,
+        description="If true, create a public agent not bound to user (requires role level > 1 to overwrite existing)",
+    ),
+    auth: Tuple[Optional[str], Optional[int]] = Depends(hybrid_auth_with_role),
 ):
-    """Create a new agent.
+    """Create a new agent with version tracking and service configuration.
+
+    You can supply the description as prompt. Services like allow_web_search and allow_generate_image
+    can be set via the top-level 'services' parameter or directly in metadata.
+    Version is tracked automatically (defaults to "0").
 
     Args:
-        agent: The agent to create
+        request: Agent creation request with version and services
         make_discoverable: If true, register the agent as a discoverable function that other agents can find and use
-        user_id: User ID from authentication
+        make_public: If true, create a public agent accessible to all users (role level > 1 can overwrite existing)
+        auth: Tuple of (user_id, role_level) from authentication
     """
-    # user_id will be None for bearer token, string for session auth
     try:
-        # Ensure agent name is qualified with namespace
-        if "." not in agent.name:
-            # Default to 'public' namespace if not specified
-            agent.name = f"public.{agent.name}"
+        user_id, role_level = auth
+        role_level = role_level or 0  # Default to 0 if None
+
+        # Convert request to Agent model (merges version and services into metadata)
+        agent = request.to_agent()
+
+        # Prepare agent and get appropriate repository
+        agent, repo = prepare_agent_for_save(agent, user_id, make_public, role_level)
 
         # Save agent to database
-        from percolate import p8
-
-        repo = p8.repository(Agent, user_id=user_id)
         result = repo.update_records([agent])
 
         # update_records returns a list, get the first item
@@ -83,7 +187,7 @@ async def list_agents(user_id: Optional[str] = Depends(hybrid_auth)):
     try:
         from percolate import p8
 
-        agents = p8.repository(Agent).select()
+        agents = p8.repository(Agent).select() if not user_id else p8.repository(Agent).select(userid=user_id)
         return agents
     except Exception as e:
         logger.error(f"Failed to list agents: {e}")
@@ -219,13 +323,13 @@ async def list_entities(
 ):
     """List all entities of a specific type."""
     import percolate as p8
-    
+
     try:
         # Special handling for p8.Function
         if entity_type == "p8.Function":
             repo = p8.repository(Function, user_id=user_id)
             results = repo.select()
-            
+
             # Extract relevant fields for functions
             function_list = []
             if results:
@@ -237,7 +341,7 @@ async def list_entities(
                         'entity_type': 'p8.Function'
                     }
                     function_list.append(function_info)
-            
+
             return function_list
         else:
             # Try to load the entity type
@@ -247,16 +351,171 @@ async def list_entities(
                     status_code=400,
                     detail=f"Invalid entity type: {entity_type}. Entity type must be a valid model."
                 )
-            
+
             repo = p8.repository(loaded, user_id=user_id)
             results = repo.select()
-            
+
             # Return paginated results
             return results[offset:offset+limit] if results else []
-            
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to list entities of type '{entity_type}': {e}")
+        logger.exception("Full traceback:")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Agent Time Machine endpoints
+
+class AgentVersionInfo(BaseModel):
+    """Version history information for an agent"""
+    id: int
+    version: str
+    created_at: str
+    name: str
+    has_version: bool
+
+
+class RollbackResponse(BaseModel):
+    """Response from rollback operation"""
+    success: bool
+    message: str
+    rolled_back_to_version: Optional[str]
+
+
+@router.get("/agents/{agent_id}/versions", response_model=List[AgentVersionInfo])
+async def list_agent_versions(
+    agent_id: uuid.UUID,
+    user_id: Optional[str] = Depends(hybrid_auth)
+):
+    """List all available versions for an agent in the time machine."""
+    try:
+        pg = PostgresService()
+
+        # Call the list_agent_versions function
+        result = pg.execute(
+            "SELECT * FROM p8.list_agent_versions(%s::uuid)",
+            [str(agent_id)]
+        )
+
+        if not result:
+            return []
+
+        versions = []
+        for row in result:
+            versions.append(AgentVersionInfo(
+                id=row[0],
+                version=row[1],
+                created_at=str(row[2]),
+                name=row[3],
+                has_version=row[4]
+            ))
+
+        return versions
+
+    except Exception as e:
+        logger.error(f"Failed to list agent versions for {agent_id}: {e}")
+        logger.exception("Full traceback:")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/agents/{agent_id}/rollback", response_model=RollbackResponse)
+async def rollback_agent_to_version(
+    agent_id: uuid.UUID,
+    version: Optional[str] = Query(None, description="Version to rollback to. If not provided, rolls back to most recent versioned entry."),
+    user_id: Optional[str] = Depends(hybrid_auth)
+):
+    """Rollback an agent to a specific version using the time machine.
+
+    If version is not provided, rolls back to the most recent versioned entry.
+    Raises an error if no versioned entry is found.
+    """
+    try:
+        pg = PostgresService()
+
+        # Call the rollback function
+        if version:
+            result = pg.execute(
+                "SELECT * FROM p8.rollback_agent_version(%s::uuid, %s)",
+                [str(agent_id), version]
+            )
+        else:
+            result = pg.execute(
+                "SELECT * FROM p8.rollback_agent_version(%s::uuid)",
+                [str(agent_id)]
+            )
+
+        if not result or len(result) == 0:
+            raise HTTPException(
+                status_code=500,
+                detail="Rollback operation did not return a result"
+            )
+
+        row = result[0]
+        response = RollbackResponse(
+            success=row[0],
+            message=row[1],
+            rolled_back_to_version=row[2]
+        )
+
+        if not response.success:
+            raise HTTPException(status_code=400, detail=response.message)
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to rollback agent {agent_id}: {e}")
+        logger.exception("Full traceback:")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/agents/{agent_id}/versions/{version}", response_model=Dict[str, Any])
+async def get_agent_version(
+    agent_id: uuid.UUID,
+    version: str,
+    user_id: Optional[str] = Depends(hybrid_auth)
+):
+    """Get a specific version of an agent from the time machine."""
+    try:
+        pg = PostgresService()
+
+        # Call the get_agent_version function
+        result = pg.execute(
+            "SELECT * FROM p8.get_agent_version(%s::uuid, %s)",
+            [str(agent_id), version]
+        )
+
+        if not result or len(result) == 0:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Version '{version}' not found for agent {agent_id}"
+            )
+
+        row = result[0]
+
+        # Build response dict matching the time machine table structure
+        version_data = {
+            "id": row[0],
+            "agent_id": str(row[1]),
+            "name": row[2],
+            "category": row[3],
+            "description": row[4],
+            "spec": row[5],
+            "functions": row[6],
+            "metadata": row[7],
+            "version": row[8],
+            "created_at": str(row[9]),
+            "userid": row[10]
+        }
+
+        return version_data
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get agent version {version} for {agent_id}: {e}")
         logger.exception("Full traceback:")
         raise HTTPException(status_code=500, detail=str(e))

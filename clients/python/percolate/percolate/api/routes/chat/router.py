@@ -55,6 +55,7 @@ from percolate.services.llm.CallingContext import CallingContext
 from datetime import datetime
 from percolate.utils import logger
 from percolate.models import Session, User, AIResponse
+from percolate.models.p8 import SessionFeedback, SessionEvaluation
 from percolate.utils import make_uuid
 from percolate.services import ModelCache
 
@@ -1400,3 +1401,76 @@ async def ask(
         return JSONResponse(content=result)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error running agent: {str(e)}")
+
+
+@router.post("/feedback")
+async def submit_feedback(
+    feedback: SessionFeedback,
+    auth_user_id: Optional[str] = Depends(hybrid_auth),
+):
+    """
+    Submit user feedback (thumbs up/down) for a chat session.
+
+    This endpoint captures user feedback on chat sessions for quality tracking
+    and observability. Feedback is converted to SessionEvaluation format and
+    stored in the observability schema for metrics tracking and analytics.
+
+    The conversion maps:
+    - approved (bool) → rating (float): True=1.0 (thumbs up), False=0.0 (thumbs down)
+    - note + tags → comments (tags are appended to the note text)
+    - session_id is preserved as UUID
+
+    If OpenTelemetry is enabled, feedback is also instrumented as a span event
+    for real-time monitoring and distributed tracing.
+
+    Args:
+        feedback: SessionFeedback model with session_id, approval, note, and tags
+        auth_user_id: Authenticated user ID from hybrid auth
+
+    Returns:
+        Success response with the saved SessionEvaluation record
+    """
+    from percolate.utils.env import OTEL_ENABLED
+
+    try:
+        # Convert feedback to SessionEvaluation and save to observability schema
+        evaluation = feedback.to_session_evaluation(user_id=auth_user_id)
+        eval_repo = p8.repository(SessionEvaluation, user_id=auth_user_id)
+        result = eval_repo.update_records([evaluation])
+
+        logger.info(f"Saved SessionEvaluation for session {feedback.session_id}: rating={evaluation.rating}")
+
+        # If OpenTelemetry is enabled, instrument as a span event
+        if OTEL_ENABLED:
+            try:
+                from opentelemetry import trace
+
+                span = trace.get_current_span()
+                if span.get_span_context().is_valid:
+                    span.add_event(
+                        name="session.feedback",
+                        attributes={
+                            "session.id": feedback.session_id,
+                            "feedback.approved": feedback.approved,
+                            "feedback.note": feedback.note or "",
+                            "feedback.tags": ",".join(feedback.tags) if feedback.tags else "",
+                            "user.id": auth_user_id or "anonymous",
+                        },
+                    )
+                    logger.info(f"Instrumented feedback for session {feedback.session_id} with OTel")
+            except Exception as otel_error:
+                # Don't fail the request if OTel instrumentation fails
+                logger.warning(f"Failed to instrument feedback with OTel: {otel_error}")
+
+        logger.info(f"Saved feedback for session {feedback.session_id}: approved={feedback.approved}")
+
+        return {
+            "status": "success",
+            "message": "Feedback submitted successfully",
+            "feedback": result[0] if result and len(result) > 0 else feedback.model_dump(),
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to submit feedback: {e}")
+        logger.exception("Full traceback:")
+        raise HTTPException(status_code=500, detail=f"Failed to submit feedback: {str(e)}")

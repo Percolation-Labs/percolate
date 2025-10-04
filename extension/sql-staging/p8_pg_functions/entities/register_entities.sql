@@ -54,6 +54,7 @@ BEGIN
     -- forcing us to rebuild for a new key in extreme cases
     view_script := format(
         $$
+        DROP VIEW IF EXISTS p8."%s";
         CREATE OR REPLACE VIEW p8."%s" AS (
             WITH G AS (
                 SELECT id AS gid,
@@ -73,6 +74,7 @@ BEGIN
         );
         $$,
         view_name,
+         view_name,
         graph_name,
         graph_node,
         key_col,
