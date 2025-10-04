@@ -205,7 +205,7 @@ class Agent(AbstractEntityModel):
     description: str  # System prompt for the agent
     spec: Optional[dict] = {}  # JSON Schema for agent data model
     functions: Optional[dict] = {}  # Function definitions
-    metadata: Optional[dict] = {}  # Custom metadata (allow_search, etc.)
+    metadata: Optional[dict] = {}  # Custom metadata (allow_web_search, allow_generate_image, etc.)
 ```
 
 #### Creating an Agent via API
@@ -242,7 +242,7 @@ curl -X POST "http://localhost:5008/entities/?make_discoverable=true" \
     "category": "customer_service",
     "description": "I help customers with their inquiries and can access order information, process returns, and escalate complex issues.",
     "metadata": {
-      "allow_search": true,
+      "allow_web_search": true,
       "version": "1.0.0"
     }
   }'
@@ -260,7 +260,7 @@ curl -X POST "http://localhost:5008/entities/?make_public=true&make_discoverable
     "category": "research",
     "description": "A public research agent accessible to all users.",
     "metadata": {
-      "allow_search": true,
+      "allow_web_search": true,
       "version": "1.0.0"
     }
   }'
@@ -277,7 +277,7 @@ curl -X POST "http://localhost:5008/entities/?make_public=true&make_discoverable
   "spec": {},
   "functions": {},
   "metadata": {
-    "allow_search": true,
+    "allow_web_search": true,
     "version": "1.0.0"
   }
 }
@@ -297,7 +297,7 @@ GET /tools/services
 
 **Current Built-in Services:**
 
-1. **Web Search** (`allow_search: true`)
+1. **Web Search** (`allow_web_search: true`)
    - Enables the `search_the_web` function
    - Uses Tavily API for real-time web searches
    - Requires `TAVILY_API_KEY` environment variable
@@ -317,7 +317,7 @@ GET /tools/services
   "name": "research.ResearchAssistant",
   "description": "I research topics on the web and provide comprehensive summaries with citations.",
   "metadata": {
-    "allow_search": true
+    "allow_web_search": true
   }
 }
 ```
@@ -332,7 +332,7 @@ When this agent is loaded and run, it will automatically have access to `search_
   "name": "creative.DesignAgent",
   "description": "I help with creative design tasks including research and image generation.",
   "metadata": {
-    "allow_search": true,
+    "allow_web_search": true,
     "allow_generate_image": true,
     "version": "2.0.0"
   }
@@ -404,7 +404,7 @@ This returns functions that have been registered and can be activated by agents.
     "post_tasks_research_execute": "Post the ResearchIteration object to execute a research plan"
   },
   "metadata": {
-    "allow_search": true,
+    "allow_web_search": true,
     "version": "1.0.0"
   }
 }
@@ -468,7 +468,7 @@ graph TD
     I --> J[p8.Agent creates ModelRunner]
     J --> K[ModelRunner.initialize]
     K --> L[Check metadata for services]
-    L --> M[Add allow_search → search_the_web]
+    L --> M[Add allow_web_search → search_the_web]
     L --> N[Add allow_generate_image → generate_image]
     M --> O[Agent ready to use]
     N --> O
@@ -493,7 +493,7 @@ updated_agent = Agent(
     name="support.CustomerAgent",
     description="Updated description with more capabilities",
     metadata={
-        "allow_search": true,
+        "allow_web_search": true,
         "allow_generate_image": true,  # Added new capability
         "version": "1.1.0"
     }
@@ -533,7 +533,7 @@ curl -X POST "http://localhost:5008/entities/?make_discoverable=true" \
     "category": "research",
     "description": "I research topics on the web, synthesize information from multiple sources, and provide well-cited summaries. I use search_the_web to find current information.",
     "metadata": {
-      "allow_search": true,
+      "allow_web_search": true,
       "version": "1.0.0"
     }
   }'
@@ -568,14 +568,14 @@ print(response)
     "post_tasks_research_execute": "Execute a research plan by posting a ResearchIteration object"
   },
   "metadata": {
-    "allow_search": true,
+    "allow_web_search": true,
     "version": "1.0.0"
   }
 }
 ```
 
 When this agent runs, it will:
-1. Have `search_the_web` available (from `allow_search` metadata)
+1. Have `search_the_web` available (from `allow_web_search` metadata)
 2. Know about `post_tasks_` and `post_tasks_research_execute` functions
 3. Can activate these functions using `activate_functions_by_name(["post_tasks_"])` when needed
 
@@ -601,7 +601,7 @@ loaded = Agent.load("research.WebResearcher")
 
 # Check model_config
 print(loaded.model_config)
-# Should show: {'allow_search': True, 'version': '1.0.0', ...}
+# Should show: {'allow_web_search': True, 'version': '1.0.0', ...}
 
 # Create runner and verify functions
 agent = p8.Agent(loaded)

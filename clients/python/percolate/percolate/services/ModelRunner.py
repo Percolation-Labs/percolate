@@ -124,7 +124,8 @@ class ModelRunner:
         self._function_manager.add_function(self.activate_functions_by_name)
 
         # Conditionally add web search based on agent metadata
-        metadata = self.agent_model.metadata if hasattr(self.agent_model, 'metadata') else {}
+        # Check model_config for metadata (from Agent.load) or metadata attribute
+        metadata = getattr(self.agent_model, 'metadata', None) or self.agent_model.model_config
         if metadata.get('allow_web_search'):
             self._function_manager.add_function(self.search_the_web)
 
