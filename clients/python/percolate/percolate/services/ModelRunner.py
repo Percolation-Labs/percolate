@@ -16,6 +16,22 @@ from percolate.services.llm import (
 import uuid
 from percolate.services.llm.proxy.unified_stream_adapter import UnifiedStreamAdapter
 
+# OpenTelemetry imports
+from opentelemetry import trace
+from opentelemetry.trace import SpanKind
+from percolate.utils.otel_utils import (
+    is_tracing_enabled,
+    get_tracer,
+    set_llm_attributes,
+    set_generation_attributes,
+    set_trace_attributes,
+    add_tool_call_event,
+    add_tool_result_event,
+    mark_span_as_error,
+)
+
+tracer = get_tracer(__name__)
+
 GENERIC_P8_PROMPT = """\n# General Advice.
 Use whatever functions are available to you and use world knowledge only if prompted 
 or if there is not other way 
@@ -106,6 +122,17 @@ class ModelRunner:
         self._function_manager.add_function(self.get_entities)
         self._function_manager.add_function(self.search)
         self._function_manager.add_function(self.activate_functions_by_name)
+
+        # Conditionally add web search based on agent metadata
+        metadata = self.agent_model.metadata if hasattr(self.agent_model, 'metadata') else {}
+        if metadata.get('allow_web_search'):
+            self._function_manager.add_function(self.search_the_web)
+
+        # Conditionally add image generation based on agent metadata
+        if metadata.get('allow_generate_image'):
+            if hasattr(self, 'generate_image'):
+                self._function_manager.add_function(self.generate_image)
+
         # self._function_manager.add_function(self.announce_generate_large_output)
         """more complex things will happen from here when we traverse what comes back"""
 
@@ -119,13 +146,18 @@ class ModelRunner:
         return {"message": "acknowledged", "output_size_estimate": estimated_length}
 
     def search(self, questions: typing.List[str], user_id: str | uuid.UUID = None):
-        """Search INTERNAL knowledge base and user data using RAG (Retrieval Augmented Generation).
-        Use this to search documents, stored knowledge, and internal data - NOT for web searches.
-        For searching the internet, use search_the_web instead.
+        """Search INTERNAL/LOCAL knowledge base and user data using RAG (Retrieval Augmented Generation).
+        **IMPORTANT**: This searches LOCAL/INTERNAL data only - NOT the web/internet.
+        Use this ONLY for: documents, stored knowledge, internal databases, and user-specific data.
+
+        For web/internet searches, you MUST use search_the_web function instead.
+        To find available functions, use help function instead of search.
+
         If you want to add multiple questions supply a list of strings as an array.
-        To find functions use help instead of search. Do not search for functions if there is already a function on the agent that you can activate.
+        Do not search for functions if there is already a function on the agent that you can activate.
+
         Args:
-            questions: ask one or more questions to search the internal data store
+            questions: ask one or more questions to search the LOCAL/INTERNAL data store (NOT the web)
             user_id: optional user identifier (email or UUID) for access control
         """
         # If no user_id provided, try to get from:
@@ -139,6 +171,84 @@ class ModelRunner:
                 user_id = self.user_id
 
         return self.get_repo().search(questions, user_id=str(user_id))
+
+    def search_the_web(self, query: str, max_results: int = 5):
+        """Search the internet using Tavily web search API.
+        Use this to find current information, news, or web content - NOT for searching internal data.
+        For searching internal knowledge base, use the search function instead.
+
+        Args:
+            query: The search query to look up on the internet
+            max_results: Maximum number of search results to return (default 5)
+        """
+        from percolate.utils.env import TAVILY_API_KEY
+        import requests
+
+        if not TAVILY_API_KEY:
+            return {
+                "error": "TAVILY_API_KEY environment variable is not set. Cannot perform web search."
+            }
+
+        try:
+            response = requests.post(
+                "https://api.tavily.com/search",
+                json={
+                    "api_key": TAVILY_API_KEY,
+                    "query": query,
+                    "max_results": max_results,
+                },
+                timeout=30,
+            )
+
+            if response.status_code in [200, 201]:
+                return response.json()
+            else:
+                return {
+                    "error": f"Tavily API returned status {response.status_code}: {response.text}"
+                }
+
+        except Exception as ex:
+            logger.error(f"Error calling Tavily search API: {ex}")
+            return {"error": f"Failed to perform web search: {str(ex)}"}
+
+    def generate_image(
+        self,
+        prompt: str,
+        size: str = "1024x1024",
+        quality: str = "standard",
+        style: str = "vivid",
+    ):
+        """Generate an image from a text description using DALL-E 3.
+
+        Use this when the user asks you to create, generate, or visualize an image.
+        The generated image will be returned as a URL that can be displayed to the user.
+
+        Args:
+            prompt: Detailed text description of the image to generate
+            size: Image dimensions - "1024x1024" (square), "1024x1792" (portrait), or "1792x1024" (landscape)
+            quality: Image quality - "standard" or "hd" (higher detail, costs more)
+            style: Image style - "vivid" (hyper-real and dramatic) or "natural" (more natural, less hyper-real)
+
+        Returns:
+            Dictionary with image URL and metadata
+        """
+        from percolate.services.llm.ImageGenerator import ImageGenerator
+
+        try:
+            generator = ImageGenerator()
+            result = generator.generate_image(
+                prompt=prompt,
+                model=ImageGenerator.DALLE_3,
+                size=size,
+                quality=quality,
+                style=style,
+                n=1,
+                response_format="url",
+            )
+            return result
+        except Exception as ex:
+            logger.error(f"Error generating image: {ex}")
+            return {"error": f"Failed to generate image: {str(ex)}"}
 
     def activate_functions_by_name(self, function_names: typing.List[str], **kwargs):
         """Provide a list of function names to load.
@@ -230,12 +340,22 @@ class ModelRunner:
             function_call (FunctionCall): the payload send from an LLM to call a function
         """
         logger.info(f"({self.name}){function_call=}")
+
+        # OTEL: Record tool call event
+        if is_tracing_enabled():
+            span = trace.get_current_span()
+            add_tool_call_event(span, function_call.name, function_call.arguments)
+
         f = self._function_manager[function_call.name]
         if not f:
             message = f"attempting to load function {function_call.name} which is not activated - please activate it"
             data = MessageStackFormatter.format_function_response_error(
                 function_call, ValueError(message), self._context
             )
+            # OTEL: Record tool error
+            if is_tracing_enabled():
+                span = trace.get_current_span()
+                add_tool_result_event(span, function_call.name, None, error=message)
         else:
             try:
                 """try call the function - assumes its some sort of json thing that comes back"""
@@ -243,6 +363,10 @@ class ModelRunner:
                 data = MessageStackFormatter.format_function_response_data(
                     function_call, data, self._context
                 )
+                # OTEL: Record tool success
+                if is_tracing_enabled():
+                    span = trace.get_current_span()
+                    add_tool_result_event(span, function_call.name, data)
 
                 """if there is an error, how you format the message matters - some generic ones are added
                 its important to make sure the format coincides with the language model being used in context
@@ -252,11 +376,19 @@ class ModelRunner:
                 data = MessageStackFormatter.format_function_response_type_error(
                     function_call, tex, self._context
                 )
+                # OTEL: Record tool error
+                if is_tracing_enabled():
+                    span = trace.get_current_span()
+                    add_tool_result_event(span, function_call.name, None, error=str(tex))
             except Exception as ex:  # general errors are usually our fault
                 logger.warning(f"Error calling function {traceback.format_exc()}")
                 data = MessageStackFormatter.format_function_response_error(
                     function_call, ex, self._context
                 )
+                # OTEL: Record tool error
+                if is_tracing_enabled():
+                    span = trace.get_current_span()
+                    add_tool_result_event(span, function_call.name, None, error=str(ex))
 
         # print(data) # maybe trace here
         """update messages with data if we can or add error messages to notify the language model"""
@@ -338,6 +470,10 @@ class ModelRunner:
 
         lm_client = LanguageModel.from_context(ctx)
         # The streaming generator will yield AIResponse objects for auditing directly
+
+        # Get agent info for tracing
+        agent_name = self.name
+        agent_version = self.agent_model.metadata.get("version") if hasattr(self.agent_model, "metadata") else None
 
         def _generator():
             """the generator manages the agentic loop which in turn manage the streaming loops
@@ -486,9 +622,37 @@ class ModelRunner:
                 if saw_stop:
                     break
 
-        return lm_client.get_stream_iterator(
-            _generator, context=ctx, user_query=question, audit_on_flush=audit
-        )
+        # Wrap generator with OTEL span if tracing is enabled
+        if is_tracing_enabled():
+            def _traced_generator():
+                with tracer.start_as_current_span(
+                    name=f"agent.{agent_name}.stream",
+                    kind=SpanKind.SERVER,
+                ) as span:
+                    # Set agent and context attributes
+                    set_llm_attributes(span, ctx.model, lm_client._scheme)
+                    set_trace_attributes(
+                        span,
+                        user_id=ctx.user_id,
+                        session_id=ctx.session_id,
+                        code_path=__file__,
+                        agent_version=agent_version,
+                    )
+                    span.set_attribute("gen_ai.is_streaming", True)
+                    span.set_attribute("agent.name", agent_name)
+                    span.set_attribute("agent.max_iterations", max_loops)
+
+                    # Run the generator and yield all items
+                    for item in _generator():
+                        yield item
+
+            return lm_client.get_stream_iterator(
+                _traced_generator, context=ctx, user_query=question, audit_on_flush=audit
+            )
+        else:
+            return lm_client.get_stream_iterator(
+                _generator, context=ctx, user_query=question, audit_on_flush=audit
+            )
 
     def run(
         self,
