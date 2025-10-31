@@ -23,16 +23,25 @@ class PhoenixAnnotation(BaseModel):
 class PhoenixClient:
     """Client for sending annotations to Phoenix."""
 
-    def __init__(self, base_url: str) -> None:
+    def __init__(self, base_url: str, api_key: Optional[str] = None) -> None:
         """
         Initialize Phoenix client.
 
         Args:
             base_url: Base URL for Phoenix API (e.g., http://localhost:6006)
+            api_key: Optional API key for authentication
         """
         self.base_url = str(base_url).rstrip("/")
         self.annotations_endpoint = f"{self.base_url}/v1/span_annotations"
         self.spans_endpoint = f"{self.base_url}/v1/spans"
+        self.api_key = api_key
+
+    def _get_headers(self) -> dict:
+        """Get headers for API requests including auth if configured."""
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["authorization"] = f"Bearer {self.api_key}"  # lowercase per Phoenix spec
+        return headers
 
     async def send_annotation(self, annotation: PhoenixAnnotation) -> bool:
         """
@@ -50,6 +59,7 @@ class PhoenixClient:
                 response = await client.post(
                     self.annotations_endpoint,
                     json=payload,
+                    headers=self._get_headers(),
                 )
                 response.raise_for_status()
                 logger.info(f"Successfully sent annotation to Phoenix for trace {annotation.trace_id}")

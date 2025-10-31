@@ -11,7 +11,7 @@ import json
 import re
 from typing import Optional
 
-from ..auth import hybrid_auth, require_user_auth, current_user, AuthUser
+from ..auth import hybrid_auth, hybrid_auth_with_role, require_user_auth, current_user, AuthUser
 from ..chat.router import completions, agent_completions
 from ..chat.models import CompletionsRequestOpenApiFormat
 from ...utils.models import list_available_models
@@ -140,18 +140,23 @@ async def v1_models():
 async def v1_chat_completions(
     request: CompletionsRequestOpenApiFormat,
     raw_request: Request,
-    user_id: Optional[str] = Depends(hybrid_auth),
+    background_tasks: BackgroundTasks,
+    auth_data: tuple[Optional[str], Optional[int]] = Depends(hybrid_auth_with_role),
     session_id: Optional[str] = Query(None, description="ID for grouping related interactions")
 ):
     """Chat completions endpoint for OpenAI compatibility"""
     # Get effective chat ID using our helper function
     effective_session_id = try_get_chat_id_by_multiple_methods(request, raw_request, session_id)
-    
+
+    # Extract user_id from auth_data tuple
+    user_id, _ = auth_data
+
     return await completions(
-        request=request, 
-        background_tasks=None, 
+        request=request,
+        background_tasks=background_tasks,
         user_id=user_id,
-        session_id=effective_session_id
+        session_id=effective_session_id,
+        auth_data=auth_data
     )
 
 # Agent-specific models endpoint - unauthenticated

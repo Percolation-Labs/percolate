@@ -664,7 +664,8 @@ class LanguageModel:
                         span,
                         prompt=prompt_text,
                         messages=messages_list,
-                        is_streaming=True
+                        is_streaming=True,
+                        model=self.model_name  # For Phoenix cost calculation
                     )
 
                 # Make the HTTP call
@@ -702,7 +703,8 @@ class LanguageModel:
                                 input_tokens=usage.get("prompt_tokens") or usage.get("input_tokens"),
                                 output_tokens=usage.get("completion_tokens") or usage.get("output_tokens"),
                                 total_tokens=usage.get("total_tokens"),
-                                is_streaming=False
+                                is_streaming=False,
+                                model=self.model_name  # For Phoenix cost calculation
                             )
 
                         # Capture finish reason if available

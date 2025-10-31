@@ -90,6 +90,10 @@ def set_llm_attributes(
     span.set_attribute("gen_ai.request.model", model)
     span.set_attribute("gen_ai.response.model", model)
 
+    # Phoenix OpenInference conventions for automatic cost calculation
+    span.set_attribute("llm.model_name", model)
+    span.set_attribute("llm.provider", provider)
+
 
 def set_generation_attributes(
     span: Span,
@@ -106,6 +110,7 @@ def set_generation_attributes(
     max_tokens: Optional[int] = None,
     finish_reason: Optional[str] = None,
     is_streaming: bool = False,
+    model: Optional[str] = None,
 ) -> None:
     """
     Annotate span with LLM generation metadata.
@@ -128,6 +133,24 @@ def set_generation_attributes(
     """
     if not span:
         return
+
+    # Note: Phoenix automatically calculates costs from llm.token_count.* and llm.model_name/llm.provider
+    # No need to manually calculate costs - Phoenix has 63 default pricing configurations
+
+    # Set model name and provider for Phoenix cost calculation
+    if model:
+        # Infer provider from model name
+        provider = "openai"  # default
+        model_lower = model.lower()
+        if "claude" in model_lower or "anthropic" in model_lower:
+            provider = "anthropic"
+        elif "gemini" in model_lower or "google" in model_lower:
+            provider = "google"
+        elif "gpt" in model_lower or "openai" in model_lower:
+            provider = "openai"
+
+        span.set_attribute("llm.model_name", model)
+        span.set_attribute("llm.provider", provider)
 
     # Capture input prompts for Phoenix (following OpenInference conventions)
     if prompt:
@@ -157,16 +180,23 @@ def set_generation_attributes(
         span.set_attribute("llm.output_messages.0.message.role", "assistant")
         span.set_attribute("llm.output_messages.0.message.content", completion)
 
+    # Set token counts using both GenAI and OpenInference conventions
+    # Phoenix uses OpenInference conventions for automatic cost calculation
     if input_tokens is not None:
         span.set_attribute("gen_ai.usage.input_tokens", input_tokens)
+        span.set_attribute("llm.token_count.prompt", input_tokens)  # Phoenix convention
 
     if output_tokens is not None:
         span.set_attribute("gen_ai.usage.output_tokens", output_tokens)
+        span.set_attribute("llm.token_count.completion", output_tokens)  # Phoenix convention
 
     if total_tokens is not None:
         span.set_attribute("gen_ai.usage.total_tokens", total_tokens)
+        span.set_attribute("llm.token_count.total", total_tokens)  # Phoenix convention
     elif input_tokens is not None and output_tokens is not None:
-        span.set_attribute("gen_ai.usage.total_tokens", input_tokens + output_tokens)
+        computed_total = input_tokens + output_tokens
+        span.set_attribute("gen_ai.usage.total_tokens", computed_total)
+        span.set_attribute("llm.token_count.total", computed_total)  # Phoenix convention
 
     if input_cost is not None:
         span.set_attribute("gen_ai.usage.input_cost", input_cost)
@@ -352,3 +382,65 @@ def get_current_trace_id_as_hex() -> Optional[str]:
 
     trace_id = span.get_span_context().trace_id
     return format(trace_id, '032x')
+
+
+def calculate_llm_cost(
+    model: str,
+    input_tokens: Optional[int] = None,
+    output_tokens: Optional[int] = None,
+) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    """
+    Calculate cost for LLM API calls based on model and token usage.
+
+    Pricing as of January 2025 (USD per 1M tokens):
+
+    Returns:
+        Tuple of (input_cost, output_cost, total_cost) in USD, or (None, None, None) if pricing unavailable
+    """
+    # Pricing table: model -> (input_price_per_1M, output_price_per_1M)
+    PRICING = {
+        # OpenAI models
+        "gpt-4o": (2.50, 10.00),
+        "gpt-4o-mini": (0.15, 0.60),
+        "gpt-4o-2024-11-20": (2.50, 10.00),
+        "gpt-4o-mini-2024-07-18": (0.15, 0.60),
+        "gpt-4-turbo": (10.00, 30.00),
+        "gpt-4-turbo-2024-04-09": (10.00, 30.00),
+        "gpt-4": (30.00, 60.00),
+        "gpt-3.5-turbo": (0.50, 1.50),
+        "gpt-3.5-turbo-0125": (0.50, 1.50),
+
+        # Anthropic models
+        "claude-3-5-sonnet-20241022": (3.00, 15.00),
+        "claude-3-5-sonnet-20240620": (3.00, 15.00),
+        "claude-3-opus-20240229": (15.00, 75.00),
+        "claude-3-sonnet-20240229": (3.00, 15.00),
+        "claude-3-haiku-20240307": (0.25, 1.25),
+
+        # Google models
+        "gemini-1.5-pro": (1.25, 5.00),
+        "gemini-1.5-flash": (0.075, 0.30),
+        "gemini-1.0-pro": (0.50, 1.50),
+    }
+
+    # Try exact match first
+    pricing = PRICING.get(model)
+
+    # If no exact match, try partial matching (e.g., "gpt-4o-mini-abc" -> "gpt-4o-mini")
+    if not pricing:
+        for model_prefix, prices in PRICING.items():
+            if model.startswith(model_prefix):
+                pricing = prices
+                break
+
+    if not pricing or input_tokens is None or output_tokens is None:
+        return None, None, None
+
+    input_price_per_1m, output_price_per_1m = pricing
+
+    # Calculate costs
+    input_cost = (input_tokens / 1_000_000) * input_price_per_1m
+    output_cost = (output_tokens / 1_000_000) * output_price_per_1m
+    total_cost = input_cost + output_cost
+
+    return input_cost, output_cost, total_cost

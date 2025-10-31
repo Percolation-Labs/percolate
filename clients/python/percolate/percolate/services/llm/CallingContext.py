@@ -124,6 +124,16 @@ class CallingContext(ApiCallingContext):
         description="A callback to send final response e.g a Slack Say method",
     )
 
+    # OTEL tracing fields - captured during agent span creation for session metadata
+    otel_span_id: typing.Optional[str] = Field(
+        default=None,
+        description="OpenTelemetry span ID captured during execution for feedback linking",
+    )
+    otel_trace_id: typing.Optional[str] = Field(
+        default=None,
+        description="OpenTelemetry trace ID captured during execution for feedback linking",
+    )
+
     def get_user_memory(self):
         """
         given a user context we can lookup the users recents

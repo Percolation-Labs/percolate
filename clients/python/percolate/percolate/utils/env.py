@@ -99,6 +99,7 @@ OTEL_ENABLED = os.environ.get("OTEL_ENABLED", "false").lower() in ("true", "1", 
 # Phoenix configuration for observability feedback
 PHOENIX_ENABLED = os.environ.get("PHOENIX_ENABLED", "true").lower() in ("true", "1", "yes", "y")
 PHOENIX_URL = os.environ.get("PHOENIX_URL", "http://localhost:6006")
+PHOENIX_API_KEY = os.environ.get("PHOENIX_API_KEY")
 
 GPT_MINI = "gpt-4.1-mini"
 DEFAULT_MODEL = "gpt-4.1"

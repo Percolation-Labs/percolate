@@ -347,16 +347,25 @@ class ModelRunner:
         # OTEL: Create a TOOL span for this tool invocation
         import json
         tool_span = None
+        tool_span_context = None
         if is_tracing_enabled():
             tracer = trace.get_tracer(__name__)
-            tool_span = tracer.start_as_current_span(
+            # Use context manager properly to avoid premature span ending
+            tool_span_context = tracer.start_as_current_span(
                 f"tool.{function_call.name}",
                 kind=SpanKind.CLIENT
-            ).__enter__()
+            )
+            tool_span = tool_span_context.__enter__()
+
             # Set TOOL span kind for Phoenix
             set_span_kind(tool_span, OpenInferenceSpanKind.TOOL)
             tool_span.set_attribute("tool.name", function_call.name)
-            tool_span.set_attribute("tool.arguments", json.dumps(function_call.arguments, default=str))
+
+            # Set tool arguments in multiple formats for Phoenix compatibility
+            args_json = json.dumps(function_call.arguments, default=str)
+            tool_span.set_attribute("tool.arguments", args_json)
+            tool_span.set_attribute("input.value", args_json)  # Phoenix OpenInference convention
+            tool_span.set_attribute("input.mime_type", "application/json")
 
         try:
             f = self._function_manager[function_call.name]
@@ -378,8 +387,10 @@ class ModelRunner:
                     )
                     # OTEL: Record tool success
                     if tool_span:
-                        result_str = json.dumps(data, default=str)[:1000]  # Truncate large results
-                        tool_span.set_attribute("tool.result", result_str)
+                        result_str = json.dumps(data, default=str)
+                        tool_span.set_attribute("tool.result", result_str[:1000])  # Truncate for attribute
+                        tool_span.set_attribute("output.value", result_str[:5000])  # Phoenix convention, larger limit
+                        tool_span.set_attribute("output.mime_type", "application/json")
 
                     """if there is an error, how you format the message matters - some generic ones are added
                     its important to make sure the format coincides with the language model being used in context
@@ -403,9 +414,9 @@ class ModelRunner:
                         tool_span.set_attribute("tool.error", str(ex))
                         mark_span_as_error(tool_span, str(ex))
         finally:
-            # Always close the tool span
-            if tool_span:
-                tool_span.__exit__(None, None, None)
+            # Always close the tool span context manager
+            if tool_span_context:
+                tool_span_context.__exit__(None, None, None)
 
         # print(data) # maybe trace here
         """update messages with data if we can or add error messages to notify the language model"""
@@ -435,6 +446,7 @@ class ModelRunner:
             session_id: The session ID to update with span metadata
         """
         if not is_tracing_enabled():
+            logger.debug(f"OTEL not enabled, skipping span ID capture for session {session_id}")
             return
 
         try:
@@ -447,6 +459,8 @@ class ModelRunner:
 
             span_id = get_current_span_id_as_hex()
             trace_id = get_current_trace_id_as_hex()
+
+            logger.info(f"Attempting to capture OTEL IDs for session {session_id}: span_id={span_id}, trace_id={trace_id}")
 
             if span_id and trace_id:
                 # Update session metadata with span/trace IDs for feedback linking
@@ -470,10 +484,16 @@ class ModelRunner:
                         'UPDATE p8."Session" SET metadata = %s WHERE id = %s',
                         (metadata_json, session_id)
                     )
-                    logger.debug(f"Stored span_id={span_id} and trace_id={trace_id} in session {session_id}")
+                    logger.info(f"✓ Stored span_id={span_id} and trace_id={trace_id} in session {session_id}")
+                else:
+                    logger.warning(f"Session {session_id} not found in database, cannot store OTEL IDs")
+            else:
+                logger.warning(f"Could not get span_id or trace_id for session {session_id}: span_id={span_id}, trace_id={trace_id}")
         except Exception as e:
             # Don't fail the request if metadata update fails
             logger.warning(f"Failed to capture span IDs to session metadata: {e}")
+            import traceback
+            logger.warning(traceback.format_exc())
 
     def __call__(
         self,
@@ -727,6 +747,16 @@ class ModelRunner:
                     set_span_kind(span, OpenInferenceSpanKind.LLM)
                     # set_span_kind(span, OpenInferenceSpanKind.AGENT)
 
+                    # Capture OTEL span/trace IDs while span is active and store in context
+                    # This allows audit_response_for_user to use them even after span ends
+                    from percolate.utils.otel_utils import get_current_span_id_as_hex, get_current_trace_id_as_hex
+                    span_id = get_current_span_id_as_hex()
+                    trace_id = get_current_trace_id_as_hex()
+                    if span_id and trace_id and ctx:
+                        ctx.otel_span_id = span_id
+                        ctx.otel_trace_id = trace_id
+                        logger.info(f"Captured OTEL IDs to context: trace={trace_id}, span={span_id}")
+
                     # Set model attributes (but don't use set_llm_attributes as it sets span kind to LLM)
                     span.set_attribute("gen_ai.operation.name", "chat")
                     span.set_attribute("gen_ai.provider.name", lm_client._scheme)
@@ -787,7 +817,8 @@ class ModelRunner:
                                 input_tokens=usage.get("prompt_tokens", 0),
                                 output_tokens=usage.get("completion_tokens", 0),
                                 total_tokens=usage.get("total_tokens", 0),
-                                is_streaming=True
+                                is_streaming=True,
+                                model=ctx.model  # For Phoenix cost calculation
                             )
                             logger.debug("OTEL attributes set successfully")
                     except Exception as e:

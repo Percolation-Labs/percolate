@@ -233,11 +233,14 @@ def handle_agent_request(
 
     stream = agent.stream(query, context=ctx)
 
-    if request.stream:
-        return stream
+    # TODO: Non-streaming agent requests are not fully implemented yet.
+    # For now, always return streaming response for agent requests.
+    # The stream iterator doesn't have an .adapter attribute needed for collect_stream_to_response()
+    # if request.stream:
+    #     return stream
+    # return collect_stream_to_response(stream)
 
-    # TODO we dont really support non streaming yet but foundation is there to do it quickly
-    return collect_stream_to_response(stream)
+    return stream
 
 
 def handle_openai_request(
@@ -1464,7 +1467,7 @@ async def submit_feedback(
 
         # Send feedback to Phoenix if enabled
         try:
-            from percolate.utils.env import PHOENIX_ENABLED, PHOENIX_URL
+            from percolate.utils.env import PHOENIX_ENABLED, PHOENIX_URL, PHOENIX_API_KEY
             from percolate.clients.phoenix.client import PhoenixClient
 
             if PHOENIX_ENABLED:
@@ -1483,7 +1486,7 @@ async def submit_feedback(
 
                     if span_id and trace_id:
                         # Send feedback annotation to Phoenix
-                        phoenix_client = PhoenixClient(base_url=PHOENIX_URL)
+                        phoenix_client = PhoenixClient(base_url=PHOENIX_URL, api_key=PHOENIX_API_KEY)
                         success = await phoenix_client.send_feedback_annotation(
                             trace_id=trace_id,
                             span_id=span_id,
