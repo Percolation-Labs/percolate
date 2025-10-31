@@ -245,7 +245,7 @@ def format_response_as_markdown(response: Dict[str, Any]) -> str:
     return '\n'.join(parts)
 
 
-def create_chat_tools(mcp: FastMCP, repository: BaseMCPRepository):
+def create_chat_tools(mcp: FastMCP, repository_factory):
     """Create chat-related MCP tools"""
     
     @mcp.tool(
@@ -274,6 +274,8 @@ def create_chat_tools(mcp: FastMCP, repository: BaseMCPRepository):
         model = model or settings.default_model
         
         try:
+            repository = repository_factory()
+            
             # Notify start
             await ctx.info(f"🚀 Starting chat with {agent}")
             await ctx.debug(f"Query: {query}")
@@ -385,6 +387,8 @@ def create_chat_tools(mcp: FastMCP, repository: BaseMCPRepository):
         model = model or settings.default_model
         
         try:
+            repository = repository_factory()
+            
             # Notify start
             await ctx.info(f"🚀 Starting chat with {agent}")
             

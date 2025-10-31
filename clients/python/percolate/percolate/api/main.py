@@ -59,42 +59,37 @@ def run_scheduled_job(schedule_record):
         logger.error(f"Error running scheduled task {schedule_record.id}: {str(e)}")
         # Don't propagate exceptions to prevent scheduler from failing
 
-# @asynccontextmanager
-# async def lifespan(app: FastAPI):
-#     """Application lifespan: start and shutdown scheduler."""
-    
-#     repo = p8.repository(Schedule)
-#     table = Schedule.get_model_table_name()  
-   
-#     try:
-#         data = repo.execute(f"SELECT * FROM {table} WHERE disabled_at IS NULL")
-#         for d in data:
-#             try:
-#                 record = Schedule(**d)
-#                 trigger = CronTrigger.from_crontab(record.schedule)
-#                 scheduler.add_job(run_scheduled_job, trigger, args=[record], id=str(record.id))
-#             except Exception as e:
-#                 logger.warning(f"Failed to schedule job for record {d.get('id')}: {e}")
-#     except Exception as ex:
-#         logger.warning(f"Failed to load scheduler data {ex}")
-    
-#     scheduler.start()
-#     logger.info(f"Scheduler started with jobs: {[j.id for j in scheduler.get_jobs()]}")
-    
-#     # Check if we need to process pending TUS uploads (we don't create schedules at startup)
-#     try:
-#         from percolate.api.controllers.tus import process_pending_s3_resources
-#         import asyncio
-#         # Process any pending uploads at startup, but don't create a schedule
-#         asyncio.create_task(process_pending_s3_resources())
-#         logger.info("Triggered initial TUS processing at startup")
-#     except Exception as e:
-#         logger.error(f"Failed to trigger initial TUS processing: {e}")
-    
-#     try:
-#         yield
-#     finally:
-#         scheduler.shutdown()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan: start OTEL, scheduler, and shutdown."""
+
+    # Initialize OpenTelemetry tracing
+    from percolate.utils.observability import initialize_otel, shutdown_otel
+    provider = initialize_otel()
+
+    repo = p8.repository(Schedule)
+    table = Schedule.get_model_table_name()
+
+    try:
+        data = repo.execute(f"SELECT * FROM {table} WHERE disabled_at IS NULL")
+        for d in data:
+            try:
+                record = Schedule(**d)
+                trigger = CronTrigger.from_crontab(record.schedule)
+                scheduler.add_job(run_scheduled_job, trigger, args=[record], id=str(record.id))
+            except Exception as e:
+                logger.warning(f"Failed to schedule job for record {d.get('id')}: {e}")
+    except Exception as ex:
+        logger.warning(f"Failed to load scheduler data {ex}")
+
+    scheduler.start()
+    logger.info(f"Scheduler started with jobs: {[j.id for j in scheduler.get_jobs()]}")
+
+    try:
+        yield
+    finally:
+        scheduler.shutdown()
+        shutdown_otel(provider)
 
 
 app = FastAPI(
@@ -115,7 +110,7 @@ app = FastAPI(
     },
     docs_url="/swagger",
     redoc_url=f"/docs",
-   # lifespan=lifespan,
+    lifespan=lifespan,
 )
 
 # Use stable session key for session persistence across restarts
@@ -257,9 +252,16 @@ async def well_known_oauth_protected():
 # Mount MCP server if configured
 try:
     from .mcp_server import mount_mcp_server
-    mount_mcp_server(app, path="/mcp")
+    logger.info("Attempting to mount MCP server at /mcp")
+    mcp_app = mount_mcp_server(app, path="/mcp")
+    if mcp_app:
+        logger.info("MCP server successfully mounted at /mcp with HTTP streamable transport")
+    else:
+        logger.warning("MCP server mount returned None - no API key configured")
+except ImportError as e:
+    logger.warning(f"MCP server import failed: {e}")
 except Exception as e:
-    logger.warning(f"MCP server not available: {e}")
+    logger.error(f"MCP server mount failed: {e}", exc_info=True)
 
 @app.get("/models")
 def get_models():

@@ -60,3 +60,4 @@ USER 26
 #DOCKER_BUILDKIT=1 docker build --progress=plain --platform linux/amd64  -t postgres-base:16 .
 #docker tag postgres-base:16 percolationlabs/postgres-base:16
 #docker push percolationlabs/postgres-base:16
+#  kubectl get pods -n p8 -l app=percolate-api --no-headers | awk '{print $1}' | head -1 | xargs -I {} kubectl logs -n p8 {} --tail=150

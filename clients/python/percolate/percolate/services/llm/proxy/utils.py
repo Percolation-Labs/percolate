@@ -307,19 +307,61 @@ def audit_response_for_user(response, context, query: str = None):
         # Prepare metadata
         channel_ts = getattr(context, 'channel_ts', None) if context else None
         thread_id = getattr(context, 'session_id', None) if context else None
-        
+
         metadata = {
             'userid': user_id,
             'channel_id': channel_ts,
             'thread_id': thread_id,
             'query': query or (getattr(context, 'plan', '') if context else '')
         }
-        
+
+        # Capture OTEL trace/span IDs for Phoenix feedback linking
+        # First try to get from context (if they were captured during span creation)
+        # Otherwise try to get from current span (if we're still in span context)
+        try:
+            from percolate.utils.env import OTEL_ENABLED
+            if OTEL_ENABLED:
+                span_id = None
+                trace_id = None
+
+                # Try to get from context first (stored by ModelRunner during span creation)
+                if context:
+                    span_id = getattr(context, 'otel_span_id', None)
+                    trace_id = getattr(context, 'otel_trace_id', None)
+                    if span_id and trace_id:
+                        logger.info(f"Retrieved OTEL IDs from context for session {session_id}: trace={trace_id}, span={span_id}")
+
+                # Fall back to current span if not in context
+                if not (span_id and trace_id):
+                    from percolate.utils.otel_utils import (
+                        get_current_span_id_as_hex,
+                        get_current_trace_id_as_hex,
+                    )
+                    span_id = get_current_span_id_as_hex()
+                    trace_id = get_current_trace_id_as_hex()
+                    if span_id and trace_id:
+                        logger.info(f"Retrieved OTEL IDs from current span for session {session_id}: trace={trace_id}, span={span_id}")
+
+                # Store in metadata if we have them
+                if span_id and trace_id:
+                    metadata['otel_span_id'] = span_id
+                    metadata['otel_trace_id'] = trace_id
+        except Exception as e:
+            logger.warning(f"Could not capture OTEL IDs for session: {e}")
+
         # Audit Session
         try:
-            session = Session(id=session_id, **metadata)
+            # Create session with metadata in the proper field
+            session = Session(
+                id=session_id,
+                userid=metadata.get('userid'),
+                channel_id=metadata.get('channel_id'),
+                thread_id=metadata.get('thread_id'),
+                query=metadata.get('query'),
+                metadata=metadata  # Store everything in metadata field including OTEL IDs
+            )
             p8.repository(Session).update_records(session)
-            logger.info(f"Audited session: {session_id} for metadata {metadata}")
+            logger.info(f"Audited session: {session_id} with metadata fields including OTEL trace IDs")
         except Exception as e:
             logger.warning(f"Problem with audit session: {e}")
         

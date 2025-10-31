@@ -2,40 +2,41 @@
 Memory proxy for LLM interfaces with unified streaming.
 
 This module implements a unified approach to handling LLM API streaming,
-with support for buffering function calls and proper handling of different
-API formats (OpenAI, Anthropic, Google).
+with support for buffering function calls, function call events, and proper
+handling of different API formats (OpenAI, Anthropic).
 
 Key features:
-- Unified pydantic models for all provider APIs
-- Stream adaptation between different provider formats
-- Function call buffering and aggregation
-- Usage tracking
+- UnifiedStreamAdapter for all streaming needs
+- Function call buffering and aggregation  
+- Function call SSE events for better UX
+- Format conversion between providers
+- Usage tracking and aggregation
 - Background auditing for AIResponse records
 
 Usage:
 ```python
 from percolate.services.llm.proxy import (
-    OpenAIRequest, AnthropicRequest, GoogleRequest,
-    request_stream_from_model, stream_with_buffered_functions,
-    BackgroundAudit
+    UnifiedStreamAdapter,
+    collect_stream_to_response
 )
 
-# Create a request in any provider format
-request = OpenAIRequest(
-    model="gpt-4",
-    messages=[{"role": "user", "content": "Hello"}],
-    max_tokens=100,
-    stream=True
-)
+# Use the unified stream adapter
+adapter = UnifiedStreamAdapter("anthropic", "openai")
+for sse_line, chunk in adapter.process_stream(response, emit_function_announcements=True):
+    if sse_line.startswith('event: function_call'):
+        # Handle function call announcements
+        print("Function being called...")
+    elif chunk.get("choices"):
+        # Handle regular content and tool calls
+        pass
 
-# Stream with unified handling
-for line, chunk in request_stream_from_model(
-    request, context, target_scheme='openai'
-):
-    # line is the raw SSE event line to send to the client
-    # chunk is the parsed OpenAI-format chunk for internal use
-    # ...
+# Or collect entire stream into complete response  
+complete_response = collect_stream_to_response(response, "anthropic")
 ```
+
+Legacy functions (deprecated):
+- `stream_with_buffered_functions` - Use UnifiedStreamAdapter directly
+- `request_stream_from_model` - Use UnifiedStreamAdapter directly
 """
 
 # Import models
@@ -58,11 +59,17 @@ from .utils import (
     format_tool_calls_for_openai
 )
 
-# Import stream generators
+# Import stream generators (legacy compatibility)
 from .stream_generators import (
     stream_with_buffered_functions,
     request_stream_from_model,
     flush_ai_response_audit
+)
+
+# Import new unified streaming
+from .unified_stream_adapter import (
+    UnifiedStreamAdapter,
+    collect_stream_to_response
 )
 
 __all__ = [
@@ -82,8 +89,12 @@ __all__ = [
     'create_sse_line',
     'format_tool_calls_for_openai',
     
-    # Stream generators
+    # Stream generators (legacy)
     'stream_with_buffered_functions',
-    'request_stream_from_model',
-    'flush_ai_response_audit'
+    'request_stream_from_model', 
+    'flush_ai_response_audit',
+    
+    # New unified streaming
+    'UnifiedStreamAdapter',
+    'collect_stream_to_response'
 ]

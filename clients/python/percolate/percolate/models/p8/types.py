@@ -25,6 +25,43 @@ from percolate.utils import logger
 from percolate.utils.decorators import tool as p8_tool
 
 
+class SessionFeedback(AbstractEntityModel):
+    """User feedback on chat sessions for quality tracking and observability.
+
+    This model captures user feedback (thumbs up/down) on chat sessions,
+    which can be used for model quality tracking, cost-benefit analysis,
+    and OpenTelemetry instrumentation.
+    """
+
+    id: uuid.UUID | str = Field(default_factory=uuid.uuid1, description="Unique feedback ID")
+    session_id: str = Field(..., description="Chat session identifier that was rated")
+    approved: bool = Field(..., description="User approval: True=thumbs up, False=thumbs down")
+    note: typing.Optional[str] = Field(None, description="Optional feedback note/comment")
+    tags: typing.Optional[typing.List[str]] = Field(None, description="Optional labels/badges for categorization")
+    created_at: datetime.datetime = Field(default_factory=datetime.datetime.utcnow, description="When feedback was submitted")
+
+    def to_session_evaluation(self, user_id: typing.Optional[str] = None) -> "SessionEvaluation":
+        """Convert SessionFeedback to SessionEvaluation format for observability storage.
+
+        Maps the feedback fields to the SessionEvaluation schema:
+        - approved (bool) -> rating (float): True=1.0, False=0.0
+        - note -> comments (with tags appended if present)
+        - session_id preserved
+        """
+        # Combine note and tags into comments
+        comments = self.note or ""
+        if self.tags:
+            tags_str = ", ".join(self.tags)
+            comments = f"{comments}\nTags: {tags_str}" if comments else f"Tags: {tags_str}"
+
+        return SessionEvaluation(
+            id=self.id,
+            session_id=self.session_id,
+            rating=1.0 if self.approved else 0.0,
+            comments=comments or None,
+        )
+
+
 class Function(AbstractEntityModel):
     """Functions are external tools that agents can use. See field comments for context.
     Functions can be searched and used as LLM tools.
@@ -182,6 +219,8 @@ class Function(AbstractEntityModel):
     @model_validator(mode="before")
     @classmethod
     def _f(cls, values):
+        if values is None:
+            return values
         if not values.get("id"):
             values["id"] = make_uuid(
                 {"key": values["name"], "proxy_uri": values["proxy_uri"]}
@@ -249,7 +288,7 @@ class LanguageModelApi(AbstractEntityModel):
 class Agent(AbstractEntityModel):
     """The agent model is a meta data object to persist agent metadata for search etc"""
 
-    id: uuid.UUID | str
+    id: typing.Optional[uuid.UUID | str] = None
     name: str
     category: typing.Optional[str] = Field(
         None, description="Simple property to filter agents by categories"
@@ -257,7 +296,7 @@ class Agent(AbstractEntityModel):
     description: str = DefaultEmbeddingField(
         description="The system prompt as markdown"
     )
-    spec: dict = Field(description="The model json schema")
+    spec: typing.Optional[dict] = Field(default_factory=dict, description="The model json schema")
     functions: typing.Optional[dict] = Field(
         description="The function that agent can call", default_factory=dict
     )
@@ -271,6 +310,23 @@ class Agent(AbstractEntityModel):
         """we take these from the class and save them"""
         if not values.get("functions") and hasattr(cls, "get_model_functions"):
             values["functions"] = cls.get_model_functions()
+
+        # Auto-generate id from name if not provided
+        if not values.get("id") and values.get("name"):
+            values["id"] = make_uuid(values["name"])
+
+        # Set default spec if not provided
+        if not values.get("spec"):
+            values["spec"] = {}
+
+        # Ensure metadata exists
+        if not values.get("metadata"):
+            values["metadata"] = {}
+
+        # Ensure version exists in metadata (default to "0")
+        if "version" not in values["metadata"]:
+            values["metadata"]["version"] = "0"
+
         return values
 
     def from_abstract_model(cls: BaseModel):
@@ -317,9 +373,15 @@ class Agent(AbstractEntityModel):
         )
 
         # Update model_config with metadata if present
-        if agent_data.get("metadata"):
+        metadata = agent_data.get("metadata", {})
+
+        # Ensure version exists in metadata (default to "0")
+        if "version" not in metadata:
+            metadata["version"] = "0"
+
+        if metadata:
             if hasattr(model, "model_config") and isinstance(model.model_config, dict):
-                model.model_config.update(agent_data["metadata"])
+                model.model_config.update(metadata)
             else:
                 # If model_config doesn't exist or isn't a dict, create it
                 model.model_config = {
@@ -327,11 +389,15 @@ class Agent(AbstractEntityModel):
                     "namespace": namespace,
                     "description": agent_data.get("description", ""),
                     "functions": agent_data.get("functions"),
-                    **agent_data["metadata"],
+                    **metadata,
                 }
 
         # Store the original agent ID for reference
         model.model_config["agent_id"] = str(agent_data["id"])
+
+        # Ensure version is always in model_config (default to "0")
+        if "version" not in model.model_config:
+            model.model_config["version"] = "0"
 
         return model
 
@@ -726,17 +792,21 @@ class Session(AbstractModel):
 
 
 class SessionEvaluation(AbstractModel):
-    """Tracks groups if session dialogue"""
+    """Tracks session evaluation/feedback for observability and quality metrics.
 
-    id: uuid.UUID | str
-    rating: float = Field(
+    This model stores user feedback on chat sessions and can be used for
+    model quality tracking, A/B testing, and observability dashboards.
+    """
+
+    id: uuid.UUID | str = Field(default_factory=uuid.uuid1, description="Unique evaluation ID")
+    session_id: uuid.UUID | str = Field(..., description="Chat session identifier being evaluated")
+    rating: typing.Optional[float] = Field(
         None,
-        description="A rating from 0 to 1 - binary thumb-up/thumbs-down are 0 or 1",
+        description="A rating from 0 to 1 - binary thumbs-up/thumbs-down are 0 or 1, or fractional for multi-level ratings",
     )
     comments: typing.Optional[str] = Field(
         None, description="Additional feedback comments from the user"
     )
-    session_id: uuid.UUID | str
 
 
 class ModelMatrix(AbstractModel):
@@ -1105,7 +1175,7 @@ class Resources(AbstractModel):
         description: str,
         unique_label: str,
         user_id: str,
-        graph_paths: typing.List[str],
+        graph_paths: str | typing.List[str] = "",
     ):
         """save the user fact with a unique label for the information
 
@@ -1115,6 +1185,8 @@ class Resources(AbstractModel):
             user_id: the user id supplied in context- if not known do not try to use this function
             graph_paths: graph paths are tags of the form A/B where A is more specific than B e.g. LLMs/AI
         """
+        if graph_paths == "":
+            graph_paths = None
 
         return UserFact.save_user_fact(
             unique_label,
@@ -1863,6 +1935,8 @@ from percolate.utils.env import MASTER_PROMPT
 class UserRoleAgent(AbstractModel):
     """Demo agent showing role-based function access"""
 
+    model_config = {"allow_search": True, "allow_generate_image": True}
+
     @classmethod
     def get_model_description(cls, *args, **kwargs) -> str:
         """Override to use MASTER_PROMPT if available"""
@@ -1925,9 +1999,9 @@ class UserRoleAgent(AbstractModel):
     def get_executive_info(cls, question: str, category: str = None):
         """
         Get executive information from executive.ExecutiveResources (admin access required).
+        Use this tool to get deep information about business internals e.g. inner workings of their org, vision, mission etc.
         When you return data note that the original drive id e.g. google drive can be used to construct a link to the document - dont use the s3 link
         For example if the metadata has gdrive_id='abasedfasdfa23342asdf' - construct a markdown link to google drive
-
 
         Args:
             question: Natural language question to search for
@@ -1955,6 +2029,9 @@ class UserRoleAgent(AbstractModel):
 
         This is a proxy method that calls Resources.get_recent_uploads_by_user()
 
+        If you want to look up one or more chunks you can use a single called to get_entities to do this, provide a list of keys.
+        It can be useful to supply at least a sample to the user and tell them they can ask for more if they wish.
+
         Args:
             user_id: The user ID to filter resources by
             limit: Maximum number of unique files to return (default: 10)
@@ -1979,12 +2056,12 @@ class UserRoleAgent(AbstractModel):
         return Resources.get_recent_uploads_by_user(user_id, limit)
 
     @classmethod
-    def save_user_fact(
+    def save_user_memory(
         cls,
         label: str,
         description: str,
         user_id: str,
-        graph_paths: typing.List[str] = None,
+        graph_paths: str | typing.List[str] = None,
     ):
         """save the user fact with a unique label for the information
 

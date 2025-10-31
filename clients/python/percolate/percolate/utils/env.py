@@ -93,6 +93,14 @@ S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME", S3_DEFAULT_BUCKET)
 #
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
 
+# OpenTelemetry configuration
+OTEL_ENABLED = os.environ.get("OTEL_ENABLED", "false").lower() in ("true", "1", "yes", "y")
+
+# Phoenix configuration for observability feedback
+PHOENIX_ENABLED = os.environ.get("PHOENIX_ENABLED", "true").lower() in ("true", "1", "yes", "y")
+PHOENIX_URL = os.environ.get("PHOENIX_URL", "http://localhost:6006")
+PHOENIX_API_KEY = os.environ.get("PHOENIX_API_KEY")
+
 GPT_MINI = "gpt-4.1-mini"
 DEFAULT_MODEL = "gpt-4.1"
 P8_BASE_URI = os.environ.get("P8_API_ENDPOINT", os.environ.get("P8_BASE_URI", "https://p8.resmagic.io"))
@@ -219,21 +227,63 @@ P8_CORS_ORIGINS = os.environ.get("P8_CORS_ORIGINS", "")
 
 
 class _MasterPromptLoader:
-    """Singleton loader for master prompt from database"""
+    """Singleton loader for master prompt with TTL caching and reload capability"""
     _instance = None
     _master_prompt: Optional[str] = None
     _loaded = False
+    _last_load_time: float = 0
+    _ttl: int = 300  # 5 minutes default TTL
     
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
     
-    def get_prompt(self) -> str:
-        """Get master prompt, loading from DB on first access"""
-        if not self._loaded:
+    def get_prompt(self, force_reload: bool = False) -> str:
+        """
+        Get master prompt with TTL caching
+        
+        Args:
+            force_reload: If True, force reload from database ignoring cache
+        """
+        import time
+        current_time = time.time()
+        
+        # Check if we need to reload
+        should_reload = (
+            force_reload or 
+            not self._loaded or 
+            (current_time - self._last_load_time) > self._ttl
+        )
+        
+        if should_reload:
             self._load_prompt()
+            self._last_load_time = current_time
+            
         return self._master_prompt or ""
+    
+    def reload(self) -> str:
+        """Force reload the master prompt from database"""
+        return self.get_prompt(force_reload=True)
+    
+    def set_ttl(self, ttl_seconds: int):
+        """Set the TTL for cache expiration"""
+        self._ttl = ttl_seconds
+    
+    def get_cache_info(self) -> dict:
+        """Get information about the current cache state"""
+        import time
+        current_time = time.time()
+        time_since_load = current_time - self._last_load_time if self._loaded else 0
+        
+        return {
+            "loaded": self._loaded,
+            "ttl_seconds": self._ttl,
+            "time_since_load": time_since_load,
+            "expires_in": max(0, self._ttl - time_since_load) if self._loaded else 0,
+            "prompt_length": len(self._master_prompt) if self._master_prompt else 0,
+            "source": "environment" if os.getenv('P8_MASTER_PROMPT') else "database"
+        }
     
     def _load_prompt(self):
         """Load prompt from database or environment"""
@@ -243,6 +293,11 @@ class _MasterPromptLoader:
             env_prompt = os.getenv('P8_MASTER_PROMPT')
             if env_prompt:
                 self._master_prompt = env_prompt
+                try:
+                    from percolate.utils import logger
+                    logger.info("Loaded master prompt from environment variable")
+                except:
+                    pass
                 return
             
             # Load from database
@@ -254,20 +309,23 @@ class _MasterPromptLoader:
             )
             if result and result[0]['value']:
                 self._master_prompt = result[0]['value']
-                # Use logger if available
                 try:
                     from percolate.utils import logger
-                    logger.info("Loaded master prompt from database")
+                    logger.info(f"Loaded master prompt from database ({len(self._master_prompt)} chars)")
                 except:
                     pass
             else:
                 self._master_prompt = ""
+                try:
+                    from percolate.utils import logger
+                    logger.warning("No master prompt found in database")
+                except:
+                    pass
                 
         except Exception as e:
-            # Log warning if logger available
             try:
                 from percolate.utils import logger
-                logger.warning(f"Failed to load master prompt: {e}")
+                logger.error(f"Failed to load master prompt: {e}")
             except:
                 pass
             self._master_prompt = ""
@@ -282,3 +340,16 @@ def _get_master_prompt():
 
 # Export as MASTER_PROMPT that can be called
 MASTER_PROMPT = _get_master_prompt
+
+# Convenience functions for managing the master prompt cache
+def reload_master_prompt() -> str:
+    """Force reload the master prompt from database/environment"""
+    return _loader.reload()
+
+def get_master_prompt_cache_info() -> dict:
+    """Get information about the master prompt cache state"""
+    return _loader.get_cache_info()
+
+def set_master_prompt_ttl(ttl_seconds: int):
+    """Set the TTL for master prompt cache (default 300 seconds / 5 minutes)"""
+    _loader.set_ttl(ttl_seconds)

@@ -500,16 +500,22 @@ class GoogleOAuthRelayProvider(GoogleOAuthProvider):
                             "Please contact your administrator to request access."
                         )
                     
-                    # Only create user if explicitly allowed
+                    # Only create user if explicitly allowed - new users get default role_level=100
                     user_id = make_uuid(user_email)
                     user = User(
                         id=user_id,
                         name=user_name,
                         email=user_email,
-                        role_level=100,  # Default public level
+                        role_level=100,  # Default public level for new users
                         groups=["oauth_users"]
                     )
                     user_repo.upsert_records(user)
+                else:
+                    # User exists - preserve their existing data but update name if changed
+                    existing_user = User(**users[0])
+                    if existing_user.name != user_name:
+                        existing_user.name = user_name
+                        user_repo.update_records(existing_user)
                 
                 # Return tokens directly from Google (not storing them)
                 return TokenResponse(
