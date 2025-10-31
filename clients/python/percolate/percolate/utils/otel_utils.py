@@ -16,6 +16,10 @@ from opentelemetry.trace import Span, SpanKind
 from opentelemetry.trace.status import Status, StatusCode
 
 from percolate.utils.env import OTEL_ENABLED
+from percolate.utils.span_kinds import (
+    OpenInferenceSpanKind,
+    OPENINFERENCE_SPAN_KIND,
+)
 
 
 def get_tracer(name: str = __name__):
@@ -40,6 +44,23 @@ def get_current_span() -> Optional[Span]:
     return span
 
 
+def set_span_kind(span: Span, span_kind: OpenInferenceSpanKind) -> None:
+    """
+    Set the OpenInference span kind for Phoenix categorization.
+
+    Phoenix uses the 'openinference.span.kind' attribute to properly
+    categorize and visualize different types of AI operations.
+
+    Args:
+        span: The span to annotate
+        span_kind: The type of operation (LLM, AGENT, TOOL, etc.)
+    """
+    if not span:
+        return
+
+    span.set_attribute(OPENINFERENCE_SPAN_KIND, span_kind.value)
+
+
 def set_llm_attributes(
     span: Span,
     model: str,
@@ -47,6 +68,8 @@ def set_llm_attributes(
 ) -> None:
     """
     Set standard LLM attributes on a span.
+
+    Automatically sets the OpenInference span kind to LLM for Phoenix categorization.
 
     Args:
         span: The span to annotate
@@ -56,15 +79,23 @@ def set_llm_attributes(
     if not span:
         return
 
+    # Set OpenInference span kind for Phoenix
+    set_span_kind(span, OpenInferenceSpanKind.LLM)
+
+    # OpenTelemetry GenAI semantic conventions (required attributes)
+    span.set_attribute("gen_ai.operation.name", "chat")  # Required: operation type
+    span.set_attribute("gen_ai.provider.name", provider)  # Required: provider name (e.g., "openai")
+
+    # Model attributes (recommended)
     span.set_attribute("gen_ai.request.model", model)
     span.set_attribute("gen_ai.response.model", model)
-    span.set_attribute("gen_ai.system", provider)
 
 
 def set_generation_attributes(
     span: Span,
     prompt: Optional[str] = None,
     completion: Optional[str] = None,
+    messages: Optional[list] = None,
     input_tokens: Optional[int] = None,
     output_tokens: Optional[int] = None,
     total_tokens: Optional[int] = None,
@@ -82,6 +113,7 @@ def set_generation_attributes(
     Args:
         span: The span to annotate
         prompt: Input prompt (omitted by default for privacy)
+        messages: Structured input messages with roles (for llm.input_messages)
         completion: Model output (omitted by default for privacy)
         input_tokens: Number of input/prompt tokens
         output_tokens: Number of output/completion tokens
@@ -97,12 +129,33 @@ def set_generation_attributes(
     if not span:
         return
 
-    # Note: prompt and completion are commented out by default to reduce data volume
-    # Uncomment if you want full prompt/completion tracking
-    # if prompt:
-    #     span.set_attribute("gen_ai.prompt", prompt)
-    # if completion:
-    #     span.set_attribute("gen_ai.completion", completion)
+    # Capture input prompts for Phoenix (following OpenInference conventions)
+    if prompt:
+        span.set_attribute("llm.prompts", json.dumps([{"text": prompt}]))
+        span.set_attribute("input.value", prompt)
+
+    # Capture structured input messages (preserves role information)
+    if messages:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(f"Setting {len(messages)} structured input messages on span")
+        for i, msg in enumerate(messages):
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            logger.debug(f"  Message {i}: role={role}, content_len={len(content)}")
+            span.set_attribute(f"llm.input_messages.{i}.message.role", role)
+            span.set_attribute(f"llm.input_messages.{i}.message.content", content)
+        logger.debug(f"Finished setting structured messages")
+
+    # Capture output completion with structured message format for Phoenix
+    if completion:
+        # Legacy attribute
+        span.set_attribute("llm.completions", json.dumps([{"text": completion}]))
+        # Phoenix OpenInference convention
+        span.set_attribute("output.value", completion)
+        # Structured output message
+        span.set_attribute("llm.output_messages.0.message.role", "assistant")
+        span.set_attribute("llm.output_messages.0.message.content", completion)
 
     if input_tokens is not None:
         span.set_attribute("gen_ai.usage.input_tokens", input_tokens)
@@ -177,6 +230,8 @@ def add_tool_call_event(
     """
     Add a tool call event to the span.
 
+    Also sets the OpenInference span kind to TOOL for Phoenix categorization.
+
     Args:
         span: The span to annotate
         tool_name: Name of the tool being called
@@ -184,6 +239,9 @@ def add_tool_call_event(
     """
     if not span:
         return
+
+    # Set OpenInference span kind for Phoenix
+    set_span_kind(span, OpenInferenceSpanKind.TOOL)
 
     span.add_event(
         name=f"tool.{tool_name}.start",
@@ -221,7 +279,14 @@ def add_tool_result_event(
         span.add_event(name=f"tool.{tool_name}.error", attributes=attributes)
     else:
         # Convert result to JSON string if not already a string
-        result_str = tool_result if isinstance(tool_result, str) else json.dumps(tool_result)
+        if isinstance(tool_result, str):
+            result_str = tool_result
+        else:
+            try:
+                result_str = json.dumps(tool_result)
+            except (TypeError, ValueError):
+                # Handle non-serializable objects (e.g., Message objects)
+                result_str = str(tool_result)
         attributes["tool.result"] = result_str[:1000]  # Limit size
         span.add_event(name=f"tool.{tool_name}.complete", attributes=attributes)
 
@@ -257,3 +322,33 @@ def add_span_event(
         return
 
     span.add_event(event_name, attributes=attributes or {})
+
+
+def get_current_span_id_as_hex() -> Optional[str]:
+    """
+    Get the current span ID in hexadecimal format for Phoenix annotations.
+
+    Returns:
+        16-character hex string representing the span ID, or None if no valid span
+    """
+    span = get_current_span()
+    if not span:
+        return None
+
+    span_id = span.get_span_context().span_id
+    return format(span_id, '016x')
+
+
+def get_current_trace_id_as_hex() -> Optional[str]:
+    """
+    Get the current trace ID in hexadecimal format for linking.
+
+    Returns:
+        32-character hex string representing the trace ID, or None if no valid span
+    """
+    span = get_current_span()
+    if not span:
+        return None
+
+    trace_id = span.get_span_context().trace_id
+    return format(trace_id, '032x')

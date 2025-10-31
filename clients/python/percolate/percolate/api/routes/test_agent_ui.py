@@ -249,11 +249,24 @@ async def agent_manager_ui(request: Request):
         <div class="container">
             <h1>Agent Manager - Test UI</h1>
             <div class="info">
-                User: amartey@gmail.com | Environment: {request.base_url}
+                Environment: {request.base_url}
             </div>
 
-            <!-- Hidden bearer token from env -->
-            <input type="hidden" id="bearerToken" value="{bearer_token}">
+            <!-- Authentication Configuration -->
+            <div class="section">
+                <div class="section-title">Authentication</div>
+                <div class="form-row">
+                    <label>X-User-Email</label>
+                    <input type="text" id="userEmail" placeholder="e.g., amartey@gmail.com" value="amartey@gmail.com">
+                </div>
+                <div class="form-row">
+                    <label>Bearer Token</label>
+                    <input type="password" id="bearerToken" placeholder="Enter bearer token" value="{bearer_token}">
+                </div>
+                <div class="form-row">
+                    <label style="color: #888; font-size: 11px;">Token Status: <span id="tokenStatus" style="color: #66ff66;">Not set</span></label>
+                </div>
+            </div>
 
             <!-- Agent Search and Load -->
             <div class="section">
@@ -388,16 +401,39 @@ async def agent_manager_ui(request: Request):
 
         <script>
             const API_BASE = '{request.base_url}';
-            const USER_EMAIL = 'amartey@gmail.com';
 
             let currentFunctions = [];
             let selectedVersion = null;
             let availableServices = [];
             let availableFunctions = [];
 
+            // Update token status display whenever the token changes
+            function updateTokenStatus() {{
+                const token = document.getElementById('bearerToken')?.value.trim();
+                const statusEl = document.getElementById('tokenStatus');
+
+                if (!token) {{
+                    statusEl.textContent = 'Not set';
+                    statusEl.style.color = '#ff6666';
+                }} else {{
+                    const first3 = token.substring(0, 3);
+                    const last3 = token.substring(token.length - 3);
+                    statusEl.textContent = `${{first3}}...${{last3}} (${{token.length}} chars)`;
+                    statusEl.style.color = '#66ff66';
+                }}
+            }}
+
+            // Call on page load and whenever token field changes
+            document.addEventListener('DOMContentLoaded', function() {{
+                updateTokenStatus();
+                document.getElementById('bearerToken')?.addEventListener('input', updateTokenStatus);
+                document.getElementById('bearerToken')?.addEventListener('change', updateTokenStatus);
+            }});
+
             function apiHeaders() {{
+                const userEmail = document.getElementById('userEmail')?.value.trim() || 'amartey@gmail.com';
                 const headers = {{
-                    'X-User-Email': USER_EMAIL,
+                    'X-User-Email': userEmail,
                     'Content-Type': 'application/json'
                 }};
 
@@ -405,6 +441,12 @@ async def agent_manager_ui(request: Request):
                 if (token) {{
                     headers['Authorization'] = `Bearer ${{token}}`;
                 }}
+
+                console.log('API Headers:', {{
+                    email: userEmail,
+                    hasToken: !!token,
+                    tokenPreview: token ? `${{token.substring(0,3)}}...${{token.substring(token.length-3)}}` : 'none'
+                }});
 
                 return headers;
             }}
@@ -588,7 +630,15 @@ async def agent_manager_ui(request: Request):
                     }});
 
                     if (!response.ok) {{
-                        throw new Error(`HTTP ${{response.status}}: ${{response.statusText}}`);
+                        const errorText = await response.text();
+                        let errorDetail = '';
+                        try {{
+                            const errorJson = JSON.parse(errorText);
+                            errorDetail = errorJson.detail || errorText;
+                        }} catch (e) {{
+                            errorDetail = errorText;
+                        }}
+                        throw new Error(`HTTP ${{response.status}}: ${{errorDetail}}`);
                     }}
 
                     const agent = await response.json();

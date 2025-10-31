@@ -44,11 +44,28 @@ data:
   OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
 ```
 
-## GenAI Semantic Conventions
+## Semantic Conventions
 
-Percolate follows the [OpenTelemetry GenAI Semantic Conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/) for standardized observability:
+Percolate follows both the [OpenTelemetry GenAI Semantic Conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/) and [OpenInference Semantic Conventions](https://arize-ai.github.io/openinference/spec/semantic_conventions.html) for standardized AI observability.
 
-### Span Attributes
+### OpenInference Span Kinds (Phoenix-Specific)
+
+Phoenix uses the `openinference.span.kind` attribute to categorize and visualize different types of AI operations:
+
+- **LLM** - Large language model API calls (automatically set for all LLM operations)
+- **AGENT** - Autonomous agent operations and workflows
+- **TOOL** - Function/tool calls used by agents
+- **CHAIN** - Workflow steps, sequences, or pipeline operations
+- **RETRIEVER** - Vector search, document retrieval, or RAG operations
+- **RERANKER** - Document reranking operations
+- **EMBEDDING** - Text or multimodal embedding generation
+
+These span kinds are automatically set by Percolate's instrumentation:
+- `set_llm_attributes()` → Sets `openinference.span.kind = "LLM"`
+- Agent streaming operations → Sets `openinference.span.kind = "AGENT"`
+- Tool invocations → Sets `openinference.span.kind = "TOOL"`
+
+### OpenTelemetry GenAI Attributes
 
 #### LLM Model Attributes
 - `gen_ai.request.model` - Model identifier (e.g., "gpt-4o", "claude-3.5-sonnet")
@@ -398,7 +415,12 @@ data:
   OTEL_SERVICE_NAME: "percolate"
   OTEL_EXPORTER_OTLP_ENDPOINT: "http://phoenix-collector:4317"
   OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
+  # Phoenix project organization
+  PROJECT_NAME: "percolate"
+  DEPLOYMENT_ENVIRONMENT: "production"
 ```
+
+**Important**: Phoenix uses `openinference.project.name` (not just `project.name`) to organize traces by project. This is automatically set from the `PROJECT_NAME` environment variable during OTEL initialization.
 
 ### Phoenix Features
 
@@ -532,9 +554,35 @@ Percolate follows the evolving [OpenTelemetry GenAI Semantic Conventions](https:
 - Multi-modal content tracking
 - Extended reasoning and chain-of-thought instrumentation
 
+## OpenInference Semantic Conventions Summary
+
+Percolate implements the following OpenInference semantic conventions for Phoenix compatibility:
+
+### Resource Attributes
+- `openinference.project.name` - Phoenix project name (set from `PROJECT_NAME` env var)
+
+### Span Attributes
+- `openinference.span.kind` - Operation type (LLM, AGENT, TOOL, CHAIN, RETRIEVER, RERANKER, EMBEDDING)
+
+### Automatic Span Kind Assignment
+- **LLM calls**: Automatically tagged with `openinference.span.kind = "LLM"` via `set_llm_attributes()`
+- **Agent workflows**: Tagged with `openinference.span.kind = "AGENT"` in `ModelRunner.stream()`
+- **Tool invocations**: Tagged with `openinference.span.kind = "TOOL"` via `add_tool_call_event()`
+
+### Implementation Locations
+- Span kind constants: `percolate/utils/span_kinds.py`
+- Helper functions: `percolate/utils/otel_utils.py`
+  - `set_span_kind(span, OpenInferenceSpanKind)` - Set span kind
+  - `set_llm_attributes(span, model, provider)` - LLM attributes + LLM span kind
+  - `add_tool_call_event(span, tool_name, args)` - Tool event + TOOL span kind
+- Resource initialization: `percolate/utils/observability.py` - Sets `openinference.project.name`
+- Agent instrumentation: `percolate/services/ModelRunner.py` - Sets AGENT span kind
+
 ## References
 
+- [OpenInference Semantic Conventions](https://arize-ai.github.io/openinference/spec/semantic_conventions.html)
 - [OpenTelemetry GenAI Semantic Conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
+- [Phoenix Documentation](https://docs.arize.com/phoenix)
 - [OpenTelemetry Python Documentation](https://opentelemetry.io/docs/instrumentation/python/)
 - [GenAI Observability Blog Post](https://opentelemetry.io/blog/2024/otel-generative-ai/)
 - [AI Agent Observability Standards](https://opentelemetry.io/blog/2025/ai-agent-observability/)

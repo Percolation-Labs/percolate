@@ -28,7 +28,9 @@ from percolate.utils.otel_utils import (
     add_tool_call_event,
     add_tool_result_event,
     mark_span_as_error,
+    set_span_kind,
 )
+from percolate.utils.span_kinds import OpenInferenceSpanKind
 
 tracer = get_tracer(__name__)
 
@@ -342,54 +344,68 @@ class ModelRunner:
         """
         logger.info(f"({self.name}){function_call=}")
 
-        # OTEL: Record tool call event
+        # OTEL: Create a TOOL span for this tool invocation
+        import json
+        tool_span = None
         if is_tracing_enabled():
-            span = trace.get_current_span()
-            add_tool_call_event(span, function_call.name, function_call.arguments)
+            tracer = trace.get_tracer(__name__)
+            tool_span = tracer.start_as_current_span(
+                f"tool.{function_call.name}",
+                kind=SpanKind.CLIENT
+            ).__enter__()
+            # Set TOOL span kind for Phoenix
+            set_span_kind(tool_span, OpenInferenceSpanKind.TOOL)
+            tool_span.set_attribute("tool.name", function_call.name)
+            tool_span.set_attribute("tool.arguments", json.dumps(function_call.arguments, default=str))
 
-        f = self._function_manager[function_call.name]
-        if not f:
-            message = f"attempting to load function {function_call.name} which is not activated - please activate it"
-            data = MessageStackFormatter.format_function_response_error(
-                function_call, ValueError(message), self._context
-            )
-            # OTEL: Record tool error
-            if is_tracing_enabled():
-                span = trace.get_current_span()
-                add_tool_result_event(span, function_call.name, None, error=message)
-        else:
-            try:
-                """try call the function - assumes its some sort of json thing that comes back"""
-                data = f(**function_call.arguments) or {}
-                data = MessageStackFormatter.format_function_response_data(
-                    function_call, data, self._context
-                )
-                # OTEL: Record tool success
-                if is_tracing_enabled():
-                    span = trace.get_current_span()
-                    add_tool_result_event(span, function_call.name, data)
-
-                """if there is an error, how you format the message matters - some generic ones are added
-                its important to make sure the format coincides with the language model being used in context
-                """
-            except TypeError as tex:  # type errors are usually the agents fault
-                logger.warning(f"Error calling function {traceback.format_exc()}")
-                data = MessageStackFormatter.format_function_response_type_error(
-                    function_call, tex, self._context
-                )
-                # OTEL: Record tool error
-                if is_tracing_enabled():
-                    span = trace.get_current_span()
-                    add_tool_result_event(span, function_call.name, None, error=str(tex))
-            except Exception as ex:  # general errors are usually our fault
-                logger.warning(f"Error calling function {traceback.format_exc()}")
+        try:
+            f = self._function_manager[function_call.name]
+            if not f:
+                message = f"attempting to load function {function_call.name} which is not activated - please activate it"
                 data = MessageStackFormatter.format_function_response_error(
-                    function_call, ex, self._context
+                    function_call, ValueError(message), self._context
                 )
                 # OTEL: Record tool error
-                if is_tracing_enabled():
-                    span = trace.get_current_span()
-                    add_tool_result_event(span, function_call.name, None, error=str(ex))
+                if tool_span:
+                    tool_span.set_attribute("tool.error", message)
+                    mark_span_as_error(tool_span, message)
+            else:
+                try:
+                    """try call the function - assumes its some sort of json thing that comes back"""
+                    data = f(**function_call.arguments) or {}
+                    data = MessageStackFormatter.format_function_response_data(
+                        function_call, data, self._context
+                    )
+                    # OTEL: Record tool success
+                    if tool_span:
+                        result_str = json.dumps(data, default=str)[:1000]  # Truncate large results
+                        tool_span.set_attribute("tool.result", result_str)
+
+                    """if there is an error, how you format the message matters - some generic ones are added
+                    its important to make sure the format coincides with the language model being used in context
+                    """
+                except TypeError as tex:  # type errors are usually the agents fault
+                    logger.warning(f"Error calling function {traceback.format_exc()}")
+                    data = MessageStackFormatter.format_function_response_type_error(
+                        function_call, tex, self._context
+                    )
+                    # OTEL: Record tool error
+                    if tool_span:
+                        tool_span.set_attribute("tool.error", str(tex))
+                        mark_span_as_error(tool_span, str(tex))
+                except Exception as ex:  # general errors are usually our fault
+                    logger.warning(f"Error calling function {traceback.format_exc()}")
+                    data = MessageStackFormatter.format_function_response_error(
+                        function_call, ex, self._context
+                    )
+                    # OTEL: Record tool error
+                    if tool_span:
+                        tool_span.set_attribute("tool.error", str(ex))
+                        mark_span_as_error(tool_span, str(ex))
+        finally:
+            # Always close the tool span
+            if tool_span:
+                tool_span.__exit__(None, None, None)
 
         # print(data) # maybe trace here
         """update messages with data if we can or add error messages to notify the language model"""
@@ -409,6 +425,55 @@ class ModelRunner:
             role_level
         )
         return [f.function_spec for _, f in filtered_functions.items()]
+
+    def _capture_span_ids_to_session_metadata(self, session_id: str) -> None:
+        """
+        Helper method to capture current span/trace IDs and store them in session metadata.
+        This is used for linking Phoenix feedback annotations to traces.
+
+        Args:
+            session_id: The session ID to update with span metadata
+        """
+        if not is_tracing_enabled():
+            return
+
+        try:
+            from percolate.utils.otel_utils import (
+                get_current_span_id_as_hex,
+                get_current_trace_id_as_hex,
+            )
+            from percolate.models.p8 import Session
+            import percolate as p8
+
+            span_id = get_current_span_id_as_hex()
+            trace_id = get_current_trace_id_as_hex()
+
+            if span_id and trace_id:
+                # Update session metadata with span/trace IDs for feedback linking
+                import json
+                repo = p8.repository(Session, user_id=self.user_id)
+
+                # Use parameterized query to prevent SQL injection
+                sessions = repo.execute(
+                    'SELECT metadata FROM p8."Session" WHERE id = %s',
+                    (session_id,)
+                )
+
+                if sessions:
+                    existing_metadata = sessions[0].get("metadata") or {}
+                    existing_metadata["otel_span_id"] = span_id
+                    existing_metadata["otel_trace_id"] = trace_id
+
+                    # Serialize dict to JSON string for PostgreSQL JSONB column
+                    metadata_json = json.dumps(existing_metadata)
+                    repo.execute(
+                        'UPDATE p8."Session" SET metadata = %s WHERE id = %s',
+                        (metadata_json, session_id)
+                    )
+                    logger.debug(f"Stored span_id={span_id} and trace_id={trace_id} in session {session_id}")
+        except Exception as e:
+            # Don't fail the request if metadata update fails
+            logger.warning(f"Failed to capture span IDs to session metadata: {e}")
 
     def __call__(
         self,
@@ -510,7 +575,8 @@ class ModelRunner:
             max_loops = limit or ctx.max_iterations
             last_ai_response = None
             saw_stop = False  # this is to kill the entire agent loop
-            for _ in range(max_loops):
+
+            for iteration_num in range(max_loops):
                 turn_content = ""
                 saw_tool_call = False
                 turn_usage = {}
@@ -523,9 +589,9 @@ class ModelRunner:
 
                 """if we use non open ai models we have a choice where we want to adapt the deltas TBD
                 in v0 ill probably make the contract openai adapter upstream but for example users may want to relay messages in another scheme
-                there are essential three adaptations we need; function call aggregation needs to be buffered and does not need relay; 
+                there are essential three adaptations we need; function call aggregation needs to be buffered and does not need relay;
                 token usage also needs to be adapted and does not need relay;
-                the decisions is simply around if the raw content line should be sent in the open ai or other scheme - here its the raw 'line' that is relayed in one scheme or another                
+                the decisions is simply around if the raw content line should be sent in the open ai or other scheme - here its the raw 'line' that is relayed in one scheme or another
                 """
 
                 # Use unified stream adapter for all providers with function call events enabled
@@ -623,15 +689,51 @@ class ModelRunner:
                 if saw_stop:
                     break
 
-        # Wrap generator with OTEL span if tracing is enabled
+        # Create the stream iterator
+        stream_iterator = lm_client.get_stream_iterator(
+            _generator, context=ctx, user_query=question, audit_on_flush=audit
+        )
+
+        # Wrap iterator with OTEL span if tracing is enabled
         if is_tracing_enabled():
-            def _traced_generator():
-                with tracer.start_as_current_span(
+            from percolate.services.llm.utils.stream_utils import LLMStreamIterator
+
+            # Store original iter_lines method
+            original_iter_lines = stream_iterator.iter_lines
+
+            # Create traced version - manually manage span and activate context
+            def traced_iter_lines():
+                # Start span manually
+                span = tracer.start_span(
                     name=f"agent.{agent_name}.stream",
                     kind=SpanKind.SERVER,
-                ) as span:
-                    # Set agent and context attributes
-                    set_llm_attributes(span, ctx.model, lm_client._scheme)
+                )
+
+                # Import context utilities to make this the active span
+                from opentelemetry import context as otel_context
+                from opentelemetry.trace import use_span
+
+                # Activate the span context so child spans (LLM, tools) nest properly
+                token = otel_context.attach(otel_context.set_value("current_span", span))
+
+                try:
+                    # Activate span as current so LLM and tool spans nest under it
+                    # Use manual context management to keep span active while setting attributes
+                    span_context = use_span(span, end_on_exit=False)
+                    span_context.__enter__()
+
+                    # Set OpenInference span kind for Phoenix
+                    # TEMPORARY: Set to LLM to test if structured messages appear
+                    set_span_kind(span, OpenInferenceSpanKind.LLM)
+                    # set_span_kind(span, OpenInferenceSpanKind.AGENT)
+
+                    # Set model attributes (but don't use set_llm_attributes as it sets span kind to LLM)
+                    span.set_attribute("gen_ai.operation.name", "chat")
+                    span.set_attribute("gen_ai.provider.name", lm_client._scheme)
+                    span.set_attribute("gen_ai.request.model", ctx.model)
+                    span.set_attribute("gen_ai.response.model", ctx.model)
+
+                    # Set trace and session attributes
                     set_trace_attributes(
                         span,
                         user_id=ctx.user_id,
@@ -641,19 +743,70 @@ class ModelRunner:
                     )
                     span.set_attribute("gen_ai.is_streaming", True)
                     span.set_attribute("agent.name", agent_name)
-                    span.set_attribute("agent.max_iterations", max_loops)
+                    span.set_attribute("agent.max_iterations", limit or ctx.max_iterations)
 
-                    # Run the generator and yield all items
-                    for item in _generator():
+                    # Capture span IDs to session metadata for Phoenix feedback linking
+                    if ctx and ctx.session_id:
+                        self._capture_span_ids_to_session_metadata(str(ctx.session_id))
+
+                    # Yield all items from the original iterator
+                    # Child spans (LLM, tools) created during iteration will nest under this span
+                    for item in original_iter_lines():
                         yield item
 
-            return lm_client.get_stream_iterator(
-                _traced_generator, context=ctx, user_query=question, audit_on_flush=audit
-            )
-        else:
-            return lm_client.get_stream_iterator(
-                _generator, context=ctx, user_query=question, audit_on_flush=audit
-            )
+                    # After stream is consumed, capture usage AND messages for Phoenix
+                    # Span is still active, so attributes can be set properly
+                    try:
+                        usage = stream_iterator.usage
+                        completion = stream_iterator.content if hasattr(stream_iterator, 'content') else ""
+
+                        # Build structured messages for OTEL
+                        structured_messages = []
+                        formatted_messages = []
+
+                        # Get system prompt if available
+                        system_prompt = self.agent_model.get_model_description() if hasattr(self.agent_model, 'get_model_description') else None
+                        if system_prompt:
+                            formatted_messages.append(f"[System]: {system_prompt}")
+                            structured_messages.append({"role": "system", "content": system_prompt})
+
+                        # Add user query
+                        if question:
+                            formatted_messages.append(f"[User]: {question}")
+                            structured_messages.append({"role": "user", "content": question})
+
+                        prompt_text = "\n\n".join(formatted_messages) if formatted_messages else question
+
+                        if usage:
+                            logger.debug(f"Setting OTEL attributes with {len(structured_messages)} messages")
+                            set_generation_attributes(
+                                span,
+                                prompt=prompt_text,           # Formatted input messages
+                                messages=structured_messages,  # Structured messages with roles
+                                completion=completion,         # Accumulated output
+                                input_tokens=usage.get("prompt_tokens", 0),
+                                output_tokens=usage.get("completion_tokens", 0),
+                                total_tokens=usage.get("total_tokens", 0),
+                                is_streaming=True
+                            )
+                            logger.debug("OTEL attributes set successfully")
+                    except Exception as e:
+                        logger.error(f"Could not capture OTEL messages for streaming: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        pass  # Don't break on OTEL errors
+                finally:
+                    # Exit the span context if it was entered
+                    if 'span_context' in locals():
+                        span_context.__exit__(None, None, None)
+                    # Always end the span and detach context
+                    span.end()
+                    otel_context.detach(token)
+
+            # Replace iter_lines method with traced version
+            stream_iterator.iter_lines = traced_iter_lines
+
+        return stream_iterator
 
     def run(
         self,
@@ -680,59 +833,96 @@ class ModelRunner:
         """a generic wrapper around the REST interfaces of any LLM client"""
         lm_client = LanguageModel.from_context(self._context)
 
-        """messages are system prompt etc. agent model's can override how message stack is constructed
-           we add p8 preamble in percolate - in future this could be disabled per model
-        """
+        # Get agent info for tracing
+        agent_name = self.name
+        agent_version = self.agent_model.metadata.get("version") if hasattr(self.agent_model, "metadata") else None
 
-        # restrict for known user role - tools that requires an access level
-        available_functions = self._function_manager.get_functions_for_role_level(
-            context.role_level if context is not None else None
-        )
+        # Wrap execution in AGENT span if tracing enabled
+        def _run_agent_loop():
+            """messages are system prompt etc. agent model's can override how message stack is constructed
+               we add p8 preamble in percolate - in future this could be disabled per model
+            """
 
-        system_prompt = GENERIC_P8_PROMPT
-
-        self.messages = self.agent_model.build_message_stack(
-            question=question,
-            functions=list(available_functions.keys()),
-            data=data,
-            system_prompt_preamble=system_prompt,
-            user_memory=self._context.get_user_memory(),
-        )
-
-        """run the agent loop to completion"""
-        for _ in range(limit or self._context.max_iterations):
-            response = None
-            """the language model may stream into a callback in the calling context"""
-            response = lm_client(
-                messages=self.messages,
-                context=self._context,
-                functions=self.function_descriptions,
-            )
-            if function_calls := response.tool_calls:
-                """models need us to add the tool call to the stack - this is not the case for openai function call but for consistency over models we must"""
-                self.messages.add(response.verbatim)
-                """call one or more functions and update messages - functions can be updated inside this context"""
-                for (
-                    func_call
-                ) in (
-                    function_calls
-                ):  # its assumed to be only one for now but we could par do in future
-                    self.invoke(FunctionCall(**func_call))
-                continue
-            if response is not None:
-                # marks the fact that we have unfinished business
-                """for full auditing we should dump the response here"""
-                # p8.repository(AIResponse).update_records(response)
-                break
-
-        """fire telemetry TODO and below dump to postgres"""
-        if audit:
-            p8.dump(
-                question,
-                self.messages.data,
-                response,
-                self._context,
-                agent=self.agent_model.get_model_full_name(),
+            # restrict for known user role - tools that requires an access level
+            available_functions = self._function_manager.get_functions_for_role_level(
+                context.role_level if context is not None else None
             )
 
-        return response.content
+            system_prompt = GENERIC_P8_PROMPT
+
+            self.messages = self.agent_model.build_message_stack(
+                question=question,
+                functions=list(available_functions.keys()),
+                data=data,
+                system_prompt_preamble=system_prompt,
+                user_memory=self._context.get_user_memory(),
+            )
+
+            """run the agent loop to completion"""
+            for _ in range(limit or self._context.max_iterations):
+                response = None
+                """the language model may stream into a callback in the calling context"""
+                response = lm_client(
+                    messages=self.messages,
+                    context=self._context,
+                    functions=self.function_descriptions,
+                )
+                if function_calls := response.tool_calls:
+                    """models need us to add the tool call to the stack - this is not the case for openai function call but for consistency over models we must"""
+                    self.messages.add(response.verbatim)
+                    """call one or more functions and update messages - functions can be updated inside this context"""
+                    for (
+                        func_call
+                    ) in (
+                        function_calls
+                    ):  # its assumed to be only one for now but we could par do in future
+                        self.invoke(FunctionCall(**func_call))
+                    continue
+                if response is not None:
+                    # marks the fact that we have unfinished business
+                    """for full auditing we should dump the response here"""
+                    # p8.repository(AIResponse).update_records(response)
+                    break
+
+            """fire telemetry TODO and below dump to postgres"""
+            if audit:
+                p8.dump(
+                    question,
+                    self.messages.data,
+                    response,
+                    self._context,
+                    agent=self.agent_model.get_model_full_name(),
+                )
+
+            return response.content
+
+        # Execute with or without OTEL tracing
+        if not is_tracing_enabled():
+            return _run_agent_loop()
+
+        # Create AGENT span with proper attributes
+        with tracer.start_as_current_span(
+            f"agent.{agent_name}.run",
+            kind=SpanKind.SERVER
+        ) as span:
+            # Set OpenInference span kind for Phoenix
+            set_span_kind(span, OpenInferenceSpanKind.AGENT)
+
+            # Set agent and context attributes
+            set_llm_attributes(span, self._context.model, lm_client._scheme)
+            set_trace_attributes(
+                span,
+                user_id=self._context.user_id,
+                session_id=self._context.session_id,
+                code_path=__file__,
+                agent_version=agent_version,
+            )
+            span.set_attribute("gen_ai.is_streaming", False)
+            span.set_attribute("agent.name", agent_name)
+            span.set_attribute("agent.max_iterations", limit or self._context.max_iterations)
+
+            # Capture span IDs to session metadata for Phoenix feedback linking
+            if self._context and self._context.session_id:
+                self._capture_span_ids_to_session_metadata(str(self._context.session_id))
+
+            return _run_agent_loop()

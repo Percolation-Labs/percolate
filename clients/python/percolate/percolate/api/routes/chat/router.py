@@ -1462,6 +1462,49 @@ async def submit_feedback(
                 # Don't fail the request if OTel instrumentation fails
                 logger.warning(f"Failed to instrument feedback with OTel: {otel_error}")
 
+        # Send feedback to Phoenix if enabled
+        try:
+            from percolate.utils.env import PHOENIX_ENABLED, PHOENIX_URL
+            from percolate.clients.phoenix.client import PhoenixClient
+
+            if PHOENIX_ENABLED:
+                # Get span/trace IDs from session metadata
+                session_repo = p8.repository(Session, user_id=auth_user_id)
+                # Use parameterized query to prevent SQL injection
+                sessions = session_repo.execute(
+                    'SELECT metadata FROM p8."Session" WHERE id = %s',
+                    (str(feedback.session_id),)
+                )
+
+                if sessions and sessions[0].get("metadata"):
+                    metadata = sessions[0]["metadata"]
+                    span_id = metadata.get("otel_span_id")
+                    trace_id = metadata.get("otel_trace_id")
+
+                    if span_id and trace_id:
+                        # Send feedback annotation to Phoenix
+                        phoenix_client = PhoenixClient(base_url=PHOENIX_URL)
+                        success = await phoenix_client.send_feedback_annotation(
+                            trace_id=trace_id,
+                            span_id=span_id,
+                            session_id=str(feedback.session_id),
+                            feedback_approved=feedback.approved,
+                            user_id=auth_user_id,
+                            feedback_note=feedback.note,
+                            feedback_tags=feedback.tags,
+                        )
+                        if success:
+                            logger.info(f"Sent feedback to Phoenix for session {feedback.session_id}")
+                        else:
+                            logger.warning(f"Failed to send feedback to Phoenix for session {feedback.session_id}")
+                    else:
+                        logger.debug(f"No span/trace IDs found in session {feedback.session_id} metadata, skipping Phoenix annotation")
+                else:
+                    logger.debug(f"No metadata found for session {feedback.session_id}, skipping Phoenix annotation")
+        except Exception as phoenix_error:
+            # Don't fail the request if Phoenix integration fails
+            logger.warning(f"Failed to send feedback to Phoenix: {phoenix_error}")
+
         logger.info(f"Saved feedback for session {feedback.session_id}: approved={feedback.approved}")
 
         return {

@@ -163,6 +163,7 @@ class LLMStreamIterator:
         user_query: str = None,
         audit_on_flush: bool = False,
         adapter=None,
+        input_messages: list = None,
     ):
         self.g = g
         self.user_query = user_query
@@ -179,6 +180,8 @@ class LLMStreamIterator:
         self._tool_calls = []
         # Tool responses collected during streaming
         self._tool_responses = {}
+        # Store input messages for OTEL tracing (system prompt + user messages)
+        self._input_messages = input_messages or []
 
     def _extract_json_from_sse_line(self, line: str) -> Optional[dict]:
         """

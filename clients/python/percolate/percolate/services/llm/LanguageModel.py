@@ -496,6 +496,16 @@ class LanguageModel:
         """
         Simple REST wrapper to use with any language model
         """
+        # Import OTEL utilities
+        from percolate.utils.otel_utils import (
+            is_tracing_enabled,
+            get_tracer,
+            set_llm_attributes,
+            set_generation_attributes,
+            mark_span_as_error,
+        )
+        from opentelemetry.trace import SpanKind
+
         logger.debug(f"invoking model {self.model_name}, {is_streaming=}")
         """select this from the database or other lookup
         e.g. db.execute('select * from "LanguageModelApi" where name = %s ', ('gpt-4o-mini',))[0]
@@ -608,9 +618,105 @@ class LanguageModel:
 
         logger.trace(f"request {data=}, {is_streaming=}")
 
-        response = requests.post(
-            url, headers=headers, data=json.dumps(data), stream=is_streaming
-        )
+        # OTEL: Wrap LLM call with instrumentation
+        if not is_tracing_enabled():
+            # No tracing - just make the call
+            response = requests.post(
+                url, headers=headers, data=json.dumps(data), stream=is_streaming
+            )
+        else:
+            # Create LLM span with proper attributes
+            tracer = get_tracer(__name__)
+            with tracer.start_as_current_span(
+                "llm.chat",
+                kind=SpanKind.CLIENT
+            ) as span:
+                # Set LLM attributes
+                provider = params.get("scheme", "openai")
+                set_llm_attributes(span, model=self.model_name, provider=provider)
+
+                # Add request parameters
+                if temperature and not is_gpt5:
+                    span.set_attribute("gen_ai.request.temperature", temperature)
+                if kwargs.get("max_tokens"):
+                    span.set_attribute("gen_ai.request.max_tokens", kwargs["max_tokens"])
+
+                span.set_attribute("gen_ai.is_streaming", is_streaming)
+
+                # For streaming calls, capture input messages before making the call
+                if is_streaming:
+                    messages_list = data.get("messages", [])
+                    input_messages = []
+                    for msg in messages_list:
+                        if msg.get("role") == "system":
+                            input_messages.append(f"[System]: {msg.get('content', '')}")
+                        elif msg.get("role") == "user":
+                            input_messages.append(f"[User]: {msg.get('content', '')}")
+                        elif msg.get("role") == "assistant":
+                            input_messages.append(f"[Assistant]: {msg.get('content', '')}")
+                        elif msg.get("role") == "tool":
+                            input_messages.append(f"[Tool]: {msg.get('content', '')}")
+
+                    prompt_text = "\n\n".join(input_messages)
+
+                    # Set input attributes immediately
+                    set_generation_attributes(
+                        span,
+                        prompt=prompt_text,
+                        messages=messages_list,
+                        is_streaming=True
+                    )
+
+                # Make the HTTP call
+                response = requests.post(
+                    url, headers=headers, data=json.dumps(data), stream=is_streaming
+                )
+
+                # For non-streaming, try to extract usage immediately
+                if not is_streaming and response.status_code in [200, 201]:
+                    try:
+                        response_data = response.json()
+                        usage = response_data.get("usage", {})
+
+                        if usage:
+                            # Construct input prompt from messages for OTEL tracing
+                            messages_list = data.get("messages", [])
+                            input_messages = []
+                            for msg in messages_list:
+                                if msg.get("role") == "system":
+                                    input_messages.append(f"[System]: {msg.get('content', '')}")
+                                elif msg.get("role") == "user":
+                                    input_messages.append(f"[User]: {msg.get('content', '')}")
+                            prompt_text = "\n\n".join(input_messages)
+
+                            # Extract completion from response
+                            completion_text = ""
+                            if "choices" in response_data and response_data["choices"]:
+                                completion_text = response_data["choices"][0].get("message", {}).get("content", "")
+
+                            set_generation_attributes(
+                                span,
+                                prompt=prompt_text,           # Input messages (system + user)
+                                messages=messages_list,        # Structured messages with roles
+                                completion=completion_text,    # Output message
+                                input_tokens=usage.get("prompt_tokens") or usage.get("input_tokens"),
+                                output_tokens=usage.get("completion_tokens") or usage.get("output_tokens"),
+                                total_tokens=usage.get("total_tokens"),
+                                is_streaming=False
+                            )
+
+                        # Capture finish reason if available
+                        if "choices" in response_data and response_data["choices"]:
+                            finish_reason = response_data["choices"][0].get("finish_reason")
+                            if finish_reason:
+                                span.set_attribute("gen_ai.response.finish_reason", finish_reason)
+
+                    except Exception as e:
+                        logger.debug(f"Could not extract usage from response: {e}")
+
+                # Mark span as error if request failed
+                if response.status_code not in [200, 201]:
+                    mark_span_as_error(span, f"HTTP {response.status_code}: {response.text[:200]}")
 
         if response.status_code not in [200, 201]:
             logger.error(
@@ -685,6 +791,7 @@ class LanguageModel:
                 scheme=params.get("scheme", "openai"),
                 context=ctx,
                 user_query=question,
+                input_messages=data.get("messages", []),  # Pass messages for OTEL tracing
             )
         else:
             # For non-streaming or internal usage (like ModelRunner), return raw response
