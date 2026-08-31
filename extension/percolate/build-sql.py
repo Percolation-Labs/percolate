@@ -30,6 +30,7 @@ ORDER = [
     ("ai-query-layer/integration-workflow.sql", "p8ql as a workflow step"),
     ("world-model-ingestion/schema.sql",        "the content plane: channels, files, resources, chunks"),
     ("world-model-ingestion/integration.sql",   "registers the corpus, projects documents into the graph"),
+    ("agentic/schema.sql",                      "agents, sessions, runs, messages -- the conversation plane"),
 ]
 
 HEADER = f"""-- ============================================================

@@ -8,7 +8,7 @@
 -- ai-query-layer/USAGE.md instructs a reader to run
 --   select aiq.register_lexical_source('chunks', 'wm.resource_chunks');
 -- and no such table shipped -- `wm` was a throwaway test fixture. TEXT,
--- SEMANTIC and HYBRID are documented as working over "chunks", so the corpus
+-- SEMANTIC and SEARCH are documented as working over "chunks", so the corpus
 -- they search has to be something the collection actually installs.
 --
 -- Applied as app_owner, after ai-query-layer. The aiq/rbac wiring lives in

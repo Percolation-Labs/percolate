@@ -13,12 +13,15 @@
 --
 -- The five REM-derived query modes (brief.md §2, §3) compile to:
 --   LOOKUP           -> node_keys btree probe -> nodes -> typed-table PK fetch
---   LOOKUP ... FUZZY -> pg_trgm over node_keys ONLY, never the data plane
+--                       (takes a LIST of keys; each resolves independently)
+--   FUZZY LOOKUP     -> pg_trgm over node_keys ONLY, never the data plane
 --   SEMANTIC         -> pgvector over the embedding table for one entity type
 --   GRAPH depth 1    -> GRAPH_TABLE over the property graph below
 --   GRAPH depth n>1  -> WITH RECURSIVE over edges (PG19 has no quantified
 --                       path patterns; confirmed empirically, brief.md §3)
---   SQL              -> read-only passthrough, SECURITY INVOKER (brief.md §3)
+--   SEARCH           -> RRF fusion of the lexical and semantic ranks
+--   <ordinary SQL>   -> read-only passthrough, SECURITY INVOKER (brief.md §3);
+--                       no keyword, recognised by how the statement starts
 -- ============================================================
 
 create extension if not exists vector;
@@ -404,6 +407,34 @@ begin
 end;
 $$ language plpgsql stable;
 
+-- LOOKUP over a LIST of keys -- what the dialect's `LOOKUP "a", "b"` compiles
+-- to, and the shape an agent actually needs: it rarely holds exactly one name.
+--
+-- Each key runs the full cascade independently. That is the whole subtlety:
+-- resolving them as one set would let one key's canonical hit suppress
+-- another key's fuzzy match, so a list of five names would answer differently
+-- than five separate calls. Independence keeps the list a convenience rather
+-- than a change of meaning.
+--
+-- It returns `input_key` alongside each row, which the scalar form has no need
+-- for. Without it a caller cannot tell WHICH of five names produced a row, or
+-- which produced none -- and "which of these did you not find" is usually the
+-- question worth asking.
+--
+-- Deliberately NOT an overload of aiq.lookup(text, ...): an untyped literal
+-- like aiq.lookup('acme') would then be ambiguous between text and text[],
+-- and "function is not unique" is a poor greeting for the dialect's most
+-- common call.
+create or replace function aiq.lookup_many(
+    p_keys text[], p_fuzzy boolean default false, p_limit int default 20
+) returns table(input_key text, node_id uuid, entity_type text, entity_id uuid,
+                key text, match_kind text, score real) as $$
+    select k.key_in, l.node_id, l.entity_type, l.entity_id, l.key,
+           l.match_kind, l.score
+    from unnest(p_keys) as k(key_in),
+         lateral aiq.lookup(k.key_in, p_fuzzy, p_limit) l;
+$$ language sql stable;
+
 -- GRAPH depth 1: native SQL/PGQ. Confirmed working on PG19 beta3.
 create or replace function aiq.graph_neighbors(
     p_node_id uuid, p_relation text default null, p_limit int default 100
@@ -588,7 +619,7 @@ begin
             'function, so this should be impossible -- if you are seeing it, the '
             'extension is partially installed. The per-mode functions '
             '(aiq.lookup, aiq.graph_neighbors, aiq.graph_walk, aiq.semantic_in, '
-            'aiq.lexical, aiq.hybrid) still work directly.';
+            'aiq.lexical, aiq.search) still work directly.';
     end if;
     p := aiq_parse(p_query);
 
@@ -598,8 +629,13 @@ begin
 
     case p->>'mode'
     when 'LOOKUP' then
+        -- The dialect takes a list, so the dispatch does too. Resolving five
+        -- names is one round trip and one plan, not five -- which is the
+        -- normal case for an agent holding several entities at once.
         select coalesce(jsonb_agg(to_jsonb(l)), '[]'::jsonb) into v_out
-        from aiq.lookup(p->>'arg', (p->>'fuzzy')::boolean, (p->>'limit')::int) l;
+        from aiq.lookup_many(
+            (select array_agg(value) from jsonb_array_elements_text(p->'args')),
+            (p->>'fuzzy')::boolean, (p->>'limit')::int) l;
 
     when 'GRAPH' then
         -- Resolve the key ONCE, here, then traverse by id: the dialect names
@@ -641,14 +677,14 @@ begin
         select coalesce(jsonb_agg(to_jsonb(l)), '[]'::jsonb) into v_out
         from aiq.lexical(p->>'source', p->>'arg', (p->>'limit')::int) l;
 
-    when 'HYBRID' then
+    when 'SEARCH' then
         if p_embedding is null then
             raise exception
-                'HYBRID fuses lexical and semantic ranks, so it needs p_embedding. '
+                'SEARCH fuses lexical and semantic ranks, so it needs p_embedding. '
                 'Use TEXT ''%'' for the lexical half alone.', p->>'arg';
         end if;
         select coalesce(jsonb_agg(to_jsonb(h)), '[]'::jsonb) into v_out
-        from aiq.hybrid(p->>'source', p->>'arg', p_embedding, p->>'model',
+        from aiq.search(p->>'source', p->>'arg', p_embedding, p->>'model',
                         (p->>'limit')::int) h;
 
     when 'SQL' then
@@ -852,7 +888,7 @@ begin
 end;
 $$ language plpgsql stable;
 
--- HYBRID: reciprocal rank fusion of lexical + semantic.
+-- SEARCH: reciprocal rank fusion of lexical + semantic.
 --
 -- RRF rather than score-weighted blending, deliberately: ts_rank and cosine
 -- distance are not on the same scale, not even the same direction (higher is
@@ -865,7 +901,7 @@ $$ language plpgsql stable;
 -- This is the mode that answers the "R7" case AND "is this product
 -- dangerous?" with one call -- which is the actual argument for a unified
 -- dialect over three separate APIs.
-create or replace function aiq.hybrid(
+create or replace function aiq.search(
     p_lexical_source text, p_query_text text,
     p_query_vector vector, p_model text default null,
     p_limit int default 10, p_k int default 60
@@ -939,7 +975,7 @@ begin
     -- transaction below is.
     if p_statement ~* '^\s*(insert|update|delete|truncate|drop|alter|create|grant|revoke|copy)\M' then
         raise exception
-            'SQL mode is read-only: statement starts with a write/DDL keyword';
+            'the SQL passthrough is read-only: statement starts with a write/DDL keyword';
     end if;
 
     -- The actual boundary. set_config(..., true) is transaction-local, so it

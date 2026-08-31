@@ -1,0 +1,67 @@
+Port pg_cron v1.6.7 to PostgreSQL 19.
+
+Three changes, none of them behavioural. Recorded as a patch rather than a
+vendored fork so that what we changed stays legible, and so this file becomes
+empty the day upstream supports PG19.
+
+meta/postgres-manifest.md carried this as "not root-caused to a one-line fix"
+and an unresolved risk against three subsystems. It is root-caused now:
+
+1. Makefile: -std=c99 -> -std=gnu11.
+   PG19's c.h implements StaticAssertExpr() with C11's `static_assert`.
+   Under -std=c99 glibc does not define that macro, so the token became an
+   implicit function declaration inside a struct and the compiler reported the
+   confusing "expected specifier-qualifier-list before 'extern'" at every
+   AllocSetContextCreate() call site. This was the error that looked like a
+   header-ordering interaction with <assert.h>; it is really just a language
+   level. gnu11 rather than c11 because Postgres headers use GNU extensions
+   (`typeof`), which strict -std=c11 rejects.
+
+2. src/pg_cron.c: include storage/fd.h for max_files_per_process.
+   It used to arrive transitively; in PG19 it does not.
+
+3. src/pg_cron.c: SIG_IGN -> PG_SIG_IGN.
+   PG19's pqsigfunc is void (*)(int, const pg_signal_info *), so the plain
+   libc SIG_IGN no longer type-checks. port.h defines PG_SIG_IGN for exactly
+   this case.
+
+Verified: builds clean under -Werror, and the extension schedules and executes
+jobs against postgres:19beta3-bookworm (dev/tests/workflow/03-cron-tick.sql).
+
+diff --git a/Makefile b/Makefile
+index c139cac..9839881 100644
+--- a/Makefile
++++ b/Makefile
+@@ -12,9 +12,9 @@ REGRESS = pg_cron-test
+ MODULE_big = $(EXTENSION)
+ OBJS = $(patsubst %.c,%.o,$(wildcard src/*.c))
+ ifeq ($(CC),gcc)
+-    PG_CPPFLAGS = -std=c99 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-uninitialized -Wno-implicit-fallthrough -Iinclude -I$(libpq_srcdir)
++    PG_CPPFLAGS = -std=gnu11 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-uninitialized -Wno-implicit-fallthrough -Iinclude -I$(libpq_srcdir)
+ else
+-    PG_CPPFLAGS = -std=c99 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-implicit-fallthrough -Iinclude -I$(libpq_srcdir)
++    PG_CPPFLAGS = -std=gnu11 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-implicit-fallthrough -Iinclude -I$(libpq_srcdir)
+ endif
+ ifeq ($(shell uname -s),SunOS)
+     PG_CPPFLAGS += -Wno-sign-compare -D__EXTENSIONS__
+diff --git a/src/pg_cron.c b/src/pg_cron.c
+index e202d14..a842bd7 100644
+--- a/src/pg_cron.c
++++ b/src/pg_cron.c
+@@ -69,6 +69,7 @@
+ #include "libpq-fe.h"
+ #include "libpq/pqmq.h"
+ #include "libpq/pqsignal.h"
++#include "storage/fd.h"
+ #include "mb/pg_wchar.h"
+ #include "parser/analyze.h"
+ #include "pgstat.h"
+@@ -564,7 +565,7 @@ PgCronLauncherMain(Datum arg)
+ 
+ 	/* Establish signal handlers before unblocking signals. */
+ 	pqsignal(SIGHUP, pg_cron_sighup);
+-	pqsignal(SIGINT, SIG_IGN);
++	pqsignal(SIGINT, PG_SIG_IGN);
+ 	pqsignal(SIGTERM, pg_cron_sigterm);
+ 
+ 	/* We're now ready to receive signals */

@@ -144,7 +144,7 @@ grant select on property graph aiq.knowledge_graph to authenticated, api_viewer;
 
 -- Embedding spaces are created DYNAMICALLY by register_embedding_space(), so
 -- they cannot be listed here -- and a table created after this file runs
--- inherits no grants, making every SEMANTIC/HYBRID call against a newly
+-- inherits no grants, making every SEMANTIC/SEARCH call against a newly
 -- registered model fail with "permission denied for table emb_<model>".
 -- Found by registering a model and immediately querying it over REST.
 --
@@ -171,11 +171,12 @@ revoke execute on all functions in schema aiq from public;
 
 grant execute on function aiq.query(text, vector) to authenticated;
 grant execute on function aiq.lookup(text, boolean, int) to authenticated;
+grant execute on function aiq.lookup_many(text[], boolean, int) to authenticated;
 grant execute on function aiq.graph_neighbors(uuid, text, int) to authenticated;
 grant execute on function aiq.graph_walk(uuid, int, text, int) to authenticated;
 grant execute on function aiq.semantic_in(vector, text, int) to authenticated;
 grant execute on function aiq.lexical(text, text, int) to authenticated;
-grant execute on function aiq.hybrid(text, text, vector, text, int, int) to authenticated;
+grant execute on function aiq.search(text, text, vector, text, int, int) to authenticated;
 grant execute on function aiq.sql_passthrough(text) to authenticated;
 
 -- Registry reads: an agent needs to know which models and sources exist to
@@ -186,7 +187,7 @@ grant select on aiq.embedding_models, aiq.lexical_sources,
 -- ------------------------------------------------------------
 -- 3b. Consumer-owned content tables.
 --
--- TEXT, SEMANTIC and HYBRID read the CONSUMER's tables (world-model
+-- TEXT, SEMANTIC and SEARCH read the CONSUMER's tables (world-model
 -- ingestion's resource_chunks, say), not aiq's own -- registered by name in
 -- lexical_sources / semantic_sources. Because the query functions are
 -- SECURITY INVOKER, the caller needs real access to those tables, and

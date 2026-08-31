@@ -90,7 +90,10 @@ begin
                         'start_child_workflow','add_task','cancel_run',
                         'begin_compensation','promote_due_timers',
                         'reap_stale_tasks','log_task_transition',
-                        'cascade_task_status')
+                        'cascade_task_status',
+                        -- §19: the ticker and the schedule REST surface
+                        'tick','schedule_workflow','set_schedule_enabled',
+                        'unschedule_workflow')
       and not p.prosecdef;
     if v_bad is not null then
         raise exception
@@ -258,3 +261,108 @@ revoke execute on function workflow.cancel_run_unchecked(uuid) from public;
 revoke execute on function workflow.assert_run_access(uuid, text) from public;
 grant execute on function workflow.cancel_run(uuid) to authenticated;
 grant execute on function workflow.signal_task(uuid, text, jsonb) to authenticated;
+
+-- ============================================================
+-- (f) Schedules (schema.sql §19) under the identity model.
+--
+-- Same three pieces every user-facing table in this collection gets, for the
+-- same reasons: an owner assigned from the verified JWT by a trigger, an RLS
+-- policy on the read path, and a real authorization check replacing the
+-- deny-by-default stand-in the core engine ships.
+-- ============================================================
+
+alter table workflow.schedules add column if not exists owner_id uuid references rbac.users(id);
+create index if not exists idx_schedules_owner on workflow.schedules (owner_id);
+
+-- Ownership from the JWT, never from an argument -- the same rule, and the
+-- same trigger shape, as runs above. schedule_workflow() therefore has no
+-- owner parameter to spoof.
+create or replace function workflow.set_schedule_owner() returns trigger as $$
+begin
+    if new.owner_id is null then
+        new.owner_id := rbac.current_user_id();
+    end if;
+    return new;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+create trigger trg_set_schedule_owner
+    before insert on workflow.schedules
+    for each row execute function workflow.set_schedule_owner();
+
+alter table workflow.schedules enable row level security;
+
+-- (select ...) wrapping, as everywhere: has_permission() runs a join.
+create policy schedules_owner_or_permitted on workflow.schedules for select
+  using (owner_id = (select rbac.current_user_id())
+         or (select rbac.has_permission(rbac.current_user_id(), 'workflow_schedules', 'select')));
+
+-- The real check, replacing schema.sql §19's deny-by-default stand-in.
+-- Mirrors assert_run_access() exactly, including its rule about system-owned
+-- rows: a schedule with no owner (seeded by the deployment itself) takes an
+-- explicit permission to touch, never bare ownership.
+--
+-- Creating a NEW schedule is the one action with no existing row to own, so
+-- it is allowed to any authenticated caller -- the trigger above then makes
+-- them its owner. An anonymous caller has no identity to own it and is
+-- refused, which is what keeps `web_anon` out.
+create or replace function workflow.assert_schedule_access(p_name text, p_action text)
+returns void as $$
+declare
+    v_owner  uuid;
+    v_exists boolean;
+    v_caller uuid := rbac.current_user_id();
+    v_tbl_owner name;
+begin
+    -- The deployment itself, seeding or repairing its own schedules, has no
+    -- JWT and no rbac.users row -- and must not need one. A caller connected
+    -- as (or able to become) the role that owns the table is that case, and
+    -- is the same escape the core engine's stand-in uses. PostgREST connects
+    -- as `authenticator`, which is deliberately NOT a member of it, so this
+    -- never widens the REST path.
+    select pg_get_userbyid(c.relowner) into v_tbl_owner
+      from pg_class c join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname = 'workflow' and c.relname = 'schedules';
+    if pg_has_role(session_user, v_tbl_owner, 'member') then
+        return;
+    end if;
+
+    select owner_id, true into v_owner, v_exists
+      from workflow.schedules where name = p_name;
+
+    if not coalesce(v_exists, false) then
+        if p_action = 'create' and v_caller is not null then
+            return;
+        end if;
+        if p_action <> 'create' then
+            -- Nothing to authorize against; the caller's own function decides
+            -- what a missing name means (unschedule_workflow returns false).
+            return;
+        end if;
+        raise exception 'not authorized to create schedule "%"', p_name
+            using hint = 'authenticate first: a schedule needs an owner';
+    end if;
+
+    if v_owner is not null and v_owner = v_caller then
+        return;
+    end if;
+    if rbac.has_permission(v_caller, 'workflow_schedules', p_action) then
+        return;
+    end if;
+    raise exception 'not authorized to % schedule "%"', p_action, p_name;
+end;
+$$ language plpgsql stable security definer set search_path = pg_catalog, public;
+
+-- The read path: a view owned by api_viewer, never the table owner.
+create view workflow.schedules_api as
+  select id, name, workflow_name, cron_expr, timezone, input, enabled,
+         overlap_policy, owner_id, org_id, last_tick_at, last_fired_at,
+         last_run_id, fire_count, skip_count, last_error, last_error_at,
+         created_at, updated_at
+  from workflow.schedules;
+
+grant select on workflow.schedules to api_viewer;
+grant create on schema workflow to api_viewer;
+alter view workflow.schedules_api owner to api_viewer;
+revoke create on schema workflow from api_viewer;
+grant select on workflow.schedules_api to authenticated;

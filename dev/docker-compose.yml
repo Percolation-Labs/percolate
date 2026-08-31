@@ -6,6 +6,19 @@ services:
     # install script to run.
     image: percolationlabs/percolate-postgres:19
     container_name: p8-experiment-pg19
+    # pg_cron runs as a background worker, so it must be preloaded at startup
+    # -- there is no CREATE EXTENSION that can add it later. cron.database_name
+    # is which database its worker connects to, and it can only be one; leaving
+    # it at the default ('postgres') is the usual reason a correctly-created
+    # job never runs. Passed as flags rather than baked into the image so the
+    # image stays generic: the database name is this deployment's, not
+    # Percolate's.
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_cron
+      - -c
+      - cron.database_name=p8experiment
     environment:
       POSTGRES_USER: p8
       POSTGRES_PASSWORD: p8
