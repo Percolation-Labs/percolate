@@ -33,3 +33,19 @@ RUN cd /tmp && git clone --branch v0.8.6 https://github.com/pgvector/pgvector.gi
 
 # pgcrypto and pg_trgm are contrib modules — already built into the base image,
 # just need CREATE EXTENSION at init time (see init/*.sql).
+
+# ---------------------------------------------------------------------------
+# The two Percolate extensions, baked in.
+#
+# This is why a user needs no Dockerfile: they pull this image and run
+# `docker compose up`. The build step exists -- a Rust .so has to be compiled
+# for this PG version and architecture -- it just is not theirs.
+#
+# percolate_parser is built by Dockerfile.pgrx-builder and copied in;
+# percolate is pure SQL generated from specs/ by
+# extension/percolate/build-sql.py.
+# ---------------------------------------------------------------------------
+COPY dist/percolate_parser.so /usr/lib/postgresql/19/lib/
+COPY dist/percolate_parser.control dist/percolate_parser--0.1.0.sql \
+     dist/percolate.control dist/percolate--0.1.0.sql \
+     /usr/share/postgresql/19/extension/

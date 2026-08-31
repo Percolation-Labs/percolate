@@ -1,8 +1,10 @@
 services:
   db:
-    build:
-      context: .
-      dockerfile: Dockerfile.pg19
+    # Pulled, not built. The image carries PG19 + pgvector + both Percolate
+    # extensions, and init/ installs them at first start -- so `docker compose
+    # up` is the whole install. There is no Dockerfile in your path and no
+    # install script to run.
+    image: percolationlabs/percolate-postgres:19
     container_name: p8-experiment-pg19
     environment:
       POSTGRES_USER: p8

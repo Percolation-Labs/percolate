@@ -2,6 +2,24 @@ use pgrx::prelude::*;
 
 ::pgrx::pg_module_magic!(name, version);
 
+// The SCHEMA is deliberately not here. An extension cannot contain both C
+// functions and RLS-protected tables, and the reason is structural:
+//
+//   superuser = false  -> the script runs as the caller, so tables are owned
+//                         by app_owner and RLS works -- but a non-superuser
+//                         cannot create C-language functions.
+//   trusted = true     -> a non-superuser may install, but the script runs as
+//                         the BOOTSTRAP SUPERUSER, so every table would be
+//                         superuser-owned and every policy inert.
+//
+// Verified both ways against PG19: the first fails with "permission denied for
+// language c", the second is caught by user-rbac's own superuser guard.
+//
+// So this extension is the C half (installed by a superuser, no tables, no
+// policies), and `percolate` is the pure-SQL half (installed by app_owner,
+// trusted, requires this one). The split is not a workaround -- a compiled
+// parser and a schema genuinely have different install requirements.
+
 // ===========================================================================
 // The query dialect parser.
 //

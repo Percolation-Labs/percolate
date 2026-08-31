@@ -1,0 +1,8 @@
+comment = 'Percolate parsers: the query dialect and YAML workflow compiler'
+default_version = '0.1.0'
+module_pathname = '$libdir/percolate_parser'
+relocatable = false
+# Superuser-installed, because it carries C-language functions. It creates no
+# tables and no policies, so nothing here depends on who owns it -- which is
+# exactly why the schema lives in a separate, non-superuser extension.
+superuser = true

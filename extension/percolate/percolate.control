@@ -1,0 +1,19 @@
+comment = 'Percolate: workflow, identity, query and content'
+default_version = '0.1.0'
+relocatable = false
+
+# NON-superuser installable, and that is the entire point. Objects created by
+# an extension are owned by whoever runs the script, and superusers bypass RLS
+# unconditionally -- so a superuser install would leave every policy here
+# inert. superuser = false makes the script run as the CALLER, so app_owner
+# owns the tables and row-level security is real.
+#
+# This works only because the extension is pure SQL: a non-superuser cannot
+# create C-language functions, which is why the compiled parsers live in
+# percolate_parser (superuser-installed, no tables, no policies) and are
+# required below rather than included here.
+superuser = false
+
+# pgcrypto and pg_trgm are trusted; vector and percolate_parser are not, so a
+# superuser installs those two first. That is the whole DBA step.
+requires = 'pgcrypto,pg_trgm,vector,percolate_parser'
