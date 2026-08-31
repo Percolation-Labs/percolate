@@ -175,12 +175,15 @@ create or replace function content.register_upload(
     p_uri         text default null,
     p_org_id      uuid default null,
     p_metadata    jsonb default '{}'::jsonb,
-    p_external_id text default null
+    p_external_id text default null,
+    p_trace_id    text default null
 ) returns uuid as $$
 declare
-    v_channel uuid;
-    v_file    uuid;
-    v_res     uuid;
+    v_channel  uuid;
+    v_file     uuid;
+    v_res      uuid;
+    v_workflow text;
+    v_run      uuid;
 begin
     select id into v_channel from content.channels
     where name = p_channel and (org_id is not distinct from p_org_id or org_id is null);
@@ -199,6 +202,31 @@ begin
     values (v_channel, v_file, p_uri, p_title, p_org_id, p_metadata, p_external_id)
     on conflict (channel_id, external_id) do update set updated_at = now()
     returning id into v_res;
+
+    -- START THE INGESTION WORKFLOW. This is the point of the whole function
+    -- (brief.md §3.5 names it the primary use case): upload -> registered ->
+    -- queryable is meant to be one flow, not three manually-wired steps. It
+    -- fires here, in the same transaction as the rows, so a committed resource
+    -- always has a run and a rolled-back upload leaves neither.
+    --
+    -- The workflow name comes from the CHANNEL, so different sources can chunk
+    -- differently without this function knowing how any of them work. A channel
+    -- with no ingest_workflow configured registers content and starts nothing,
+    -- which is a legitimate choice rather than an error.
+    select config->>'ingest_workflow' into v_workflow
+    from content.channels where id = v_channel;
+
+    if v_workflow is not null then
+        -- p_trace_id propagates the caller's trace when the Content Server has
+        -- one (specs/README.md's OTel ground rule), so an upload and everything
+        -- it causes share one trace rather than three disconnected ones.
+        v_run := workflow.start_workflow(
+            v_workflow,
+            jsonb_build_object('resource_id', v_res, 'file_id', v_file,
+                               'org_id', p_org_id),
+            'ingest:' || v_res::text,
+            p_trace_id);
+    end if;
 
     return v_res;
 end;
