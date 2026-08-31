@@ -23,10 +23,11 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 
+from .. import __version__
 from ..core import as_caller, claims_from_jwt, optional
 from . import storage
 
-app = FastAPI(title="p8 Content Server", version="0.1.0")
+app = FastAPI(title="percolate content", version=__version__)
 
 
 async def caller(authorization: str | None = Header(default=None)) -> dict[str, Any] | None:

@@ -190,7 +190,9 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         async with lifespan(app, resolved):
             yield
 
-    app = FastAPI(title="percolate-agent", version="0.1.0", lifespan=_lifespan)
+    from .. import __version__
+
+    app = FastAPI(title="percolate-agent", version=__version__, lifespan=_lifespan)
     app.include_router(router())
     return app
 
