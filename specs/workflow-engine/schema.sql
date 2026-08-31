@@ -644,12 +644,24 @@ begin
 end;
 $$ language plpgsql;
 
-create or replace function workflow.fail_task(p_task_id uuid, p_error jsonb)
+-- p_terminal: "do not retry this, no matter how many attempts remain."
+--
+-- Retry is the right default -- most failures are transient -- but some are
+-- provably not: a 400 or a 404 from an http_call will fail identically on
+-- every attempt, and retrying it five times with exponential backoff just
+-- turns a fast failure into a slow one while burning the caller's rate limit.
+-- The DISPATCHER decides which is which (it is the only thing that knows an
+-- HTTP status code means); the engine just honours the verdict.
+--
+-- Defaulted to false so every existing call site keeps its previous behaviour.
+drop function if exists workflow.fail_task(uuid, jsonb);
+create or replace function workflow.fail_task(
+    p_task_id uuid, p_error jsonb, p_terminal boolean default false)
 returns void as $$
 declare t workflow.tasks;
 begin
     select * into t from workflow.tasks where id = p_task_id;
-    if t.attempts < t.max_attempts and not t.cancel_requested then
+    if not p_terminal and t.attempts < t.max_attempts and not t.cancel_requested then
         update workflow.tasks set status = 'ready', error = p_error,
             run_after = now() + (power(2, t.attempts) * interval '1 second')
         where id = p_task_id;
@@ -1049,7 +1061,7 @@ alter function workflow.heartbeat_task(uuid)
     security definer set search_path = pg_catalog, public;
 alter function workflow.complete_task(uuid, jsonb)
     security definer set search_path = pg_catalog, public;
-alter function workflow.fail_task(uuid, jsonb)
+alter function workflow.fail_task(uuid, jsonb, boolean)
     security definer set search_path = pg_catalog, public;
 alter function workflow.complete_decision_task(uuid, jsonb, jsonb)
     security definer set search_path = pg_catalog, public;
@@ -1146,7 +1158,7 @@ grant execute on function workflow.claim_tasks(text, text, int) to worker;
 grant execute on function workflow.claim_task_rate_limited(text, text) to worker;
 grant execute on function workflow.heartbeat_task(uuid) to worker;
 grant execute on function workflow.complete_task(uuid, jsonb) to worker;
-grant execute on function workflow.fail_task(uuid, jsonb) to worker;
+grant execute on function workflow.fail_task(uuid, jsonb, boolean) to worker;
 grant execute on function workflow.complete_decision_task(uuid, jsonb, jsonb) to worker;
 grant execute on function workflow.start_child_workflow(uuid, text, jsonb) to worker;
 grant execute on function workflow.add_task(uuid, text, text, uuid[], text, jsonb, text) to worker;
