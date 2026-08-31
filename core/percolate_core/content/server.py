@@ -17,7 +17,6 @@ acceptable because it is stateless and scales horizontally.
 
 from __future__ import annotations
 
-import json
 import os
 from typing import Any
 from uuid import UUID

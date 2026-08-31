@@ -291,7 +291,7 @@ async def main() -> None:
         async with httpx.AsyncClient(transport=transport, base_url="http://host") as http:
             health = await http.get("/healthz")
             check("the host's own routes still work beside the mounted ones",
-                  health.json().get("mounted") == "p8agentic", health.text)
+                  health.json().get("mounted") == "percolate_core.agentic", health.text)
 
             unauth = await http.post("/agents/chat", json={"model": "echo", "messages": []})
             check("the mounted router enforces the same identity rule",

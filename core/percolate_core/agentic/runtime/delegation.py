@@ -18,7 +18,7 @@ Three invariants worth checking at review time:
 
 **How an agent declares who it may delegate to** — the gap this module raised,
 now settled in ``brief.md`` §5.1 item 3: the runtime exposes its own agents as
-an MCP server (``p8agentic.gateway``), so delegation is an ordinary
+an MCP server (``percolate_core.agentic.gateway``), so delegation is an ordinary
 ``tool_servers`` reference with an ordinary per-agent allowlist. Nothing in the
 tool path knows a delegation is happening, which is exactly what keeps "zero
 built-in tools" true rather than nearly true.

@@ -11,10 +11,11 @@ wording differ per run; shapes do not.
 . dev/env.sh          # DB url, test user, JWT, and the LLM key
 ./dev/db.sh up        # PG19 on :5500, loaded from specs/
 ./dev/stack.sh up     # PostgREST :3001 (CRUD) and :3002 (retrieval), gateway :8765
-uv run python -m percolate_core.cli serve      # the HTTP surface on :8080
+percolate agent serve                          # the HTTP surface on :8080
 ```
 
-The same path, asserted rather than narrated: `uv run python dev/verify.py`.
+The same path, asserted rather than narrated:
+`uv run --all-extras python dev/verify.py` — 38 checks against a live model.
 
 The agent used here is data, applied with `percolate agent push` — and, like
 every agent, it is a JSON Schema document (`description` is the system prompt;
@@ -362,7 +363,10 @@ citations are there without the retrieval payload:
 A tool provider is registered the same way — `percolate agent tools register p8-rag
 http://localhost:3002/ --kind openapi --credential-ref env:P8_REST_TOKEN
 --emits-citations` — which fetches the OpenAPI document once and caches the
-operations on the row. Neither adding an agent nor adding a tool provider
+operations on the row. The agent gateway is registered the same way, with
+`--kind mcp --serves-agents`: that flag is what makes its tools *delegations*
+(slow-path rows, a delegated-by header) rather than ordinary tool calls, and it
+is a column rather than a name prefix so no other server can claim it. Neither adding an agent nor adding a tool provider
 touches the runtime.
 
 ## Coming back to a conversation

@@ -22,14 +22,22 @@ from contextlib import asynccontextmanager
 from typing import Any
 from uuid import UUID
 
+from ...core import identity
 from ..settings import Settings
 
 
 class PgClient:
     """Owns the pool. One per process."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, owns_pool: bool = True) -> None:
         self.settings = settings
+        # Whether closing this client closes the *process* pool. A service's
+        # lifespan owns it; a short-lived helper borrows it. Getting this wrong
+        # is not subtle in effect and is very subtle in cause: a helper that
+        # closed on exit tore the pool out from under a turn that was still
+        # streaming, which surfaced as `InterfaceError: pool is closing` from
+        # code that had done nothing wrong.
+        self.owns_pool = owns_pool
         self._pool: Any = None
         # Listeners hold a connection *outside* the pool for as long as a client
         # is streaming, so without a cap a burst of clients exhausts Postgres'
@@ -38,25 +46,23 @@ class PgClient:
         self._listeners = asyncio.Semaphore(settings.max_listeners)
 
     async def connect(self) -> None:
-        import asyncpg
+        """Open the process pool, through ``core.identity``.
 
-        async def _init(conn: Any) -> None:
-            for typ in ("json", "jsonb"):
-                await conn.set_type_codec(
-                    typ, encoder=json.dumps, decoder=json.loads, schema="pg_catalog"
-                )
-
-        self._pool = await asyncpg.create_pool(
+        Not a pool of its own: one process holds one pool (see
+        ``core.identity.open_pool``), and this service may be sharing that
+        process with the Content Server.
+        """
+        opener = identity.open_pool if self.owns_pool else identity.pool
+        self._pool = await opener(
             self.settings.database_url,
             min_size=self.settings.pool_min,
             max_size=self.settings.pool_max,
-            init=_init,
         )
 
     async def close(self) -> None:
-        if self._pool is not None:
-            await self._pool.close()
-            self._pool = None
+        if self.owns_pool:
+            await identity.close_pool()
+        self._pool = None
 
     def _require(self) -> Any:
         if self._pool is None:
@@ -67,28 +73,16 @@ class PgClient:
     async def as_user(
         self, user_id: UUID | None, role: str = "authenticated"
     ) -> AsyncIterator[Any]:
-        """One transaction, running as ``role`` with the user's claims.
+        """One transaction, as ``role``, carrying the user's claims.
 
-        ``role`` is almost always ``authenticated``. The exception is
-        ``workflow-engine``'s ``worker`` role, which is what
-        ``complete_task``/``claim_task`` are granted to — when this runtime
-        finishes a scheduled run it *is* a worker, and borrowing that role for
-        exactly those calls is using that system's role model rather than
-        widening this one's (``brief.md`` §3).
-
-        ``set local`` rather than ``set``: the settings must not survive the
-        connection going back to the pool, or the next borrower inherits an
-        identity — the exact failure mode that makes pooled RLS dangerous.
-
-        A null ``user_id`` is a real case (an unauthenticated request), and it
-        deliberately does *not* fall back to a privileged role: the statements
-        simply see nothing, which is the correct answer.
+        Delegates to ``core.identity.as_caller`` rather than repeating it: that
+        function is the collection's one implementation of "whose RLS applies",
+        and a second copy here is how the two drift into authorising
+        differently. This wrapper exists only to turn a ``user_id`` into the
+        claim shape the rest of this subpackage already speaks.
         """
-        pool = self._require()
-        async with pool.acquire() as conn, conn.transaction():
-            await conn.execute(f"set local role {role}")
-            claims = json.dumps({"sub": str(user_id)}) if user_id else "{}"
-            await conn.execute("select set_config('request.jwt.claims', $1, true)", claims)
+        claims = {"sub": str(user_id)} if user_id else None
+        async with identity.as_caller(claims, role=role) as conn:
             yield conn
 
     @asynccontextmanager
@@ -111,7 +105,7 @@ class PgClient:
         """
         pool = self._require()
         async with pool.acquire() as conn:
-            await conn.execute("set role authenticated")
+            await conn.execute(f"set role {identity.ROLE}")
             claims = json.dumps({"sub": str(user_id)}) if user_id else "{}"
             await conn.execute("select set_config('request.jwt.claims', $1, false)", claims)
 

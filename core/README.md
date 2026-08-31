@@ -1,20 +1,27 @@
-# p8
+# percolate-core
 
-The processes that sit in front of the database. `../../INSTALL.md` covers the
-database itself; nothing here is required to use it.
+The processes that sit in front of the database. The database itself, and the
+specs all of this is built against, live in
+[p8-subsystems](https://github.com/percolating-sirsh/p8-subsystems); nothing
+here is required to use it.
 
 ```bash
-pip install p8                 # the worker -- asyncpg, httpx, typer
-pip install 'p8[content]'      # + Content Server (boto3, fastapi)
-pip install 'p8[agent]'        # + Agent Runtime (pydantic-ai, mcp)
-pip install 'p8[all]'
+pip install percolate-core                 # the worker -- asyncpg, httpx, typer
+pip install 'percolate-core[content]'      # + Content Server (boto3, fastapi)
+pip install 'percolate-core[agent]'        # + Agent Runtime (pydantic-ai, mcp)
+pip install 'percolate-core[all]'
 ```
 
 ```bash
-p8 worker --queue http    # claim and execute tasks
-p8 content serve          # uploads, scraping, http_call execution
-p8 agent serve            # agents, streaming, delegation
+percolate worker --queue http    # claim and execute tasks
+percolate content serve          # uploads, scraping, ingestion
+percolate agent serve            # agents, streaming, delegation
+percolate agent --help           # the runtime's own operator commands
 ```
+
+[`docs-sample.md`](docs-sample.md) is the one to read next: a real REST call to
+the Agent Runtime, the events it streams back, the rows it leaves behind, and
+every header and option a caller can send — captured output, not illustration.
 
 ---
 
@@ -22,38 +29,43 @@ p8 agent serve            # agents, streaming, delegation
 
 | Module | Extra | What it is |
 |---|---|---|
-| `p8.core` | — | connecting **as the caller**, configuration, credential resolution |
-| `p8.worker` | — | the step loop and the `@handler` registry |
-| `p8.content` | `content` | the Content Server |
-| `p8.agentic` | `agent` | the Agent Runtime |
+| `percolate_core.core` | — | connecting **as the caller**, configuration, credential resolution |
+| `percolate_core.worker` | — | the step loop and the `@handler` registry |
+| `percolate_core.content` | `content` | the Content Server |
+| `percolate_core.agentic` | `agent` | the Agent Runtime |
+
+The import package matches the distribution name exactly, so there is no mapping
+to remember. (`p8` was taken on PyPI.)
 
 **One distribution rather than three.** Three packages means a version matrix
-(`p8content 0.3` requiring `p8core >=0.2,<0.3`) resolved forever, for services
+(`percolate-content 0.3` requiring `percolate-core >=0.2,<0.3`) resolved forever, for services
 that release together and are written by the same people. Splitting later is
 mechanical; merging two that have drifted is not.
 
 **The base install stays small on purpose.** The common case is someone writing
 their own worker, and they should not pull boto3 and pydantic-ai to do it. The
-CLI imports each subpackage lazily, so `p8 worker` runs without either
-installed and `p8 content serve` fails with the extra to install rather than an
-`ImportError`.
+root CLI mounts each subpackage's own command group and tolerates its absence,
+so `percolate worker` runs with neither installed and `percolate content` says
+which extra to install — naming the module that was actually missing, rather
+than guessing.
 
 ---
 
-## `p8.core` — the one that matters
+## `percolate_core.core` — the one that matters
 
 It decides **whose** RLS applies, and it exists because that logic was
 previously written three times on two different database drivers.
 
 ```python
-from p8.core import as_caller
+from percolate_core.core import as_caller
 
 async with as_caller(claims) as conn:      # claims = the VERIFIED JWT payload
     rows = await conn.fetch("select * from content.resources")
 ```
 
-Every service connects as a low-privilege role and sets the caller's claims
-**per transaction**, exactly as PostgREST does. A service that queried as
+Every service connects as a low-privilege role — set explicitly by `as_caller`,
+not inherited from whatever the connection string happens to log in as — and
+sets the caller's claims **per transaction**, exactly as PostgREST does. A service that queried as
 *itself* would bypass every policy in the collection — not by exploiting
 anything, just by never presenting an identity for the policies to filter on.
 
@@ -65,6 +77,12 @@ identity.
 `as_service()` exists for work with genuinely no user behind it — a scheduled
 poll, a reconciliation sweep. Deliberately a separate function rather than
 `as_caller(None)`, so "this query has no user" is something someone wrote down.
+
+**One pool per process, with explicit ownership.** A service's lifespan owns it
+(`open_pool`/`close_pool`, reference-counted); every short-lived helper borrows
+it (`pool()`). Several mounted services in one process share it, and the last
+one out closes it — without that, one service's shutdown closes the pool another
+is still streaming through.
 
 ---
 
@@ -83,7 +101,7 @@ When you do need one, it is this loop with a handler registered — not a
 different program:
 
 ```python
-from p8.worker import handler, run
+from percolate_core.worker import handler, run
 
 @handler("transcode")
 async def transcode(spec, ctx):
@@ -125,27 +143,49 @@ resolves, so `workflow.tasks` stays inspectable and replayable.
 
 ## Deployment
 
-One image, three entrypoints — they share `p8.core`, so three images would be
-three builds of the same base and three tags to keep in step.
+One image, several entrypoints — they share `percolate_core.core`, so separate
+images would be separate builds of the same base and separate tags to keep in
+step. `ENTRYPOINT ["percolate"]`, and the command selects the service:
 
 ```yaml
-content: { image: p8/runtime:0.1, command: ["p8","content","serve"] }
-agent:   { image: p8/runtime:0.1, command: ["p8","agent","serve"] }
-worker:  { image: p8/runtime:0.1, command: ["p8","worker","--queue","http"] }
+content: { image: percolationlabs/percolate-core:0.1.0, command: ["content","serve"] }
+agent:   { image: percolationlabs/percolate-core:0.1.0, command: ["agent","serve"] }
+gateway: { image: percolationlabs/percolate-core:0.1.0, command: ["agent","gateway"] }
+worker:  { image: percolationlabs/percolate-core:0.1.0, command: ["worker","--queue","http"] }
 ```
 
-See [`../../PACKAGING.md`](../../PACKAGING.md) for the reasoning and the
-remaining work.
+The agent gateway is its own entrypoint because delegation is an MCP call into
+it: an agent that delegates references it as an ordinary `tool_servers` row.
+
+For the packaging decision record see
+[PACKAGING.md](https://github.com/percolating-sirsh/p8-subsystems/blob/main/PACKAGING.md);
+for what packaging *requires of the design*, `specs/agentic/brief.md` §10.
 
 ---
 
 ## Status
 
-- `p8.core`, `p8.worker`, `p8.content` — built, and exercised against a live
-  PG19 instance with MinIO.
-- `p8.agentic` — moved from `experiments/agentic-runtime` unchanged (it uses
-  relative imports throughout, so the move needed no edits). Its own tests have
-  not been re-run under the new namespace.
-- No Dockerfile yet. No service-surface entries in `../../surface.sql`, which
-  by `meta/skills/spec-driven-development` §7 should exist **before** the
-  endpoints they describe.
+- `core`, `worker`, `content` — built, and exercised against a live PG19
+  instance with MinIO.
+- `agentic` — built and verified under the new namespace: `tests/smoke.py` (6
+  checks, no database or credentials) and `dev/verify.py` (38 assertions against
+  a live model, covering streaming, what is and is not persisted, the delegation
+  and span trees, the reload round trip, mounting, session resume, tenant
+  isolation, and a scheduled run completing its own workflow task).
+- Still open: no service-surface entries in the specs repo's `surface.sql`,
+  which by `meta/skills/spec-driven-development` §7 should exist **before** the
+  endpoints they describe; and no startup check that the deployed schema is the
+  one this version expects (`specs/agentic/brief.md` §10.4).
+
+## Development
+
+```bash
+. dev/env.sh          # DSN, test user, JWT, and the LLM key
+./dev/db.sh up        # a PG19 cluster of its own, loaded from the specs repo
+./dev/stack.sh up     # PostgREST, the retrieval service, the agent gateway
+uv run --all-extras python dev/verify.py
+```
+
+`dev/db.sh` loads `specs/*/schema.sql` from a p8-subsystems checkout directly —
+never a copy — so a schema that only works because a harness did something extra
+fails here. Set `P8_SPECS` if your checkout is elsewhere.

@@ -102,7 +102,7 @@ async def relay(client: PgClient, session_id: UUID) -> AsyncIterator[dict[str, A
     ``messages`` trigger, which is what lets a client that missed a delta resume
     from the row.
 
-    The FastAPI SSE bridge is this loop plus ``to_sse``; ``p8agentic listen`` is
+    The FastAPI SSE bridge is this loop plus ``to_sse``; ``percolate agent listen`` is
     this loop plus a console. Neither adds protocol logic, which is the point.
     """
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()

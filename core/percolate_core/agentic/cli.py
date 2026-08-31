@@ -6,11 +6,11 @@ here calls the same ``TurnSequencer`` the HTTP surface will call; the eventual
 FastAPI app adds the SSE bridge and nothing else, so anything that only works
 over HTTP would be a design smell rather than a missing feature.
 
-    p8agentic gates            # sequence.md's gates and where they stand
-    p8agentic steps            # the canonical order of one turn, with spec refs
-    p8agentic demo             # dummy end-to-end: fake model, fake tools, memory repo
-    p8agentic agent show NAME  # read an agent row back as its schema document
-    p8agentic agent push FILE  # apply a schema document as an agent row
+    percolate agent gates            # sequence.md's gates and where they stand
+    percolate agent steps            # the canonical order of one turn, with spec refs
+    percolate agent demo             # dummy end-to-end: fake model, fake tools, memory repo
+    percolate agent show NAME  # read an agent row back as its schema document
+    percolate agent push FILE  # apply a schema document as an agent row
 """
 
 from __future__ import annotations
@@ -309,7 +309,7 @@ def chat(
     """Run one turn against the real database.
 
     Rows land in `agentic.messages`, AG-UI events go out as `pg_notify` on the
-    session's channel, and `p8agentic listen` on that session sees them — which
+    session's channel, and `percolate agent listen` on that session sees them — which
     is the whole of `brief.md` §4 exercised by hand.
     """
 
@@ -417,7 +417,7 @@ def serve(
 
     from .api import build_app
 
-    console.print(f"[green]p8agentic api[/green] on http://{host}:{port}")
+    console.print(f"[green]percolate agent[/green] on http://{host}:{port}")
     uvicorn.run(build_app(Settings.from_env()), host=host, port=port, log_level="warning")
 
 

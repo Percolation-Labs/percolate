@@ -21,7 +21,9 @@ async def connected(
     the deliberate exception: it holds a pool for its whole lifetime rather than
     one per request.
     """
-    client = PgClient(settings)
+    # Borrows the process pool rather than owning it: this helper wraps a single
+    # short operation, and the pool outlives it.
+    client = PgClient(settings, owns_pool=False)
     await client.connect()
     try:
         yield PgRepository(client, user_id)

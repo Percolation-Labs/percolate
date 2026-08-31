@@ -45,13 +45,13 @@ up)
     postgrest/postgrest:v12.2.8 >/dev/null
   echo "==> postgrest (demo retrieval) on http://localhost:3002"
 
-  pkill -f "percolate_core.cli gateway" 2>/dev/null || true
+  pkill -f "percolate_core.cli agent gateway" 2>/dev/null || true
   # The gateway dispatches delegated calls of its own (a sub-agent that
   # delegates further), so it needs the same credentials any other caller
   # does. That an `env:` credential_ref has to be present in *every* process
   # that might dispatch is precisely the limitation brief.md §9 flags: it is a
   # placeholder for a secrets mechanism, not one.
-  export P8_REST_TOKEN=$(python3 "$HERE/../../pg19-stack/mint_jwt.py" \
+  export P8_REST_TOKEN=$(python3 "$HERE/mint_jwt.py" \
       "${P8_USER_ID:-aaaaaaaa-0000-0000-0000-000000000001}")
   # P8_DEFAULT_MODEL is inherited: set it to `test` for a no-credentials run
   # (pydantic-ai's TestModel drives delegated runs through the whole real path
@@ -62,19 +62,19 @@ up)
      P8_REST_TOKEN="$P8_REST_TOKEN" \
      P8_DEFAULT_MODEL="${P8_DEFAULT_MODEL:-test}" \
      OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
-     uv run python -m percolate_core.cli gateway >/tmp/p8-gateway.log 2>&1 &)
+     uv run --all-extras python -m percolate_core.cli agent gateway >/tmp/p8-gateway.log 2>&1 &)
   sleep 4
   echo "==> agent gateway on http://127.0.0.1:8765/mcp (log: /tmp/p8-gateway.log)"
   ;;
 down)
   docker rm -f p8-agentic-postgrest >/dev/null 2>&1 || true
-  pkill -f "percolate_core.cli gateway" 2>/dev/null || true
+  pkill -f "percolate_core.cli agent gateway" 2>/dev/null || true
   # The gateway dispatches delegated calls of its own (a sub-agent that
   # delegates further), so it needs the same credentials any other caller
   # does. That an `env:` credential_ref has to be present in *every* process
   # that might dispatch is precisely the limitation brief.md §9 flags: it is a
   # placeholder for a secrets mechanism, not one.
-  export P8_REST_TOKEN=$(python3 "$HERE/../../pg19-stack/mint_jwt.py" \
+  export P8_REST_TOKEN=$(python3 "$HERE/mint_jwt.py" \
       "${P8_USER_ID:-aaaaaaaa-0000-0000-0000-000000000001}")
   echo "==> stopped"
   ;;

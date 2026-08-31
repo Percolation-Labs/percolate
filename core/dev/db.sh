@@ -20,7 +20,15 @@ NAME=p8-agentic-pg
 PORT=${P8_PG_PORT:-5500}
 DB=p8agentic
 HERE="$(cd "$(dirname "$0")" && pwd)"
-SPECS="$(cd "$HERE/../../../specs" && pwd)"
+# The specs live in the sibling repo -- this loads the ACTUAL spec files, never
+# copies, so a schema that only works because the harness did something extra
+# fails here. Overridable for a checkout in a different place.
+SPECS="${P8_SPECS:-$HERE/../../p8-subsystems/specs}"
+if [[ ! -d "$SPECS" ]]; then
+  echo "specs not found at $SPECS -- set P8_SPECS to your p8-subsystems/specs" >&2
+  exit 1
+fi
+SPECS="$(cd "$SPECS" && pwd)"
 
 psql_super() { docker exec -i "$NAME" psql -U p8 -d "$DB" -v ON_ERROR_STOP=1 "$@"; }
 load() { docker cp "$1" "$NAME:/tmp/x.sql" >/dev/null; shift; psql_super -q "$@" -f /tmp/x.sql; }

@@ -4,7 +4,7 @@ Spec intent (``brief.md`` §2): "Agents as rows, not code. An agent is config �
 name, system prompt, tools, model, structured-output schema — not a Python
 class. Adding an agent is an insert." Everything in this module is therefore a
 faithful typed mirror of a table row, not an in-process registry entry: it must
-round-trip to and from Postgres losslessly (see ``p8agentic.authoring`` for the
+round-trip to and from Postgres losslessly (see ``percolate_core.agentic.authoring`` for the
 authored form of the same data — a JSON Schema document, whose ``description``
 *is* the system prompt and whose ``properties`` *are* the structured output).
 """

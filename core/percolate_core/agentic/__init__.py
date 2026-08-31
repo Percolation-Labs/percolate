@@ -1,4 +1,4 @@
-"""p8agentic — the agent runtime speced in ``specs/agentic``.
+"""The agent runtime speced in ``specs/agentic``.
 
 Agents are rows in Postgres, tools are MCP/OpenAPI services reached over the
 network, a turn's rows are written through RLS as an ordinary ``authenticated``

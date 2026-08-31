@@ -2,7 +2,7 @@
 
 The point of writing the gates down here rather than leaving them in prose: the
 runtime can then answer "which gates does this actually pass today, and what is
-missing for the rest" mechanically (``p8agentic gates``), which is the honest
+missing for the rest" mechanically (``percolate agent gates``), which is the honest
 version of a progress report — and it makes the discipline in ``sequence.md``'s
 "why this order" section survive contact with an implementation.
 

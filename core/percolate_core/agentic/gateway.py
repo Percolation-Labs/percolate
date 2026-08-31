@@ -18,7 +18,7 @@ Two things worth checking at review time, because both are load-bearing:
    is the whole of ``brief.md`` §4's multiplexing claim, and it is why this file
    contains no queue, no ``ContextVar``, and no event forwarding.
 
-Run it: ``p8agentic gateway`` (defaults to ``127.0.0.1:8765``).
+Run it: ``percolate agent gateway`` (defaults to ``127.0.0.1:8765``).
 """
 
 from __future__ import annotations

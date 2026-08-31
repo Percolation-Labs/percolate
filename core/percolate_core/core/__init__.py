@@ -6,9 +6,27 @@ boto3, FastAPI or pydantic-ai belongs in the subpackage that needs it, so
 """
 
 from .config import ConfigError, credential, dsn, optional, required
-from .identity import as_caller, as_service, claims_from_jwt, close_pool, pool
+from .identity import (
+    as_caller,
+    as_service,
+    claims_from_jwt,
+    close_pool,
+    open_pool,
+    pool,
+    set_pool,
+)
 
 __all__ = [
-    "ConfigError", "credential", "dsn", "optional", "required",
-    "as_caller", "as_service", "claims_from_jwt", "close_pool", "pool",
+    "ConfigError",
+    "as_caller",
+    "as_service",
+    "claims_from_jwt",
+    "close_pool",
+    "credential",
+    "dsn",
+    "open_pool",
+    "optional",
+    "pool",
+    "required",
+    "set_pool",
 ]

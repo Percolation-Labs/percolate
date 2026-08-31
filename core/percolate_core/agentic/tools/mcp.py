@@ -5,7 +5,7 @@ usable", so this provider is close to an identity mapping — an MCP ``list_tool
 entry *is* a ``CanonicalTool``, and ``call_tool`` *is* the invocation.
 
 This is also the provider delegation runs through: the agent gateway
-(``p8agentic.gateway``) is an ordinary MCP server as far as this file is
+(``percolate_core.agentic.gateway``) is an ordinary MCP server as far as this file is
 concerned, and nothing here knows that one of its tools happens to be another
 agent (``brief.md`` §5.1 item 3).
 """

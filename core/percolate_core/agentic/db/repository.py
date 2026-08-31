@@ -12,7 +12,7 @@ Two implementations:
 - ``PgRepository`` — the real one: ``*_api`` views for reads, ``SECURITY
   DEFINER`` functions for writes, every statement inside a transaction that has
   assumed ``authenticated`` and set ``request.jwt.claims``.
-- ``p8agentic.fakes.MemoryRepository`` — an in-memory stand-in, which is what
+- ``percolate_core.agentic.testing.MemoryRepository`` — an in-memory stand-in, which is what
   makes the dummy end-to-end path runnable with no Postgres at all.
 
 If a method here has no plausible SQL, that is a signal the schema is missing

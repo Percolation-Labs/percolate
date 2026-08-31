@@ -52,13 +52,13 @@ async def lifespan(app: FastAPI, settings: Settings | None = None) -> AsyncItera
     finds it exactly where a standalone one does.
     """
     resolved = settings or Settings.from_env()
-    app.state.p8agentic_settings = resolved
-    app.state.p8agentic_client = PgClient(resolved)
-    await app.state.p8agentic_client.connect()
+    app.state.percolate_agent_settings = resolved
+    app.state.percolate_agent_client = PgClient(resolved)
+    await app.state.percolate_agent_client.connect()
     try:
         yield
     finally:
-        await app.state.p8agentic_client.close()
+        await app.state.percolate_agent_client.close()
 
 
 def _state(request: Request) -> tuple[PgClient, Settings]:
@@ -69,14 +69,14 @@ def _state(request: Request) -> tuple[PgClient, Settings]:
     is a module that collides with the next one to do the same.
     """
     app = request.app
-    client = getattr(app.state, "p8agentic_client", None)
+    client = getattr(app.state, "percolate_agent_client", None)
     if client is None:
         raise HTTPException(
             500,
-            "p8agentic is mounted but its lifespan is not installed — compose "
-            "p8agentic.api.lifespan into the host app's lifespan",
+            "the agent runtime is mounted but its lifespan is not installed — compose "
+            "percolate_core.agentic.api.lifespan into the host app's lifespan",
         )
-    return client, app.state.p8agentic_settings
+    return client, app.state.percolate_agent_settings
 
 
 def router() -> APIRouter:
@@ -190,7 +190,7 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         async with lifespan(app, resolved):
             yield
 
-    app = FastAPI(title="p8agentic", version="0.0.1", lifespan=_lifespan)
+    app = FastAPI(title="percolate-agent", version="0.1.0", lifespan=_lifespan)
     app.include_router(router())
     return app
 

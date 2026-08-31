@@ -14,51 +14,85 @@ from __future__ import annotations
 import typer
 
 app = typer.Typer(help="percolate — Postgres-native subsystems", no_args_is_help=True)
-content_app = typer.Typer(help="Content Server: uploads, scraping, ingestion")
-agent_app = typer.Typer(help="Agent Runtime: agents, streaming, delegation")
-app.add_typer(content_app, name="content")
-app.add_typer(agent_app, name="agent")
+
+_EXTRAS = {
+    "content": ("boto3", "fastapi", "uvicorn"),
+    "agent": ("pydantic_ai", "fastapi", "uvicorn", "mcp", "yaml", "rich"),
+}
 
 
-def _missing(extra: str, err: Exception) -> typer.Exit:
-    typer.secho(
-        f"this command needs the '{extra}' extra: pip install 'percolate-core[{extra}]'\n  ({err})",
-        fg=typer.colors.RED, err=True)
-    return typer.Exit(1)
+def _missing_extra(err: ModuleNotFoundError) -> str | None:
+    """Which extra would supply the module that is missing, if any.
+
+    The point is the *if any*: an earlier version reported every ImportError as
+    "install the extra", so a genuine bug inside an installed subpackage was
+    reported as a missing dependency the user already had — a wrong answer that
+    reads as a helpful one.
+    """
+    return next((x for x, mods in _EXTRAS.items() if err.name in mods), None)
+
+
+def _subcommands(name: str, module: str, help: str) -> typer.Typer:
+    """Mount a subpackage's own CLI, or a stub that explains why it is absent.
+
+    Imported at module load rather than per-invocation, deliberately: the
+    promise of the extras is that `pip install percolate-core` does not *pull*
+    boto3 and pydantic-ai, not that a full install starts a millisecond faster.
+    Trying and catching keeps a worker-only install working, and — unlike
+    hand-written proxy commands — the whole operator surface of the subpackage
+    comes with it instead of whichever commands somebody remembered to forward.
+    """
+    try:
+        module_obj = __import__(module, fromlist=["app"])
+        return module_obj.app
+    except ModuleNotFoundError as err:
+        stub = typer.Typer(help=f"{help} (not installed)")
+        extra = _missing_extra(err) or name
+        missing = err.name
+
+        @stub.callback(invoke_without_command=True)
+        def _unavailable() -> None:
+            typer.secho(
+                f"this command group needs the '{extra}' extra:\n"
+                f"    pip install 'percolate-core[{extra}]'\n"
+                f"  (missing module: {missing})",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(1)
+
+        return stub
+
+
+app.add_typer(
+    _subcommands("agent", "percolate_core.agentic.cli", "Agent Runtime"),
+    name="agent",
+    help="Agent Runtime: agents, tools, streaming, delegation",
+)
+app.add_typer(
+    _subcommands("content", "percolate_core.content.cli", "Content Server"),
+    name="content",
+    help="Content Server: uploads, scraping, ingestion",
+)
 
 
 @app.command()
-def worker(queue: str = typer.Option("default", "--queue", "-q"),
-           worker_id: str = typer.Option(None, "--id")):
+def worker(
+    queue: str = typer.Option("default", "--queue", "-q"),
+    worker_id: str = typer.Option(None, "--id"),
+) -> None:
     """Claim and execute tasks. http_call is built in; add your own with @handler."""
     from .worker import run
+
     run(queue=queue, worker_id=worker_id)
 
 
-@content_app.command("serve")
-def content_serve(port: int = typer.Option(8081, "--port", "-p")):
-    try:
-        from .content import serve
-    except ImportError as e:
-        raise _missing("content", e)
-    serve(port=port)
-
-
-@agent_app.command("serve")
-def agent_serve(port: int = typer.Option(8080, "--port", "-p")):
-    try:
-        from .agentic.api import app as api
-    except ImportError as e:
-        raise _missing("agent", e)
-    import uvicorn
-    uvicorn.run(api, host="0.0.0.0", port=port)
-
-
 @app.command()
-def version():
+def version() -> None:
     from . import __version__
+
     typer.echo(__version__)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # `python -m percolate_core.cli`, as dev/stack.sh runs it
     app()

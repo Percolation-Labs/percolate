@@ -18,7 +18,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from percolate_core.agentic import authoring
-from percolate_core.agentic.contracts import ChatRequest, InboundMessage, RequestContext, ToolServer
+from percolate_core.agentic.contracts import (
+    ChatRequest,
+    InboundMessage,
+    RequestContext,
+    ToolServer,
+)
 from percolate_core.agentic.sequencer import TurnSequencer
 from percolate_core.agentic.settings import Settings
 from percolate_core.agentic.testing import (
