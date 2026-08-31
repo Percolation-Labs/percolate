@@ -268,6 +268,15 @@ $$ language plpgsql;
 -- Rebuild + drift detection (D7). The rebuild MUST use the same predicate as
 -- the live trigger -- both read it from entity_registry, so they cannot drift
 -- apart by editing one and forgetting the other.
+--
+-- The source row is aliased `n` here, matching the alias the live trigger's
+-- transition table uses. That is not cosmetic: registry expressions are stored
+-- as SQL text (`n.is_public`, `coalesce(n.ticker, n.name)`), so the alias is
+-- part of their contract. An earlier version aliased the source `s` in rebuild
+-- and `n` in the trigger, which made every rebuild fail outright with
+-- "missing FROM-clause entry for table n" -- caught by running it. Worse than
+-- a silent drift, but the same root cause D7 is about: two code paths that
+-- must agree, with nothing forcing them to.
 create or replace function aiq.rebuild_entity_type(p_entity_type text)
 returns bigint as $$
 declare
@@ -279,7 +288,7 @@ begin
 
     execute format($q$
         insert into aiq.nodes (entity_type, entity_id, org_id, summary)
-        select %1$L, s.id, %2$s, %3$s from %4$s s where %5$s
+        select %1$L, n.id, %2$s, %3$s from %4$s n where %5$s
         on conflict (entity_type, entity_id) do update
             set summary = excluded.summary, org_id = excluded.org_id, updated_at = now()
     $q$, r.entity_type, r.org_expr, r.summary_expr, r.source_table, r.include_where);
@@ -287,8 +296,8 @@ begin
     execute format($q$
         insert into aiq.node_keys (node_id, entity_type, key, kind, org_id)
         select nd.id, %1$L, lower(trim(%2$s)), 'canonical', %3$s
-        from %4$s s
-        join aiq.nodes nd on nd.entity_type = %1$L and nd.entity_id = s.id
+        from %4$s n
+        join aiq.nodes nd on nd.entity_type = %1$L and nd.entity_id = n.id
         where %5$s
         on conflict (node_id, key, kind) do nothing
     $q$, r.entity_type, r.key_expr, r.org_expr, r.source_table, r.include_where);
@@ -297,7 +306,7 @@ begin
     execute format($q$
         delete from aiq.nodes nd
         where nd.entity_type = %1$L
-          and not exists (select 1 from %2$s s where s.id = nd.entity_id and %3$s)
+          and not exists (select 1 from %2$s n where n.id = nd.entity_id and %3$s)
     $q$, r.entity_type, r.source_table, r.include_where);
 
     get diagnostics v_count = row_count;
@@ -316,13 +325,13 @@ begin
     if not found then raise exception 'entity type % not registered', p_entity_type; end if;
 
     return query execute format($q$
-        select 'missing_node'::text, s.id from %2$s s where %3$s
+        select 'missing_node'::text, n.id from %2$s n where %3$s
         except
         select 'missing_node'::text, nd.entity_id from aiq.nodes nd where nd.entity_type = %1$L
         union all
         select 'orphan_node'::text, nd.entity_id from aiq.nodes nd where nd.entity_type = %1$L
         except
-        select 'orphan_node'::text, s.id from %2$s s where %3$s
+        select 'orphan_node'::text, n.id from %2$s n where %3$s
     $q$, r.entity_type, r.source_table, r.include_where);
 end;
 $$ language plpgsql;
@@ -591,13 +600,31 @@ begin
         -- embedding generation is an external model call, one of the few
         -- things structurally outside SQL (brief.md §4). The dialect carries
         -- the TEXT so the plan stays legible; the vector arrives alongside it.
+        -- USING names the model, so the caller controls WHICH space is
+        -- searched -- two 768-dim models are not interchangeable (§10).
         if p_embedding is null then
             raise exception
-                'SEMANTIC requires p_embedding -- embed %L with your model and pass the vector',
+                'SEMANTIC requires p_embedding -- embed ''%'' with your model and pass the vector',
                 p->>'arg';
         end if;
         select coalesce(jsonb_agg(to_jsonb(s)), '[]'::jsonb) into v_out
-        from aiq.semantic(p->>'source', p_embedding, (p->>'limit')::int) s;
+        from aiq.semantic_in(p_embedding, p->>'model', (p->>'limit')::int) s;
+
+    when 'TEXT' then
+        -- Lexical only. Needs no embedding at all, which is exactly why it
+        -- answers the rare-exact-token case (§11) that SEMANTIC misses.
+        select coalesce(jsonb_agg(to_jsonb(l)), '[]'::jsonb) into v_out
+        from aiq.lexical(p->>'source', p->>'arg', (p->>'limit')::int) l;
+
+    when 'HYBRID' then
+        if p_embedding is null then
+            raise exception
+                'HYBRID fuses lexical and semantic ranks, so it needs p_embedding. '
+                'Use TEXT ''%'' for the lexical half alone.', p->>'arg';
+        end if;
+        select coalesce(jsonb_agg(to_jsonb(h)), '[]'::jsonb) into v_out
+        from aiq.hybrid(p->>'source', p->>'arg', p_embedding, p->>'model',
+                        (p->>'limit')::int) h;
 
     when 'SQL' then
         -- Deliberately NOT executed here. Returning the statement keeps this
@@ -856,3 +883,49 @@ begin
     using p_lexical_source, p_query_text, p_query_vector, p_limit, p_k, p_model;
 end;
 $$ language plpgsql stable;
+
+-- ------------------------------------------------------------
+-- 12. The SQL escape hatch, actually implemented.
+--
+-- §9 returned the statement and told the caller to run it "via the SECURITY
+-- INVOKER read-only passthrough" -- which did not exist. Written now, because
+-- a spec that names a component it never defines is exactly the kind of gap
+-- these prototype rounds keep finding.
+--
+-- SECURITY INVOKER, not DEFINER (brief.md §3's correction): this function
+-- executes caller-supplied SQL, so DEFINER would make it an RLS-bypass and
+-- privilege-escalation primitive -- the same class of bug as workflow's
+-- cancel_run and rbac's grant_role, and the reason those were fixed.
+--
+-- Read-only is enforced by the DATABASE, not by inspecting the string. A
+-- parser that tries to decide whether SQL is "read-only" is a filter to be
+-- bypassed; a read-only transaction is a guarantee. Any write, DDL, or
+-- function with a side effect raises inside the block and the whole thing
+-- aborts.
+-- ------------------------------------------------------------
+create or replace function aiq.sql_passthrough(p_statement text)
+returns jsonb as $$
+declare
+    v_result jsonb;
+begin
+    -- Rejected up front only for the things that are unambiguous and cheap to
+    -- catch, giving a clear error instead of a confusing transaction abort.
+    -- This is a courtesy, NOT the security boundary -- the read-only
+    -- transaction below is.
+    if p_statement ~* '^\s*(insert|update|delete|truncate|drop|alter|create|grant|revoke|copy)\M' then
+        raise exception
+            'SQL mode is read-only: statement starts with a write/DDL keyword';
+    end if;
+
+    -- The actual boundary. set_config(..., true) is transaction-local, so it
+    -- reverts on commit or rollback and cannot leak into a pooled connection's
+    -- next transaction -- the same pooling hazard rbac.current_user_id() was
+    -- hardened against.
+    perform set_config('transaction_read_only', 'on', true);
+
+    execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
+    into v_result;
+
+    return v_result;
+end;
+$$ language plpgsql volatile security invoker;
