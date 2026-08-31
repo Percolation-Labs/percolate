@@ -184,7 +184,7 @@ create table workflow.tasks (
     -- "mode":"sync"|"async"}), `output` carries the response, existing
     -- max_attempts/run_after drive retry/backoff exactly like any other kind.
     kind             text not null default 'work'
-                         check (kind in ('work','decision','timer','signal','sub_workflow','http_call')),
+                         check (kind in ('work','decision','timer','signal','sub_workflow','http_call','sql')),
     queue            text not null default 'default',
     status           text not null default 'pending'
                          check (status in
@@ -322,13 +322,36 @@ create trigger trg_log_task_transition
 -- ------------------------------------------------------------
 -- 7. Payload-ref enforcement
 -- ------------------------------------------------------------
+-- The limit is a SETTING, not a literal, and the default was raised from 8KB
+-- to 64KB after a real workflow hit it: a 768-dimension embedding is ~10KB as
+-- JSON, and passing one from an embed step to a search step is a legitimate
+-- intermediate, not a blob someone forgot to offload.
+--
+-- The guard's purpose is keeping multi-megabyte payloads out of the task
+-- table, and 8KB was tight enough to reject ordinary structured values --
+-- which pushes authors toward the $ref escape hatch for things that do not
+-- warrant object storage, or (worse) toward not using the engine.
+--
+-- Still a hard limit rather than a warning: an unbounded payload column is how
+-- a task table becomes unqueryable, and $ref remains the right answer for
+-- anything genuinely large.
 create or replace function workflow.enforce_payload_ref_size() returns trigger as $$
+declare
+    v_max int := coalesce(
+        nullif(current_setting('workflow.max_payload_bytes', true), '')::int,
+        65536);
 begin
-    if new.input is not null and pg_column_size(new.input) > 8192 and not (new.input ? '$ref') then
-        raise exception 'task %: input payload exceeds 8KB and is not an S3 ref ($ref)', new.id;
+    if new.input is not null and pg_column_size(new.input) > v_max and not (new.input ? '$ref') then
+        raise exception
+            'task %: input payload is % bytes, over the % byte limit, and is not an S3 ref ($ref). '
+            'Raise workflow.max_payload_bytes, or pass a $ref to object storage.',
+            new.id, pg_column_size(new.input), v_max;
     end if;
-    if new.output is not null and pg_column_size(new.output) > 8192 and not (new.output ? '$ref') then
-        raise exception 'task %: output payload exceeds 8KB and is not an S3 ref ($ref)', new.id;
+    if new.output is not null and pg_column_size(new.output) > v_max and not (new.output ? '$ref') then
+        raise exception
+            'task %: output payload is % bytes, over the % byte limit, and is not an S3 ref ($ref). '
+            'Raise workflow.max_payload_bytes, or return a $ref to object storage.',
+            new.id, pg_column_size(new.output), v_max;
     end if;
     return new;
 end;
@@ -548,6 +571,15 @@ begin
         where id = v_new_id;
     end loop;
 
+    -- Kick any `sql` steps that are ready. THIS is the right place and the
+    -- only one: the dependency graph is not valid until pass 2 finishes, and
+    -- a root step is already 'ready' from mark_roots_ready, so the
+    -- ready-transition trigger never sees an edge to fire on. Everything
+    -- downstream is reached by that trigger via ordinary cascade; this call
+    -- only starts the ones that begin the run. Safe when there are none --
+    -- drain_sql_steps returns 0 without touching anything.
+    perform workflow.drain_sql_steps(v_run_id);
+
     return v_run_id;
 end;
 $$ language plpgsql;
@@ -630,14 +662,25 @@ create or replace function workflow.complete_task(p_task_id uuid, p_output jsonb
 returns void as $$
 declare v_run_id uuid;
 begin
-    update workflow.tasks set status = 'done', output = p_output, completed_at = now()
-    where id = p_task_id
-    returning run_id into v_run_id;
+    -- CONTEXT FIRST, THEN STATUS. The order matters and is not stylistic:
+    -- flipping the task to 'done' fires the cascade, which can mark a `sql`
+    -- step ready, which auto-executes it IN THE SAME STATEMENT (§17). If the
+    -- run's context has not been written yet, that step resolves
+    -- {{steps.<this>.result}} against a context that does not contain this
+    -- step's output and fails with 'template resolved to nothing'.
+    -- Reproduced exactly that way: an embed step completed, and the P8QL step
+    -- consuming its vector failed on the very output that had just been
+    -- produced.
+    select run_id into v_run_id from workflow.tasks where id = p_task_id;
 
     update workflow.runs r
-    set context = context || jsonb_build_object((select step_key from workflow.tasks where id = p_task_id), p_output),
+    set context = context || jsonb_build_object(
+            (select step_key from workflow.tasks where id = p_task_id), p_output),
         updated_at = now()
     where r.id = v_run_id;
+
+    update workflow.tasks set status = 'done', output = p_output, completed_at = now()
+    where id = p_task_id;
 
     perform workflow.check_run_completion(v_run_id);
     perform workflow.check_compensation_completion(v_run_id);
@@ -1210,3 +1253,351 @@ begin
 
     raise notice 'workflow-engine self-check passed: all state mutators are SECURITY DEFINER';
 end $$;
+
+-- ============================================================
+-- 17. `sql` steps -- declarative, and executed by NOBODY.
+--
+-- The question this answers: which step kinds actually need a process outside
+-- Postgres? Only two. `http_call` does, because it performs network I/O.
+-- `work` does, because it runs arbitrary user code. Everything else --
+-- indexing, projection, a query, a rollup -- is just SQL, and making a worker
+-- claim a task in order to send SQL back to the same database is machinery
+-- with no purpose.
+--
+-- So a `sql` step runs IN the database, the moment it becomes ready, with no
+-- poller, no queue consumer and no deployment. A workflow of only `sql` steps
+-- completes with nothing running anywhere.
+--
+-- This does NOT weaken the "database never blocks on HTTP" invariant, and it
+-- is worth being precise about why: that invariant is about waiting on
+-- someone ELSE's latency, which is unbounded and belongs in a worker where it
+-- costs worker capacity rather than a connection slot. A `sql` step waits only
+-- on Postgres, which is work the database was going to do anyway.
+--
+-- THREE GUARDS, because "execute SQL from a table" is otherwise a
+-- privilege-escalation primitive and a long-transaction generator:
+--
+--   1. ALLOW-LIST, not arbitrary SQL. A step names a registered function; it
+--      cannot supply a statement. Registration is an admin act (owner-only),
+--      so authoring a workflow never widens what can be executed.
+--   2. A SUBTRANSACTION per step. A failing step fails ITSELF -- it must not
+--      abort the transaction of whichever worker happened to complete the
+--      preceding task. Without this, one bad SQL step would roll back an
+--      unrelated worker's completed work.
+--   3. A statement timeout, so a pathological query cannot hold the caller's
+--      transaction open indefinitely.
+-- ============================================================
+
+-- The kind is added by ALTER as well as in the CREATE TABLE above, so an
+-- existing installation picks it up. `create table` is skipped when the table
+-- exists, which silently leaves the old constraint in place -- caught by a
+-- `sql` step being rejected on a database that had already been installed.
+alter table workflow.tasks drop constraint if exists tasks_kind_check;
+alter table workflow.tasks add constraint tasks_kind_check
+    check (kind in ('work','decision','timer','signal','sub_workflow','http_call','sql'));
+
+create table workflow.step_functions (
+    name          text primary key,        -- what a step spec names
+    fn            text not null,            -- schema-qualified function
+    arg_types     text[] not null default '{}',
+    timeout_ms    int not null default 30000,
+    description   text,
+    registered_at timestamptz not null default now()
+);
+
+-- Registering is deliberately owner-only (no grant below): it decides what a
+-- workflow author is allowed to cause to run.
+create or replace function workflow.register_step_function(
+    p_name text, p_fn text, p_arg_types text[] default '{}',
+    p_timeout_ms int default 30000, p_description text default null
+) returns void as $$
+begin
+    if to_regprocedure(p_fn || '(' || array_to_string(p_arg_types, ',') || ')') is null then
+        raise exception 'function %(%) does not exist', p_fn, array_to_string(p_arg_types, ',');
+    end if;
+    insert into workflow.step_functions (name, fn, arg_types, timeout_ms, description)
+    values (p_name, p_fn, p_arg_types, p_timeout_ms, p_description)
+    on conflict (name) do update set fn = excluded.fn, arg_types = excluded.arg_types,
+        timeout_ms = excluded.timeout_ms, description = excluded.description;
+end;
+$$ language plpgsql;
+
+-- Executes one ready `sql` task. Returns true if it did something.
+-- Resolve {{steps.x.y}} / {{run.x}} in a sql step's arguments.
+--
+-- The worker does this for http_call steps; sql steps need it for the same
+-- reason and it was missing -- so a P8QL step could not consume the output of
+-- the REST step before it, which is exactly the composition the YAML syntax
+-- exists to express. Found by running a pipeline whose HYBRID step needed the
+-- embedding produced by a preceding model call.
+--
+-- Deliberately narrower than the worker's resolver: no {{env.*}}, because the
+-- database has no business reading the deployment's environment, and that is
+-- precisely the sort of ambient authority this collection keeps removing.
+create or replace function workflow.resolve_args(p_args jsonb, p_run_id uuid)
+returns jsonb as $$
+declare
+    r        workflow.runs;
+    v_out    jsonb := '[]'::jsonb;
+    v_arg    jsonb;
+    v_txt    text;
+    v_ref    text;
+    v_head   text;
+    v_rest   text;
+    v_val    jsonb;
+begin
+    select * into r from workflow.runs where id = p_run_id;
+
+    for v_arg in select * from jsonb_array_elements(coalesce(p_args, '[]'::jsonb))
+    loop
+        v_txt := v_arg #>> '{}';
+        -- Only a WHOLE-string reference is substituted, and it keeps its
+        -- native type. Partial interpolation inside a larger string is the
+        -- worker's job; here an argument is a value, not a template.
+        if v_txt is not null and v_txt ~ '^\s*\{\{\s*[a-zA-Z0-9_.]+\s*\}\}\s*$' then
+            v_ref  := trim(both from replace(replace(v_txt, '{{', ''), '}}', ''));
+            v_head := split_part(v_ref, '.', 1);
+            v_rest := substr(v_ref, length(v_head) + 2);
+            if v_head = 'steps' then
+                v_val := r.context #> string_to_array(v_rest, '.');
+            elsif v_head = 'run' then
+                v_val := r.input #> string_to_array(v_rest, '.');
+            else
+                raise exception
+                    'unknown template namespace ''%'' in a sql step argument '
+                    '-- expected steps or run', v_head;
+            end if;
+            if v_val is null then
+                raise exception 'template ''%'' resolved to nothing', v_ref;
+            end if;
+            v_out := v_out || jsonb_build_array(v_val);
+        else
+            v_out := v_out || jsonb_build_array(v_arg);
+        end if;
+    end loop;
+    return v_out;
+end;
+$$ language plpgsql stable;
+
+create or replace function workflow.execute_sql_step(p_task_id uuid)
+returns boolean as $$
+declare
+    t        workflow.tasks;
+    r        workflow.runs;
+    f        workflow.step_functions;
+    v_spec   jsonb;
+    v_args   jsonb;
+    v_sql    text;
+    v_out    jsonb;
+begin
+    select * into t from workflow.tasks where id = p_task_id;
+    if not found or t.status <> 'ready' or t.kind <> 'sql' then
+        return false;
+    end if;
+
+    update workflow.tasks set status = 'running', claimed_by = 'in-database',
+           claimed_at = now(), heartbeat_at = now(), attempts = attempts + 1
+    where id = p_task_id;
+
+    select * into r from workflow.runs where id = t.run_id;
+    v_spec := coalesce(t.input, '{}'::jsonb);
+
+    begin      -- subtransaction: a failure here must not abort the caller
+        select * into f from workflow.step_functions where name = v_spec->>'function';
+        if not found then
+            raise exception
+                'sql step names function ''%'', which is not registered. Register it with '
+                'workflow.register_step_function() -- steps may not supply arbitrary SQL.',
+                v_spec->>'function';
+        end if;
+
+        perform set_config('statement_timeout', f.timeout_ms::text, true);
+
+        -- Arguments are passed as parameters, never interpolated: a step's
+        -- args are data from the run, and building SQL text out of them would
+        -- be injection with extra steps.
+        v_args := workflow.resolve_args(coalesce(v_spec->'args', '[]'::jsonb), t.run_id);
+        -- Each argument is extracted according to its REGISTERED type, not
+        -- uniformly as text. Getting this wrong surfaces as
+        -- "function f(text, text) does not exist" -- which reads as a missing
+        -- function rather than a coercion problem, and cost real time.
+        --   text   -> $1->>i      (JSON string to text)
+        --   jsonb  -> $1->i       (the JSON value itself, structure intact)
+        --   other  -> ($1->>i)::type
+        if jsonb_array_length(v_args) = 0 then
+            execute format('select to_jsonb(%s())', f.fn) into v_out;
+        else
+            v_sql := format('select to_jsonb(%s(%s))', f.fn, (
+                select string_agg(
+                    case lower(coalesce(f.arg_types[i], 'text'))
+                        when 'text'  then format('$1->>%s', i - 1)
+                        when 'jsonb' then format('$1->%s', i - 1)
+                        when 'json'  then format('($1->%s)::json', i - 1)
+                        else format('($1->>%s)::%s', i - 1, f.arg_types[i])
+                    end, ',' order by i)
+                from generate_series(1, jsonb_array_length(v_args)) i));
+            execute v_sql into v_out using v_args;
+        end if;
+
+        perform workflow.complete_task(p_task_id, jsonb_build_object('result', v_out));
+        return true;
+    exception when others then
+        perform workflow.fail_task(p_task_id,
+            jsonb_build_object('error', sqlerrm, 'sqlstate', sqlstate),
+            -- A missing registration or a bad signature will fail identically
+            -- on every retry; a deadlock or timeout will not.
+            sqlstate in ('42883','42P01','P0001'));
+        return true;
+    end;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- Run every ready `sql` task for one run, until none remain. Chained sql steps
+-- therefore complete in one call: index -> rollup -> notify needs no round trip.
+-- Bounded, because a definition cycle would otherwise spin here.
+create or replace function workflow.drain_sql_steps(p_run_id uuid, p_max int default 50)
+returns int as $$
+declare v_id uuid; v_done int := 0;
+begin
+    loop
+        select id into v_id from workflow.tasks
+        where run_id = p_run_id and kind = 'sql' and status = 'ready'
+          and run_after <= now()
+        limit 1;
+        exit when v_id is null or v_done >= p_max;
+        perform workflow.execute_sql_step(v_id);
+        v_done := v_done + 1;
+    end loop;
+    return v_done;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- The hook that makes it automatic. Fires after a task's status changes, so a
+-- `sql` step becomes ready and runs within the same statement that unblocked
+-- it -- no poller, no latency, nothing deployed.
+-- Fires when a `sql` step is UPDATED into 'ready'. Both entry points are
+-- updates, so this catches everything: start_workflow's second pass flips
+-- roots ready, and cascade_task_status flips dependents ready.
+--
+-- ON UPDATE ONLY, and that is not an oversight -- an AFTER INSERT trigger was
+-- tried first and was actively wrong. start_workflow builds in two passes:
+-- pass 1 inserts every step with pending_deps = 0 (dependencies are not wired
+-- until pass 2), so mark_roots_ready marks EVERY step ready on insert. An
+-- insert-time autorun therefore executed the whole workflow immediately, in
+-- arbitrary order, ignoring the dependency graph -- and pass 2 then reset the
+-- statuses underneath it, re-running the first step and reverting the second
+-- to 'pending' while the run reported 'completed'. The task_events trail
+-- showed all of it. During construction the graph is not yet valid, so the
+-- only safe signal is a deliberate transition INTO ready.
+--
+-- Re-entry is safe: execute_sql_step() moves the row to 'running' before doing
+-- any work, so the recursive fire sees a non-ready row and stops. A chain of
+-- sql steps runs to completion through ordinary cascade.
+create or replace function workflow.autorun_sql_steps() returns trigger as $$
+begin
+    if new.kind = 'sql' and new.status = 'ready'
+       and old.status is distinct from 'ready' then
+        perform workflow.execute_sql_step(new.id);
+    end if;
+    return null;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+create trigger trg_autorun_sql_steps
+    after update of status on workflow.tasks
+    for each row execute function workflow.autorun_sql_steps();
+
+grant execute on function workflow.execute_sql_step(uuid) to worker, authenticated;
+grant execute on function workflow.drain_sql_steps(uuid, int) to worker, authenticated;
+grant select on workflow.step_functions to worker, authenticated;
+
+-- ============================================================
+-- 18. YAML authoring: workflow.define_yaml()
+--
+-- The payoff of §17 plus the http_call handler: a workflow whose steps are
+-- only P8QL and REST needs NO USER CODE ANYWHERE. The worker stops being
+-- something a user writes and becomes something purely generic that ships.
+--
+--     name: classify_recent
+--     steps:
+--       - id: find
+--         p8ql: 'HYBRID "safety recall" FROM chunks LIMIT 5'
+--       - id: judge
+--         needs: [find]
+--         agent: classifier          # a row in agentic.agents, by NAME
+--         input: 'Classify: {{steps.find.result}}'
+--       - id: reindex
+--         needs: [judge]
+--         sql: {function: rebuild_graph_index, args: [company]}
+--
+-- compiles to ordinary workflow.tasks rows, so retry, backoff, the reaper,
+-- saga, cancellation and OTel tracing all apply unchanged -- this is sugar
+-- over start_workflow, never a second execution engine.
+--
+-- The YAML parse itself is in the p8_query extension (serde_yaml); doing it in
+-- PL/pgSQL is not a reasonable thing to attempt. Keeping it there rather than
+-- in the Content Server means authoring is SQL-native: no service has to be
+-- running to define a workflow.
+-- ============================================================
+
+create or replace function workflow.define_yaml(p_yaml text)
+returns uuid as $$
+declare
+    c      jsonb;
+    v_id   uuid;
+    v_name text;
+    v_ver  int;
+begin
+    if to_regprocedure('p8_compile_workflow(text)') is null then
+        raise exception
+            'workflow.define_yaml needs the p8_query extension (p8_compile_workflow). '
+            'Run "create extension p8_query".';
+    end if;
+
+    c := p8_compile_workflow(p_yaml);
+    if not (c->>'ok')::boolean then
+        -- The compiler's message names the offending step, so surface it as-is
+        -- rather than wrapping it in something vaguer.
+        raise exception 'workflow YAML did not compile: %', c->>'error';
+    end if;
+
+    v_name := c->'workflow'->>'name';
+    v_ver  := coalesce((c->'workflow'->>'version')::int, 1);
+
+    -- validate_spec() still runs via the insert trigger: the compiler checks
+    -- that every `needs` names a real step, the engine checks reachability and
+    -- cycles. Two different questions, both worth asking.
+    insert into workflow.definitions (name, version, spec)
+    values (v_name, v_ver, c->'workflow'->'spec')
+    on conflict (name, version) do update set spec = excluded.spec
+    returning id into v_id;
+
+    return v_id;
+end;
+$$ language plpgsql;
+
+-- P8QL as a step. This is what makes a query a first-class workflow node with
+-- no process behind it -- it is an ordinary §17 sql step whose registered
+-- function happens to be the query dialect.
+-- Two arities. SEMANTIC and HYBRID need a vector, which the database cannot
+-- produce -- embedding is an external model call. So those modes are composed
+-- as: a `rest` step that embeds, then a p8ql step taking
+-- {{steps.embed.result}} as its second argument. LOOKUP, GRAPH and TEXT need
+-- no vector and use the one-argument form.
+create or replace function workflow.p8ql(p_query text)
+returns jsonb as $$
+    select aiq.query(p_query);
+$$ language sql;
+
+create or replace function workflow.p8ql(p_query text, p_embedding jsonb)
+returns jsonb as $$
+    select aiq.query(p_query,
+        case when p_embedding is null or p_embedding = 'null'::jsonb then null
+             else (select array_agg((v #>> '{}')::real order by ord)
+                   from jsonb_array_elements(p_embedding) with ordinality t(v, ord))::vector
+        end);
+$$ language sql;
+
+grant execute on function workflow.define_yaml(text) to authenticated;
+grant execute on function workflow.p8ql(text) to authenticated, worker;
+grant execute on function workflow.p8ql(text, jsonb) to authenticated, worker;
