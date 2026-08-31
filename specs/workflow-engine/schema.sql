@@ -1550,8 +1550,9 @@ declare
 begin
     if to_regprocedure('p8_compile_workflow(text)') is null then
         raise exception
-            'workflow.define_yaml needs the p8_query extension (p8_compile_workflow). '
-            'Run "create extension p8_query".';
+            'workflow.define_yaml needs the percolate extension (p8_compile_workflow). '
+            'This should be impossible -- the function is part of the same extension '
+            'as this one.';
     end if;
 
     c := p8_compile_workflow(p_yaml);

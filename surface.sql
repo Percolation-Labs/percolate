@@ -35,7 +35,8 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('install','extension','pgcrypto',null,'INSTALL.md: required'),
 ('install','extension','pg_trgm',null,'INSTALL.md: required, FUZZY over node_keys'),
 ('install','extension','vector',null,'INSTALL.md: required, embeddings + HNSW'),
-('install','extension','p8_query',null,'INSTALL.md: required -- the dialect is the primary interface'),
+('install','extension','percolate_parser',null,'the C parsers: superuser-installed, no tables'),
+('install','extension','percolate',null,'the schema, installed by app_owner so RLS is real'),
 
 -- ---------- user-rbac --------------------------------------------------
 ('user-rbac','schema','rbac',null,'spec.md: identity lives in Postgres'),

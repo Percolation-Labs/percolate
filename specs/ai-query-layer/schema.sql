@@ -584,12 +584,11 @@ declare
 begin
     if to_regprocedure('aiq_parse(text)') is null then
         raise exception
-            'the p8_query extension is not installed (aiq_parse is missing). '
-            'It is required: run "create extension p8_query", or build it with '
-            '"cd extension/p8_query && cargo pgrx package --features pg19". '
-            'The per-mode functions (aiq.lookup, aiq.graph_neighbors, '
-            'aiq.graph_walk, aiq.semantic_in, aiq.lexical, aiq.hybrid) still '
-            'work directly if you need to proceed without it.';
+            'aiq_parse is missing. It ships in the same extension as this '
+            'function, so this should be impossible -- if you are seeing it, the '
+            'extension is partially installed. The per-mode functions '
+            '(aiq.lookup, aiq.graph_neighbors, aiq.graph_walk, aiq.semantic_in, '
+            'aiq.lexical, aiq.hybrid) still work directly.';
     end if;
     p := aiq_parse(p_query);
 
