@@ -1354,7 +1354,7 @@ $$ language plpgsql;
 -- The worker does this for http_call steps; sql steps need it for the same
 -- reason and it was missing -- so a P8QL step could not consume the output of
 -- the REST step before it, which is exactly the composition the YAML syntax
--- exists to express. Found by running a pipeline whose HYBRID step needed the
+-- exists to express. Found by running a pipeline whose SEARCH step needed the
 -- embedding produced by a preceding model call.
 --
 -- Deliberately narrower than the worker's resolver: no {{env.*}}, because the
@@ -1535,7 +1535,14 @@ create trigger trg_autorun_sql_steps
 
 grant execute on function workflow.execute_sql_step(uuid) to worker, authenticated;
 grant execute on function workflow.drain_sql_steps(uuid, int) to worker, authenticated;
-grant select on workflow.step_functions to worker, authenticated;
+-- The allow-list is readable by `authenticated` for discoverability: a user
+-- authoring a `sql` step should be able to see which functions are callable
+-- without guessing. It is NOT granted to `worker`, and that omission is the
+-- point: execute_sql_step is SECURITY DEFINER, so nothing needs this grant to
+-- run, and a service role holding a table grant it never uses is exactly the
+-- privilege that survives long enough to be useful to an attacker. The claim
+-- "no service role holds a table grant" is only true if it stays true.
+grant select on workflow.step_functions to authenticated;
 
 -- ============================================================
 -- 18. YAML authoring: workflow.define_yaml()
@@ -1547,7 +1554,7 @@ grant select on workflow.step_functions to worker, authenticated;
 --     name: classify_recent
 --     steps:
 --       - id: find
---         p8ql: 'HYBRID "safety recall" FROM chunks LIMIT 5'
+--         p8ql: 'SEARCH "safety recall" FROM chunks LIMIT 5'
 --       - id: judge
 --         needs: [find]
 --         agent: classifier          # a row in agentic.agents, by NAME
@@ -1615,6 +1622,425 @@ $$ language plpgsql;
 -- It lives in ai-query-layer/integration-workflow.sql, applied after both --
 -- the same boundary discipline as workflow-engine/integration-rbac.sql.
 grant execute on function workflow.define_yaml(text) to authenticated;
+
+-- ------------------------------------------------------------
+-- 19. Schedules -- a scheduled workflow is a ROW, not a cron entry.
+--
+-- spec.md §10 said "register scheduled workflows with pg_cron" and left the
+-- shape open. Registering one cron job per schedule was tried first and is
+-- the wrong answer for this collection, for three reasons that only show up
+-- once you try it:
+--
+--   * cron.job is a catalog table in another extension's schema. It has no
+--     org_id and no owner, so a scheduled workflow could not be RLS-scoped,
+--     and "list my schedules" would have to read a table every tenant shares.
+--   * Creating one needs rights on the cron schema, so adding a schedule
+--     could never be an ordinary authenticated REST call.
+--   * It would be a second copy of state -- cron.job plus whatever row we
+--     kept alongside it -- and this collection has already paid for that kind
+--     of drift more than once.
+--
+-- So pg_cron drives exactly ONE job:
+--
+--     select cron.schedule('workflow-tick', '* * * * *',
+--                          $$select workflow.tick()$$);
+--
+-- and every schedule is a row in the table below. That keeps the whole
+-- feature inside the ownership and RLS model the rest of the collection
+-- already has, and it makes pg_cron a *driver* rather than a dependency:
+-- anything that calls workflow.tick() once a minute works identically -- an
+-- operator, a KEDA-scaled pod, a `while sleep 60` -- which matters because
+-- pg_cron's PG19 support is a patch we carry (dev/patches/), not a given.
+--
+-- The unit of scheduling is deliberately the RUN, not the task: a schedule
+-- starts a workflow through start_workflow() like any other caller, so
+-- retry, backoff, the reaper, saga compensation, cancellation and tracing all
+-- apply unchanged. Nothing here is a second execution engine.
+-- ------------------------------------------------------------
+create table workflow.schedules (
+    id             uuid primary key default gen_random_uuid(),
+    name           text not null unique,
+    -- The definition NAME, not its id: start_workflow() resolves the latest
+    -- version at fire time, so publishing v2 of a workflow changes what the
+    -- schedule runs without touching the schedule.
+    workflow_name  text not null,
+    cron_expr      text not null,
+    -- IANA zone. Stored per schedule rather than assumed UTC because "every
+    -- weekday at 09:00" is a statement about somebody's morning, and the whole
+    -- point of a cron expression is lost if it silently means 09:00 UTC.
+    timezone       text not null default 'UTC',
+    input          jsonb not null default '{}'::jsonb,
+    enabled        boolean not null default true,
+    -- 'skip': do not start a new run while this schedule's previous run is
+    -- still running. This is world-model-ingestion/brief.md §5's
+    -- overlapping-poll problem, solved once here rather than per pipeline: a
+    -- channel polled every minute whose fetch takes ninety seconds must not
+    -- accumulate runs. 'allow' is the escape hatch for genuinely independent
+    -- ticks.
+    overlap_policy text not null default 'skip'
+                       check (overlap_policy in ('skip','allow')),
+    -- last_tick_at is the minute this schedule was last EVALUATED;
+    -- last_fired_at is the minute it last STARTED a run. Two columns because
+    -- they answer different questions -- "is the ticker alive?" and "is this
+    -- schedule producing work?" -- and collapsing them makes a schedule that
+    -- is being skipped every minute look identical to one that is firing.
+    last_tick_at   timestamptz,
+    last_fired_at  timestamptz,
+    last_run_id    uuid references workflow.runs(id),
+    fire_count     bigint not null default 0,
+    skip_count     bigint not null default 0,
+    -- A schedule whose workflow was deleted, or whose input no longer
+    -- validates, must say so out loud rather than failing invisibly once a
+    -- minute forever (RELEASE-0.1.md §5, "honest failure modes").
+    last_error     text,
+    last_error_at  timestamptz,
+    org_id         uuid,
+    created_at     timestamptz not null default now(),
+    updated_at     timestamptz not null default now()
+);
+create index idx_schedules_due on workflow.schedules (last_tick_at) where enabled;
+create index idx_schedules_org on workflow.schedules (org_id);
+
+create trigger trg_schedules_touch before update on workflow.schedules
+    for each row execute function public.touch_updated_at();
+
+-- One field of a 5-field cron expression, against one integer.
+-- Supports `*`, `n`, `a-b`, `*/s`, `a-b/s` and `n/s`, comma-separated.
+-- Deliberately NOT supported: `@daily` and friends (sugar that would need its
+-- own expansion table), `L`/`W`/`#` (Quartz extensions, not Vixie cron).
+-- An unsupported field raises at authoring time via schedule_workflow().
+create or replace function workflow.cron_field_matches(
+    p_field text, p_value int, p_min int, p_max int)
+returns boolean as $$
+declare
+    v_part  text;
+    v_range text;
+    v_step  int;
+    v_lo    int;
+    v_hi    int;
+begin
+    foreach v_part in array string_to_array(btrim(p_field), ',')
+    loop
+        v_part := btrim(v_part);
+        if v_part = '' then
+            raise exception 'cron: empty element in field "%"', p_field;
+        end if;
+
+        v_step  := 1;
+        v_range := v_part;
+        if position('/' in v_part) > 0 then
+            v_range := split_part(v_part, '/', 1);
+            if split_part(v_part, '/', 2) !~ '^\d+$' then
+                raise exception 'cron: bad step in "%"', v_part;
+            end if;
+            v_step := split_part(v_part, '/', 2)::int;
+            if v_step < 1 then
+                raise exception 'cron: step must be >= 1 in "%"', v_part;
+            end if;
+        end if;
+
+        if v_range = '*' then
+            v_lo := p_min;
+            v_hi := p_max;
+        elsif v_range ~ '^\d+-\d+$' then
+            v_lo := split_part(v_range, '-', 1)::int;
+            v_hi := split_part(v_range, '-', 2)::int;
+        elsif v_range ~ '^\d+$' then
+            v_lo := v_range::int;
+            -- `n/s` means "from n to the end of the range, every s" (the
+            -- common extension); a bare `n` is just itself.
+            v_hi := case when v_step > 1 then p_max else v_lo end;
+        else
+            raise exception 'cron: unsupported element "%" in field "%"', v_part, p_field;
+        end if;
+
+        if v_lo < p_min or v_hi > p_max or v_lo > v_hi then
+            raise exception 'cron: "%" out of range %-% in field "%"',
+                v_part, p_min, p_max, p_field;
+        end if;
+
+        if p_value between v_lo and v_hi and (p_value - v_lo) % v_step = 0 then
+            return true;
+        end if;
+    end loop;
+    return false;
+end;
+$$ language plpgsql immutable;
+
+-- Does a 5-field cron expression match this instant, in this zone?
+--
+-- Matching rather than "compute the next run time" is deliberate, and it is
+-- what cron itself does: the ticker wakes once a minute and asks whether now
+-- matches. A next_run_at column would be a cached derivation that goes stale
+-- the moment a DST boundary, a timezone edit or a clock change disagrees
+-- with it -- and it would have to be recomputed correctly in every path that
+-- edits a schedule. There is nothing to keep in sync here.
+create or replace function workflow.cron_matches(
+    p_expr text, p_ts timestamptz, p_timezone text default 'UTC')
+returns boolean as $$
+declare
+    f               text[];
+    v_local         timestamp;
+    v_dow           int;
+    v_min_ok        boolean;
+    v_hour_ok       boolean;
+    v_month_ok      boolean;
+    v_dom_ok        boolean;
+    v_dow_ok        boolean;
+begin
+    f := regexp_split_to_array(btrim(p_expr), '\s+');
+    if coalesce(array_length(f, 1), 0) <> 5 then
+        raise exception
+            'cron: expected 5 fields (minute hour day-of-month month day-of-week), got % in "%"',
+            coalesce(array_length(f, 1), 0), p_expr;
+    end if;
+
+    -- Raises for an unknown zone, which is the point: a typo'd timezone is
+    -- caught when the schedule is created rather than never firing.
+    v_local := p_ts at time zone p_timezone;
+
+    -- All five fields are evaluated before any of them is allowed to decide
+    -- the answer. Short-circuiting on the first non-match is the obvious
+    -- implementation and it makes validation depend on the CLOCK: with
+    -- `5 9 * * MON`, a check run at 09:04 returns false from the minute field
+    -- and never parses the unsupported day-of-week at all -- so
+    -- schedule_workflow() accepts it, and it fails once a minute forever
+    -- instead of in the caller's hand. Found by testing exactly that.
+    v_min_ok   := workflow.cron_field_matches(f[1], extract(minute from v_local)::int, 0, 59);
+    v_hour_ok  := workflow.cron_field_matches(f[2], extract(hour   from v_local)::int, 0, 23);
+    v_month_ok := workflow.cron_field_matches(f[4], extract(month  from v_local)::int, 1, 12);
+
+    v_dow    := extract(dow from v_local)::int;    -- 0 = Sunday, matching cron
+    v_dom_ok := workflow.cron_field_matches(f[3], extract(day from v_local)::int, 1, 31);
+    -- Both 0 and 7 mean Sunday in cron, so Sunday is tested twice.
+    v_dow_ok := workflow.cron_field_matches(f[5], v_dow, 0, 7)
+                or (v_dow = 0 and workflow.cron_field_matches(f[5], 7, 0, 7));
+
+    if not (v_min_ok and v_hour_ok and v_month_ok) then
+        return false;
+    end if;
+
+    -- Vixie cron's genuinely surprising rule, reproduced rather than "fixed":
+    -- when BOTH day-of-month and day-of-week are restricted, a match on
+    -- either one fires. `0 0 13 * 5` is the 13th *or* any Friday, not
+    -- Friday the 13th. Implementing the intuitive AND here would make every
+    -- expression copied from a crontab mean something different.
+    if f[3] <> '*' and f[5] <> '*' then
+        return v_dom_ok or v_dow_ok;
+    end if;
+    return v_dom_ok and v_dow_ok;
+end;
+$$ language plpgsql stable;
+
+-- The ticker. Call once a minute, from pg_cron or from anything else.
+--
+-- Returns the number of runs STARTED, so a caller (or a monitoring query) can
+-- tell "the ticker ran and nothing was due" from "the ticker is not running",
+-- which last_tick_at also answers per schedule.
+create or replace function workflow.tick(p_now timestamptz default now())
+returns int as $$
+declare
+    v_minute  timestamptz := date_trunc('minute', p_now);
+    s         workflow.schedules;
+    v_run_id  uuid;
+    v_started int := 0;
+    v_active  boolean;
+begin
+    for s in
+        select * from workflow.schedules
+         where enabled
+           -- Dedupe by minute: two overlapping ticks, or a ticker that fires
+           -- twice in the same minute, cannot double-start anything.
+           and (last_tick_at is null or last_tick_at < v_minute)
+         order by name
+         for update skip locked
+    loop
+        begin
+            if not workflow.cron_matches(s.cron_expr, v_minute, s.timezone) then
+                update workflow.schedules set last_tick_at = v_minute where id = s.id;
+                continue;
+            end if;
+
+            if s.overlap_policy = 'skip' and s.last_run_id is not null then
+                select exists (
+                    select 1 from workflow.runs r
+                     where r.id = s.last_run_id and r.status = 'running'
+                ) into v_active;
+                if v_active then
+                    update workflow.schedules
+                       set last_tick_at = v_minute, skip_count = skip_count + 1
+                     where id = s.id;
+                    continue;
+                end if;
+            end if;
+
+            -- The external_id is the schedule and the minute, which makes a
+            -- fire idempotent through the engine's OWN idempotency rather
+            -- than a second mechanism here: if this transaction is retried,
+            -- start_workflow() returns the existing run instead of a second
+            -- one.
+            v_run_id := workflow.start_workflow(
+                s.workflow_name,
+                s.input,
+                'schedule:' || s.name || ':' ||
+                    to_char(v_minute at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI"Z"'),
+                null);
+
+            update workflow.schedules
+               set last_tick_at  = v_minute,
+                   last_fired_at = v_minute,
+                   last_run_id   = v_run_id,
+                   fire_count    = fire_count + 1,
+                   last_error    = null,
+                   last_error_at = null
+             where id = s.id;
+            v_started := v_started + 1;
+
+        exception when others then
+            -- One broken schedule must not stop the other schedules from
+            -- firing. The subtransaction rolls back, the record of WHY does
+            -- not: this update runs after the rollback.
+            update workflow.schedules
+               set last_tick_at  = v_minute,
+                   last_error    = sqlerrm,
+                   last_error_at = now()
+             where id = s.id;
+        end;
+    end loop;
+
+    return v_started;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- ---------- the REST surface -------------------------------------------
+-- Three functions, reached over PostgREST as POST /rpc/<name> with
+-- `Content-Profile: workflow`. Functions rather than table grants for the
+-- same reason as everywhere else in this schema: the write path is a
+-- SECURITY DEFINER call, and no PostgREST-facing role holds INSERT on a base
+-- table.
+
+-- Every SECURITY DEFINER function an end user can reach must do its own
+-- authorization -- integration-rbac.sql (e) states the rule and records the
+-- confirmed exploit that produced it. These three take a caller-supplied
+-- schedule NAME, so without a check any authenticated caller could repoint or
+-- delete any tenant's schedule.
+--
+-- The core engine has no identity system to consult, so this is the seam:
+-- integration-rbac.sql replaces this function with the real owner/permission
+-- check. The default DENIES rather than permits -- anyone who is not a member
+-- of the role owning the table is refused -- so a deployment that grants
+-- schedule management to users without applying integration-rbac.sql fails
+-- loudly instead of silently authorizing everyone. An identity-free
+-- deployment (the engine standing alone) still works, because there the
+-- operator IS the schema owner.
+create or replace function workflow.assert_schedule_access(p_name text, p_action text)
+returns void as $$
+declare
+    v_owner name;
+begin
+    select pg_get_userbyid(c.relowner) into v_owner
+      from pg_class c join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname = 'workflow' and c.relname = 'schedules';
+
+    if pg_has_role(session_user, v_owner, 'member') then
+        return;
+    end if;
+
+    raise exception 'not authorized to % schedule "%"', p_action, p_name
+        using hint = 'workflow-engine/integration-rbac.sql installs the '
+                     'owner-and-permission check this default stands in for';
+end;
+$$ language plpgsql stable security definer set search_path = pg_catalog, public;
+
+-- Create or update a schedule, by name. Idempotent: calling it again with a
+-- different expression edits the schedule rather than creating a second one,
+-- so a deployment can re-run its own seed without accumulating duplicates.
+create or replace function workflow.schedule_workflow(
+    p_name          text,
+    p_workflow      text,
+    p_cron          text,
+    p_input         jsonb default '{}'::jsonb,
+    p_timezone      text  default 'UTC',
+    p_overlap       text  default 'skip')
+returns uuid as $$
+declare
+    v_id uuid;
+begin
+    -- Validate everything that can be validated NOW. A schedule that cannot
+    -- possibly fire should fail in the caller's hand, not once a minute into
+    -- last_error where nobody is looking.
+    perform workflow.assert_schedule_access(p_name, 'create');
+
+    if not exists (select 1 from workflow.definitions where name = p_workflow) then
+        raise exception 'no workflow definition named "%"', p_workflow
+            using hint = 'register it with workflow.define_yaml() first';
+    end if;
+    -- Raises on a malformed expression or an unknown timezone.
+    perform workflow.cron_matches(p_cron, now(), p_timezone);
+
+    insert into workflow.schedules (name, workflow_name, cron_expr, input,
+                                    timezone, overlap_policy)
+    values (p_name, p_workflow, p_cron, coalesce(p_input, '{}'::jsonb),
+            p_timezone, p_overlap)
+    on conflict (name) do update
+        set workflow_name  = excluded.workflow_name,
+            cron_expr      = excluded.cron_expr,
+            input          = excluded.input,
+            timezone       = excluded.timezone,
+            overlap_policy = excluded.overlap_policy,
+            last_error     = null,
+            last_error_at  = null
+    returning id into v_id;
+
+    return v_id;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- Enable or disable without losing the definition or its history. Disabling
+-- is the reversible operation and is what a UI's toggle should call;
+-- unschedule_workflow() is the destructive one.
+create or replace function workflow.set_schedule_enabled(
+    p_name text, p_enabled boolean)
+returns boolean as $$
+declare
+    v_found boolean;
+begin
+    perform workflow.assert_schedule_access(p_name, 'enable');
+
+    update workflow.schedules set enabled = p_enabled
+     where name = p_name
+    returning true into v_found;
+    return coalesce(v_found, false);
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- Returns false rather than raising when the name is unknown, so that
+-- deleting something already deleted is not an error a caller has to catch.
+create or replace function workflow.unschedule_workflow(p_name text)
+returns boolean as $$
+declare
+    v_found boolean;
+begin
+    perform workflow.assert_schedule_access(p_name, 'delete');
+
+    delete from workflow.schedules where name = p_name
+    returning true into v_found;
+    return coalesce(v_found, false);
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- The ticker runs as `scheduler`, the role user-rbac/roles.sql §3 defines for
+-- exactly this and which holds no table grants. tick() is SECURITY DEFINER,
+-- so EXECUTE is the whole grant it needs.
+grant execute on function workflow.tick(timestamptz) to scheduler;
+
+grant execute on function workflow.schedule_workflow(text, text, text, jsonb, text, text)
+    to authenticated;
+grant execute on function workflow.set_schedule_enabled(text, boolean) to authenticated;
+grant execute on function workflow.unschedule_workflow(text) to authenticated;
+grant execute on function workflow.cron_matches(text, timestamptz, text) to authenticated;
+
+revoke execute on function workflow.assert_schedule_access(text, text) from public;
 
 
 -- ============================================================
@@ -2511,7 +2937,10 @@ begin
                         'start_child_workflow','add_task','cancel_run',
                         'begin_compensation','promote_due_timers',
                         'reap_stale_tasks','log_task_transition',
-                        'cascade_task_status')
+                        'cascade_task_status',
+                        -- §19: the ticker and the schedule REST surface
+                        'tick','schedule_workflow','set_schedule_enabled',
+                        'unschedule_workflow')
       and not p.prosecdef;
     if v_bad is not null then
         raise exception
@@ -2680,6 +3109,111 @@ revoke execute on function workflow.assert_run_access(uuid, text) from public;
 grant execute on function workflow.cancel_run(uuid) to authenticated;
 grant execute on function workflow.signal_task(uuid, text, jsonb) to authenticated;
 
+-- ============================================================
+-- (f) Schedules (schema.sql §19) under the identity model.
+--
+-- Same three pieces every user-facing table in this collection gets, for the
+-- same reasons: an owner assigned from the verified JWT by a trigger, an RLS
+-- policy on the read path, and a real authorization check replacing the
+-- deny-by-default stand-in the core engine ships.
+-- ============================================================
+
+alter table workflow.schedules add column if not exists owner_id uuid references rbac.users(id);
+create index if not exists idx_schedules_owner on workflow.schedules (owner_id);
+
+-- Ownership from the JWT, never from an argument -- the same rule, and the
+-- same trigger shape, as runs above. schedule_workflow() therefore has no
+-- owner parameter to spoof.
+create or replace function workflow.set_schedule_owner() returns trigger as $$
+begin
+    if new.owner_id is null then
+        new.owner_id := rbac.current_user_id();
+    end if;
+    return new;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+create trigger trg_set_schedule_owner
+    before insert on workflow.schedules
+    for each row execute function workflow.set_schedule_owner();
+
+alter table workflow.schedules enable row level security;
+
+-- (select ...) wrapping, as everywhere: has_permission() runs a join.
+create policy schedules_owner_or_permitted on workflow.schedules for select
+  using (owner_id = (select rbac.current_user_id())
+         or (select rbac.has_permission(rbac.current_user_id(), 'workflow_schedules', 'select')));
+
+-- The real check, replacing schema.sql §19's deny-by-default stand-in.
+-- Mirrors assert_run_access() exactly, including its rule about system-owned
+-- rows: a schedule with no owner (seeded by the deployment itself) takes an
+-- explicit permission to touch, never bare ownership.
+--
+-- Creating a NEW schedule is the one action with no existing row to own, so
+-- it is allowed to any authenticated caller -- the trigger above then makes
+-- them its owner. An anonymous caller has no identity to own it and is
+-- refused, which is what keeps `web_anon` out.
+create or replace function workflow.assert_schedule_access(p_name text, p_action text)
+returns void as $$
+declare
+    v_owner  uuid;
+    v_exists boolean;
+    v_caller uuid := rbac.current_user_id();
+    v_tbl_owner name;
+begin
+    -- The deployment itself, seeding or repairing its own schedules, has no
+    -- JWT and no rbac.users row -- and must not need one. A caller connected
+    -- as (or able to become) the role that owns the table is that case, and
+    -- is the same escape the core engine's stand-in uses. PostgREST connects
+    -- as `authenticator`, which is deliberately NOT a member of it, so this
+    -- never widens the REST path.
+    select pg_get_userbyid(c.relowner) into v_tbl_owner
+      from pg_class c join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname = 'workflow' and c.relname = 'schedules';
+    if pg_has_role(session_user, v_tbl_owner, 'member') then
+        return;
+    end if;
+
+    select owner_id, true into v_owner, v_exists
+      from workflow.schedules where name = p_name;
+
+    if not coalesce(v_exists, false) then
+        if p_action = 'create' and v_caller is not null then
+            return;
+        end if;
+        if p_action <> 'create' then
+            -- Nothing to authorize against; the caller's own function decides
+            -- what a missing name means (unschedule_workflow returns false).
+            return;
+        end if;
+        raise exception 'not authorized to create schedule "%"', p_name
+            using hint = 'authenticate first: a schedule needs an owner';
+    end if;
+
+    if v_owner is not null and v_owner = v_caller then
+        return;
+    end if;
+    if rbac.has_permission(v_caller, 'workflow_schedules', p_action) then
+        return;
+    end if;
+    raise exception 'not authorized to % schedule "%"', p_action, p_name;
+end;
+$$ language plpgsql stable security definer set search_path = pg_catalog, public;
+
+-- The read path: a view owned by api_viewer, never the table owner.
+create view workflow.schedules_api as
+  select id, name, workflow_name, cron_expr, timezone, input, enabled,
+         overlap_policy, owner_id, org_id, last_tick_at, last_fired_at,
+         last_run_id, fire_count, skip_count, last_error, last_error_at,
+         created_at, updated_at
+  from workflow.schedules;
+
+grant select on workflow.schedules to api_viewer;
+grant create on schema workflow to api_viewer;
+alter view workflow.schedules_api owner to api_viewer;
+revoke create on schema workflow from api_viewer;
+grant select on workflow.schedules_api to authenticated;
+
 
 -- ============================================================
 -- ai-query-layer/schema.sql
@@ -2701,12 +3235,15 @@ grant execute on function workflow.signal_task(uuid, text, jsonb) to authenticat
 --
 -- The five REM-derived query modes (brief.md §2, §3) compile to:
 --   LOOKUP           -> node_keys btree probe -> nodes -> typed-table PK fetch
---   LOOKUP ... FUZZY -> pg_trgm over node_keys ONLY, never the data plane
+--                       (takes a LIST of keys; each resolves independently)
+--   FUZZY LOOKUP     -> pg_trgm over node_keys ONLY, never the data plane
 --   SEMANTIC         -> pgvector over the embedding table for one entity type
 --   GRAPH depth 1    -> GRAPH_TABLE over the property graph below
 --   GRAPH depth n>1  -> WITH RECURSIVE over edges (PG19 has no quantified
 --                       path patterns; confirmed empirically, brief.md §3)
---   SQL              -> read-only passthrough, SECURITY INVOKER (brief.md §3)
+--   SEARCH           -> RRF fusion of the lexical and semantic ranks
+--   <ordinary SQL>   -> read-only passthrough, SECURITY INVOKER (brief.md §3);
+--                       no keyword, recognised by how the statement starts
 -- ============================================================
 
 
@@ -3092,6 +3629,34 @@ begin
 end;
 $$ language plpgsql stable;
 
+-- LOOKUP over a LIST of keys -- what the dialect's `LOOKUP "a", "b"` compiles
+-- to, and the shape an agent actually needs: it rarely holds exactly one name.
+--
+-- Each key runs the full cascade independently. That is the whole subtlety:
+-- resolving them as one set would let one key's canonical hit suppress
+-- another key's fuzzy match, so a list of five names would answer differently
+-- than five separate calls. Independence keeps the list a convenience rather
+-- than a change of meaning.
+--
+-- It returns `input_key` alongside each row, which the scalar form has no need
+-- for. Without it a caller cannot tell WHICH of five names produced a row, or
+-- which produced none -- and "which of these did you not find" is usually the
+-- question worth asking.
+--
+-- Deliberately NOT an overload of aiq.lookup(text, ...): an untyped literal
+-- like aiq.lookup('acme') would then be ambiguous between text and text[],
+-- and "function is not unique" is a poor greeting for the dialect's most
+-- common call.
+create or replace function aiq.lookup_many(
+    p_keys text[], p_fuzzy boolean default false, p_limit int default 20
+) returns table(input_key text, node_id uuid, entity_type text, entity_id uuid,
+                key text, match_kind text, score real) as $$
+    select k.key_in, l.node_id, l.entity_type, l.entity_id, l.key,
+           l.match_kind, l.score
+    from unnest(p_keys) as k(key_in),
+         lateral aiq.lookup(k.key_in, p_fuzzy, p_limit) l;
+$$ language sql stable;
+
 -- GRAPH depth 1: native SQL/PGQ. Confirmed working on PG19 beta3.
 create or replace function aiq.graph_neighbors(
     p_node_id uuid, p_relation text default null, p_limit int default 100
@@ -3276,7 +3841,7 @@ begin
             'function, so this should be impossible -- if you are seeing it, the '
             'extension is partially installed. The per-mode functions '
             '(aiq.lookup, aiq.graph_neighbors, aiq.graph_walk, aiq.semantic_in, '
-            'aiq.lexical, aiq.hybrid) still work directly.';
+            'aiq.lexical, aiq.search) still work directly.';
     end if;
     p := aiq_parse(p_query);
 
@@ -3286,8 +3851,13 @@ begin
 
     case p->>'mode'
     when 'LOOKUP' then
+        -- The dialect takes a list, so the dispatch does too. Resolving five
+        -- names is one round trip and one plan, not five -- which is the
+        -- normal case for an agent holding several entities at once.
         select coalesce(jsonb_agg(to_jsonb(l)), '[]'::jsonb) into v_out
-        from aiq.lookup(p->>'arg', (p->>'fuzzy')::boolean, (p->>'limit')::int) l;
+        from aiq.lookup_many(
+            (select array_agg(value) from jsonb_array_elements_text(p->'args')),
+            (p->>'fuzzy')::boolean, (p->>'limit')::int) l;
 
     when 'GRAPH' then
         -- Resolve the key ONCE, here, then traverse by id: the dialect names
@@ -3329,14 +3899,14 @@ begin
         select coalesce(jsonb_agg(to_jsonb(l)), '[]'::jsonb) into v_out
         from aiq.lexical(p->>'source', p->>'arg', (p->>'limit')::int) l;
 
-    when 'HYBRID' then
+    when 'SEARCH' then
         if p_embedding is null then
             raise exception
-                'HYBRID fuses lexical and semantic ranks, so it needs p_embedding. '
+                'SEARCH fuses lexical and semantic ranks, so it needs p_embedding. '
                 'Use TEXT ''%'' for the lexical half alone.', p->>'arg';
         end if;
         select coalesce(jsonb_agg(to_jsonb(h)), '[]'::jsonb) into v_out
-        from aiq.hybrid(p->>'source', p->>'arg', p_embedding, p->>'model',
+        from aiq.search(p->>'source', p->>'arg', p_embedding, p->>'model',
                         (p->>'limit')::int) h;
 
     when 'SQL' then
@@ -3540,7 +4110,7 @@ begin
 end;
 $$ language plpgsql stable;
 
--- HYBRID: reciprocal rank fusion of lexical + semantic.
+-- SEARCH: reciprocal rank fusion of lexical + semantic.
 --
 -- RRF rather than score-weighted blending, deliberately: ts_rank and cosine
 -- distance are not on the same scale, not even the same direction (higher is
@@ -3553,7 +4123,7 @@ $$ language plpgsql stable;
 -- This is the mode that answers the "R7" case AND "is this product
 -- dangerous?" with one call -- which is the actual argument for a unified
 -- dialect over three separate APIs.
-create or replace function aiq.hybrid(
+create or replace function aiq.search(
     p_lexical_source text, p_query_text text,
     p_query_vector vector, p_model text default null,
     p_limit int default 10, p_k int default 60
@@ -3627,7 +4197,7 @@ begin
     -- transaction below is.
     if p_statement ~* '^\s*(insert|update|delete|truncate|drop|alter|create|grant|revoke|copy)\M' then
         raise exception
-            'SQL mode is read-only: statement starts with a write/DDL keyword';
+            'the SQL passthrough is read-only: statement starts with a write/DDL keyword';
     end if;
 
     -- The actual boundary. set_config(..., true) is transaction-local, so it
@@ -3795,7 +4365,7 @@ grant select on property graph aiq.knowledge_graph to authenticated, api_viewer;
 
 -- Embedding spaces are created DYNAMICALLY by register_embedding_space(), so
 -- they cannot be listed here -- and a table created after this file runs
--- inherits no grants, making every SEMANTIC/HYBRID call against a newly
+-- inherits no grants, making every SEMANTIC/SEARCH call against a newly
 -- registered model fail with "permission denied for table emb_<model>".
 -- Found by registering a model and immediately querying it over REST.
 --
@@ -3822,11 +4392,12 @@ revoke execute on all functions in schema aiq from public;
 
 grant execute on function aiq.query(text, vector) to authenticated;
 grant execute on function aiq.lookup(text, boolean, int) to authenticated;
+grant execute on function aiq.lookup_many(text[], boolean, int) to authenticated;
 grant execute on function aiq.graph_neighbors(uuid, text, int) to authenticated;
 grant execute on function aiq.graph_walk(uuid, int, text, int) to authenticated;
 grant execute on function aiq.semantic_in(vector, text, int) to authenticated;
 grant execute on function aiq.lexical(text, text, int) to authenticated;
-grant execute on function aiq.hybrid(text, text, vector, text, int, int) to authenticated;
+grant execute on function aiq.search(text, text, vector, text, int, int) to authenticated;
 grant execute on function aiq.sql_passthrough(text) to authenticated;
 
 -- Registry reads: an agent needs to know which models and sources exist to
@@ -3837,7 +4408,7 @@ grant select on aiq.embedding_models, aiq.lexical_sources,
 -- ------------------------------------------------------------
 -- 3b. Consumer-owned content tables.
 --
--- TEXT, SEMANTIC and HYBRID read the CONSUMER's tables (world-model
+-- TEXT, SEMANTIC and SEARCH read the CONSUMER's tables (world-model
 -- ingestion's resource_chunks, say), not aiq's own -- registered by name in
 -- lexical_sources / semantic_sources. Because the query functions are
 -- SECURITY INVOKER, the caller needs real access to those tables, and
@@ -3921,7 +4492,7 @@ end $$;
 -- this collection specs.
 -- ============================================================
 
--- Two arities. SEMANTIC and HYBRID need a vector, which the database cannot
+-- Two arities. SEMANTIC and SEARCH need a vector, which the database cannot
 -- produce -- embedding is an external model call. So those modes are composed
 -- as: a `rest` step that embeds, then a p8ql step taking
 -- {{steps.embed.result}} as its second argument. LOOKUP, GRAPH and TEXT need
@@ -3970,7 +4541,7 @@ select workflow.register_step_function(
 -- ai-query-layer/USAGE.md instructs a reader to run
 --   select aiq.register_lexical_source('chunks', 'wm.resource_chunks');
 -- and no such table shipped -- `wm` was a throwaway test fixture. TEXT,
--- SEMANTIC and HYBRID are documented as working over "chunks", so the corpus
+-- SEMANTIC and SEARCH are documented as working over "chunks", so the corpus
 -- they search has to be something the collection actually installs.
 --
 -- Applied as app_owner, after ai-query-layer. The aiq/rbac wiring lives in
@@ -4450,8 +5021,751 @@ begin
     -- The corpus the query layer documents must actually be registered.
     if not exists (select 1 from aiq.lexical_sources where name = 'chunks')
        or not exists (select 1 from aiq.semantic_sources where name = 'chunks') then
-        raise exception 'the "chunks" source is not registered -- TEXT/SEMANTIC/HYBRID have no corpus';
+        raise exception 'the "chunks" source is not registered -- TEXT/SEMANTIC/SEARCH have no corpus';
     end if;
 
     raise notice 'world-model-ingestion self-check passed: files unexposed; chunks corpus registered';
+end $$;
+
+
+-- ============================================================
+-- agentic/schema.sql
+--   agents, sessions, runs, messages -- the conversation plane
+-- ============================================================
+
+-- ============================================================
+-- Agentic — sessions, runs, messages, agents, tool servers
+--
+-- The territory for `brief.md`'s §7 map. Loads after workflow-engine and
+-- user-rbac (it references `workflow.tasks` and `rbac.current_user_id()`),
+-- as app_owner, never as a superuser.
+--
+-- Three conventions inherited from this collection rather than re-decided,
+-- because each was learned the hard way in `user-rbac/schema.sql`:
+--
+--   1. app_owner owns tables and SECURITY DEFINER functions; RLS is ENABLEd
+--      but NOT FORCEd, so the trusted function path can still write.
+--   2. The untrusted read path is `*_api` views owned by api_viewer -- a
+--      DIFFERENT role from the table owner, which is what makes RLS actually
+--      enforce through a view. PostgREST is pointed at the views.
+--   3. Every SECURITY DEFINER function sets `search_path` explicitly and
+--      qualifies every reference.
+--
+-- What is deliberately NOT here: anything the agent runtime could do itself.
+-- The LLM call, the tool calls, and the SSE fan-out are outside SQL's reach
+-- (brief.md §8); everything else in an agent turn is a row this file owns.
+-- ============================================================
+
+do $$
+begin
+    if (select usesuper from pg_user where usename = current_user) then
+        raise exception
+            'agentic/schema.sql must NOT be loaded as a superuser: superusers '
+            'bypass RLS unconditionally, which would make every policy below '
+            'silently inert (see user-rbac/schema.sql for the reproduction). '
+            'Run: psql -c ''set role app_owner;'' -f schema.sql';
+    end if;
+end $$;
+
+
+create schema if not exists agentic;
+
+-- ------------------------------------------------------------
+-- 1. Tool servers -- registered once, referenced by every agent (brief §5.2)
+--
+-- One row per MCP server or OpenAPI service. The runtime's entire tool
+-- surface is this table plus agents.tools; there is no built-in tool, ever.
+-- ------------------------------------------------------------
+create table agentic.tool_servers (
+    id              uuid primary key default gen_random_uuid(),
+    name            text not null unique,
+    kind            text not null check (kind in ('mcp', 'openapi')),
+    url             text not null,
+    -- An indirection, never a literal secret -- the same boundary
+    -- workflow-engine's http_call draws. brief.md §9: this collection has no
+    -- secrets mechanism yet, and this column is the seam one plugs into.
+    credential_ref  text,
+    -- brief.md §5.2/§5.3: which servers return citable retrieval results.
+    -- A flag, not a tool-name convention -- ai-query-layer's server sets it,
+    -- a ticketing API does not.
+    emits_citations boolean not null default false,
+    -- Which server is the runtime's own agent gateway (brief.md §5.1 item 3),
+    -- i.e. whose tools ARE agents. Also a flag rather than a name prefix, and
+    -- for a sharper reason than citations: delegation decides the persistence
+    -- granularity (§2's slow path) and hands the callee a delegated-by header.
+    -- Detecting it by an `agent__` prefix meant any registered MCP server could
+    -- claim that namespace, and a server merely *named* `agent` produced it by
+    -- accident through collision-prefixing.
+    serves_agents   boolean not null default false,
+    -- Synced at registration and refreshed by a scheduled workflow-engine
+    -- task; NOT re-fetched per agent invocation.
+    cached_tools    jsonb not null default '[]'::jsonb,
+    synced_at       timestamptz,
+    created_at      timestamptz not null default now(),
+    updated_at      timestamptz not null default now()
+);
+
+create trigger trg_tool_servers_updated
+    before update on agentic.tool_servers
+    for each row execute function public.touch_updated_at();
+
+-- ------------------------------------------------------------
+-- 2. Agents -- config rows; adding one is an insert (brief §2, §6)
+-- ------------------------------------------------------------
+create table agentic.agents (
+    id                       uuid primary key default gen_random_uuid(),
+    name                     text not null unique,
+    system_prompt            text not null default '',
+    model                    text,
+    -- References into tool_servers, never inline urls/credentials (§5.2):
+    --   [{"server": "p8-query", "tools": ["semantic_search"] | null}]
+    -- The optional per-server allowlist is also how an agent's delegation
+    -- targets are narrowed, since the agent gateway is an ordinary MCP
+    -- tool_servers row (§5.1 item 3).
+    tools                    jsonb not null default '[]'::jsonb,
+    structured_output_schema jsonb,
+    -- {"kind": "pg_function"|"webhook", "target": "..."} (§4, §9)
+    chained_action           jsonb,
+    -- Who summarizes this agent's windowed-out history (§3). Null falls back
+    -- to one system-wide default summarizer. Self-referencing on purpose:
+    -- "who summarizes" is data, not code.
+    summarizer_agent_id      uuid references agentic.agents(id),
+    -- {"window_messages": int, "window_tokens": int,
+    --  "summarize_after_messages": int} -- §9 leaves the numbers open, so
+    -- they are per-agent data with a runtime default, not constants.
+    context_policy           jsonb not null default '{}'::jsonb,
+    created_at               timestamptz not null default now(),
+    updated_at               timestamptz not null default now()
+);
+
+create trigger trg_agents_updated
+    before update on agentic.agents
+    for each row execute function public.touch_updated_at();
+
+-- ------------------------------------------------------------
+-- 3. Sessions -- one AG-UI thread; the unit a conversation is owned by
+-- ------------------------------------------------------------
+create table agentic.sessions (
+    id             uuid primary key default gen_random_uuid(),
+    user_id        uuid not null default rbac.current_user_id(),
+    agui_thread_id text,
+    title          text,
+    created_at     timestamptz not null default now(),
+    updated_at     timestamptz not null default now()
+);
+
+create index on agentic.sessions (user_id, created_at desc);
+
+create trigger trg_sessions_updated
+    before update on agentic.sessions
+    for each row execute function public.touch_updated_at();
+
+-- ------------------------------------------------------------
+-- 4. Runs -- one agent invocation, delegated sub-runs included (brief §7)
+--
+-- The delegation tree IS the span tree: parent_span_id is the parent run's
+-- own span_id, never independently maintained, and trace_id is shared across
+-- an entire tree -- one trace per top-level session or scheduled trigger.
+--
+-- owner_id is not redundant with sessions.user_id (brief §3): a scheduled run
+-- has no session, so scoping RLS through a session join would put background
+-- runs outside tenant isolation entirely.
+-- ------------------------------------------------------------
+create table agentic.runs (
+    id                      uuid primary key default gen_random_uuid(),
+    session_id              uuid references agentic.sessions(id) on delete cascade,
+    agent_id                uuid not null references agentic.agents(id),
+    owner_id                uuid not null default rbac.current_user_id(),
+    parent_run_id           uuid references agentic.runs(id) on delete cascade,
+    delegated_by_message_id uuid,   -- FK added below, once messages exists
+    trigger_kind            text not null default 'interactive'
+                                check (trigger_kind in ('interactive','scheduled')),
+    -- Set only for scheduled runs: the workflow-engine task that created this
+    -- one, so retry/rate-limiting/observability come from that system's
+    -- existing machinery rather than a second scheduler here (§3).
+    workflow_task_id        uuid references workflow.tasks(id) on delete set null,
+    trace_id                text,
+    span_id                 text,
+    parent_span_id          text,
+    depth                   int not null default 0,
+    state                   jsonb not null default '{}'::jsonb,
+    status                  text not null default 'pending'
+                                check (status in ('pending','running','succeeded',
+                                                  'failed','cancelled','quota_exceeded')),
+    created_at              timestamptz not null default now(),
+    updated_at              timestamptz not null default now(),
+    finished_at             timestamptz,
+    constraint interactive_runs_have_a_session
+        check (trigger_kind <> 'interactive' or session_id is not null),
+    constraint scheduled_runs_name_their_task
+        check (trigger_kind <> 'scheduled' or workflow_task_id is not null),
+    constraint child_runs_are_deeper_than_their_parent
+        check (parent_run_id is null or depth > 0)
+);
+
+create index on agentic.runs (session_id, created_at);
+create index on agentic.runs (parent_run_id);
+create index on agentic.runs (trace_id);
+create index on agentic.runs (owner_id, created_at desc);
+create index on agentic.runs (workflow_task_id) where workflow_task_id is not null;
+
+create trigger trg_runs_updated
+    before update on agentic.runs
+    for each row execute function public.touch_updated_at();
+
+-- ------------------------------------------------------------
+-- 5. Messages -- both persistence granularities in one table (brief §2)
+--
+-- Fast path: a user row and an assistant row, tool calls riding along as
+-- JSONB. Slow path: discrete tool_call/tool_response rows -- mandatory when a
+-- tool call IS a delegation, so the sub-run stays independently queryable
+-- rather than buried in a blob. role='summary' is a third kind entirely: one
+-- row per session, superseded rather than appended to (§3).
+-- ------------------------------------------------------------
+create table agentic.messages (
+    id           uuid primary key default gen_random_uuid(),
+    run_id       uuid references agentic.runs(id) on delete cascade,
+    session_id   uuid references agentic.sessions(id) on delete cascade,
+    role         text not null check (role in ('system','user','assistant',
+                                               'tool_call','tool_response','summary')),
+    content      text,
+    tool_calls   jsonb not null default '[]'::jsonb,
+    tool_call_id text,
+    is_error     boolean not null default false,
+    error_kind   text check (error_kind in ('tool_error','dispatch_error')),
+    -- Derived by the runtime from this turn's tool_response rows, never
+    -- authored by the LLM (§5.3). Tagged union, not one column meaning two
+    -- things:  {"kind":"chunk","resource_type","resource_id","chunk_id"}
+    --       |  {"kind":"node","node_id"}
+    citations    jsonb not null default '[]'::jsonb,
+    seq          bigserial,
+    created_at   timestamptz not null default now(),
+    constraint only_summaries_may_be_runless
+        check (role = 'summary' or run_id is not null),
+    constraint only_tool_responses_carry_errors
+        check (role = 'tool_response' or (is_error = false and error_kind is null)),
+    constraint only_assistants_carry_citations
+        check (role = 'assistant' or citations = '[]'::jsonb)
+);
+
+-- One summary per session, enforced by the database rather than by the
+-- application remembering to update instead of insert (§3).
+create unique index one_summary_per_session
+    on agentic.messages (session_id) where role = 'summary';
+create index on agentic.messages (session_id, seq);
+create index on agentic.messages (run_id, seq);
+
+alter table agentic.runs
+    add constraint runs_delegated_by_message_fk
+    foreign key (delegated_by_message_id)
+    references agentic.messages(id) on delete set null;
+
+-- ------------------------------------------------------------
+-- 6. Streaming -- NOTIFY per session, relayed as AG-UI events (brief §4)
+--
+-- Per session, not per run, and that is the whole trick: every run in a
+-- session -- delegated sub-runs included -- publishes to the same channel
+-- tagged with its own run_id, so multiplexing a delegation tree into one
+-- client stream is structural rather than something the runtime arranges.
+--
+-- NOTIFY's payload limit is 8000 bytes, so the payload is a reference (ids +
+-- role), never content: the relay reads the row back. Same discipline as
+-- workflow-engine's payload_ref.
+-- ------------------------------------------------------------
+create or replace function agentic.channel_for(p_session_id uuid) returns text
+language sql immutable as $$
+    select 'agui_' || replace(p_session_id::text, '-', '');
+$$;
+
+create or replace function agentic.notify_message() returns trigger as $$
+begin
+    perform pg_notify(
+        agentic.channel_for(new.session_id),
+        -- Tagged like every other event on this channel: the relay forwards
+        -- AG-UI events from the runtime as-is and treats this one as a
+        -- persistence checkpoint (read the row, emit it if the live delta was
+        -- missed), so a late-joining or reconnecting client is never left
+        -- with a gap the stream alone can't fill.
+        json_build_object(
+            'type',       'MESSAGE_PERSISTED',
+            'message_id', new.id,
+            'run_id',     new.run_id,
+            'role',       new.role,
+            'seq',        new.seq
+        )::text
+    );
+    return new;
+end;
+$$ language plpgsql
+set search_path = pg_catalog, public, agentic;
+
+create trigger trg_notify_message
+    after insert on agentic.messages
+    for each row when (new.session_id is not null)
+    execute function agentic.notify_message();
+
+-- ------------------------------------------------------------
+-- 7. RLS -- ENABLE, not FORCE (see header note 1)
+-- ------------------------------------------------------------
+alter table agentic.sessions enable row level security;
+alter table agentic.runs     enable row level security;
+alter table agentic.messages enable row level security;
+
+create policy sessions_owner on agentic.sessions
+    for select using (user_id = rbac.current_user_id());
+
+-- Scoped on the run's own owner, never through the session join: a scheduled
+-- run has no session, and an escape hatch for that case is how a table ends up
+-- with rows nobody can see and everybody can read (brief §3).
+create policy runs_owner on agentic.runs
+    for select using (owner_id = rbac.current_user_id());
+
+create policy messages_via_run on agentic.messages
+    for select using (
+        exists (select 1 from agentic.runs r
+                where r.id = messages.run_id
+                  and r.owner_id = rbac.current_user_id())
+        or exists (select 1 from agentic.sessions s
+                   where s.id = messages.session_id
+                     and s.user_id = rbac.current_user_id())
+    );
+
+-- Agents and tool_servers are configuration, not tenant data: readable by any
+-- authenticated caller, writable only through the functions below. RLS is
+-- ENABLEd with an explicitly permissive read policy rather than left off --
+-- the two are equivalent to a reader today and completely different to the next
+-- person to touch this file: "no policy" reads as an oversight, a policy that
+-- says `true` reads as a decision, and it is the seam per-tenant agents would
+-- attach to.
+--
+-- OPEN, and stated because it is a real consequence rather than an accident:
+-- every authenticated user can therefore see, and run, every agent -- `/chat`'s
+-- `model` field is just a name. A deployment that needs per-tenant agents needs
+-- a column that does not exist yet (brief.md §9).
+alter table agentic.agents       enable row level security;
+alter table agentic.tool_servers enable row level security;
+
+create policy agents_are_shared_config on agentic.agents
+    for select using (true);
+create policy tool_servers_are_shared_config on agentic.tool_servers
+    for select using (true);
+-- ------------------------------------------------------------
+-- 8. The write path -- SECURITY DEFINER, ownership checked explicitly
+--
+-- DEFINER bypasses RLS, so each function re-checks what the policy would have:
+-- these are the trusted path, and a trusted path that forgets to check is
+-- indistinguishable from no policy at all.
+-- ------------------------------------------------------------
+create or replace function agentic.create_session(p_title text default null)
+returns agentic.sessions
+language sql security definer
+set search_path = pg_catalog, public
+as $$
+    insert into agentic.sessions (user_id, title)
+    values (rbac.current_user_id(), p_title)
+    returning *;
+$$;
+
+create or replace function agentic.start_run(
+    p_agent_name    text,
+    p_session_id    uuid default null,
+    p_parent_run_id uuid default null,
+    p_delegated_by  uuid default null,
+    p_trace_id      text default null,
+    p_span_id       text default null,
+    p_trigger_kind  text default 'interactive',
+    p_workflow_task_id uuid default null
+) returns agentic.runs
+language plpgsql security definer
+set search_path = pg_catalog, public
+as $$
+declare
+    v_agent   agentic.agents;
+    v_parent  agentic.runs;
+    v_run     agentic.runs;
+    v_owner   uuid := rbac.current_user_id();
+    v_depth   int  := 0;
+    v_pspan   text;
+    v_trace   text := p_trace_id;
+begin
+    select * into v_agent from agentic.agents where name = p_agent_name;
+    if not found then
+        raise exception 'no agent named %', p_agent_name;
+    end if;
+
+    if p_session_id is not null then
+        if not exists (select 1 from agentic.sessions
+                       where id = p_session_id and user_id = v_owner) then
+            raise exception 'session % is not yours', p_session_id;
+        end if;
+
+        -- One live turn per conversation. Two concurrent turns both reload the
+        -- same window and both append to it, so the history each one saw is not
+        -- the history that ends up stored -- a silent corruption, not an error.
+        -- Delegated runs (parent_run_id set) are exempt: they happen *inside* a
+        -- turn, which is the whole point.
+        --
+        -- Bounded by age deliberately: a runtime that dies mid-turn would
+        -- otherwise leave a session wedged forever, and a stale `running` row
+        -- is evidence of a crash, not of a live client.
+        if p_parent_run_id is null and p_trigger_kind = 'interactive'
+           and exists (
+               select 1 from agentic.runs
+                where session_id = p_session_id
+                  and parent_run_id is null
+                  and status = 'running'
+                  and created_at > now() - interval '10 minutes'
+           )
+        then
+            raise exception 'session % already has a turn in flight', p_session_id;
+        end if;
+    end if;
+
+    if p_parent_run_id is not null then
+        select * into v_parent from agentic.runs where id = p_parent_run_id;
+        if not found or v_parent.owner_id <> v_owner then
+            raise exception 'parent run % is not yours', p_parent_run_id;
+        end if;
+        -- The delegation tree and the trace tree are the same tree: a child's
+        -- parent_span_id is simply its parent's span_id (brief §7).
+        v_depth := v_parent.depth + 1;
+        v_pspan := v_parent.span_id;
+        v_trace := coalesce(v_trace, v_parent.trace_id);
+
+        -- A hard ceiling, here and not only in the runtime. brief.md §9 leaves
+        -- the *policy* number open and a runtime may set a lower one; this is
+        -- the structural backstop, because start_run is granted to every
+        -- authenticated caller and an app-side limit protects only callers who
+        -- go through the app.
+        if v_depth > 8 then
+            raise exception 'delegation depth % exceeds the hard limit of 8', v_depth;
+        end if;
+    end if;
+
+    insert into agentic.runs (session_id, agent_id, owner_id, parent_run_id,
+                              delegated_by_message_id, trigger_kind,
+                              workflow_task_id, trace_id, span_id,
+                              parent_span_id, depth, status)
+    values (p_session_id, v_agent.id, v_owner, p_parent_run_id,
+            p_delegated_by, p_trigger_kind, p_workflow_task_id,
+            coalesce(v_trace, encode(gen_random_bytes(16), 'hex')),
+            coalesce(p_span_id, encode(gen_random_bytes(8), 'hex')),
+            v_pspan, v_depth, 'running')
+    returning * into v_run;
+    return v_run;
+end;
+$$;
+
+create or replace function agentic.finish_run(
+    p_run_id uuid,
+    p_status text,
+    p_state  jsonb default null
+) returns agentic.runs
+language plpgsql security definer
+set search_path = pg_catalog, public
+as $$
+declare
+    v_run agentic.runs;
+begin
+    select * into v_run from agentic.runs where id = p_run_id;
+    if not found or v_run.owner_id <> rbac.current_user_id() then
+        raise exception 'run % is not yours', p_run_id;
+    end if;
+
+    update agentic.runs
+       set status      = p_status,
+           state       = coalesce(p_state, state),
+           finished_at = case when p_status in ('pending','running')
+                              then null else now() end
+     where id = p_run_id
+     returning * into v_run;
+    return v_run;
+end;
+$$;
+
+-- One RPC, one transaction: a half-written turn is not a state this database
+-- can be left in (sequence.md Gate 2). Takes both granularities -- the caller
+-- decides fast or slow path, the function does not care.
+create or replace function agentic.persist_turn(p_rows jsonb)
+returns setof agentic.messages
+language plpgsql security definer
+set search_path = pg_catalog, public
+as $$
+declare
+    v_run_ids uuid[];
+begin
+    select array_agg(distinct (r->>'run_id')::uuid)
+      into v_run_ids
+      from jsonb_array_elements(p_rows) as r
+     where r->>'run_id' is not null;
+
+    if exists (select 1 from agentic.runs
+               where id = any(v_run_ids) and owner_id <> rbac.current_user_id())
+    then
+        raise exception 'cannot write messages into a run that is not yours';
+    end if;
+
+    return query
+    insert into agentic.messages (id, run_id, session_id, role, content, tool_calls,
+                                  tool_call_id, is_error, error_kind, citations)
+    -- The caller may supply the id, and for the assistant row it always does:
+    -- the runtime mints that id before the turn runs so its streamed
+    -- TEXT_MESSAGE_* deltas and this row are the same message (brief.md §4).
+    -- Letting the database assign one instead silently breaks that -- the
+    -- stream refers to a message id that never existed.
+    select coalesce((r->>'id')::uuid, gen_random_uuid()),
+           (r->>'run_id')::uuid,
+           (r->>'session_id')::uuid,
+           r->>'role',
+           r->>'content',
+           coalesce(r->'tool_calls', '[]'::jsonb),
+           r->>'tool_call_id',
+           coalesce((r->>'is_error')::boolean, false),
+           r->>'error_kind',
+           coalesce(r->'citations', '[]'::jsonb)
+      from jsonb_array_elements(p_rows) with ordinality as t(r, ord)
+     -- The ORDER BY is what makes `seq` follow conversation order rather than
+     -- whatever order the planner felt like emitting rows in. Postgres assigns
+     -- serial values in the order the INSERT's SELECT produces them; that is
+     -- relied on here deliberately, and named so the reliance is visible.
+     order by t.ord
+    returning *;
+end;
+$$;
+
+-- Superseded, never appended to -- the partial unique index makes that a
+-- database guarantee, this function makes it a single round trip (§3).
+create or replace function agentic.upsert_summary(p_session_id uuid, p_content text)
+returns agentic.messages
+language plpgsql security definer
+set search_path = pg_catalog, public
+as $$
+declare
+    v_row agentic.messages;
+begin
+    if not exists (select 1 from agentic.sessions
+                   where id = p_session_id and user_id = rbac.current_user_id()) then
+        raise exception 'session % is not yours', p_session_id;
+    end if;
+
+    insert into agentic.messages (session_id, role, content)
+    values (p_session_id, 'summary', p_content)
+    on conflict (session_id) where role = 'summary'
+    do update set content = excluded.content, created_at = now()
+    returning * into v_row;
+    return v_row;
+end;
+$$;
+
+-- Configuration writes. brief.md §6 calls applying an agent a *migration*, not
+-- a deploy -- these are what such a migration calls, and they are gated on the
+-- same permission model everything else in this collection uses.
+create or replace function agentic.upsert_agent(p_spec jsonb)
+returns agentic.agents
+language plpgsql security definer
+set search_path = pg_catalog, public
+as $$
+declare
+    v_row agentic.agents;
+begin
+    if not rbac.has_permission(rbac.current_user_id(), 'agents', 'update') then
+        raise exception 'not authorized to author agents';
+    end if;
+
+    insert into agentic.agents (name, system_prompt, model, tools,
+                                structured_output_schema, chained_action,
+                                summarizer_agent_id, context_policy)
+    values (p_spec->>'name',
+            coalesce(p_spec->>'system_prompt', ''),
+            p_spec->>'model',
+            coalesce(p_spec->'tools', '[]'::jsonb),
+            p_spec->'structured_output_schema',
+            p_spec->'chained_action',
+            (p_spec->>'summarizer_agent_id')::uuid,
+            coalesce(p_spec->'context_policy', '{}'::jsonb))
+    on conflict (name) do update
+       set system_prompt            = excluded.system_prompt,
+           model                    = excluded.model,
+           tools                    = excluded.tools,
+           structured_output_schema = excluded.structured_output_schema,
+           chained_action           = excluded.chained_action,
+           summarizer_agent_id      = excluded.summarizer_agent_id,
+           context_policy           = excluded.context_policy
+    returning * into v_row;
+    return v_row;
+end;
+$$;
+
+create or replace function agentic.upsert_tool_server(p_spec jsonb)
+returns agentic.tool_servers
+language plpgsql security definer
+set search_path = pg_catalog, public
+as $$
+declare
+    v_row agentic.tool_servers;
+begin
+    if not rbac.has_permission(rbac.current_user_id(), 'tool_servers', 'update') then
+        raise exception 'not authorized to register tool servers';
+    end if;
+
+    insert into agentic.tool_servers (name, kind, url, credential_ref,
+                                      emits_citations, serves_agents,
+                                      cached_tools, synced_at)
+    values (p_spec->>'name', p_spec->>'kind', p_spec->>'url',
+            p_spec->>'credential_ref',
+            coalesce((p_spec->>'emits_citations')::boolean, false),
+            coalesce((p_spec->>'serves_agents')::boolean, false),
+            coalesce(p_spec->'cached_tools', '[]'::jsonb),
+            case when p_spec ? 'cached_tools' then now() end)
+    on conflict (name) do update
+       set kind            = excluded.kind,
+           url             = excluded.url,
+           credential_ref  = excluded.credential_ref,
+           emits_citations = excluded.emits_citations,
+           serves_agents   = excluded.serves_agents,
+           cached_tools    = excluded.cached_tools,
+           synced_at       = coalesce(excluded.synced_at, agentic.tool_servers.synced_at)
+    returning * into v_row;
+    return v_row;
+end;
+$$;
+
+-- A chained-action target this system owns, and the reference example of the
+-- shape (brief.md §4): the runtime calls <target>(jsonb) with the run's
+-- structured output plus the run context that produced it --
+--   {"run_id", "session_id", "agent", "trigger_kind", "output": {...}}
+-- The context half is not optional: a chained action that only receives the
+-- model's output cannot write anything scoped to the conversation it came
+-- from, which is what both the summarizer here and §3's consolidation run need.
+--
+-- And `trigger_kind` is why the context needs to be more than ids. A chained
+-- action fires whenever its agent produces structured output -- including when
+-- that agent was invoked as somebody's *delegate* mid-conversation. The
+-- summarizer delegated to by another agent would then overwrite the live
+-- session's rolling summary with a compression of whatever it was asked. Found
+-- by running it: an agent that delegated to the summarizer clobbered the
+-- window summary of the conversation it was helping with. A session-scoped
+-- write must therefore check *why* the run happened, not only where it sat.
+-- The signature every chained-action target must have: jsonb in, jsonb out.
+-- Not a style preference -- the runtime persists the result as an ordinary
+-- tool_response message row, so it has to be JSON; a function returning a
+-- composite type cannot even be decoded by the client (confirmed the hard way:
+-- "text encoding of composite types is not supported").
+create or replace function agentic.apply_summary(p_payload jsonb)
+returns jsonb
+language sql security definer
+set search_path = pg_catalog, public
+as $$
+    select case
+        when p_payload->>'trigger_kind' is distinct from 'scheduled'
+            -- Not an error: the summarizer did its job, it simply was not the
+            -- scheduled window-summarization run, so its output is a tool
+            -- result for whoever delegated to it and nothing else.
+            then jsonb_build_object('skipped', 'not a scheduled run')
+        else to_jsonb(agentic.upsert_summary(
+            (p_payload->>'session_id')::uuid,
+            p_payload->'output'->>'summary'
+        ))
+    end;
+$$;
+
+-- ------------------------------------------------------------
+-- 9. The read path -- *_api views owned by api_viewer (header note 2)
+-- ------------------------------------------------------------
+grant usage on schema agentic to web_anon, authenticated, api_viewer;
+
+create view agentic.sessions_api as
+    select id, user_id, agui_thread_id, title, created_at from agentic.sessions;
+create view agentic.runs_api as
+    select id, session_id, agent_id, owner_id, parent_run_id,
+           delegated_by_message_id, trigger_kind, workflow_task_id,
+           trace_id, span_id, parent_span_id, depth, state, status,
+           created_at, finished_at
+      from agentic.runs;
+create view agentic.messages_api as
+    select id, run_id, session_id, role, content, tool_calls, tool_call_id,
+           is_error, error_kind, citations, seq, created_at
+      from agentic.messages;
+-- credential_ref is included, and that is deliberate rather than an oversight:
+-- it is a *reference* ("env:X", "vault://path"), never the secret itself --
+-- brief.md §5.2 forbids a literal secret in a row, so there is nothing here to
+-- hide. Excluding it was tried first and is worse than useless: the runtime
+-- reads its tool servers through this view like every other client, so hiding
+-- the ref silently produced unauthenticated tool syncs -- a tool list that
+-- looks correct and is missing every operation the caller's role would have
+-- been allowed to see.
+create view agentic.tool_servers_api as
+    select id, name, kind, url, credential_ref, emits_citations, serves_agents,
+           cached_tools, synced_at, created_at
+      from agentic.tool_servers;
+create view agentic.agents_api as
+    select id, name, system_prompt, model, tools, structured_output_schema,
+           chained_action, summarizer_agent_id, context_policy, created_at
+      from agentic.agents;
+
+grant select on agentic.sessions, agentic.runs, agentic.messages,
+                agentic.agents, agentic.tool_servers to api_viewer;
+grant execute on function rbac.current_user_id() to api_viewer;
+
+-- Temporary CREATE, exactly as user-rbac does it: needed only for the
+-- ownership transfer, revoked immediately after.
+grant create on schema agentic to api_viewer;
+alter view agentic.sessions_api     owner to api_viewer;
+alter view agentic.runs_api         owner to api_viewer;
+alter view agentic.messages_api     owner to api_viewer;
+alter view agentic.tool_servers_api owner to api_viewer;
+alter view agentic.agents_api       owner to api_viewer;
+revoke create on schema agentic from api_viewer;
+
+grant select on agentic.sessions_api, agentic.runs_api, agentic.messages_api,
+                agentic.tool_servers_api, agentic.agents_api to authenticated;
+
+grant execute on function agentic.create_session(text) to authenticated;
+grant execute on function agentic.start_run(text, uuid, uuid, uuid, text, text, text, uuid)
+    to authenticated;
+grant execute on function agentic.finish_run(uuid, text, jsonb) to authenticated;
+grant execute on function agentic.persist_turn(jsonb) to authenticated;
+grant execute on function agentic.upsert_summary(uuid, text) to authenticated;
+grant execute on function agentic.apply_summary(jsonb) to authenticated;
+grant execute on function agentic.upsert_agent(jsonb) to authenticated;
+grant execute on function agentic.upsert_tool_server(jsonb) to authenticated;
+grant execute on function agentic.channel_for(uuid) to authenticated, api_viewer;
+
+-- No base-table INSERT/UPDATE/DELETE grant to any PostgREST-facing role: the
+-- write path is the functions above, and nothing else.
+
+-- ------------------------------------------------------------
+-- 10. Invariant self-checks -- the same two this collection has already been
+--     bitten by, asserted at load time rather than trusted.
+-- ------------------------------------------------------------
+do $$
+declare
+    v_bad text;
+begin
+    -- (a) Every *_api view must be owned by api_viewer, NOT by the table
+    -- owner: an owner-privileged view owned by the table owner bypasses RLS
+    -- for every caller.
+    select string_agg(c.relname, ', ')
+      into v_bad
+      from pg_class c
+      join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname = 'agentic' and c.relkind = 'v'
+       and c.relname like '%\_api'
+       and pg_get_userbyid(c.relowner) <> 'api_viewer';
+    if v_bad is not null then
+        raise exception 'VIEW OWNERSHIP INVARIANT VIOLATED: % must be owned by '
+                        'api_viewer, not the table owner', v_bad;
+    end if;
+
+    -- (b) No write grant on a base table for the PostgREST-facing roles.
+    select string_agg(distinct table_name, ', ')
+      into v_bad
+      from information_schema.role_table_grants
+     where table_schema = 'agentic'
+       and grantee in ('web_anon', 'authenticated')
+       and privilege_type in ('INSERT', 'UPDATE', 'DELETE');
+    if v_bad is not null then
+        raise exception 'WRITE GRANT INVARIANT VIOLATED: % is writable directly; '
+                        'the write path is the SECURITY DEFINER functions only', v_bad;
+    end if;
 end $$;

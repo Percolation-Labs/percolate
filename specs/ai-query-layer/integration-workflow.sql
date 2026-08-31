@@ -13,7 +13,7 @@
 -- this collection specs.
 -- ============================================================
 
--- Two arities. SEMANTIC and HYBRID need a vector, which the database cannot
+-- Two arities. SEMANTIC and SEARCH need a vector, which the database cannot
 -- produce -- embedding is an external model call. So those modes are composed
 -- as: a `rest` step that embeds, then a p8ql step taking
 -- {{steps.embed.result}} as its second argument. LOOKUP, GRAPH and TEXT need

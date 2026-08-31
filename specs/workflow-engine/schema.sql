@@ -1328,7 +1328,7 @@ $$ language plpgsql;
 -- The worker does this for http_call steps; sql steps need it for the same
 -- reason and it was missing -- so a P8QL step could not consume the output of
 -- the REST step before it, which is exactly the composition the YAML syntax
--- exists to express. Found by running a pipeline whose HYBRID step needed the
+-- exists to express. Found by running a pipeline whose SEARCH step needed the
 -- embedding produced by a preceding model call.
 --
 -- Deliberately narrower than the worker's resolver: no {{env.*}}, because the
@@ -1509,7 +1509,14 @@ create trigger trg_autorun_sql_steps
 
 grant execute on function workflow.execute_sql_step(uuid) to worker, authenticated;
 grant execute on function workflow.drain_sql_steps(uuid, int) to worker, authenticated;
-grant select on workflow.step_functions to worker, authenticated;
+-- The allow-list is readable by `authenticated` for discoverability: a user
+-- authoring a `sql` step should be able to see which functions are callable
+-- without guessing. It is NOT granted to `worker`, and that omission is the
+-- point: execute_sql_step is SECURITY DEFINER, so nothing needs this grant to
+-- run, and a service role holding a table grant it never uses is exactly the
+-- privilege that survives long enough to be useful to an attacker. The claim
+-- "no service role holds a table grant" is only true if it stays true.
+grant select on workflow.step_functions to authenticated;
 
 -- ============================================================
 -- 18. YAML authoring: workflow.define_yaml()
@@ -1521,7 +1528,7 @@ grant select on workflow.step_functions to worker, authenticated;
 --     name: classify_recent
 --     steps:
 --       - id: find
---         p8ql: 'HYBRID "safety recall" FROM chunks LIMIT 5'
+--         p8ql: 'SEARCH "safety recall" FROM chunks LIMIT 5'
 --       - id: judge
 --         needs: [find]
 --         agent: classifier          # a row in agentic.agents, by NAME
@@ -1589,3 +1596,422 @@ $$ language plpgsql;
 -- It lives in ai-query-layer/integration-workflow.sql, applied after both --
 -- the same boundary discipline as workflow-engine/integration-rbac.sql.
 grant execute on function workflow.define_yaml(text) to authenticated;
+
+-- ------------------------------------------------------------
+-- 19. Schedules -- a scheduled workflow is a ROW, not a cron entry.
+--
+-- spec.md §10 said "register scheduled workflows with pg_cron" and left the
+-- shape open. Registering one cron job per schedule was tried first and is
+-- the wrong answer for this collection, for three reasons that only show up
+-- once you try it:
+--
+--   * cron.job is a catalog table in another extension's schema. It has no
+--     org_id and no owner, so a scheduled workflow could not be RLS-scoped,
+--     and "list my schedules" would have to read a table every tenant shares.
+--   * Creating one needs rights on the cron schema, so adding a schedule
+--     could never be an ordinary authenticated REST call.
+--   * It would be a second copy of state -- cron.job plus whatever row we
+--     kept alongside it -- and this collection has already paid for that kind
+--     of drift more than once.
+--
+-- So pg_cron drives exactly ONE job:
+--
+--     select cron.schedule('workflow-tick', '* * * * *',
+--                          $$select workflow.tick()$$);
+--
+-- and every schedule is a row in the table below. That keeps the whole
+-- feature inside the ownership and RLS model the rest of the collection
+-- already has, and it makes pg_cron a *driver* rather than a dependency:
+-- anything that calls workflow.tick() once a minute works identically -- an
+-- operator, a KEDA-scaled pod, a `while sleep 60` -- which matters because
+-- pg_cron's PG19 support is a patch we carry (dev/patches/), not a given.
+--
+-- The unit of scheduling is deliberately the RUN, not the task: a schedule
+-- starts a workflow through start_workflow() like any other caller, so
+-- retry, backoff, the reaper, saga compensation, cancellation and tracing all
+-- apply unchanged. Nothing here is a second execution engine.
+-- ------------------------------------------------------------
+create table workflow.schedules (
+    id             uuid primary key default gen_random_uuid(),
+    name           text not null unique,
+    -- The definition NAME, not its id: start_workflow() resolves the latest
+    -- version at fire time, so publishing v2 of a workflow changes what the
+    -- schedule runs without touching the schedule.
+    workflow_name  text not null,
+    cron_expr      text not null,
+    -- IANA zone. Stored per schedule rather than assumed UTC because "every
+    -- weekday at 09:00" is a statement about somebody's morning, and the whole
+    -- point of a cron expression is lost if it silently means 09:00 UTC.
+    timezone       text not null default 'UTC',
+    input          jsonb not null default '{}'::jsonb,
+    enabled        boolean not null default true,
+    -- 'skip': do not start a new run while this schedule's previous run is
+    -- still running. This is world-model-ingestion/brief.md §5's
+    -- overlapping-poll problem, solved once here rather than per pipeline: a
+    -- channel polled every minute whose fetch takes ninety seconds must not
+    -- accumulate runs. 'allow' is the escape hatch for genuinely independent
+    -- ticks.
+    overlap_policy text not null default 'skip'
+                       check (overlap_policy in ('skip','allow')),
+    -- last_tick_at is the minute this schedule was last EVALUATED;
+    -- last_fired_at is the minute it last STARTED a run. Two columns because
+    -- they answer different questions -- "is the ticker alive?" and "is this
+    -- schedule producing work?" -- and collapsing them makes a schedule that
+    -- is being skipped every minute look identical to one that is firing.
+    last_tick_at   timestamptz,
+    last_fired_at  timestamptz,
+    last_run_id    uuid references workflow.runs(id),
+    fire_count     bigint not null default 0,
+    skip_count     bigint not null default 0,
+    -- A schedule whose workflow was deleted, or whose input no longer
+    -- validates, must say so out loud rather than failing invisibly once a
+    -- minute forever (RELEASE-0.1.md §5, "honest failure modes").
+    last_error     text,
+    last_error_at  timestamptz,
+    org_id         uuid,
+    created_at     timestamptz not null default now(),
+    updated_at     timestamptz not null default now()
+);
+create index idx_schedules_due on workflow.schedules (last_tick_at) where enabled;
+create index idx_schedules_org on workflow.schedules (org_id);
+
+create trigger trg_schedules_touch before update on workflow.schedules
+    for each row execute function public.touch_updated_at();
+
+-- One field of a 5-field cron expression, against one integer.
+-- Supports `*`, `n`, `a-b`, `*/s`, `a-b/s` and `n/s`, comma-separated.
+-- Deliberately NOT supported: `@daily` and friends (sugar that would need its
+-- own expansion table), `L`/`W`/`#` (Quartz extensions, not Vixie cron).
+-- An unsupported field raises at authoring time via schedule_workflow().
+create or replace function workflow.cron_field_matches(
+    p_field text, p_value int, p_min int, p_max int)
+returns boolean as $$
+declare
+    v_part  text;
+    v_range text;
+    v_step  int;
+    v_lo    int;
+    v_hi    int;
+begin
+    foreach v_part in array string_to_array(btrim(p_field), ',')
+    loop
+        v_part := btrim(v_part);
+        if v_part = '' then
+            raise exception 'cron: empty element in field "%"', p_field;
+        end if;
+
+        v_step  := 1;
+        v_range := v_part;
+        if position('/' in v_part) > 0 then
+            v_range := split_part(v_part, '/', 1);
+            if split_part(v_part, '/', 2) !~ '^\d+$' then
+                raise exception 'cron: bad step in "%"', v_part;
+            end if;
+            v_step := split_part(v_part, '/', 2)::int;
+            if v_step < 1 then
+                raise exception 'cron: step must be >= 1 in "%"', v_part;
+            end if;
+        end if;
+
+        if v_range = '*' then
+            v_lo := p_min;
+            v_hi := p_max;
+        elsif v_range ~ '^\d+-\d+$' then
+            v_lo := split_part(v_range, '-', 1)::int;
+            v_hi := split_part(v_range, '-', 2)::int;
+        elsif v_range ~ '^\d+$' then
+            v_lo := v_range::int;
+            -- `n/s` means "from n to the end of the range, every s" (the
+            -- common extension); a bare `n` is just itself.
+            v_hi := case when v_step > 1 then p_max else v_lo end;
+        else
+            raise exception 'cron: unsupported element "%" in field "%"', v_part, p_field;
+        end if;
+
+        if v_lo < p_min or v_hi > p_max or v_lo > v_hi then
+            raise exception 'cron: "%" out of range %-% in field "%"',
+                v_part, p_min, p_max, p_field;
+        end if;
+
+        if p_value between v_lo and v_hi and (p_value - v_lo) % v_step = 0 then
+            return true;
+        end if;
+    end loop;
+    return false;
+end;
+$$ language plpgsql immutable;
+
+-- Does a 5-field cron expression match this instant, in this zone?
+--
+-- Matching rather than "compute the next run time" is deliberate, and it is
+-- what cron itself does: the ticker wakes once a minute and asks whether now
+-- matches. A next_run_at column would be a cached derivation that goes stale
+-- the moment a DST boundary, a timezone edit or a clock change disagrees
+-- with it -- and it would have to be recomputed correctly in every path that
+-- edits a schedule. There is nothing to keep in sync here.
+create or replace function workflow.cron_matches(
+    p_expr text, p_ts timestamptz, p_timezone text default 'UTC')
+returns boolean as $$
+declare
+    f               text[];
+    v_local         timestamp;
+    v_dow           int;
+    v_min_ok        boolean;
+    v_hour_ok       boolean;
+    v_month_ok      boolean;
+    v_dom_ok        boolean;
+    v_dow_ok        boolean;
+begin
+    f := regexp_split_to_array(btrim(p_expr), '\s+');
+    if coalesce(array_length(f, 1), 0) <> 5 then
+        raise exception
+            'cron: expected 5 fields (minute hour day-of-month month day-of-week), got % in "%"',
+            coalesce(array_length(f, 1), 0), p_expr;
+    end if;
+
+    -- Raises for an unknown zone, which is the point: a typo'd timezone is
+    -- caught when the schedule is created rather than never firing.
+    v_local := p_ts at time zone p_timezone;
+
+    -- All five fields are evaluated before any of them is allowed to decide
+    -- the answer. Short-circuiting on the first non-match is the obvious
+    -- implementation and it makes validation depend on the CLOCK: with
+    -- `5 9 * * MON`, a check run at 09:04 returns false from the minute field
+    -- and never parses the unsupported day-of-week at all -- so
+    -- schedule_workflow() accepts it, and it fails once a minute forever
+    -- instead of in the caller's hand. Found by testing exactly that.
+    v_min_ok   := workflow.cron_field_matches(f[1], extract(minute from v_local)::int, 0, 59);
+    v_hour_ok  := workflow.cron_field_matches(f[2], extract(hour   from v_local)::int, 0, 23);
+    v_month_ok := workflow.cron_field_matches(f[4], extract(month  from v_local)::int, 1, 12);
+
+    v_dow    := extract(dow from v_local)::int;    -- 0 = Sunday, matching cron
+    v_dom_ok := workflow.cron_field_matches(f[3], extract(day from v_local)::int, 1, 31);
+    -- Both 0 and 7 mean Sunday in cron, so Sunday is tested twice.
+    v_dow_ok := workflow.cron_field_matches(f[5], v_dow, 0, 7)
+                or (v_dow = 0 and workflow.cron_field_matches(f[5], 7, 0, 7));
+
+    if not (v_min_ok and v_hour_ok and v_month_ok) then
+        return false;
+    end if;
+
+    -- Vixie cron's genuinely surprising rule, reproduced rather than "fixed":
+    -- when BOTH day-of-month and day-of-week are restricted, a match on
+    -- either one fires. `0 0 13 * 5` is the 13th *or* any Friday, not
+    -- Friday the 13th. Implementing the intuitive AND here would make every
+    -- expression copied from a crontab mean something different.
+    if f[3] <> '*' and f[5] <> '*' then
+        return v_dom_ok or v_dow_ok;
+    end if;
+    return v_dom_ok and v_dow_ok;
+end;
+$$ language plpgsql stable;
+
+-- The ticker. Call once a minute, from pg_cron or from anything else.
+--
+-- Returns the number of runs STARTED, so a caller (or a monitoring query) can
+-- tell "the ticker ran and nothing was due" from "the ticker is not running",
+-- which last_tick_at also answers per schedule.
+create or replace function workflow.tick(p_now timestamptz default now())
+returns int as $$
+declare
+    v_minute  timestamptz := date_trunc('minute', p_now);
+    s         workflow.schedules;
+    v_run_id  uuid;
+    v_started int := 0;
+    v_active  boolean;
+begin
+    for s in
+        select * from workflow.schedules
+         where enabled
+           -- Dedupe by minute: two overlapping ticks, or a ticker that fires
+           -- twice in the same minute, cannot double-start anything.
+           and (last_tick_at is null or last_tick_at < v_minute)
+         order by name
+         for update skip locked
+    loop
+        begin
+            if not workflow.cron_matches(s.cron_expr, v_minute, s.timezone) then
+                update workflow.schedules set last_tick_at = v_minute where id = s.id;
+                continue;
+            end if;
+
+            if s.overlap_policy = 'skip' and s.last_run_id is not null then
+                select exists (
+                    select 1 from workflow.runs r
+                     where r.id = s.last_run_id and r.status = 'running'
+                ) into v_active;
+                if v_active then
+                    update workflow.schedules
+                       set last_tick_at = v_minute, skip_count = skip_count + 1
+                     where id = s.id;
+                    continue;
+                end if;
+            end if;
+
+            -- The external_id is the schedule and the minute, which makes a
+            -- fire idempotent through the engine's OWN idempotency rather
+            -- than a second mechanism here: if this transaction is retried,
+            -- start_workflow() returns the existing run instead of a second
+            -- one.
+            v_run_id := workflow.start_workflow(
+                s.workflow_name,
+                s.input,
+                'schedule:' || s.name || ':' ||
+                    to_char(v_minute at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI"Z"'),
+                null);
+
+            update workflow.schedules
+               set last_tick_at  = v_minute,
+                   last_fired_at = v_minute,
+                   last_run_id   = v_run_id,
+                   fire_count    = fire_count + 1,
+                   last_error    = null,
+                   last_error_at = null
+             where id = s.id;
+            v_started := v_started + 1;
+
+        exception when others then
+            -- One broken schedule must not stop the other schedules from
+            -- firing. The subtransaction rolls back, the record of WHY does
+            -- not: this update runs after the rollback.
+            update workflow.schedules
+               set last_tick_at  = v_minute,
+                   last_error    = sqlerrm,
+                   last_error_at = now()
+             where id = s.id;
+        end;
+    end loop;
+
+    return v_started;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- ---------- the REST surface -------------------------------------------
+-- Three functions, reached over PostgREST as POST /rpc/<name> with
+-- `Content-Profile: workflow`. Functions rather than table grants for the
+-- same reason as everywhere else in this schema: the write path is a
+-- SECURITY DEFINER call, and no PostgREST-facing role holds INSERT on a base
+-- table.
+
+-- Every SECURITY DEFINER function an end user can reach must do its own
+-- authorization -- integration-rbac.sql (e) states the rule and records the
+-- confirmed exploit that produced it. These three take a caller-supplied
+-- schedule NAME, so without a check any authenticated caller could repoint or
+-- delete any tenant's schedule.
+--
+-- The core engine has no identity system to consult, so this is the seam:
+-- integration-rbac.sql replaces this function with the real owner/permission
+-- check. The default DENIES rather than permits -- anyone who is not a member
+-- of the role owning the table is refused -- so a deployment that grants
+-- schedule management to users without applying integration-rbac.sql fails
+-- loudly instead of silently authorizing everyone. An identity-free
+-- deployment (the engine standing alone) still works, because there the
+-- operator IS the schema owner.
+create or replace function workflow.assert_schedule_access(p_name text, p_action text)
+returns void as $$
+declare
+    v_owner name;
+begin
+    select pg_get_userbyid(c.relowner) into v_owner
+      from pg_class c join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname = 'workflow' and c.relname = 'schedules';
+
+    if pg_has_role(session_user, v_owner, 'member') then
+        return;
+    end if;
+
+    raise exception 'not authorized to % schedule "%"', p_action, p_name
+        using hint = 'workflow-engine/integration-rbac.sql installs the '
+                     'owner-and-permission check this default stands in for';
+end;
+$$ language plpgsql stable security definer set search_path = pg_catalog, public;
+
+-- Create or update a schedule, by name. Idempotent: calling it again with a
+-- different expression edits the schedule rather than creating a second one,
+-- so a deployment can re-run its own seed without accumulating duplicates.
+create or replace function workflow.schedule_workflow(
+    p_name          text,
+    p_workflow      text,
+    p_cron          text,
+    p_input         jsonb default '{}'::jsonb,
+    p_timezone      text  default 'UTC',
+    p_overlap       text  default 'skip')
+returns uuid as $$
+declare
+    v_id uuid;
+begin
+    -- Validate everything that can be validated NOW. A schedule that cannot
+    -- possibly fire should fail in the caller's hand, not once a minute into
+    -- last_error where nobody is looking.
+    perform workflow.assert_schedule_access(p_name, 'create');
+
+    if not exists (select 1 from workflow.definitions where name = p_workflow) then
+        raise exception 'no workflow definition named "%"', p_workflow
+            using hint = 'register it with workflow.define_yaml() first';
+    end if;
+    -- Raises on a malformed expression or an unknown timezone.
+    perform workflow.cron_matches(p_cron, now(), p_timezone);
+
+    insert into workflow.schedules (name, workflow_name, cron_expr, input,
+                                    timezone, overlap_policy)
+    values (p_name, p_workflow, p_cron, coalesce(p_input, '{}'::jsonb),
+            p_timezone, p_overlap)
+    on conflict (name) do update
+        set workflow_name  = excluded.workflow_name,
+            cron_expr      = excluded.cron_expr,
+            input          = excluded.input,
+            timezone       = excluded.timezone,
+            overlap_policy = excluded.overlap_policy,
+            last_error     = null,
+            last_error_at  = null
+    returning id into v_id;
+
+    return v_id;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- Enable or disable without losing the definition or its history. Disabling
+-- is the reversible operation and is what a UI's toggle should call;
+-- unschedule_workflow() is the destructive one.
+create or replace function workflow.set_schedule_enabled(
+    p_name text, p_enabled boolean)
+returns boolean as $$
+declare
+    v_found boolean;
+begin
+    perform workflow.assert_schedule_access(p_name, 'enable');
+
+    update workflow.schedules set enabled = p_enabled
+     where name = p_name
+    returning true into v_found;
+    return coalesce(v_found, false);
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- Returns false rather than raising when the name is unknown, so that
+-- deleting something already deleted is not an error a caller has to catch.
+create or replace function workflow.unschedule_workflow(p_name text)
+returns boolean as $$
+declare
+    v_found boolean;
+begin
+    perform workflow.assert_schedule_access(p_name, 'delete');
+
+    delete from workflow.schedules where name = p_name
+    returning true into v_found;
+    return coalesce(v_found, false);
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- The ticker runs as `scheduler`, the role user-rbac/roles.sql §3 defines for
+-- exactly this and which holds no table grants. tick() is SECURITY DEFINER,
+-- so EXECUTE is the whole grant it needs.
+grant execute on function workflow.tick(timestamptz) to scheduler;
+
+grant execute on function workflow.schedule_workflow(text, text, text, jsonb, text, text)
+    to authenticated;
+grant execute on function workflow.set_schedule_enabled(text, boolean) to authenticated;
+grant execute on function workflow.unschedule_workflow(text) to authenticated;
+grant execute on function workflow.cron_matches(text, timestamptz, text) to authenticated;
+
+revoke execute on function workflow.assert_schedule_access(text, text) from public;

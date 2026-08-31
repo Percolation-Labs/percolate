@@ -137,7 +137,7 @@ begin
     -- The corpus the query layer documents must actually be registered.
     if not exists (select 1 from aiq.lexical_sources where name = 'chunks')
        or not exists (select 1 from aiq.semantic_sources where name = 'chunks') then
-        raise exception 'the "chunks" source is not registered -- TEXT/SEMANTIC/HYBRID have no corpus';
+        raise exception 'the "chunks" source is not registered -- TEXT/SEMANTIC/SEARCH have no corpus';
     end if;
 
     raise notice 'world-model-ingestion self-check passed: files unexposed; chunks corpus registered';

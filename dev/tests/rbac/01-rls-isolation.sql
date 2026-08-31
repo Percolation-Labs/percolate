@@ -12,6 +12,23 @@
 
 \set ON_ERROR_STOP on
 
+-- 0. Idempotent teardown.
+--
+-- The rest of this file deliberately uses real BEGIN/COMMIT blocks -- it is
+-- simulating PostgREST's one-transaction-per-request -- so it cannot be
+-- wrapped in a single rolled-back transaction the way the other suites are.
+-- That makes it commit its fixtures, and a suite that can only be run once is
+-- not a suite. Clean up first instead.
+drop table if exists widgets;
+delete from rbac.user_roles where user_id in (
+    '11111111-1111-1111-1111-111111111111',
+    '22222222-2222-2222-2222-222222222222');
+delete from rbac.role_permissions where role in ('admin','member');
+delete from rbac.users where id in (
+    '11111111-1111-1111-1111-111111111111',
+    '22222222-2222-2222-2222-222222222222');
+delete from rbac.roles where name in ('admin','member');
+
 -- 1. Two users, one role each
 insert into rbac.users (id, email) values
   ('11111111-1111-1111-1111-111111111111', 'alice@test.com'),

@@ -104,13 +104,22 @@ grant authenticated to authenticator;
 --    audits it, which it could then forge entries in.
 --
 --    scheduler: what pg_cron (or an operator) runs maintenance as --
---    promote_due_timers(), reap_stale_tasks(). Separated from worker because
---    "run the state machine" and "sweep stale state" are different jobs with
---    different blast radii, and a worker should not be able to reap.
+--    workflow.tick(), promote_due_timers(), reap_stale_tasks(). Separated
+--    from worker because "run the state machine" and "sweep stale state" are
+--    different jobs with different blast radii, and a worker should not be
+--    able to reap.
 --
 --    Neither may be a superuser, for the same reason as every other role
---    here. Both are NOLOGIN: real deployments grant them to a LOGIN role
+--    here. Both are NOLOGIN here: real deployments grant them to a LOGIN role
 --    whose credential lives in deployment config.
+--
+--    One caveat worth stating because it costs an hour to rediscover:
+--    pg_cron does not run a job inside the server, it opens a libpq
+--    CONNECTION as the job's username. A NOLOGIN scheduler therefore produces
+--    "cron job N connection failed" in the server log once a minute -- the
+--    job is registered, active, and silently doing nothing. A deployment that
+--    drives the clock with pg_cron must give this role LOGIN (dev/ does, over
+--    loopback); one that drives tick() from outside does not.
 -- ------------------------------------------------------------
 create role worker nologin;
 create role scheduler nologin;

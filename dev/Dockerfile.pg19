@@ -16,16 +16,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN cd /tmp && git clone --branch v0.8.6 https://github.com/pgvector/pgvector.git \
     && cd pgvector && make && make install && rm -rf /tmp/pgvector
 
-# pg_cron — core per meta/postgres-manifest.md
-# FINDING (2026-08-31): v1.6.7 (latest tag, == main HEAD) fails to build against
-# PG19 beta3. PG19's c.h now expands StaticAssertExpr() using C11 `static_assert`
-# directly (previously implemented differently); pg_cron's job_metadata.c hits a
-# header-ordering interaction with glibc's <assert.h> macro and fails with
-# "expected specifier-qualifier-list before 'extern'" at the AllocSetContextCreate
-# call site. Not yet root-caused to a one-line fix; disabled here so the rest of
-# the experiment isn't blocked. See ../FINDINGS.md.
-# RUN cd /tmp && git clone --branch v1.6.7 https://github.com/citusdata/pg_cron.git \
-#     && cd pg_cron && make && make install && rm -rf /tmp/pg_cron
+# pg_cron — core per meta/postgres-manifest.md, and the driver behind
+# workflow.tick() (workflow-engine/schema.sql §19).
+#
+# RESOLVED (was: "fails to build against PG19 beta3, not root-caused"). It was
+# never a header-ordering interaction with <assert.h>: pg_cron's Makefile pins
+# -std=c99, and PG19's StaticAssertExpr() needs C11's `static_assert`. Three
+# lines, all recorded with their reasoning in patches/pg_cron-pg19.patch.
+#
+# Applied as a patch rather than a fork so the delta stays visible and this
+# whole block disappears the day upstream supports PG19.
+COPY patches/pg_cron-pg19.patch /tmp/
+RUN cd /tmp && git clone --branch v1.6.7 https://github.com/citusdata/pg_cron.git \
+    && cd pg_cron && git apply /tmp/pg_cron-pg19.patch \
+    && make && make install && rm -rf /tmp/pg_cron /tmp/pg_cron-pg19.patch
 
 # pg_partman — core per meta/postgres-manifest.md — untested pending the above.
 # RUN cd /tmp && git clone --branch v5.2.4 https://github.com/pgpartman/pg_partman.git \

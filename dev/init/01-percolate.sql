@@ -20,7 +20,13 @@ grant authenticated to authenticator;
 -- They hold NO table grants -- every interaction is a SECURITY DEFINER function
 -- call -- which is what makes running them safe to hand to anyone.
 create role worker login password 'workerpass';
-create role scheduler nologin;
+-- LOGIN, unlike the spec's default: pg_cron runs each job over a libpq
+-- connection as the job's username, so a NOLOGIN scheduler means "cron job N
+-- connection failed" once a minute with the job still showing active. No
+-- password: the connection is loopback inside the container, which pg_hba
+-- trusts. It holds no table grants -- all three jobs are SECURITY DEFINER
+-- function calls.
+create role scheduler login;
 
 -- 2. The extensions a non-superuser cannot install.
 create extension if not exists vector;
@@ -41,3 +47,26 @@ grant create, usage on schema public to app_owner;
 set role app_owner;
 create extension percolate cascade;
 reset role;
+
+-- 5. The clock. ONE cron job for the whole system.
+--
+-- Every scheduled workflow is a row in workflow.schedules, so this never
+-- changes and nobody needs rights on the cron schema to add a schedule --
+-- that is an ordinary authenticated REST call to
+-- POST /rpc/schedule_workflow (workflow-engine/schema.sql §19).
+--
+-- The two maintenance jobs the engine has always documented in comments get
+-- registered here too, for the first time: promote_due_timers() is what makes
+-- `timer` steps fire at all, and reap_stale_tasks() is what recovers a task
+-- whose worker died. Both were speced, granted to `scheduler`, and then left
+-- with nothing calling them.
+--
+-- Jobs run as `scheduler`, the role user-rbac/roles.sql defines for exactly
+-- this and which holds no table grants: all three functions are SECURITY
+-- DEFINER, so EXECUTE is the whole grant any of them needs.
+select cron.schedule('workflow-tick',     '* * * * *', $$select workflow.tick()$$);
+select cron.schedule('workflow-reaper',   '* * * * *', $$select workflow.reap_stale_tasks()$$);
+select cron.schedule('workflow-timers',   '* * * * *', $$select workflow.promote_due_timers()$$);
+
+update cron.job set username = 'scheduler'
+ where jobname in ('workflow-tick', 'workflow-reaper', 'workflow-timers');

@@ -16,6 +16,28 @@
 -- The rule this encodes: a capability named in a spec is a row in the
 -- expectations list below. If the spec says it, this file asserts it, and a
 -- missing piece fails here rather than in someone's first hour.
+--
+-- ------------------------------------------------------------
+-- TWO THINGS THIS FILE DOES NOT COVER, stated here so its final
+-- "SURFACE COMPLETE" is not read as more than it means.
+--
+-- 1. SERVICE ROUTES. Every check below is a Postgres catalog lookup. The
+--    database halves of the service contracts are covered -- register_upload,
+--    resolve_file, claim_task, complete_task -- but no HTTP surface is:
+--    not POST /files, not GET /files/{id}, not /health, not POST /chat,
+--    not /internal/run, not the MCP transport. Those live in
+--    percolate-core, which is a dependency consumed at a contract, and the
+--    contract is currently kept honest by prose rather than by this file.
+--    An audit run reported clean while `POST /files` claimed a scraper that
+--    did not exist; that is the gap, precisely.
+--
+-- 2. THE AGENTIC SUBSYSTEM. Every other subsystem has a block below. This one
+--    has none -- no agentic schema, no sessions/runs/messages/agents tables,
+--    no functions. It is the least-exercised corner of the collection and the
+--    audit is silent about it rather than reassuring.
+--
+-- Both are debts, not decisions. `meta/skills/spec-driven-development` says
+-- the audit should exist before the thing it describes.
 -- ============================================================
 
 \set ON_ERROR_STOP on
@@ -79,7 +101,8 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','function','aiq.graph_walk','uuid,integer,text,integer','§7: GRAPH depth n>1'),
 ('ai-query-layer','function','aiq.semantic_in','vector,text,integer','§10: SEMANTIC, model-scoped'),
 ('ai-query-layer','function','aiq.lexical','text,text,integer','§11: TEXT'),
-('ai-query-layer','function','aiq.hybrid','text,text,vector,text,integer,integer','§11: HYBRID / RRF'),
+('ai-query-layer','function','aiq.search','text,text,vector,text,integer,integer','§11: SEARCH / RRF'),
+('ai-query-layer','function','aiq.lookup_many','text[],boolean,integer','§7: LOOKUP takes a list of keys'),
 ('ai-query-layer','function','aiq.sql_passthrough','text','§12: the escape hatch'),
 ('ai-query-layer','function','aiq.check_drift','text','graph-identity.md D7'),
 ('ai-query-layer','function','aiq.rebuild_entity_type','text','graph-identity.md: rebuild'),
@@ -96,6 +119,35 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('world-model-ingestion','function','content.resolve_file','uuid','brief.md §3.5: proxied reads'),
 ('world-model-ingestion','function','content.record_chunks','uuid,jsonb','brief.md §3: chunking writes back'),
 ('world-model-ingestion','function','content.check_drift','','brief.md §3: reconciliation is definition-of-done'),
+
+-- ---------- workflow-engine: schedules (schema.sql §19) ----------------
+-- pg_cron is deliberately NOT asserted here. It is one caller of tick(), not
+-- the mechanism -- an operator or a KEDA-scaled pod driving the same function
+-- is a supported deployment -- so what the spec promises is the capability,
+-- and that is what this checks.
+('workflow-engine','table','workflow.schedules',null,'§19: a scheduled workflow is a row'),
+('workflow-engine','function','workflow.tick','timestamptz','§19: the one clock'),
+('workflow-engine','function','workflow.cron_matches','text,timestamptz,text','§19: 5-field cron, in the schedule''s timezone'),
+('workflow-engine','function','workflow.schedule_workflow','text,text,text,jsonb,text,text','§19: POST /rpc/schedule_workflow'),
+('workflow-engine','function','workflow.set_schedule_enabled','text,boolean','§19: disable without losing history'),
+('workflow-engine','function','workflow.unschedule_workflow','text','§19: the destructive one'),
+
+-- ---------- agentic ----------------------------------------------------
+-- The fifth subsystem. It had a complete schema.sql and zero rows here, which
+-- is the one gap this file cannot catch on its own: an unbuilt subsystem
+-- declares no expectations, so the audit passes by not asking.
+('agentic','schema','agentic',null,'brief.md: conversations and delegation live in Postgres'),
+('agentic','table','agentic.agents',null,'brief.md §2: every agent is a row, never runtime code'),
+('agentic','table','agentic.sessions',null,'brief.md §3: the conversation'),
+('agentic','table','agentic.runs',null,'brief.md §3: interactive and scheduled runs are one primitive'),
+('agentic','table','agentic.messages',null,'brief.md §4: the turn record'),
+('agentic','table','agentic.tool_servers',null,'brief.md §5.2: a tool is an OpenAPI/MCP binding'),
+('agentic','function','agentic.create_session','text','brief.md §3'),
+('agentic','function','agentic.start_run','text,uuid,uuid,uuid,text,text,text,uuid','brief.md §3: delegation carries the span tree'),
+('agentic','function','agentic.finish_run','uuid,text,jsonb','brief.md §3'),
+('agentic','function','agentic.persist_turn','jsonb','brief.md §4: one call per turn, not N inserts'),
+('agentic','function','agentic.upsert_agent','jsonb','brief.md §2: agents are declared, not deployed'),
+('agentic','function','agentic.upsert_tool_server','jsonb','brief.md §5.2'),
 
 -- ---------- registrations the docs depend on ---------------------------
 ('cross','registration','lexical:chunks',null,'USAGE.md tells readers TEXT searches "chunks"'),
