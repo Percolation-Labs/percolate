@@ -1,0 +1,5 @@
+comment = 'p8 query dialect parser'
+default_version = '0.1.0'
+module_pathname = '$libdir/p8_query'
+relocatable = false
+superuser = false

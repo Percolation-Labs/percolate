@@ -563,16 +563,18 @@ $$ language plpgsql stable;
 -- different shapes, and forcing them into one row type would mean a lowest
 -- common denominator that loses each mode's useful columns.
 -- ------------------------------------------------------------
--- DEPENDENCY, stated because it is the one thing here that is not core SQL:
--- this function needs aiq_parse(), which lives in the OPTIONAL pgrx extension.
--- Everything else in this file works without it -- aiq.lookup(),
--- graph_neighbors(), graph_walk(), semantic_in(), lexical() and hybrid() are
--- plain SQL and are the no-extension path. The dialect is an ergonomic layer
--- over them (one RPC instead of six), not a requirement for using them.
+-- DEPENDENCY: aiq_parse(), from the p8_query extension. REQUIRED, not
+-- optional -- the dialect is the primary interface to this layer, and
+-- install.sh treats p8_query exactly like pgcrypto or pgvector.
 --
--- Checked at call time with an actionable message rather than failing on an
--- unqualified "function does not exist", which reads as a broken install
--- rather than a missing optional component.
+-- The per-mode functions (lookup, graph_neighbors, graph_walk, semantic_in,
+-- lexical, hybrid) remain plain SQL and callable directly. That is a
+-- convenience for SQL clients and a fallback for a broken install, not a
+-- supported alternative interface -- new capability lands in the dialect.
+--
+-- Checked at call time so a missing extension says WHICH extension and how to
+-- get it, rather than failing on an unqualified "function does not exist"
+-- that reads as a corrupt schema.
 create or replace function aiq.query(p_query text, p_embedding vector default null)
 returns jsonb as $$
 declare
@@ -582,11 +584,12 @@ declare
 begin
     if to_regprocedure('aiq_parse(text)') is null then
         raise exception
-            'the query dialect needs the optional p8 parser extension (aiq_parse). '
-            'Either install it, or call the per-mode functions directly -- '
-            'aiq.lookup(), aiq.graph_neighbors(), aiq.graph_walk(), '
-            'aiq.semantic_in(), aiq.lexical(), aiq.hybrid() -- which are plain '
-            'SQL and need no extension.';
+            'the p8_query extension is not installed (aiq_parse is missing). '
+            'It is required: run "create extension p8_query", or build it with '
+            '"cd extension/p8_query && cargo pgrx package --features pg19". '
+            'The per-mode functions (aiq.lookup, aiq.graph_neighbors, '
+            'aiq.graph_walk, aiq.semantic_in, aiq.lexical, aiq.hybrid) still '
+            'work directly if you need to proceed without it.';
     end if;
     p := aiq_parse(p_query);
 
