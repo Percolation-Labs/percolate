@@ -22,6 +22,19 @@
 
 create extension if not exists pgcrypto;
 
+-- System-fields envelope (specs/README.md ground rule): mutable entity
+-- tables get created_at/updated_at maintained by this shared trigger, never
+-- hand-set in every UPDATE statement -- confirmed error-prone the hard way
+-- (workflow_runs.updated_at was hand-set in some UPDATE statements and not
+-- verified against all of them; tasks had no updated_at at all despite
+-- being the most heavily mutated table in this schema).
+create or replace function touch_updated_at() returns trigger as $$
+begin
+    new.updated_at = now();
+    return new;
+end;
+$$ language plpgsql;
+
 -- ------------------------------------------------------------
 -- 1. Workflow defs
 -- ------------------------------------------------------------
@@ -31,6 +44,11 @@ create table workflow_defs (
     version     int not null default 1,
     spec        jsonb not null,   -- {"steps": [{"key","queue","kind","depends_on":[keys]}]}
     created_at  timestamptz not null default now(),
+    -- Deprecation, not deletion: existing runs still reference a specific
+    -- (name, version), so a def is retired by marking it, never removed.
+    -- Was a genuine gap -- this table had no way to say "don't start new
+    -- runs against this version" before this column existed.
+    deleted_at  timestamptz,
     unique (name, version)
 );
 
@@ -187,8 +205,18 @@ create table tasks (
     compensated_at   timestamptz,          -- set once this task's compensation has run
     decision_output_hash text,             -- determinism guard: hash of a decision's recorded output
     created_at       timestamptz not null default now(),
+    -- Was missing entirely despite being the most heavily mutated table in
+    -- this schema (claim/heartbeat/complete/fail/cancel all touch a row) --
+    -- system-fields ground rule, maintained by touch_updated_at() below, not
+    -- hand-set at each call site.
+    updated_at       timestamptz not null default now(),
     unique (run_id, step_key)
 );
+
+create trigger trg_workflow_runs_touch before update on workflow_runs
+    for each row execute function touch_updated_at();
+create trigger trg_tasks_touch before update on tasks
+    for each row execute function touch_updated_at();
 
 create index idx_tasks_claimable on tasks (queue, priority, run_after) where status = 'ready';
 create index idx_tasks_run on tasks (run_id);
