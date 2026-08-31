@@ -94,7 +94,7 @@ grant select on content.channels, content.resources, content.resource_chunks
 -- The Content Server registers uploads and the ingestion workflow records
 -- chunks; both go through SECURITY DEFINER functions, so neither needs a write
 -- grant on any table.
-grant execute on function content.register_upload(text,text,text,text,bigint,text,text,text,uuid,jsonb,text) to authenticated;
+grant execute on function content.register_upload(text,text,text,text,bigint,text,text,text,uuid,jsonb,text,text) to authenticated;
 grant execute on function content.register_fetched(text,text,text,text,uuid,jsonb) to authenticated;
 grant execute on function content.record_chunks(uuid,jsonb) to worker, authenticated;
 grant execute on function content.resolve_file(uuid) to authenticated;

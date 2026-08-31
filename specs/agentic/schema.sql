@@ -574,10 +574,12 @@ begin
     end if;
 
     insert into agentic.tool_servers (name, kind, url, credential_ref,
-                                      emits_citations, cached_tools, synced_at)
+                                      emits_citations, serves_agents,
+                                      cached_tools, synced_at)
     values (p_spec->>'name', p_spec->>'kind', p_spec->>'url',
             p_spec->>'credential_ref',
             coalesce((p_spec->>'emits_citations')::boolean, false),
+            coalesce((p_spec->>'serves_agents')::boolean, false),
             coalesce(p_spec->'cached_tools', '[]'::jsonb),
             case when p_spec ? 'cached_tools' then now() end)
     on conflict (name) do update
@@ -585,6 +587,7 @@ begin
            url             = excluded.url,
            credential_ref  = excluded.credential_ref,
            emits_citations = excluded.emits_citations,
+           serves_agents   = excluded.serves_agents,
            cached_tools    = excluded.cached_tools,
            synced_at       = coalesce(excluded.synced_at, agentic.tool_servers.synced_at)
     returning * into v_row;
@@ -657,7 +660,7 @@ create view agentic.messages_api as
 -- looks correct and is missing every operation the caller's role would have
 -- been allowed to see.
 create view agentic.tool_servers_api as
-    select id, name, kind, url, credential_ref, emits_citations,
+    select id, name, kind, url, credential_ref, emits_citations, serves_agents,
            cached_tools, synced_at, created_at
       from agentic.tool_servers;
 create view agentic.agents_api as
