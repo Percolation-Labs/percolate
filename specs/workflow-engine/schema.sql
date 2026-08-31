@@ -1579,25 +1579,12 @@ $$ language plpgsql;
 -- P8QL as a step. This is what makes a query a first-class workflow node with
 -- no process behind it -- it is an ordinary §17 sql step whose registered
 -- function happens to be the query dialect.
--- Two arities. SEMANTIC and HYBRID need a vector, which the database cannot
--- produce -- embedding is an external model call. So those modes are composed
--- as: a `rest` step that embeds, then a p8ql step taking
--- {{steps.embed.result}} as its second argument. LOOKUP, GRAPH and TEXT need
--- no vector and use the one-argument form.
-create or replace function workflow.p8ql(p_query text)
-returns jsonb as $$
-    select aiq.query(p_query);
-$$ language sql;
-
-create or replace function workflow.p8ql(p_query text, p_embedding jsonb)
-returns jsonb as $$
-    select aiq.query(p_query,
-        case when p_embedding is null or p_embedding = 'null'::jsonb then null
-             else (select array_agg((v #>> '{}')::real order by ord)
-                   from jsonb_array_elements(p_embedding) with ordinality t(v, ord))::vector
-        end);
-$$ language sql;
-
+-- workflow.p8ql() -- the P8QL step function -- deliberately does NOT live here.
+-- It calls aiq.query(), which would make this file depend on ai-query-layer
+-- and break the property that workflow-engine is deployable on its own with
+-- no other subsystem present. Caught by verifying a clean install: this schema
+-- loads at step 2 and aiq does not exist until step 5.
+--
+-- It lives in ai-query-layer/integration-workflow.sql, applied after both --
+-- the same boundary discipline as workflow-engine/integration-rbac.sql.
 grant execute on function workflow.define_yaml(text) to authenticated;
-grant execute on function workflow.p8ql(text) to authenticated, worker;
-grant execute on function workflow.p8ql(text, jsonb) to authenticated, worker;
