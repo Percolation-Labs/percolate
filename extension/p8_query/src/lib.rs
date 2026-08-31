@@ -354,3 +354,190 @@ pub mod pg_test {
         vec![]
     }
 }
+
+// ===========================================================================
+// The workflow compiler: YAML -> workflow.definitions spec.
+//
+// The point of this is not ergonomics. It is that a workflow composed only of
+// P8QL and REST steps needs NO USER CODE ANYWHERE -- the worker stops being
+// something you write and becomes something purely generic that we ship. A
+// step is one of:
+//
+//   p8ql:  <query>     -> kind 'sql'       -> runs INSIDE Postgres, no process
+//   sql:   <function>  -> kind 'sql'       -> ditto, allow-listed function
+//   rest:  {...}       -> kind 'http_call' -> the generic HTTP handler
+//   agent: <name>      -> kind 'http_call' -> the Agent Runtime, agent loaded
+//                                             from agentic.agents by name
+//   work:  <queue>     -> kind 'work'      -> the ONLY case needing your code
+//
+// So "bring your own worker" becomes the exception rather than the shape of
+// the system, and an entire LLM pipeline -- retrieve, classify, delegate,
+// index -- is a YAML document that compiles to ordinary task rows and
+// inherits retry, backoff, saga, cancellation and tracing unchanged.
+//
+// Compiled in Rust rather than PL/pgSQL because YAML parsing in plpgsql is not
+// a reasonable thing to attempt, and because it keeps authoring SQL-native:
+// `select workflow.define_yaml($$...$$)` needs no service running.
+// ===========================================================================
+
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct WfDoc {
+    name: String,
+    #[serde(default)]
+    version: Option<i32>,
+    steps: Vec<WfStep>,
+}
+
+#[derive(Deserialize)]
+struct WfStep {
+    id: String,
+    #[serde(default)]
+    needs: Vec<String>,
+    #[serde(default)]
+    queue: Option<String>,
+
+    // exactly one of these
+    #[serde(default)]
+    p8ql: Option<String>,
+    #[serde(default)]
+    sql: Option<SqlStep>,
+    #[serde(default)]
+    rest: Option<serde_yaml::Value>,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    work: Option<bool>,
+
+    // agent steps
+    #[serde(default)]
+    input: Option<serde_yaml::Value>,
+    #[serde(default)]
+    session: Option<String>,
+
+    // saga
+    #[serde(default)]
+    compensate_with: Option<String>,
+    #[serde(default)]
+    saga_group: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SqlStep {
+    function: String,
+    #[serde(default)]
+    args: Vec<serde_yaml::Value>,
+}
+
+fn y2j(v: &serde_yaml::Value) -> serde_json::Value {
+    serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
+}
+
+pub fn compile_workflow(yaml: &str) -> Result<serde_json::Value, String> {
+    let doc: WfDoc = serde_yaml::from_str(yaml).map_err(|e| format!("invalid YAML: {e}"))?;
+    if doc.steps.is_empty() {
+        return Err("workflow has no steps".into());
+    }
+
+    let ids: Vec<&str> = doc.steps.iter().map(|s| s.id.as_str()).collect();
+    let mut steps = Vec::new();
+
+    for s in &doc.steps {
+        // Validate the dependency graph HERE rather than letting a broken
+        // reference become a task that waits forever. The engine's own
+        // validate_spec() also checks reachability; this catches the typo with
+        // the step name in the message.
+        for n in &s.needs {
+            if !ids.contains(&n.as_str()) {
+                return Err(format!("step '{}' needs '{}', which is not a step in this workflow", s.id, n));
+            }
+        }
+
+        let chosen: Vec<&str> = [
+            s.p8ql.is_some().then_some("p8ql"),
+            s.sql.is_some().then_some("sql"),
+            s.rest.is_some().then_some("rest"),
+            s.agent.is_some().then_some("agent"),
+            s.work.unwrap_or(false).then_some("work"),
+        ].into_iter().flatten().collect();
+        if chosen.len() != 1 {
+            return Err(format!(
+                "step '{}' must have exactly one of p8ql/sql/rest/agent/work, found {}",
+                s.id,
+                if chosen.is_empty() { "none".to_string() } else { chosen.join(" + ") }
+            ));
+        }
+
+        let (kind, queue, input) = match chosen[0] {
+            // P8QL runs in-database as an allow-listed sql step. No queue, no
+            // process: 'none' is a label, nothing polls it.
+            "p8ql" => ("sql", "none".to_string(), serde_json::json!({
+                "function": "p8ql",
+                "args": [s.p8ql.clone().unwrap()]
+            })),
+            "sql" => {
+                let sq = s.sql.as_ref().unwrap();
+                ("sql", "none".to_string(), serde_json::json!({
+                    "function": sq.function,
+                    "args": sq.args.iter().map(y2j).collect::<Vec<_>>()
+                }))
+            }
+            "rest" => ("http_call",
+                s.queue.clone().unwrap_or_else(|| "http".into()),
+                y2j(s.rest.as_ref().unwrap())),
+            // An agent step is a REST call to the Agent Runtime with the agent
+            // NAMED, not defined -- the agent itself is a row in
+            // agentic.agents, so changing its prompt or tools never touches
+            // this workflow.
+            "agent" => ("http_call",
+                s.queue.clone().unwrap_or_else(|| "http".into()),
+                serde_json::json!({
+                    "url": "{{env.P8_AGENT_URL}}/v1/chat/completions",
+                    "method": "POST",
+                    "credential_ref": "P8_API_KEY",
+                    "timeout_ms": 120000,
+                    "body": {
+                        "model": s.agent.clone().unwrap(),
+                        "session": s.session.clone(),
+                        "messages": [{"role": "user",
+                                      "content": s.input.as_ref().map(y2j)
+                                          .unwrap_or(serde_json::Value::Null)}]
+                    },
+                    "jsonpath": "choices.0.message.content"
+                })),
+            _ => ("work", s.queue.clone().unwrap_or_else(|| "default".into()),
+                  s.input.as_ref().map(y2j).unwrap_or(serde_json::json!({}))),
+        };
+
+        let mut step = serde_json::json!({
+            "key": s.id, "kind": kind, "queue": queue, "input": input
+        });
+        if !s.needs.is_empty() {
+            step["depends_on"] = serde_json::json!(s.needs);
+        }
+        if let Some(c) = &s.compensate_with {
+            step["compensation_task_key"] = serde_json::json!(c);
+            step["saga_group"] = serde_json::json!(
+                s.saga_group.clone().unwrap_or_else(|| "default".into()));
+        }
+        steps.push(step);
+    }
+
+    Ok(serde_json::json!({
+        "name": doc.name,
+        "version": doc.version.unwrap_or(1),
+        "spec": {"steps": steps}
+    }))
+}
+
+/// Compile a YAML workflow into the spec shape workflow.definitions stores.
+/// Returns {ok:false, error:...} rather than raising, so a caller can show the
+/// author a message instead of a stack trace.
+#[pg_extern(immutable, parallel_safe)]
+fn p8_compile_workflow(yaml: &str) -> pgrx::JsonB {
+    match compile_workflow(yaml) {
+        Ok(v) => pgrx::JsonB(serde_json::json!({"ok": true, "workflow": v})),
+        Err(e) => pgrx::JsonB(serde_json::json!({"ok": false, "error": e})),
+    }
+}

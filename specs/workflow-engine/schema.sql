@@ -322,13 +322,36 @@ create trigger trg_log_task_transition
 -- ------------------------------------------------------------
 -- 7. Payload-ref enforcement
 -- ------------------------------------------------------------
+-- The limit is a SETTING, not a literal, and the default was raised from 8KB
+-- to 64KB after a real workflow hit it: a 768-dimension embedding is ~10KB as
+-- JSON, and passing one from an embed step to a search step is a legitimate
+-- intermediate, not a blob someone forgot to offload.
+--
+-- The guard's purpose is keeping multi-megabyte payloads out of the task
+-- table, and 8KB was tight enough to reject ordinary structured values --
+-- which pushes authors toward the $ref escape hatch for things that do not
+-- warrant object storage, or (worse) toward not using the engine.
+--
+-- Still a hard limit rather than a warning: an unbounded payload column is how
+-- a task table becomes unqueryable, and $ref remains the right answer for
+-- anything genuinely large.
 create or replace function workflow.enforce_payload_ref_size() returns trigger as $$
+declare
+    v_max int := coalesce(
+        nullif(current_setting('workflow.max_payload_bytes', true), '')::int,
+        65536);
 begin
-    if new.input is not null and pg_column_size(new.input) > 8192 and not (new.input ? '$ref') then
-        raise exception 'task %: input payload exceeds 8KB and is not an S3 ref ($ref)', new.id;
+    if new.input is not null and pg_column_size(new.input) > v_max and not (new.input ? '$ref') then
+        raise exception
+            'task %: input payload is % bytes, over the % byte limit, and is not an S3 ref ($ref). '
+            'Raise workflow.max_payload_bytes, or pass a $ref to object storage.',
+            new.id, pg_column_size(new.input), v_max;
     end if;
-    if new.output is not null and pg_column_size(new.output) > 8192 and not (new.output ? '$ref') then
-        raise exception 'task %: output payload exceeds 8KB and is not an S3 ref ($ref)', new.id;
+    if new.output is not null and pg_column_size(new.output) > v_max and not (new.output ? '$ref') then
+        raise exception
+            'task %: output payload is % bytes, over the % byte limit, and is not an S3 ref ($ref). '
+            'Raise workflow.max_payload_bytes, or return a $ref to object storage.',
+            new.id, pg_column_size(new.output), v_max;
     end if;
     return new;
 end;
@@ -639,14 +662,25 @@ create or replace function workflow.complete_task(p_task_id uuid, p_output jsonb
 returns void as $$
 declare v_run_id uuid;
 begin
-    update workflow.tasks set status = 'done', output = p_output, completed_at = now()
-    where id = p_task_id
-    returning run_id into v_run_id;
+    -- CONTEXT FIRST, THEN STATUS. The order matters and is not stylistic:
+    -- flipping the task to 'done' fires the cascade, which can mark a `sql`
+    -- step ready, which auto-executes it IN THE SAME STATEMENT (§17). If the
+    -- run's context has not been written yet, that step resolves
+    -- {{steps.<this>.result}} against a context that does not contain this
+    -- step's output and fails with 'template resolved to nothing'.
+    -- Reproduced exactly that way: an embed step completed, and the P8QL step
+    -- consuming its vector failed on the very output that had just been
+    -- produced.
+    select run_id into v_run_id from workflow.tasks where id = p_task_id;
 
     update workflow.runs r
-    set context = context || jsonb_build_object((select step_key from workflow.tasks where id = p_task_id), p_output),
+    set context = context || jsonb_build_object(
+            (select step_key from workflow.tasks where id = p_task_id), p_output),
         updated_at = now()
     where r.id = v_run_id;
+
+    update workflow.tasks set status = 'done', output = p_output, completed_at = now()
+    where id = p_task_id;
 
     perform workflow.check_run_completion(v_run_id);
     perform workflow.check_compensation_completion(v_run_id);
@@ -1289,6 +1323,62 @@ end;
 $$ language plpgsql;
 
 -- Executes one ready `sql` task. Returns true if it did something.
+-- Resolve {{steps.x.y}} / {{run.x}} in a sql step's arguments.
+--
+-- The worker does this for http_call steps; sql steps need it for the same
+-- reason and it was missing -- so a P8QL step could not consume the output of
+-- the REST step before it, which is exactly the composition the YAML syntax
+-- exists to express. Found by running a pipeline whose HYBRID step needed the
+-- embedding produced by a preceding model call.
+--
+-- Deliberately narrower than the worker's resolver: no {{env.*}}, because the
+-- database has no business reading the deployment's environment, and that is
+-- precisely the sort of ambient authority this collection keeps removing.
+create or replace function workflow.resolve_args(p_args jsonb, p_run_id uuid)
+returns jsonb as $$
+declare
+    r        workflow.runs;
+    v_out    jsonb := '[]'::jsonb;
+    v_arg    jsonb;
+    v_txt    text;
+    v_ref    text;
+    v_head   text;
+    v_rest   text;
+    v_val    jsonb;
+begin
+    select * into r from workflow.runs where id = p_run_id;
+
+    for v_arg in select * from jsonb_array_elements(coalesce(p_args, '[]'::jsonb))
+    loop
+        v_txt := v_arg #>> '{}';
+        -- Only a WHOLE-string reference is substituted, and it keeps its
+        -- native type. Partial interpolation inside a larger string is the
+        -- worker's job; here an argument is a value, not a template.
+        if v_txt is not null and v_txt ~ '^\s*\{\{\s*[a-zA-Z0-9_.]+\s*\}\}\s*$' then
+            v_ref  := trim(both from replace(replace(v_txt, '{{', ''), '}}', ''));
+            v_head := split_part(v_ref, '.', 1);
+            v_rest := substr(v_ref, length(v_head) + 2);
+            if v_head = 'steps' then
+                v_val := r.context #> string_to_array(v_rest, '.');
+            elsif v_head = 'run' then
+                v_val := r.input #> string_to_array(v_rest, '.');
+            else
+                raise exception
+                    'unknown template namespace ''%'' in a sql step argument '
+                    '-- expected steps or run', v_head;
+            end if;
+            if v_val is null then
+                raise exception 'template ''%'' resolved to nothing', v_ref;
+            end if;
+            v_out := v_out || jsonb_build_array(v_val);
+        else
+            v_out := v_out || jsonb_build_array(v_arg);
+        end if;
+    end loop;
+    return v_out;
+end;
+$$ language plpgsql stable;
+
 create or replace function workflow.execute_sql_step(p_task_id uuid)
 returns boolean as $$
 declare
@@ -1326,14 +1416,26 @@ begin
         -- Arguments are passed as parameters, never interpolated: a step's
         -- args are data from the run, and building SQL text out of them would
         -- be injection with extra steps.
-        v_args := coalesce(v_spec->'args', '[]'::jsonb);
-        v_sql := format('select to_jsonb(%s(%s))', f.fn,
-                        (select string_agg(format('$1->>%s', i - 1), ',')
-                         from generate_series(1, jsonb_array_length(v_args)) i));
+        v_args := workflow.resolve_args(coalesce(v_spec->'args', '[]'::jsonb), t.run_id);
+        -- Each argument is extracted according to its REGISTERED type, not
+        -- uniformly as text. Getting this wrong surfaces as
+        -- "function f(text, text) does not exist" -- which reads as a missing
+        -- function rather than a coercion problem, and cost real time.
+        --   text   -> $1->>i      (JSON string to text)
+        --   jsonb  -> $1->i       (the JSON value itself, structure intact)
+        --   other  -> ($1->>i)::type
         if jsonb_array_length(v_args) = 0 then
-            v_sql := format('select to_jsonb(%s())', f.fn);
-            execute v_sql into v_out;
+            execute format('select to_jsonb(%s())', f.fn) into v_out;
         else
+            v_sql := format('select to_jsonb(%s(%s))', f.fn, (
+                select string_agg(
+                    case lower(coalesce(f.arg_types[i], 'text'))
+                        when 'text'  then format('$1->>%s', i - 1)
+                        when 'jsonb' then format('$1->%s', i - 1)
+                        when 'json'  then format('($1->%s)::json', i - 1)
+                        else format('($1->>%s)::%s', i - 1, f.arg_types[i])
+                    end, ',' order by i)
+                from generate_series(1, jsonb_array_length(v_args)) i));
             execute v_sql into v_out using v_args;
         end if;
 
@@ -1408,3 +1510,94 @@ create trigger trg_autorun_sql_steps
 grant execute on function workflow.execute_sql_step(uuid) to worker, authenticated;
 grant execute on function workflow.drain_sql_steps(uuid, int) to worker, authenticated;
 grant select on workflow.step_functions to worker, authenticated;
+
+-- ============================================================
+-- 18. YAML authoring: workflow.define_yaml()
+--
+-- The payoff of §17 plus the http_call handler: a workflow whose steps are
+-- only P8QL and REST needs NO USER CODE ANYWHERE. The worker stops being
+-- something a user writes and becomes something purely generic that ships.
+--
+--     name: classify_recent
+--     steps:
+--       - id: find
+--         p8ql: 'HYBRID "safety recall" FROM chunks LIMIT 5'
+--       - id: judge
+--         needs: [find]
+--         agent: classifier          # a row in agentic.agents, by NAME
+--         input: 'Classify: {{steps.find.result}}'
+--       - id: reindex
+--         needs: [judge]
+--         sql: {function: rebuild_graph_index, args: [company]}
+--
+-- compiles to ordinary workflow.tasks rows, so retry, backoff, the reaper,
+-- saga, cancellation and OTel tracing all apply unchanged -- this is sugar
+-- over start_workflow, never a second execution engine.
+--
+-- The YAML parse itself is in the p8_query extension (serde_yaml); doing it in
+-- PL/pgSQL is not a reasonable thing to attempt. Keeping it there rather than
+-- in the Content Server means authoring is SQL-native: no service has to be
+-- running to define a workflow.
+-- ============================================================
+
+create or replace function workflow.define_yaml(p_yaml text)
+returns uuid as $$
+declare
+    c      jsonb;
+    v_id   uuid;
+    v_name text;
+    v_ver  int;
+begin
+    if to_regprocedure('p8_compile_workflow(text)') is null then
+        raise exception
+            'workflow.define_yaml needs the p8_query extension (p8_compile_workflow). '
+            'Run "create extension p8_query".';
+    end if;
+
+    c := p8_compile_workflow(p_yaml);
+    if not (c->>'ok')::boolean then
+        -- The compiler's message names the offending step, so surface it as-is
+        -- rather than wrapping it in something vaguer.
+        raise exception 'workflow YAML did not compile: %', c->>'error';
+    end if;
+
+    v_name := c->'workflow'->>'name';
+    v_ver  := coalesce((c->'workflow'->>'version')::int, 1);
+
+    -- validate_spec() still runs via the insert trigger: the compiler checks
+    -- that every `needs` names a real step, the engine checks reachability and
+    -- cycles. Two different questions, both worth asking.
+    insert into workflow.definitions (name, version, spec)
+    values (v_name, v_ver, c->'workflow'->'spec')
+    on conflict (name, version) do update set spec = excluded.spec
+    returning id into v_id;
+
+    return v_id;
+end;
+$$ language plpgsql;
+
+-- P8QL as a step. This is what makes a query a first-class workflow node with
+-- no process behind it -- it is an ordinary §17 sql step whose registered
+-- function happens to be the query dialect.
+-- Two arities. SEMANTIC and HYBRID need a vector, which the database cannot
+-- produce -- embedding is an external model call. So those modes are composed
+-- as: a `rest` step that embeds, then a p8ql step taking
+-- {{steps.embed.result}} as its second argument. LOOKUP, GRAPH and TEXT need
+-- no vector and use the one-argument form.
+create or replace function workflow.p8ql(p_query text)
+returns jsonb as $$
+    select aiq.query(p_query);
+$$ language sql;
+
+create or replace function workflow.p8ql(p_query text, p_embedding jsonb)
+returns jsonb as $$
+    select aiq.query(p_query,
+        case when p_embedding is null or p_embedding = 'null'::jsonb then null
+             else (select array_agg((v #>> '{}')::real order by ord)
+                   from jsonb_array_elements(p_embedding) with ordinality t(v, ord))::vector
+        end);
+$$ language sql;
+
+grant execute on function workflow.define_yaml(text) to authenticated;
+grant execute on function workflow.p8ql(text) to authenticated, worker;
+grant execute on function workflow.p8ql(text, jsonb) to authenticated, worker;
