@@ -54,6 +54,14 @@ create table agentic.tool_servers (
     -- A flag, not a tool-name convention -- ai-query-layer's server sets it,
     -- a ticketing API does not.
     emits_citations boolean not null default false,
+    -- Which server is the runtime's own agent gateway (brief.md §5.1 item 3),
+    -- i.e. whose tools ARE agents. Also a flag rather than a name prefix, and
+    -- for a sharper reason than citations: delegation decides the persistence
+    -- granularity (§2's slow path) and hands the callee a delegated-by header.
+    -- Detecting it by an `agent__` prefix meant any registered MCP server could
+    -- claim that namespace, and a server merely *named* `agent` produced it by
+    -- accident through collision-prefixing.
+    serves_agents   boolean not null default false,
     -- Synced at registration and refreshed by a scheduled workflow-engine
     -- task; NOT re-fetched per agent invocation.
     cached_tools    jsonb not null default '[]'::jsonb,
@@ -288,7 +296,24 @@ create policy messages_via_run on agentic.messages
     );
 
 -- Agents and tool_servers are configuration, not tenant data: readable by any
--- authenticated caller, writable only through the functions below.
+-- authenticated caller, writable only through the functions below. RLS is
+-- ENABLEd with an explicitly permissive read policy rather than left off --
+-- the two are equivalent to a reader today and completely different to the next
+-- person to touch this file: "no policy" reads as an oversight, a policy that
+-- says `true` reads as a decision, and it is the seam per-tenant agents would
+-- attach to.
+--
+-- OPEN, and stated because it is a real consequence rather than an accident:
+-- every authenticated user can therefore see, and run, every agent -- `/chat`'s
+-- `model` field is just a name. A deployment that needs per-tenant agents needs
+-- a column that does not exist yet (brief.md §9).
+alter table agentic.agents       enable row level security;
+alter table agentic.tool_servers enable row level security;
+
+create policy agents_are_shared_config on agentic.agents
+    for select using (true);
+create policy tool_servers_are_shared_config on agentic.tool_servers
+    for select using (true);
 -- ------------------------------------------------------------
 -- 8. The write path -- SECURITY DEFINER, ownership checked explicitly
 --
@@ -338,6 +363,27 @@ begin
                        where id = p_session_id and user_id = v_owner) then
             raise exception 'session % is not yours', p_session_id;
         end if;
+
+        -- One live turn per conversation. Two concurrent turns both reload the
+        -- same window and both append to it, so the history each one saw is not
+        -- the history that ends up stored -- a silent corruption, not an error.
+        -- Delegated runs (parent_run_id set) are exempt: they happen *inside* a
+        -- turn, which is the whole point.
+        --
+        -- Bounded by age deliberately: a runtime that dies mid-turn would
+        -- otherwise leave a session wedged forever, and a stale `running` row
+        -- is evidence of a crash, not of a live client.
+        if p_parent_run_id is null and p_trigger_kind = 'interactive'
+           and exists (
+               select 1 from agentic.runs
+                where session_id = p_session_id
+                  and parent_run_id is null
+                  and status = 'running'
+                  and created_at > now() - interval '10 minutes'
+           )
+        then
+            raise exception 'session % already has a turn in flight', p_session_id;
+        end if;
     end if;
 
     if p_parent_run_id is not null then
@@ -350,6 +396,15 @@ begin
         v_depth := v_parent.depth + 1;
         v_pspan := v_parent.span_id;
         v_trace := coalesce(v_trace, v_parent.trace_id);
+
+        -- A hard ceiling, here and not only in the runtime. brief.md §9 leaves
+        -- the *policy* number open and a runtime may set a lower one; this is
+        -- the structural backstop, because start_run is granted to every
+        -- authenticated caller and an app-side limit protects only callers who
+        -- go through the app.
+        if v_depth > 8 then
+            raise exception 'delegation depth % exceeds the hard limit of 8', v_depth;
+        end if;
     end if;
 
     insert into agentic.runs (session_id, agent_id, owner_id, parent_run_id,
@@ -434,6 +489,10 @@ begin
            r->>'error_kind',
            coalesce(r->'citations', '[]'::jsonb)
       from jsonb_array_elements(p_rows) with ordinality as t(r, ord)
+     -- The ORDER BY is what makes `seq` follow conversation order rather than
+     -- whatever order the planner felt like emitting rows in. Postgres assigns
+     -- serial values in the order the INSERT's SELECT produces them; that is
+     -- relied on here deliberately, and named so the reliance is visible.
      order by t.ord
     returning *;
 end;
