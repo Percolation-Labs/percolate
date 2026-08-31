@@ -162,6 +162,24 @@ create or replace function current_user_id() returns uuid as $$
     select (nullif(current_setting('request.jwt.claims', true), '')::json->>'sub')::uuid;
 $$ language sql stable;
 
+-- OTel ground rule (specs/README.md): the W3C trace_id for the request this
+-- function call is happening inside, not a fresh disconnected one, whenever
+-- the caller already has one. Reads request.trace_id, the same "GUC PostgREST
+-- sets per-request" mechanism as current_user_id() above -- bridged from the
+-- standard `traceparent` HTTP header via PostgREST's db-pre-request hook (a
+-- function that runs before every request and can set session GUCs from
+-- request.headers), not a new mechanism. Falls back to a fresh trace_id only
+-- when the caller genuinely didn't propagate one -- an auth_events row should
+-- never have a null trace_id, even for a client that doesn't participate in
+-- tracing. Same empty-string-after-pooled-connection-commit guard as
+-- current_user_id() -- see its comment above -- applies here too.
+create or replace function current_trace_id() returns text as $$
+    select coalesce(
+        nullif(current_setting('request.trace_id', true), ''),
+        encode(gen_random_bytes(16), 'hex')
+    );
+$$ language sql stable;
+
 -- Example RLS policy shape any module adopts:
 -- create policy select_own_or_permitted on <table> for select
 --   using (owner_id = current_user_id() or has_permission(current_user_id(), '<resource>', 'select'));
@@ -374,6 +392,13 @@ create table auth_events (
     event_type text not null,   -- login_success, login_failed, password_changed,
                                  -- session_revoked, role_granted, role_revoked, api_key_created
     detail     jsonb,
+    -- W3C Trace Context fields, specs/README.md's OTel ground rule -- current_trace_id()
+    -- propagates the caller's own trace via request.trace_id when set, so a
+    -- signup that triggers a send_verification_email workflow task shares one
+    -- trace_id across auth_events and workflow-engine's task_events. span_id is
+    -- this event's own span, generated fresh every row.
+    trace_id   text not null default current_trace_id(),
+    span_id    text not null default encode(gen_random_bytes(8), 'hex'),
     at         timestamptz not null default now()
 );
 create index idx_auth_events_user on auth_events (user_id, at);

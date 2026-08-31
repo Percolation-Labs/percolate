@@ -133,7 +133,12 @@ create table workflow_runs (
     cancel_requested boolean not null default false,
     input            jsonb,
     context          jsonb not null default '{}'::jsonb,
-    trace_id         text,
+    -- W3C Trace Context trace_id (32 hex chars / 128 bit) -- specs/README.md's
+    -- OTel ground rule. Defaulted so a run always has one even if the caller
+    -- doesn't propagate one, but see start_workflow()'s p_trace_id param for
+    -- the propagation path -- a run started from an already-traced FastAPI
+    -- request should continue that trace, not start a disconnected one.
+    trace_id         text not null default encode(gen_random_bytes(16), 'hex'),
     created_at       timestamptz not null default now(),
     updated_at       timestamptz not null default now(),
     completed_at     timestamptz
@@ -169,6 +174,12 @@ create table tasks (
     error            jsonb,
     wait_signal      text,
     child_run_id     uuid references workflow_runs(id),
+    -- W3C Trace Context span_id (16 hex chars / 64 bit) for this task's own
+    -- span, and the parent span it was created under -- specs/README.md's
+    -- OTel ground rule. trace_id itself lives on workflow_runs (one trace per
+    -- run, shared by every task in it); span_id/parent_span_id build the span
+    -- tree within that trace.
+    span_id          text not null default encode(gen_random_bytes(8), 'hex'),
     parent_span_id   text,
     completed_at     timestamptz,          -- set on 'done'; drives saga reverse-order compensation
     saga_group       text,                 -- groups tasks that must be compensated together on failure
@@ -375,7 +386,11 @@ $$ language sql;
 --    id), then wire task_deps + compute real pending_deps once all
 --    ids are known. Idempotent via external_id.
 -- ------------------------------------------------------------
-create or replace function start_workflow(p_name text, p_input jsonb, p_external_id text default null)
+-- p_trace_id: propagate an existing W3C trace_id from an already-traced
+-- caller (e.g. a FastAPI request already inside a trace) instead of always
+-- starting a disconnected new one -- specs/README.md's OTel ground rule.
+-- Omit it and the run gets a fresh trace_id via the column default.
+create or replace function start_workflow(p_name text, p_input jsonb, p_external_id text default null, p_trace_id text default null)
 returns uuid as $$
 declare
     v_def       workflow_defs;
@@ -399,8 +414,8 @@ begin
         raise exception 'no workflow_def found for name %', p_name;
     end if;
 
-    insert into workflow_runs (workflow_def_id, input, external_id)
-    values (v_def.id, p_input, p_external_id)
+    insert into workflow_runs (workflow_def_id, input, external_id, trace_id)
+    values (v_def.id, p_input, p_external_id, coalesce(p_trace_id, encode(gen_random_bytes(16), 'hex')))
     returning id into v_run_id;
 
     -- pass 1: create every step row, deps wired in pass 2
