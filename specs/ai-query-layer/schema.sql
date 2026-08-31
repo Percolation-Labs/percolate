@@ -563,13 +563,33 @@ $$ language plpgsql stable;
 -- different shapes, and forcing them into one row type would mean a lowest
 -- common denominator that loses each mode's useful columns.
 -- ------------------------------------------------------------
+-- DEPENDENCY, stated because it is the one thing here that is not core SQL:
+-- this function needs aiq_parse(), which lives in the OPTIONAL pgrx extension.
+-- Everything else in this file works without it -- aiq.lookup(),
+-- graph_neighbors(), graph_walk(), semantic_in(), lexical() and hybrid() are
+-- plain SQL and are the no-extension path. The dialect is an ergonomic layer
+-- over them (one RPC instead of six), not a requirement for using them.
+--
+-- Checked at call time with an actionable message rather than failing on an
+-- unqualified "function does not exist", which reads as a broken install
+-- rather than a missing optional component.
 create or replace function aiq.query(p_query text, p_embedding vector default null)
 returns jsonb as $$
 declare
-    p        jsonb := aiq_parse(p_query);
+    p        jsonb;
     v_node   uuid;
     v_out    jsonb;
 begin
+    if to_regprocedure('aiq_parse(text)') is null then
+        raise exception
+            'the query dialect needs the optional p8 parser extension (aiq_parse). '
+            'Either install it, or call the per-mode functions directly -- '
+            'aiq.lookup(), aiq.graph_neighbors(), aiq.graph_walk(), '
+            'aiq.semantic_in(), aiq.lexical(), aiq.hybrid() -- which are plain '
+            'SQL and need no extension.';
+    end if;
+    p := aiq_parse(p_query);
+
     if not (p->>'ok')::boolean then
         raise exception 'query parse error: %', p->>'error';
     end if;
