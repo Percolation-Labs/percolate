@@ -72,9 +72,24 @@ def main() -> int:
         parts.append(body)
 
     out = ROOT / f"extension/percolate/sql/percolate--{VERSION}.sql"
-    out.write_text("\n".join(parts))
+    body = "\n".join(parts)
+
+    # --check asserts the committed artifact matches the specs. The generated
+    # SQL is tracked (a clone must be able to install without a Python
+    # toolchain), so the thing to guard against is it going stale after a
+    # schema edit -- which is exactly the drift this collection keeps finding.
+    if "--check" in sys.argv:
+        if not out.exists() or out.read_text() != body:
+            print(f"STALE: {out.relative_to(ROOT)} does not match specs/ -- "
+                  f"run: python3 {pathlib.Path(__file__).relative_to(ROOT)}",
+                  file=sys.stderr)
+            return 1
+        print(f"{out.relative_to(ROOT)} is current")
+        return 0
+
+    out.write_text(body)
     print(f"wrote {out.relative_to(ROOT)} "
-          f"({len(out.read_text().splitlines())} lines from {len(ORDER)} spec files)")
+          f"({len(body.splitlines())} lines from {len(ORDER)} spec files)")
     return 0
 
 
