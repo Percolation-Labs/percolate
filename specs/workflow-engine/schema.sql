@@ -217,6 +217,14 @@ create table workflow.tasks (
     saga_group       text,                 -- groups tasks that must be compensated together on failure
     compensation_task_key text,            -- step_key to run (in reverse order) if this task must be undone
     compensated_at   timestamptz,          -- set once this task's compensation has run
+    -- Set only on a COMPENSATION task, pointing at the forward task it undoes.
+    -- Added after a live saga run reported compensation_state='compensated'
+    -- while both of its compensation tasks were still unrun: the completion
+    -- check had no way to tell a compensation task from a forward one, so it
+    -- was inspecting the wrong set of rows entirely (see
+    -- check_compensation_completion below). Also gives the compensation trail
+    -- real lineage instead of encoding it in a step_key string.
+    compensates_task_id uuid references workflow.tasks(id),
     decision_output_hash text,             -- determinism guard: hash of a decision's recorded output
     created_at       timestamptz not null default now(),
     -- Was missing entirely despite being the most heavily mutated table in
@@ -411,13 +419,33 @@ $$ language sql;
 -- Saga: flips compensation_state once every compensation task for a
 -- run's saga groups has resolved. Cheap no-op call from workflow.complete_task/
 -- workflow.fail_task; only does anything while compensation_state='compensating'.
+--
+-- BUG FIXED HERE, found by running a real saga (charge -> hotel -> flight,
+-- flight fails): this predicate used to filter on `compensation_task_key is
+-- not null`, which selects the FORWARD tasks -- the ones that *declare* a
+-- compensation -- not the compensation tasks themselves. By the time
+-- compensation begins those forward tasks are all terminal
+-- (done/failed/cancelled), so `not exists` was immediately true and the run
+-- flipped straight to 'compensated' while every compensation task was still
+-- ready/pending. Measured: cancel_hotel 'ready', refund 'pending',
+-- compensation_state 'compensated'. In the worked example that means the
+-- system reports a completed rollback while the customer's card has not been
+-- refunded -- a correctness failure that reports success, the worst kind.
+-- The fix keys off compensates_task_id, which is set only on compensation
+-- tasks, so this now waits on the rows it was always meant to wait on.
 create or replace function workflow.check_compensation_completion(p_run_id uuid) returns void as $$
     update workflow.runs
     set compensation_state = 'compensated'
     where id = p_run_id and compensation_state = 'compensating'
+      and exists (
+          -- there is at least one compensation task (otherwise 'compensated'
+          -- would be claimed for a run whose compensations were never created)
+          select 1 from workflow.tasks
+          where run_id = p_run_id and compensates_task_id is not null
+      )
       and not exists (
           select 1 from workflow.tasks
-          where run_id = p_run_id and compensation_task_key is not null
+          where run_id = p_run_id and compensates_task_id is not null
             and status not in ('done', 'failed', 'cancelled')
       );
 $$ language sql;
@@ -463,10 +491,31 @@ begin
     -- pass 1: create every step row, deps wired in pass 2
     for v_step in select * from jsonb_array_elements(v_def.spec->'steps')
     loop
-        insert into workflow.tasks (run_id, step_key, queue, kind, pending_deps, status)
+        insert into workflow.tasks (run_id, step_key, queue, kind, pending_deps, status,
+                                    wait_signal, input, rate_key,
+                                    saga_group, compensation_task_key)
         values (
             v_run_id, v_step->>'key', coalesce(v_step->>'queue', 'default'),
-            coalesce(v_step->>'kind', 'work'), 0, 'pending'
+            coalesce(v_step->>'kind', 'work'), 0, 'pending',
+            -- wait_signal was NEVER populated here, which made the entire
+            -- signal mechanism inert: signal_task() matches on
+            -- (run_id, wait_signal, status), and with wait_signal null it can
+            -- never match, so a `kind: signal` step waits forever. Confirmed
+            -- by running it -- the task sat in waiting_external and no signal
+            -- could ever resolve it. Defaults to the step's own key, so
+            -- {"key":"approval","kind":"signal"} is signalled as 'approval'
+            -- without needing a redundant "signal" field.
+            case when coalesce(v_step->>'kind','work') = 'signal'
+                 then coalesce(v_step->>'signal', v_step->>'key') end,
+            -- Same class of omission: a step spec could declare input,
+            -- rate_key, saga_group and compensation_task_key and they were all
+            -- silently dropped, so saga/compensation and per-step rate limiting
+            -- were unreachable through start_workflow() -- only through
+            -- add_task(). Carried through now.
+            v_step->'input',
+            v_step->>'rate_key',
+            v_step->>'saga_group',
+            v_step->>'compensation_task_key'
         )
         returning id into v_new_id;
         v_step_ids := v_step_ids || jsonb_build_object(v_step->>'key', v_new_id::text);
@@ -648,6 +697,11 @@ begin
             'work',
             v_task.output    -- the compensation sees what the forward step produced
         );
+        -- Tag the new task as a compensation and record WHICH forward task it
+        -- undoes. check_compensation_completion() keys off this; without it,
+        -- that function cannot distinguish a compensation task from a forward
+        -- one and completes the saga before any compensation has run.
+        update workflow.tasks set compensates_task_id = v_task.id where id = v_new_id;
         update workflow.tasks set compensated_at = now() where id = v_task.id;
         v_prev_comp_id := v_new_id;
     end loop;
@@ -928,13 +982,19 @@ create view workflow.v_stuck_tasks as
        or (t.status = 'running' and t.heartbeat_at < now() - coalesce(qc.stale_timeout, interval '2 minutes'))
        or (t.status = 'waiting_external' and t.created_at < now() - interval '1 hour');
 
+-- Reports on the COMPENSATION tasks (the work that undoes), not merely on
+-- forward tasks that have been marked as having had a compensation created --
+-- the same distinction the check_compensation_completion bug turned on.
 create view workflow.v_compensation_status as
-    select run_id, saga_group,
-           count(*) filter (where compensated_at is not null) as compensated,
-           count(*) as total_compensatable
-    from workflow.tasks
-    where saga_group is not null and compensation_task_key is not null
-    group by run_id, saga_group;
+    select f.run_id, f.saga_group,
+           count(*) as total_compensatable,
+           count(c.id) as compensations_created,
+           count(*) filter (where c.status = 'done') as compensations_done,
+           count(*) filter (where c.status = 'failed') as compensations_failed
+    from workflow.tasks f
+    left join workflow.tasks c on c.compensates_task_id = f.id
+    where f.saga_group is not null and f.compensation_task_key is not null
+    group by f.run_id, f.saga_group;
 
 create view workflow.v_decision_history as
     select te.run_id, te.task_id, t.step_key, te.input_snapshot, t.output as decision_output, te.at
@@ -942,3 +1002,145 @@ create view workflow.v_decision_history as
     join workflow.tasks t on t.id = te.task_id
     where t.kind = 'decision' and te.to_status = 'running'
     order by te.run_id, te.at;
+
+-- ============================================================
+-- 16. Role model, ownership, and RLS.
+--
+-- This section did not exist until the schema was prototyped against real
+-- cross-subsystem cases. Before it, this file had NO grants, NO RLS, and no
+-- SECURITY DEFINER anywhere -- it implicitly assumed every caller was the
+-- table owner. That assumption is wrong for both real callers (a KEDA-scaled
+-- worker, and an end user reading their own runs through PostgREST), and the
+-- gap was not academic: three other spec sections already described
+-- `workflow.runs.owner_id` + RLS as though it existed
+-- (user-rbac/spec.md §6, its schema.sql §8 sketch, and this system's own
+-- spec.md §13 usage metering).
+--
+-- THE FAILURE THIS PREVENTS, reproduced end to end against PG19 beta3:
+-- adding the RLS that those sections describe, without also making the
+-- engine's mutation functions SECURITY DEFINER, causes SILENT DATA LOSS.
+-- complete_task() updates workflow.runs to merge a step's output into
+-- run.context. Under RLS, a worker (which has no JWT, so current_user_id()
+-- is null) matches no rows -- and an UPDATE matching zero rows is not an
+-- error. Measured, same procedure, only the function's security mode varying:
+--
+--     SECURITY INVOKER -> task status 'done', run.context {}          <-- lost
+--     SECURITY DEFINER -> task status 'done', run.context {"gather":...}
+--
+-- Every step output silently discarded while the run reports success. The
+-- lesson generalizes past this schema: whenever an RLS-protected table is
+-- written by a trusted background process, the write path must be a
+-- SECURITY DEFINER function, or RLS turns a write into a no-op instead of a
+-- refusal.
+-- ============================================================
+
+-- (a) The TRUSTED path: the engine's own state machine. These run as the
+-- table owner (which bypasses RLS -- ENABLE, never FORCE, same rule as
+-- user-rbac/schema.sql §9), because a worker is not a user and cannot
+-- satisfy a user-scoped policy. search_path pinned, same CVE-2018-1058
+-- hardening as every other SECURITY DEFINER function in this collection.
+alter function workflow.claim_task(text, text)
+    security definer set search_path = pg_catalog, public;
+alter function workflow.claim_tasks(text, text, int)
+    security definer set search_path = pg_catalog, public;
+alter function workflow.claim_task_rate_limited(text, text)
+    security definer set search_path = pg_catalog, public;
+alter function workflow.heartbeat_task(uuid)
+    security definer set search_path = pg_catalog, public;
+alter function workflow.complete_task(uuid, jsonb)
+    security definer set search_path = pg_catalog, public;
+alter function workflow.fail_task(uuid, jsonb)
+    security definer set search_path = pg_catalog, public;
+alter function workflow.complete_decision_task(uuid, jsonb, jsonb)
+    security definer set search_path = pg_catalog, public;
+alter function workflow.signal_task(uuid, text, jsonb)
+    security definer set search_path = pg_catalog, public;
+alter function workflow.start_workflow(text, jsonb, text, text)
+    security definer set search_path = pg_catalog, public;
+alter function workflow.start_child_workflow(uuid, text, jsonb)
+    security definer set search_path = pg_catalog, public;
+alter function workflow.add_task(uuid, text, text, uuid[], text, jsonb, text)
+    security definer set search_path = pg_catalog, public;
+alter function workflow.cancel_run(uuid)
+    security definer set search_path = pg_catalog, public;
+alter function workflow.begin_compensation(uuid, text)
+    security definer set search_path = pg_catalog, public;
+alter function workflow.promote_due_timers()
+    security definer set search_path = pg_catalog, public;
+alter function workflow.reap_stale_tasks()
+    security definer set search_path = pg_catalog, public;
+
+-- The audit trigger, likewise. Without this a worker needs INSERT on
+-- task_events just to change a task's status -- i.e. write access to the log
+-- that audits it, which it could then forge entries in. An audit trigger must
+-- write with the owner's privileges, never the caller's.
+alter function workflow.log_task_transition()
+    security definer set search_path = pg_catalog, public;
+alter function workflow.cascade_task_status()
+    security definer set search_path = pg_catalog, public;
+
+-- (b) Deny by default, then grant only the entry points -- same rule and same
+-- reasoning as user-rbac/schema.sql §9(a).
+revoke execute on all functions in schema workflow from public;
+
+grant usage on schema workflow to worker, scheduler, authenticated;
+
+-- The worker role: executes the state machine, and that is ALL it can do. It
+-- gets NO table grants whatsoever -- every one of its interactions is a
+-- function call. Enumerated the hard way: granting a worker direct table
+-- access meant it needed SELECT/UPDATE on tasks, INSERT on task_events,
+-- SELECT on task_dependencies, SELECT/UPDATE on runs, and EXECUTE on
+-- rbac.current_user_id() -- five tables and a cross-schema function, just to
+-- finish one task. Routing everything through SECURITY DEFINER functions
+-- reduces that to this list, and removes the forge-the-audit-log problem.
+grant execute on function workflow.claim_task(text, text) to worker;
+grant execute on function workflow.claim_tasks(text, text, int) to worker;
+grant execute on function workflow.claim_task_rate_limited(text, text) to worker;
+grant execute on function workflow.heartbeat_task(uuid) to worker;
+grant execute on function workflow.complete_task(uuid, jsonb) to worker;
+grant execute on function workflow.fail_task(uuid, jsonb) to worker;
+grant execute on function workflow.complete_decision_task(uuid, jsonb, jsonb) to worker;
+grant execute on function workflow.start_child_workflow(uuid, text, jsonb) to worker;
+grant execute on function workflow.add_task(uuid, text, text, uuid[], text, jsonb, text) to worker;
+
+-- Scheduled maintenance (pg_cron, or an operator). Not the worker's job.
+grant execute on function workflow.promote_due_timers() to scheduler;
+grant execute on function workflow.reap_stale_tasks() to scheduler;
+
+-- End users, via PostgREST: start a run, signal it, cancel their own.
+grant execute on function workflow.start_workflow(text, jsonb, text, text) to authenticated;
+grant execute on function workflow.signal_task(uuid, text, jsonb) to authenticated;
+grant execute on function workflow.cancel_run(uuid) to authenticated;
+
+-- (c) Self-check for THIS file's invariant. The view-ownership check lives in
+-- integration-rbac.sql, alongside the views it validates.
+do $$
+declare
+    v_bad text;
+begin
+    -- Every function that writes state must be SECURITY DEFINER, or a worker's
+    -- write becomes a silent no-op once integration-rbac.sql adds RLS (see this
+    -- section's header). This is the check that would have caught the data-loss
+    -- bug that motivated this whole section.
+    select string_agg(p.proname, ', ')
+    into v_bad
+    from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'workflow'
+      and p.proname in ('claim_task','claim_tasks','claim_task_rate_limited',
+                        'heartbeat_task','complete_task','fail_task',
+                        'complete_decision_task','signal_task','start_workflow',
+                        'start_child_workflow','add_task','cancel_run',
+                        'begin_compensation','promote_due_timers',
+                        'reap_stale_tasks','log_task_transition',
+                        'cascade_task_status')
+      and not p.prosecdef;
+    if v_bad is not null then
+        raise exception
+            'STATE-MUTATING FUNCTIONS ARE NOT SECURITY DEFINER: %. Once RLS is on '
+            'workflow.runs, a worker (no JWT) matches no rows, and an UPDATE '
+            'matching zero rows is NOT an error -- step outputs would be silently '
+            'discarded while runs report success.', v_bad;
+    end if;
+
+    raise notice 'workflow-engine self-check passed: all state mutators are SECURITY DEFINER';
+end $$;
