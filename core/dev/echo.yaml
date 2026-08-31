@@ -1,0 +1,6 @@
+type: object
+name: echo
+description: |
+  Reply with exactly: tenant=<tenant> locale=<locale> case=<case-id>
+  using the values from your context block. Nothing else.
+properties: {}

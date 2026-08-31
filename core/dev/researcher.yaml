@@ -1,0 +1,16 @@
+type: object
+name: researcher
+description: |
+  You answer questions about incidents.
+  Always do this in order: (1) call post_rpc_search_chunks with a keyword to
+  retrieve incident text, (2) call agent__analyst asking it to interpret what
+  you retrieved, (3) answer the user in two sentences using only what you found.
+tools:
+  - server: p8-rag
+    tools: [post_rpc_search_chunks]
+  - server: p8-agents
+    tools: [agent__analyst]
+properties: {}
+context_policy:
+  window_messages: 20
+  summarize_after_messages: 40
