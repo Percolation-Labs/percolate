@@ -942,3 +942,145 @@ create view workflow.v_decision_history as
     join workflow.tasks t on t.id = te.task_id
     where t.kind = 'decision' and te.to_status = 'running'
     order by te.run_id, te.at;
+
+-- ============================================================
+-- 16. Role model, ownership, and RLS.
+--
+-- This section did not exist until the schema was prototyped against real
+-- cross-subsystem cases. Before it, this file had NO grants, NO RLS, and no
+-- SECURITY DEFINER anywhere -- it implicitly assumed every caller was the
+-- table owner. That assumption is wrong for both real callers (a KEDA-scaled
+-- worker, and an end user reading their own runs through PostgREST), and the
+-- gap was not academic: three other spec sections already described
+-- `workflow.runs.owner_id` + RLS as though it existed
+-- (user-rbac/spec.md §6, its schema.sql §8 sketch, and this system's own
+-- spec.md §13 usage metering).
+--
+-- THE FAILURE THIS PREVENTS, reproduced end to end against PG19 beta3:
+-- adding the RLS that those sections describe, without also making the
+-- engine's mutation functions SECURITY DEFINER, causes SILENT DATA LOSS.
+-- complete_task() updates workflow.runs to merge a step's output into
+-- run.context. Under RLS, a worker (which has no JWT, so current_user_id()
+-- is null) matches no rows -- and an UPDATE matching zero rows is not an
+-- error. Measured, same procedure, only the function's security mode varying:
+--
+--     SECURITY INVOKER -> task status 'done', run.context {}          <-- lost
+--     SECURITY DEFINER -> task status 'done', run.context {"gather":...}
+--
+-- Every step output silently discarded while the run reports success. The
+-- lesson generalizes past this schema: whenever an RLS-protected table is
+-- written by a trusted background process, the write path must be a
+-- SECURITY DEFINER function, or RLS turns a write into a no-op instead of a
+-- refusal.
+-- ============================================================
+
+-- (a) The TRUSTED path: the engine's own state machine. These run as the
+-- table owner (which bypasses RLS -- ENABLE, never FORCE, same rule as
+-- user-rbac/schema.sql §9), because a worker is not a user and cannot
+-- satisfy a user-scoped policy. search_path pinned, same CVE-2018-1058
+-- hardening as every other SECURITY DEFINER function in this collection.
+alter function workflow.claim_task(text, text)
+    security definer set search_path = pg_catalog, public;
+alter function workflow.claim_tasks(text, text, int)
+    security definer set search_path = pg_catalog, public;
+alter function workflow.claim_task_rate_limited(text, text)
+    security definer set search_path = pg_catalog, public;
+alter function workflow.heartbeat_task(uuid)
+    security definer set search_path = pg_catalog, public;
+alter function workflow.complete_task(uuid, jsonb)
+    security definer set search_path = pg_catalog, public;
+alter function workflow.fail_task(uuid, jsonb)
+    security definer set search_path = pg_catalog, public;
+alter function workflow.complete_decision_task(uuid, jsonb, jsonb)
+    security definer set search_path = pg_catalog, public;
+alter function workflow.signal_task(uuid, text, jsonb)
+    security definer set search_path = pg_catalog, public;
+alter function workflow.start_workflow(text, jsonb, text, text)
+    security definer set search_path = pg_catalog, public;
+alter function workflow.start_child_workflow(uuid, text, jsonb)
+    security definer set search_path = pg_catalog, public;
+alter function workflow.add_task(uuid, text, text, uuid[], text, jsonb, text)
+    security definer set search_path = pg_catalog, public;
+alter function workflow.cancel_run(uuid)
+    security definer set search_path = pg_catalog, public;
+alter function workflow.begin_compensation(uuid, text)
+    security definer set search_path = pg_catalog, public;
+alter function workflow.promote_due_timers()
+    security definer set search_path = pg_catalog, public;
+alter function workflow.reap_stale_tasks()
+    security definer set search_path = pg_catalog, public;
+
+-- The audit trigger, likewise. Without this a worker needs INSERT on
+-- task_events just to change a task's status -- i.e. write access to the log
+-- that audits it, which it could then forge entries in. An audit trigger must
+-- write with the owner's privileges, never the caller's.
+alter function workflow.log_task_transition()
+    security definer set search_path = pg_catalog, public;
+alter function workflow.cascade_task_status()
+    security definer set search_path = pg_catalog, public;
+
+-- (b) Deny by default, then grant only the entry points -- same rule and same
+-- reasoning as user-rbac/schema.sql §9(a).
+revoke execute on all functions in schema workflow from public;
+
+grant usage on schema workflow to worker, authenticated;
+
+-- The worker role: executes the state machine, and that is ALL it can do. It
+-- gets NO table grants whatsoever -- every one of its interactions is a
+-- function call. Enumerated the hard way: granting a worker direct table
+-- access meant it needed SELECT/UPDATE on tasks, INSERT on task_events,
+-- SELECT on task_dependencies, SELECT/UPDATE on runs, and EXECUTE on
+-- rbac.current_user_id() -- five tables and a cross-schema function, just to
+-- finish one task. Routing everything through SECURITY DEFINER functions
+-- reduces that to this list, and removes the forge-the-audit-log problem.
+grant execute on function workflow.claim_task(text, text) to worker;
+grant execute on function workflow.claim_tasks(text, text, int) to worker;
+grant execute on function workflow.claim_task_rate_limited(text, text) to worker;
+grant execute on function workflow.heartbeat_task(uuid) to worker;
+grant execute on function workflow.complete_task(uuid, jsonb) to worker;
+grant execute on function workflow.fail_task(uuid, jsonb) to worker;
+grant execute on function workflow.complete_decision_task(uuid, jsonb, jsonb) to worker;
+grant execute on function workflow.start_child_workflow(uuid, text, jsonb) to worker;
+grant execute on function workflow.add_task(uuid, text, text, uuid[], text, jsonb, text) to worker;
+
+-- Scheduled maintenance (pg_cron, or an operator). Not the worker's job.
+grant execute on function workflow.promote_due_timers() to scheduler;
+grant execute on function workflow.reap_stale_tasks() to scheduler;
+
+-- End users, via PostgREST: start a run, signal it, cancel their own.
+grant execute on function workflow.start_workflow(text, jsonb, text, text) to authenticated;
+grant execute on function workflow.signal_task(uuid, text, jsonb) to authenticated;
+grant execute on function workflow.cancel_run(uuid) to authenticated;
+
+-- (c) Self-check for THIS file's invariant. The view-ownership check lives in
+-- integration-rbac.sql, alongside the views it validates.
+do $$
+declare
+    v_bad text;
+begin
+    -- Every function that writes state must be SECURITY DEFINER, or a worker's
+    -- write becomes a silent no-op once integration-rbac.sql adds RLS (see this
+    -- section's header). This is the check that would have caught the data-loss
+    -- bug that motivated this whole section.
+    select string_agg(p.proname, ', ')
+    into v_bad
+    from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'workflow'
+      and p.proname in ('claim_task','claim_tasks','claim_task_rate_limited',
+                        'heartbeat_task','complete_task','fail_task',
+                        'complete_decision_task','signal_task','start_workflow',
+                        'start_child_workflow','add_task','cancel_run',
+                        'begin_compensation','promote_due_timers',
+                        'reap_stale_tasks','log_task_transition',
+                        'cascade_task_status')
+      and not p.prosecdef;
+    if v_bad is not null then
+        raise exception
+            'STATE-MUTATING FUNCTIONS ARE NOT SECURITY DEFINER: %. Once RLS is on '
+            'workflow.runs, a worker (no JWT) matches no rows, and an UPDATE '
+            'matching zero rows is NOT an error -- step outputs would be silently '
+            'discarded while runs report success.', v_bad;
+    end if;
+
+    raise notice 'workflow-engine self-check passed: all state mutators are SECURITY DEFINER';
+end $$;

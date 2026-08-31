@@ -90,3 +90,27 @@ grant authenticated to authenticator;
 -- The authenticator LOGIN password belongs in deployment config, never
 -- in a checked-in file:
 --     alter role authenticator with password '<from your secret store>';
+
+-- ------------------------------------------------------------
+-- 4. Workflow-engine roles (workflow-engine/schema.sql §16).
+--
+--    worker: what a KEDA-scaled task worker connects as. It holds NO table
+--    privileges at all -- every interaction is a SECURITY DEFINER function
+--    call (claim/heartbeat/complete/fail). That is not minimalism for its
+--    own sake: granting a worker direct table access was prototyped, and it
+--    required SELECT/UPDATE on tasks, INSERT on task_events, SELECT on
+--    task_dependencies, SELECT/UPDATE on runs, and EXECUTE on
+--    rbac.current_user_id() -- including write access to the audit log that
+--    audits it, which it could then forge entries in.
+--
+--    scheduler: what pg_cron (or an operator) runs maintenance as --
+--    promote_due_timers(), reap_stale_tasks(). Separated from worker because
+--    "run the state machine" and "sweep stale state" are different jobs with
+--    different blast radii, and a worker should not be able to reap.
+--
+--    Neither may be a superuser, for the same reason as every other role
+--    here. Both are NOLOGIN: real deployments grant them to a LOGIN role
+--    whose credential lives in deployment config.
+-- ------------------------------------------------------------
+create role worker nologin;
+create role scheduler nologin;
