@@ -1132,6 +1132,11 @@ begin
         'context',     coalesce(v_run.context, '{}'::jsonb),
         'task_input',  coalesce(v_task.input, '{}'::jsonb),
         'step_key',    v_task.step_key,
+        -- The worker dispatches to a handler by KIND, so it has to be told
+        -- what it just claimed. Omitted at first, which forced the worker to
+        -- guess from the shape of the input -- exactly the kind of inference
+        -- that silently does the wrong thing when a task is malformed.
+        'kind',        v_task.kind,
         'attempt',     v_task.attempts,
         'trace_id',    v_run.trace_id,
         'span_id',     v_task.span_id
