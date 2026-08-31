@@ -721,3 +721,138 @@ begin
         using p_query, p_limit;
 end;
 $$ language plpgsql stable;
+
+-- ============================================================
+-- 11. Lexical search -- the mode that was missing entirely.
+--
+-- THE GAP, demonstrated rather than argued: the dialect had LOOKUP (exact
+-- keys), FUZZY (trigram over KEYS), SEMANTIC (vectors) and GRAPH -- and
+-- nothing that searches document TEXT lexically. Asking for the part number
+-- "R7", which appears verbatim in a chunk:
+--     LOOKUP 'R7'        -> 0 hits   (node_keys only; chunks are not nodes)
+--     LOOKUP 'R7' FUZZY  -> 0 hits   (trigram over keys, not content)
+--     native FTS         -> found it immediately
+-- Rare exact tokens -- part numbers, tickers, error codes, case IDs, proper
+-- nouns -- are precisely where embeddings are weakest and lexical search is
+-- strongest, which is why production RAG is near-universally hybrid. We had
+-- only half of it.
+--
+-- Native tsvector/ts_rank, NOT BM25, and the difference is worth being honest
+-- about: ts_rank uses its own length-normalisation and has no k1/b term
+-- saturation, so a term occurring 20 times keeps accruing score in a way BM25
+-- deliberately damps. For short chunks the practical difference is small; for
+-- long documents with repeated terms it is not.
+--
+-- Chosen as the DEFAULT anyway because it is permissive-licensed, already in
+-- core Postgres, costs one GIN index and zero new dependencies. pg_search
+-- (ParadeDB, real BM25) is the promote-on-evidence upgrade -- see
+-- meta/postgres-manifest.md for its AGPLv3 posture, which is the one
+-- non-permissive license in the collection and deserves a deliberate decision
+-- rather than a default.
+-- ============================================================
+
+create table aiq.lexical_sources (
+    name         text primary key,
+    source_table text not null,
+    content_col  text not null default 'content',
+    regconfig    text not null default 'english'
+);
+
+-- A generated tsvector column + GIN index is the standard shape: the vector
+-- is maintained by Postgres on write, never by application code that can
+-- forget, and the index is what makes it a search rather than a scan.
+create or replace function aiq.register_lexical_source(
+    p_name text, p_source_table text,
+    p_content_col text default 'content', p_regconfig text default 'english'
+) returns void as $$
+declare v_short text := split_part(p_source_table, '.', 2);
+begin
+    insert into aiq.lexical_sources (name, source_table, content_col, regconfig)
+    values (p_name, p_source_table, p_content_col, p_regconfig)
+    on conflict (name) do update set source_table = excluded.source_table,
+        content_col = excluded.content_col, regconfig = excluded.regconfig;
+
+    execute format(
+        'alter table %s add column if not exists search_tsv tsvector
+         generated always as (to_tsvector(%L, coalesce(%I, ''''))) stored',
+        p_source_table, p_regconfig, p_content_col);
+    execute format(
+        'create index if not exists %I on %s using gin (search_tsv)',
+        'idx_' || v_short || '_tsv', p_source_table);
+end;
+$$ language plpgsql;
+
+-- TEXT mode. Deliberately returns the same (id, score) shape as
+-- aiq.semantic_in() so the two can be fused without reshaping either.
+create or replace function aiq.lexical(
+    p_source text, p_query text, p_limit int default 10
+) returns table(chunk_id uuid, content text, score real) as $$
+declare s aiq.lexical_sources;
+begin
+    select * into s from aiq.lexical_sources where name = p_source;
+    if not found then raise exception 'lexical source % not registered', p_source; end if;
+    return query execute format(
+        'select c.id, c.%I::text, ts_rank(c.search_tsv, plainto_tsquery(%L, $1))::real
+         from %s c where c.search_tsv @@ plainto_tsquery(%L, $1)
+         order by ts_rank(c.search_tsv, plainto_tsquery(%L, $1)) desc limit $2',
+        s.content_col, s.regconfig, s.source_table, s.regconfig, s.regconfig)
+        using p_query, p_limit;
+end;
+$$ language plpgsql stable;
+
+-- HYBRID: reciprocal rank fusion of lexical + semantic.
+--
+-- RRF rather than score-weighted blending, deliberately: ts_rank and cosine
+-- distance are not on the same scale, not even the same direction (higher is
+-- better vs lower is better), and no fixed normalisation of the two survives a
+-- change of model or corpus. RRF only uses RANK, so it is invariant to both.
+-- k=60 is the value from the original RRF paper and the common default; it
+-- damps the contribution of low-ranked items without a tunable that needs
+-- per-corpus fitting.
+--
+-- This is the mode that answers the "R7" case AND "is this product
+-- dangerous?" with one call -- which is the actual argument for a unified
+-- dialect over three separate APIs.
+create or replace function aiq.hybrid(
+    p_lexical_source text, p_query_text text,
+    p_query_vector vector, p_model text default null,
+    p_limit int default 10, p_k int default 60
+) returns table(chunk_id uuid, content text, rrf_score real,
+                lexical_rank int, semantic_rank int) as $$
+declare
+    src aiq.lexical_sources;
+begin
+    select * into src from aiq.lexical_sources where name = p_lexical_source;
+    if not found then
+        raise exception 'lexical source % not registered', p_lexical_source;
+    end if;
+
+    return query execute format($q$
+    with lex as (
+        select l.chunk_id, row_number() over (order by l.score desc)::int as rnk
+        from aiq.lexical($1, $2, $4 * 4) l
+    ),
+    sem as (
+        select s.chunk_id, row_number() over (order by s.distance asc)::int as rnk
+        from aiq.semantic_in($3, $6, $4 * 4) s
+    )
+    -- Content is fetched by id AFTER the fusion, not carried through the
+    -- lexical branch: a chunk matched only semantically has no row in `lex`,
+    -- so taking content from there returns NULL for exactly the results the
+    -- semantic side contributed. Found by running it -- the fused output had
+    -- blank content for every vector-only hit.
+    select f.chunk_id, c.%1$I::text, f.rrf, f.lexical_rank, f.semantic_rank
+    from (
+        select coalesce(lex.chunk_id, sem.chunk_id) as chunk_id,
+               (coalesce(1.0 / ($5 + lex.rnk), 0)
+                + coalesce(1.0 / ($5 + sem.rnk), 0))::real as rrf,
+               lex.rnk as lexical_rank, sem.rnk as semantic_rank
+        from lex full outer join sem on sem.chunk_id = lex.chunk_id
+    ) f
+    join %2$s c on c.id = f.chunk_id
+    order by f.rrf desc
+    limit $4
+    $q$, src.content_col, src.source_table)
+    using p_lexical_source, p_query_text, p_query_vector, p_limit, p_k, p_model;
+end;
+$$ language plpgsql stable;
