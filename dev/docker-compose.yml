@@ -1,0 +1,51 @@
+services:
+  db:
+    build:
+      context: .
+      dockerfile: Dockerfile.pg19
+    container_name: p8-experiment-pg19
+    environment:
+      POSTGRES_USER: p8
+      POSTGRES_PASSWORD: p8
+      POSTGRES_DB: p8experiment
+    ports:
+      - "5499:5432"
+    volumes:
+      - ./init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U p8 -d p8experiment"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  postgrest:
+    image: postgrest/postgrest:v12.2.8
+    container_name: p8-experiment-postgrest
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGRST_DB_URI: postgres://authenticator:authpass@db:5432/p8experiment
+      PGRST_DB_SCHEMAS: content, aiq, rbac, workflow, public
+      PGRST_DB_ANON_ROLE: web_anon
+      # Test-only secret -- never reuse in a real deployment.
+      PGRST_JWT_SECRET: experiment-only-jwt-secret-not-for-real-use-0123456789
+      PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:3000
+    ports:
+      - "3000:3000"
+
+  minio:
+    image: minio/minio:latest
+    container_name: p8-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: p8admin
+      MINIO_ROOT_PASSWORD: p8password
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - p8-minio:/data
+
+volumes:
+  p8-minio:
