@@ -1079,6 +1079,54 @@ alter function workflow.log_task_transition()
 alter function workflow.cascade_task_status()
     security definer set search_path = pg_catalog, public;
 
+-- A worker holds no table grants, so it cannot read the run its task belongs
+-- to -- and start_workflow() puts the CALLER's input on the RUN, while a task
+-- only carries whatever its step spec declared. Without this function a worker
+-- literally cannot see what it is supposed to work on: confirmed by running a
+-- real embedding pipeline, where the worker got `input = NULL` and
+-- `permission denied for table runs` when it tried to join for the
+-- resource_id. That made the engine unusable for any workflow whose steps
+-- share run-level data, which is nearly all of them.
+--
+-- Returns the run's input, its accumulated context (so a later step can read
+-- an earlier step's output -- the whole point of complete_task() merging into
+-- context), and the task's own input, in one call.
+--
+-- Scoped to a task the CALLER HAS CLAIMED. Without that check this is a
+-- cross-tenant read primitive: any worker could pass any task_id and get that
+-- run's input. The claim is the authorization, exactly as the grant is the
+-- authorization for claim_task itself.
+create or replace function workflow.get_task_context(p_task_id uuid, p_worker_id text)
+returns jsonb as $$
+declare
+    v_task workflow.tasks;
+    v_run  workflow.runs;
+begin
+    select * into v_task from workflow.tasks where id = p_task_id;
+    if not found then
+        raise exception 'task % not found', p_task_id;
+    end if;
+    if v_task.claimed_by is distinct from p_worker_id or v_task.status <> 'running' then
+        raise exception
+            'task % is not currently claimed by % -- a worker may only read the context of a task it holds',
+            p_task_id, p_worker_id;
+    end if;
+
+    select * into v_run from workflow.runs where id = v_task.run_id;
+
+    return jsonb_build_object(
+        'run_id',      v_run.id,
+        'run_input',   coalesce(v_run.input, '{}'::jsonb),
+        'context',     coalesce(v_run.context, '{}'::jsonb),
+        'task_input',  coalesce(v_task.input, '{}'::jsonb),
+        'step_key',    v_task.step_key,
+        'attempt',     v_task.attempts,
+        'trace_id',    v_run.trace_id,
+        'span_id',     v_task.span_id
+    );
+end;
+$$ language plpgsql stable security definer set search_path = pg_catalog, public;
+
 -- (b) Deny by default, then grant only the entry points -- same rule and same
 -- reasoning as user-rbac/schema.sql §9(a).
 revoke execute on all functions in schema workflow from public;
@@ -1102,6 +1150,7 @@ grant execute on function workflow.fail_task(uuid, jsonb) to worker;
 grant execute on function workflow.complete_decision_task(uuid, jsonb, jsonb) to worker;
 grant execute on function workflow.start_child_workflow(uuid, text, jsonb) to worker;
 grant execute on function workflow.add_task(uuid, text, text, uuid[], text, jsonb, text) to worker;
+grant execute on function workflow.get_task_context(uuid, text) to worker;
 
 -- Scheduled maintenance (pg_cron, or an operator). Not the worker's job.
 grant execute on function workflow.promote_due_timers() to scheduler;

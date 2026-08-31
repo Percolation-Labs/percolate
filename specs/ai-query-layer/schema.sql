@@ -613,3 +613,111 @@ begin
     return jsonb_build_object('mode', p->>'mode', 'plan', p, 'rows', v_out);
 end;
 $$ language plpgsql stable;
+
+-- ============================================================
+-- 10. Embedding spaces: multiple models, multiple dimensions.
+--
+-- THE CONSTRAINT, measured rather than assumed:
+--   * `vector(n)` is fixed-width -- inserting 1536 dims into vector(768)
+--     fails with "expected 768 dimensions, not 1536".
+--   * An UNTYPED `vector` column DOES accept mixed dimensions, but cannot be
+--     indexed at all: `create index ... using hnsw` fails with "column does
+--     not have dimensions". So it is unusable for search -- every query
+--     becomes a seq scan.
+-- Therefore embeddings of different shapes MUST live in different columns
+-- with their own indexes. There is no single-table shortcut.
+--
+-- THE CORRECTION worth stating: the partition key is the MODEL, not the
+-- dimension. Two different 768-dimension models do not produce comparable
+-- vectors -- cosine distance between them is meaningless, not merely
+-- imprecise. Naming storage after the dimension alone (embedding_768) invites
+-- exactly that mistake, because it makes two incompatible things look
+-- interchangeable. Dimension is an ATTRIBUTE of a model here, never the
+-- identity of a space.
+--
+-- One table per registered model, each with its own typed column and its own
+-- HNSW index. A chunk may have rows in several of them simultaneously, which
+-- is what makes migrating models (or A/B-ing them) possible without a
+-- destructive rewrite: embed into the new space alongside the old, compare,
+-- switch the default, drop the old space when nothing references it.
+-- ============================================================
+
+create table aiq.embedding_models (
+    name        text primary key,          -- 'nomic-embed-text', 'text-embedding-3-small'
+    dim         int  not null check (dim > 0),
+    provider    text not null,             -- 'ollama' | 'openai' | ...
+    endpoint    text,                      -- resolved by the worker, not called from SQL
+    distance_op text not null default 'vector_cosine_ops'
+                    check (distance_op in ('vector_cosine_ops','vector_l2_ops','vector_ip_ops')),
+    is_default  boolean not null default false,
+    notes       text,
+    created_at  timestamptz not null default now()
+);
+
+-- Exactly one default at a time. A partial unique index rather than a trigger:
+-- the database enforces it, so a bad deploy fails loudly instead of leaving
+-- two defaults and a coin-flip about which one SEMANTIC uses.
+create unique index idx_embedding_models_one_default
+    on aiq.embedding_models ((true)) where is_default;
+
+-- Each registered model gets its own storage table + HNSW index, generated
+-- from the registry so the dimension and operator class can never drift from
+-- what the model actually produces.
+create or replace function aiq.register_embedding_space(p_model text)
+returns void as $$
+declare m aiq.embedding_models;
+begin
+    select * into m from aiq.embedding_models where name = p_model;
+    if not found then raise exception 'embedding model % not registered', p_model; end if;
+
+    execute format($q$
+        create table if not exists aiq.%1$I (
+            chunk_id   uuid primary key,
+            embedding  vector(%2$s) not null,
+            embedded_at timestamptz not null default now()
+        )$q$, 'emb_' || replace(m.name, '-', '_'), m.dim);
+
+    execute format($q$
+        create index if not exists %1$I on aiq.%2$I
+        using hnsw (embedding %3$s)$q$,
+        'idx_' || replace(m.name,'-','_') || '_hnsw',
+        'emb_' || replace(m.name, '-', '_'), m.distance_op);
+end;
+$$ language plpgsql;
+
+-- SEMANTIC against a named model (or the default when null). The caller still
+-- supplies the vector -- embedding generation is an external model call (§4),
+-- and which model produced that vector is now explicit rather than implied.
+create or replace function aiq.semantic_in(
+    p_query vector, p_model text default null, p_limit int default 10
+) returns table(chunk_id uuid, distance float8, model text) as $$
+declare
+    m aiq.embedding_models;
+    v_tbl text;
+begin
+    if p_model is null then
+        select * into m from aiq.embedding_models where is_default;
+        if not found then raise exception
+            'no default embedding model -- set one, or name a model explicitly'; end if;
+    else
+        select * into m from aiq.embedding_models where name = p_model;
+        if not found then raise exception 'embedding model % not registered', p_model; end if;
+    end if;
+
+    -- Dimension mismatch is caught HERE with a message naming both sides,
+    -- rather than surfacing as pgvector's bare "expected N dimensions".
+    -- Querying the wrong space is the single easiest mistake to make once
+    -- more than one model exists.
+    if vector_dims(p_query) <> m.dim then
+        raise exception
+            'query vector has % dimensions but model % expects % -- embedded with the wrong model?',
+            vector_dims(p_query), m.name, m.dim;
+    end if;
+
+    v_tbl := 'emb_' || replace(m.name, '-', '_');
+    return query execute format(
+        'select e.chunk_id, (e.embedding <=> $1)::float8, %L
+         from aiq.%I e order by e.embedding <=> $1 limit $2', m.name, v_tbl)
+        using p_query, p_limit;
+end;
+$$ language plpgsql stable;
