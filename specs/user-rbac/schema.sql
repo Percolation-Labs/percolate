@@ -83,8 +83,17 @@ $$ language sql stable;
 
 -- Convenience: current user id from the JWT claims PostgREST already
 -- exposes via current_setting -- use this directly inside RLS policies.
+--
+-- The nullif() guards the RAW SETTING, not the extracted 'sub' field: once a
+-- pooled connection (PgBouncer/pgcat) has had request.jwt.claims SET LOCAL in
+-- any prior transaction, an unregistered custom GUC resets to '' (not NULL)
+-- after that transaction commits -- confirmed empirically against PG19 beta3,
+-- see ../../experiments/pg19-stack/FINDINGS.md §1. Casting '' straight to
+-- ::json throws before a nullif() applied only to ->>'sub' ever runs; guarding
+-- the raw string first avoids that, and is what makes the very next anonymous
+-- request on a reused pooled connection return zero rows instead of a 500.
 create or replace function current_user_id() returns uuid as $$
-    select nullif(current_setting('request.jwt.claims', true)::json->>'sub', '')::uuid;
+    select (nullif(current_setting('request.jwt.claims', true), '')::json->>'sub')::uuid;
 $$ language sql stable;
 
 -- Example RLS policy shape any module adopts:
