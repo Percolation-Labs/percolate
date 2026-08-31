@@ -67,10 +67,31 @@ alter table aiq.edges     enable row level security;
 -- get it hoisted (user-rbac/schema.sql §9's EXPLAIN finding).
 create policy nodes_org_scoped on aiq.nodes for select
   using (org_id is null or org_id in (select aiq.current_org_ids()));
-create policy node_keys_org_scoped on aiq.node_keys for select
-  using (org_id is null or org_id in (select aiq.current_org_ids()));
-create policy edges_org_scoped on aiq.edges for select
-  using (org_id is null or org_id in (select aiq.current_org_ids()));
+-- node_keys INHERITS its node's visibility rather than re-deriving it from
+-- its own org_id copy. That copy exists for the canonical-key unique index
+-- (two orgs may each have their own 'acme' -- graph-identity.md "Keys"), and
+-- it is the wrong thing to gate reads on.
+--
+-- Found by running LOOKUP over REST after a rebuild: nodes.org_id had been
+-- updated while node_keys.org_id had not (the projection's ON CONFLICT DO
+-- NOTHING never touches an existing key row), so the key was visible and its
+-- node was not. The join returned nothing and LOOKUP reported an empty result
+-- -- indistinguishable from "no such key". A duplicated tenancy fact that can
+-- drift is a silent-wrong-answer generator, and the same table cannot be both
+-- the uniqueness scope and the visibility source without staying in lockstep.
+--
+-- One source of truth: visibility lives on nodes, keys inherit it. Drift is
+-- now impossible rather than merely detected. (Same shape as workflow.tasks
+-- inheriting visibility from workflow.runs.)
+create policy node_keys_via_node on aiq.node_keys for select
+  using (exists (select 1 from aiq.nodes n where n.id = aiq.node_keys.node_id));
+-- Edges likewise inherit: an edge is visible only when BOTH endpoints are.
+-- Its own org_id stays for authoring/provenance, not for read gating -- same
+-- reasoning as node_keys above, and it additionally prevents an edge from
+-- revealing that an invisible node exists.
+create policy edges_via_endpoints on aiq.edges for select
+  using (exists (select 1 from aiq.nodes s where s.id = aiq.edges.src_id)
+     and exists (select 1 from aiq.nodes d where d.id = aiq.edges.dst_id));
 
 -- ------------------------------------------------------------
 -- 2. Read path: views owned by api_viewer, exactly as user-rbac does.
@@ -93,6 +114,47 @@ alter view aiq.edges_api owner to api_viewer;
 revoke create on schema aiq from api_viewer;
 
 grant select on aiq.nodes_api, aiq.edges_api to authenticated;
+
+-- Base-table SELECT for `authenticated` too -- and this is NOT the same
+-- decision user-rbac made, so the difference is worth stating.
+--
+-- user-rbac grants no base-table access because its sensitivity is
+-- COLUMN-level: password_hash and mfa_secret must never be selectable, and
+-- RLS cannot hide a column. Only a view whose SELECT list omits them can.
+--
+-- Here the sensitivity is purely ROW-level (which org owns this node), which
+-- is exactly what RLS does. There is no secret column to hide, so a view adds
+-- nothing to safety -- and the query functions are SECURITY INVOKER by
+-- design (§3), so they read as the CALLER and are filtered by the caller's
+-- policies. Withholding the grant would simply make every mode fail with
+-- "permission denied for table node_keys", which is what happened the first
+-- time this was exercised over REST.
+--
+-- The rule, generalised: views for COLUMN secrecy, RLS for ROW visibility.
+-- Reaching for a view when the problem is row-level buys nothing and costs a
+-- layer of indirection.
+grant select on aiq.nodes, aiq.node_keys, aiq.edges to authenticated;
+
+-- A PROPERTY GRAPH is its own privilege object in PG19, separate from the
+-- tables it is defined over. Granting SELECT on nodes and edges is NOT
+-- sufficient: GRAPH mode fails with "permission denied for property graph
+-- knowledge_graph" until this is granted too. Not guessable -- found by a
+-- REST call failing after every table grant was already in place.
+grant select on property graph aiq.knowledge_graph to authenticated, api_viewer;
+
+-- Embedding spaces are created DYNAMICALLY by register_embedding_space(), so
+-- they cannot be listed here -- and a table created after this file runs
+-- inherits no grants, making every SEMANTIC/HYBRID call against a newly
+-- registered model fail with "permission denied for table emb_<model>".
+-- Found by registering a model and immediately querying it over REST.
+--
+-- ALTER DEFAULT PRIVILEGES is the mechanism that actually covers this: it
+-- applies to objects app_owner creates in this schema FROM NOW ON, so a model
+-- registered next month is readable without anyone remembering to come back
+-- here. The existing grant covers spaces created before this line runs.
+grant select on all tables in schema aiq to authenticated, api_viewer;
+alter default privileges for role app_owner in schema aiq
+    grant select on tables to authenticated, api_viewer;
 
 -- ------------------------------------------------------------
 -- 3. Query functions: deny by default, then grant the entry points.
@@ -120,6 +182,28 @@ grant execute on function aiq.sql_passthrough(text) to authenticated;
 -- form a valid query at all. Read-only, no row-level sensitivity.
 grant select on aiq.embedding_models, aiq.lexical_sources,
                 aiq.semantic_sources, aiq.relation_types to authenticated;
+
+-- ------------------------------------------------------------
+-- 3b. Consumer-owned content tables.
+--
+-- TEXT, SEMANTIC and HYBRID read the CONSUMER's tables (world-model
+-- ingestion's resource_chunks, say), not aiq's own -- registered by name in
+-- lexical_sources / semantic_sources. Because the query functions are
+-- SECURITY INVOKER, the caller needs real access to those tables, and
+-- without it every content mode fails with "permission denied for schema
+-- <consumer>" even though every aiq grant is correct.
+--
+-- Deliberately NOT granted here: this file must not reach into a consumer
+-- schema it does not own and decide who may read it. That is the consumer's
+-- policy to set, alongside its own RLS. Stated explicitly because the failure
+-- is confusing -- it looks like an ai-query-layer permissions bug and is not.
+--
+-- A consumer registering a source is signing up for, e.g.:
+--     grant usage on schema wm to authenticated;
+--     grant select on wm.resource_chunks to authenticated;
+--     alter table wm.resource_chunks enable row level security;
+--     create policy ... ;   -- the consumer's own visibility rule
+-- ------------------------------------------------------------
 
 -- Registration and projection are ADMIN operations, not user operations, and
 -- stay owner-only: register_entity_table() and register_embedding_space()

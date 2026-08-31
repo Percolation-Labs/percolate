@@ -223,7 +223,10 @@ begin
             from new_rows n
             join aiq.nodes nd on nd.entity_type = %2$L and nd.entity_id = n.id
             where %5$s
-            on conflict (node_id, key, kind) do nothing;
+            -- DO UPDATE, not DO NOTHING: org_id scopes the canonical-key
+            -- unique index, so leaving a stale copy on an existing key row
+            -- silently corrupts that scoping after a tenancy change.
+            on conflict (node_id, key, kind) do update set org_id = excluded.org_id;
             return null;
         end;
         $b$ language plpgsql;
@@ -299,7 +302,7 @@ begin
         from %4$s n
         join aiq.nodes nd on nd.entity_type = %1$L and nd.entity_id = n.id
         where %5$s
-        on conflict (node_id, key, kind) do nothing
+        on conflict (node_id, key, kind) do update set org_id = excluded.org_id
     $q$, r.entity_type, r.key_expr, r.org_expr, r.source_table, r.include_where);
 
     -- Evict nodes whose source row is gone or no longer satisfies inclusion.
