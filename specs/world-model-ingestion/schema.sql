@@ -265,17 +265,29 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- proxies the bytes (brief.md §3.5 -- proxied reads, not presigned URLs, for
 -- one authorization path), so it needs the location and nothing else.
 --
--- SECURITY INVOKER on purpose: this is a READ on behalf of a user, so it must
--- be subject to that user's RLS. Making it DEFINER would hand any caller any
--- tenant's storage keys -- the same distinction ai-query-layer's read path
--- draws for the same reason.
+-- SECURITY DEFINER with an EXPLICIT visibility check, and the combination is
+-- forced rather than chosen. This has to read content.files, which is granted
+-- to nobody -- deduped by content hash, so it has no single owner and any
+-- owner-scoped policy on it would be meaningless. A SECURITY INVOKER version
+-- therefore cannot succeed for anyone; it failed with "permission denied for
+-- table resources" the first time a containerized Content Server called it.
+--
+-- So authorization is done here instead of by RLS: the caller must be able to
+-- see the RESOURCE, checked against exactly the predicate resources' own
+-- policy uses. That keeps one rule in two places, which is a cost -- but the
+-- alternative is exposing storage keys through a table that cannot be scoped.
+--
+-- Returns nothing when the caller may not see it, rather than raising:
+-- distinguishing "not yours" from "does not exist" tells an unauthorized
+-- caller that the resource exists.
 create or replace function content.resolve_file(p_resource_id uuid)
 returns table(bucket text, object_key text, content_type text, size_bytes bigint) as $$
     select f.bucket, f.object_key, f.content_type, f.size_bytes
     from content.resources r
     join content.files f on f.id = r.file_id
-    where r.id = p_resource_id;
-$$ language sql stable security invoker;
+    where r.id = p_resource_id
+      and (r.org_id is null or r.org_id in (select aiq.current_org_ids()));
+$$ language sql stable security definer set search_path = pg_catalog, public;
 
 -- Record chunks produced by the ingestion workflow, and flip the resource
 -- ready. One call rather than N inserts plus an update, so a resource is never

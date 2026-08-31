@@ -36,6 +36,53 @@ services:
     ports:
       - "3000:3000"
 
+  # ---------------------------------------------------------------------
+  # percolate-core, pulled from Docker Hub. One image, three entrypoints --
+  # the services share percolate_core.core, so three images would be three
+  # builds of the same base and three tags to keep in step.
+  #
+  # None of them holds a table grant. Every database interaction is a
+  # SECURITY DEFINER function call, and each sets the caller's claims per
+  # transaction, so RLS sees the user rather than the service.
+  # ---------------------------------------------------------------------
+  worker:
+    image: percolationlabs/percolate-core:0.1.2
+    container_name: p8-worker
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["worker", "--queue", "http"]
+    environment:
+      P8_DSN: postgres://worker:workerpass@db:5432/p8experiment
+      P8_WORKER_ID: worker-1
+      # Credentials referenced by http_call tasks are resolved from HERE, by
+      # name. The database stores only the reference, so a dump of
+      # workflow.tasks never contains a secret.
+      LLM_API_KEY: ${LLM_API_KEY:-}
+
+  content:
+    image: percolationlabs/percolate-core:0.1.2
+    container_name: p8-content
+    depends_on:
+      db:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    command: ["content", "serve"]
+    environment:
+      # authenticator, exactly as PostgREST uses it: it holds no privileges of
+      # its own and can SET ROLE into web_anon or authenticated per request.
+      # A service connecting as a role that CANNOT switch would run every query
+      # as itself, ignoring the caller identity it just installed.
+      P8_DSN: postgres://authenticator:authpass@db:5432/p8experiment
+      P8_S3_ENDPOINT: http://minio:9000
+      P8_S3_KEY: p8admin
+      P8_S3_SECRET: p8password
+      P8_BUCKET: p8-content
+      P8_JWT_SECRET: experiment-only-jwt-secret-not-for-real-use-0123456789
+    ports:
+      - "8081:8081"
+
   minio:
     image: minio/minio:latest
     container_name: p8-minio

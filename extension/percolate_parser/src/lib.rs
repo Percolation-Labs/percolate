@@ -83,20 +83,31 @@ impl ParseError {
     }
 }
 
-/// Split into tokens, treating a double-quoted run as ONE token so keys may
-/// contain spaces ("acme robotics") and slashes ("places/ukraine/bakhmut").
+/// Split into tokens, treating a quoted run as ONE token so keys may contain
+/// spaces ("acme robotics") and slashes ("places/ukraine/bakhmut").
+///
+/// Both quote characters are accepted, and that is not laxity. P8QL is always
+/// written *inside* a host language, and the two hosts it has both claim the
+/// double quote first: SQL (`aiq.query('LOOKUP ...')`) and YAML
+/// (`args: ["LOOKUP ..."]`). An author embedding a query in either reaches for
+/// the single quote because it is the one still available. Accepting only the
+/// double quote made `LOOKUP 'R7 Notice'` fail with `unexpected token
+/// 'Notice''` — and, far worse, made `LOOKUP 'R7'` *succeed* with the quotes
+/// left inside the key, looking up a key literally named `'R7'`, matching
+/// nothing, and reporting no error at all.
 fn tokenize(input: &str) -> Result<Vec<String>, ParseError> {
     let mut out = Vec::new();
     let mut chars = input.chars().peekable();
     while let Some(&c) = chars.peek() {
         if c.is_whitespace() {
             chars.next();
-        } else if c == '"' {
+        } else if c == '"' || c == '\'' {
+            let quote = c;
             chars.next();
             let mut buf = String::new();
             let mut closed = false;
             while let Some(c2) = chars.next() {
-                if c2 == '"' {
+                if c2 == quote {
                     closed = true;
                     break;
                 }
@@ -286,6 +297,22 @@ mod tests {
     fn parses_quoted_key_with_spaces_and_slashes() {
         let q = parse_query("LOOKUP \"places/ukraine/bakhmut city\"").unwrap();
         assert_eq!(q.arg, "places/ukraine/bakhmut city");
+    }
+
+    /// Single quotes are the only ones left once SQL or YAML has taken the
+    /// double quote, so they must produce the identical parse. The second
+    /// assertion is the one that matters: before single quotes were a quoting
+    /// character, this parsed *successfully* with `arg` as `'R7'`, which
+    /// matches no key and raises no error.
+    #[pg_test]
+    fn single_quotes_quote_exactly_as_double_quotes_do() {
+        assert_eq!(parse_query("LOOKUP 'R7 Notice'").unwrap().arg, "R7 Notice");
+        assert_eq!(parse_query("LOOKUP 'R7'").unwrap().arg, "R7");
+    }
+
+    #[pg_test]
+    fn unterminated_single_quote_is_an_error_not_a_key() {
+        assert!(parse_query("LOOKUP 'R7 Notice").is_err());
     }
 
     #[pg_test]

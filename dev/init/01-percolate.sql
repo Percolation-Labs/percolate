@@ -16,7 +16,10 @@ create role authenticated nologin;
 create role authenticator noinherit login password 'authpass';
 grant web_anon to authenticator;
 grant authenticated to authenticator;
-create role worker nologin;
+-- worker and the content server connect as themselves, so they need a login.
+-- They hold NO table grants -- every interaction is a SECURITY DEFINER function
+-- call -- which is what makes running them safe to hand to anyone.
+create role worker login password 'workerpass';
 create role scheduler nologin;
 
 -- 2. The extensions a non-superuser cannot install.
