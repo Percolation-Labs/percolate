@@ -119,3 +119,142 @@ begin
 
     raise notice 'workflow-engine self-check passed: state mutators are SECURITY DEFINER; api views separately owned';
 end $$;
+
+-- ============================================================
+-- (e) Ownership assignment, and authorization on the user-facing entry
+--     points. Both belong here rather than in schema.sql because both need
+--     rbac.current_user_id(), and the core engine is deliberately identity-free.
+-- ============================================================
+
+-- Runs get their owner from the verified JWT, never from a caller-supplied
+-- argument (the lesson rbac.grant_role() and rbac.issue_refresh_token() both
+-- taught: a caller-supplied "whose is this" parameter is always spoofable
+-- through PostgREST). A trigger rather than a modified start_workflow(), so
+-- start_child_workflow() and any future insert path get it for free, and so
+-- the core function keeps no rbac dependency.
+--
+-- Found by running it: start_workflow() set no owner at all, so every run
+-- created through the RPC was ownerless -- and therefore invisible to the
+-- person who started it, since the RLS policy above matches on owner_id. The
+-- ownership model three spec sections describe was unusable end to end.
+-- Null stays null for system-initiated runs (a scheduled poll, a
+-- consolidation run) -- those have no human owner and must not invent one.
+create or replace function workflow.set_run_owner() returns trigger as $$
+begin
+    if new.owner_id is null then
+        new.owner_id := rbac.current_user_id();
+    end if;
+    return new;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+create trigger trg_set_run_owner
+    before insert on workflow.runs
+    for each row execute function workflow.set_run_owner();
+
+-- Authorization on the two run-scoped user entry points.
+--
+-- CONFIRMED EXPLOITABLE before this was added, and worth being precise about
+-- why: making these SECURITY DEFINER in schema.sql §16 (necessary, so workers
+-- and owners can act on runs without base-table grants) means they no longer
+-- get RLS as an accidental backstop. A non-owner with no permissions
+-- cancelled another user's running workflow end to end -- reproduced
+-- directly. This is the same shape as the grant_role privilege escalation
+-- found in user-rbac: a SECURITY DEFINER function that acts on a
+-- caller-supplied id without checking the caller's authority over it.
+--
+-- The rule this makes explicit, for any future function in this collection:
+-- SECURITY DEFINER deliberately bypasses RLS, so every SECURITY DEFINER
+-- function reachable by an end user MUST do its own authorization check.
+-- Worker-facing functions (claim/complete/fail/heartbeat) are exempt because
+-- EXECUTE on them is granted only to `worker`, which is infrastructure, not
+-- a user identity -- their authorization IS the grant.
+create or replace function workflow.assert_run_access(p_run_id uuid, p_action text)
+returns void as $$
+declare v_owner uuid;
+begin
+    select owner_id into v_owner from workflow.runs where id = p_run_id;
+    if not found then
+        raise exception 'run % not found', p_run_id;
+    end if;
+    -- A system-owned run (owner_id null) is not "owned by everyone": it takes
+    -- an explicit permission, never bare ownership, to act on.
+    if v_owner is not null and v_owner = rbac.current_user_id() then
+        return;
+    end if;
+    if rbac.has_permission(rbac.current_user_id(), 'workflow_runs', p_action) then
+        return;
+    end if;
+    raise exception 'not authorized to % run %', p_action, p_run_id;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+create or replace function workflow.cancel_run(p_run_id uuid) returns void as $$
+declare v_child uuid;
+begin
+    perform workflow.assert_run_access(p_run_id, 'cancel');
+
+    update workflow.runs set status = 'cancelled', cancel_requested = true
+    where id = p_run_id and status = 'running';
+
+    update workflow.tasks set cancel_requested = true
+    where run_id = p_run_id and status = 'running';
+
+    update workflow.tasks set status = 'cancelled'
+    where run_id = p_run_id and status in ('pending', 'ready', 'waiting_external');
+
+    -- Child runs are cancelled by the same authority as their parent, not
+    -- re-checked against the caller: a child run is frequently system-owned
+    -- (no owner_id), and re-running the check would fail on exactly the runs
+    -- a legitimate parent cancellation most needs to reach. The parent check
+    -- above is the authorization boundary for the whole tree.
+    for v_child in select child_run_id from workflow.tasks
+                   where run_id = p_run_id and child_run_id is not null
+    loop
+        perform workflow.cancel_run_unchecked(v_child);
+    end loop;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- The recursive/internal form: no authorization, never granted to any user
+-- role, reachable only from cancel_run() above (same owner) and from the
+-- engine itself. Split out rather than adding a "skip the check" boolean
+-- parameter, because a caller-supplied flag that disables authorization is
+-- precisely the pattern this collection keeps finding to be exploitable.
+create or replace function workflow.cancel_run_unchecked(p_run_id uuid) returns void as $$
+declare v_child uuid;
+begin
+    update workflow.runs set status = 'cancelled', cancel_requested = true
+    where id = p_run_id and status = 'running';
+    update workflow.tasks set cancel_requested = true
+    where run_id = p_run_id and status = 'running';
+    update workflow.tasks set status = 'cancelled'
+    where run_id = p_run_id and status in ('pending', 'ready', 'waiting_external');
+    for v_child in select child_run_id from workflow.tasks
+                   where run_id = p_run_id and child_run_id is not null
+    loop
+        perform workflow.cancel_run_unchecked(v_child);
+    end loop;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+create or replace function workflow.signal_task(p_run_id uuid, p_signal text, p_payload jsonb)
+returns void as $$
+begin
+    -- Was equally open, and only *appeared* safe when tested because
+    -- wait_signal was never populated (schema.sql's start_workflow bug, fixed
+    -- there) -- so the UPDATE matched nothing regardless of who called it. A
+    -- security property that holds only because a different feature is broken
+    -- is not a security property.
+    perform workflow.assert_run_access(p_run_id, 'signal');
+
+    update workflow.tasks
+    set status = 'done', output = p_payload
+    where run_id = p_run_id and wait_signal = p_signal and status = 'waiting_external';
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+revoke execute on function workflow.cancel_run_unchecked(uuid) from public;
+revoke execute on function workflow.assert_run_access(uuid, text) from public;
+grant execute on function workflow.cancel_run(uuid) to authenticated;
+grant execute on function workflow.signal_task(uuid, text, jsonb) to authenticated;

@@ -463,10 +463,31 @@ begin
     -- pass 1: create every step row, deps wired in pass 2
     for v_step in select * from jsonb_array_elements(v_def.spec->'steps')
     loop
-        insert into workflow.tasks (run_id, step_key, queue, kind, pending_deps, status)
+        insert into workflow.tasks (run_id, step_key, queue, kind, pending_deps, status,
+                                    wait_signal, input, rate_key,
+                                    saga_group, compensation_task_key)
         values (
             v_run_id, v_step->>'key', coalesce(v_step->>'queue', 'default'),
-            coalesce(v_step->>'kind', 'work'), 0, 'pending'
+            coalesce(v_step->>'kind', 'work'), 0, 'pending',
+            -- wait_signal was NEVER populated here, which made the entire
+            -- signal mechanism inert: signal_task() matches on
+            -- (run_id, wait_signal, status), and with wait_signal null it can
+            -- never match, so a `kind: signal` step waits forever. Confirmed
+            -- by running it -- the task sat in waiting_external and no signal
+            -- could ever resolve it. Defaults to the step's own key, so
+            -- {"key":"approval","kind":"signal"} is signalled as 'approval'
+            -- without needing a redundant "signal" field.
+            case when coalesce(v_step->>'kind','work') = 'signal'
+                 then coalesce(v_step->>'signal', v_step->>'key') end,
+            -- Same class of omission: a step spec could declare input,
+            -- rate_key, saga_group and compensation_task_key and they were all
+            -- silently dropped, so saga/compensation and per-step rate limiting
+            -- were unreachable through start_workflow() -- only through
+            -- add_task(). Carried through now.
+            v_step->'input',
+            v_step->>'rate_key',
+            v_step->>'saga_group',
+            v_step->>'compensation_task_key'
         )
         returning id into v_new_id;
         v_step_ids := v_step_ids || jsonb_build_object(v_step->>'key', v_new_id::text);
@@ -1023,7 +1044,7 @@ alter function workflow.cascade_task_status()
 -- reasoning as user-rbac/schema.sql §9(a).
 revoke execute on all functions in schema workflow from public;
 
-grant usage on schema workflow to worker, authenticated;
+grant usage on schema workflow to worker, scheduler, authenticated;
 
 -- The worker role: executes the state machine, and that is ALL it can do. It
 -- gets NO table grants whatsoever -- every one of its interactions is a
