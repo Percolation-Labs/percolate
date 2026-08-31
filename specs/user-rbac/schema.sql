@@ -6,6 +6,25 @@
 -- the handful of things that structurally cannot live in SQL
 -- (OAuth token exchange, email sending, TOTP).
 -- ============================================================
+--
+-- Every SECURITY DEFINER function below sets `search_path = pg_catalog,
+-- public` explicitly. This is standard PostgreSQL hardening (CVE-2018-1058
+-- and the advisory it produced: https://wiki.postgresql.org/wiki/
+-- A_Guide_to_CVE-2018-1058:_Protect_Your_Search_Path) for any SECURITY
+-- DEFINER function that calls other objects by unqualified name -- without
+-- it, a caller who can create an object earlier in their own session's
+-- search_path (a schema they own, or in some configurations pg_temp) could
+-- have a DEFINER function resolve to their malicious same-named function
+-- instead of the real one, executing it with the DEFINER's privileges. One
+-- specific reproduction attempt (a pg_temp function shadow against
+-- grant_role's internal has_permission() call) did NOT succeed against this
+-- schema's current grants (authenticated has neither CREATE on the database
+-- nor on public) -- see ../../experiments/pg19-stack/FINDINGS.md #3 for the
+-- full test. That's exactly the point: today's grants happening to block one
+-- attempt is not a reason to skip a fix the authoritative guidance states
+-- unconditionally, especially given this schema's own history of "safe by
+-- accident of which grants don't exist yet" bugs (§9).
+-- ============================================================
 
 create extension if not exists pgcrypto;   -- bcrypt via crypt()/gen_salt()
 -- create extension if not exists pgjwt;   -- optional: mint JWTs in SQL (see §7 callout)
@@ -43,7 +62,7 @@ returns void as $$
     update users
     set password_hash = crypt(p_plain, gen_salt('bf', 12)), updated_at = now()
     where id = p_user_id;
-$$ language sql security definer;
+$$ language sql security definer set search_path = pg_catalog, public;
 
 create or replace function verify_password(p_email text, p_plain text)
 returns uuid as $$
@@ -51,7 +70,7 @@ returns uuid as $$
     where email = p_email
       and status = 'active'
       and password_hash = crypt(p_plain, password_hash);
-$$ language sql security definer;
+$$ language sql security definer set search_path = pg_catalog, public;
 -- security definer: callable by an unprivileged 'api_user' role via
 -- PostgREST RPC without granting that role SELECT on users.password_hash.
 -- Confirmed empirically: with EXECUTE left at its Postgres default (granted
@@ -74,7 +93,7 @@ begin
     end if;
     perform set_password(current_user_id(), p_new_plain);
 end;
-$$ language plpgsql security definer;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
 
 -- Signup. The function spec.md's FastAPI example always assumed existed --
 -- it didn't (empirically confirmed missing here); added to close that gap.
@@ -89,7 +108,7 @@ begin
     perform set_password(v_user_id, p_plain);
     return v_user_id;
 end;
-$$ language plpgsql security definer;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
 
 -- ------------------------------------------------------------
 -- 2. RBAC — roles and permissions as data, uniform across every
@@ -185,7 +204,7 @@ begin
     returning id into v_id;
     return v_id;
 end;
-$$ language plpgsql security definer;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
 
 -- security definer: self-authenticating via token possession, so safe as a
 -- public entry point, but needs to INSERT/UPDATE refresh_tokens without
@@ -228,7 +247,7 @@ begin
     )
     select v_row.user_id, (select id from new_token);
 end;
-$$ language plpgsql security definer;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
 
 -- SECURITY: p_user_id used to be a caller-supplied parameter -- dropped.
 -- Confirmed empirically (same class of bug as grant_role below): a
@@ -243,12 +262,12 @@ create or replace function revoke_session(p_refresh_token_id uuid)
 returns void as $$
     update refresh_tokens set revoked_at = now()
     where id = p_refresh_token_id and user_id = current_user_id();
-$$ language sql security definer;
+$$ language sql security definer set search_path = pg_catalog, public;
 
 create or replace function revoke_all_sessions() returns void as $$
     update refresh_tokens set revoked_at = now()
     where user_id = current_user_id() and revoked_at is null;
-$$ language sql security definer;
+$$ language sql security definer set search_path = pg_catalog, public;
 
 -- ------------------------------------------------------------
 -- 4. API keys — for agents/service accounts that shouldn't hold a
@@ -277,7 +296,7 @@ returns table(key_id uuid, user_id uuid, scopes text[]) as $$
     where key_hash = encode(digest(p_raw_key, 'sha256'), 'hex')
       and revoked_at is null
     returning id, user_id, scopes;
-$$ language sql security definer;
+$$ language sql security definer set search_path = pg_catalog, public;
 
 -- ------------------------------------------------------------
 -- 5. Login throttling — reuses the WORKFLOW ENGINE's rate limiter
@@ -322,7 +341,7 @@ begin
     end if;
     return v_user_id;
 end;
-$$ language plpgsql security definer;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
 
 -- The actual public login entry point: attempt_login() and
 -- issue_refresh_token() combined atomically, so the token is always issued
@@ -342,7 +361,7 @@ begin
     v_token_id := issue_refresh_token(v_user_id, p_device_label, p_raw_token);
     return query select v_user_id, v_token_id;
 end;
-$$ language plpgsql security definer;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
 
 -- ------------------------------------------------------------
 -- 6. Audit log — append-only, same shape as the workflow engine's
@@ -381,7 +400,7 @@ begin
     insert into auth_events (user_id, event_type, detail)
     values (p_target_user_id, 'role_granted', jsonb_build_object('role', p_role, 'by', current_user_id()));
 end;
-$$ language plpgsql security definer;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
 
 -- ------------------------------------------------------------
 -- 7. OPTIONAL maximal-pushdown callout: mint JWTs in SQL via pgjwt,
@@ -407,7 +426,7 @@ $$ language plpgsql security definer;
 --         current_setting('app.jwt_secret')
 --     );
 -- end;
--- $$ language plpgsql security definer;
+-- $$ language plpgsql security definer set search_path = pg_catalog, public;
 
 -- ------------------------------------------------------------
 -- 8. Tie into the workflow engine: row-level ownership so a user
@@ -501,16 +520,31 @@ alter table auth_events force row level security;
 alter table user_roles enable row level security;
 alter table user_roles force row level security;
 
+-- Every predicate below wraps current_user_id()/has_permission() in a scalar
+-- subquery -- (select ...) -- rather than calling them bare. Both are STABLE
+-- and none of their arguments depend on row data, so this looks purely
+-- cosmetic, but it isn't: confirmed directly via EXPLAIN
+-- (../../experiments/pg19-stack/FINDINGS.md #3) that the wrapped form
+-- produces a separate InitPlan the row filter just references (evaluated
+-- once), while the bare form inlines the full expression into the per-row
+-- Filter with no InitPlan at all -- STABLE alone does not make the planner
+-- hoist it. At the tiny scale tested this doesn't show up in the numbers,
+-- but has_permission() itself runs a join against user_roles/role_permissions
+-- -- at real table sizes the difference is a join-per-row-scanned versus a
+-- join-once. This is a documented general pattern (Postgres RLS
+-- performance guidance, cited in FINDINGS.md #3), not specific to this
+-- schema -- worth applying to every RLS policy written for any future
+-- module, not just these five.
 create policy users_self_or_admin on users for select
-  using (id = current_user_id() or has_permission(current_user_id(), 'users', 'select'));
+  using (id = (select current_user_id()) or (select has_permission(current_user_id(), 'users', 'select')));
 create policy refresh_tokens_self_or_admin on refresh_tokens for select
-  using (user_id = current_user_id() or has_permission(current_user_id(), 'refresh_tokens', 'select'));
+  using (user_id = (select current_user_id()) or (select has_permission(current_user_id(), 'refresh_tokens', 'select')));
 create policy api_keys_self_or_admin on api_keys for select
-  using (user_id = current_user_id() or has_permission(current_user_id(), 'api_keys', 'select'));
+  using (user_id = (select current_user_id()) or (select has_permission(current_user_id(), 'api_keys', 'select')));
 create policy auth_events_self_or_admin on auth_events for select
-  using (user_id = current_user_id() or has_permission(current_user_id(), 'auth_events', 'select'));
+  using (user_id = (select current_user_id()) or (select has_permission(current_user_id(), 'auth_events', 'select')));
 create policy user_roles_self_or_admin on user_roles for select
-  using (user_id = current_user_id() or has_permission(current_user_id(), 'user_roles', 'select'));
+  using (user_id = (select current_user_id()) or (select has_permission(current_user_id(), 'user_roles', 'select')));
 
 -- Read paths for users/refresh_tokens/api_keys are VIEWS, not column-level
 -- grants on the base table -- confirmed empirically
