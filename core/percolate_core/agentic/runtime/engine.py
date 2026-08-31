@@ -1,0 +1,176 @@
+"""The thin layer around pydantic-ai's ``Agent`` (``brief.md`` §5, §5.1).
+
+"The LLM-calling, tool-invoking, structured-output engine stays pydantic-ai's;
+this layer's job is everything around that engine that pydantic-ai itself is
+naturally silent on."
+
+So this module is deliberately small. If it starts growing prompt templating,
+retry policies, or tool logic, that is the layer stopping being thin — and each
+of those is something the spec explicitly assigns elsewhere (data, the tool
+server, or ``workflow-engine``).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+from ..contracts import AgentDeps, AgentSpec, RequestContext, ToolResult
+from ..settings import Settings
+from ..tools import ResolvedToolset, build_pydantic_ai_tools
+from .injection import build_instructions
+
+
+@dataclass(slots=True)
+class ExecutionResult:
+    """What one LLM turn produced, before any of it is persisted."""
+
+    text: str | None = None
+    output: Any = None
+    tool_results: list[ToolResult] = field(default_factory=list)
+    usage: dict[str, Any] = field(default_factory=dict)
+
+
+class AgentEngine:
+    """Builds and runs one pydantic-ai agent from one ``agents`` row."""
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+
+    def build(
+        self,
+        agent: AgentSpec,
+        toolset: ResolvedToolset,
+        context: RequestContext,
+        *,
+        model: Any = None,
+        on_tool_result: Any = None,
+        headers: dict[str, str] | None = None,
+        before_call: Any = None,
+    ) -> Any:
+        """Assemble a ``pydantic_ai.Agent`` from config alone.
+
+        Every argument to the constructed agent traces to a column:
+        ``instructions`` from ``system_prompt`` plus injected context,
+        ``tools`` from resolved ``tool_servers`` references, ``output_type``
+        from ``structured_output_schema``, ``model`` from ``agents.model`` (or
+        the process default).
+
+        ``model`` overrides the row — that is what makes the fake-model test
+        path (``fakes.scripted_model``) possible without a special code path in
+        the runtime, per ``sequence.md``'s "tested only through the contract."
+        """
+        from pydantic_ai import Agent
+
+        return Agent(
+            model or agent.model or self.settings.default_model,
+            instructions=build_instructions(agent, context),
+            deps_type=AgentDeps,
+            tools=build_pydantic_ai_tools(
+                toolset, on_result=on_tool_result, headers=headers, before_call=before_call
+            ),
+            output_type=self.output_type(agent),
+            name=agent.name,
+        )
+
+    def output_type(self, agent: AgentSpec) -> Any:
+        """Turn ``structured_output_schema`` (JSON Schema) into an output type.
+
+        Presence of a schema is what makes ``chained_action`` reachable
+        (``brief.md`` §2/§4), so this is not cosmetic: it decides whether a run
+        can trigger a follow-on action at all.
+
+        pydantic-ai's ``StructuredDict`` takes the JSON Schema directly, which
+        is the whole conversion — no model generation, and deliberately no
+        validation layer of our own on top. The schema in the row is the
+        contract; pydantic-ai enforces it and retries the model against it,
+        which is exactly the part of the job §5 says stays pydantic-ai's.
+        """
+        if not agent.structured_output_schema:
+            return str
+        from pydantic_ai.output import StructuredDict
+
+        return StructuredDict(
+            agent.structured_output_schema,
+            name=f"{agent.name}_output",
+        )
+
+    async def execute(
+        self,
+        pai_agent: Any,
+        user_prompt: str,
+        message_history: list[Any],
+        deps: AgentDeps,
+        *,
+        on_event: Any = None,
+    ) -> ExecutionResult:
+        """Run one turn, streaming pydantic-ai's own events out as they happen.
+
+        ``on_event`` receives already-mapped AG-UI events. Mapping here rather
+        than in the caller keeps one rule true: every AG-UI event this system
+        emits during generation corresponds to something pydantic-ai actually
+        reported, so the stream cannot drift from what the model did.
+
+        The stream is not the record. Rows are (``brief.md`` §4: ``runs.state``
+        exists so "a resumed/observed run doesn't need in-memory server
+        affinity") — a client that disconnects mid-run loses the deltas and
+        nothing else, because the ``MESSAGE_PERSISTED`` checkpoint on the same
+        channel lets it resume from the row.
+        """
+        handler = None
+        if on_event is not None:
+
+            async def handler(ctx: Any, stream: Any) -> None:
+                async for event in stream:
+                    for mapped in map_stream_event(event):
+                        await on_event(mapped)
+
+        result = await pai_agent.run(
+            user_prompt,
+            message_history=message_history or None,
+            deps=deps,
+            event_stream_handler=handler,
+        )
+        return ExecutionResult(text=str(result.output), output=result.output)
+
+
+def map_stream_event(event: Any) -> list[dict[str, Any]]:
+    """pydantic-ai stream event → zero or more AG-UI-shaped payloads.
+
+    Deliberately returns plain dicts of *fields*, not built AG-UI models: the
+    caller owns ``run_id``/``thread_id``/``message_id``, which this function has
+    no business knowing. Nested delegation needs no special case here at all
+    (``brief.md`` §5.1 item 2) — a delegated call is a ``FunctionToolCallEvent``
+    like any other, and the child's own events arrive on the same session
+    channel tagged with the child's ``run_id``.
+    """
+    from pydantic_ai.messages import (
+        FunctionToolCallEvent,
+        FunctionToolResultEvent,
+        PartDeltaEvent,
+        PartStartEvent,
+        TextPart,
+        TextPartDelta,
+    )
+
+    if isinstance(event, PartStartEvent) and isinstance(event.part, TextPart):
+        return [{"kind": "text_start"}, {"kind": "text_delta", "delta": event.part.content}]
+    if isinstance(event, PartDeltaEvent) and isinstance(event.delta, TextPartDelta):
+        return [{"kind": "text_delta", "delta": event.delta.content_delta}]
+    if isinstance(event, FunctionToolCallEvent):
+        return [
+            {
+                "kind": "tool_start",
+                "tool_call_id": event.part.tool_call_id,
+                "tool_name": event.part.tool_name,
+            }
+        ]
+    if isinstance(event, FunctionToolResultEvent):
+        return [
+            {
+                "kind": "tool_end",
+                "tool_call_id": event.part.tool_call_id,
+                "tool_name": getattr(event.part, "tool_name", ""),
+            }
+        ]
+    return []

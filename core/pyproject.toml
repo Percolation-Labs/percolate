@@ -1,0 +1,52 @@
+[project]
+name = "percolate-core"
+version = "0.1.0"
+description = "Percolate core: the worker, Content Server and Agent Runtime for a Postgres-native stack"
+requires-python = ">=3.11"
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Percolate" }]
+keywords = ["postgres", "workflow", "agents", "rag", "pgvector"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# Base install is the worker plus a driver, and nothing else. Someone writing
+# their own worker should not pull boto3 and pydantic-ai to do it.
+dependencies = [
+    "asyncpg>=0.30",
+    "httpx>=0.28",
+    "typer>=0.15",
+]
+
+[project.optional-dependencies]
+content = ["boto3>=1.35", "fastapi>=0.115", "uvicorn>=0.34"]
+agent = [
+    "pydantic>=2.9",
+    "pydantic-ai-slim[openai]>=0.4",
+    "fastapi>=0.115",
+    "uvicorn>=0.34",
+    "mcp>=1.2",
+    "pyyaml>=6.0",
+    "rich>=13.9",
+]
+all = ["percolate-core[content,agent]"]
+
+[project.scripts]
+percolate = "percolate_core.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["percolate_core"]
+
+[project.urls]
+Homepage = "https://github.com/percolating-sirsh/percolate-core"
+Repository = "https://github.com/percolating-sirsh/percolate-core"
+Specs = "https://github.com/percolating-sirsh/p8-subsystems"
