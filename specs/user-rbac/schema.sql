@@ -19,8 +19,7 @@
 -- specific reproduction attempt (a pg_temp function shadow against
 -- grant_role's internal has_permission() call) did NOT succeed against this
 -- schema's current grants (authenticated has neither CREATE on the database
--- nor on public) -- see ../../experiments/pg19-stack/FINDINGS.md #3 for the
--- full test. That's exactly the point: today's grants happening to block one
+-- nor on public). That's exactly the point: today's grants happening to block one
 -- attempt is not a reason to skip a fix the authoritative guidance states
 -- unconditionally, especially given this schema's own history of "safe by
 -- accident of which grants don't exist yet" bugs (§9).
@@ -48,8 +47,7 @@ create table users (
 -- tunable independent of the app layer.
 --
 -- SECURITY (fixed after empirical testing against a live PostgREST role
--- model, see ../../experiments/pg19-stack/FINDINGS.md #2): this and
--- verify_password() are now internal-only -- EXECUTE is revoked from
+-- model): this and verify_password() are now internal-only -- EXECUTE is revoked from
 -- PUBLIC in §9, so they're callable only from within another
 -- SECURITY DEFINER function owned by the same role (create_user_with_password,
 -- change_password, attempt_login below), never directly via PostgREST RPC.
@@ -153,8 +151,8 @@ $$ language sql stable;
 -- The nullif() guards the RAW SETTING, not the extracted 'sub' field: once a
 -- pooled connection (PgBouncer/pgcat) has had request.jwt.claims SET LOCAL in
 -- any prior transaction, an unregistered custom GUC resets to '' (not NULL)
--- after that transaction commits -- confirmed empirically against PG19 beta3,
--- see ../../experiments/pg19-stack/FINDINGS.md §1. Casting '' straight to
+-- after that transaction commits -- confirmed empirically against PG19 beta3.
+-- Casting '' straight to
 -- ::json throws before a nullif() applied only to ->>'sub' ever runs; guarding
 -- the raw string first avoids that, and is what makes the very next anonymous
 -- request on a reused pooled connection return zero rows instead of a 500.
@@ -333,8 +331,8 @@ create or replace function attempt_login(p_email text, p_plain text)
 returns uuid as $$
 declare v_user_id uuid;
 begin
-    -- FIX (empirically confirmed broken, ../../experiments/pg19-stack/FINDINGS.md
-    -- #2): try_consume_rate_limit() does an UPDATE against an existing
+    -- FIX (empirically confirmed broken): try_consume_rate_limit() does an
+    -- UPDATE against an existing
     -- rate_limits row -- with none pre-seeded, the UPDATE matches zero rows,
     -- and it fails closed (returns false). With no bucket ever created for a
     -- new email, this meant NOBODY could ever log in, for any account --
@@ -405,7 +403,7 @@ create index idx_auth_events_user on auth_events (user_id, at);
 
 -- SECURITY: this is the vulnerability that motivated this whole section --
 -- confirmed empirically as a full, working privilege escalation, not a
--- theoretical one (see ../../experiments/pg19-stack/FINDINGS.md #2). p_actor_id
+-- theoretical one. p_actor_id
 -- used to be a caller-supplied parameter: any authenticated non-admin user
 -- could call grant_role(<a real admin's id>, <their own id>, 'admin') and the
 -- has_permission() check would pass, because it was checking the ADMIN's
@@ -469,8 +467,8 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- ------------------------------------------------------------
 -- 9. PostgREST role model, grants, and RLS -- not previously written
 --    down anywhere; added after empirically confirming its absence was
---    exploitable (../../experiments/pg19-stack/FINDINGS.md #2), not just
---    incomplete. Two structural rules this section enforces:
+--    exploitable, not just incomplete. Two structural rules this section
+--    enforces:
 --      a) EVERY function meant to be a PostgREST RPC entry point is
 --         SECURITY DEFINER (fixed above) AND has EXECUTE explicitly
 --         granted -- Postgres's default (EXECUTE granted to PUBLIC on
@@ -520,9 +518,8 @@ grant execute on function current_user_id() to web_anon, authenticated;
 -- callers should get on tables this sensitive.
 --
 -- FORCE is not optional here, and its absence is exactly the kind of gap
--- that looks fine until tested. Confirmed empirically
--- (../../experiments/pg19-stack/FINDINGS.md #2), through a chain of three
--- successive failures before this was right: table owners bypass their own
+-- that looks fine until tested. Confirmed empirically, through a chain of
+-- three successive failures before this was right: table owners bypass their own
 -- RLS policies BY DEFAULT, regardless of superuser status -- this has
 -- nothing to do with whether the owner happens to be a superuser (a
 -- separate, also-real trap: never let the schema owner be a cluster
@@ -548,18 +545,16 @@ alter table user_roles force row level security;
 -- Every predicate below wraps current_user_id()/has_permission() in a scalar
 -- subquery -- (select ...) -- rather than calling them bare. Both are STABLE
 -- and none of their arguments depend on row data, so this looks purely
--- cosmetic, but it isn't: confirmed directly via EXPLAIN
--- (../../experiments/pg19-stack/FINDINGS.md #3) that the wrapped form
--- produces a separate InitPlan the row filter just references (evaluated
+-- cosmetic, but it isn't: confirmed directly via EXPLAIN that the wrapped
+-- form produces a separate InitPlan the row filter just references (evaluated
 -- once), while the bare form inlines the full expression into the per-row
 -- Filter with no InitPlan at all -- STABLE alone does not make the planner
 -- hoist it. At the tiny scale tested this doesn't show up in the numbers,
 -- but has_permission() itself runs a join against user_roles/role_permissions
 -- -- at real table sizes the difference is a join-per-row-scanned versus a
--- join-once. This is a documented general pattern (Postgres RLS
--- performance guidance, cited in FINDINGS.md #3), not specific to this
--- schema -- worth applying to every RLS policy written for any future
--- module, not just these five.
+-- join-once. This is a documented general Postgres RLS performance pattern,
+-- not specific to this schema -- worth applying to every RLS policy written
+-- for any future module, not just these five.
 create policy users_self_or_admin on users for select
   using (id = (select current_user_id()) or (select has_permission(current_user_id(), 'users', 'select')));
 create policy refresh_tokens_self_or_admin on refresh_tokens for select
@@ -572,9 +567,8 @@ create policy user_roles_self_or_admin on user_roles for select
   using (user_id = (select current_user_id()) or (select has_permission(current_user_id(), 'user_roles', 'select')));
 
 -- Read paths for users/refresh_tokens/api_keys are VIEWS, not column-level
--- grants on the base table -- confirmed empirically
--- (../../experiments/pg19-stack/FINDINGS.md #2) that a partial column-level
--- GRANT does NOT do what it looks like it does here: PostgREST's `GET
+-- grants on the base table -- confirmed empirically that a partial
+-- column-level GRANT does NOT do what it looks like it does here: PostgREST's `GET
 -- /users` issues the equivalent of `SELECT *`, and Postgres fails that
 -- *entire* query with "permission denied for table users" the moment it
 -- references even one ungranted column -- it does not silently drop
