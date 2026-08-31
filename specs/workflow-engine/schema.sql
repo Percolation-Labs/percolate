@@ -169,8 +169,14 @@ create table tasks (
     id               uuid primary key default gen_random_uuid(),
     run_id           uuid not null references workflow_runs(id) on delete cascade,
     step_key         text not null,
+    -- http_call: a durable outbound HTTP dispatch, claimed and executed by a
+    -- GENERIC worker (no per-consumer code) -- spec.md §14. Needs no new
+    -- columns: `input` carries the call spec
+    -- ({"url","method","headers"?,"credential_ref"?,"body"?,"timeout_ms"?,
+    -- "mode":"sync"|"async"}), `output` carries the response, existing
+    -- max_attempts/run_after drive retry/backoff exactly like any other kind.
     kind             text not null default 'work'
-                         check (kind in ('work','decision','timer','signal','sub_workflow')),
+                         check (kind in ('work','decision','timer','signal','sub_workflow','http_call')),
     queue            text not null default 'default',
     status           text not null default 'pending'
                          check (status in
