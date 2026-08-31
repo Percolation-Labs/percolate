@@ -184,7 +184,7 @@ create table workflow.tasks (
     -- "mode":"sync"|"async"}), `output` carries the response, existing
     -- max_attempts/run_after drive retry/backoff exactly like any other kind.
     kind             text not null default 'work'
-                         check (kind in ('work','decision','timer','signal','sub_workflow','http_call')),
+                         check (kind in ('work','decision','timer','signal','sub_workflow','http_call','sql')),
     queue            text not null default 'default',
     status           text not null default 'pending'
                          check (status in
@@ -547,6 +547,15 @@ begin
             end
         where id = v_new_id;
     end loop;
+
+    -- Kick any `sql` steps that are ready. THIS is the right place and the
+    -- only one: the dependency graph is not valid until pass 2 finishes, and
+    -- a root step is already 'ready' from mark_roots_ready, so the
+    -- ready-transition trigger never sees an edge to fire on. Everything
+    -- downstream is reached by that trigger via ordinary cascade; this call
+    -- only starts the ones that begin the run. Safe when there are none --
+    -- drain_sql_steps returns 0 without touching anything.
+    perform workflow.drain_sql_steps(v_run_id);
 
     return v_run_id;
 end;
@@ -1210,3 +1219,192 @@ begin
 
     raise notice 'workflow-engine self-check passed: all state mutators are SECURITY DEFINER';
 end $$;
+
+-- ============================================================
+-- 17. `sql` steps -- declarative, and executed by NOBODY.
+--
+-- The question this answers: which step kinds actually need a process outside
+-- Postgres? Only two. `http_call` does, because it performs network I/O.
+-- `work` does, because it runs arbitrary user code. Everything else --
+-- indexing, projection, a query, a rollup -- is just SQL, and making a worker
+-- claim a task in order to send SQL back to the same database is machinery
+-- with no purpose.
+--
+-- So a `sql` step runs IN the database, the moment it becomes ready, with no
+-- poller, no queue consumer and no deployment. A workflow of only `sql` steps
+-- completes with nothing running anywhere.
+--
+-- This does NOT weaken the "database never blocks on HTTP" invariant, and it
+-- is worth being precise about why: that invariant is about waiting on
+-- someone ELSE's latency, which is unbounded and belongs in a worker where it
+-- costs worker capacity rather than a connection slot. A `sql` step waits only
+-- on Postgres, which is work the database was going to do anyway.
+--
+-- THREE GUARDS, because "execute SQL from a table" is otherwise a
+-- privilege-escalation primitive and a long-transaction generator:
+--
+--   1. ALLOW-LIST, not arbitrary SQL. A step names a registered function; it
+--      cannot supply a statement. Registration is an admin act (owner-only),
+--      so authoring a workflow never widens what can be executed.
+--   2. A SUBTRANSACTION per step. A failing step fails ITSELF -- it must not
+--      abort the transaction of whichever worker happened to complete the
+--      preceding task. Without this, one bad SQL step would roll back an
+--      unrelated worker's completed work.
+--   3. A statement timeout, so a pathological query cannot hold the caller's
+--      transaction open indefinitely.
+-- ============================================================
+
+-- The kind is added by ALTER as well as in the CREATE TABLE above, so an
+-- existing installation picks it up. `create table` is skipped when the table
+-- exists, which silently leaves the old constraint in place -- caught by a
+-- `sql` step being rejected on a database that had already been installed.
+alter table workflow.tasks drop constraint if exists tasks_kind_check;
+alter table workflow.tasks add constraint tasks_kind_check
+    check (kind in ('work','decision','timer','signal','sub_workflow','http_call','sql'));
+
+create table workflow.step_functions (
+    name          text primary key,        -- what a step spec names
+    fn            text not null,            -- schema-qualified function
+    arg_types     text[] not null default '{}',
+    timeout_ms    int not null default 30000,
+    description   text,
+    registered_at timestamptz not null default now()
+);
+
+-- Registering is deliberately owner-only (no grant below): it decides what a
+-- workflow author is allowed to cause to run.
+create or replace function workflow.register_step_function(
+    p_name text, p_fn text, p_arg_types text[] default '{}',
+    p_timeout_ms int default 30000, p_description text default null
+) returns void as $$
+begin
+    if to_regprocedure(p_fn || '(' || array_to_string(p_arg_types, ',') || ')') is null then
+        raise exception 'function %(%) does not exist', p_fn, array_to_string(p_arg_types, ',');
+    end if;
+    insert into workflow.step_functions (name, fn, arg_types, timeout_ms, description)
+    values (p_name, p_fn, p_arg_types, p_timeout_ms, p_description)
+    on conflict (name) do update set fn = excluded.fn, arg_types = excluded.arg_types,
+        timeout_ms = excluded.timeout_ms, description = excluded.description;
+end;
+$$ language plpgsql;
+
+-- Executes one ready `sql` task. Returns true if it did something.
+create or replace function workflow.execute_sql_step(p_task_id uuid)
+returns boolean as $$
+declare
+    t        workflow.tasks;
+    r        workflow.runs;
+    f        workflow.step_functions;
+    v_spec   jsonb;
+    v_args   jsonb;
+    v_sql    text;
+    v_out    jsonb;
+begin
+    select * into t from workflow.tasks where id = p_task_id;
+    if not found or t.status <> 'ready' or t.kind <> 'sql' then
+        return false;
+    end if;
+
+    update workflow.tasks set status = 'running', claimed_by = 'in-database',
+           claimed_at = now(), heartbeat_at = now(), attempts = attempts + 1
+    where id = p_task_id;
+
+    select * into r from workflow.runs where id = t.run_id;
+    v_spec := coalesce(t.input, '{}'::jsonb);
+
+    begin      -- subtransaction: a failure here must not abort the caller
+        select * into f from workflow.step_functions where name = v_spec->>'function';
+        if not found then
+            raise exception
+                'sql step names function ''%'', which is not registered. Register it with '
+                'workflow.register_step_function() -- steps may not supply arbitrary SQL.',
+                v_spec->>'function';
+        end if;
+
+        perform set_config('statement_timeout', f.timeout_ms::text, true);
+
+        -- Arguments are passed as parameters, never interpolated: a step's
+        -- args are data from the run, and building SQL text out of them would
+        -- be injection with extra steps.
+        v_args := coalesce(v_spec->'args', '[]'::jsonb);
+        v_sql := format('select to_jsonb(%s(%s))', f.fn,
+                        (select string_agg(format('$1->>%s', i - 1), ',')
+                         from generate_series(1, jsonb_array_length(v_args)) i));
+        if jsonb_array_length(v_args) = 0 then
+            v_sql := format('select to_jsonb(%s())', f.fn);
+            execute v_sql into v_out;
+        else
+            execute v_sql into v_out using v_args;
+        end if;
+
+        perform workflow.complete_task(p_task_id, jsonb_build_object('result', v_out));
+        return true;
+    exception when others then
+        perform workflow.fail_task(p_task_id,
+            jsonb_build_object('error', sqlerrm, 'sqlstate', sqlstate),
+            -- A missing registration or a bad signature will fail identically
+            -- on every retry; a deadlock or timeout will not.
+            sqlstate in ('42883','42P01','P0001'));
+        return true;
+    end;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- Run every ready `sql` task for one run, until none remain. Chained sql steps
+-- therefore complete in one call: index -> rollup -> notify needs no round trip.
+-- Bounded, because a definition cycle would otherwise spin here.
+create or replace function workflow.drain_sql_steps(p_run_id uuid, p_max int default 50)
+returns int as $$
+declare v_id uuid; v_done int := 0;
+begin
+    loop
+        select id into v_id from workflow.tasks
+        where run_id = p_run_id and kind = 'sql' and status = 'ready'
+          and run_after <= now()
+        limit 1;
+        exit when v_id is null or v_done >= p_max;
+        perform workflow.execute_sql_step(v_id);
+        v_done := v_done + 1;
+    end loop;
+    return v_done;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- The hook that makes it automatic. Fires after a task's status changes, so a
+-- `sql` step becomes ready and runs within the same statement that unblocked
+-- it -- no poller, no latency, nothing deployed.
+-- Fires when a `sql` step is UPDATED into 'ready'. Both entry points are
+-- updates, so this catches everything: start_workflow's second pass flips
+-- roots ready, and cascade_task_status flips dependents ready.
+--
+-- ON UPDATE ONLY, and that is not an oversight -- an AFTER INSERT trigger was
+-- tried first and was actively wrong. start_workflow builds in two passes:
+-- pass 1 inserts every step with pending_deps = 0 (dependencies are not wired
+-- until pass 2), so mark_roots_ready marks EVERY step ready on insert. An
+-- insert-time autorun therefore executed the whole workflow immediately, in
+-- arbitrary order, ignoring the dependency graph -- and pass 2 then reset the
+-- statuses underneath it, re-running the first step and reverting the second
+-- to 'pending' while the run reported 'completed'. The task_events trail
+-- showed all of it. During construction the graph is not yet valid, so the
+-- only safe signal is a deliberate transition INTO ready.
+--
+-- Re-entry is safe: execute_sql_step() moves the row to 'running' before doing
+-- any work, so the recursive fire sees a non-ready row and stops. A chain of
+-- sql steps runs to completion through ordinary cascade.
+create or replace function workflow.autorun_sql_steps() returns trigger as $$
+begin
+    if new.kind = 'sql' and new.status = 'ready'
+       and old.status is distinct from 'ready' then
+        perform workflow.execute_sql_step(new.id);
+    end if;
+    return null;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+create trigger trg_autorun_sql_steps
+    after update of status on workflow.tasks
+    for each row execute function workflow.autorun_sql_steps();
+
+grant execute on function workflow.execute_sql_step(uuid) to worker, authenticated;
+grant execute on function workflow.drain_sql_steps(uuid, int) to worker, authenticated;
+grant select on workflow.step_functions to worker, authenticated;
