@@ -1,0 +1,35 @@
+# Experimental PG19-beta stack for validating specs/ against reality.
+# Adapted from ../../../p8k8/docker/Dockerfile.pg18 (precedent, per
+# meta/skills/spec-driven-development §5 — reuse the working pattern rather
+# than inventing a new one).
+FROM postgres:19beta3-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential git postgresql-server-dev-19 ca-certificates \
+    curl pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# pgvector — core per meta/postgres-manifest.md
+# NOTE: v0.8.1 (what ../../../p8k8/docker/Dockerfile.pg18 pins) fails to build
+# against PG19 beta headers (LWLock/slock_t/ConditionVariable missing from
+# hnsw.c's include chain) - trying latest tag instead.
+RUN cd /tmp && git clone --branch v0.8.6 https://github.com/pgvector/pgvector.git \
+    && cd pgvector && make && make install && rm -rf /tmp/pgvector
+
+# pg_cron — core per meta/postgres-manifest.md
+# FINDING (2026-08-31): v1.6.7 (latest tag, == main HEAD) fails to build against
+# PG19 beta3. PG19's c.h now expands StaticAssertExpr() using C11 `static_assert`
+# directly (previously implemented differently); pg_cron's job_metadata.c hits a
+# header-ordering interaction with glibc's <assert.h> macro and fails with
+# "expected specifier-qualifier-list before 'extern'" at the AllocSetContextCreate
+# call site. Not yet root-caused to a one-line fix; disabled here so the rest of
+# the experiment isn't blocked. See ../FINDINGS.md.
+# RUN cd /tmp && git clone --branch v1.6.7 https://github.com/citusdata/pg_cron.git \
+#     && cd pg_cron && make && make install && rm -rf /tmp/pg_cron
+
+# pg_partman — core per meta/postgres-manifest.md — untested pending the above.
+# RUN cd /tmp && git clone --branch v5.2.4 https://github.com/pgpartman/pg_partman.git \
+#     && cd pg_partman && make && make install && rm -rf /tmp/pg_partman
+
+# pgcrypto and pg_trgm are contrib modules — already built into the base image,
+# just need CREATE EXTENSION at init time (see init/*.sql).
