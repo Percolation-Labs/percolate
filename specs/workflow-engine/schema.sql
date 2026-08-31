@@ -217,6 +217,14 @@ create table workflow.tasks (
     saga_group       text,                 -- groups tasks that must be compensated together on failure
     compensation_task_key text,            -- step_key to run (in reverse order) if this task must be undone
     compensated_at   timestamptz,          -- set once this task's compensation has run
+    -- Set only on a COMPENSATION task, pointing at the forward task it undoes.
+    -- Added after a live saga run reported compensation_state='compensated'
+    -- while both of its compensation tasks were still unrun: the completion
+    -- check had no way to tell a compensation task from a forward one, so it
+    -- was inspecting the wrong set of rows entirely (see
+    -- check_compensation_completion below). Also gives the compensation trail
+    -- real lineage instead of encoding it in a step_key string.
+    compensates_task_id uuid references workflow.tasks(id),
     decision_output_hash text,             -- determinism guard: hash of a decision's recorded output
     created_at       timestamptz not null default now(),
     -- Was missing entirely despite being the most heavily mutated table in
@@ -411,13 +419,33 @@ $$ language sql;
 -- Saga: flips compensation_state once every compensation task for a
 -- run's saga groups has resolved. Cheap no-op call from workflow.complete_task/
 -- workflow.fail_task; only does anything while compensation_state='compensating'.
+--
+-- BUG FIXED HERE, found by running a real saga (charge -> hotel -> flight,
+-- flight fails): this predicate used to filter on `compensation_task_key is
+-- not null`, which selects the FORWARD tasks -- the ones that *declare* a
+-- compensation -- not the compensation tasks themselves. By the time
+-- compensation begins those forward tasks are all terminal
+-- (done/failed/cancelled), so `not exists` was immediately true and the run
+-- flipped straight to 'compensated' while every compensation task was still
+-- ready/pending. Measured: cancel_hotel 'ready', refund 'pending',
+-- compensation_state 'compensated'. In the worked example that means the
+-- system reports a completed rollback while the customer's card has not been
+-- refunded -- a correctness failure that reports success, the worst kind.
+-- The fix keys off compensates_task_id, which is set only on compensation
+-- tasks, so this now waits on the rows it was always meant to wait on.
 create or replace function workflow.check_compensation_completion(p_run_id uuid) returns void as $$
     update workflow.runs
     set compensation_state = 'compensated'
     where id = p_run_id and compensation_state = 'compensating'
+      and exists (
+          -- there is at least one compensation task (otherwise 'compensated'
+          -- would be claimed for a run whose compensations were never created)
+          select 1 from workflow.tasks
+          where run_id = p_run_id and compensates_task_id is not null
+      )
       and not exists (
           select 1 from workflow.tasks
-          where run_id = p_run_id and compensation_task_key is not null
+          where run_id = p_run_id and compensates_task_id is not null
             and status not in ('done', 'failed', 'cancelled')
       );
 $$ language sql;
@@ -669,6 +697,11 @@ begin
             'work',
             v_task.output    -- the compensation sees what the forward step produced
         );
+        -- Tag the new task as a compensation and record WHICH forward task it
+        -- undoes. check_compensation_completion() keys off this; without it,
+        -- that function cannot distinguish a compensation task from a forward
+        -- one and completes the saga before any compensation has run.
+        update workflow.tasks set compensates_task_id = v_task.id where id = v_new_id;
         update workflow.tasks set compensated_at = now() where id = v_task.id;
         v_prev_comp_id := v_new_id;
     end loop;
@@ -949,13 +982,19 @@ create view workflow.v_stuck_tasks as
        or (t.status = 'running' and t.heartbeat_at < now() - coalesce(qc.stale_timeout, interval '2 minutes'))
        or (t.status = 'waiting_external' and t.created_at < now() - interval '1 hour');
 
+-- Reports on the COMPENSATION tasks (the work that undoes), not merely on
+-- forward tasks that have been marked as having had a compensation created --
+-- the same distinction the check_compensation_completion bug turned on.
 create view workflow.v_compensation_status as
-    select run_id, saga_group,
-           count(*) filter (where compensated_at is not null) as compensated,
-           count(*) as total_compensatable
-    from workflow.tasks
-    where saga_group is not null and compensation_task_key is not null
-    group by run_id, saga_group;
+    select f.run_id, f.saga_group,
+           count(*) as total_compensatable,
+           count(c.id) as compensations_created,
+           count(*) filter (where c.status = 'done') as compensations_done,
+           count(*) filter (where c.status = 'failed') as compensations_failed
+    from workflow.tasks f
+    left join workflow.tasks c on c.compensates_task_id = f.id
+    where f.saga_group is not null and f.compensation_task_key is not null
+    group by f.run_id, f.saga_group;
 
 create view workflow.v_decision_history as
     select te.run_id, te.task_id, t.step_key, te.input_snapshot, t.output as decision_output, te.at
