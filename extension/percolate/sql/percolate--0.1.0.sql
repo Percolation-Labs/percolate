@@ -4797,6 +4797,17 @@ begin
         -- because a reference can appear in an arg, a url, a header or three
         -- levels down a request body, and enumerating those places is a list
         -- that goes stale the next time a step kind is added.
+        --
+        -- KNOWN OVER-STRICT, and the note is here rather than in an issue
+        -- because this is where someone will read the rule. The condition that
+        -- makes a reference safe is that the step is a REACHABLE ANCESTOR --
+        -- runs.context accumulates every completed step's output, so in
+        -- a -> b -> c, `c` reading {{steps.a.result}} cannot race anything.
+        -- This checks the DIRECT edge, which is merely the easiest case of it,
+        -- so it refuses a correct diamond. Nobody has reported it because the
+        -- workaround under explicit `needs:` is to name both (`needs: [a, b]`)
+        -- and that reads fine. It stops being invisible the moment dependencies
+        -- can come from document order: see YAML.md § Not built: `sequence:`.
         for v_ref in
             select m[1] from regexp_matches(v_step::text,
                 '\{\{\s*steps\.([a-zA-Z0-9_-]+)', 'g') m

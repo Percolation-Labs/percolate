@@ -554,11 +554,13 @@ fn p8_workflow_grammar() -> pgrx::JsonB {
         },
         "actions": [
             {"key": "p8ql", "compiles_to": "kind: sql", "runs_on": "nobody -- inside Postgres",
-             "purpose": "A dialect query as a step. No process, no queue wait."},
+             "purpose": "A dialect query as a step. No process, no queue wait. In SEMANTIC or SEARCH mode it compiles to TWO tasks -- see `desugaring` below -- because those rank against a vector and the database makes no model calls."},
             {"key": "sql", "compiles_to": "kind: sql", "runs_on": "nobody -- inside Postgres",
              "purpose": "Call an allow-listed function by name. Steps may not supply arbitrary SQL; see workflow.step_functions for what is callable."},
             {"key": "rest", "compiles_to": "kind: http_call", "runs_on": "the worker's built-in handler",
              "purpose": "A durable outbound HTTP call. Retries, backoff and the reaper apply unchanged."},
+            {"key": "embed", "compiles_to": "kind: http_call", "runs_on": "the worker's built-in handler",
+             "purpose": "Turn text into a vector. Spelled `embed: \"<text>\"` or `embed: {text: ..., model: ...}`. You never write a url: the endpoint, request body and response path come from aiq.embedding_models and aiq.embedding_providers, and define_yaml fills them in. The result is the vector, so a search step reads it as {{steps.<id>.result}}."},
             {"key": "agent", "compiles_to": "kind: http_call", "runs_on": "the Agent Runtime",
              "purpose": "Names a row in agentic.agents. The agent's prompt and tools are data, so changing them never touches the workflow."},
             {"key": "work", "compiles_to": "kind: work", "runs_on": "your own code",
@@ -572,6 +574,16 @@ fn p8_workflow_grammar() -> pgrx::JsonB {
             "item": "{{item.x}} -- one matrix row; bound only on fan-out children",
             "env": "{{env.X}} -- resolved by the WORKER only. sql steps have no env: the database has no business reading the deployment's environment.",
             "when": "All of these resolve at DISPATCH, never at definition time."
+        },
+        "desugaring": {
+            "p8ql SEMANTIC/SEARCH": {
+                "you_write": "- id: retrieve\n  p8ql: 'SEARCH \"outage causes\" FROM chunks LIMIT 5'",
+                "compiles_to": "an http_call step keyed <id>__embed, plus the sql step keyed <id> calling p8ql_vec with {{steps.<id>__embed.result}} and depending on it",
+                "your_id_stays_on_the_search": "successors still say needs: [<id>] and read {{steps.<id>.result}} -- the embed is a hidden PREDECESSOR, so nothing is rewired",
+                "the_model_is_pinned_at_definition_time": "USING <model> is written into the query if it was not there, and refused if it disagrees with the embed step's model. A vector from one space ranked against another is not an error at runtime, only a meaningless number.",
+                "queue": "queue: on the step routes the EMBED half; the search half runs in-database and is claimed by nobody",
+                "escape_hatch": "write the two steps by hand -- `embed:` then `sql: {function: p8ql_vec, ...}` -- and you get the same rows"
+            }
         },
         "limits": {
             "payload": "task input/output are capped (workflow.max_payload_bytes); anything larger must be a $ref to object storage",
@@ -814,6 +826,11 @@ struct WfStep {
     sql: Option<SqlStep>,
     #[serde(default)]
     rest: Option<serde_yaml::Value>,
+    // `embed:` is a REST call whose url, body shape and response path the
+    // author never writes -- they are rows in aiq.embedding_models and
+    // aiq.embedding_providers, filled in by define_yaml. See EmbedStep.
+    #[serde(default)]
+    embed: Option<serde_yaml::Value>,
     #[serde(default)]
     agent: Option<String>,
     #[serde(default)]
@@ -875,9 +892,91 @@ struct SqlStep {
     args: Vec<serde_yaml::Value>,
 }
 
+// `embed:` -- the one action whose ENDPOINT is deployment data.
+//
+// Every other action is fully described by what the author wrote: a `rest:`
+// step carries its url, a `sql:` step names its function. An embedding call
+// cannot be, and the reason is in ai-query-layer/schema.sql §10: a vector is
+// only comparable inside the space of the MODEL that produced it, and which
+// models exist, where they are served and what their request and response
+// shapes look like are rows in aiq.embedding_models and
+// aiq.embedding_providers. Spelling a url in the YAML would put a deployment
+// fact in a document that is meant to survive deployments -- and, worse, would
+// let a workflow embed with one model and search a space built by another,
+// which is not an error anywhere: cosine distance between two spaces is a
+// number, just a meaningless one.
+//
+// So the compiler emits a MARKER -- {"embed": {text, model}} and no url -- and
+// define_yaml fills it in from the registry, pinning the model into both
+// halves at once. The marker is deliberately unrunnable: an http_call with no
+// url is refused by the lint, so a spec that reached workflow.definitions
+// without passing the expander cannot quietly become a task nobody can
+// explain.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmbedStep {
+    text: String,
+    // Optional because a deployment has a default model. Naming one pins it,
+    // which is what a workflow searching a space built by a specific model
+    // wants; leaving it out asks define_yaml for the default AT DEFINITION
+    // TIME, so the answer is recorded in the spec rather than re-decided per
+    // run by whichever row happens to carry is_default that day.
+    #[serde(default)]
+    model: Option<String>,
+}
+
+// `embed: "some text"` and `embed: {text: ..., model: ...}` are the same step.
+// Hand-parsed rather than an untagged enum: serde's untagged error for a typo
+// is "data did not match any variant", which tells an author nothing about
+// which of the two spellings they were closer to.
+fn parse_embed(what: &str, v: &serde_yaml::Value) -> Result<(String, Option<String>), String> {
+    match v {
+        serde_yaml::Value::String(t) => Ok((t.clone(), None)),
+        serde_yaml::Value::Mapping(_) => {
+            let e: EmbedStep = serde_yaml::from_value(v.clone()).map_err(|err| {
+                format!(
+                    "{}: {}. An embed step is `embed: \"<text>\"` or \
+                     `embed: {{text: <text>, model: <a registered model>}}` -- the url is \
+                     not yours to write, it comes from aiq.embedding_models.",
+                    what, err)
+            })?;
+            Ok((e.text, e.model))
+        }
+        _ => Err(format!(
+            "{} has an `embed:` that is neither text nor a mapping. Write \
+             `embed: \"<text>\"` or `embed: {{text: <text>, model: <a registered model>}}`.",
+            what)),
+    }
+}
+
+// SEMANTIC and SEARCH rank against a vector, and the database cannot make one:
+// embedding is a model call and no HTTP client is installed. That has always
+// been true, and the consequence used to be the author's problem -- two steps,
+// hand-wired, with the model named twice or not at all.
+//
+// It is a COMPILER's problem, because the compiler is the one thing here that
+// already knows which modes need a vector: parse_query lives in this crate.
+// Returns the text to embed and the model named by USING, or None for the
+// modes that need neither.
+//
+// A query that does not parse returns None rather than an error, deliberately:
+// the compiler has never been the thing that reports a bad query -- the lint
+// (workflow.lint_spec) is, with the step key and the parser's own message --
+// and turning a parse failure into a compile failure here would move that
+// diagnosis to a worse place. A query that is itself a template
+// (`p8ql: '{{run.query}}'`) lands here too, and correctly compiles to the
+// one-argument form: nothing can know at authoring time what mode it will be.
+fn vector_mode_of(query: &str) -> Option<(String, Option<String>)> {
+    let p = parse_query(query).ok()?;
+    match p.mode.as_str() {
+        "SEMANTIC" | "SEARCH" => Some((p.arg().to_string(), p.model.clone())),
+        _ => None,
+    }
+}
+
 // A matrix step: a row set, a ceiling, and ONE ordinary step spelled once and
 // run per row. The template is deliberately the same vocabulary as a top-level
-// step (rest/sql/p8ql/agent/work) rather than a second syntax -- YAML.md's
+// step (rest/sql/p8ql/embed/agent/work) rather than a second syntax -- YAML.md's
 // rule that every high-level step must remain expressible in raw steps applies
 // to the thing being fanned out as much as to the fan-out.
 #[derive(Deserialize)]
@@ -920,6 +1019,8 @@ struct WfTemplate {
     #[serde(default)]
     rest: Option<serde_yaml::Value>,
     #[serde(default)]
+    embed: Option<serde_yaml::Value>,
+    #[serde(default)]
     agent: Option<String>,
     #[serde(default)]
     work: Option<bool>,
@@ -952,6 +1053,7 @@ struct Action<'a> {
     p8ql: &'a Option<String>,
     sql: &'a Option<SqlStep>,
     rest: &'a Option<serde_yaml::Value>,
+    embed: &'a Option<serde_yaml::Value>,
     agent: &'a Option<String>,
     work: Option<bool>,
     queue: &'a Option<String>,
@@ -966,12 +1068,13 @@ fn resolve_action(what: &str, a: &Action) -> Result<(&'static str, String, serde
         a.p8ql.is_some().then_some("p8ql"),
         a.sql.is_some().then_some("sql"),
         a.rest.is_some().then_some("rest"),
+        a.embed.is_some().then_some("embed"),
         a.agent.is_some().then_some("agent"),
         a.work.unwrap_or(false).then_some("work"),
     ].into_iter().flatten().collect();
     if chosen.len() != 1 {
         return Err(format!(
-            "{} must have exactly one of p8ql/sql/rest/agent/work, found {}",
+            "{} must have exactly one of p8ql/sql/rest/embed/agent/work, found {}",
             what,
             if chosen.is_empty() { "none".to_string() } else { chosen.join(" + ") }
         ));
@@ -994,6 +1097,16 @@ fn resolve_action(what: &str, a: &Action) -> Result<(&'static str, String, serde
         "rest" => ("http_call",
             a.queue.clone().unwrap_or_else(|| "http".into()),
             y2j(a.rest.as_ref().unwrap())),
+        // A MARKER, not a call: url, method, body and jsonpath are added by
+        // define_yaml from the model registry (see EmbedStep). The queue is
+        // the ordinary http one by default, because after expansion this is an
+        // ordinary http_call and the shipped worker already polls it --
+        // `queue: embed` routes it to a pool of its own where one exists.
+        "embed" => {
+            let (text, model) = parse_embed(what, a.embed.as_ref().unwrap())?;
+            ("http_call", a.queue.clone().unwrap_or_else(|| "http".into()),
+             serde_json::json!({"embed": {"text": text, "model": model}}))
+        }
         // An agent step is a REST call to the Agent Runtime with the agent
         // NAMED, not defined -- the agent itself is a row in agentic.agents,
         // so changing its prompt or tools never touches this workflow.
@@ -1053,7 +1166,8 @@ fn compile_control(id: &str, s: &WfStep) -> Result<(&'static str, String, serde_
     }
     let acted: Vec<&str> = [
         s.p8ql.is_some().then_some("p8ql"), s.sql.is_some().then_some("sql"),
-        s.rest.is_some().then_some("rest"), s.agent.is_some().then_some("agent"),
+        s.rest.is_some().then_some("rest"), s.embed.is_some().then_some("embed"),
+        s.agent.is_some().then_some("agent"),
         s.work.unwrap_or(false).then_some("work"),
     ].into_iter().flatten().collect();
     if !acted.is_empty() {
@@ -1149,10 +1263,24 @@ fn compile_matrix(id: &str, m: &WfMatrix, s: &WfStep)
              would complete before they finished.", id));
     }
 
+    // A template is ONE step, and a vector-mode query is two. Refused by name
+    // rather than compiled into a search with no vector, which is a runtime
+    // failure on every child at once.
+    if let Some(q) = &m.template.p8ql {
+        if vector_mode_of(q).is_some() {
+            return Err(format!(
+                "matrix step '{}' templates a SEMANTIC/SEARCH query, which needs an embedding \
+                 and therefore two steps -- a template is one. Fan out over `embed:` and search \
+                 in a fan-in step, or embed once before the matrix and pass \
+                 {{{{steps.<id>.result}}}} to a `sql:` template calling p8ql_vec.", id));
+        }
+    }
+
     let (tkind, tqueue, tinput) = resolve_action(
         &format!("the matrix template of step '{}'", id),
         &Action {
             p8ql: &m.template.p8ql, sql: &m.template.sql, rest: &m.template.rest,
+            embed: &m.template.embed,
             agent: &m.template.agent, work: m.template.work,
             queue: &m.template.queue, input: &m.template.input,
             session: &m.template.session,
@@ -1230,13 +1358,14 @@ pub fn compile_workflow(yaml: &str) -> Result<serde_json::Value, String> {
         }
 
         let kind_is_agent = s.agent.is_some();
-        let (kind, queue, input) = if let Some(m) = &s.matrix {
+        let (kind, queue, mut input) = if let Some(m) = &s.matrix {
             compile_matrix(&s.id, m, s)?
         } else if s.signal.is_some() || s.timer.is_some() || s.workflow.is_some() {
             compile_control(&s.id, s)?
         } else {
             resolve_action(&format!("step '{}'", s.id), &Action {
-                p8ql: &s.p8ql, sql: &s.sql, rest: &s.rest, agent: &s.agent,
+                p8ql: &s.p8ql, sql: &s.sql, rest: &s.rest, embed: &s.embed,
+                agent: &s.agent,
                 work: s.work, queue: &s.queue, input: &s.input, session: &s.session,
                 session_group: &s.session_group, jsonpath: &s.jsonpath,
             })?
@@ -1260,6 +1389,45 @@ pub fn compile_workflow(yaml: &str) -> Result<serde_json::Value, String> {
             }
         }
 
+        // ---- the vector-mode desugar --------------------------------------
+        //
+        // `p8ql: 'SEARCH "..." FROM chunks'` compiles to TWO rows: an embed
+        // step and the search that consumes it. What makes this sugar rather
+        // than a new step kind is that both rows are ones an author can write
+        // by hand today -- YAML.md's promotion rule -- and the test is a diff:
+        // this must emit exactly what the hand-written pair emits.
+        //
+        // It PREPENDS a hidden predecessor rather than inserting children, and
+        // that is the difference from `matrix:` that makes it cheap. The
+        // author's step id stays on the SEARCH, which is the step that
+        // produces the result, so every successor's `needs:` and every
+        // {{steps.<id>.result}} still mean what they meant. Nothing is
+        // rewired, because nothing moved.
+        let mut extra_dep: Option<String> = None;
+        if let Some(q) = &s.p8ql {
+            if let Some((text, model)) = vector_mode_of(q) {
+                let ekey = format!("{}__embed", s.id);
+                if ids.contains(&ekey.as_str()) {
+                    return Err(format!(
+                        "step '{}' is a SEMANTIC/SEARCH query, which compiles to an embed step \
+                         named '{}' -- and this workflow already has a step by that name. \
+                         Rename one of them.", s.id, ekey));
+                }
+                steps.push(serde_json::json!({
+                    "key": ekey, "kind": "http_call",
+                    "queue": s.queue.clone().unwrap_or_else(|| "http".into()),
+                    "input": {"embed": {"text": text, "model": model}}
+                }));
+                // The two-argument registration. Same function underneath
+                // (workflow.p8ql); the second name is how the allow-list
+                // distinguishes the arity that takes a vector.
+                input["function"] = serde_json::json!("p8ql_vec");
+                input["args"] = serde_json::json!([
+                    q.clone(), format!("{{{{steps.{}.result}}}}", ekey)]);
+                extra_dep = Some(ekey);
+            }
+        }
+
         let mut step = serde_json::json!({
             "key": s.id, "kind": kind, "queue": queue, "input": input
         });
@@ -1273,8 +1441,10 @@ pub fn compile_workflow(yaml: &str) -> Result<serde_json::Value, String> {
             }
             step["input"]["output_schema"] = y2j(sc);
         }
-        if !s.needs.is_empty() {
-            step["depends_on"] = serde_json::json!(s.needs);
+        if !s.needs.is_empty() || extra_dep.is_some() {
+            let mut deps = s.needs.clone();
+            if let Some(d) = extra_dep { deps.push(d); }
+            step["depends_on"] = serde_json::json!(deps);
         }
         // saga_group is emitted INDEPENDENTLY of compensate_with, and tying
         // the two together was a real bug found by running a saga: the step

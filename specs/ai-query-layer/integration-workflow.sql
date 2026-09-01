@@ -45,3 +45,206 @@ select workflow.register_step_function(
 select workflow.register_step_function(
     'p8ql_vec', 'workflow.p8ql', array['text','jsonb'], 30000,
     'P8QL with an embedding produced by a prior step');
+
+-- ============================================================
+-- Embed steps: the half of a vector search the database cannot do.
+--
+-- The two arities above are the mechanism, and for a long time they were also
+-- the interface: an author wrote the `rest:` call to a model by hand, then
+-- passed {{steps.embed.result}} into p8ql_vec. That has two defects, and only
+-- the first is ergonomic.
+--
+--  1. The url, the request body's shape and the path to the vector in the
+--     response are deployment facts written into a document that outlives
+--     deployments. Two workflows in one database embed differently against the
+--     same model because two people wrote two `rest:` blocks.
+--
+--  2. NOTHING TIED THE TWO HALVES TOGETHER. The embed step names a model, the
+--     query names a space with USING (or takes the default), and if those two
+--     disagree the run does not fail -- aiq.semantic_in only checks the
+--     DIMENSION, so two 768-dim models produce a cosine distance that is a
+--     number and not an answer. §10 says this in the strongest terms it has
+--     ("meaningless, not merely imprecise") and then left the workflow author
+--     to hold both ends of it by hand.
+--
+-- So the compiler emits a MARKER -- an http_call whose input is
+-- {"embed": {"text": ..., "model": ...}} and no url -- and this function turns
+-- it into an ordinary REST call at DEFINITION time, from the registry. Three
+-- consequences worth stating:
+--
+--   * The shipped worker needs no new handler. After expansion this is an
+--     http_call like any other, on the queue the author named, with retry,
+--     backoff, the reaper and tracing already applying. An `embed:` step is
+--     not a new deployable and not a new execution path.
+--   * The model is resolved ONCE and pinned into BOTH halves -- written into
+--     the query as `USING <model>` if it was not already there, and refused if
+--     it was there and disagrees. The invariant the two-step form could not
+--     hold is now unstatable in a stored definition.
+--   * It resolves at definition time rather than dispatch, so the answer is
+--     visible in workflow.definitions.spec. A run does not re-decide which
+--     model it meant because someone moved is_default in between.
+-- ============================================================
+create or replace function aiq.expand_embed_steps(p_spec jsonb)
+returns jsonb as $$
+declare
+    v_steps   jsonb := '[]'::jsonb;
+    v_out     jsonb;
+    v_step    jsonb;
+    v_models  jsonb := '{}'::jsonb;   -- embed step key -> the model it resolved to
+    v_text    text;
+    v_named   text;
+    v_body    jsonb;
+    v_input   jsonb;
+    v_ref     text;
+    v_plan    jsonb;
+    v_query   text;
+    v_model   text;
+    m         aiq.embedding_models;
+    p         aiq.embedding_providers;
+begin
+    if p_spec is null or p_spec->'steps' is null then
+        return p_spec;
+    end if;
+
+    -- Pass 1: every marker becomes a REST call.
+    for v_step in select * from jsonb_array_elements(p_spec->'steps') loop
+        if v_step->>'kind' = 'http_call'
+           and v_step->'input' ? 'embed' and not (v_step->'input' ? 'url') then
+
+            v_text  := v_step->'input'->'embed'->>'text';
+            v_named := v_step->'input'->'embed'->>'model';
+
+            if v_named is null then
+                select * into m from aiq.embedding_models where is_default;
+                if not found then
+                    raise exception
+                        'step ''%'' embeds text but this deployment has no default embedding '
+                        'model. Name one with `embed: {text: ..., model: <name>}` (or '
+                        'USING <model> in the query), or set is_default on a row in '
+                        'aiq.embedding_models.', v_step->>'key';
+                end if;
+            else
+                select * into m from aiq.embedding_models where name = v_named;
+                if not found then
+                    raise exception
+                        'step ''%'' embeds with model ''%'', which is not registered. '
+                        'SCHEMA "graph" lists the registered ones.',
+                        v_step->>'key', v_named;
+                end if;
+            end if;
+
+            select * into p from aiq.embedding_providers where provider = m.provider;
+            if not found then
+                raise exception
+                    'embedding model ''%'' is served by provider ''%'', which has no row in '
+                    'aiq.embedding_providers -- so nothing here knows what its request '
+                    'body looks like or where the vector sits in its response.',
+                    m.name, m.provider;
+            end if;
+
+            -- Refused rather than defaulted: a guessed url is a step that 404s
+            -- on every run of every workflow that ever names this model, and
+            -- the message would name the endpoint rather than the omission.
+            if m.endpoint is null then
+                raise exception
+                    'embedding model ''%'' has no endpoint, so step ''%'' has nowhere to send '
+                    'its text. Set aiq.embedding_models.endpoint -- it may be written as '
+                    '''{{env.LLM_URL}}/api/embeddings'', which the worker resolves.',
+                    m.name, v_step->>'key';
+            end if;
+
+            -- Whole VALUES only (§10a): the author's text becomes a jsonb
+            -- string via to_jsonb, so quotes, newlines and braces in it are
+            -- escaped by the database rather than by a regex of ours.
+            select jsonb_object_agg(k,
+                       case when v = '"{{text}}"'::jsonb  then to_jsonb(v_text)
+                            when v = '"{{model}}"'::jsonb then to_jsonb(m.name)
+                            else v end)
+              into v_body
+              from jsonb_each(p.request_template) e(k, v);
+
+            v_input := jsonb_build_object(
+                'url',        m.endpoint,
+                'method',     p.method,
+                'body',       v_body,
+                'jsonpath',   p.response_path,
+                'timeout_ms', 30000,
+                -- Kept beside the call, not consumed by it. It is what makes a
+                -- task row say what it IS -- "the embedding of {{run.question}}
+                -- in nomic-embed-text" -- rather than leaving a reader to infer
+                -- an intent from a url and a body.
+                'embed',      jsonb_build_object('text', v_text, 'model', m.name));
+
+            if m.credential_ref is not null then
+                v_input := v_input || jsonb_build_object('credential_ref', m.credential_ref);
+            end if;
+
+            v_step   := jsonb_set(v_step, '{input}', v_input);
+            v_models := v_models || jsonb_build_object(v_step->>'key', m.name);
+        end if;
+        v_steps := v_steps || jsonb_build_array(v_step);
+    end loop;
+
+    -- Pass 2: pin the model into the query that consumes each vector.
+    --
+    -- The pairing is read off the DATA FLOW -- a p8ql step whose arguments
+    -- reference {{steps.<an embed step>.result}} -- rather than off a marker
+    -- the compiler left behind. That is deliberate: it makes the check apply
+    -- to the hand-written two-step form exactly as it applies to the sugar,
+    -- so the raw spelling is not the one that quietly keeps the old defect.
+    v_out := '[]'::jsonb;
+    for v_step in select * from jsonb_array_elements(v_steps) loop
+        if v_step->>'kind' = 'sql'
+           and coalesce(v_step->'input'->>'function', '') in ('p8ql', 'p8ql_vec') then
+
+            v_query := v_step->'input'->'args'->>0;
+            v_model := null;
+            for v_ref in
+                select m2[1] from regexp_matches(v_step::text,
+                    '\{\{\s*steps\.([a-zA-Z0-9_-]+)\.result\s*\}\}', 'g') m2
+            loop
+                if v_models ? v_ref then v_model := v_models->>v_ref; end if;
+            end loop;
+
+            if v_query is not null and v_model is not null then
+                execute 'select aiq_parse($1)' into v_plan using v_query;
+
+                -- A query that does not parse is the lint's to report, with
+                -- the step key and the parser's own message. Saying it twice,
+                -- here, in a function about embeddings, would put the worst
+                -- version of that message in front of the author.
+                if coalesce((v_plan->>'ok')::boolean, false)
+                   and v_plan->>'mode' in ('SEMANTIC', 'SEARCH') then
+
+                    if v_plan->>'model' is null then
+                        -- USING is order-independent in the dialect, so
+                        -- appending is legal whatever else the query carries.
+                        v_step := jsonb_set(v_step, '{input,args,0}',
+                            to_jsonb(v_query || ' USING ' || v_model));
+
+                    elsif v_plan->>'model' <> v_model then
+                        raise exception
+                            'step ''%'' searches the ''%'' space but is handed a vector produced '
+                            'by ''%''. Nothing downstream can catch this: cosine distance '
+                            'between two embedding spaces is a number, not an answer, and '
+                            'the dimension check passes whenever the two models happen to '
+                            'be the same width.',
+                            v_step->>'key', v_plan->>'model', v_model;
+                    end if;
+                end if;
+            end if;
+        end if;
+        v_out := v_out || jsonb_build_array(v_step);
+    end loop;
+
+    return jsonb_set(p_spec, '{steps}', v_out);
+end;
+$$ language plpgsql stable;
+
+grant execute on function aiq.expand_embed_steps(jsonb) to authenticated;
+
+comment on function aiq.expand_embed_steps(jsonb) is
+    'Turn every `embed:` marker in a compiled workflow spec into an ordinary REST '
+    'call from aiq.embedding_models + aiq.embedding_providers, and pin the model it '
+    'resolved to into the query that consumes the vector. Called by '
+    'workflow.define_yaml; an unexpanded marker is refused by the lint.';

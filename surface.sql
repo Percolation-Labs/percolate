@@ -130,6 +130,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('workflow-engine','function','workflow.call_step_function','text,jsonb,uuid,jsonb','§20b: one allow-list dispatcher, two callers'),
 ('workflow-engine','function','workflow.validate_matrix_steps','jsonb','§20f: a matrix without a ceiling is refused at registration'),
 ('workflow-engine','function','workflow.resolve_args','jsonb,uuid,jsonb','§20a: {{item.*}} is a third namespace'),
+('workflow-engine','function','workflow.resolve_template_ref','text,uuid,jsonb','§20a: one reference resolved, so a query argument can carry text AROUND its templates'),
 ('workflow-engine','column','workflow.tasks.matrix_parent_id',null,'§20: a child points at the matrix that produced it'),
 
 -- ---------- workflow-engine: artifacts, output class 4 (outputs.md) ----
@@ -148,6 +149,9 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','table','aiq.node_keys',null,'graph-identity.md: lookup index'),
 ('ai-query-layer','table','aiq.edges',null,'graph-identity.md: authored soft links'),
 ('ai-query-layer','table','aiq.embedding_models',null,'schema.sql §10: one space per MODEL'),
+('ai-query-layer','table','aiq.embedding_providers',null,'schema.sql §10a: what an embedding CALL looks like is data, not code'),
+('ai-query-layer','column','aiq.embedding_models.credential_ref',null,'schema.sql §10: the env var name, never the token'),
+('ai-query-layer','function','aiq.expand_embed_steps','jsonb','integration-workflow.sql: an embed step names a model, never a url -- and the model is pinned into both halves'),
 ('ai-query-layer','function','aiq.query','text,vector','§9: one RPC for the whole dialect'),
 ('ai-query-layer','function','aiq.lookup','text,boolean,integer','§7: LOOKUP / FUZZY'),
 ('ai-query-layer','function','aiq.graph_neighbors','uuid,text,integer','§7: GRAPH depth 1'),

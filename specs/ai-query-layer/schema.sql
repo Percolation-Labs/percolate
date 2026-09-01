@@ -1244,7 +1244,16 @@ create table aiq.embedding_models (
     name        text primary key,          -- 'nomic-embed-text', 'text-embedding-3-small'
     dim         int  not null check (dim > 0),
     provider    text not null,             -- 'ollama' | 'openai' | ...
-    endpoint    text,                      -- resolved by the worker, not called from SQL
+    -- Resolved by the WORKER, not called from SQL -- and it may be written as
+    -- a `{{env.X}}` reference ('{{env.LLM_URL}}/api/embeddings'), because the
+    -- worker resolves that namespace and the database deliberately cannot.
+    -- That is what lets one registry row serve dev, staging and production
+    -- without a per-deployment UPDATE.
+    endpoint    text,
+    -- The env var name the worker reads a bearer token from, for a hosted
+    -- provider. Never the token: a secret in a table is a secret in every
+    -- backup, every logical replica and every pg_dump.
+    credential_ref text,
     distance_op text not null default 'vector_cosine_ops'
                     check (distance_op in ('vector_cosine_ops','vector_l2_ops','vector_ip_ops')),
     is_default  boolean not null default false,
@@ -1257,6 +1266,50 @@ create table aiq.embedding_models (
 -- two defaults and a coin-flip about which one SEMANTIC uses.
 create unique index idx_embedding_models_one_default
     on aiq.embedding_models ((true)) where is_default;
+
+-- ------------------------------------------------------------
+-- 10a. What an embedding CALL looks like -- one row per provider.
+--
+-- `provider` above was a label: it recorded which service produced a space and
+-- nothing could act on it. Everything needed to actually make the call -- the
+-- request body's shape and where the vector sits in the response -- lived in
+-- whatever YAML an author happened to write, which is how two workflows in one
+-- deployment end up embedding differently against the same model.
+--
+-- It is a TABLE rather than code in the worker for the reason the rest of this
+-- collection is tables: a new provider is then a row, insertable by a
+-- deployment that cannot rebuild an image. Both shipped rows were written from
+-- the providers' published request formats; a deployment whose gateway differs
+-- overrides the row rather than forking anything.
+--
+-- The template is deliberately ONE LEVEL DEEP, and that is a limit worth
+-- naming rather than discovering: `{{model}}` and `{{text}}` are substituted
+-- as whole VALUES of top-level keys, never inside a longer string. Substituting
+-- into arbitrary nested JSON text would mean escaping author-supplied text into
+-- a JSON literal by hand, and hand-rolled JSON escaping is a defect waiting for
+-- a quote character. Both providers' bodies are flat objects, so the limit
+-- costs nothing today and fails loudly rather than silently if it ever does.
+--
+-- `{{text}}` may itself arrive holding a workflow template ('{{run.question}}')
+-- -- it is left intact, and the worker resolves it at dispatch like any other
+-- REST body. Two template layers, resolved in the right order by the two halves
+-- that own them.
+-- ------------------------------------------------------------
+create table aiq.embedding_providers (
+    provider         text primary key,
+    request_template jsonb not null,
+    response_path    text  not null,   -- dotted path, the worker's `jsonpath`
+    method           text  not null default 'POST',
+    notes            text
+);
+
+insert into aiq.embedding_providers (provider, request_template, response_path, notes) values
+    ('ollama', '{"model": "{{model}}", "prompt": "{{text}}"}'::jsonb, 'embedding',
+     'POST /api/embeddings -- one vector, at the top level under "embedding".'),
+    ('openai', '{"model": "{{model}}", "input": "{{text}}"}'::jsonb, 'data.0.embedding',
+     'POST /v1/embeddings -- a list, because the API embeds a batch; a single '
+     'text still comes back as data[0]. Needs credential_ref on the model row.')
+on conflict (provider) do nothing;
 
 -- Each registered model gets its own storage table + HNSW index, generated
 -- from the registry so the dimension and operator class can never drift from
@@ -2055,6 +2108,29 @@ begin
             'agents', coalesce((select jsonb_agg(jsonb_build_object(
                     'name', name, 'model', model) order by name)
                 from agentic.agents), '[]'::jsonb),
+            -- What an `embed:` step -- and therefore a SEMANTIC or SEARCH
+            -- `p8ql:` step, which compiles to one -- may name. It belongs in
+            -- THIS facet and not only in `graph`, on the rule the queues note
+            -- above was written for: an author is told what they may write in
+            -- the document they are writing, not sent to a second facet to
+            -- find out whether the step they just authored can run.
+            --
+            -- `callable` is the half a registration can get wrong: a model row
+            -- with no endpoint, or a provider with no request shape, is
+            -- registered as a SPACE and unusable as a STEP -- and the two
+            -- registrations are made in different places by different people.
+            'embedding_models', coalesce((select jsonb_agg(jsonb_build_object(
+                    'name', m.name, 'dim', m.dim, 'provider', m.provider,
+                    'is_default', m.is_default,
+                    'callable', (m.endpoint is not null and p.provider is not null))
+                    order by m.name)
+                from aiq.embedding_models m
+                left join aiq.embedding_providers p on p.provider = m.provider), '[]'::jsonb),
+            'embedding_note', 'An `embed:` step names a model, never a url: the endpoint, '
+                              'request shape and response path come from aiq.embedding_models '
+                              'and aiq.embedding_providers, and define_yaml writes them in. '
+                              'A SEMANTIC or SEARCH `p8ql:` step compiles to one of these '
+                              'plus the search, and the model is pinned into both halves.',
             -- Everything a template can name. {{run.*}} reads the run INPUT;
             -- the run's own identity is under the reserved $ prefix, because
             -- an input key called `id` is not unusual and shadowing it would
@@ -2342,21 +2418,30 @@ steps:
     sql: {function: rebuild_graph_index, args: [company]}
 $y$, 'A workflow of only sql steps completes with nothing running anywhere.', 10);
 
-select aiq.register_schema_example('workflow', 'rest-then-search', 'workflow_yaml',
+select aiq.register_schema_example('workflow', 'search', 'workflow_yaml',
 $y$name: hybrid_research
 steps:
-  - id: embed
-    rest:
-      url: http://localhost:11435/api/embeddings
-      method: POST
-      body: {model: nomic-embed-text, prompt: '{{run.question}}'}
-      jsonpath: embedding
   - id: retrieve
-    needs: [embed]
+    p8ql: 'SEARCH "{{run.question}}" FROM chunks LIMIT 3'
+$y$, 'A vector mode still runs as two tasks -- a sql step cannot embed text, because that '
+     'is a model call -- but the compiler writes the embed step, and define_yaml pins the '
+     'model into both halves. Compile it and look: there are two steps, and the query in '
+     'the stored spec carries USING.', 20);
+
+select aiq.register_schema_example('workflow', 'search-spelled-out', 'workflow_yaml',
+$y$name: hybrid_research_raw
+steps:
+  - id: q
+    embed: {text: '{{run.question}}', model: nomic-embed-text}
+  - id: retrieve
+    needs: [q]
     sql:
       function: p8ql_vec
-      args: ['SEARCH "{{run.question}}" FROM chunks LIMIT 3', '{{steps.embed.result}}']
-$y$, 'Vector modes take two steps: a sql step cannot embed text, because that is a model call.', 20);
+      args: ['SEARCH "{{run.question}}" FROM chunks USING nomic-embed-text LIMIT 3',
+             '{{steps.q.result}}']
+$y$, 'The same two tasks, written by hand. Worth knowing they are the same rows: the '
+     'shorthand is not a second execution path, and reaching for this form costs nothing '
+     'when a pipeline embeds once and searches twice.', 25);
 
 select aiq.register_schema_example('workflow', 'matrix-fanout', 'workflow_yaml',
 $y$name: edgar_restatements

@@ -42,6 +42,15 @@ cycle, a hub, a node reachable two ways and a node reachable no way. `04` builds
 its own, because it tests the write path and a write path has to be exercised
 with writes.
 
+`workflow/09` is the other end of those same two registries, from the authoring
+side: it asserts that a `SEARCH` query compiles to the embed task plus the
+search, that the shorthand and the hand-written pair produce **byte-identical
+stored specs** (the diff test `YAML.md` sets for promoting any shorthand), and
+that a workflow embedding with one model while searching another space is
+refused — a wrong answer with no run-time symptom, since two 768-dimension
+models are the same width and only the width was ever checked. Nothing in it
+touches the network: the failures it pins are all authoring-time.
+
 `07`–`09` are the other half of the same debt. `07` is the escape hatch:
 `aiq.sql_passthrough` runs SQL the caller wrote, `brief.md` §3 calls the wrong
 design for it "an RLS bypass and privilege escalation primitive", and nothing
