@@ -2298,6 +2298,16 @@ begin
 
     v_spec := coalesce(t.input, '{}'::jsonb);
 
+    -- The run this step belongs to, published transaction-locally so an
+    -- allow-listed function can tell "my own run" from "a run id somebody
+    -- typed into a step spec". Needed the moment a step function takes a task
+    -- id -- matrix_outputs does -- because a workflow author could otherwise
+    -- name another tenant's matrix task and read its results. Transaction-local
+    -- (set_config's third argument), so it cannot leak into a pooled
+    -- connection's next transaction; the same hazard rbac.current_user_id()
+    -- was hardened against.
+    perform set_config('workflow.current_run_id', t.run_id::text, true);
+
     begin      -- subtransaction: a failure here must not abort the caller
         v_out := workflow.call_step_function(
             v_spec->>'function', v_spec->'args', t.run_id, t.input->'item');
@@ -2313,6 +2323,120 @@ begin
     end;
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
+-- 20a-bis. `{{item.*}}` is substituted AT EXPANSION, and the first version of
+-- this section said the opposite. Reversed by running it.
+--
+-- The original decision was that the row should be stored on the child and
+-- `{{item.cik}}` resolved at dispatch, like {{run.*}} and {{steps.*}}, on the
+-- grounds that YAML.md's Templates section says author-time substitution makes
+-- the recorded task input a lie about what was sent.
+--
+-- Then the worked case ran -- a matrix of `rest:` steps against SEC EDGAR --
+-- and all six children failed terminally with:
+--
+--     unknown template namespace 'item' in {{item.cik}}
+--     -- expected steps, run or env
+--
+-- That message is the WORKER's, not this database's. Deferring to dispatch put
+-- `item` into the worker's contract, and the worker is a shipped image that
+-- knows three namespaces. So the headline use case for this entire feature --
+-- fan out over a query, fetch one URL per row -- did not work, on a design
+-- that had been written up as if it did. Only `sql` children had been
+-- exercised, because those resolve in-database where the namespace had been
+-- added.
+--
+-- The decision was also wrong on its own terms, which is the part worth
+-- keeping. The "recorded input is a lie" objection is about a stored
+-- DEFINITION, which is shared across every run and cannot be resolved in
+-- advance. A fan-out child is not that: it exists for exactly one row, and
+-- substituting that row makes its recorded input say EXACTLY what will be
+-- sent. Deferring made the recorded input say `{{item.cik}}` and forced a
+-- reader to join to `input->'item'` to learn what was actually requested.
+-- Substitution is the more honest record, not the less.
+--
+-- So: `item` is substituted here, the other namespaces are untouched and still
+-- resolve at dispatch, and the row is ALSO kept verbatim on the child --
+-- because it is the recorded snapshot §20 turns on, and because a `sql` child
+-- can then read it with its type intact.
+--
+-- The payoff beyond correctness: a worker never learns that a task came from a
+-- fan-out. Expansion is the engine's business, and it now stays there.
+-- ------------------------------------------------------------
+create or replace function workflow.substitute_item(p_value jsonb, p_item jsonb, p_step text)
+returns jsonb as $$
+declare
+    v_txt   text;
+    v_path  text;
+    v_val   jsonb;
+    v_out   jsonb;
+    v_key   text;
+    m       text[];
+begin
+    if p_value is null then
+        return null;
+    end if;
+
+    case jsonb_typeof(p_value)
+    when 'object' then
+        v_out := '{}'::jsonb;
+        for v_key in select jsonb_object_keys(p_value) loop
+            v_out := v_out || jsonb_build_object(
+                v_key, workflow.substitute_item(p_value->v_key, p_item, p_step));
+        end loop;
+        return v_out;
+
+    when 'array' then
+        return coalesce((
+            select jsonb_agg(workflow.substitute_item(e, p_item, p_step) order by ord)
+            from jsonb_array_elements(p_value) with ordinality as x(e, ord)), '[]'::jsonb);
+
+    when 'string' then
+        v_txt := p_value #>> '{}';
+
+        -- A WHOLE-STRING reference keeps its native type, so a numeric column
+        -- arrives as a number and a nested object arrives as an object. Same
+        -- rule resolve_args applies, for the same reason: an argument that is
+        -- only a reference is a value, not a template.
+        m := regexp_match(v_txt, '^\s*\{\{\s*item\.([a-zA-Z0-9_.]+)\s*\}\}\s*$');
+        if m is not null then
+            v_val := p_item #> string_to_array(m[1], '.');
+            if v_val is null then
+                raise exception
+                    'matrix step ''%'': template names {{item.%}}, which is not a column of '
+                    'the row set. The row has: %',
+                    p_step, m[1], (select string_agg(k, ', ' order by k)
+                                   from jsonb_object_keys(p_item) k);
+            end if;
+            return v_val;
+        end if;
+
+        -- Embedded in a larger string -- a URL, a prompt -- so the value is
+        -- interpolated as text. A string is inserted bare; anything else is
+        -- inserted as its JSON form, which is what a caller building a URL out
+        -- of a number means.
+        for m in select regexp_matches(v_txt, '\{\{\s*item\.([a-zA-Z0-9_.]+)\s*\}\}', 'g') loop
+            v_val := p_item #> string_to_array(m[1], '.');
+            if v_val is null then
+                raise exception
+                    'matrix step ''%'': template names {{item.%}}, which is not a column of '
+                    'the row set. The row has: %',
+                    p_step, m[1], (select string_agg(k, ', ' order by k)
+                                   from jsonb_object_keys(p_item) k);
+            end if;
+            v_txt := replace(v_txt,
+                (regexp_match(v_txt, '\{\{\s*item\.' || m[1] || '\s*\}\}'))[1],
+                case when jsonb_typeof(v_val) = 'string' then v_val #>> '{}'
+                     else v_val::text end);
+        end loop;
+        return to_jsonb(v_txt);
+
+    else
+        return p_value;
+    end case;
+end;
+$$ language plpgsql immutable;
 
 -- ------------------------------------------------------------
 -- 20c. Expansion -- the whole mechanism, in one transaction.
@@ -2467,7 +2591,11 @@ begin
                 t.step_key || '[' || v_i || ']',
                 coalesce(v_tmpl->>'queue', t.queue),
                 coalesce(v_tmpl->>'kind', 'work'),
-                coalesce(v_tmpl->'input', '{}'::jsonb) || jsonb_build_object('item', v_row),
+                -- Substituted, then the row appended verbatim. The child's
+                -- input therefore says exactly what will be sent AND still
+                -- carries the snapshot §20 records.
+                workflow.substitute_item(coalesce(v_tmpl->'input', '{}'::jsonb), v_row, t.step_key)
+                    || jsonb_build_object('item', v_row),
                 v_tmpl->>'rate_key',
                 0, 'ready', p_task_id, t.span_id,
                 v_tmpl->>'saga_group',
@@ -2520,10 +2648,25 @@ begin
         --    The digest goes into runs.context under the step key, so
         --    {{steps.<key>.fanout}} is available downstream. The rows do not:
         --    they are on the children.
-        perform workflow.complete_task(p_task_id, jsonb_build_object(
-            'fanout',    coalesce(array_length(v_children, 1), 0),
-            'rows_hash', v_hash,
-            'source',    coalesce(v_spec#>>'{rows,function}', 'items')));
+        -- WRAPPED IN `result`, and the first version was not. Every other kind
+        -- puts its payload there -- execute_sql_step returns {'result': ...},
+        -- the worker's http_call returns {'status':..., 'result':...} -- so
+        -- {{steps.<id>.result}} is the one idiom an author learns. A matrix
+        -- step returning a bare object broke it on exactly one kind, and the
+        -- first fan-in written against this feature failed with
+        -- `template 'steps.fan.result' resolved to nothing`. One idiom beats
+        -- two, so the shape moved rather than the idiom.
+        --
+        -- `task_id` is in there because without it a successor cannot REACH
+        -- its siblings. The digest said how many children there were and
+        -- nothing about how to find them; matrix_outputs() below needs the
+        -- handle, and this is the only place a downstream step can get one.
+        perform workflow.complete_task(p_task_id, jsonb_build_object('result',
+            jsonb_build_object(
+                'task_id',   p_task_id,
+                'fanout',    coalesce(array_length(v_children, 1), 0),
+                'rows_hash', v_hash,
+                'source',    coalesce(v_spec#>>'{rows,function}', 'items'))));
         update workflow.tasks set decision_output_hash = v_hash where id = p_task_id;
 
         -- 4. `sql` children need a kick. The autorun trigger (§17) fires ON
@@ -2549,6 +2692,72 @@ begin
     end;
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- The fan-in, made possible. THE FIRST VERSION OF §20 SHIPPED WITHOUT THIS
+-- AND SAID SO WRONGLY.
+--
+-- It claimed no aggregation was needed yet because "the pattern that works
+-- today is that children write to a domain table and the successor is a `sql`
+-- step over it". Running it showed that is false for the commonest child kind:
+-- a `rest` child's output goes to workflow.tasks.output and nowhere else --
+-- the generic worker records a response, it does not know a domain. So for a
+-- fan-out of HTTP calls, which is the entire worked example, there was no way
+-- for a successor to see a single result. Fan-out without a reachable fan-in
+-- is not fan-out.
+--
+-- This is deliberately NOT the {{items.<step>}} namespace §20 defers. It is
+-- the handle plus a reader: a successor takes {{steps.<id>.result.task_id}}
+-- and calls this, either as a step in its own right or from inside its own
+-- registered aggregate. That keeps the reduction in the author's function,
+-- where it belongs -- 5,000 outputs are for aggregating, not for passing
+-- around as a step argument, which would hit §7's payload cap immediately.
+--
+-- `status` is returned per child and not filtered, because with no
+-- continue-on-failure yet a successor only runs when every child succeeded --
+-- but the moment that changes, an aggregate needs to see which rows are
+-- missing rather than silently averaging over the survivors.
+-- SCOPED TO THE EXECUTING RUN, and that requirement was found by running it.
+--
+-- The first version had no check at all; adding the ordinary one
+-- (assert_run_access, as matrix_rows has) then broke the fan-in immediately --
+-- `not authorized to read run ...` -- because execute_sql_step runs as the
+-- owner with no JWT, so the engine calling its own registered function has no
+-- user identity to be authorized as. That is the same collision cancel_run
+-- hit, and the same answer applies: the caller's authority is not the only
+-- authority.
+--
+-- But an unchecked variant is not the answer here, because this one takes a
+-- TASK ID from a step spec. A workflow author could name another tenant's
+-- matrix task and read its outputs -- an exfiltration path with a YAML front
+-- end. The authority that actually matters is "this task belongs to the run I
+-- am executing", which execute_sql_step publishes above.
+--
+-- integration-rbac.sql widens this to "or a run the caller may read", for a
+-- human or an API client calling it directly with an identity.
+create or replace function workflow.matrix_outputs(p_task_id uuid)
+returns jsonb as $$
+declare v_run uuid; v_cur text;
+begin
+    select run_id into v_run from workflow.tasks where id = p_task_id;
+    if not found then
+        raise exception 'task % not found', p_task_id;
+    end if;
+
+    v_cur := nullif(current_setting('workflow.current_run_id', true), '');
+    if v_cur is null or v_cur::uuid <> v_run then
+        raise exception
+            'task % belongs to run %, which is not the run being executed. A step may '
+            'read the fan-out of its OWN run; pass {{steps.<id>.result.task_id}} rather '
+            'than a task id from elsewhere.', p_task_id, v_run;
+    end if;
+
+    return (select coalesce(jsonb_agg(jsonb_build_object(
+                'step_key', t.step_key, 'item', t.input->'item',
+                'status', t.status, 'output', t.output)
+            order by t.created_at, t.step_key), '[]'::jsonb)
+            from workflow.tasks t where t.matrix_parent_id = p_task_id);
+end;
+$$ language plpgsql stable security definer set search_path = pg_catalog, public;
 
 -- Read the recorded row set back, in expansion order. This is the "snapshot"
 -- that §12's purity contract is about -- it is a query, not a column, because
@@ -2790,6 +2999,92 @@ end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
 -- ------------------------------------------------------------
+-- 20h-bis. An output that cannot be stored is a TERMINAL failure.
+--
+-- Found by the same EDGAR run. One child fetched Amazon's NetIncomeLoss
+-- concept -- an ordinary single-company XBRL response -- and came back with
+-- 69,248 bytes against the 65,536-byte cap. The payload trigger did what it
+-- exists to do and raised. What happened next was wrong:
+--
+--     attempts | status | error
+--     -------- + ------ + -------------------------------------------
+--            4 | ready  | output payload is 69248 bytes, over the ...
+--
+-- It was RETRIED. Four times, with exponential backoff, on a failure that is
+-- byte-for-byte identical on every attempt -- and it would have burned all
+-- five attempts, re-fetching a public API each time, before failing anyway.
+--
+-- The worker cannot be blamed for that and cannot fix it: it classifies
+-- terminal-vs-retryable from the HTTP status (4xx terminal, 5xx not), and the
+-- HTTP call SUCCEEDED. The size limit is this engine's constraint, so this
+-- engine has to be the one that knows retrying cannot help. Leaving it to the
+-- worker would mean every third-party worker independently learning to string
+-- match an error message this schema produced.
+--
+-- So complete_task checks the size ITSELF and fails the task terminally with
+-- the remedy in the message, rather than raising and making the caller guess.
+-- The task did not complete -- its output cannot be stored -- and `failed` is
+-- the honest word for that.
+--
+-- WHAT THIS DOES NOT FIX, stated because the cap has now been hit twice by
+-- real traffic: §7's `$ref` offload is the designed answer and the worker does
+-- not implement it. The default was already raised once (8KB -> 64KB) after a
+-- pipeline hit it; raising it again would move the wall rather than remove it,
+-- and 69KB of JSON in a task row is exactly the TOAST and replication weight
+-- the cap exists to keep out. The gap is the offload, not the number.
+-- ------------------------------------------------------------
+create or replace function workflow.complete_task(p_task_id uuid, p_output jsonb)
+returns void as $$
+declare
+    v_run_id uuid;
+    v_matrix uuid;
+    v_max    int := coalesce(
+        nullif(current_setting('workflow.max_payload_bytes', true), '')::int, 65536);
+begin
+    select run_id, matrix_parent_id into v_run_id, v_matrix
+    from workflow.tasks where id = p_task_id;
+
+    -- Checked before anything is written, so a rejected output leaves no
+    -- partial trace in runs.context either.
+    if p_output is not null and pg_column_size(p_output) > v_max
+       and not (p_output ? '$ref') then
+        perform workflow.fail_task(p_task_id, jsonb_build_object(
+            'error', format(
+                'output is %s bytes, over the %s byte limit, and is not a $ref. This is '
+                'terminal: the same response will be the same size on every attempt. '
+                'Return {"$ref": "s3://..."} instead, or raise workflow.max_payload_bytes '
+                'deliberately.', pg_column_size(p_output), v_max),
+            'bytes', pg_column_size(p_output),
+            'limit', v_max),
+            true);   -- terminal
+        return;
+    end if;
+
+    -- CONTEXT FIRST, THEN STATUS. The order matters and is not stylistic:
+    -- flipping the task to 'done' fires the cascade, which can mark a `sql`
+    -- step ready, which auto-executes it IN THE SAME STATEMENT (§17). If the
+    -- run's context has not been written yet, that step resolves
+    -- {{steps.<this>.result}} against a context that does not contain this
+    -- step's output and fails with 'template resolved to nothing'.
+    if v_matrix is null then
+        update workflow.runs r
+        set context = context || jsonb_build_object(
+                (select step_key from workflow.tasks where id = p_task_id), p_output),
+            updated_at = now()
+        where r.id = v_run_id;
+    else
+        update workflow.runs set updated_at = now() where id = v_run_id;
+    end if;
+
+    update workflow.tasks set status = 'done', output = p_output, completed_at = now()
+    where id = p_task_id;
+
+    perform workflow.check_run_completion(v_run_id);
+    perform workflow.check_compensation_completion(v_run_id);
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
 -- 20i. A task that completes twice must not decrement twice.
 --
 -- NOT a matrix bug, found by a matrix test. §7 of dev/tests/workflow/04
@@ -2872,7 +3167,16 @@ revoke execute on function workflow.expand_matrix(uuid) from public;
 -- collection gets. The check lives in integration-rbac.sql (f), next to
 -- assert_run_access; this grant is what that file re-authorizes.
 grant execute on function workflow.matrix_rows(uuid) to worker, authenticated;
+grant execute on function workflow.matrix_outputs(uuid) to worker, authenticated;
 grant execute on function workflow.resolve_args(jsonb, uuid, jsonb) to worker, authenticated;
+
+-- Registered in the allow-list, so a fan-in needs no user code at all:
+--   - id: gather
+--     needs: [fan]
+--     sql: {function: matrix_outputs, args: ['{{steps.fan.result.task_id}}']}
+-- An author's own aggregate can equally call it directly and reduce inside.
+select workflow.register_step_function('matrix_outputs', 'workflow.matrix_outputs',
+    '{uuid}', 30000, 'Every child of a matrix step: its row, status and output');
 -- call_step_function is DELIBERATELY not granted. It is the allow-list
 -- dispatcher, reachable only through execute_sql_step and expand_matrix,
 -- which decide WHICH task's arguments get passed to it. Granting it directly

@@ -106,6 +106,9 @@ insert into expected (subsystem, kind, name, detail, why) values
 -- ---------- workflow-engine: matrix fan-out (schema.sql §20) -----------
 ('workflow-engine','function','workflow.expand_matrix','uuid','§20: fan-out is a SELECT, expanded with no process'),
 ('workflow-engine','function','workflow.matrix_rows','uuid','§20: the children ARE the recorded row set'),
+('workflow-engine','function','workflow.matrix_outputs','uuid','§20: a successor must be able to reach its siblings'),
+('workflow-engine','function','workflow.substitute_item','jsonb,jsonb,text','§20a-bis: {{item.*}} is bound at expansion, not at dispatch'),
+('workflow-engine','registration','step:matrix_outputs',null,'§20: a fan-in needs no user code'),
 ('workflow-engine','function','workflow.call_step_function','text,jsonb,uuid,jsonb','§20b: one allow-list dispatcher, two callers'),
 ('workflow-engine','function','workflow.validate_matrix_steps','jsonb','§20f: a matrix without a ceiling is refused at registration'),
 ('workflow-engine','function','workflow.resolve_args','jsonb,uuid,jsonb','§20a: {{item.*}} is a third namespace'),

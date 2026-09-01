@@ -108,14 +108,29 @@ begin
         raise exception 'child does not carry its row: %', v_first.input->'item';
     end if;
 
-    -- AND THE TEMPLATE IS NOT PRE-SUBSTITUTED. Resolving {{item.*}} at
-    -- expansion time would make the recorded task input a lie about what was
-    -- sent -- 5,000 times over. The row is stored; the URL still says
-    -- {{item.cik}} until dispatch, exactly like {{run.*}} and {{steps.*}}.
-    if v_first.input->>'url' not like '%{{item.cik}}%' then
+    -- THE TEMPLATE IS SUBSTITUTED HERE, AND THIS ASSERTION USED TO SAY THE
+    -- OPPOSITE. It required {{item.cik}} to survive to dispatch, on the
+    -- argument that pre-substituting makes the recorded input a lie. Then a
+    -- real fan-out of `rest:` steps against SEC EDGAR failed on all six
+    -- children with the WORKER's error -- `unknown template namespace 'item'
+    -- ... expected steps, run or env` -- because deferring had quietly put
+    -- `item` into the contract of a shipped worker image that knows three
+    -- namespaces. The headline case for the whole feature did not work, and
+    -- only `sql` children had ever been exercised.
+    --
+    -- The reversal is also right on the merits: the "recorded input is a lie"
+    -- objection is about a stored DEFINITION shared across runs. A fan-out
+    -- child exists for exactly one row, so substituting that row makes its
+    -- recorded input say precisely what will be sent.
+    if v_first.input->>'url' <> 'https://data.sec.gov/CIK0000320193/Revenues' then
         raise exception
-            'the template was substituted at expansion time: % -- {{item.*}} must '
-            'resolve at dispatch like every other namespace', v_first.input->>'url';
+            'the row was not substituted into the template: %. A worker must never need '
+            'to know a task came from a fan-out.', v_first.input->>'url';
+    end if;
+    -- ...and the row is STILL recorded verbatim, because it is the snapshot
+    -- §20's determinism guard turns on and a sql child wants it typed.
+    if v_first.input->'item'->>'concept' <> 'Revenues' then
+        raise exception 'substitution dropped the recorded row';
     end if;
 
     -- Every child is ready with no worker involved.
@@ -171,11 +186,20 @@ begin
     join workflow.definitions d on d.id = r.workflow_def_id
     where d.name = 't_mx_fan' order by r.created_at desc limit 1;
 
-    if (v_ctx#>>'{fan,fanout}')::int <> 3 then
-        raise exception '{{steps.fan.fanout}} is not readable downstream: %', v_ctx;
+    -- Under `result`, like every other kind. A bare object here broke
+    -- {{steps.<id>.result}} on exactly one step kind, and the first fan-in
+    -- written against this feature failed with 'resolved to nothing'.
+    if (v_ctx#>>'{fan,result,fanout}')::int <> 3 then
+        raise exception '{{steps.fan.result.fanout}} is not readable downstream: %', v_ctx;
     end if;
-    if v_ctx#>>'{fan,rows_hash}' is null then
+    if v_ctx#>>'{fan,result,rows_hash}' is null then
         raise exception 'the matrix task recorded no row-set digest';
+    end if;
+    -- And the handle, without which a successor cannot reach its siblings.
+    if (v_ctx#>>'{fan,result,task_id}') is null then
+        raise exception
+            'the matrix output carries no task_id -- a successor would know how many '
+            'children there were and have no way to find them';
     end if;
 
     -- Complete one child the way a worker would, then check context again.
@@ -282,7 +306,7 @@ begin
     if v_st <> 'ready' then
         raise exception 'an empty matrix must release its successor immediately, got %', v_st;
     end if;
-    if (select (context#>>'{fan,fanout}')::int from workflow.runs where id = v_run) <> 0 then
+    if (select (context#>>'{fan,result,fanout}')::int from workflow.runs where id = v_run) <> 0 then
         raise exception 'an empty matrix did not record fanout 0';
     end if;
 end $$;
@@ -492,6 +516,149 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
+-- 8b. Substitution: types, interpolation, and a typo that must not become a
+--     404. Every case here comes from the EDGAR run that reversed the
+--     dispatch-time decision.
+-- ---------------------------------------------------------------------
+do $$
+declare v jsonb; v_err text;
+begin
+    v := workflow.substitute_item(
+        '{"url":"https://x/CIK{{item.cik}}/{{item.concept}}.json",
+          "n":"{{item.n}}", "obj":"{{item.nested}}", "lit":"untouched",
+          "keep":"{{run.tier}}", "arr":["{{item.cik}}"]}'::jsonb,
+        '{"cik":"0000320193","concept":"Revenues","n":42,"nested":{"a":1}}'::jsonb, 'fan');
+
+    -- Interpolated into a larger string.
+    if v->>'url' <> 'https://x/CIK0000320193/Revenues.json' then
+        raise exception 'two references in one string did not both substitute: %', v->>'url';
+    end if;
+    -- A WHOLE-string reference keeps its native type -- otherwise a numeric
+    -- column arrives as "42" and an embedding arrives as a string.
+    if jsonb_typeof(v->'n') <> 'number' or (v->>'n')::int <> 42 then
+        raise exception 'a whole-string reference was stringified: %', v->'n';
+    end if;
+    if jsonb_typeof(v->'obj') <> 'object' then
+        raise exception 'a nested row value was flattened: %', v->'obj';
+    end if;
+    -- Only `item` is bound here. The others still resolve at dispatch.
+    if v->>'keep' <> '{{run.tier}}' then
+        raise exception 'expansion consumed a namespace that is not its own: %', v->>'keep';
+    end if;
+    if v->'arr'->>0 <> '0000320193' then
+        raise exception 'substitution did not descend into arrays';
+    end if;
+    if v->>'lit' <> 'untouched' then
+        raise exception 'a literal was rewritten';
+    end if;
+
+    -- A column that does not exist is an authoring error, and it must fail
+    -- BEFORE any child exists -- not become a URL with a literal {{item.typo}}
+    -- in it and a 404 nobody can explain.
+    begin
+        perform workflow.substitute_item('{"u":"{{item.typo}}"}'::jsonb,
+                                         '{"cik":"1"}'::jsonb, 'fan');
+        raise exception 'a template naming a missing column was accepted';
+    exception when others then
+        v_err := sqlerrm;
+    end;
+    if v_err not like '%not a column of the row set%' or v_err not like '%cik%' then
+        raise exception 'the missing-column error does not say what the row has: %', v_err;
+    end if;
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 8c. The fan-in, which the first version of §20 shipped without and
+--     described wrongly. It claimed children could write to a domain table
+--     and a `sql` successor could read it -- true for `work` children, false
+--     for `rest` ones, which are the whole worked example: a generic worker
+--     records a response and knows no domain.
+-- ---------------------------------------------------------------------
+insert into workflow.definitions (name, spec) values
+('t_mx_gather', '{"steps":[
+    {"key":"fan", "kind":"matrix", "queue":"t", "input":{
+        "items":[{"n":1},{"n":2},{"n":3}], "max_fanout":10,
+        "template":{"queue":"none", "kind":"sql",
+                    "input":{"function":"t_mx_echo", "args":["{{item.n}}"]}}}},
+    {"key":"gather", "kind":"sql", "queue":"none", "depends_on":["fan"],
+     "input":{"function":"matrix_outputs", "args":["{{steps.fan.result.task_id}}"]}}
+ ]}');
+
+do $$
+declare v_run uuid; v jsonb;
+begin
+    v_run := workflow.start_workflow('t_mx_gather', '{}'::jsonb);
+
+    if (select status from workflow.runs where id = v_run) <> 'completed' then
+        raise exception 'the gather run did not complete: %',
+            (select jsonb_agg(jsonb_build_object('k',step_key,'s',status,'e',error))
+             from workflow.tasks where run_id = v_run);
+    end if;
+
+    select output->'result' into v from workflow.tasks
+    where run_id = v_run and step_key = 'gather';
+
+    if jsonb_array_length(v) <> 3 then
+        raise exception 'the fan-in saw % children, not 3: %', jsonb_array_length(v), v;
+    end if;
+    -- Each child comes back with its ROW alongside its output, because an
+    -- aggregate almost always needs to know which input produced which result.
+    if v->0->'item'->>'n' is null or v->0->'output' is null then
+        raise exception 'matrix_outputs does not pair the row with its output: %', v->0;
+    end if;
+    -- And its status, unfiltered -- so that when continue-on-failure exists,
+    -- an aggregate can see which rows are missing rather than silently
+    -- averaging over the survivors.
+    if v->0->>'status' <> 'done' then
+        raise exception 'matrix_outputs does not report per-child status';
+    end if;
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 8d. An output that cannot be stored fails TERMINALLY.
+--
+-- Found by the same run: an ordinary single-company XBRL response came back
+-- at 69,248 bytes against the 65,536 cap, and was retried four times with
+-- exponential backoff -- re-fetching a public API each time -- on a failure
+-- that is byte-for-byte identical on every attempt. The worker cannot
+-- classify it (the HTTP call succeeded), so the engine has to.
+-- ---------------------------------------------------------------------
+-- The cap is set locally rather than assumed: it is deployment tuning
+-- (this database has it raised), and a test that depends on the operator's
+-- number tests the operator, not the engine.
+set local workflow.max_payload_bytes = '4096';
+
+do $$
+declare v_run uuid; v_task uuid; t workflow.tasks;
+begin
+    insert into workflow.definitions (name, spec) values
+    ('t_mx_big', '{"steps":[{"key":"one","kind":"work","queue":"t"}]}');
+    v_run := workflow.start_workflow('t_mx_big', '{}'::jsonb);
+    select id into v_task from workflow.tasks where run_id = v_run and step_key = 'one';
+
+    perform workflow.complete_task(v_task,
+        jsonb_build_object('result', repeat('x', 9000)));
+
+    select * into t from workflow.tasks where id = v_task;
+    if t.status <> 'failed' then
+        raise exception 'an unstorable output did not fail the task: %', t.status;
+    end if;
+    if t.attempts > 1 then
+        raise exception 'an unstorable output was retried (% attempts) -- it is the same '
+            'size on every attempt', t.attempts;
+    end if;
+    if t.error->>'error' not like '%$ref%' or (t.error->>'bytes')::int < 9000 then
+        raise exception 'the failure does not name the size or the remedy: %', t.error;
+    end if;
+    -- Nothing partial was written: the check runs before context is touched.
+    if (select context ? 'one' from workflow.runs where id = v_run) then
+        raise exception 'a rejected output still reached runs.context';
+    end if;
+end $$;
+
+reset workflow.max_payload_bytes;
+
+-- ---------------------------------------------------------------------
 -- 9. ROUND TRIP. The spec below is the VERBATIM output of
 --    p8_compile_workflow() for this YAML:
 --
@@ -542,10 +709,13 @@ rollback;
 do $$ begin
     raise notice 'workflow/04: a matrix expands from a registered query, in-transaction, with nothing deployed';
     raise notice 'workflow/04: the fan-in is rewired onto the children -- a successor waits for all N';
-    raise notice 'workflow/04: children carry their row unresolved, and stay out of runs.context';
+    raise notice 'workflow/04: children carry their row recorded AND substituted, and stay out of runs.context';
     raise notice 'workflow/04: an empty matrix releases its successor; a blown ceiling fails terminally';
-    raise notice 'workflow/04: {{item.*}} resolves at dispatch, including in sql children';
+    raise notice 'workflow/04: a whole fan-out of sql steps runs with nothing deployed';
     raise notice 'workflow/04: re-expansion over a changed row set is refused, an identical one is a no-op';
     raise notice 'workflow/04: the spec p8_compile_workflow emits for a matrix step runs on this engine';
     raise notice 'workflow/04: matrix_rows is authorized against the run, not the task id it is handed';
+    raise notice 'workflow/04: {{item.*}} is substituted at expansion -- a worker never learns a task was fanned out';
+    raise notice 'workflow/04: a successor reaches its siblings via {{steps.<id>.result.task_id}} + matrix_outputs';
+    raise notice 'workflow/04: an output that cannot be stored fails terminally, not five times';
 end $$;
