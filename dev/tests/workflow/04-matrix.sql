@@ -166,12 +166,57 @@ begin
         raise notice 'workflow/04: rbac not installed -- matrix_rows authz check not applicable';
         return;
     end if;
-    if pg_get_functiondef(to_regprocedure('workflow.matrix_rows(uuid)')::oid)
-       not like '%assert_run_access%' then
-        raise exception
-            'matrix_rows does not check the caller''s authority over the run -- any '
-            'authenticated user holding a task id could read another tenant''s row set';
-    end if;
+    -- Asserted by CALLING it, not by reading its source for the string
+    -- 'assert_run_access'. A source check catches the guard being deleted and
+    -- not the guard being wrong, which is the failure assert_run_access
+    -- actually had twice (the engine acting with no identity; unowned
+    -- scheduled runs). Same conversion as 06-recovery §7/§8.
+    declare
+        v_run uuid; v_matrix uuid; v_owner uuid; v_stranger uuid; v_rows jsonb;
+    begin
+        -- Its own definition, not t_mx_fan: the sections below count children
+        -- and pending_deps across runs of the same definition, so borrowing
+        -- one would make this check quietly break those.
+        insert into workflow.definitions (name, spec) values
+        ('t_mx_authz', '{"steps":[
+            {"key":"fan", "kind":"matrix", "queue":"tz", "input":{
+                "rows":{"function":"t_mx_rows", "args":["1"]}, "max_fanout":10,
+                "template":{"queue":"tz-fetch", "kind":"work"}}}
+         ]}');
+        v_owner    := gen_random_uuid();
+        v_stranger := gen_random_uuid();
+        insert into rbac.users (id, email) values
+            (v_owner,    'matrix-owner@test.com'),
+            (v_stranger, 'matrix-stranger@test.com');
+
+        v_run := workflow.start_workflow('t_mx_authz', '{}'::jsonb, 'authz-rows');
+        update workflow.runs set owner_id = v_owner where id = v_run;
+        select id into v_matrix from workflow.tasks
+        where run_id = v_run and step_key = 'fan';
+
+        -- The owner reads their own fan-out.
+        perform set_config('request.jwt.claims',
+            json_build_object('sub', v_owner::text)::text, true);
+        v_rows := workflow.matrix_rows(v_matrix);
+        if jsonb_array_length(v_rows) = 0 then
+            raise exception 'the owner cannot read their own recorded row set';
+        end if;
+
+        -- A stranger holding the same task id must not.
+        perform set_config('request.jwt.claims',
+            json_build_object('sub', v_stranger::text)::text, true);
+        begin
+            perform workflow.matrix_rows(v_matrix);
+            perform set_config('request.jwt.claims', '', true);
+            raise exception 'TENANT LEAK: a stranger holding a task id read another '
+                            'run''s recorded row set';
+        exception when others then
+            perform set_config('request.jwt.claims', '', true);
+            if sqlerrm like 'TENANT LEAK%' then raise; end if;
+        end;
+        raise notice 'workflow/04: matrix_rows is authorized by calling it -- the owner '
+                     'reads the row set and a stranger with the same task id cannot';
+    end;
 end $$;
 
 -- ---------------------------------------------------------------------

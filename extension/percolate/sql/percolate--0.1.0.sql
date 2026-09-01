@@ -4359,6 +4359,81 @@ $$ language plpgsql immutable;
 -- This section explains why they have the shape they do; the bodies are not
 -- repeated, because two copies of a function is how a fix lands in only one of them.
 
+-- ============================================================
+-- 24. The descriptions a bound tool actually carries.
+--
+-- These COMMENTs are not documentation for humans reading psql. They are the
+-- text a language model reads before deciding whether to call the function,
+-- and they got written the moment this engine was first bound as a tool
+-- server (`specs/agentic/reference/`).
+--
+-- The mechanism, confirmed against PostgREST 12.2 rather than assumed: a
+-- COMMENT ON becomes the operation's OpenAPI documentation -- FIRST LINE into
+-- `summary`, the remaining lines into `description`. `agentic`'s OpenAPI
+-- adapter is required to carry no per-service knowledge (brief.md §5.2), so it
+-- copies whatever is there and adds nothing. PostgREST emits no `operationId`
+-- either, so a bound tool's name is mechanical (`post_rpc_start_workflow`) and
+-- the comment is the ONLY thing distinguishing it from any other RPC.
+--
+-- Which makes the absence of a comment a real defect rather than an untidiness:
+-- an uncommented function binds as a tool with a generated name, an argument
+-- list, and no statement anywhere of what it does or when to use it. That is
+-- what these functions did before this section existed. The first line is
+-- therefore written as a summary -- one sentence, imperative, no leading
+-- "This function" -- and the rest as the caller-facing contract, because that
+-- is exactly how the two halves are split downstream.
+--
+-- Scope: the entry points an outside caller reaches, not the internals. A
+-- comment on `resolve_args` would be documentation; a comment on
+-- `start_workflow` is a tool description.
+-- ============================================================
+
+comment on function workflow.start_workflow(text, jsonb, text, text) is
+$c$Start a run of a workflow that has already been defined.
+Takes the workflow NAME (not an id) and a JSON input object, and returns the
+new run's id immediately -- it does not wait for the run to finish. Steps whose
+kind is p8ql or sql execute inside Postgres as soon as they are ready; rest,
+agent and work steps become queued tasks a worker picks up. Poll runs_api by
+that id for status, or tasks_api by run_id for per-step detail.
+p_external_id is an idempotency key: starting twice with the same one returns
+the existing run rather than a second one.$c$;
+
+comment on function workflow.define_yaml(text) is
+$c$Define or re-version a workflow from a YAML document.
+The document is a name plus a list of steps, each with an id, an optional
+needs: list naming the steps it waits for, and exactly one action --
+p8ql, sql, rest, agent, work, or a control form. Returns the new definition's
+id. Defining a name that already exists creates a NEW VERSION rather than
+overwriting: runs already in flight keep the version they started on.
+This only defines; use start_workflow to run it.$c$;
+
+comment on function workflow.schedule_workflow(text, text, text, jsonb, text, text) is
+$c$Run a defined workflow repeatedly on a cron schedule.
+p_name names the schedule, p_workflow names the workflow it starts. p_cron is
+standard five-field cron, interpreted in p_timezone. p_overlap decides what
+happens when a run is still going when the next tick arrives: skip (default),
+queue, or allow. Creating a schedule does not start a run immediately.$c$;
+
+comment on function workflow.cancel_run(uuid) is
+$c$Cancel a run that is still in flight.
+Stops any step that has not started and triggers saga compensation for the ones
+that completed, in reverse order. A run that has already finished is left
+alone -- cancelling it is a no-op, not an error.$c$;
+
+comment on view workflow.runs_api is
+$c$One row per workflow run, filtered to the runs you may see.
+status is pending, running, completed, failed or cancelled. Filter it the
+PostgREST way -- ?status=eq.running, ?id=eq.<uuid>, ?order=created_at.desc --
+and use ?select= to narrow the columns. This is the read side of
+start_workflow: check a run here by the id that returned.$c$;
+
+comment on view workflow.tasks_api is
+$c$One row per step of a workflow run -- the per-step detail behind a run's status.
+Filter by ?run_id=eq.<uuid> to see how a single run is progressing. status
+distinguishes ready, running, completed and failed; attempts against
+max_attempts shows what has been retried, and error carries why the last
+attempt failed.$c$;
+
 
 -- ============================================================
 -- user-rbac/schema.sql
@@ -9027,9 +9102,13 @@ create view agentic.messages_api as
 -- the ref silently produced unauthenticated tool syncs -- a tool list that
 -- looks correct and is missing every operation the caller's role would have
 -- been allowed to see.
+-- `default_headers` is in the view for the same reason and by the same rule:
+-- the constraint on the table guarantees it holds no secret, and a caller that
+-- cannot see it cannot reach the document it was registered against -- the
+-- identical failure, one layer along.
 create view agentic.tool_servers_api as
     select id, name, kind, url, credential_ref, emits_citations, serves_agents,
-           cached_tools, synced_at, created_at
+           default_headers, cached_tools, synced_at, created_at
       from agentic.tool_servers;
 -- The view an interactive UI reads. `audience = 'user'` is the whole point of
 -- the column: a thousand extractors are invisible here without anyone having
