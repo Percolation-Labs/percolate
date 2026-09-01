@@ -131,9 +131,14 @@ impl ParseError {
     pub fn message(&self) -> String {
         match self {
             ParseError::Empty => "empty query".into(),
+            // SCHEMA is named last and with a nudge, because it is the one
+            // mode that answers "what may I ask for" -- a caller who got here
+            // by guessing a mode name is exactly the caller who should be
+            // told there is a query that lists them.
             ParseError::UnknownMode(m) => format!(
                 "unknown mode '{m}' -- expected one of LOOKUP, SEMANTIC, TEXT, SEARCH, GRAPH, \
-                 or an ordinary SQL statement"
+                 SCHEMA, or an ordinary SQL statement. Write SCHEMA to see what this \
+                 database can answer."
             ),
             ParseError::MissingArgument(m) => format!("{m}"),
             ParseError::UnterminatedQuote => "unterminated quoted string".into(),
@@ -458,6 +463,121 @@ fn aiq_parse(query: &str) -> pgrx::JsonB {
             "error": e.message(),
         })),
     }
+}
+
+/// The dialect, described by the thing that parses it.
+///
+/// This exists so `SCHEMA "p8ql"` can hand an agent the grammar without a
+/// second copy of it living in SQL or in markdown. A grammar written down
+/// anywhere other than beside the parser is a grammar that will eventually
+/// describe a dialect this crate no longer implements -- and an agent has no
+/// way to notice, because a wrong grammar produces a parse error that reads
+/// like the agent's mistake.
+///
+/// The `example` on each row is not decoration: the SQL side feeds every one
+/// of them back through `aiq_parse` and reports whether it still parses, so a
+/// row that stops being true announces itself instead of teaching a syntax
+/// that no longer works.
+#[pg_extern(immutable, parallel_safe)]
+fn p8_query_grammar() -> pgrx::JsonB {
+    pgrx::JsonB(serde_json::json!({
+        "dialect": "p8ql",
+        "one_endpoint": "aiq.query(text, vector) -- POST /rpc/query",
+        "notes": [
+            "Quotes are interchangeable ('...' and \"...\"), commas in a LOOKUP list are optional, and mode keywords are case-insensitive.",
+            "A modifier that means nothing for a mode is REFUSED, never ignored: a query must not quietly mean something other than what it says.",
+            "The response always carries the parsed plan alongside the rows, because a misparse is otherwise indistinguishable from an empty result."
+        ],
+        "modes": [
+            {"mode": "LOOKUP",
+             "syntax": "[FUZZY] LOOKUP \"<key>\" [, \"<key>\" ...] [LIMIT n]",
+             "purpose": "Resolve one or more names to nodes. Takes a list because an agent almost never holds exactly one entity.",
+             "example": "FUZZY LOOKUP \"acme\", \"globex\" LIMIT 5"},
+            {"mode": "GRAPH",
+             "syntax": "GRAPH \"<key>\" [DEPTH n] [TYPE <relation>] [LIMIT n]",
+             "purpose": "Walk relationships out from a named node. DEPTH and TYPE apply only here.",
+             "example": "GRAPH \"acme\" DEPTH 2 TYPE competes_with"},
+            {"mode": "TEXT",
+             "syntax": "TEXT \"<text>\" FROM <source> [LIMIT n]",
+             "purpose": "Lexical search. Needs no embedding, which is why it answers the rare-exact-token case SEMANTIC misses.",
+             "example": "TEXT \"R7 recall notice\" FROM chunks LIMIT 10"},
+            {"mode": "SEMANTIC",
+             "syntax": "SEMANTIC \"<text>\" FROM <source> [USING <model>] [LIMIT n]",
+             "purpose": "Meaning-based search. The caller supplies the embedding; the database makes no model calls.",
+             "example": "SEMANTIC \"battery safety\" FROM chunks USING nomic-embed-text"},
+            {"mode": "SEARCH",
+             "syntax": "SEARCH \"<text>\" FROM <source> [USING <model>] [LIMIT n]",
+             "purpose": "Lexical and semantic rank fused. Named for the intent, not the fusion.",
+             "example": "SEARCH \"safety recall\" FROM chunks LIMIT 5"},
+            {"mode": "SCHEMA",
+             "syntax": "SCHEMA [\"<facet>\"] [FROM <name>]",
+             "purpose": "What this database IS. Bare SCHEMA is the index of facets; the argument names one. The only mode answerable before you know anything.",
+             "example": "SCHEMA \"workflow\""},
+            {"mode": "SQL",
+             "syntax": "<any read-only SQL statement>",
+             "purpose": "The floor everything else sits on. Recognised by how it starts, not by an announcement; executed read-only through the SECURITY INVOKER passthrough.",
+             "example": "select count(*) from aiq.nodes"}
+        ],
+        "retired": [
+            {"was": "HYBRID \"...\"", "now": "SEARCH \"...\"",
+             "why": "HYBRID named the implementation; SEARCH names the intent."},
+            {"was": "LOOKUP \"...\" FUZZY", "now": "FUZZY LOOKUP \"...\"",
+             "why": "A modifier that changes what a query means belongs before the thing it modifies."},
+            {"was": "SQL select ...", "now": "select ...",
+             "why": "Ceremony on the one mode that needed no help identifying itself."}
+        ]
+    }))
+}
+
+/// The workflow YAML vocabulary, described by the compiler that reads it.
+///
+/// Same argument as p8_query_grammar, and the same mechanism: the SQL side
+/// feeds the examples back through `p8_compile_workflow` and reports what
+/// each one compiled to. An agent therefore gets the step vocabulary AND
+/// proof that the spelling it is about to use still compiles on this
+/// deployment -- which is the difference between documentation and a
+/// capability report.
+#[pg_extern(immutable, parallel_safe)]
+fn p8_workflow_grammar() -> pgrx::JsonB {
+    pgrx::JsonB(serde_json::json!({
+        "document": {
+            "name": "required -- the workflow's name",
+            "version": "optional int, default 1",
+            "steps": "required, non-empty. Each step: id, optional needs[], optional queue, and EXACTLY ONE action (or a matrix)."
+        },
+        "step_keys": {
+            "id": "required, unique within the document; becomes the task's step_key",
+            "needs": "list of step ids this one waits for -- an AND-join",
+            "queue": "which worker pool claims it; in-database kinds ignore it",
+            "compensate_with": "step id to run in reverse order if a saga member fails",
+            "saga_group": "groups tasks compensated together"
+        },
+        "actions": [
+            {"key": "p8ql", "compiles_to": "kind: sql", "runs_on": "nobody -- inside Postgres",
+             "purpose": "A dialect query as a step. No process, no queue wait."},
+            {"key": "sql", "compiles_to": "kind: sql", "runs_on": "nobody -- inside Postgres",
+             "purpose": "Call an allow-listed function by name. Steps may not supply arbitrary SQL; see workflow.step_functions for what is callable."},
+            {"key": "rest", "compiles_to": "kind: http_call", "runs_on": "the worker's built-in handler",
+             "purpose": "A durable outbound HTTP call. Retries, backoff and the reaper apply unchanged."},
+            {"key": "agent", "compiles_to": "kind: http_call", "runs_on": "the Agent Runtime",
+             "purpose": "Names a row in agentic.agents. The agent's prompt and tools are data, so changing them never touches the workflow."},
+            {"key": "work", "compiles_to": "kind: work", "runs_on": "your own code",
+             "purpose": "The only case that needs a worker you wrote."},
+            {"key": "matrix", "compiles_to": "kind: matrix", "runs_on": "nobody -- expansion is a transaction",
+             "purpose": "Fan out over a row set: one child task per row, inserted by the statement that completes the parent. Requires max_fanout and exactly one of rows (a registered function) or items (a literal list). The template is an ordinary action, spelled the same way."}
+        ],
+        "templates": {
+            "run": "{{run.x}} -- what start_workflow was called with",
+            "steps": "{{steps.<id>.result}} -- a completed step's output",
+            "item": "{{item.x}} -- one matrix row; bound only on fan-out children",
+            "env": "{{env.X}} -- resolved by the WORKER only. sql steps have no env: the database has no business reading the deployment's environment.",
+            "when": "All of these resolve at DISPATCH, never at definition time."
+        },
+        "limits": {
+            "payload": "task input/output are capped (workflow.max_payload_bytes); anything larger must be a $ref to object storage",
+            "max_fanout": "mandatory on a matrix step -- a cross join with a forgotten WHERE would otherwise insert the cartesian product as task rows"
+        }
+    }))
 }
 
 #[cfg(any(test, feature = "pg_test"))]

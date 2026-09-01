@@ -4420,7 +4420,7 @@ declare
     v_count bigint;
 begin
     select * into r from aiq.entity_registry where entity_type = p_entity_type;
-    if not found then raise exception 'entity type % not registered', p_entity_type; end if;
+    if not found then raise exception 'entity type % not registered -- SCHEMA "graph" lists the registered ones', p_entity_type; end if;
 
     execute format($q$
         insert into aiq.nodes (entity_type, entity_id, org_id, summary)
@@ -4458,7 +4458,7 @@ returns table(direction text, entity_id uuid) as $$
 declare r aiq.entity_registry;
 begin
     select * into r from aiq.entity_registry where entity_type = p_entity_type;
-    if not found then raise exception 'entity type % not registered', p_entity_type; end if;
+    if not found then raise exception 'entity type % not registered -- SCHEMA "graph" lists the registered ones', p_entity_type; end if;
 
     return query execute format($q$
         select 'missing_node'::text, n.id from %2$s n where %3$s
@@ -4655,7 +4655,7 @@ create or replace function aiq.semantic(
 declare s aiq.semantic_sources;
 begin
     select * into s from aiq.semantic_sources where name = p_source;
-    if not found then raise exception 'semantic source % not registered', p_source; end if;
+    if not found then raise exception 'semantic source % not registered -- SCHEMA "graph" lists the registered ones', p_source; end if;
     return query execute format(
         'select c.id, c.%I::text, (c.%I <=> $1)::float8 as distance
          from %s c order by c.%I <=> $1 limit $2',
@@ -4817,6 +4817,15 @@ begin
         from aiq.search(p->>'source', p->>'arg', p_embedding, p->>'model',
                         (p->>'limit')::int) h;
 
+    when 'SCHEMA' then
+        -- The one mode that returns a document rather than rows, so it says
+        -- `schema` rather than pretending to be a one-element result set.
+        -- `arg` is '' rather than null when SCHEMA carried no facet -- the
+        -- parser emits the first argument of a possibly-empty list -- and the
+        -- index is what an empty facet means (§13c).
+        return jsonb_build_object('mode','SCHEMA','plan', p,
+            'schema', aiq.schema(nullif(p->>'arg', ''), p->>'source'));
+
     when 'SQL' then
         -- Deliberately NOT executed here. Returning the statement keeps this
         -- function's security mode irrelevant to it; the caller runs it
@@ -4886,7 +4895,7 @@ returns void as $$
 declare m aiq.embedding_models;
 begin
     select * into m from aiq.embedding_models where name = p_model;
-    if not found then raise exception 'embedding model % not registered', p_model; end if;
+    if not found then raise exception 'embedding model % not registered -- SCHEMA "graph" lists the registered ones', p_model; end if;
 
     execute format($q$
         create table if not exists aiq.%1$I (
@@ -4919,7 +4928,7 @@ begin
             'no default embedding model -- set one, or name a model explicitly'; end if;
     else
         select * into m from aiq.embedding_models where name = p_model;
-        if not found then raise exception 'embedding model % not registered', p_model; end if;
+        if not found then raise exception 'embedding model % not registered -- SCHEMA "graph" lists the registered ones', p_model; end if;
     end if;
 
     -- Dimension mismatch is caught HERE with a message naming both sides,
@@ -5008,7 +5017,7 @@ create or replace function aiq.lexical(
 declare s aiq.lexical_sources;
 begin
     select * into s from aiq.lexical_sources where name = p_source;
-    if not found then raise exception 'lexical source % not registered', p_source; end if;
+    if not found then raise exception 'lexical source % not registered -- SCHEMA "graph" lists the registered ones', p_source; end if;
     return query execute format(
         'select c.id, c.%I::text, ts_rank(c.search_tsv, plainto_tsquery(%L, $1))::real
          from %s c where c.search_tsv @@ plainto_tsquery(%L, $1)
@@ -5042,7 +5051,7 @@ declare
 begin
     select * into src from aiq.lexical_sources where name = p_lexical_source;
     if not found then
-        raise exception 'lexical source % not registered', p_lexical_source;
+        raise exception 'lexical source % not registered -- SCHEMA "graph" lists the registered ones', p_lexical_source;
     end if;
 
     return query execute format($q$
@@ -5120,6 +5129,690 @@ begin
     return v_result;
 end;
 $$ language plpgsql volatile security invoker;
+
+-- ============================================================
+-- 13. `SCHEMA` -- the mode that answers "what IS this database".
+--
+-- Every other mode requires you to already know something: a key to look up,
+-- a source to search, a relation to walk. An agent arriving cold can write
+-- none of them. `SCHEMA` is the one query answerable before you know
+-- anything, and bare `SCHEMA` returns the index of what you may ask about.
+--
+-- The reason to build it here rather than hand agents markdown: the registries
+-- it reports on ALREADY EXIST and are already the truth --
+-- `aiq.entity_registry`, `aiq.relation_types`, `aiq.semantic_sources`,
+-- `aiq.lexical_sources`, `aiq.embedding_models`, `workflow.step_functions`,
+-- `agentic.agents`. Every one of them is a table a caller could read if it
+-- knew to. Nothing joins them into one caller-facing surface, and the failure
+-- that costs is visible in this file's own error messages: `semantic source %
+-- not registered` tells you the name was wrong and nothing about which names
+-- are right.
+--
+-- THREE COMMITMENTS, each of which is what makes this a capability report
+-- rather than documentation:
+--
+--   1. DERIVED BEATS DECLARED, AND THE SPLIT IS VISIBLE. Anything the catalog
+--      can prove is read from the catalog -- the legal `kind` values come off
+--      the check constraint, the callable functions off the allow-list, the
+--      relation catalogue off the table that enforces it. What a catalog
+--      cannot express (what a `matrix` step is FOR, how the YAML is spelled)
+--      is emitted by the Rust crate that implements it, so the grammar an
+--      agent reads is the grammar that parses its input. Every facet reports
+--      both halves under `derived` and `declared`, so a reader knows which
+--      half could go stale.
+--
+--   2. EXAMPLES ARE VERIFIED BY EXECUTION, NOT TRUSTED. The example corpus is
+--      a table, and every read feeds each example back through the real parser
+--      (`aiq_parse`) or the real compiler (`p8_compile_workflow`) and reports
+--      what it did. An example that stops parsing says so on its own row
+--      rather than teaching an agent a syntax this deployment no longer
+--      accepts. This is the same discipline `../../surface.sql` applies to
+--      capabilities, applied to the sentences that describe them.
+--
+--   3. THE VERSION IS A HASH, NOT A NUMBER SOMEBODY REMEMBERS TO BUMP.
+--      `aiq.schema_revisions` records one row per facet per distinct content
+--      hash, so "versioned and maintained with updates" is literal: registering
+--      a step function, adding a relation type or shipping a new step kind
+--      changes the hash, and capture writes a new revision you can diff
+--      against the last. A hand-maintained semver would be a second thing to
+--      keep true, and this collection's whole method is to not have those.
+--
+-- A FACET IS A REGISTRATION, NOT A BRANCH. `SCHEMA "tradecraft"` over
+-- `tradecraft.likelihood`/`evidence_classes`/`source_reliability`, or a facet
+-- over `content.v_required_credentials`, needs an INSERT and a function --
+-- never a change to the parser or to this dispatch. That is the extensibility
+-- the "soft schema we might add later" case actually requires, and it is the
+-- second-consumer evidence that justifies a registry over a CASE statement.
+-- ============================================================
+
+create table if not exists aiq.schema_facets (
+    name          text primary key,          -- what SCHEMA "<name>" names
+    provider_fn   text not null,             -- schema-qualified, (text) -> jsonb
+    title         text not null,
+    description   text not null,
+    -- A GLOBAL facet describes the deployment and reads the same for
+    -- everyone, so its provider is SECURITY DEFINER over metadata tables no
+    -- user role holds a grant on. A CALLER-SCOPED facet describes what YOU can
+    -- reach, so its provider must be SECURITY INVOKER -- a schema document
+    -- listing tables the reader cannot select from is both a leak and a lie.
+    caller_scoped boolean not null default false,
+    registered_at timestamptz not null default now()
+);
+
+-- Owner-only, and for the same reason workflow.register_step_function is: it
+-- decides what a `SCHEMA` query can cause to run.
+create or replace function aiq.register_schema_facet(
+    p_name text, p_fn text, p_title text, p_description text,
+    p_caller_scoped boolean default false
+) returns void as $$
+begin
+    if to_regprocedure(p_fn || '(text)') is null then
+        raise exception
+            'schema facet provider %(text) does not exist. A provider takes the optional '
+            'FROM argument (null when absent) and returns jsonb.', p_fn;
+    end if;
+    insert into aiq.schema_facets (name, provider_fn, title, description, caller_scoped)
+    values (lower(p_name), p_fn, p_title, p_description, p_caller_scoped)
+    on conflict (name) do update set provider_fn = excluded.provider_fn,
+        title = excluded.title, description = excluded.description,
+        caller_scoped = excluded.caller_scoped;
+end;
+$$ language plpgsql;
+
+-- ------------------------------------------------------------
+-- 13a. The example corpus -- data, and checked by running it.
+--
+-- Few-shot examples are the single most useful thing a schema document can
+-- give an agent, and the single most likely thing to go quietly wrong: an
+-- example written against an older dialect keeps being served, keeps looking
+-- authoritative, and teaches a syntax that now fails. So examples are rows,
+-- and every read executes them.
+--
+-- `kind` says which executor verifies it. Adding a third (a p8ql fragment, a
+-- cron expression, a JSON spec) is a new branch in aiq.verify_example and
+-- nothing else.
+-- ------------------------------------------------------------
+create table if not exists aiq.schema_examples (
+    facet     text not null references aiq.schema_facets(name) on delete cascade,
+    label     text not null,
+    kind      text not null check (kind in ('p8ql', 'workflow_yaml')),
+    example   text not null,
+    note      text,
+    ordinal   int  not null default 100,
+    primary key (facet, label)
+);
+
+create or replace function aiq.register_schema_example(
+    p_facet text, p_label text, p_kind text, p_example text,
+    p_note text default null, p_ordinal int default 100
+) returns void as $$
+    insert into aiq.schema_examples (facet, label, kind, example, note, ordinal)
+    values (lower(p_facet), p_label, p_kind, p_example, p_note, p_ordinal)
+    on conflict (facet, label) do update set kind = excluded.kind,
+        example = excluded.example, note = excluded.note, ordinal = excluded.ordinal;
+$$ language sql;
+
+-- Run one example through the thing that actually consumes it.
+--
+-- `verified` is three-valued on purpose. true/false is a claim about the
+-- example; null means "this deployment cannot check" -- which is what you get
+-- when the extension is older than the example's kind. Collapsing null into
+-- false would report a correct example as broken every time the .so lags the
+-- schema, and collapsing it into true would report an unchecked example as
+-- proven. Neither is the truth, so neither is what is returned.
+create or replace function aiq.verify_example(p_kind text, p_example text)
+returns jsonb as $$
+declare v jsonb;
+begin
+    if p_kind = 'p8ql' then
+        if to_regprocedure('aiq_parse(text)') is null then
+            return jsonb_build_object('verified', null,
+                'note', 'aiq_parse is unavailable -- the p8_query extension is not installed');
+        end if;
+        v := aiq_parse(p_example);
+        return jsonb_build_object('verified', coalesce((v->>'ok')::boolean, false),
+                                  'plan', v);
+    elsif p_kind = 'workflow_yaml' then
+        if to_regprocedure('p8_compile_workflow(text)') is null then
+            return jsonb_build_object('verified', null,
+                'note', 'p8_compile_workflow is unavailable -- the percolate extension is not installed');
+        end if;
+        v := p8_compile_workflow(p_example);
+        return jsonb_build_object('verified', coalesce((v->>'ok')::boolean, false),
+                                  'compiles_to', v->'workflow'->'spec',
+                                  'error', v->>'error');
+    end if;
+    raise exception 'unknown example kind %', p_kind;
+end;
+$$ language plpgsql stable;
+
+create or replace function aiq.facet_examples(p_facet text)
+returns jsonb as $$
+    select coalesce(jsonb_agg(
+        jsonb_build_object('label', e.label, 'kind', e.kind, 'example', e.example,
+                           'note', e.note)
+        || aiq.verify_example(e.kind, e.example)
+        order by e.ordinal, e.label), '[]'::jsonb)
+    from aiq.schema_examples e where e.facet = p_facet;
+$$ language sql stable;
+
+-- ------------------------------------------------------------
+-- 13b. Revisions -- what "versioned and maintained with updates" means here.
+--
+-- Reads never write. A schema query is on the read path and must stay
+-- `stable`; recording a revision from it would also mean a poll loop writes a
+-- row every time nothing has changed. So capture is a separate, deliberate
+-- act -- `aiq.capture_schema_revisions()` -- run from CI next to
+-- ../../surface.sql, or as a scheduled workflow, or by hand after a
+-- migration.
+--
+-- The consequence is the interesting part: a read can find that the live hash
+-- differs from the last recorded revision, and it SAYS SO (`captured: false`)
+-- rather than silently serving an uncaptured document as if it were versioned.
+-- That is the drift signal. An agent that caches by hash still gets a correct
+-- answer; an operator watching `aiq.schema_drift()` learns the schema moved
+-- and nobody recorded it.
+-- ------------------------------------------------------------
+create table if not exists aiq.schema_revisions (
+    facet       text not null references aiq.schema_facets(name) on delete cascade,
+    revision    int  not null,
+    hash        text not null,
+    doc         jsonb not null,
+    captured_at timestamptz not null default now(),
+    primary key (facet, revision)
+);
+create index if not exists idx_schema_revisions_hash on aiq.schema_revisions (facet, hash);
+
+-- The one place a facet is produced, so hashing, scoping and the FROM
+-- argument cannot be done three slightly different ways.
+--
+-- The hash covers the document only -- not the revision, not the timestamp --
+-- because it has to be comparable across captures. Timestamps in a hashed
+-- payload make every capture a new revision, which is a changelog of nothing.
+create or replace function aiq.render_facet(p_facet text, p_name text default null)
+returns jsonb as $$
+declare
+    f    aiq.schema_facets;
+    v    jsonb;
+begin
+    select * into f from aiq.schema_facets where name = lower(p_facet);
+    if not found then
+        raise exception
+            'no schema facet named %. Registered facets: %',
+            p_facet,
+            coalesce((select string_agg(name, ', ' order by name) from aiq.schema_facets),
+                     '(none)');
+    end if;
+    execute format('select %s($1)', f.provider_fn) into v using p_name;
+    return coalesce(v, '{}'::jsonb);
+end;
+$$ language plpgsql stable;
+
+-- Record a revision for every facet whose content hash has moved. Returns the
+-- facets it captured, so a CI step can print what changed rather than only
+-- that something did.
+--
+-- Caller-scoped facets are captured as the OWNER sees them, and that is the
+-- honest definition: the revision describes what this DATABASE is, while a
+-- caller's read describes what that caller can reach. A read of a
+-- caller-scoped facet therefore carries `scoped: true` next to the global
+-- revision, so nobody mistakes the hash for a hash of what they received.
+create or replace function aiq.capture_schema_revisions()
+returns table (facet text, revision int, hash text) as $$
+declare
+    f      aiq.schema_facets;
+    v_doc  jsonb;
+    v_hash text;
+    v_last text;
+    v_rev  int;
+begin
+    for f in select * from aiq.schema_facets order by name loop
+        v_doc  := aiq.render_facet(f.name, null);
+        v_hash := md5(v_doc::text);
+
+        select r.hash into v_last from aiq.schema_revisions r
+        where r.facet = f.name order by r.revision desc limit 1;
+
+        if v_last is distinct from v_hash then
+            select coalesce(max(r.revision), 0) + 1 into v_rev
+            from aiq.schema_revisions r where r.facet = f.name;
+            insert into aiq.schema_revisions (facet, revision, hash, doc)
+            values (f.name, v_rev, v_hash, v_doc);
+            facet := f.name; revision := v_rev; hash := v_hash;
+            return next;
+        end if;
+    end loop;
+end;
+$$ language plpgsql volatile security definer set search_path = pg_catalog, public;
+
+-- Which facets have moved since anyone recorded them. The read-only half of
+-- capture, so a CI gate can fail on drift without writing anything.
+create or replace function aiq.schema_drift()
+returns table (facet text, live_hash text, recorded_hash text, recorded_at timestamptz) as $$
+    select f.name,
+           md5(aiq.render_facet(f.name, null)::text),
+           r.hash,
+           r.captured_at
+    from aiq.schema_facets f
+    left join lateral (
+        select hash, captured_at from aiq.schema_revisions
+        where facet = f.name order by revision desc limit 1) r on true
+    where r.hash is distinct from md5(aiq.render_facet(f.name, null)::text)
+    order by f.name;
+$$ language sql stable security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
+-- 13c. The read. `SCHEMA` with no argument is the index.
+--
+-- SECURITY INVOKER, deliberately: a caller-scoped provider has to see the
+-- caller. Everything it reads directly (the three tables above) is deployment
+-- metadata already granted to `authenticated`, the same way
+-- aiq.entity_registry and workflow.step_functions already are.
+-- ------------------------------------------------------------
+create or replace function aiq.schema(p_facet text default null, p_name text default null)
+returns jsonb as $$
+declare
+    f      aiq.schema_facets;
+    v_doc  jsonb;
+    v_hash text;
+    r      record;
+begin
+    -- The index. Deliberately cheap -- it does NOT render every facet to
+    -- report their hashes, because rendering the whole deployment to answer
+    -- "what may I ask about" would make the one query an agent writes first
+    -- the most expensive one it ever writes.
+    if p_facet is null or btrim(p_facet) = '' then
+        return jsonb_build_object(
+            'facet', null,
+            'facets', coalesce((
+                select jsonb_agg(jsonb_build_object(
+                    'name', f2.name, 'title', f2.title, 'description', f2.description,
+                    'caller_scoped', f2.caller_scoped,
+                    -- Double quotes: %L would emit the single-quoted form,
+                    -- which parses but is not how the dialect is written down
+                    -- anywhere else, and an index whose copy-paste spelling
+                    -- differs from the documentation teaches a second dialect.
+                    'query', format('SCHEMA "%s"', f2.name),
+                    'revision', (select max(revision) from aiq.schema_revisions
+                                 where facet = f2.name))
+                order by f2.name) from aiq.schema_facets f2), '[]'::jsonb),
+            'note', 'Ask for one with SCHEMA "<name>". Some facets narrow with FROM, '
+                    'e.g. SCHEMA "sql" FROM chunks.');
+    end if;
+
+    select * into f from aiq.schema_facets where name = lower(p_facet);
+    if not found then
+        raise exception
+            'no schema facet named %. Write SCHEMA with no argument for the list.', p_facet;
+    end if;
+
+    v_doc  := aiq.render_facet(f.name, p_name);
+    v_hash := md5(v_doc::text);
+
+    select revision, hash, captured_at into r from aiq.schema_revisions
+    where facet = f.name order by revision desc limit 1;
+
+    return jsonb_build_object(
+        'facet',       f.name,
+        'title',       f.title,
+        'description', f.description,
+        'narrowed_to', p_name,
+        -- For a global facet these agree or the schema has moved since the
+        -- last capture. For a caller-scoped one they are not expected to
+        -- agree at all, which is exactly what `scoped` says.
+        'scoped',      f.caller_scoped,
+        'hash',        v_hash,
+        'revision',    r.revision,
+        'captured_at', r.captured_at,
+        'captured',    case when f.caller_scoped then null
+                            else (r.hash is not distinct from v_hash) end,
+        'doc',         v_doc);
+end;
+$$ language plpgsql stable security invoker;
+
+-- ------------------------------------------------------------
+-- 13d. Facet: p8ql -- the dialect, described by what parses it.
+--
+-- The declared half comes from `p8_query_grammar()` in the parser crate, so
+-- there is exactly one copy of the grammar and it lives next to the code that
+-- implements it. When the extension predates that function the facet says so
+-- by name and still returns the examples, which are verified against the
+-- parser that IS installed -- so the useful half never depends on the
+-- packaging step.
+-- ------------------------------------------------------------
+create or replace function aiq.schema_p8ql(p_name text default null)
+returns jsonb as $$
+declare v_grammar jsonb;
+begin
+    if to_regprocedure('p8_query_grammar()') is null then
+        v_grammar := jsonb_build_object('unavailable',
+            'p8_query_grammar() is not in the installed extension -- the grammar prose '
+            'ships with the parser, so this deployment''s .so predates it. The examples '
+            'below are still verified against the parser that IS installed.');
+    else
+        execute 'select p8_query_grammar()' into v_grammar;
+    end if;
+
+    return jsonb_build_object(
+        'declared', v_grammar,
+        'derived', jsonb_build_object(
+            'parser_installed', to_regprocedure('aiq_parse(text)') is not null,
+            -- Which corpora the content-searching modes may name in FROM.
+            -- These are the registries whose "not registered" errors do not
+            -- list the alternatives; this is where the alternatives live.
+            'text_sources',     coalesce((select jsonb_agg(jsonb_build_object(
+                                    'name', name, 'regconfig', regconfig) order by name)
+                                 from aiq.lexical_sources), '[]'::jsonb),
+            'semantic_sources', coalesce((select jsonb_agg(jsonb_build_object(
+                                    'name', name) order by name)
+                                 from aiq.semantic_sources), '[]'::jsonb),
+            'embedding_models', coalesce((select jsonb_agg(jsonb_build_object(
+                                    'name', name, 'dim', dim, 'provider', provider,
+                                    'is_default', is_default) order by name)
+                                 from aiq.embedding_models), '[]'::jsonb)),
+        'examples', aiq.facet_examples('p8ql'));
+end;
+$$ language plpgsql stable security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
+-- 13e. Facet: workflow -- enough to author one unaided.
+--
+-- The derived half is the part that matters and the part that cannot drift.
+-- `step_kinds` is read off the CHECK CONSTRAINT rather than listed, so
+-- shipping a new kind (as `matrix` was) updates this document with no edit
+-- here; `step_functions` is the allow-list itself, with the real registered
+-- signatures, so an agent writing a `sql:` step is reading the same row the
+-- executor will look the function up in.
+--
+-- SECURITY DEFINER because workflow.queue_config and agentic.agents hold no
+-- grants for user roles. Only names and shapes are returned -- no run, task or
+-- session data crosses this boundary. Queue and agent names are deployment
+-- topology, and an agent that cannot see them cannot author a step that
+-- routes anywhere.
+-- ------------------------------------------------------------
+create or replace function aiq.schema_workflow(p_name text default null)
+returns jsonb as $$
+declare
+    v_grammar jsonb;
+    v_kinds   text[];
+    v_def     text;
+begin
+    if to_regprocedure('p8_workflow_grammar()') is null then
+        v_grammar := jsonb_build_object('unavailable',
+            'p8_workflow_grammar() is not in the installed extension. The step vocabulary '
+            'ships with the compiler that reads it; this deployment''s .so predates it. '
+            'The derived half below is complete, and the examples are compiled against '
+            'the compiler that IS installed.');
+    else
+        execute 'select p8_workflow_grammar()' into v_grammar;
+    end if;
+
+    -- Off the constraint, not off a list. `kind in ('work','decision',...)`
+    -- becomes an array of the quoted literals inside it.
+    select pg_get_constraintdef(c.oid) into v_def
+    from pg_constraint c
+    join pg_class t on t.oid = c.conrelid
+    join pg_namespace n on n.oid = t.relnamespace
+    where n.nspname = 'workflow' and t.relname = 'tasks' and c.conname = 'tasks_kind_check';
+
+    if v_def is not null then
+        select array_agg(m[1] order by ord) into v_kinds
+        from regexp_matches(v_def, '''([a-z_]+)''', 'g') with ordinality as x(m, ord);
+    end if;
+
+    return jsonb_build_object(
+        'declared', v_grammar,
+        'derived', jsonb_build_object(
+            'step_kinds', coalesce(to_jsonb(v_kinds), '[]'::jsonb),
+            'step_functions', coalesce((select jsonb_agg(jsonb_build_object(
+                    'name', name, 'arg_types', to_jsonb(arg_types),
+                    'timeout_ms', timeout_ms, 'description', description) order by name)
+                from workflow.step_functions), '[]'::jsonb),
+            'queues', coalesce((select jsonb_agg(jsonb_build_object(
+                    'queue', queue, 'stale_timeout', stale_timeout::text) order by queue)
+                from workflow.queue_config), '[]'::jsonb),
+            'agents', coalesce((select jsonb_agg(jsonb_build_object(
+                    'name', name, 'model', model) order by name)
+                from agentic.agents), '[]'::jsonb),
+            'limits', jsonb_build_object(
+                'max_payload_bytes', coalesce(
+                    nullif(current_setting('workflow.max_payload_bytes', true), '')::int, 65536),
+                'max_fanout', 'declared per matrix step; there is no global default, '
+                              'because the ceiling is the thing the author must think about'),
+            'definitions', coalesce((select jsonb_agg(jsonb_build_object(
+                    'name', name, 'version', version) order by name, version)
+                from workflow.definitions where deleted_at is null), '[]'::jsonb)),
+        'examples', aiq.facet_examples('workflow'));
+end;
+$$ language plpgsql stable security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
+-- 13f. Facet: sql -- caller-scoped, and that is the whole point.
+--
+-- SECURITY INVOKER, so `has_table_privilege(current_user, ...)` is the
+-- caller's. A schema document that lists tables the reader cannot select from
+-- is worse than no document: it is a directory of things to try, and it tells
+-- one tenant that another's tables exist.
+--
+-- `SCHEMA "sql" FROM <relation>` narrows to one table, which is the form worth
+-- having -- the unnarrowed document over a real deployment is large, and an
+-- agent almost always wants one relation it just learned the name of.
+-- ------------------------------------------------------------
+create or replace function aiq.schema_sql(p_name text default null)
+returns jsonb as $$
+    with visible as (
+        select c.oid, n.nspname, c.relname, c.relkind, c.relrowsecurity,
+               obj_description(c.oid, 'pg_class') as comment
+        from pg_class c
+        join pg_namespace n on n.oid = c.relnamespace
+        where c.relkind in ('r', 'v', 'm', 'p', 'f')
+          and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+          and n.nspname not like 'pg_temp%'
+          and has_table_privilege(c.oid, 'SELECT')
+          and (p_name is null
+               or c.relname = p_name
+               or n.nspname || '.' || c.relname = p_name)
+    )
+    select jsonb_build_object(
+        'declared', jsonb_build_object(
+            'note', 'Relations you can SELECT from, as your current role. Another role '
+                    'sees a different document; the recorded revision is the owner''s '
+                    'view of the whole database, not this.',
+            'narrow_with', 'SCHEMA "sql" FROM <relation>'),
+        'derived', jsonb_build_object(
+            'role', current_user,
+            'relation_count', (select count(*) from visible),
+            'relations', coalesce((
+                select jsonb_agg(jsonb_build_object(
+                    'schema', v.nspname, 'name', v.relname,
+                    'kind', case v.relkind when 'r' then 'table' when 'p' then 'partitioned table'
+                                           when 'v' then 'view'  when 'm' then 'materialized view'
+                                           else 'foreign table' end,
+                    -- Worth surfacing: on an RLS table, "you may select" and
+                    -- "you will see rows" are different statements, and an
+                    -- agent that does not know the difference reads an empty
+                    -- result as an absent fact.
+                    'row_level_security', v.relrowsecurity,
+                    'comment', v.comment,
+                    'columns', (
+                        select jsonb_agg(jsonb_build_object(
+                            'name', a.attname,
+                            'type', format_type(a.atttypid, a.atttypmod),
+                            'not_null', a.attnotnull,
+                            'default', pg_get_expr(d.adbin, d.adrelid))
+                        order by a.attnum)
+                        from pg_attribute a
+                        left join pg_attrdef d on d.adrelid = a.attrelid and d.adnum = a.attnum
+                        where a.attrelid = v.oid and a.attnum > 0 and not a.attisdropped),
+                    'constraints', (
+                        select jsonb_agg(jsonb_build_object(
+                            'name', co.conname, 'definition', pg_get_constraintdef(co.oid))
+                        order by co.conname)
+                        from pg_constraint co where co.conrelid = v.oid))
+                order by v.nspname, v.relname)
+                from visible v), '[]'::jsonb)),
+        'examples', aiq.facet_examples('sql'));
+$$ language sql stable security invoker;
+
+-- ------------------------------------------------------------
+-- 13g. Facet: graph -- the soft schema, which was already written down.
+--
+-- `aiq.relation_types` is the richest thing in this collection for this
+-- purpose: it is the edge catalogue the insert trigger ENFORCES, it carries an
+-- inverse label and a human description, and until now nothing served it to
+-- the caller who needs it. An agent writing `GRAPH "acme" TYPE competes_with`
+-- has no other way to learn that `competes_with` exists, that it runs
+-- company -> company, or what it means.
+-- ------------------------------------------------------------
+create or replace function aiq.schema_graph(p_name text default null)
+returns jsonb as $$
+    select jsonb_build_object(
+        'declared', jsonb_build_object(
+            'model', 'Nodes are projections of typed rows registered in aiq.entity_registry; '
+                     'keys in aiq.node_keys are how the dialect NAMES them; edges are soft '
+                     '(authored) links validated against the relation catalogue below.',
+            'traversal', 'GRAPH "<key>" [DEPTH n] [TYPE <relation>] -- the key is resolved '
+                         'once and the walk proceeds by id, never by name.'),
+        'derived', jsonb_build_object(
+            'entity_types', coalesce((select jsonb_agg(jsonb_build_object(
+                    'entity_type', entity_type, 'source_table', source_table,
+                    'key_expr', key_expr, 'include_where', include_where) order by entity_type)
+                from aiq.entity_registry
+                where p_name is null or entity_type = p_name), '[]'::jsonb),
+            'relations', coalesce((select jsonb_agg(jsonb_build_object(
+                    'src_type', src_type, 'relation', relation, 'dst_type', dst_type,
+                    'inverse_label', inverse_label, 'description', description)
+                    order by src_type, relation, dst_type)
+                from aiq.relation_types
+                where p_name is null
+                   or p_name in (src_type, relation, dst_type)), '[]'::jsonb),
+            'semantic_sources', coalesce((select jsonb_agg(jsonb_build_object(
+                    'name', name, 'source_table', source_table, 'content_col', content_col)
+                    order by name) from aiq.semantic_sources), '[]'::jsonb),
+            'lexical_sources', coalesce((select jsonb_agg(jsonb_build_object(
+                    'name', name, 'source_table', source_table, 'regconfig', regconfig)
+                    order by name) from aiq.lexical_sources), '[]'::jsonb),
+            'embedding_models', coalesce((select jsonb_agg(jsonb_build_object(
+                    'name', name, 'dim', dim, 'provider', provider,
+                    'distance_op', distance_op, 'is_default', is_default) order by name)
+                from aiq.embedding_models), '[]'::jsonb)),
+        'examples', aiq.facet_examples('graph'));
+$$ language sql stable security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
+-- 13h. Registration, and the starting example corpus.
+--
+-- Four facets and nothing hardcoded anywhere above them. A fifth --
+-- `tradecraft` over the controlled vocabularies in
+-- world-model-ingestion/tradecraft.sql, or `connectors` over
+-- content.v_required_credentials -- is these two calls and a function.
+-- ------------------------------------------------------------
+select aiq.register_schema_facet('p8ql', 'aiq.schema_p8ql',
+    'The query dialect',
+    'Every mode, its syntax, and the sources and models you may name in FROM and USING. '
+    'The grammar is emitted by the parser itself; the examples are parsed on every read.');
+
+select aiq.register_schema_facet('workflow', 'aiq.schema_workflow',
+    'Authoring a workflow',
+    'The step vocabulary, the legal step kinds read off the engine''s own constraint, the '
+    'allow-listed functions a sql step may call with their real signatures, the queues and '
+    'agents a step may route to, and worked YAML that is compiled on every read.');
+
+select aiq.register_schema_facet('sql', 'aiq.schema_sql',
+    'Relations you can read',
+    'Tables, views and columns your current role may SELECT, with constraints and whether '
+    'row-level security applies. Narrow with FROM <relation>.', true);
+
+select aiq.register_schema_facet('graph', 'aiq.schema_graph',
+    'The entity and relation catalogue',
+    'Registered entity types, the enforced edge catalogue with descriptions and inverse '
+    'labels, and the search sources and embedding spaces behind them.');
+
+select aiq.register_schema_example('p8ql', 'lookup-list', 'p8ql',
+    'FUZZY LOOKUP "acme", "globex" LIMIT 5',
+    'Resolving several names is one round trip, not N.', 10);
+select aiq.register_schema_example('p8ql', 'graph-walk', 'p8ql',
+    'GRAPH "acme" DEPTH 2 TYPE competes_with',
+    'DEPTH and TYPE apply only to GRAPH; written elsewhere they are refused, not ignored.', 20);
+select aiq.register_schema_example('p8ql', 'lexical', 'p8ql',
+    'TEXT "R7 recall notice" FROM chunks LIMIT 10',
+    'No embedding needed -- this is the rare-exact-token case SEMANTIC misses.', 30);
+select aiq.register_schema_example('p8ql', 'fused', 'p8ql',
+    'SEARCH "safety recall" FROM chunks USING nomic-embed-text LIMIT 5',
+    'Needs an embedding passed alongside; the database makes no model calls.', 40);
+select aiq.register_schema_example('p8ql', 'self', 'p8ql',
+    'SCHEMA "workflow"',
+    'The query that produced this document.', 50);
+
+select aiq.register_schema_example('workflow', 'sql-only', 'workflow_yaml',
+$y$name: reindex_nightly
+steps:
+  - id: rebuild
+    sql: {function: rebuild_graph_index, args: [company]}
+$y$, 'A workflow of only sql steps completes with nothing running anywhere.', 10);
+
+select aiq.register_schema_example('workflow', 'rest-then-search', 'workflow_yaml',
+$y$name: hybrid_research
+steps:
+  - id: embed
+    rest:
+      url: http://localhost:11435/api/embeddings
+      method: POST
+      body: {model: nomic-embed-text, prompt: '{{run.question}}'}
+      jsonpath: embedding
+  - id: retrieve
+    needs: [embed]
+    sql:
+      function: p8ql_vec
+      args: ['SEARCH "{{run.question}}" FROM chunks LIMIT 3', '{{steps.embed.result}}']
+$y$, 'Vector modes take two steps: a sql step cannot embed text, because that is a model call.', 20);
+
+select aiq.register_schema_example('workflow', 'matrix-fanout', 'workflow_yaml',
+$y$name: edgar_restatements
+steps:
+  - id: fan
+    matrix:
+      rows: {function: tier1_concepts, args: ['{{run.tier}}']}
+      max_fanout: 5000
+      template:
+        queue: edgar-xbrl
+        rest:
+          url: https://data.sec.gov/api/xbrl/companyconcept/CIK{{item.cik}}/us-gaap/{{item.concept}}.json
+          jsonpath: units.USD
+  - id: checks
+    needs: [fan]
+    sql: {function: detect_restatements, args: ['{{run.tier}}']}
+$y$, 'One task per row, inserted by the statement that completes the parent. `checks` waits '
+     'for every child, not for the expansion.', 30);
+
+-- ------------------------------------------------------------
+-- 13i. Grants.
+--
+-- The three registry tables are readable by `authenticated`, exactly as
+-- aiq.entity_registry, aiq.relation_types and workflow.step_functions already
+-- are: they describe the deployment, not a tenant. Registration is NOT granted
+-- -- it decides what a SCHEMA query can cause to run, the same rule
+-- workflow.register_step_function follows.
+-- ------------------------------------------------------------
+grant select on aiq.schema_facets, aiq.schema_examples, aiq.schema_revisions
+    to authenticated, api_viewer;
+
+grant execute on function aiq.schema(text, text) to authenticated, web_anon;
+grant execute on function aiq.render_facet(text, text) to authenticated;
+grant execute on function aiq.verify_example(text, text) to authenticated;
+grant execute on function aiq.facet_examples(text) to authenticated;
+grant execute on function aiq.schema_p8ql(text)    to authenticated;
+grant execute on function aiq.schema_workflow(text) to authenticated;
+grant execute on function aiq.schema_sql(text)     to authenticated;
+grant execute on function aiq.schema_graph(text)   to authenticated;
+
+-- Capture writes history, so it is the operator's, not the caller's. It is
+-- the same shape as workflow.reap_stale_tasks: scheduled maintenance, granted
+-- to `scheduler`, callable from CI beside ../../surface.sql.
+grant execute on function aiq.capture_schema_revisions() to scheduler;
+grant execute on function aiq.schema_drift() to scheduler, authenticated;
+revoke execute on function aiq.register_schema_facet(text, text, text, text, boolean) from public;
+revoke execute on function aiq.register_schema_example(text, text, text, text, text, int) from public;
 
 
 -- ============================================================
