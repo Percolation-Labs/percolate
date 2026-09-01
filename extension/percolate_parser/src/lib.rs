@@ -44,7 +44,13 @@ use pgrx::prelude::*;
 //   TEXT     "<text>" FROM <source> [LIMIT n]          -- lexical, ts_rank
 //   SEARCH   "<text>" FROM <source> [USING <model>] [LIMIT n]  -- RRF fusion
 //   GRAPH    "<key>"  [DEPTH n] [TYPE <relation>] [LIMIT n]
+//   SCHEMA   ["<facet>"] [FROM <name>]              -- what this database IS
 //   <any ordinary SQL statement>
+//
+// SCHEMA is the one mode whose argument is optional, and deliberately so:
+// bare `SCHEMA` is the index -- the list of facets you may ask about -- which
+// is the only query an agent can write before it knows anything. Every other
+// mode requires you to already know what you are looking for.
 //
 // Four deliberate shapes, all of them about the dialect reading the way a
 // person would write it:
@@ -264,7 +270,7 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, ParseError> {
 
     if !matches!(
         mode.as_str(),
-        "LOOKUP" | "SEMANTIC" | "GRAPH" | "TEXT" | "SEARCH"
+        "LOOKUP" | "SEMANTIC" | "GRAPH" | "TEXT" | "SEARCH" | "SCHEMA"
     ) {
         return Err(ParseError::UnknownMode(mode));
     }
@@ -296,7 +302,11 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, ParseError> {
         i += 1;
     }
 
-    if q.args.is_empty() {
+    // Bare `SCHEMA` is legal and means the index. Every other mode needs to be
+    // told what it is looking for; the whole point of this one is that it is
+    // answerable before you know anything, so requiring an argument would put
+    // the only bootstrapping query behind knowledge you do not yet have.
+    if q.args.is_empty() && mode != "SCHEMA" {
         return Err(ParseError::MissingArgument(
             "expected a quoted argument, e.g. LOOKUP \"acme\"",
         ));
@@ -308,6 +318,14 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, ParseError> {
             q.args.len()
         )));
     }
+
+    // Written-ness, not value: `limit` and `depth` carry defaults, so "was it
+    // asked for" cannot be read off the struct afterwards. That distinction is
+    // what lets a modifier be REFUSED where it means nothing rather than
+    // silently ignored -- the rule this dialect already applies to USING and
+    // FUZZY, extended to the two that had escaped it.
+    let mut wrote_limit = false;
+    let mut wrote_graph_modifier: Option<&'static str> = None;
 
     while i < toks.len() {
         match toks[i].to_uppercase().as_str() {
@@ -326,6 +344,7 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, ParseError> {
                 q.depth = v
                     .parse::<i32>()
                     .map_err(|_| ParseError::BadNumber(v.clone()))?;
+                wrote_graph_modifier = Some("DEPTH");
                 i += 2;
             }
             "TYPE" => {
@@ -333,6 +352,7 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, ParseError> {
                     "TYPE requires a relation name",
                 ))?;
                 q.relation = Some(v.clone());
+                wrote_graph_modifier = Some("TYPE");
                 i += 2;
             }
             "FROM" => {
@@ -360,6 +380,7 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, ParseError> {
                 q.limit = v
                     .parse::<i32>()
                     .map_err(|_| ParseError::BadNumber(v.clone()))?;
+                wrote_limit = true;
                 i += 2;
             }
             _ => return Err(ParseError::UnexpectedToken(toks[i].clone())),
@@ -380,6 +401,26 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, ParseError> {
     if q.model.is_some() && !matches!(q.mode.as_str(), "SEMANTIC" | "SEARCH") {
         return Err(ParseError::MissingArgument(
             "USING <model> applies only to SEMANTIC and SEARCH",
+        ));
+    }
+    // The same rule, applied to the two modifiers that had escaped it. DEPTH
+    // and TYPE describe a traversal, so `LOOKUP "acme" DEPTH 3` parsed and
+    // silently did a depth-1 lookup -- a query that quietly meant something
+    // other than what it said, which is the exact failure the two rules above
+    // exist to prevent. Found while adding SCHEMA, not by SCHEMA.
+    if let Some(m) = wrote_graph_modifier {
+        if q.mode != "GRAPH" {
+            return Err(ParseError::MissingArgument(match m {
+                "DEPTH" => "DEPTH applies only to GRAPH -- it describes a traversal",
+                _ => "TYPE applies only to GRAPH -- it filters a relation on an edge",
+            }));
+        }
+    }
+    // A schema document is not a result set, so LIMIT has nothing to limit.
+    if wrote_limit && q.mode == "SCHEMA" {
+        return Err(ParseError::MissingArgument(
+            "LIMIT does not apply to SCHEMA -- a schema document is not a result set. \
+             Narrow it with SCHEMA \"sql\" FROM <relation> instead",
         ));
     }
     Ok(q)
