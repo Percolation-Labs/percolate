@@ -4386,6 +4386,13 @@ $$ language plpgsql immutable;
 -- Scope: the entry points an outside caller reaches, not the internals. A
 -- comment on `resolve_args` would be documentation; a comment on
 -- `start_workflow` is a tool description.
+--
+-- One of these -- `cancel_run` -- is redefined later, by
+-- integration-rbac.sql, which loads after this file. The comment survives:
+-- pg_description is keyed on the function's oid and CREATE OR REPLACE does
+-- not change it (checked, rather than assumed). So the comments stay together
+-- here, where they can be read as one set, instead of being scattered to
+-- wherever each function's final definition happens to live.
 -- ============================================================
 
 comment on function workflow.start_workflow(text, jsonb, text, text) is
@@ -8938,6 +8945,43 @@ $$;
 -- Configuration writes. brief.md §6 calls applying an agent a *migration*, not
 -- a deploy -- these are what such a migration calls, and they are gated on the
 -- same permission model everything else in this collection uses.
+-- Who may author agents and tool servers, and the case the first version of
+-- this check got wrong.
+--
+-- The rule for an ordinary caller is unchanged: a permission row, checked
+-- against the identity in the JWT. What it missed is that the FIRST agent in
+-- any deployment is registered by a migration -- there is no end user at
+-- initdb, `rbac.current_user_id()` is null, and a null holds no permissions,
+-- so every seeded agent failed with "not authorized" and the documented write
+-- path could not be used to install the sample that documents it.
+--
+-- The bootstrap branch is deliberately narrow: no end-user identity at all,
+-- AND a session that could have written the row with a plain INSERT anyway.
+-- The second half is what keeps this from being a hole -- `session_user` is
+-- the login role, not the SECURITY DEFINER owner, so it is `authenticator`
+-- for anything arriving over REST, and authenticator holds no table grant by
+-- design. A caller who can already write the table gains nothing from being
+-- refused here except a reason to bypass this function.
+-- The table is a separate argument rather than derived from the resource
+-- name. They happen to match today, and building one from the other would
+-- make a permission-vocabulary string (an untyped tag, per user-rbac's header
+-- note) silently load-bearing on a table name.
+create or replace function agentic.may_author(p_resource text, p_table regclass)
+returns boolean
+language sql stable security definer
+set search_path = pg_catalog, public
+as $$
+    select rbac.has_permission(rbac.current_user_id(), p_resource, 'update')
+        or (rbac.current_user_id() is null
+            -- `session_user` is a reserved SQL expression, not a function
+            -- in a schema: qualifying it the way this file qualifies
+            -- everything else fails to parse ("missing FROM-clause entry for
+            -- table pg_catalog"). Bare is the only spelling, and it is safe
+            -- for the same reason -- a keyword cannot be shadowed by a
+            -- search_path.
+            and pg_catalog.has_table_privilege(session_user, p_table, 'insert'));
+$$;
+
 create or replace function agentic.upsert_agent(p_spec jsonb)
 returns agentic.agents
 language plpgsql security definer
@@ -8946,7 +8990,7 @@ as $$
 declare
     v_row agentic.agents;
 begin
-    if not rbac.has_permission(rbac.current_user_id(), 'agents', 'update') then
+    if not agentic.may_author('agents', 'agentic.agents'::regclass) then
         raise exception 'not authorized to author agents';
     end if;
 
@@ -9002,7 +9046,7 @@ as $$
 declare
     v_row agentic.tool_servers;
 begin
-    if not rbac.has_permission(rbac.current_user_id(), 'tool_servers', 'update') then
+    if not agentic.may_author('tool_servers', 'agentic.tool_servers'::regclass) then
         raise exception 'not authorized to register tool servers';
     end if;
 

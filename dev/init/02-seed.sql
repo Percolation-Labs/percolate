@@ -66,4 +66,26 @@ select workflow.schedule_workflow(
     p_workflow => 'content_reconcile',
     p_cron     => '*/5 * * * *');
 
+-- ------------------------------------------------------------
+-- 4. The permission vocabulary the agentic plane checks against.
+--
+-- `agentic.upsert_agent` and `upsert_tool_server` ask
+-- `rbac.has_permission(user, 'agents'|'tool_servers', 'update')`, and until
+-- this file existed nothing anywhere inserted those rows -- so the resources
+-- were named in a check, granted to nobody, and no end user could author an
+-- agent over REST at all. `rbac.role_permissions`' own comment says a new
+-- module is added by inserting rows here rather than by writing authz code;
+-- this is that insert, finally made for the module that needed it.
+--
+-- Roles and users are deployment identity, not schema, which is why only the
+-- vocabulary is seeded: grant `admin` to somebody and they can author agents.
+-- The sample in 03 does not depend on this -- it runs as the table owner --
+-- but every agent authored after it does.
+-- ------------------------------------------------------------
+insert into rbac.roles (name) values ('admin') on conflict do nothing;
+insert into rbac.role_permissions (role, resource, action) values
+    ('admin', 'agents',       'update'),
+    ('admin', 'tool_servers', 'update')
+on conflict do nothing;
+
 reset role;

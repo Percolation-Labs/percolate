@@ -4360,6 +4360,13 @@ $$ language plpgsql immutable;
 -- Scope: the entry points an outside caller reaches, not the internals. A
 -- comment on `resolve_args` would be documentation; a comment on
 -- `start_workflow` is a tool description.
+--
+-- One of these -- `cancel_run` -- is redefined later, by
+-- integration-rbac.sql, which loads after this file. The comment survives:
+-- pg_description is keyed on the function's oid and CREATE OR REPLACE does
+-- not change it (checked, rather than assumed). So the comments stay together
+-- here, where they can be read as one set, instead of being scattered to
+-- wherever each function's final definition happens to live.
 -- ============================================================
 
 comment on function workflow.start_workflow(text, jsonb, text, text) is

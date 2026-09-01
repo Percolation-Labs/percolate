@@ -41,7 +41,13 @@ services:
         condition: service_healthy
     environment:
       PGRST_DB_URI: postgres://authenticator:authpass@db:5432/p8experiment
-      PGRST_DB_SCHEMAS: content, aiq, rbac, workflow, public
+      # `agentic` is in this list because the agent runtime reads its own
+      # agents and tool servers through these views like any other client
+      # (brief.md §10.2) -- omitting it left the whole conversation plane
+      # installed and unreachable. The FIRST schema is the default one;
+      # every other is selected per request with Accept-Profile, which is
+      # the fact `agentic.tool_servers.default_headers` exists for.
+      PGRST_DB_SCHEMAS: content, aiq, rbac, workflow, agentic, public
       PGRST_DB_ANON_ROLE: web_anon
       # Test-only secret -- never reuse in a real deployment.
       PGRST_JWT_SECRET: experiment-only-jwt-secret-not-for-real-use-0123456789
@@ -95,6 +101,28 @@ services:
       P8_JWT_SECRET: experiment-only-jwt-secret-not-for-real-use-0123456789
     ports:
       - "8081:8081"
+
+  # ---------------------------------------------------------------------
+  # The one MCP tool this collection ships: `query`, over the p8ql dialect.
+  #
+  # Mounted from specs/ and run on a stock python image, exactly like faultsrv:
+  # it is stdlib-only, so there is nothing to build and nothing to pull. It
+  # holds NO credential -- it forwards the caller's Authorization header to
+  # PostgREST, so RLS sees whoever is talking to the agent rather than seeing
+  # this process (brief.md §11.1).
+  # ---------------------------------------------------------------------
+  query-mcp:
+    image: python:3.12-alpine
+    container_name: p8-query-mcp
+    depends_on:
+      db:
+        condition: service_healthy
+    command: python /query_mcp.py --port 8090 --postgrest http://postgrest:3000
+    volumes:
+      - ../specs/agentic/reference/query_mcp.py:/query_mcp.py:ro
+    ports:
+      - "8090:8090"
+    restart: unless-stopped
 
   # Fault injection for workflow tests. Every failure this collection has hit
   # in real traffic, on demand, at a URL -- so a test of the retry branch does
