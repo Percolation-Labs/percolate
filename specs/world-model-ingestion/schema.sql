@@ -443,7 +443,7 @@ begin
     -- since this table was written -- "so a citation can point at a span
     -- rather than just a chunk" -- and nothing had ever filled them, because
     -- the only chunker was hypothetical. semchunk returns offsets on request
-    -- (ingestion.md §4), so the citation this schema promised is now
+    -- (ingestion.md §2), so the citation this schema promised is now
     -- reachable rather than aspirational.
     insert into content.resource_chunks
         (resource_id, ordinal, content, token_count, start_offset, end_offset, metadata)
@@ -584,7 +584,7 @@ returns jsonb as $$
     join content.channels c on c.id = r.channel_id
     left join content.files f on f.id = r.file_id
     where r.id = p_resource_id
-      and content.may_write_org(r.org_id);
+      and content.may_access_org(r.org_id);
 $$ language sql stable security definer set search_path = pg_catalog, public;
 
 -- What the worker calls when it is done. ONE call, so a resource is never
@@ -617,7 +617,7 @@ declare
     v_status text;
 begin
     select r.org_id into v_org from content.resources r where r.id = p_resource_id;
-    if not found or not content.may_write_org(v_org) then
+    if not found or not content.may_access_org(v_org) then
         raise exception 'no such resource, or it is not yours';
     end if;
 
@@ -663,20 +663,59 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- is copied verbatim onto the child task it produces: a column added here is
 -- a column stored N times.
 --
--- SECURITY INVOKER, and that is not the same as scoped: matrix expansion
--- calls step functions from inside the engine's SECURITY DEFINER path, so
--- this runs as the schema owner and RLS does not apply to it. Said plainly
--- because the comfortable assumption -- "invoker, so the caller's policy
--- filters it" -- is false here and would be a bad thing to believe about a
--- function that reads a tenant's corpus. What scopes the fan-out is the
--- resource id, which comes from the run that was started by the upload.
+-- SECURITY DEFINER WITH ITS OWN CHECK, and it got here the hard way. It was
+-- SECURITY INVOKER while its only caller was matrix expansion, which runs
+-- inside the engine's own definer context and therefore reads as the schema
+-- owner. The moment the batching embed step began calling it from the WORKER
+-- -- which holds no table grants at all, by design -- every call failed with
+-- "permission denied for table resource_chunks", five times per resource.
+--
+-- So it is definer, and because it is also granted to `authenticated` it does
+-- its own authorization rather than relying on the grant: a definer function
+-- that returned any resource's chunks to anyone holding its id would hand a
+-- tenant's corpus to whoever guessed a uuid. The predicate is the one
+-- content.may_access_org states, so there is one rule and not a second copy of
+-- it -- and a claimless connection (a worker, a migration) is exempt exactly
+-- as it is everywhere else in this schema.
+--
+-- It returns only what an embed call needs, id and text, because in the
+-- fan-out shape every row is copied verbatim onto the child task it produces:
+-- a column added here is a column stored N times.
 create or replace function content.chunks_to_embed(p_resource_id uuid)
 returns jsonb as $$
     select coalesce(jsonb_agg(jsonb_build_object('chunk_id', c.id, 'content', c.content)
                               order by c.ordinal), '[]'::jsonb)
     from content.resource_chunks c
-    where c.resource_id = p_resource_id;
-$$ language sql stable;
+    where c.resource_id = p_resource_id
+      and exists (select 1 from content.resources r
+                  where r.id = p_resource_id and content.may_access_org(r.org_id));
+$$ language sql stable security definer set search_path = pg_catalog, public;
+
+-- The row set the GRAPH indexer fans out over.
+--
+-- Named `windows_to_index` because that is what graph-index.md §6.2 calls it,
+-- and like chunks_to_embed it is a function the design used as an example and
+-- nobody had written. A window is a chunk here: the chunker already split the
+-- document on the most semantically significant boundary that fits a budget,
+-- and cutting it a second way for the extractor would mean two answers to
+-- "which span produced this" for the same document.
+--
+-- It carries THREE fields where chunks_to_embed carries two, and the extra two
+-- are what aiq.land_graph_fanout reads off each child to attribute a landed
+-- graph -- `resource_id` and `window_ordinal` -- so a node can be traced back
+-- to the passage that named it. Same reason the embed rows are minimal: every
+-- row is copied verbatim onto the child task it creates.
+create or replace function content.windows_to_index(p_resource_id uuid)
+returns jsonb as $$
+    select coalesce(jsonb_agg(jsonb_build_object(
+               'resource_id',    c.resource_id,
+               'window_ordinal', c.ordinal,
+               'content',        c.content) order by c.ordinal), '[]'::jsonb)
+    from content.resource_chunks c
+    where c.resource_id = p_resource_id
+      and exists (select 1 from content.resources r
+                  where r.id = p_resource_id and content.may_access_org(r.org_id));
+$$ language sql stable security definer set search_path = pg_catalog, public;
 
 -- ------------------------------------------------------------
 -- 7b. Datasets — the tabular path, which is not the chunking path.
@@ -712,9 +751,30 @@ create table if not exists content.datasets (
     file_count   int not null default 0,
     partition_by text[] not null default '{}',
     created_at   timestamptz not null default now(),
-    updated_at   timestamptz not null default now(),
-    unique (org_id, name)
+    updated_at   timestamptz not null default now()
 );
+
+-- NULLS NOT DISTINCT, and it is the whole of whether `mode: append` works.
+--
+-- A plain `unique (org_id, name)` does not constrain the single-tenant case at
+-- all: NULLs are distinct in a unique index unless it says otherwise, so
+-- `on conflict (org_id, name) do update` in register_dataset() matched nothing
+-- for an org-less dataset and every upload inserted ANOTHER `sales`. Two
+-- uploads, two datasets, both called sales, and the reader picking one --
+-- caught by 02-ingestion.sql §5 with "more than one row returned by a subquery",
+-- which is a better error than the silent one it would have been in production.
+--
+-- content.channels has the same shape and answers it differently (WHERE NOT
+-- EXISTS at each insert site, §5b of integration.sql). Here the constraint is
+-- the right place, because the upsert is the API: a caller appending to a
+-- dataset must not have to know whether it already exists.
+--
+-- Drop-then-add rather than inline, so an installation that already created
+-- this table picks the change up on the next apply -- the same discipline
+-- resources_status_check above is written with.
+alter table content.datasets drop constraint if exists datasets_org_name_key;
+alter table content.datasets add constraint datasets_org_name_key
+    unique nulls not distinct (org_id, name);
 
 -- Which resources make up a dataset. A dataset is not one upload, and the
 -- resource still exists in its own right -- it has bytes, an uploader, a
@@ -728,7 +788,10 @@ create table if not exists content.dataset_files (
     primary key (dataset_id, resource_id)
 );
 
-create trigger trg_datasets_touch before update on content.datasets
+-- `create or replace`, matching the `if not exists` on the table above: this
+-- section is written to be re-applicable, because a deployment that already
+-- has the content plane picks ingestion up by re-running the file.
+create or replace trigger trg_datasets_touch before update on content.datasets
     for each row execute function public.touch_updated_at();
 
 -- Register the Parquet a tabular upload was converted into.
@@ -754,7 +817,7 @@ declare
     v_ds     uuid;
 begin
     select r.org_id into v_org from content.resources r where r.id = p_resource_id;
-    if not found or not content.may_write_org(v_org) then
+    if not found or not content.may_access_org(v_org) then
         raise exception 'no such resource, or it is not yours';
     end if;
 

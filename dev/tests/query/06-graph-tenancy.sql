@@ -214,7 +214,21 @@ begin
       -- that reads as the caller).
       and p.proname not like 'schema%'
       and p.proname not in ('render_facet','facet_examples','verify_example',
-                            'capture_schema_revisions');
+                            'capture_schema_revisions')
+      -- ...and only functions a USER can actually reach. The rule this section
+      -- asserts is integration-rbac's: "every SECURITY DEFINER function
+      -- reachable by an end user MUST do its own authorization check.
+      -- Worker-facing functions are exempt because EXECUTE on them is granted
+      -- only to `worker`, which is infrastructure, not a user identity --
+      -- their authorization IS the grant." Written as a predicate rather than
+      -- as three more names on the exclusion list above, because the list is
+      -- the failure mode this section's own comment names: the function added
+      -- next month is the one that is not on it. A definer function that is
+      -- reachable by authenticated, web_anon or api_viewer still fails here,
+      -- which is the case that matters.
+      and (has_function_privilege('authenticated', p.oid, 'execute')
+        or has_function_privilege('web_anon', p.oid, 'execute')
+        or has_function_privilege('api_viewer', p.oid, 'execute'));
     if v_bad is not null then
         raise exception
             'aiq read-path functions are SECURITY DEFINER: %. These run on behalf '

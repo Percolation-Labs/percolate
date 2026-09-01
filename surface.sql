@@ -175,6 +175,24 @@ insert into expected (subsystem, kind, name, detail, why) values
 -- clean against a deployment where GRAPH mode returns "permission denied".
 ('ai-query-layer','property_graph','aiq.knowledge_graph',null,'graph-identity.md D8: SQL/PGQ is the read-only overlay'),
 
+-- Embedding a CORPUS, which is a different function from embedding a query and
+-- was missing until the pipeline was run. A deployment with expand_embed_steps
+-- and no record_embeddings can answer a question and cannot index a document.
+('ai-query-layer','function','aiq.embed_batch_call','text,jsonb','ingestion.md §1: the worker asks for the endpoint and request shape, so the model still lives in one place'),
+('ai-query-layer','function','aiq.record_embeddings','text,jsonb','ingestion.md §4: a whole batch at once, because two vectors do not fit in one task output'),
+('ai-query-layer','function','aiq.land_embeddings','uuid','ingestion.md §4: the fan-in for a declarative matrix of embed children'),
+
+-- The graph writer. Its reference tables are checked because the machine path's
+-- whole claim is that it writes THESE and never a human's typed table.
+('ai-query-layer','table','aiq.soft_nodes',null,'graph-index.md §4.4: an unresolved mention is a candidate, never an invented company'),
+('ai-query-layer','table','aiq.lake_nodes',null,'graph-index.md §4.4: identity is always in Postgres, payload need not be'),
+('ai-query-layer','function','aiq.upsert_graph','jsonb,jsonb','graph-index.md §5: one writer for an extracted graph, holding invariants 1-5'),
+('ai-query-layer','function','aiq.land_graph','jsonb,uuid','graph-index.md §6.1: the whole-document shape, no fan-in'),
+('ai-query-layer','function','aiq.land_graph_fanout','uuid','graph-index.md §6.2: the windowed shape''s fan-in'),
+('ai-query-layer','function','aiq.register_graph_vocabulary','jsonb','graph-index.md §5.3: an unlisted relation is refused at write, so the vocabulary has to exist'),
+('ai-query-layer','function','aiq.install_structure_null','text','graph-index.md §1: the null extractor is a row, installed like the ingest workflow'),
+('ai-query-layer','function','aiq.extractor_call','text,text,text,text,text','graph-index.md §6: the model half -- registered, never yet called'),
+
 -- ---------- world-model-ingestion --------------------------------------
 ('world-model-ingestion','schema','content',null,'brief.md §2-§3: the content plane'),
 ('world-model-ingestion','table','content.channels',null,'brief.md §2: a source is a row'),
@@ -187,6 +205,19 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('world-model-ingestion','function','content.resolve_file','uuid','brief.md §3.5: proxied reads'),
 ('world-model-ingestion','function','content.record_chunks','uuid,jsonb','brief.md §3: chunking writes back'),
 ('world-model-ingestion','function','content.check_drift','','brief.md §3: reconciliation is definition-of-done'),
+-- Ingestion. Every row here was named in a spec sentence for months and checked
+-- by nothing: the audit reported clean against a database where an upload could
+-- be stored and never chunked, which is the exact gap this file exists to close.
+('world-model-ingestion','function','content.install_ingest_workflow','text,text,text,boolean,text,text','ingestion.md §1: the pipeline is two steps and a call that writes them'),
+('world-model-ingestion','function','content.merge_policy','jsonb,jsonb','ingestion.md §3: a DEEP merge, so an upload setting one chunking field does not erase the channel''s others'),
+('world-model-ingestion','function','content.record_ingest','uuid,jsonb','ingestion.md §5: ready means "in the corpus", stored means it is not'),
+('world-model-ingestion','function','content.chunks_to_embed','uuid','ingestion.md §1: what both the batched and the fanned-out path read'),
+-- The lake half. A table is not prose, and the alternative is 200 near-identical
+-- embeddings of a price table that rank against each other and answer nothing.
+('world-model-ingestion','table','content.datasets',null,'ingestion.md §6: a tabular upload becomes Parquet, registered under one name'),
+('world-model-ingestion','table','content.dataset_files',null,'ingestion.md §6: append means this month''s export joins last month''s under one prefix'),
+('world-model-ingestion','function','content.register_dataset','uuid,text,text,text,jsonb,bigint,text,text[]','ingestion.md §7.4: the upsert is the API, so the constraint is NULLS NOT DISTINCT'),
+('world-model-ingestion','function','content.dataset_uri','text','ingestion.md §6: DuckDB reads the dataset by name, not by object key'),
 ('world-model-ingestion','channel','workflow_artifacts',null,'outputs.md §4: step output has a channel, with no ingest_workflow on it'),
 
 -- ---------- workflow-engine: schedules (schema.sql §19) ----------------

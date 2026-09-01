@@ -94,6 +94,8 @@ ORDER = [
     ("world-model-ingestion/schema.sql",        "the content plane: channels, files, resources, chunks"),
     ("world-model-ingestion/integration.sql",   "registers the corpus, projects documents into the graph"),
     ("agentic/schema.sql",                      "agents, sessions, runs, messages -- the conversation plane"),
+    ("world-model-ingestion/graph.sql",         "graph indexing: the soft/lake reference tables and upsert_graph -- after agentic, because it registers an extractor agent"),
+    ("world-model-ingestion/ingestion.sql",     "the default ingestion pipeline -- LAST: it installs a workflow, so it needs the lint (agentic), the embedding registry and the graph indexer to already exist"),
 ]
 
 # Every specs/*/*.sql file is either in ORDER above or named here, with the
@@ -106,6 +108,12 @@ ORDER = [
 # in the product at all. A file being missing from ORDER looked identical to a
 # file being deliberately excluded, so neither was a decision.
 NOT_SHIPPED = {
+    "world-model-ingestion/graph-demo.sql":
+        "a demonstration, not a schema: it uploads two contracts, lands their "
+        "extracted graphs and runs the traversal, inside a transaction it rolls "
+        "back. It ships nothing and must not run at install time -- an earlier "
+        "version committed and broke dev/tests/query/06-graph-tenancy.sql, whose "
+        "assertion is true only of the untouched fixture.",
     "user-rbac/roles.sql":
         "cluster-level CREATE ROLE; a non-superuser extension script cannot run it. "
         "Applied once by a DBA -- see the HEADER below.",

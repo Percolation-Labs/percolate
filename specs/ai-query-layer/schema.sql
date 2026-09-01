@@ -1336,6 +1336,174 @@ begin
 end;
 $$ language plpgsql;
 
+-- ------------------------------------------------------------
+-- 10b. Embedding a CORPUS, in batches, and why that is not the `embed:` step.
+--
+-- `embed:` is one text per call, and for a query that is exactly right: embed
+-- the question, rank against it, discard the vector. For a corpus it is the
+-- wrong unit by two orders of magnitude. A 300-chunk document fanned out as
+-- one `embed:` child per chunk is 300 HTTP requests, 300 task rows and 300
+-- round trips to a provider that accepts an array of 2048 inputs in one call.
+--
+-- IT CANNOT BE FIXED BY BATCHING THE FAN-OUT, and the reason is structural
+-- rather than a missing feature: a step's output is capped
+-- (workflow.max_payload_bytes, 64KB) and one 1536-dimension vector is ~31KB of
+-- JSON. Two vectors do not fit in one task output. Any design that carries
+-- corpus vectors through `tasks.output` is limited to batches of one or two,
+-- whatever else it does -- so the vectors have to be written by the process
+-- that received them, and what comes back to the engine is a receipt.
+--
+-- Hence these two functions: one hands a worker the request shape from the
+-- registry (so the model, its url and its request body still live in exactly
+-- one place), and the other takes the vectors back. The declarative
+-- `embed:` + `land_embeddings` path stays exactly as it is and is still what
+-- a query-shaped fan-out uses; it is simply not what a corpus uses.
+-- ------------------------------------------------------------
+alter table aiq.embedding_providers
+    add column if not exists batch_request_template jsonb,
+    add column if not exists batch_response_path text;
+
+comment on column aiq.embedding_providers.batch_request_template is
+    'The request body for MANY texts at once, with {{texts}} where the array goes. '
+    'Null means the provider embeds one text per call and a batch is N calls.';
+
+-- OpenAI''s /v1/embeddings takes `input` as a string OR an array and answers
+-- with `data` in input order. Ollama''s /api/embeddings takes one prompt, so
+-- it keeps a null batch template and is called per text -- which is honest
+-- rather than a limitation of this design.
+update aiq.embedding_providers
+   set batch_request_template = '{"model": "{{model}}", "input": "{{texts}}"}'::jsonb,
+       batch_response_path    = 'data'
+ where provider = 'openai' and batch_request_template is null;
+
+-- Everything a worker needs to embed a batch, from the registry rather than
+-- from a document: url, method, the body with the array substituted, where the
+-- vectors are in the response, and the NAME of the credential to use.
+--
+-- Returns the same shape aiq.embed_call does for one text, deliberately: two
+-- functions describing one endpoint differently is how a batch path starts
+-- calling a different model than the single path.
+create or replace function aiq.embed_batch_call(p_model text, p_texts jsonb)
+returns jsonb as $$
+declare
+    m aiq.embedding_models;
+    p aiq.embedding_providers;
+    v_body jsonb;
+    v_out  jsonb;
+begin
+    if p_model is null then
+        select * into m from aiq.embedding_models where is_default;
+    else
+        select * into m from aiq.embedding_models where name = p_model;
+    end if;
+    if not found then
+        raise exception
+            'embedding model % is not registered -- SCHEMA "graph" lists the '
+            'registered ones', coalesce(p_model, '(the default)');
+    end if;
+
+    select * into p from aiq.embedding_providers where provider = m.provider;
+    if not found then
+        raise exception
+            'embedding model ''%'' is served by provider ''%'', which has no row in '
+            'aiq.embedding_providers -- so nothing here knows what its request body '
+            'looks like or where the vector sits in its response.', m.name, m.provider;
+    end if;
+    if m.endpoint is null then
+        raise exception
+            'embedding model ''%'' has no endpoint, so there is nowhere to send its '
+            'text. Set aiq.embedding_models.endpoint.', m.name;
+    end if;
+
+    -- Whole VALUES only, exactly as embed_call does: the texts become a jsonb
+    -- ARRAY rather than a string containing JSON, so the provider receives a
+    -- list and the database did the escaping.
+    if p.batch_request_template is not null then
+        select jsonb_object_agg(k,
+                   case when v = '"{{texts}}"'::jsonb then p_texts
+                        when v = '"{{model}}"'::jsonb then to_jsonb(m.name)
+                        else v end)
+          into v_body
+          from jsonb_each(p.batch_request_template) e(k, v);
+    end if;
+
+    v_out := jsonb_build_object(
+        'model',     m.name,
+        'dim',       m.dim,
+        'url',       m.endpoint,
+        'method',    p.method,
+        'batch',     p.batch_request_template is not null,
+        -- The single-text shapes too, so a provider that cannot batch is
+        -- called N times by the same caller rather than by a second one.
+        'single_template', p.request_template,
+        'single_path',     p.response_path,
+        'body',      v_body,
+        'jsonpath',  coalesce(p.batch_response_path, p.response_path));
+
+    if m.credential_ref is not null then
+        v_out := v_out || jsonb_build_object('credential_ref', m.credential_ref);
+    end if;
+    return v_out;
+end;
+-- SECURITY DEFINER, and revoked from PUBLIC below rather than left open.
+--
+-- It reads aiq.embedding_models and aiq.embedding_providers on behalf of a
+-- caller that holds no table grants anywhere -- which is the WORKER, by
+-- design, and which is why "permission denied for table embedding_models" is
+-- what the first batching run got. What it hands back is a url, a request
+-- shape and the NAME of a credential; never a secret, and never a row of
+-- anyone's content. Its authorization is its grant, the exemption
+-- workflow-engine/integration-rbac.sql already states for worker-facing
+-- functions -- so the grant has to be the only one, hence the revoke.
+$$ language plpgsql stable security definer set search_path = pg_catalog, public;
+
+revoke execute on function aiq.embed_batch_call(text, jsonb) from public;
+
+-- Take the vectors back. One call for a whole batch, so a worker that embedded
+-- 96 chunks writes them in one statement rather than 96.
+--
+-- p_rows: [{"chunk_id": uuid, "embedding": [floats]}, ...]
+--
+-- SECURITY DEFINER and granted to `worker` only: aiq.emb_* tables are owned by
+-- app_owner and a worker holds no table grants at all, so the grant IS the
+-- authorization -- the same exemption workflow-engine states for its own
+-- worker-facing functions. It is not granted to `authenticated`, because a
+-- user who could write vectors could poison what every SEMANTIC search in the
+-- deployment ranks against.
+create or replace function aiq.record_embeddings(p_model text, p_rows jsonb)
+returns int as $$
+declare
+    m     aiq.embedding_models;
+    v_tbl text;
+    v_n   int;
+begin
+    select * into m from aiq.embedding_models where name = p_model;
+    if not found then
+        raise exception 'embedding model % is not registered', p_model;
+    end if;
+    -- Idempotent, so the space existing is not a precondition the caller has
+    -- to arrange separately.
+    perform aiq.register_embedding_space(m.name);
+    v_tbl := 'emb_' || replace(m.name, '-', '_');
+
+    execute format($q$
+        insert into aiq.%1$I (chunk_id, embedding)
+        select (r->>'chunk_id')::uuid,
+               (select array_agg((v #>> '{}')::real order by ord)
+                  from jsonb_array_elements(r->'embedding') with ordinality e(v, ord))::vector
+        from jsonb_array_elements($1) r
+        -- Re-embedding a chunk REPLACES its vector: a resource whose text
+        -- changed must not leave the old vector ranking against the new text.
+        on conflict (chunk_id) do update
+            set embedding = excluded.embedding, embedded_at = now()
+    $q$, v_tbl) using p_rows;
+    get diagnostics v_n = row_count;
+    return v_n;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+revoke execute on function aiq.record_embeddings(text, jsonb) from public;
+
 -- SEMANTIC against a named corpus and a named model (or the default model when
 -- null). The caller still supplies the vector -- embedding generation is an
 -- external model call (§4), and which model produced that vector is now

@@ -7809,6 +7809,174 @@ begin
 end;
 $$ language plpgsql;
 
+-- ------------------------------------------------------------
+-- 10b. Embedding a CORPUS, in batches, and why that is not the `embed:` step.
+--
+-- `embed:` is one text per call, and for a query that is exactly right: embed
+-- the question, rank against it, discard the vector. For a corpus it is the
+-- wrong unit by two orders of magnitude. A 300-chunk document fanned out as
+-- one `embed:` child per chunk is 300 HTTP requests, 300 task rows and 300
+-- round trips to a provider that accepts an array of 2048 inputs in one call.
+--
+-- IT CANNOT BE FIXED BY BATCHING THE FAN-OUT, and the reason is structural
+-- rather than a missing feature: a step's output is capped
+-- (workflow.max_payload_bytes, 64KB) and one 1536-dimension vector is ~31KB of
+-- JSON. Two vectors do not fit in one task output. Any design that carries
+-- corpus vectors through `tasks.output` is limited to batches of one or two,
+-- whatever else it does -- so the vectors have to be written by the process
+-- that received them, and what comes back to the engine is a receipt.
+--
+-- Hence these two functions: one hands a worker the request shape from the
+-- registry (so the model, its url and its request body still live in exactly
+-- one place), and the other takes the vectors back. The declarative
+-- `embed:` + `land_embeddings` path stays exactly as it is and is still what
+-- a query-shaped fan-out uses; it is simply not what a corpus uses.
+-- ------------------------------------------------------------
+alter table aiq.embedding_providers
+    add column if not exists batch_request_template jsonb,
+    add column if not exists batch_response_path text;
+
+comment on column aiq.embedding_providers.batch_request_template is
+    'The request body for MANY texts at once, with {{texts}} where the array goes. '
+    'Null means the provider embeds one text per call and a batch is N calls.';
+
+-- OpenAI''s /v1/embeddings takes `input` as a string OR an array and answers
+-- with `data` in input order. Ollama''s /api/embeddings takes one prompt, so
+-- it keeps a null batch template and is called per text -- which is honest
+-- rather than a limitation of this design.
+update aiq.embedding_providers
+   set batch_request_template = '{"model": "{{model}}", "input": "{{texts}}"}'::jsonb,
+       batch_response_path    = 'data'
+ where provider = 'openai' and batch_request_template is null;
+
+-- Everything a worker needs to embed a batch, from the registry rather than
+-- from a document: url, method, the body with the array substituted, where the
+-- vectors are in the response, and the NAME of the credential to use.
+--
+-- Returns the same shape aiq.embed_call does for one text, deliberately: two
+-- functions describing one endpoint differently is how a batch path starts
+-- calling a different model than the single path.
+create or replace function aiq.embed_batch_call(p_model text, p_texts jsonb)
+returns jsonb as $$
+declare
+    m aiq.embedding_models;
+    p aiq.embedding_providers;
+    v_body jsonb;
+    v_out  jsonb;
+begin
+    if p_model is null then
+        select * into m from aiq.embedding_models where is_default;
+    else
+        select * into m from aiq.embedding_models where name = p_model;
+    end if;
+    if not found then
+        raise exception
+            'embedding model % is not registered -- SCHEMA "graph" lists the '
+            'registered ones', coalesce(p_model, '(the default)');
+    end if;
+
+    select * into p from aiq.embedding_providers where provider = m.provider;
+    if not found then
+        raise exception
+            'embedding model ''%'' is served by provider ''%'', which has no row in '
+            'aiq.embedding_providers -- so nothing here knows what its request body '
+            'looks like or where the vector sits in its response.', m.name, m.provider;
+    end if;
+    if m.endpoint is null then
+        raise exception
+            'embedding model ''%'' has no endpoint, so there is nowhere to send its '
+            'text. Set aiq.embedding_models.endpoint.', m.name;
+    end if;
+
+    -- Whole VALUES only, exactly as embed_call does: the texts become a jsonb
+    -- ARRAY rather than a string containing JSON, so the provider receives a
+    -- list and the database did the escaping.
+    if p.batch_request_template is not null then
+        select jsonb_object_agg(k,
+                   case when v = '"{{texts}}"'::jsonb then p_texts
+                        when v = '"{{model}}"'::jsonb then to_jsonb(m.name)
+                        else v end)
+          into v_body
+          from jsonb_each(p.batch_request_template) e(k, v);
+    end if;
+
+    v_out := jsonb_build_object(
+        'model',     m.name,
+        'dim',       m.dim,
+        'url',       m.endpoint,
+        'method',    p.method,
+        'batch',     p.batch_request_template is not null,
+        -- The single-text shapes too, so a provider that cannot batch is
+        -- called N times by the same caller rather than by a second one.
+        'single_template', p.request_template,
+        'single_path',     p.response_path,
+        'body',      v_body,
+        'jsonpath',  coalesce(p.batch_response_path, p.response_path));
+
+    if m.credential_ref is not null then
+        v_out := v_out || jsonb_build_object('credential_ref', m.credential_ref);
+    end if;
+    return v_out;
+end;
+-- SECURITY DEFINER, and revoked from PUBLIC below rather than left open.
+--
+-- It reads aiq.embedding_models and aiq.embedding_providers on behalf of a
+-- caller that holds no table grants anywhere -- which is the WORKER, by
+-- design, and which is why "permission denied for table embedding_models" is
+-- what the first batching run got. What it hands back is a url, a request
+-- shape and the NAME of a credential; never a secret, and never a row of
+-- anyone's content. Its authorization is its grant, the exemption
+-- workflow-engine/integration-rbac.sql already states for worker-facing
+-- functions -- so the grant has to be the only one, hence the revoke.
+$$ language plpgsql stable security definer set search_path = pg_catalog, public;
+
+revoke execute on function aiq.embed_batch_call(text, jsonb) from public;
+
+-- Take the vectors back. One call for a whole batch, so a worker that embedded
+-- 96 chunks writes them in one statement rather than 96.
+--
+-- p_rows: [{"chunk_id": uuid, "embedding": [floats]}, ...]
+--
+-- SECURITY DEFINER and granted to `worker` only: aiq.emb_* tables are owned by
+-- app_owner and a worker holds no table grants at all, so the grant IS the
+-- authorization -- the same exemption workflow-engine states for its own
+-- worker-facing functions. It is not granted to `authenticated`, because a
+-- user who could write vectors could poison what every SEMANTIC search in the
+-- deployment ranks against.
+create or replace function aiq.record_embeddings(p_model text, p_rows jsonb)
+returns int as $$
+declare
+    m     aiq.embedding_models;
+    v_tbl text;
+    v_n   int;
+begin
+    select * into m from aiq.embedding_models where name = p_model;
+    if not found then
+        raise exception 'embedding model % is not registered', p_model;
+    end if;
+    -- Idempotent, so the space existing is not a precondition the caller has
+    -- to arrange separately.
+    perform aiq.register_embedding_space(m.name);
+    v_tbl := 'emb_' || replace(m.name, '-', '_');
+
+    execute format($q$
+        insert into aiq.%1$I (chunk_id, embedding)
+        select (r->>'chunk_id')::uuid,
+               (select array_agg((v #>> '{}')::real order by ord)
+                  from jsonb_array_elements(r->'embedding') with ordinality e(v, ord))::vector
+        from jsonb_array_elements($1) r
+        -- Re-embedding a chunk REPLACES its vector: a resource whose text
+        -- changed must not leave the old vector ranking against the new text.
+        on conflict (chunk_id) do update
+            set embedding = excluded.embedding, embedded_at = now()
+    $q$, v_tbl) using p_rows;
+    get diagnostics v_n = row_count;
+    return v_n;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+revoke execute on function aiq.record_embeddings(text, jsonb) from public;
+
 -- SEMANTIC against a named corpus and a named model (or the default model when
 -- null). The caller still supplies the vector -- embedding generation is an
 -- external model call (§4), and which model produced that vector is now
@@ -9543,6 +9711,160 @@ comment on function aiq.expand_embed_steps(jsonb) is
     'resolved to into the query that consumes the vector. Called by '
     'workflow.define_yaml; an unexpanded marker is refused by the lint.';
 
+-- ============================================================
+-- Landing the vectors: the half of `embed:` that had nowhere to go.
+--
+-- `embed:` produces a vector and hands it to the next step as a template
+-- value. That is exactly right for a QUERY -- embed the question, rank against
+-- it, discard the vector -- and it is the entire story this collection had.
+-- Embedding a CORPUS is the other direction: N vectors that must be KEPT, in
+-- the space of the model that produced them, keyed by the chunk they describe.
+--
+-- Nothing could do that. `aiq.register_embedding_space()` creates the table
+-- and `aiq.semantic_in()` reads it; no function anywhere writes a row into it,
+-- so every vector in the collection's only embedding space arrived as a
+-- literal in a fixture (dev/init/05-corpus-sample.sql, which says so in
+-- capitals). A pipeline that embeds an uploaded document had no last step.
+--
+-- THE MODEL IS NOT AN ARGUMENT, and that is the point of the shape.
+--
+-- The obvious signature is land_embeddings(matrix_task, model) -- and it
+-- reintroduces, one step later, the exact defect aiq.expand_embed_steps()
+-- exists to remove. The author would name the model twice (once on the embed
+-- template, once here), the two could disagree, and the result would be
+-- vectors from model A sitting in model B's space: no error, no dimension
+-- mismatch when the two are the same width, and a corpus that ranks
+-- confidently and wrongly forever.
+--
+-- So the model is read off each child's OWN task input, where embed_call()
+-- recorded it -- "the model each child embedded with is recorded on the
+-- child", as expand_embed_steps' own comment already promised. The vector and
+-- the name of the space it belongs in travel together on one row, and there is
+-- no second place to state it and therefore nothing to disagree with.
+-- ============================================================
+-- SECURITY INVOKER, and it matters that this is not a preference. Its only
+-- legitimate caller is workflow.execute_sql_step, which is SECURITY DEFINER
+-- and owned by the schema owner -- so an invoker function called from there
+-- already runs with the privileges it needs, and gains nothing from carrying
+-- them itself. What it gains from NOT carrying them is that a client calling
+-- it directly is refused by the grants on aiq.emb_* rather than by this
+-- function's own run-id guard alone.
+--
+-- dev/tests/query/06 enforces exactly this for the whole aiq schema, with a
+-- named exemption list and a comment about why a named list is dangerous --
+-- "the function added next month is the one that is not on it". This was that
+-- function, and the test caught it the day it landed.
+create or replace function aiq.land_embeddings(p_matrix_task uuid)
+returns jsonb as $$
+declare
+    v_run     uuid;
+    v_cur     text;
+    v_model   text;
+    v_tbl     text;
+    v_landed  int := 0;   -- accumulated across spaces, not per space
+    v_this    int := 0;
+    v_total   int := 0;
+    v_missing int;
+    v_models  text[] := '{}';
+begin
+    select run_id into v_run from workflow.tasks where id = p_matrix_task;
+    if not found then
+        raise exception 'task % not found', p_matrix_task;
+    end if;
+
+    -- The same guard workflow.matrix_outputs() uses, for the same reason: a
+    -- step may read the fan-out of its OWN run. Without it a registered step
+    -- function handed an arbitrary task id is a read of someone else's run.
+    v_cur := nullif(current_setting('workflow.current_run_id', true), '');
+    if v_cur is null or v_cur::uuid <> v_run then
+        raise exception
+            'task % belongs to run %, which is not the run being executed. Pass '
+            '{{steps.<id>.result.task_id}} rather than a task id from elsewhere.',
+            p_matrix_task, v_run;
+    end if;
+
+    select count(*) into v_total from workflow.tasks
+     where matrix_parent_id = p_matrix_task;
+
+    -- A child that succeeded and left no `result` is the offload case: its
+    -- output went to object storage as an artifact and the vector is not in
+    -- the column. Raised rather than skipped, because a chunk silently absent
+    -- from the space is a hole in a corpus that still answers questions --
+    -- the failure-reporting-success shape this collection keeps finding.
+    select count(*) into v_missing from workflow.tasks
+     where matrix_parent_id = p_matrix_task
+       and status = 'done'
+       and (output is null or not (output ? 'result'));
+    if v_missing > 0 then
+        raise exception
+            '% of % embed children completed with no vector in their output -- they '
+            'were offloaded as artifacts (workflow-engine/outputs.md class 4) because '
+            'the response exceeded workflow.max_payload_bytes. A vector that is not in '
+            'the payload cannot be landed from here; raise the cap for the queue that '
+            'embeds, or embed with a smaller model.', v_missing, v_total;
+    end if;
+
+    for v_model in
+        select distinct t.input->'embed'->>'model'
+        from workflow.tasks t
+        where t.matrix_parent_id = p_matrix_task
+          and t.input->'embed' ? 'model'
+    loop
+        -- register_embedding_space() is the one place that knows how a space
+        -- table is named and shaped; calling it here rather than reproducing
+        -- the name is what keeps this function correct when that one changes.
+        -- It is idempotent (create table if not exists), so the space existing
+        -- is not a precondition the pipeline has to arrange separately.
+        perform aiq.register_embedding_space(v_model);
+        v_tbl    := 'emb_' || replace(v_model, '-', '_');
+        v_models := v_models || v_model;
+
+        execute format($q$
+            insert into aiq.%1$I (chunk_id, embedding)
+            select (t.input->'item'->>'chunk_id')::uuid,
+                   (select array_agg((v #>> '{}')::real order by ord)
+                      from jsonb_array_elements(t.output->'result') with ordinality e(v, ord))::vector
+            from workflow.tasks t
+            where t.matrix_parent_id = $1
+              and t.status = 'done'
+              and t.input->'embed'->>'model' = $2
+              and t.input->'item' ? 'chunk_id'
+            -- Re-embedding a chunk REPLACES its vector. A run that re-ingests
+            -- a resource whose text changed must not leave the old vector
+            -- ranking against the new text, and the chunk id is the key of
+            -- the space, so ON CONFLICT is the whole of the update path.
+            on conflict (chunk_id) do update
+                set embedding = excluded.embedding, embedded_at = now()
+        $q$, v_tbl) using p_matrix_task, v_model;
+
+        get diagnostics v_this = row_count;
+        v_landed := v_landed + v_this;
+    end loop;
+
+    if v_landed = 0 and v_total > 0 and array_length(v_models, 1) is null then
+        raise exception
+            'none of the % embed children carry a model on their input, so there is no '
+            'space to land them in. This step reads the fan-out of an `embed:` matrix '
+            'template; a hand-written `rest:` call to a model endpoint records nothing '
+            'about which space its vector belongs to and cannot be landed.', v_total;
+    end if;
+
+    -- A receipt (outputs.md §2): counts and the spaces written, not the rows.
+    return jsonb_build_object('landed', v_landed, 'children', v_total,
+                              'models', to_jsonb(v_models));
+end;
+$$ language plpgsql set search_path = pg_catalog, public;
+
+select workflow.register_step_function(
+    'land_embeddings', 'aiq.land_embeddings', array['uuid'], 120000,
+    'Store an embed matrix''s vectors in the space each child embedded with');
+
+-- A registered step function is called by workflow.execute_sql_step as the
+-- schema owner, never by a client, so the PUBLIC default EXECUTE that came
+-- with it was reach nobody needs. See workflow-engine/integration-rbac.sql §6
+-- for the enumeration this came out of.
+revoke execute on function aiq.land_embeddings(uuid) from public;
+
 
 -- ============================================================
 -- world-model-ingestion/schema.sql
@@ -9994,7 +10316,7 @@ begin
     -- since this table was written -- "so a citation can point at a span
     -- rather than just a chunk" -- and nothing had ever filled them, because
     -- the only chunker was hypothetical. semchunk returns offsets on request
-    -- (ingestion.md §4), so the citation this schema promised is now
+    -- (ingestion.md §2), so the citation this schema promised is now
     -- reachable rather than aspirational.
     insert into content.resource_chunks
         (resource_id, ordinal, content, token_count, start_offset, end_offset, metadata)
@@ -10135,7 +10457,7 @@ returns jsonb as $$
     join content.channels c on c.id = r.channel_id
     left join content.files f on f.id = r.file_id
     where r.id = p_resource_id
-      and content.may_write_org(r.org_id);
+      and content.may_access_org(r.org_id);
 $$ language sql stable security definer set search_path = pg_catalog, public;
 
 -- What the worker calls when it is done. ONE call, so a resource is never
@@ -10168,7 +10490,7 @@ declare
     v_status text;
 begin
     select r.org_id into v_org from content.resources r where r.id = p_resource_id;
-    if not found or not content.may_write_org(v_org) then
+    if not found or not content.may_access_org(v_org) then
         raise exception 'no such resource, or it is not yours';
     end if;
 
@@ -10214,20 +10536,59 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- is copied verbatim onto the child task it produces: a column added here is
 -- a column stored N times.
 --
--- SECURITY INVOKER, and that is not the same as scoped: matrix expansion
--- calls step functions from inside the engine's SECURITY DEFINER path, so
--- this runs as the schema owner and RLS does not apply to it. Said plainly
--- because the comfortable assumption -- "invoker, so the caller's policy
--- filters it" -- is false here and would be a bad thing to believe about a
--- function that reads a tenant's corpus. What scopes the fan-out is the
--- resource id, which comes from the run that was started by the upload.
+-- SECURITY DEFINER WITH ITS OWN CHECK, and it got here the hard way. It was
+-- SECURITY INVOKER while its only caller was matrix expansion, which runs
+-- inside the engine's own definer context and therefore reads as the schema
+-- owner. The moment the batching embed step began calling it from the WORKER
+-- -- which holds no table grants at all, by design -- every call failed with
+-- "permission denied for table resource_chunks", five times per resource.
+--
+-- So it is definer, and because it is also granted to `authenticated` it does
+-- its own authorization rather than relying on the grant: a definer function
+-- that returned any resource's chunks to anyone holding its id would hand a
+-- tenant's corpus to whoever guessed a uuid. The predicate is the one
+-- content.may_access_org states, so there is one rule and not a second copy of
+-- it -- and a claimless connection (a worker, a migration) is exempt exactly
+-- as it is everywhere else in this schema.
+--
+-- It returns only what an embed call needs, id and text, because in the
+-- fan-out shape every row is copied verbatim onto the child task it produces:
+-- a column added here is a column stored N times.
 create or replace function content.chunks_to_embed(p_resource_id uuid)
 returns jsonb as $$
     select coalesce(jsonb_agg(jsonb_build_object('chunk_id', c.id, 'content', c.content)
                               order by c.ordinal), '[]'::jsonb)
     from content.resource_chunks c
-    where c.resource_id = p_resource_id;
-$$ language sql stable;
+    where c.resource_id = p_resource_id
+      and exists (select 1 from content.resources r
+                  where r.id = p_resource_id and content.may_access_org(r.org_id));
+$$ language sql stable security definer set search_path = pg_catalog, public;
+
+-- The row set the GRAPH indexer fans out over.
+--
+-- Named `windows_to_index` because that is what graph-index.md §6.2 calls it,
+-- and like chunks_to_embed it is a function the design used as an example and
+-- nobody had written. A window is a chunk here: the chunker already split the
+-- document on the most semantically significant boundary that fits a budget,
+-- and cutting it a second way for the extractor would mean two answers to
+-- "which span produced this" for the same document.
+--
+-- It carries THREE fields where chunks_to_embed carries two, and the extra two
+-- are what aiq.land_graph_fanout reads off each child to attribute a landed
+-- graph -- `resource_id` and `window_ordinal` -- so a node can be traced back
+-- to the passage that named it. Same reason the embed rows are minimal: every
+-- row is copied verbatim onto the child task it creates.
+create or replace function content.windows_to_index(p_resource_id uuid)
+returns jsonb as $$
+    select coalesce(jsonb_agg(jsonb_build_object(
+               'resource_id',    c.resource_id,
+               'window_ordinal', c.ordinal,
+               'content',        c.content) order by c.ordinal), '[]'::jsonb)
+    from content.resource_chunks c
+    where c.resource_id = p_resource_id
+      and exists (select 1 from content.resources r
+                  where r.id = p_resource_id and content.may_access_org(r.org_id));
+$$ language sql stable security definer set search_path = pg_catalog, public;
 
 -- ------------------------------------------------------------
 -- 7b. Datasets — the tabular path, which is not the chunking path.
@@ -10263,9 +10624,30 @@ create table if not exists content.datasets (
     file_count   int not null default 0,
     partition_by text[] not null default '{}',
     created_at   timestamptz not null default now(),
-    updated_at   timestamptz not null default now(),
-    unique (org_id, name)
+    updated_at   timestamptz not null default now()
 );
+
+-- NULLS NOT DISTINCT, and it is the whole of whether `mode: append` works.
+--
+-- A plain `unique (org_id, name)` does not constrain the single-tenant case at
+-- all: NULLs are distinct in a unique index unless it says otherwise, so
+-- `on conflict (org_id, name) do update` in register_dataset() matched nothing
+-- for an org-less dataset and every upload inserted ANOTHER `sales`. Two
+-- uploads, two datasets, both called sales, and the reader picking one --
+-- caught by 02-ingestion.sql §5 with "more than one row returned by a subquery",
+-- which is a better error than the silent one it would have been in production.
+--
+-- content.channels has the same shape and answers it differently (WHERE NOT
+-- EXISTS at each insert site, §5b of integration.sql). Here the constraint is
+-- the right place, because the upsert is the API: a caller appending to a
+-- dataset must not have to know whether it already exists.
+--
+-- Drop-then-add rather than inline, so an installation that already created
+-- this table picks the change up on the next apply -- the same discipline
+-- resources_status_check above is written with.
+alter table content.datasets drop constraint if exists datasets_org_name_key;
+alter table content.datasets add constraint datasets_org_name_key
+    unique nulls not distinct (org_id, name);
 
 -- Which resources make up a dataset. A dataset is not one upload, and the
 -- resource still exists in its own right -- it has bytes, an uploader, a
@@ -10279,7 +10661,10 @@ create table if not exists content.dataset_files (
     primary key (dataset_id, resource_id)
 );
 
-create trigger trg_datasets_touch before update on content.datasets
+-- `create or replace`, matching the `if not exists` on the table above: this
+-- section is written to be re-applicable, because a deployment that already
+-- has the content plane picks ingestion up by re-running the file.
+create or replace trigger trg_datasets_touch before update on content.datasets
     for each row execute function public.touch_updated_at();
 
 -- Register the Parquet a tabular upload was converted into.
@@ -10305,7 +10690,7 @@ declare
     v_ds     uuid;
 begin
     select r.org_id into v_org from content.resources r where r.id = p_resource_id;
-    if not found or not content.may_write_org(v_org) then
+    if not found or not content.may_access_org(v_org) then
         raise exception 'no such resource, or it is not yours';
     end if;
 
@@ -10458,6 +10843,48 @@ create policy chunks_via_resource on content.resource_chunks for select
 grant usage on schema content to authenticated, worker, api_viewer;
 grant select on content.channels, content.resources, content.resource_chunks
     to authenticated, api_viewer;
+
+-- REVOKE BEFORE GRANT, on every one of them, and it is not ceremony.
+--
+-- Postgres grants EXECUTE on a new function to PUBLIC unless it is taken away,
+-- so every line below that reads "worker may call this" has always meant
+-- "worker AND everyone else may call this" -- the grant is an addition to
+-- access every role already had, not a restriction. The engine's own
+-- enumeration found eleven functions like that (workflow-engine/
+-- integration-rbac.sql §6); this is the same sweep over `content`.
+--
+-- Measured before writing it, because the interesting half is which layer was
+-- actually holding: an ANONYMOUS caller (web_anon, no claims) trying to rewrite
+-- another org's chunks is refused with "permission denied for SCHEMA content"
+-- -- schema usage, granted to authenticated/worker/api_viewer and never to
+-- web_anon, was doing the work that the function grants appeared to. That is
+-- one revoke away from being the only thing between an unauthenticated request
+-- and content.record_chunks, and it is not a defence anyone chose.
+--
+-- What it does change today: `authenticated` HAS usage on this schema, so
+-- until these lines existed a logged-in user could call ingest_target,
+-- record_ingest and register_dataset -- three functions this file documents as
+-- worker-only. Their own org check meant no cross-tenant leak, but
+-- ingest_target hands back a bucket and an object key for the caller's own
+-- resources, and the read path a user is offered is the Content Server's
+-- proxy precisely so that a storage location never becomes one.
+revoke execute on function content.register_upload(text,text,text,text,bigint,text,text,text,uuid,jsonb,text,text) from public;
+revoke execute on function content.register_fetched(text,text,text,text,uuid,jsonb) from public;
+revoke execute on function content.record_chunks(uuid,jsonb) from public;
+revoke execute on function content.resolve_file(uuid) from public;
+revoke execute on function content.check_drift() from public;
+revoke execute on function content.may_access_org(uuid) from public;
+revoke execute on function content.assert_org_write(uuid,text) from public;
+revoke execute on function content.ingest_target(uuid) from public;
+revoke execute on function content.record_ingest(uuid,jsonb) from public;
+revoke execute on function content.register_dataset(uuid,text,text,text,jsonb,bigint,text,text[]) from public;
+revoke execute on function content.chunks_to_embed(uuid) from public;
+revoke execute on function content.windows_to_index(uuid) from public;
+revoke execute on function content.merge_policy(jsonb,jsonb) from public;
+revoke execute on function content.dataset_uri(text) from public;
+-- (install_ingest_workflow's own revoke is in ingestion.sql, where it is
+--  DEFINED -- this file loads first, and a revoke can only name a signature
+--  that already exists. The same lesson register_artifact taught below.)
 
 -- The Content Server registers uploads and the ingestion workflow records
 -- chunks; both go through SECURITY DEFINER functions, so neither needs a write
@@ -10643,6 +11070,67 @@ select workflow.register_step_function(
 -- ------------------------------------------------------------
 -- 6. Self-check.
 -- ------------------------------------------------------------
+-- ------------------------------------------------------------
+-- 6. Ingestion — the default pipeline, and the channel that runs it.
+--
+-- schema.sql §7 built the pieces; this is where they become a thing that runs
+-- when someone uploads a file, which is the only form of "built" that counts
+-- for the claim brief.md §3.5 makes.
+-- ------------------------------------------------------------
+grant execute on function content.ingest_target(uuid) to worker;
+grant execute on function content.record_ingest(uuid, jsonb) to worker;
+grant execute on function content.register_dataset(uuid, text, text, text, jsonb, bigint, text, text[]) to worker;
+grant execute on function content.merge_policy(jsonb, jsonb) to worker, authenticated;
+grant execute on function content.chunks_to_embed(uuid) to worker, authenticated;
+grant execute on function content.windows_to_index(uuid) to worker, authenticated;
+grant execute on function content.dataset_uri(text) to authenticated, api_viewer;
+
+-- The batching embed path (ai-query-layer/schema.sql §10b). `worker` only:
+-- embed_batch_call hands back a url and a credential NAME, and
+-- record_embeddings writes the space every SEMANTIC search ranks against --
+-- a user who could write vectors could poison retrieval for the deployment.
+-- USAGE on the schema as well as EXECUTE on the functions, because EXECUTE
+-- alone is not enough: without it the call fails with "permission denied for
+-- schema aiq" -- which reads like a missing grant on the function and is not.
+-- `worker` still holds no table privilege anywhere; usage on a schema grants
+-- the right to NAME what it already has execute on.
+grant usage on schema aiq to worker;
+grant execute on function aiq.embed_batch_call(text, jsonb) to worker;
+grant execute on function aiq.record_embeddings(text, jsonb) to worker;
+
+-- ingest_target and record_ingest are granted to `worker` and NOT to
+-- `authenticated`, and the asymmetry is the rule stated in schema.sql §4a
+-- being applied rather than an oversight. ingest_target hands back a bucket
+-- and an object key -- a storage location is a capability, and the read path
+-- a user is offered is content.resolve_file() through the Content Server.
+-- Worker-facing functions are authorized by their grant, because `worker` is
+-- infrastructure rather than a person.
+
+-- Datasets are org-scoped exactly as resources are, and for the same reason:
+-- a dataset is a thing a tenant uploaded, and its bucket prefix is a
+-- capability. dataset_files carries no org of its own -- it inherits, the way
+-- chunks do, because duplicating a tenancy fact is how node_keys and nodes
+-- drifted.
+alter table content.datasets      enable row level security;
+alter table content.dataset_files enable row level security;
+
+create policy datasets_org_scoped on content.datasets for select
+  using (org_id is null or org_id in (select aiq.current_org_ids()));
+
+create policy dataset_files_via_dataset on content.dataset_files for select
+  using (exists (select 1 from content.datasets d
+                 where d.id = content.dataset_files.dataset_id));
+
+grant select on content.datasets, content.dataset_files to authenticated, api_viewer;
+
+select workflow.register_step_function(
+    'chunks_to_embed', 'content.chunks_to_embed', array['uuid'], 30000,
+    'The chunks of one resource, as rows for an embed matrix to fan out over');
+select workflow.register_step_function(
+    'windows_to_index', 'content.windows_to_index', array['uuid'], 30000,
+    'The chunks of one resource, as windows for a graph extractor to fan out over');
+
+
 do $$
 declare v_bad text;
 begin
@@ -10680,6 +11168,13 @@ begin
 
     raise notice 'world-model-ingestion self-check passed: files unexposed; chunks corpus registered; artifact channel inert';
 end $$;
+
+-- The PUBLIC default EXECUTE, revoked -- see workflow-engine/integration-rbac.sql
+-- §6 for the enumeration. This one lives here because this is where the
+-- function is defined: the engine owns the capability, content owns the
+-- registration half, and a revoke can only be written where the signature
+-- already exists.
+revoke execute on function workflow.register_artifact(uuid, text, text, text, bigint, text, text, uuid) from public;
 
 
 -- ============================================================
@@ -11665,4 +12160,1452 @@ begin
         raise exception 'WRITE GRANT INVARIANT VIOLATED: % is writable directly; '
                         'the write path is the SECURITY DEFINER functions only', v_bad;
     end if;
+end $$;
+
+
+-- ============================================================
+-- world-model-ingestion/graph.sql
+--   graph indexing: the soft/lake reference tables and upsert_graph -- after agentic, because it registers an extractor agent
+-- ============================================================
+
+-- ============================================================
+-- graph.sql -- a lightweight, runnable implementation of graph-index.md.
+--
+-- Scope, stated so it is not mistaken for the whole design doc: this file
+-- builds the WRITE path -- the two reference tables, the vocabulary, the
+-- resolver, and `aiq.upsert_graph`, which is the repository function the whole
+-- thing exists for. It does NOT build the windowing row functions or the bulk
+-- indexer's scope predicate (graph-index.md §6.2/§6.3), which need a running
+-- extractor to be worth anything.
+--
+-- The point of doing it in this order: the model half of graph-index.md is a
+-- prompt and a schema, and neither can be tested without spending money. The
+-- DATABASE half -- "given this JSON, does the right graph appear, and does the
+-- wrong JSON get refused" -- is completely testable with a literal, which is
+-- what graph-demo.sql does.
+--
+-- Re-applicable: `if not exists` / `create or replace` throughout.
+-- ============================================================
+
+-- ------------------------------------------------------------
+-- 1. The vocabulary -- what an extractor may emit, and what a machine-written
+--    edge is worth on a walk.
+--
+-- SEPARATE FROM aiq.relation_types on purpose, rather than a column added to
+-- it. That table is the CATALOGUE: what the edge table permits from anyone,
+-- authored edges included. This one is what the null extractor is ALLOWED TO
+-- SAY, plus its tier prior. Registering the vocabulary writes both, so they
+-- cannot disagree; keeping them separate means a relation an analyst may
+-- author by hand does not thereby become one a cheap model may invent.
+-- ------------------------------------------------------------
+create table if not exists aiq.graph_vocabulary (
+    relation       text primary key,
+    machine_weight real not null default 0.5
+        check (machine_weight > 0 and machine_weight <= 1.0),
+    description    text,
+    registered_at  timestamptz not null default now()
+);
+
+comment on table aiq.graph_vocabulary is
+    'What a structure extractor may emit as `r`, and what that edge is worth on '
+    'a graph_walk. Distinct from aiq.relation_types, which is what the edge '
+    'table permits from any writer.';
+
+-- machine_weight is not decoration: aiq.graph_walk scores a path as the
+-- PRODUCT of its edge weights and orders by that score. 0.5 means two machine
+-- hops (0.25) sort below one authored hop (1.0), which is the ordering an
+-- analyst wants and would otherwise impose by hand on every query. It is a
+-- PROVENANCE TIER PRIOR -- it says who wrote the edge, not how true it is.
+
+-- ------------------------------------------------------------
+-- 2. Registering the vocabulary, and the cross product it implies.
+--
+-- aiq.edges rejects any (src_type, relation, dst_type) not in the catalogue.
+-- The soft and lake tiers are ONE entity_type each, but the pg tier is N, so
+-- the triples an extracted graph can need are
+--     (every registered entity type + 'soft' + 'lake')^2 x relations.
+-- Generated here rather than hand-maintained.
+--
+-- THE REFRESH OBLIGATION, stated because it is the thing that will bite:
+-- registering a NEW entity table afterwards does not extend the catalogue, so
+-- the first extracted edge touching that type raises. The error names the
+-- missing triple, so the message is the instruction: re-run this function.
+-- Deliberately not a trigger on aiq.entity_registry -- one module silently
+-- writing another module's catalogue is worse than a legible failure.
+-- ------------------------------------------------------------
+create or replace function aiq.register_graph_vocabulary(
+    p_relations jsonb default null   -- [{"relation":..,"machine_weight":..,"description":..}]
+) returns jsonb as $$
+declare
+    v_types text[];
+    v_rels  int;
+    v_trip  int;
+begin
+    if p_relations is not null then
+        insert into aiq.graph_vocabulary (relation, machine_weight, description)
+        select e->>'relation',
+               coalesce((e->>'machine_weight')::real, 0.5),
+               e->>'description'
+        from jsonb_array_elements(p_relations) e
+        on conflict (relation) do update
+            set machine_weight = excluded.machine_weight,
+                description    = coalesce(excluded.description, aiq.graph_vocabulary.description);
+    end if;
+
+    -- Every type an extracted edge can have at either end.
+    select array_agg(distinct t) into v_types
+    from (select entity_type as t from aiq.entity_registry
+          union select 'soft' union select 'lake') s;
+
+    select count(*) into v_rels from aiq.graph_vocabulary;
+
+    insert into aiq.relation_types (src_type, relation, dst_type, description)
+    select s, v.relation, d,
+           'machine-extractable (aiq.graph_vocabulary)'
+    from unnest(v_types) s, unnest(v_types) d, aiq.graph_vocabulary v
+    on conflict (src_type, relation, dst_type) do nothing;
+    get diagnostics v_trip = row_count;
+
+    return jsonb_build_object(
+        'relations', v_rels,
+        'types', to_jsonb(v_types),
+        'triples_added', v_trip,
+        'triples_total', v_rels * array_length(v_types,1) * array_length(v_types,1));
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
+-- 3. The two reference tables (graph-index.md §4.4).
+--
+-- Neither holds adjacency. Edges live once, in aiq.edges. That is the single
+-- property separating these from the JSONB kv_store cache specs/README.md
+-- declines to carry forward from ../p8k8 -- if either grows a column pointing
+-- at another node, that rejection has been reversed.
+-- ------------------------------------------------------------
+
+-- 3a. Candidates: an entity the extractor named that resolved to nothing.
+create table if not exists aiq.soft_nodes (
+    id               uuid primary key default gen_random_uuid(),
+    kind             text not null,     -- normalized claimed kind
+    key              text not null,     -- normalized name
+    label            text,              -- name as first seen, for display
+    attrs            jsonb not null default '{}'::jsonb,
+    org_id           uuid,
+    -- NO `observations` COUNTER HERE, deliberately. An earlier version had one
+    -- commented "distinct resources" and nothing ever incremented it -- a
+    -- column making a claim no code kept. How often a thing was named is
+    -- already answerable from the provenance of its edges, at the grain that
+    -- actually means something (which document said it), so a second counter
+    -- at node level would be a worse copy of a better answer.
+    first_seen_at    timestamptz not null default now(),
+    last_seen_at     timestamptz not null default now(),
+    -- Set by promotion. Makes the row fail the inclusion predicate, which is
+    -- how the candidate node is evicted -- see aiq.promote_soft_node.
+    resolved_node_id uuid references aiq.nodes(id)
+);
+
+-- NULLS NOT DISTINCT, and it is the whole guarantee rather than a detail --
+-- the same lesson node_keys learned. org_id IS NULL means shared reference
+-- data, which is the normal state, and under the default two NULLs never
+-- conflict: the constraint would hold for tenants and not at all for the tier
+-- with the most rows.
+create unique index if not exists idx_soft_nodes_key
+    on aiq.soft_nodes (org_id, kind, key) nulls not distinct;
+create index if not exists idx_soft_nodes_unresolved
+    on aiq.soft_nodes (kind, key) where resolved_node_id is null;
+
+-- 3b. Lake references: the entity's row is in Parquet, not in Postgres.
+--
+-- IDENTITY IS ALWAYS IN POSTGRES. PAYLOAD NEED NOT BE. aiq.nodes never stored
+-- payload -- it stores entity_type + entity_id and lookup hydrates against the
+-- owning table's key -- so nothing in graph-identity.md requires that owning
+-- thing to be a Postgres table. A dataset row is hydrated by a different fetch
+-- (DuckDB over content.dataset_uri) and is otherwise an ordinary vertex.
+create table if not exists aiq.lake_nodes (
+    id            uuid primary key default gen_random_uuid(),
+    dataset       text not null,        -- content.datasets.name
+    row_key       text not null,        -- the dataset's business key for the row
+    label         text,
+    -- A DISPLAY CACHE, and it must be treated as one: it exists so a walk can
+    -- render a hundred vertices without a hundred DuckDB round trips. It is
+    -- not the row, it may be stale, and NOTHING MAY COMPUTE ON IT. The row is
+    -- in the Parquet; content.dataset_uri() names where; that is the only
+    -- authority. The moment something joins or filters on this column, the
+    -- lake has been forked into Postgres and this table has become the copy it
+    -- exists to avoid.
+    attrs         jsonb not null default '{}'::jsonb,
+    org_id        uuid,
+    first_seen_at timestamptz not null default now(),
+    last_seen_at  timestamptz not null default now()
+);
+create unique index if not exists idx_lake_nodes_key
+    on aiq.lake_nodes (org_id, dataset, row_key) nulls not distinct;
+
+-- The move that makes both legal: they are ORDINARY ENTITY TABLES. The
+-- projection gives them nodes/node_keys rows in the same transaction, so
+-- invariant 4 (LOOKUP sees a committed insert) holds with no special case, and
+-- invariant 5 is not bent -- application code writes a typed table it owns and
+-- the projection writes aiq.nodes. Both are PGQ vertices already, because the
+-- vertex table is aiq.nodes.
+--
+-- The canonical key is `kind/key`, the qualified form graph-identity.md calls
+-- unambiguous. It is why ONE entity_type per residence does not collapse two
+-- kinds into one identity.
+--
+-- NOTE the residence scheme is NOT in the key: `shipments/abc-771`, never
+-- `lake:shipments/abc-771`. Residence is a fact about where a row currently
+-- sits, and a dataset promoted into a table must not invalidate every name
+-- that refers to it.
+select aiq.register_entity_table(
+    p_entity_type   => 'soft',
+    p_source_table  => 'aiq.soft_nodes',
+    p_key_expr      => 'n.kind || ''/'' || n.key',
+    p_summary_expr  => 'coalesce(n.label, n.key)',
+    p_org_expr      => 'n.org_id',
+    p_include_where => 'n.resolved_node_id is null');
+
+select aiq.register_entity_table(
+    p_entity_type   => 'lake',
+    p_source_table  => 'aiq.lake_nodes',
+    p_key_expr      => 'n.dataset || ''/'' || n.row_key',
+    p_summary_expr  => 'coalesce(n.label, n.row_key)',
+    p_org_expr      => 'n.org_id');
+-- No include_where on lake: a reference has no promotion path, because the row
+-- it points at is already the real thing. There is nothing to resolve it INTO,
+-- which is exactly what distinguishes a reference from a candidate.
+
+-- ------------------------------------------------------------
+-- 4. The output contract -- one definition, used three ways.
+--
+-- graph-index.md's wire shape, as a JSON Schema. It is the null extractor's
+-- structured_output_schema, the step's output_schema, and what
+-- aiq.is_graph_schema recognises. Defined ONCE here so those three cannot
+-- drift, which is the same reason expand_embed_steps resolves a model in one
+-- place rather than letting an author name it twice.
+--
+-- Short per-item keys are the token argument, and the ordinal is most of it:
+-- naming endpoints by string makes a document that states eight relations
+-- about "Acme Corporation" pay that string sixteen times. An ordinal is one
+-- token. Top-level names are spelled out because they are paid once.
+-- ------------------------------------------------------------
+create or replace function aiq.graph_schema() returns jsonb as $$
+    select jsonb_build_object(
+      'type','object',
+      'required', jsonb_build_array('nodes','edges'),
+      'additionalProperties', false,
+      'properties', jsonb_build_object(
+        'nodes', jsonb_build_object(
+          'type','array',
+          'items', jsonb_build_object(
+            'type','object',
+            'required', jsonb_build_array('k','n'),
+            'additionalProperties', false,
+            'properties', jsonb_build_object(
+              'k', jsonb_build_object('type','string',
+                   'description','kind; optionally pg:/lake:/soft: prefixed'),
+              'n', jsonb_build_object('type','string',
+                   'description','the name as the document wrote it'),
+              'a', jsonb_build_object('type','object')))),
+        'edges', jsonb_build_object(
+          'type','array',
+          'items', jsonb_build_object(
+            'type','object',
+            'required', jsonb_build_array('s','t','r'),
+            'additionalProperties', false,
+            'properties', jsonb_build_object(
+              's', jsonb_build_object('type','integer',
+                   'description','ordinal into nodes, 0-based'),
+              't', jsonb_build_object('type','integer',
+                   'description','ordinal into nodes, 0-based'),
+              'r', jsonb_build_object('type','string',
+                   'enum', (select coalesce(jsonb_agg(relation order by relation),'[]'::jsonb)
+                              from aiq.graph_vocabulary)),
+              'a', jsonb_build_object('type','object'))))));
+$$ language sql stable;
+
+-- Detection exists to REFUSE at definition time, never to route at runtime
+-- (graph-index.md §3). Routing is declared: a workflow names land_graph.
+create or replace function aiq.is_graph_schema(p_schema jsonb) returns boolean as $$
+    select coalesce(
+        p_schema->'properties'->'nodes'->'items'->'properties' ?& array['k','n']
+        and p_schema->'properties'->'edges'->'items'->'properties' ?& array['s','t','r'],
+        false);
+$$ language sql immutable;
+
+-- ------------------------------------------------------------
+-- 5. Type-scoped resolution.
+--
+-- WHY THIS IS NOT aiq.lookup, since duplicating a cascade is normally the
+-- wrong answer here: aiq.lookup returns as soon as a STAGE matches, globally
+-- across types. Filtering its result by entity_type afterwards is not the same
+-- function -- a canonical hit of the wrong type would stop the cascade and
+-- hide a short key of the right one, so "Acme Robotics" as a company would
+-- resolve to nothing because some document happened to be canonically named
+-- the same. A type filter has to live INSIDE the cascade.
+--
+-- If this ships beyond a trial, the consolidation is to give aiq.lookup an
+-- optional entity_type and have this call it. Recorded here rather than left
+-- as an unexplained twin.
+-- ------------------------------------------------------------
+-- ORG SCOPING IS AN EXPLICIT ARGUMENT, NOT AMBIENT RLS, AND THAT IS THE WHOLE
+-- POINT OF THE PARAMETER. This function is SECURITY INVOKER, so a user calling
+-- it directly is filtered by their own policies -- but aiq.upsert_graph is
+-- SECURITY DEFINER (it writes tables the worker holds no grants on), and a
+-- function called from inside a definer runs as the DEFINER. So resolution
+-- inside the write path is not RLS-filtered at all, and without p_org_id a
+-- tenant's document naming another tenant's private company would resolve to
+-- it and hang an edge on it -- a cross-tenant write with nothing raised.
+--
+-- Found by dev/tests/query/06-graph-tenancy.sql §5 rejecting these functions
+-- as definer-and-user-reachable; the grant was the surface bug, and this was
+-- the one underneath it. `org_id is null` is the shared reference tier, which
+-- integration-rbac.sql calls "a real category here, not a loophole."
+create or replace function aiq.resolve_ref(
+    p_entity_type text, p_name text, p_fuzzy boolean default false,
+    p_threshold real default 0.45, p_org_id uuid default null
+) returns uuid as $$
+declare
+    v_norm text := lower(trim(p_name));
+    v_ids  uuid[];
+begin
+    -- 1. exact canonical, scoped to the type AND the caller's tenancy.
+    select array_agg(distinct n.id) into v_ids
+    from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
+    where k.key = v_norm and k.kind = 'canonical' and n.entity_type = p_entity_type
+      and (n.org_id is null or n.org_id is not distinct from p_org_id);
+    if array_length(v_ids,1) = 1 then return v_ids[1]; end if;
+    if array_length(v_ids,1) > 1 then return null; end if;  -- ambiguous: a miss
+
+    -- 2. short / alias.
+    select array_agg(distinct n.id) into v_ids
+    from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
+    where k.key = v_norm and k.kind in ('short','alias') and n.entity_type = p_entity_type
+      and (n.org_id is null or n.org_id is not distinct from p_org_id);
+    if array_length(v_ids,1) = 1 then return v_ids[1]; end if;
+    if array_length(v_ids,1) > 1 then return null; end if;
+
+    -- 3. fuzzy, opt-in, and only over node_keys -- never the data plane.
+    if p_fuzzy then
+        select array_agg(id) into v_ids from (
+            select n.id, max(similarity(k.key, v_norm)) as sim
+            from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
+            where n.entity_type = p_entity_type and k.key % v_norm
+              and (n.org_id is null or n.org_id is not distinct from p_org_id)
+            group by n.id having max(similarity(k.key, v_norm)) >= p_threshold
+            order by 2 desc limit 2) d;
+        -- Exactly one candidate above threshold, or it is a miss. AN AMBIGUOUS
+        -- RESOLUTION IS A MISS, NOT A COIN FLIP -- the same rule add_node_key
+        -- already applies ("refuses an ambiguous target rather than picking
+        -- one"). Picking is wrong silently; a candidate is wrong visibly.
+        if array_length(v_ids,1) = 1 then return v_ids[1]; end if;
+    end if;
+
+    return null;
+end;
+$$ language plpgsql stable security invoker;
+
+-- ------------------------------------------------------------
+-- 6. aiq.upsert_graph -- THE REPOSITORY FUNCTION.
+--
+-- Takes the structure an extractor produced and lands it: resolve every node
+-- to a node id under the residence rules, then write the edges. Everything
+-- else in this file exists to make this one call correct.
+--
+-- p_context: {"resource_id":uuid, "agent":text, "run_id":uuid, "window":int,
+--             "org_id":uuid, "fuzzy":bool}
+-- ------------------------------------------------------------
+create or replace function aiq.upsert_graph(p_graph jsonb, p_context jsonb default '{}'::jsonb)
+returns jsonb as $$
+declare
+    v_nodes   jsonb := p_graph->'nodes';
+    v_edges   jsonb := coalesce(p_graph->'edges', '[]'::jsonb);
+    v_n       int;
+    v_ids     uuid[] := '{}';          -- ordinal -> node id
+    v_res     text[] := '{}';          -- ordinal -> residence, for the receipt
+    v_org     uuid   := (p_context->>'org_id')::uuid;
+    -- FUZZY IS OFF BY DEFAULT, and that default was inverted after running it.
+    --
+    -- The obvious reading -- "resolve_ref implements the cascade, and the
+    -- cascade ends in fuzzy, so use the cascade" -- gives a machine writer
+    -- trigram matching over every name in the deployment. Measured on the test
+    -- fixture: an extracted "Northgate Freight Ltd" bound itself to the
+    -- existing "Northgate Freight" and no candidate was created, so an
+    -- assertion about a company nobody had heard of landed on a real company's
+    -- vertex with nothing raised.
+    --
+    -- That is the exact failure this file refuses everywhere else. Picking is
+    -- wrong silently; a candidate is wrong visibly. A human typing LOOKUP is
+    -- present to judge a fuzzy hit; an extractor is not, and its output is
+    -- durable. So the machine path resolves on EXACT canonical, short and
+    -- alias keys only -- which is what makes populating aliases a real step
+    -- (graph-demo.sql §2) rather than a nicety -- and fuzzy is available
+    -- per-call for a caller that has a reason.
+    v_fuzzy   boolean := coalesce((p_context->>'fuzzy')::boolean, false);
+    v_e       jsonb;
+    v_node    jsonb;
+    v_k       text; v_scheme text; v_kind text; v_name text; v_key text;
+    v_id      uuid; v_soft uuid; v_lake uuid;
+    v_s int; v_t int;
+    v_rel text; v_w real;
+    v_prov jsonb;
+    v_counts jsonb := jsonb_build_object('pg',0,'lake',0,'soft',0);
+    v_edges_written int := 0;
+    v_self int := 0;
+    v_merged int := 0;
+    v_before bigint;
+begin
+    -- ---- Validate. This gate is LOAD-BEARING, not belt-and-braces: the
+    -- step-level output_schema check is reported unimplemented by
+    -- workflow.compiler_capabilities(), so nothing upstream is checking shape
+    -- today. An error here names the agent so the reader knows who to blame.
+    if v_nodes is null or jsonb_typeof(v_nodes) <> 'array' then
+        raise exception 'graph payload has no `nodes` array (agent: %)',
+            coalesce(p_context->>'agent','?');
+    end if;
+    if jsonb_typeof(v_edges) <> 'array' then
+        raise exception 'graph payload `edges` is not an array (agent: %)',
+            coalesce(p_context->>'agent','?');
+    end if;
+    v_n := jsonb_array_length(v_nodes);
+
+    -- ---- Resolve, BY ORDINAL POSITION, from the list as emitted.
+    --
+    -- G5: ordinals are resolved exactly once, here, and nothing may reorder,
+    -- filter or dedupe v_nodes first. An ordinal is a POSITIONAL reference, so
+    -- a filter applied before this loop silently rewires every edge -- an edge
+    -- from the wrong company to the wrong person, no error, and a graph that
+    -- goes on answering confidently. Deduplication is a dedup of RESOLVED IDS,
+    -- after this loop, never of the emitted list.
+    for i in 0 .. greatest(v_n - 1, 0) loop
+        exit when v_n = 0;
+        v_node := v_nodes -> i;
+        v_k    := lower(trim(coalesce(v_node->>'k','')));
+        v_name := trim(coalesce(v_node->>'n',''));
+        if v_k = '' or v_name = '' then
+            raise exception 'node ordinal % has an empty kind or name (agent: %)',
+                i, coalesce(p_context->>'agent','?');
+        end if;
+
+        -- Residence scheme, if the extractor pinned one. Bare is the normal
+        -- case: a cheap model does not know where anything in this deployment
+        -- lives, and asking it to say would be asking it to hallucinate
+        -- infrastructure. The scheme is for a TYPED extractor that knows what
+        -- it is mapping onto.
+        v_scheme := null;
+        if strpos(v_k, ':') > 0 then
+            v_scheme := split_part(v_k, ':', 1);
+            v_kind   := split_part(v_k, ':', 2);
+            if v_scheme not in ('pg','lake','soft') then
+                raise exception
+                    'node ordinal % has residence scheme ''%'', which is not one of '
+                    'pg/lake/soft. A kind containing '':'' is read as a scheme.', i, v_scheme;
+            end if;
+        else
+            v_kind := v_k;
+        end if;
+        v_key := lower(trim(v_name));
+        v_id  := null;
+
+        -- (a) pg: the kind names a registered entity type and the name
+        --     resolves. The edge lands on the REAL typed vertex, and PGQ walks
+        --     it as that type because aiq.nodes.entity_type already says so.
+        if coalesce(v_scheme,'pg') = 'pg'
+           and exists (select 1 from aiq.entity_registry where entity_type = v_kind) then
+            v_id := aiq.resolve_ref(v_kind, v_name, v_fuzzy, 0.45, v_org);
+            if v_id is not null then
+                v_counts := jsonb_set(v_counts, '{pg}',
+                            to_jsonb((v_counts->>'pg')::int + 1));
+                v_res := v_res || 'pg'::text;
+            end if;
+        end if;
+
+        -- (b) lake: the kind names a registered dataset. A reference is
+        --     CREATED rather than resolved-or-refused, and the asymmetry with
+        --     (c) is the point: refusing to invent a `companies` row is right
+        --     because that table has an owner, an inclusion predicate and a
+        --     projection that a back-door insert would bypass. aiq.lake_nodes
+        --     has none of those -- it is a reference table this path owns, and
+        --     writing a pointer to a Parquet row is not writing the row.
+        --
+        --     The DATASET is checked; the row_key is taken on trust, because
+        --     checking it means a DuckDB read from inside a Postgres function.
+        --     A dangling reference is a known gap (graph-index.md §9).
+        if v_id is null
+           and coalesce(v_scheme,'') in ('lake','')
+           and exists (select 1 from content.datasets where name = v_kind) then
+            insert into aiq.lake_nodes (dataset, row_key, label, attrs, org_id)
+            values (v_kind, v_key, v_name, coalesce(v_node->'a','{}'::jsonb), v_org)
+            on conflict (org_id, dataset, row_key) do update
+                set last_seen_at = now(),
+                    label = coalesce(aiq.lake_nodes.label, excluded.label),
+                    attrs = content.merge_policy(aiq.lake_nodes.attrs, excluded.attrs)
+            returning id into v_lake;
+            -- The projection fired with the statement above, so the node
+            -- exists NOW -- invariant 4, with no special case.
+            select id into v_id from aiq.nodes
+             where entity_type = 'lake' and entity_id = v_lake;
+            v_counts := jsonb_set(v_counts, '{lake}', to_jsonb((v_counts->>'lake')::int + 1));
+            v_res := v_res || 'lake'::text;
+        elsif v_scheme = 'lake' and v_id is null then
+            raise exception
+                'node ordinal % pins residence lake:% but no dataset named ''%'' is '
+                'registered in content.datasets. A pinned residence is a claim by the '
+                'EXTRACTOR AUTHOR, not by the model, so it is refused rather than '
+                'downgraded to a candidate.', i, v_kind, v_kind;
+        end if;
+
+        -- (c)/(d) soft: a registered kind whose name did not resolve, or a
+        --     kind nothing knows. Either way a CANDIDATE, carrying the kind it
+        --     claimed. It is not a company; binding it to one is entity
+        --     resolution (brief.md §4's tiered cascade), a separate and later
+        --     job. What this contributes is the claim, written down with its
+        --     provenance, so that cascade has something to resolve.
+        if v_id is null then
+            insert into aiq.soft_nodes (kind, key, label, attrs, org_id)
+            values (v_kind, v_key, v_name, coalesce(v_node->'a','{}'::jsonb), v_org)
+            on conflict (org_id, kind, key) do update
+                set last_seen_at = now(),
+                    label = coalesce(aiq.soft_nodes.label, excluded.label),
+                    attrs = content.merge_policy(aiq.soft_nodes.attrs, excluded.attrs)
+            returning id into v_soft;
+            select id into v_id from aiq.nodes
+             where entity_type = 'soft' and entity_id = v_soft;
+            v_counts := jsonb_set(v_counts, '{soft}', to_jsonb((v_counts->>'soft')::int + 1));
+            v_res := v_res || 'soft'::text;
+        end if;
+
+        v_ids := v_ids || v_id;
+    end loop;
+
+    -- ---- Edges.
+    for v_e in select value from jsonb_array_elements(v_edges) loop
+        v_s := (v_e->>'s')::int;
+        v_t := (v_e->>'t')::int;
+        v_rel := lower(trim(v_e->>'r'));
+
+        -- Out of range RAISES rather than skipping. A dropped edge is a hole
+        -- in a graph that still answers questions, which is worse than a run
+        -- that failed loudly.
+        if v_s is null or v_t is null or v_s < 0 or v_t < 0 or v_s >= v_n or v_t >= v_n then
+            raise exception
+                'edge references node ordinal s=%, t=% but only % nodes were emitted. '
+                'Ordinals are positions in the `nodes` array as the model wrote it.',
+                v_s, v_t, v_n;
+        end if;
+        if not exists (select 1 from aiq.graph_vocabulary where relation = v_rel) then
+            raise exception
+                'relation ''%'' is not in aiq.graph_vocabulary. The vocabulary is closed: '
+                'an extractor that can emit anything cannot be checked, costed, or '
+                'swapped for a cheaper one.', v_rel;
+        end if;
+
+        -- A self-edge is a model artefact ("Acme, a subsidiary of Acme"), not
+        -- a wiring bug, so it is dropped -- but COUNTED IN THE RECEIPT, never
+        -- silently, which is how this collection has previously reported
+        -- success while losing data.
+        if v_ids[v_s+1] = v_ids[v_t+1] then
+            v_self := v_self + 1;
+            continue;
+        end if;
+
+        select machine_weight into v_w from aiq.graph_vocabulary where relation = v_rel;
+
+        -- Provenance: WHERE THIS EDGE CAME FROM, and it is not bookkeeping --
+        -- it is what makes the machine tier separable from the authored tier.
+        -- An edge with no provenance did not come from here.
+        --
+        -- Edge attributes ride INSIDE the source entry rather than in a column
+        -- of their own, and that is deliberate: "since 2019" is something a
+        -- particular document asserted, not a property of the edge in general.
+        -- Two documents may disagree, and a column would have to pick.
+        v_prov := jsonb_build_object(
+            'tier','machine',
+            'sources', jsonb_build_array(jsonb_strip_nulls(jsonb_build_object(
+                'resource_id', p_context->>'resource_id',
+                'agent',       p_context->>'agent',
+                'run_id',      p_context->>'run_id',
+                'window',      p_context->'window',
+                'attrs',       nullif(v_e->'a','{}'::jsonb),
+                'at',          to_char(now(),'YYYY-MM-DD"T"HH24:MI:SSOF')))));
+
+        select count(*) into v_before from aiq.edges
+         where src_id = v_ids[v_s+1] and dst_id = v_ids[v_t+1] and relation = v_rel;
+
+        insert into aiq.edges (src_id, dst_id, relation, weight, provenance, org_id)
+        values (v_ids[v_s+1], v_ids[v_t+1], v_rel, v_w, v_prov, v_org)
+        -- THE SAME EDGE FROM TWO DOCUMENTS IS ONE ROW, because edge identity is
+        -- (src, dst, relation). The second assertion merges into the
+        -- provenance list rather than replacing it -- and the resulting count
+        -- IS a distinct-resource count, because a document-level extractor
+        -- emits each edge once per document. It is still the weak, gameable
+        -- proxy brief.md §4 warns about, and it is NOT a trust score.
+        on conflict (src_id, dst_id, relation) do update
+            -- `||` on the OBJECT, and coalesce on the array, because this edge
+            -- may not have been written by this path at all. Written as
+            -- jsonb_set(existing, '{sources}', existing->'sources' || new) it
+            -- is a silent total erase: an AUTHORED edge has no `sources` key,
+            -- so `existing->'sources'` is NULL, `NULL || jsonb` is NULL, and
+            -- jsonb_set returns NULL -- the whole provenance column, including
+            -- whatever the analyst put there. The NOT NULL constraint caught
+            -- it here only by luck; on a nullable column it would have been a
+            -- silent data loss on the most ordinary event there is, a machine
+            -- agreeing with a human. Found by asserting §11.
+            set provenance = aiq.edges.provenance || jsonb_build_object(
+                    'sources',
+                    coalesce(aiq.edges.provenance->'sources', '[]'::jsonb)
+                    || (case when coalesce(aiq.edges.provenance->'sources','[]'::jsonb) @>
+                                  jsonb_build_array(jsonb_build_object(
+                                      'resource_id', p_context->>'resource_id'))
+                             then '[]'::jsonb
+                             else excluded.provenance->'sources' end)),
+                -- GREATEST, not least: weight is the BEST provenance tier that
+                -- ever asserted this edge. A cheap model agreeing with an
+                -- analyst adds nothing, but it must not subtract -- and
+                -- `least` did exactly that, quietly demoting an authored edge
+                -- from 1.0 to the machine prior and reordering every walk
+                -- through it. Corroboration by a weaker source is not evidence
+                -- against a stronger one.
+                weight = greatest(aiq.edges.weight, excluded.weight);
+
+        if v_before > 0 then v_merged := v_merged + 1; else v_edges_written := v_edges_written + 1; end if;
+    end loop;
+
+    -- A receipt (outputs.md §2): counts and what was written, never the rows.
+    return jsonb_build_object(
+        'nodes', v_n,
+        'residence', v_counts,
+        'edges_new', v_edges_written,
+        'edges_merged', v_merged,
+        'self_edges_dropped', v_self,
+        'node_ids', to_jsonb(v_ids));
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
+-- 7. The two workflow entry points (graph-index.md §5).
+--
+-- The split is FORCED BY THE ENGINE, not chosen. A matrix step's result is
+-- {"result":{"task_id":..,"fanout":N}}, which is why land_embeddings can take
+-- a task id; an ordinary step's result is its payload, and a step has NO
+-- TEMPLATE FOR ITS OWN TASK ID. Document granularity makes the ordinary upload
+-- a single agent step, so it has no task id to hand a landing function and
+-- must pass the graph itself -- which is fine here and would not have been for
+-- embeddings, because a graph is a few KB and a fan-out of 1536-dim vectors is
+-- not.
+-- ------------------------------------------------------------
+create or replace function aiq.land_graph(p_graph jsonb, p_resource_id uuid default null)
+returns jsonb as $$
+declare v_org uuid; v_agent text;
+begin
+    if p_resource_id is not null then
+        select org_id into v_org from content.resources where id = p_resource_id;
+    end if;
+    -- No run guard is needed and none is written: this function takes a
+    -- payload and a resource id from its own run's input, so there is no task
+    -- id to point at somebody else's run. land_graph_fanout, which does take
+    -- one, carries the guard.
+    return aiq.upsert_graph(p_graph, jsonb_build_object(
+        'resource_id', p_resource_id, 'org_id', v_org,
+        'run_id', nullif(current_setting('workflow.current_run_id', true),''),
+        'agent', 'structure_null'));
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+create or replace function aiq.land_graph_fanout(p_matrix_task uuid)
+returns jsonb as $$
+declare
+    v_run uuid; v_cur text; v_child record;
+    v_missing int; v_total int;
+    v_acc jsonb := jsonb_build_object('graphs',0,'edges_new',0,'edges_merged',0,'self_edges_dropped',0);
+    v_r jsonb;
+begin
+    select run_id into v_run from workflow.tasks where id = p_matrix_task;
+    if not found then raise exception 'task % not found', p_matrix_task; end if;
+
+    -- The same guard workflow.matrix_outputs() uses, for the same reason: a
+    -- step may read the fan-out of its OWN run. Without it a registered step
+    -- function handed an arbitrary task id is a read of someone else's run.
+    v_cur := nullif(current_setting('workflow.current_run_id', true), '');
+    if v_cur is null or v_cur::uuid <> v_run then
+        raise exception
+            'task % belongs to run %, which is not the run being executed. Pass '
+            '{{steps.<id>.result.task_id}} rather than a task id from elsewhere.',
+            p_matrix_task, v_run;
+    end if;
+
+    select count(*) into v_total from workflow.tasks where matrix_parent_id = p_matrix_task;
+    -- A child that succeeded and left no `result` was offloaded as an artifact.
+    -- Raised rather than skipped: a document silently absent from the index is
+    -- a hole in a graph that still answers questions.
+    select count(*) into v_missing from workflow.tasks
+     where matrix_parent_id = p_matrix_task and status = 'done'
+       and (output is null or not (output ? 'result'));
+    if v_missing > 0 then
+        raise exception
+            '% of % graph children completed with no payload -- they were offloaded as '
+            'artifacts because the response exceeded workflow.max_payload_bytes. Raise '
+            'the cap for the queue that indexes, or window the document.', v_missing, v_total;
+    end if;
+
+    for v_child in
+        select t.output->'result' as graph, t.input->'item'->>'resource_id' as rid,
+               t.input->'item'->'window_ordinal' as win
+        from workflow.tasks t
+        where t.matrix_parent_id = p_matrix_task and t.status = 'done'
+    loop
+        v_r := aiq.upsert_graph(v_child.graph, jsonb_build_object(
+            'resource_id', v_child.rid, 'run_id', v_run,
+            'window', v_child.win, 'agent', 'structure_null'));
+        v_acc := jsonb_build_object(
+            'graphs',             (v_acc->>'graphs')::int + 1,
+            'edges_new',          (v_acc->>'edges_new')::int + (v_r->>'edges_new')::int,
+            'edges_merged',       (v_acc->>'edges_merged')::int + (v_r->>'edges_merged')::int,
+            'self_edges_dropped', (v_acc->>'self_edges_dropped')::int + (v_r->>'self_edges_dropped')::int);
+    end loop;
+
+    return v_acc || jsonb_build_object('children', v_total);
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
+-- 8. Promotion -- and it must rewrite edges BEFORE it evicts.
+--
+-- THE SHARP EDGE OF THE WHOLE DESIGN. aiq.edges cascades on node delete, so
+-- setting resolved_node_id (which makes the row fail the inclusion predicate,
+-- which evicts the candidate node) DESTROYS EVERY EDGE THE INDEXER WROTE about
+-- it -- which is the entire product.
+--
+-- And the conflict in step 1/2 is the EXPECTED state, not a corner case: the
+-- reason a candidate is being promoted is usually that it and the real node
+-- were talked about in the same corpus, so a shared edge is normal. A
+-- promotion that fails on the unique constraint is an outage; one that drops
+-- the conflicting edge is silent loss. Merging is the only correct option.
+-- ------------------------------------------------------------
+create or replace function aiq.promote_soft_node(p_soft_id uuid, p_target_node_id uuid)
+returns jsonb as $$
+declare
+    v_cand uuid; v_moved int := 0; v_merged int := 0; v_self int := 0; v_c int;
+begin
+    select id into v_cand from aiq.nodes where entity_type = 'soft' and entity_id = p_soft_id;
+    if v_cand is null then
+        raise exception 'soft node % has no registry node (already promoted?)', p_soft_id;
+    end if;
+    if not exists (select 1 from aiq.nodes where id = p_target_node_id) then
+        raise exception 'target node % does not exist', p_target_node_id;
+    end if;
+
+    -- 1/2. Repoint, merging provenance on conflict.
+    for v_c in select 1 loop end loop;  -- (no-op; keeps the block shape readable)
+
+    with moved as (
+        update aiq.edges e set src_id = p_target_node_id
+        where e.src_id = v_cand
+          and not exists (select 1 from aiq.edges x
+                          where x.src_id = p_target_node_id and x.dst_id = e.dst_id
+                            and x.relation = e.relation)
+        returning 1)
+    select count(*) into v_c from moved;  v_moved := v_moved + v_c;
+
+    with merged as (
+        update aiq.edges x
+           set provenance = jsonb_set(x.provenance, '{sources}',
+                            (x.provenance->'sources') || (e.provenance->'sources')),
+               weight = least(x.weight, e.weight)
+          from aiq.edges e
+         where e.src_id = v_cand and x.src_id = p_target_node_id
+           and x.dst_id = e.dst_id and x.relation = e.relation
+        returning 1)
+    select count(*) into v_c from merged;  v_merged := v_merged + v_c;
+    delete from aiq.edges where src_id = v_cand;
+
+    with moved as (
+        update aiq.edges e set dst_id = p_target_node_id
+        where e.dst_id = v_cand
+          and not exists (select 1 from aiq.edges x
+                          where x.dst_id = p_target_node_id and x.src_id = e.src_id
+                            and x.relation = e.relation)
+        returning 1)
+    select count(*) into v_c from moved;  v_moved := v_moved + v_c;
+
+    with merged as (
+        update aiq.edges x
+           set provenance = jsonb_set(x.provenance, '{sources}',
+                            (x.provenance->'sources') || (e.provenance->'sources')),
+               weight = least(x.weight, e.weight)
+          from aiq.edges e
+         where e.dst_id = v_cand and x.dst_id = p_target_node_id
+           and x.src_id = e.src_id and x.relation = e.relation
+        returning 1)
+    select count(*) into v_c from merged;  v_merged := v_merged + v_c;
+    delete from aiq.edges where dst_id = v_cand;
+
+    -- 3. An edge the repoint made self-referential.
+    delete from aiq.edges where src_id = p_target_node_id and dst_id = p_target_node_id;
+    get diagnostics v_self = row_count;
+
+    -- 4. Only now: evict. The candidate stops satisfying the inclusion
+    --    predicate and the projection's UPDATE eviction removes its node.
+    update aiq.soft_nodes set resolved_node_id = p_target_node_id where id = p_soft_id;
+
+    return jsonb_build_object('moved', v_moved, 'merged', v_merged,
+                              'self_removed', v_self, 'target', p_target_node_id);
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
+-- 9. The default mapping agent -- data, not code.
+--
+-- Authored form, for the record (agentic/brief.md §6: the JSON Schema a
+-- pydantic model emits IS the agent -- the docstring is the system prompt and
+-- the properties are the output contract):
+--
+--   class GraphMap(BaseModel):
+--       """Read the document and return only what it NAMES and how those
+--       things CONNECT. Use a `k` from the kinds listed; if none fits, invent
+--       a lowercase singular noun. `n` is the name exactly as written. Edges
+--       reference nodes by their ORDINAL in your `nodes` list, and `r` must be
+--       one of the listed relations. Assert nothing the document does not
+--       state."""
+--       model_config = ConfigDict(json_schema_extra={
+--           "name": "structure_null", "model": "claude-haiku-4-5-20251001",
+--           "category": "extractor", "audience": "internal"})
+--       nodes: list[GraphNode]
+--       edges: list[GraphEdge]
+--
+-- There is no `prompt` key in that convention -- the system prompt is the
+-- schema's description, which is the docstring. Registering it here is the
+-- deployment step, and it is an INSERT.
+--
+-- category='extractor' is not decoration: agentic.schema.sql enforces that an
+-- extractor declares a structured_output_schema, because the shape is what
+-- makes N extractions combinable and what makes a bad answer RETRYABLE rather
+-- than silently wrong.
+-- ------------------------------------------------------------
+create or replace function aiq.install_structure_null(p_model text default null)
+returns text as $$
+declare v_row agentic.agents;
+begin
+    v_row := agentic.upsert_agent(jsonb_build_object(
+        'name', 'structure_null',
+        'model', p_model,
+        'category', 'extractor',
+        'audience', 'internal',
+        'tags', jsonb_build_array('graph','structure','null-extractor'),
+        'system_prompt',
+            'Read the document and return only what it NAMES and how those things '
+         || 'CONNECT. Use a `k` from the kinds listed; if none fits, invent a '
+         || 'lowercase singular noun. `n` is the name exactly as written. Edges '
+         || 'reference nodes by their ORDINAL in your `nodes` list, and `r` must be '
+         || 'one of the listed relations. Assert nothing the document does not state.',
+        'structured_output_schema', aiq.graph_schema()));
+    return 'structure_null: ' || v_row.id::text
+        || ' (' || coalesce(v_row.model,'no model pinned') || ')';
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
+-- 10. Workflow registration and grants.
+-- ------------------------------------------------------------
+select workflow.register_step_function(
+    'land_graph', 'aiq.land_graph', array['jsonb','uuid'], 60000,
+    'Upsert one extracted graph into nodes/edges');
+
+select workflow.register_step_function(
+    'land_graph_fanout', 'aiq.land_graph_fanout', array['uuid'], 120000,
+    'Upsert every graph a matrix fan-out produced');
+
+-- REVOKE FROM PUBLIC FIRST. Postgres grants EXECUTE on a new function to
+-- PUBLIC by default, so "granted to worker" is not a restriction -- it is an
+-- addition to an access every role already had. Every SECURITY DEFINER
+-- function below was therefore reachable by `authenticated`, which is exactly
+-- what query/06 §5 refuses: a definer function a user can call must either do
+-- its own authorization check or not be callable by a user at all. These are
+-- worker-facing, so the grant IS the authorization -- but only once the
+-- default one is taken away.
+revoke execute on function aiq.upsert_graph(jsonb, jsonb)                  from public;
+revoke execute on function aiq.land_graph(jsonb, uuid)                     from public;
+revoke execute on function aiq.land_graph_fanout(uuid)                     from public;
+revoke execute on function aiq.promote_soft_node(uuid, uuid)               from public;
+revoke execute on function aiq.register_graph_vocabulary(jsonb)            from public;
+revoke execute on function aiq.install_structure_null(text)                from public;
+
+grant execute on function aiq.upsert_graph(jsonb, jsonb)      to worker;
+grant execute on function aiq.land_graph(jsonb, uuid)         to worker;
+grant execute on function aiq.land_graph_fanout(uuid)         to worker;
+-- promote_soft_node is entity resolution's write path, which is background
+-- work, not a user action -- so it is worker-facing too.
+grant execute on function aiq.promote_soft_node(uuid, uuid)   to worker;
+
+-- The read helpers are SECURITY INVOKER, so a user calling them is filtered by
+-- their own policies and the grant is safe.
+grant execute on function aiq.resolve_ref(text, text, boolean, real, uuid)
+                                                              to worker, authenticated;
+grant execute on function aiq.graph_schema()                  to worker, authenticated;
+grant execute on function aiq.is_graph_schema(jsonb)          to worker, authenticated;
+grant select on aiq.soft_nodes, aiq.lake_nodes, aiq.graph_vocabulary to authenticated, api_viewer;
+
+-- ------------------------------------------------------------
+-- 11. The default vocabulary, installed rather than left to a first caller.
+--
+-- Ships as DATA because it is not a preference: aiq.edges refuses an
+-- out-of-catalogue relation, so a deployment whose vocabulary is empty cannot
+-- land a single extracted edge and the failure is a catalogue error rather
+-- than "nobody registered a vocabulary". The agent is NOT installed here --
+-- it is one `select aiq.install_structure_null()` away, the same shape as
+-- content.install_ingest_workflow(), because which model to point it at is a
+-- deployment's decision and an install may not make it.
+--
+-- The relational subset of extraction.md's motif list, plus a small generic
+-- remainder, so the null extractor and the templated extractors land in ONE
+-- vocabulary rather than two that drift. Generic on purpose: this runs over a
+-- corpus with no known format, and a rich vocabulary would mostly be a menu a
+-- cheap model picks from at random. A source that has earned a template should
+-- use the template's motifs instead.
+--
+-- IT IS AN ARGUMENT, NOT A MEASUREMENT, unlike extraction.md's eight motifs,
+-- which came from 32 real documents. The first operational task after this
+-- ships is to count which of these are ever emitted and which never resolve.
+-- ------------------------------------------------------------
+select aiq.register_graph_vocabulary($v$[
+  {"relation":"is_a",            "machine_weight":0.6,  "description":"classification (extraction.md motif)"},
+  {"relation":"part_of",         "machine_weight":0.6,  "description":"composition, ownership (motif)"},
+  {"relation":"succession",      "machine_weight":0.5,  "description":"replacement over time (motif)"},
+  {"relation":"causal",          "machine_weight":0.25, "description":"deliberately low-confidence (motif)"},
+  {"relation":"mentions",        "machine_weight":0.4,  "description":"co-occurrence; the weakest useful edge"},
+  {"relation":"located_in",      "machine_weight":0.6,  "description":"physical or jurisdictional containment"},
+  {"relation":"affiliated_with", "machine_weight":0.5,  "description":"connected, unspecified"},
+  {"relation":"owns",            "machine_weight":0.6,  "description":"ownership or control"},
+  {"relation":"supplies",        "machine_weight":0.6,  "description":"provides goods or services to"},
+  {"relation":"party_to",        "machine_weight":0.7,  "description":"a named party of an agreement"},
+  {"relation":"binds",           "machine_weight":0.7,  "description":"a clause imposing an obligation on a party"},
+  {"relation":"contains",        "machine_weight":0.8,  "description":"a document containing a part of itself"}
+]$v$::jsonb);
+
+
+-- ============================================================
+-- world-model-ingestion/ingestion.sql
+--   the default ingestion pipeline -- LAST: it installs a workflow, so it needs the lint (agentic), the embedding registry and the graph indexer to already exist
+-- ============================================================
+
+-- ============================================================
+-- The default ingestion pipeline.
+--
+-- A SEPARATE FILE, APPLIED LAST, and the reason is a fact about
+-- workflow.define_yaml rather than a preference: defining a workflow LINTS it,
+-- and the lint checks `agent:` steps against agentic.agents. So any file that
+-- defines a workflow depends on the agentic schema, which loads after this
+-- subsystem -- and putting these lines in integration.sql broke `CREATE
+-- EXTENSION percolate` on a clean database with
+--
+--     ERROR: relation "agentic.agents" does not exist
+--
+-- from inside a DO block about content channels. Found by installing from
+-- scratch rather than by reading; the running dev database had agentic
+-- already, so the same statements had worked there for hours.
+--
+-- Everything here therefore comes after every schema in the collection. It is
+-- the only file in world-model-ingestion that installs BEHAVIOUR rather than
+-- structure: a workflow definition and the channel that points at it.
+-- ============================================================
+
+-- ------------------------------------------------------------
+-- The default ingestion workflow, installed as a FUNCTION rather than as a
+-- literal define_yaml() call, for one concrete reason: `embed:` resolves its
+-- model at DEFINITION time (aiq.expand_embed_steps), so a definition
+-- containing one cannot be written by an extension script that may be
+-- installing into a database with no embedding model registered. It would
+-- fail the install, and the remedy -- "register a model first" -- is not
+-- something an extension may demand.
+--
+-- So the shape of the pipeline that gets installed depends on what the
+-- deployment can actually do, and the function SAYS WHICH ONE IT INSTALLED
+-- rather than quietly picking:
+--
+--   * with an embedding model: parse -> embed (matrix over the chunks) ->
+--     land. Upload to answerable, with nothing to run but the ingest worker.
+--   * without one: parse only. The chunks exist and TEXT mode searches them;
+--     SEMANTIC and SEARCH do not, because there is no space to rank in. Call
+--     this function again after registering a model and the pipeline upgrades
+--     itself -- workflow.define_yaml versions the definition, so runs already
+--     in flight keep the shape they started with.
+--
+-- The parse step is `work:` because chunking is the one thing here that needs
+-- code you did not get from this repository -- brief.md §3 is explicit that
+-- `chunk:` was refused as a shorthand because the strategy is a decision the
+-- author has to make. percolate-core ships a default implementation of that
+-- decision; the step kind is what keeps it replaceable.
+-- ------------------------------------------------------------
+-- The graph branch's extractor call, built from the AGENT ROW.
+--
+-- graph-index.md §6.1 writes this step as `agent: structure_null`, and that is
+-- the right end state: an extractor is a row in agentic.agents, so changing its
+-- prompt or its schema never touches a workflow. It cannot run today, and the
+-- reason is a seam rather than an omission -- MEASURED, not assumed:
+--
+--   * the compiler emits `{{env.P8_AGENT_URL}}/v1/chat/completions` for an
+--     `agent:` step (percolate_parser/src/lib.rs);
+--   * the Agent Runtime serves `POST /chat`, which is SSE and refuses
+--     `stream: false` by design, plus `POST /internal/run`, which is the
+--     machine-to-machine trigger the brief actually specifies;
+--   * so the url an `agent:` step calls is a route no runtime serves, and
+--     `select count(*) from agentic.runs where workflow_task_id is not null`
+--     is 0 on every deployment -- which workflow-engine/outputs.md §3 already
+--     reports without naming this as the cause.
+--
+-- What this function does instead keeps the part that matters and gives up the
+-- part that is broken: THE EXTRACTOR IS STILL A ROW. The system prompt and the
+-- output schema are read from agentic.agents at definition time, so the agent
+-- is still the unit of authorship; only the transport is an ordinary `rest:`
+-- call to a chat endpoint rather than a call to the runtime. When the seam is
+-- closed this becomes `agent: structure_null` and this function is deleted --
+-- and because the prompt and schema come from the same row either way, the
+-- extraction does not change when it does.
+create or replace function aiq.extractor_call(
+    p_agent      text,
+    p_model      text,
+    p_text       text,
+    p_endpoint   text default 'https://api.openai.com/v1/chat/completions',
+    p_credential text default 'LLM_API_KEY'
+) returns jsonb as $$
+declare a agentic.agents;
+begin
+    select * into a from agentic.agents where name = p_agent;
+    if not found then
+        raise exception
+            'no agent named ''%'' -- an extractor is a row, and this one is not '
+            'installed. Run: select aiq.install_structure_null(''%'');',
+            p_agent, coalesce(p_model, 'gpt-4o-mini');
+    end if;
+    if a.structured_output_schema is null then
+        raise exception
+            'agent ''%'' declares no structured_output_schema, so there is no shape '
+            'to land. An extractor without one is a model call with extra steps.',
+            p_agent;
+    end if;
+    if not aiq.is_graph_schema(a.structured_output_schema) then
+        raise exception
+            'agent ''%'' does not declare a GRAPH schema (nodes with k/n, edges with '
+            's/t/r), so aiq.land_graph cannot land what it returns. It is an '
+            'extractor for something else.', p_agent;
+    end if;
+
+    return jsonb_build_object(
+        'url',        p_endpoint,
+        'method',     'POST',
+        'timeout_ms', 120000,
+        'credential_ref', p_credential,
+        -- The vectorless half of what the runtime would have done: system
+        -- prompt from the row, schema from the row, text from the matrix item.
+        'body', jsonb_build_object(
+            'model', coalesce(p_model, a.model),
+            'temperature', 0,
+            'messages', jsonb_build_array(
+                jsonb_build_object('role','system','content', a.system_prompt),
+                jsonb_build_object('role','user','content', p_text)),
+            'response_format', jsonb_build_object(
+                'type','json_schema',
+                'json_schema', jsonb_build_object(
+                    'name','graph', 'schema', a.structured_output_schema))),
+        'jsonpath',   'choices.0.message.content',
+        -- Kept beside the call for the same reason embed_call keeps its
+        -- marker: the task row should say what it IS, not leave a reader to
+        -- infer an intent from a url and a body.
+        'extractor',  jsonb_build_object('agent', a.name,
+                                         'model', coalesce(p_model, a.model)));
+end;
+$$ language plpgsql stable;
+
+revoke execute on function aiq.extractor_call(text, text, text, text, text) from public;
+grant execute on function aiq.extractor_call(text, text, text, text, text) to authenticated;
+
+-- ------------------------------------------------------------
+-- The graph fan-in, with the two things running it found.
+--
+-- aiq.land_graph_fanout does this job and is the function graph-index.md
+-- specifies. This one exists beside it rather than instead of it, because a
+-- real extraction over real documents hit two things that function does not
+-- handle -- and one of them is a decision in its own file that is not mine to
+-- overturn:
+--
+--  1. A MATRIX TEMPLATE CANNOT DECLARE output_schema. The compiler accepts
+--     queue, rate_key, rest, embed, agent, work, input, session, jsonpath and
+--     matrix inside a template -- and not output_schema, which is the field
+--     that parses a model's JSON-in-a-string answer into an object before
+--     storing it (workflow.complete_task §21). So every child of a graph
+--     fan-out lands a jsonb STRING where a graph is expected. This is the
+--     fourth thing `matrix:` has answered wrongly by omission, after nested
+--     fan-out, the successors that had to be rewired, and `template: {embed:}`
+--     -- and the fix belongs in the parser, at which point this function
+--     collapses into theirs.
+--
+--  2. A MODEL EMITS EDGE ORDINALS THAT ARE OUT OF RANGE. Measured on the first
+--     real run: gpt-4o-mini at temperature 0, eight nodes, an edge citing
+--     s=7 t=8. aiq.upsert_graph raises on that, deliberately and with a stated
+--     argument ("a dropped edge is a hole in a graph that still answers
+--     questions, which is worse than a run that failed loudly"), and the
+--     argument is right about a graph and wrong about a model: an ordinal past
+--     the end is not a hole in the evidence, it is the extractor mis-numbering
+--     a list, and it is ordinary rather than exceptional. So the edge is
+--     dropped HERE, before upsert_graph sees it, and COUNTED in the receipt --
+--     which keeps their invariant exactly as written: what reaches upsert_graph
+--     is coherent, and nothing is lost silently.
+create or replace function content.land_graph_windows(p_matrix_task uuid)
+returns jsonb as $$
+declare
+    v_run     uuid;
+    v_cur     text;
+    v_child   record;
+    v_graph   jsonb;
+    v_nodes   int;
+    v_edges   jsonb;
+    v_kept    jsonb;
+    v_e       jsonb;
+    v_dropped int := 0;
+    v_offvocab int := 0;
+    v_total   int := 0;
+    v_r       jsonb;
+    v_acc     jsonb := jsonb_build_object('graphs',0,'edges_new',0,'edges_merged',0,
+                                          'self_edges_dropped',0);
+begin
+    select run_id into v_run from workflow.tasks where id = p_matrix_task;
+    if not found then
+        raise exception 'task % not found', p_matrix_task;
+    end if;
+    -- The same guard matrix_outputs uses: a step may read the fan-out of its
+    -- OWN run, and a registered function handed an arbitrary task id would be
+    -- a read of someone else's.
+    v_cur := nullif(current_setting('workflow.current_run_id', true), '');
+    if v_cur is null or v_cur::uuid <> v_run then
+        raise exception
+            'task % belongs to run %, which is not the run being executed. Pass '
+            '{{steps.<id>.result.task_id}} rather than a task id from elsewhere.',
+            p_matrix_task, v_run;
+    end if;
+
+    for v_child in
+        select t.id, t.step_key, t.output->'result' as payload,
+               (t.input->'item'->>'resource_id')::uuid as rid,
+               t.input->'item'->'window_ordinal' as win
+        from workflow.tasks t
+        where t.matrix_parent_id = p_matrix_task and t.status = 'done'
+        order by t.created_at
+    loop
+        v_total := v_total + 1;
+
+        if v_child.payload is null then
+            raise exception
+                'child % completed with no payload -- it was offloaded as an artifact '
+                'because the response exceeded workflow.max_payload_bytes. Window the '
+                'document more finely, or raise the cap for the queue that extracts.',
+                v_child.step_key;
+        end if;
+
+        -- (1) above: the model's answer arrives as a string.
+        if jsonb_typeof(v_child.payload) = 'string' then
+            begin
+                v_graph := (v_child.payload #>> '{}')::jsonb;
+            exception when others then
+                raise exception
+                    'child % returned text that is not JSON, so there is no graph to '
+                    'land: %', v_child.step_key, left(v_child.payload #>> '{}', 200);
+            end;
+        else
+            v_graph := v_child.payload;
+        end if;
+
+        if not (v_graph ? 'nodes' and v_graph ? 'edges') then
+            raise exception
+                'child % returned JSON that is not a graph (no nodes/edges): %',
+                v_child.step_key, left(v_graph::text, 200);
+        end if;
+
+        -- (2) above: drop the edges a model got wrong, and count each kind.
+        --
+        -- OUT-OF-VOCABULARY IS THE SECOND KIND, and it is not the schema being
+        -- ignored -- it is the schema not being enforced. `r` carries an enum
+        -- built from aiq.graph_vocabulary, and OpenAI honours an enum only in
+        -- STRICT structured-output mode, which aiq.graph_schema() cannot use:
+        -- strict requires every property to appear in `required`, and `a` (the
+        -- attribute bag) is deliberately optional. So the enum is a strong hint
+        -- and not a constraint, and a cheap model reaches past it -- measured,
+        -- gpt-4o-mini emitted `trips` on a document about a robotic arm.
+        -- upsert_graph refuses it, correctly and terminally; a refusal that
+        -- fails the upload is the wrong end of a right rule.
+        v_nodes := jsonb_array_length(v_graph->'nodes');
+        v_kept  := '[]'::jsonb;
+        for v_e in select value from jsonb_array_elements(v_graph->'edges') loop
+            if (v_e->>'s')::int is null or (v_e->>'t')::int is null
+               or (v_e->>'s')::int < 0 or (v_e->>'t')::int < 0
+               or (v_e->>'s')::int >= v_nodes or (v_e->>'t')::int >= v_nodes then
+                v_dropped := v_dropped + 1;
+            elsif not exists (select 1 from aiq.graph_vocabulary g
+                              where g.relation = lower(trim(v_e->>'r'))) then
+                v_offvocab := v_offvocab + 1;
+            else
+                v_kept := v_kept || jsonb_build_array(v_e);
+            end if;
+        end loop;
+        v_graph := jsonb_set(v_graph, '{edges}', v_kept);
+
+        v_r := aiq.upsert_graph(v_graph, jsonb_build_object(
+            'resource_id', v_child.rid, 'run_id', v_run,
+            'window', v_child.win, 'agent', 'structure_null'));
+
+        v_acc := jsonb_build_object(
+            'graphs',             (v_acc->>'graphs')::int + 1,
+            'edges_new',          (v_acc->>'edges_new')::int + coalesce((v_r->>'edges_new')::int,0),
+            'edges_merged',       (v_acc->>'edges_merged')::int + coalesce((v_r->>'edges_merged')::int,0),
+            'self_edges_dropped', (v_acc->>'self_edges_dropped')::int
+                                  + coalesce((v_r->>'self_edges_dropped')::int,0));
+    end loop;
+
+    -- Both counts in the receipt, never silently: a vocabulary that is being
+    -- reached past constantly is the signal that it is too small, and it is
+    -- only visible if the drops are counted. graph.sql says the first
+    -- operational task after it ships is to count which relations are ever
+    -- emitted and which never resolve; this is half of that measurement.
+    return v_acc || jsonb_build_object('children', v_total,
+                                       'edges_dropped_ordinal', v_dropped,
+                                       'edges_dropped_offvocab', v_offvocab);
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+revoke execute on function content.land_graph_windows(uuid) from public;
+
+select workflow.register_step_function(
+    'land_graph_windows', 'content.land_graph_windows', array['uuid'], 120000,
+    'Upsert every graph a window fan-out produced, dropping edges a model mis-numbered');
+
+-- Drop-then-create, because the signature GREW. `create or replace` leaves the
+-- old three-argument body in place beside the new one, and every no-argument
+-- call is then ambiguous: "could not choose a best candidate function", which
+-- is what an upgraded database says the first time anything uploads a file.
+drop function if exists content.install_ingest_workflow(text, text, text);
+
+create or replace function content.install_ingest_workflow(
+    p_model text default null,
+    p_queue text default 'ingest',
+    p_name  text default 'ingest_file',
+    -- The second index, off by default. graph-index.md §6.1 argues the
+    -- default: an embedding per chunk is cheap and is the whole point of an
+    -- upload; a completion per window is a different order of money, so it is
+    -- opt-in and the return value says which shape was installed rather than
+    -- leaving an operator to infer it from a bill.
+    p_graph_index boolean default false,
+    p_graph_model text default null,
+    p_graph_agent text default 'structure_null'
+) returns text as $$
+declare
+    v_model  text := p_model;
+    v_chosen boolean := p_model is not null;   -- did the CALLER name it?
+    v_parse  text;
+    v_embed  text;
+    v_graph  text;
+    v_says   text;
+begin
+    if v_model is null then
+        select name into v_model from aiq.embedding_models where is_default;
+    elsif not exists (select 1 from aiq.embedding_models where name = v_model) then
+        raise exception
+            'embedding model ''%'' is not registered, so an ingestion pipeline '
+            'naming it would fail at every run. Register it first, or call this '
+            'with no argument to install the parse-only pipeline.', v_model;
+    end if;
+
+    v_parse := format($y$
+name: %1$s
+steps:
+  - id: parse
+    work: true
+    queue: %2$s
+    input:
+      op: ingest
+      resource_id: '{{run.resource_id}}'
+$y$, p_name, p_queue);
+
+    -- THE TWO INDEXES ARE SIBLINGS, NOT A CHAIN, and that is the whole shape.
+    -- Both declare needs: [parse], so the semantic index and the graph index
+    -- run concurrently over the same parse and their failures are independent:
+    -- a deployment with no embedding model can still index a graph, and a
+    -- failed extraction does not cost the vectors. Same workflow, two
+    -- indexers, one parse.
+    if v_model is not null then
+        -- THE EMBED STEP IS `work`, NOT A MATRIX OF `embed:`, AND THE REASON IS
+        -- THE PAYLOAD CAP.
+        --
+        -- The declarative shape -- a matrix over the chunks with an `embed:`
+        -- template and aiq.land_embeddings as the fan-in -- is written, tested
+        -- and still the right way to embed a QUERY. It cannot be the way to
+        -- embed a CORPUS: it is one HTTP request per chunk, and it cannot be
+        -- batched, because a step's output is capped at
+        -- workflow.max_payload_bytes (64KB) and one 1536-dimension vector is
+        -- ~31KB of JSON. Two vectors do not fit in one task output.
+        --
+        -- So the process that receives the vectors writes them, and what comes
+        -- back to the engine is a receipt. The MODEL still comes from
+        -- aiq.embedding_models -- the worker asks aiq.embed_batch_call() for
+        -- the url, the body shape, the response path and the credential NAME --
+        -- so naming it here is naming a registered model and there is still no
+        -- url in this document.
+        v_embed := format($y$
+  - id: embed
+    needs: [parse]
+    work: true
+    queue: %2$s
+    input:
+      op: embed
+      resource_id: '{{run.resource_id}}'
+      model: %1$s
+$y$, v_model, p_queue);
+    end if;
+
+    -- The graph branch: a matrix over WINDOWS, because a completion has a
+    -- context limit where a batch of embeddings has a request limit, and one
+    -- extraction per window is the unit graph-index.md §6.2 specifies. The
+    -- fan-in is aiq.land_graph_fanout, which reads the model's output off each
+    -- child and attributes every node to the window that named it.
+    if p_graph_index then
+        -- THE THROTTLE HAS TO EXIST BEFORE THE STEP NAMES IT, and this is the
+        -- one place the pipeline still names one. `rate_key` is not a
+        -- declaration -- it is a reference to a row in workflow.rate_limits,
+        -- and claim_task's try_consume_rate_limit() does
+        -- `update ... where key = p_key`, which matches nothing when there is
+        -- no row and returns false. A task whose rate_key names a bucket that
+        -- does not exist is never claimed BY ANYONE, forever, while the worker
+        -- beside it reports an empty queue. Measured on the embed fan-out
+        -- before it was batched: six children in `ready`, no error, no retry,
+        -- no dead task.
+        --
+        -- A SEPARATE KEY from embeddings, deliberately (graph-index.md §6.1):
+        -- completions and embeddings hit different provider limits, so sharing
+        -- one bucket would throttle the cheap call behind the expensive one.
+        -- 20 tokens refilling at 1/second is an argument, not a measurement:
+        -- one completion per second per deployment is slow enough to be
+        -- survivable on any provider and fast enough that a fifty-window
+        -- document indexes in under a minute.
+        insert into workflow.rate_limits (key, capacity, tokens, refill_rate)
+        values ('structure_extraction', 20, 20, 1)
+        on conflict (key) do nothing;
+
+        -- A MATRIX OVER WINDOWS, which is graph-index.md §6.2's shape, and
+        -- three things make it the right one here rather than §6.1's single
+        -- document extraction:
+        --
+        --   * A CHUNKLESS RESOURCE SKIPS THE BRANCH FOR FREE. A tabular upload
+        --     has no text, and an empty row set releases the successor
+        --     immediately -- where a document-level step has to raise, which
+        --     failed the whole ingest run of a CSV that had succeeded.
+        --   * A long document does not have to fit in a task payload. The
+        --     document shape carries its text through tasks.output, which caps
+        --     at 64KB -- about fifteen pages.
+        --   * The window is the chunk, so the extractor reads exactly what the
+        --     embedder embedded, and a node can be attributed to the passage
+        --     that named it rather than to the file.
+        --
+        -- The fan-in is content.land_graph_windows rather than
+        -- aiq.land_graph_fanout for two reasons that are recorded where that
+        -- function is defined: a matrix template cannot declare output_schema,
+        -- and a model mis-numbers an edge ordinal often enough that raising on
+        -- it fails ordinary ingestion.
+        v_graph := format($y$
+  - id: graph
+    needs: [parse]
+    matrix:
+      rows: {function: windows_to_index, args: ['{{run.resource_id}}']}
+      max_fanout: 200
+      template:
+        queue: http
+        rate_key: structure_extraction
+        rest: %1$s
+
+  - id: land_graph
+    needs: [graph]
+    sql: {function: land_graph_windows, args: ['{{steps.graph.result.task_id}}']}
+$y$, (aiq.extractor_call(p_graph_agent, p_graph_model, '{{item.content}}'))::text);
+    end if;
+
+    if v_model is null and not p_graph_index then
+        perform workflow.define_yaml(v_parse);
+        return p_name || ': parse only -- no embedding model is registered and graph '
+                      || 'indexing was not asked for, so chunks will be searchable by '
+                      || 'TEXT and by nothing else';
+    end if;
+
+    -- A REGISTERED MODEL IS NOT NECESSARILY A CALLABLE ONE, and the difference
+    -- is what this block is for. The probe has to be explicit: while the embed
+    -- half was a matrix of `embed:` markers, define_yaml expanded them and
+    -- refused an uncallable model for free; a `work` step names a model in its
+    -- input, which the compiler has no reason to resolve. Without this line an
+    -- unreachable model would be accepted here and fail at every run, which is
+    -- precisely the trade the `embed:` sugar exists to prevent. An empty batch
+    -- resolves the endpoint, the provider and the request shape without
+    -- embedding anything.
+    --
+    -- The rule, stated rather than implied: a model the CALLER named must
+    -- work, and a failure raises. A default this function chose for itself may
+    -- turn out to be uncallable -- the committed corpus fixture registers
+    -- `demo-quad-a` as the DEFAULT with provider `fixture` and no endpoint, so
+    -- installing on a database carrying the sample once failed with "provider
+    -- 'fixture' has no row in aiq.embedding_providers", an install broken by a
+    -- fixture -- and then the pipeline degrades to what it can run and SAYS
+    -- SO, carrying the compiler's own message rather than a summary of it.
+    begin
+        if v_model is not null then
+            perform aiq.embed_batch_call(v_model, '[]'::jsonb);
+        end if;
+        perform workflow.define_yaml(v_parse || coalesce(v_embed,'') || coalesce(v_graph,''));
+    exception when others then
+        if v_chosen or p_graph_index then
+            raise;
+        end if;
+        perform workflow.define_yaml(v_parse);
+        return p_name || ': parse only -- the default embedding model '
+                      || quote_literal(v_model) || ' cannot be called (' || sqlerrm || ')';
+    end;
+
+    v_says := p_name || ': parse';
+    if v_model is not null then
+        v_says := v_says || ', embed with ' || v_model || ' in batches';
+    end if;
+    if p_graph_index then
+        v_says := v_says || ', graph-index each window with ' || p_graph_agent
+                         || ' (' || coalesce(p_graph_model, 'the agent''s own model') || ')';
+    end if;
+    return v_says;
+end;
+$$ language plpgsql;
+
+-- Not callable by anyone but the owner: it runs workflow.define_yaml, which
+-- decides what the deployment's uploads do with their bytes. PUBLIC holds
+-- EXECUTE on every new function until it is taken away, so this line is what
+-- makes "owner-only" true rather than intended.
+revoke execute on function content.install_ingest_workflow(text, text, text, boolean, text, text) from public;
+
+-- The channel POST /files defaults to when no X-P8-Channel header is sent.
+--
+-- It did not exist. percolate-core's Content Server defaults `x_p8_channel` to
+-- 'uploads', register_upload raises 'no channel named uploads for this org',
+-- and the documented first command in RELEASE-0.1.md §2 therefore 400s on a
+-- clean install. Found by reading the two halves against each other while
+-- wiring up ingestion; every upload this collection had ever done named a
+-- channel explicitly.
+--
+-- WHERE NOT EXISTS rather than ON CONFLICT, for the reason §5b gives: the
+-- unique index is (org_id, name) with a nullable org_id, and NULLs are
+-- distinct.
+do $$
+declare v_msg text;
+begin
+    -- Install the pipeline first: a channel pointing at a definition that does
+    -- not exist turns every upload into an error from start_workflow.
+    select content.install_ingest_workflow() into v_msg;
+    raise notice 'ingestion pipeline installed -- %', v_msg;
+
+    insert into content.channels (name, kind, config)
+    select 'uploads', 'file_upload',
+           jsonb_build_object(
+               'description', 'the default channel for POST /files',
+               'ingest_workflow', 'ingest_file')
+    where not exists (
+        select 1 from content.channels where name = 'uploads' and org_id is null);
 end $$;

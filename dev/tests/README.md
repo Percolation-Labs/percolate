@@ -58,6 +58,20 @@ cycle, a hub, a node reachable two ways and a node reachable no way. `04` builds
 its own, because it tests the write path and a write path has to be exercised
 with writes.
 
+`10-graph-index.sql` is the newest and is the same argument one layer up: it
+tests the write path a *machine* takes into that graph
+(`specs/world-model-ingestion/graph-index.md`), where the characteristic
+failure is not an error but a graph that landed and is wrong in a way nothing
+raises — an edge wired to the wrong endpoint because an ordinal moved, a
+machine-invented row in a human's table, a promotion that deleted the edges it
+existed to preserve. It builds its own fixture for the same reason `04` does.
+Five of its assertions exist because the first implementation failed them, and
+one of those was found by `06` rather than by itself: `06`'s rule that no
+`aiq` SECURITY DEFINER function may be user-reachable caught a missing
+`revoke ... from public`, and underneath it a resolver that was not
+tenant-scoped. That is the argument for a suite over a per-feature test file —
+the assertion that catches you is rarely the one you wrote.
+
 `workflow/09` is the other end of those same two registries, from the authoring
 side: it asserts that a `SEARCH` query compiles to the embed task plus the
 search, that the shorthand and the hand-written pair produce **byte-identical
@@ -126,6 +140,33 @@ absent from the product.
 
 `scenarios/` is upstream of this directory. Exploration happens there; what
 turns out to be worth re-running forever gets pinned here.
+
+## The one test that is not SQL
+
+`content/e2e-ingest.py` uploads five real formats — markdown, PDF, DOCX, WAV
+and CSV — through a running Content Server and asserts what came out the other
+end: chunks with spans, a vector per chunk (in ONE batched request, not one
+each), nodes and edges extracted from the same parse and attributed to the
+window that named them, a Parquet dataset DuckDB reads from object storage, and
+four questions answered from four different formats.
+`run.sh` does not run it (it globs `*.sql`), because it needs a stack, an
+object store and a real embedding key:
+
+    cd dev && docker compose up -d db minio
+    LLM_API_KEY=sk-… python3 tests/content/e2e-ingest.py
+
+It exists because the thing it tests cannot be faked. `dev/init/05-corpus-sample.sql`
+proves retrieval works over vectors that are literals in a fixture, and says so
+in capitals; nothing anywhere had ever turned a PDF into a chunk or written a
+vector into a space. Every fixture is *generated* (`content/fixtures.py`) rather
+than committed, for the same reason those vectors are literals: a fixture you
+cannot regenerate is a fixture nobody can check, and a PDF in git is 40KB of
+bytes a reviewer has to take on trust.
+
+Five defects came out of running it, all recorded in
+`../../specs/world-model-ingestion/ingestion.md` §7 — including a `rate_key`
+that names a bucket with no row, which parks the task forever while the worker
+beside it reports an empty queue.
 
 ## What is deliberately not tested here
 

@@ -91,6 +91,48 @@ grant usage on schema content to authenticated, worker, api_viewer;
 grant select on content.channels, content.resources, content.resource_chunks
     to authenticated, api_viewer;
 
+-- REVOKE BEFORE GRANT, on every one of them, and it is not ceremony.
+--
+-- Postgres grants EXECUTE on a new function to PUBLIC unless it is taken away,
+-- so every line below that reads "worker may call this" has always meant
+-- "worker AND everyone else may call this" -- the grant is an addition to
+-- access every role already had, not a restriction. The engine's own
+-- enumeration found eleven functions like that (workflow-engine/
+-- integration-rbac.sql §6); this is the same sweep over `content`.
+--
+-- Measured before writing it, because the interesting half is which layer was
+-- actually holding: an ANONYMOUS caller (web_anon, no claims) trying to rewrite
+-- another org's chunks is refused with "permission denied for SCHEMA content"
+-- -- schema usage, granted to authenticated/worker/api_viewer and never to
+-- web_anon, was doing the work that the function grants appeared to. That is
+-- one revoke away from being the only thing between an unauthenticated request
+-- and content.record_chunks, and it is not a defence anyone chose.
+--
+-- What it does change today: `authenticated` HAS usage on this schema, so
+-- until these lines existed a logged-in user could call ingest_target,
+-- record_ingest and register_dataset -- three functions this file documents as
+-- worker-only. Their own org check meant no cross-tenant leak, but
+-- ingest_target hands back a bucket and an object key for the caller's own
+-- resources, and the read path a user is offered is the Content Server's
+-- proxy precisely so that a storage location never becomes one.
+revoke execute on function content.register_upload(text,text,text,text,bigint,text,text,text,uuid,jsonb,text,text) from public;
+revoke execute on function content.register_fetched(text,text,text,text,uuid,jsonb) from public;
+revoke execute on function content.record_chunks(uuid,jsonb) from public;
+revoke execute on function content.resolve_file(uuid) from public;
+revoke execute on function content.check_drift() from public;
+revoke execute on function content.may_access_org(uuid) from public;
+revoke execute on function content.assert_org_write(uuid,text) from public;
+revoke execute on function content.ingest_target(uuid) from public;
+revoke execute on function content.record_ingest(uuid,jsonb) from public;
+revoke execute on function content.register_dataset(uuid,text,text,text,jsonb,bigint,text,text[]) from public;
+revoke execute on function content.chunks_to_embed(uuid) from public;
+revoke execute on function content.windows_to_index(uuid) from public;
+revoke execute on function content.merge_policy(jsonb,jsonb) from public;
+revoke execute on function content.dataset_uri(text) from public;
+-- (install_ingest_workflow's own revoke is in ingestion.sql, where it is
+--  DEFINED -- this file loads first, and a revoke can only name a signature
+--  that already exists. The same lesson register_artifact taught below.)
+
 -- The Content Server registers uploads and the ingestion workflow records
 -- chunks; both go through SECURITY DEFINER functions, so neither needs a write
 -- grant on any table.
@@ -275,6 +317,67 @@ select workflow.register_step_function(
 -- ------------------------------------------------------------
 -- 6. Self-check.
 -- ------------------------------------------------------------
+-- ------------------------------------------------------------
+-- 6. Ingestion — the default pipeline, and the channel that runs it.
+--
+-- schema.sql §7 built the pieces; this is where they become a thing that runs
+-- when someone uploads a file, which is the only form of "built" that counts
+-- for the claim brief.md §3.5 makes.
+-- ------------------------------------------------------------
+grant execute on function content.ingest_target(uuid) to worker;
+grant execute on function content.record_ingest(uuid, jsonb) to worker;
+grant execute on function content.register_dataset(uuid, text, text, text, jsonb, bigint, text, text[]) to worker;
+grant execute on function content.merge_policy(jsonb, jsonb) to worker, authenticated;
+grant execute on function content.chunks_to_embed(uuid) to worker, authenticated;
+grant execute on function content.windows_to_index(uuid) to worker, authenticated;
+grant execute on function content.dataset_uri(text) to authenticated, api_viewer;
+
+-- The batching embed path (ai-query-layer/schema.sql §10b). `worker` only:
+-- embed_batch_call hands back a url and a credential NAME, and
+-- record_embeddings writes the space every SEMANTIC search ranks against --
+-- a user who could write vectors could poison retrieval for the deployment.
+-- USAGE on the schema as well as EXECUTE on the functions, because EXECUTE
+-- alone is not enough: without it the call fails with "permission denied for
+-- schema aiq" -- which reads like a missing grant on the function and is not.
+-- `worker` still holds no table privilege anywhere; usage on a schema grants
+-- the right to NAME what it already has execute on.
+grant usage on schema aiq to worker;
+grant execute on function aiq.embed_batch_call(text, jsonb) to worker;
+grant execute on function aiq.record_embeddings(text, jsonb) to worker;
+
+-- ingest_target and record_ingest are granted to `worker` and NOT to
+-- `authenticated`, and the asymmetry is the rule stated in schema.sql §4a
+-- being applied rather than an oversight. ingest_target hands back a bucket
+-- and an object key -- a storage location is a capability, and the read path
+-- a user is offered is content.resolve_file() through the Content Server.
+-- Worker-facing functions are authorized by their grant, because `worker` is
+-- infrastructure rather than a person.
+
+-- Datasets are org-scoped exactly as resources are, and for the same reason:
+-- a dataset is a thing a tenant uploaded, and its bucket prefix is a
+-- capability. dataset_files carries no org of its own -- it inherits, the way
+-- chunks do, because duplicating a tenancy fact is how node_keys and nodes
+-- drifted.
+alter table content.datasets      enable row level security;
+alter table content.dataset_files enable row level security;
+
+create policy datasets_org_scoped on content.datasets for select
+  using (org_id is null or org_id in (select aiq.current_org_ids()));
+
+create policy dataset_files_via_dataset on content.dataset_files for select
+  using (exists (select 1 from content.datasets d
+                 where d.id = content.dataset_files.dataset_id));
+
+grant select on content.datasets, content.dataset_files to authenticated, api_viewer;
+
+select workflow.register_step_function(
+    'chunks_to_embed', 'content.chunks_to_embed', array['uuid'], 30000,
+    'The chunks of one resource, as rows for an embed matrix to fan out over');
+select workflow.register_step_function(
+    'windows_to_index', 'content.windows_to_index', array['uuid'], 30000,
+    'The chunks of one resource, as windows for a graph extractor to fan out over');
+
+
 do $$
 declare v_bad text;
 begin
@@ -312,3 +415,10 @@ begin
 
     raise notice 'world-model-ingestion self-check passed: files unexposed; chunks corpus registered; artifact channel inert';
 end $$;
+
+-- The PUBLIC default EXECUTE, revoked -- see workflow-engine/integration-rbac.sql
+-- §6 for the enumeration. This one lives here because this is where the
+-- function is defined: the engine owns the capability, content owns the
+-- registration half, and a revoke can only be written where the signature
+-- already exists.
+revoke execute on function workflow.register_artifact(uuid, text, text, text, bigint, text, text, uuid) from public;

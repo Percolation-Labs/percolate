@@ -311,3 +311,157 @@ comment on function aiq.expand_embed_steps(jsonb) is
     'call from aiq.embedding_models + aiq.embedding_providers, and pin the model it '
     'resolved to into the query that consumes the vector. Called by '
     'workflow.define_yaml; an unexpanded marker is refused by the lint.';
+
+-- ============================================================
+-- Landing the vectors: the half of `embed:` that had nowhere to go.
+--
+-- `embed:` produces a vector and hands it to the next step as a template
+-- value. That is exactly right for a QUERY -- embed the question, rank against
+-- it, discard the vector -- and it is the entire story this collection had.
+-- Embedding a CORPUS is the other direction: N vectors that must be KEPT, in
+-- the space of the model that produced them, keyed by the chunk they describe.
+--
+-- Nothing could do that. `aiq.register_embedding_space()` creates the table
+-- and `aiq.semantic_in()` reads it; no function anywhere writes a row into it,
+-- so every vector in the collection's only embedding space arrived as a
+-- literal in a fixture (dev/init/05-corpus-sample.sql, which says so in
+-- capitals). A pipeline that embeds an uploaded document had no last step.
+--
+-- THE MODEL IS NOT AN ARGUMENT, and that is the point of the shape.
+--
+-- The obvious signature is land_embeddings(matrix_task, model) -- and it
+-- reintroduces, one step later, the exact defect aiq.expand_embed_steps()
+-- exists to remove. The author would name the model twice (once on the embed
+-- template, once here), the two could disagree, and the result would be
+-- vectors from model A sitting in model B's space: no error, no dimension
+-- mismatch when the two are the same width, and a corpus that ranks
+-- confidently and wrongly forever.
+--
+-- So the model is read off each child's OWN task input, where embed_call()
+-- recorded it -- "the model each child embedded with is recorded on the
+-- child", as expand_embed_steps' own comment already promised. The vector and
+-- the name of the space it belongs in travel together on one row, and there is
+-- no second place to state it and therefore nothing to disagree with.
+-- ============================================================
+-- SECURITY INVOKER, and it matters that this is not a preference. Its only
+-- legitimate caller is workflow.execute_sql_step, which is SECURITY DEFINER
+-- and owned by the schema owner -- so an invoker function called from there
+-- already runs with the privileges it needs, and gains nothing from carrying
+-- them itself. What it gains from NOT carrying them is that a client calling
+-- it directly is refused by the grants on aiq.emb_* rather than by this
+-- function's own run-id guard alone.
+--
+-- dev/tests/query/06 enforces exactly this for the whole aiq schema, with a
+-- named exemption list and a comment about why a named list is dangerous --
+-- "the function added next month is the one that is not on it". This was that
+-- function, and the test caught it the day it landed.
+create or replace function aiq.land_embeddings(p_matrix_task uuid)
+returns jsonb as $$
+declare
+    v_run     uuid;
+    v_cur     text;
+    v_model   text;
+    v_tbl     text;
+    v_landed  int := 0;   -- accumulated across spaces, not per space
+    v_this    int := 0;
+    v_total   int := 0;
+    v_missing int;
+    v_models  text[] := '{}';
+begin
+    select run_id into v_run from workflow.tasks where id = p_matrix_task;
+    if not found then
+        raise exception 'task % not found', p_matrix_task;
+    end if;
+
+    -- The same guard workflow.matrix_outputs() uses, for the same reason: a
+    -- step may read the fan-out of its OWN run. Without it a registered step
+    -- function handed an arbitrary task id is a read of someone else's run.
+    v_cur := nullif(current_setting('workflow.current_run_id', true), '');
+    if v_cur is null or v_cur::uuid <> v_run then
+        raise exception
+            'task % belongs to run %, which is not the run being executed. Pass '
+            '{{steps.<id>.result.task_id}} rather than a task id from elsewhere.',
+            p_matrix_task, v_run;
+    end if;
+
+    select count(*) into v_total from workflow.tasks
+     where matrix_parent_id = p_matrix_task;
+
+    -- A child that succeeded and left no `result` is the offload case: its
+    -- output went to object storage as an artifact and the vector is not in
+    -- the column. Raised rather than skipped, because a chunk silently absent
+    -- from the space is a hole in a corpus that still answers questions --
+    -- the failure-reporting-success shape this collection keeps finding.
+    select count(*) into v_missing from workflow.tasks
+     where matrix_parent_id = p_matrix_task
+       and status = 'done'
+       and (output is null or not (output ? 'result'));
+    if v_missing > 0 then
+        raise exception
+            '% of % embed children completed with no vector in their output -- they '
+            'were offloaded as artifacts (workflow-engine/outputs.md class 4) because '
+            'the response exceeded workflow.max_payload_bytes. A vector that is not in '
+            'the payload cannot be landed from here; raise the cap for the queue that '
+            'embeds, or embed with a smaller model.', v_missing, v_total;
+    end if;
+
+    for v_model in
+        select distinct t.input->'embed'->>'model'
+        from workflow.tasks t
+        where t.matrix_parent_id = p_matrix_task
+          and t.input->'embed' ? 'model'
+    loop
+        -- register_embedding_space() is the one place that knows how a space
+        -- table is named and shaped; calling it here rather than reproducing
+        -- the name is what keeps this function correct when that one changes.
+        -- It is idempotent (create table if not exists), so the space existing
+        -- is not a precondition the pipeline has to arrange separately.
+        perform aiq.register_embedding_space(v_model);
+        v_tbl    := 'emb_' || replace(v_model, '-', '_');
+        v_models := v_models || v_model;
+
+        execute format($q$
+            insert into aiq.%1$I (chunk_id, embedding)
+            select (t.input->'item'->>'chunk_id')::uuid,
+                   (select array_agg((v #>> '{}')::real order by ord)
+                      from jsonb_array_elements(t.output->'result') with ordinality e(v, ord))::vector
+            from workflow.tasks t
+            where t.matrix_parent_id = $1
+              and t.status = 'done'
+              and t.input->'embed'->>'model' = $2
+              and t.input->'item' ? 'chunk_id'
+            -- Re-embedding a chunk REPLACES its vector. A run that re-ingests
+            -- a resource whose text changed must not leave the old vector
+            -- ranking against the new text, and the chunk id is the key of
+            -- the space, so ON CONFLICT is the whole of the update path.
+            on conflict (chunk_id) do update
+                set embedding = excluded.embedding, embedded_at = now()
+        $q$, v_tbl) using p_matrix_task, v_model;
+
+        get diagnostics v_this = row_count;
+        v_landed := v_landed + v_this;
+    end loop;
+
+    if v_landed = 0 and v_total > 0 and array_length(v_models, 1) is null then
+        raise exception
+            'none of the % embed children carry a model on their input, so there is no '
+            'space to land them in. This step reads the fan-out of an `embed:` matrix '
+            'template; a hand-written `rest:` call to a model endpoint records nothing '
+            'about which space its vector belongs to and cannot be landed.', v_total;
+    end if;
+
+    -- A receipt (outputs.md §2): counts and the spaces written, not the rows.
+    return jsonb_build_object('landed', v_landed, 'children', v_total,
+                              'models', to_jsonb(v_models));
+end;
+$$ language plpgsql set search_path = pg_catalog, public;
+
+select workflow.register_step_function(
+    'land_embeddings', 'aiq.land_embeddings', array['uuid'], 120000,
+    'Store an embed matrix''s vectors in the space each child embedded with');
+
+-- A registered step function is called by workflow.execute_sql_step as the
+-- schema owner, never by a client, so the PUBLIC default EXECUTE that came
+-- with it was reach nobody needs. See workflow-engine/integration-rbac.sql §6
+-- for the enumeration this came out of.
+revoke execute on function aiq.land_embeddings(uuid) from public;
