@@ -692,7 +692,11 @@ begin
         raise exception 'an unstorable output was retried (% attempts) -- it is the same '
             'size on every attempt', t.attempts;
     end if;
-    if t.error->>'error' not like '%$ref%' or (t.error->>'bytes')::int < 9000 then
+    -- The remedy used to be spelled `$ref` and pointed at an s3:// URI. It
+    -- never worked -- see 08-artifacts.sql section 1 for the probe -- so this
+    -- asserts the spelling that does. The size still has to be in the error:
+    -- "too big" without the number is not actionable.
+    if t.error->>'error' not like '%$artifact%' or (t.error->>'bytes')::int < 9000 then
         raise exception 'the failure does not name the size or the remedy: %', t.error;
     end if;
     -- Nothing partial was written: the check runs before context is touched.

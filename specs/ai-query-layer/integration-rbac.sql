@@ -33,30 +33,10 @@
 -- tenancy -- it asks the one that already exists.
 -- ------------------------------------------------------------
 
--- user-rbac has no org model yet (specs/README.md scope decisions defer
--- tenant/org management deliberately). Rather than invent one here, the
--- predicate is expressed against a single function that a real deployment
--- replaces. Shipping a permissive default silently would be the worst option;
--- this one is explicit about being a seam, and errs closed for org-scoped rows
--- when no membership source exists.
--- Returns SETOF rather than an array, deliberately: `org_id = any (select ...)`
--- against an array-returning function compares uuid to uuid[] and fails, while
--- the array form `= any (f())` gives up the InitPlan hoisting that
--- user-rbac/schema.sql §9 measured as the difference between evaluating a
--- predicate once per query and once per row scanned. SETOF gives both --
--- `in (select ...)` type-checks and plans as a hashed SubPlan.
-create or replace function aiq.current_org_ids() returns setof uuid as $$
-    -- Reads the same request-scoped GUC mechanism as rbac.current_user_id():
-    -- PostgREST sets request.jwt.claims per request, so an org claim rides in
-    -- the verified token rather than being supplied as a spoofable argument.
-    select (value #>> '{}')::uuid
-    from jsonb_array_elements(
-        coalesce(
-            nullif(current_setting('request.jwt.claims', true), '')::jsonb -> 'orgs',
-            '[]'::jsonb
-        )
-    );
-$$ language sql stable;
+-- The org-membership seam, `aiq.current_org_ids()`, is defined in
+-- ai-query-layer/schema.sql rather than here, and the reason is a build
+-- ordering one rather than a design one -- see the comment at its definition.
+-- What belongs here is the POLICIES that use it, below.
 
 alter table aiq.nodes     enable row level security;
 alter table aiq.node_keys enable row level security;
@@ -174,7 +154,7 @@ grant execute on function aiq.lookup(text, boolean, int) to authenticated;
 grant execute on function aiq.lookup_many(text[], boolean, int) to authenticated;
 grant execute on function aiq.graph_neighbors(uuid, text, int) to authenticated;
 grant execute on function aiq.graph_walk(uuid, int, text, int) to authenticated;
-grant execute on function aiq.semantic_in(vector, text, int) to authenticated;
+grant execute on function aiq.semantic_in(text, vector, text, int) to authenticated;
 grant execute on function aiq.lexical(text, text, int) to authenticated;
 grant execute on function aiq.search(text, text, vector, text, int, int) to authenticated;
 grant execute on function aiq.sql_passthrough(text) to authenticated;

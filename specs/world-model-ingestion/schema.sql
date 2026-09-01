@@ -96,8 +96,21 @@ create table content.resources (
     -- 'pending' until the ingestion workflow has chunked it; 'ready' once
     -- retrievable. A resource that failed to parse stays 'failed' and is
     -- visible rather than silently absent.
+    -- 'stored' is the fourth state and it is not a stage on the way to
+    -- 'ready': it means "bytes registered, and there is nothing to chunk".
+    -- A workflow artifact -- a rendered report, an offloaded response --
+    -- is retrievable the moment it lands and is not corpus. Giving it its
+    -- own status rather than reusing 'ready' closes two collisions by
+    -- construction rather than by adding a predicate to each:
+    --   * check_drift() below reports pending-too-long and ready-with-no-
+    --     chunks. An artifact is legitimately neither, and under 'ready'
+    --     every artifact ever produced would be permanent drift noise.
+    --   * integration.sql registers resources as graph 'document' nodes
+    --     where status = 'ready'. Machine-generated step output is exactly
+    --     the data-plane volume graph-identity.md's inclusion policy keeps
+    --     out of the node registry -- the same argument that excludes chunks.
     status       text not null default 'pending'
-                     check (status in ('pending','ready','failed','superseded')),
+                     check (status in ('pending','ready','stored','failed','superseded')),
     metadata     jsonb not null default '{}'::jsonb,
     org_id       uuid,
     ingested_at  timestamptz not null default now(),
@@ -106,7 +119,22 @@ create table content.resources (
 );
 create index idx_resources_channel on content.resources (channel_id, ingested_at desc);
 create index idx_resources_org on content.resources (org_id);
-create index idx_resources_status on content.resources (status) where status <> 'ready';
+-- Partial on the states worth hunting for. 'stored' joins 'ready' in the
+-- exclusion: both are terminal and neither is something an operator goes
+-- looking for, so admitting artifacts here would grow the index without
+-- making it answer anything.
+--
+-- Written as drop-then-create (and the check as drop-then-add) so an
+-- installation that already exists picks both up: `create table` is skipped
+-- when the table is there, which silently leaves the old constraint and the
+-- old index in place. The workflow engine learned this the hard way with
+-- tasks_kind_check.
+alter table content.resources drop constraint if exists resources_status_check;
+alter table content.resources add constraint resources_status_check
+    check (status in ('pending','ready','stored','failed','superseded'));
+drop index if exists content.idx_resources_status;
+create index idx_resources_status on content.resources (status)
+    where status not in ('ready','stored');
 
 create trigger trg_resources_touch before update on content.resources
     for each row execute function public.touch_updated_at();

@@ -19,27 +19,46 @@
 -- wrapped in a single rolled-back transaction the way the other suites are.
 -- That makes it commit its fixtures, and a suite that can only be run once is
 -- not a suite. Clean up first instead.
+-- Scoped to what this file OWNS, which it was not. The teardown used to say
+-- `delete from rbac.role_permissions where role in ('admin','member')` and
+-- then `delete from rbac.roles ...`, which is every permission the DEPLOYMENT
+-- had granted those roles, not just the one row below. Running the suite
+-- therefore removed `agents/update` and `tool_servers/update` -- seeded by
+-- dev/init/02-seed.sql -- and afterwards nobody could author an agent over
+-- REST at all. A green suite that quietly revokes a capability is worse than a
+-- red one, and it took an agent registration failing hours later to notice.
+--
+-- The roles themselves are no longer dropped and recreated for the same
+-- reason: `admin` and `member` are deployment vocabulary this file borrows,
+-- not fixtures it invented.
 drop table if exists widgets;
 delete from rbac.user_roles where user_id in (
     '11111111-1111-1111-1111-111111111111',
     '22222222-2222-2222-2222-222222222222');
-delete from rbac.role_permissions where role in ('admin','member');
-delete from rbac.users where id in (
-    '11111111-1111-1111-1111-111111111111',
-    '22222222-2222-2222-2222-222222222222');
-delete from rbac.roles where name in ('admin','member');
+delete from rbac.role_permissions
+ where role in ('admin','member') and resource = 'widgets';
+-- The users are NOT deleted either, and that is the second half of the same
+-- lesson. alice and bob have fixed uuids and are the only identities a dev
+-- stack has, so everything anyone tries by hand ends up owned by one of them
+-- -- a workflow run, an agent session. Deleting them then fails on a foreign
+-- key from another subsystem's table ("still referenced from table runs"),
+-- which reads as a broken RBAC test and is really the suite trying to delete
+-- the deployment's only user. They are stable fixtures; making them exist is
+-- the requirement, not making them new.
 
 -- 1. Two users, one role each
 insert into rbac.users (id, email) values
   ('11111111-1111-1111-1111-111111111111', 'alice@test.com'),
-  ('22222222-2222-2222-2222-222222222222', 'bob@test.com');
+  ('22222222-2222-2222-2222-222222222222', 'bob@test.com')
+on conflict (id) do nothing;
 
-insert into rbac.roles (name) values ('admin'), ('member');
+insert into rbac.roles (name) values ('admin'), ('member') on conflict do nothing;
 insert into rbac.user_roles (user_id, role) values
   ('11111111-1111-1111-1111-111111111111', 'admin'),
-  ('22222222-2222-2222-2222-222222222222', 'member');
+  ('22222222-2222-2222-2222-222222222222', 'member')
+on conflict do nothing;
 insert into rbac.role_permissions (role, resource, action) values
-  ('admin', 'widgets', 'select');
+  ('admin', 'widgets', 'select') on conflict do nothing;
 
 -- 2. A toy owned resource, RLS applied exactly per the spec's commented pattern
 create table widgets (

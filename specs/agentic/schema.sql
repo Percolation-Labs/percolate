@@ -674,19 +674,58 @@ begin
                         from jsonb_array_elements_text(p_spec->'tags')), '{}'),
             p_spec->>'extracts_source',
             p_spec->>'extracts_doctype')
+    -- AN OMITTED KEY MEANS "LEAVE IT ALONE", NOT "SET IT TO THE DEFAULT".
+    --
+    -- Written the obvious way -- `set x = excluded.x` for every column -- this
+    -- is a silent, total data-loss bug, and it fires on the most ordinary edit
+    -- there is. `{"name": "percolate", "model": "openai:gpt-4.1-mini"}` is how
+    -- anyone changes an agent's model. `excluded` carries the column DEFAULT
+    -- for every key the caller did not send, so that call returned 200 and
+    -- left the agent with an empty system prompt and no tools at all: the
+    -- agent still existed, still resolved by name, and could do nothing.
+    --
+    -- Found by doing it. It is the same mistake as upsert_tool_server erasing
+    -- cached_tools, which was fixed one function away and not here -- twice
+    -- now this schema has shipped a partial write that reports success, so the
+    -- rule is stated once and applied to every column: the presence of the KEY
+    -- decides, never the emptiness of the value.
     on conflict (name) do update
-       set system_prompt            = excluded.system_prompt,
-           model                    = excluded.model,
-           tools                    = excluded.tools,
-           structured_output_schema = excluded.structured_output_schema,
-           chained_action           = excluded.chained_action,
-           summarizer_agent_id      = excluded.summarizer_agent_id,
-           context_policy           = excluded.context_policy,
-           audience                 = excluded.audience,
-           category                 = excluded.category,
-           tags                     = excluded.tags,
-           extracts_source          = excluded.extracts_source,
-           extracts_doctype         = excluded.extracts_doctype
+       set system_prompt            = case when p_spec ? 'system_prompt'
+                                      then excluded.system_prompt
+                                      else agentic.agents.system_prompt end,
+           model                    = case when p_spec ? 'model'
+                                      then excluded.model
+                                      else agentic.agents.model end,
+           tools                    = case when p_spec ? 'tools'
+                                      then excluded.tools
+                                      else agentic.agents.tools end,
+           structured_output_schema = case when p_spec ? 'structured_output_schema'
+                                      then excluded.structured_output_schema
+                                      else agentic.agents.structured_output_schema end,
+           chained_action           = case when p_spec ? 'chained_action'
+                                      then excluded.chained_action
+                                      else agentic.agents.chained_action end,
+           summarizer_agent_id      = case when p_spec ? 'summarizer_agent_id'
+                                      then excluded.summarizer_agent_id
+                                      else agentic.agents.summarizer_agent_id end,
+           context_policy           = case when p_spec ? 'context_policy'
+                                      then excluded.context_policy
+                                      else agentic.agents.context_policy end,
+           audience                 = case when p_spec ? 'audience'
+                                      then excluded.audience
+                                      else agentic.agents.audience end,
+           category                 = case when p_spec ? 'category'
+                                      then excluded.category
+                                      else agentic.agents.category end,
+           tags                     = case when p_spec ? 'tags'
+                                      then excluded.tags
+                                      else agentic.agents.tags end,
+           extracts_source          = case when p_spec ? 'extracts_source'
+                                      then excluded.extracts_source
+                                      else agentic.agents.extracts_source end,
+           extracts_doctype         = case when p_spec ? 'extracts_doctype'
+                                      then excluded.extracts_doctype
+                                      else agentic.agents.extracts_doctype end
     returning * into v_row;
     return v_row;
 end;
@@ -707,26 +746,50 @@ begin
     insert into agentic.tool_servers (name, kind, url, credential_ref,
                                       emits_citations, serves_agents,
                                       default_headers, cached_tools, synced_at)
-    values (p_spec->>'name', p_spec->>'kind', p_spec->>'url',
+    -- kind and url are NOT NULL, so unlike every other column here they
+    -- cannot be left to the ON CONFLICT arm: the tuple has to be VALID before
+    -- Postgres will even look for the conflict, and a partial registration
+    -- naming only the url therefore failed with a null-constraint violation on
+    -- `kind` -- from an UPDATE path that would never have touched it. The
+    -- existing row supplies them, which makes "omitted means unchanged" true
+    -- on both arms rather than only on the one that is easy to write.
+    values (p_spec->>'name',
+            coalesce(p_spec->>'kind',
+                     (select s.kind from agentic.tool_servers s
+                       where s.name = p_spec->>'name')),
+            coalesce(p_spec->>'url',
+                     (select s.url from agentic.tool_servers s
+                       where s.name = p_spec->>'name')),
             p_spec->>'credential_ref',
             coalesce((p_spec->>'emits_citations')::boolean, false),
             coalesce((p_spec->>'serves_agents')::boolean, false),
             coalesce(p_spec->'default_headers', '{}'::jsonb),
             coalesce(p_spec->'cached_tools', '[]'::jsonb),
             case when p_spec ? 'cached_tools' then now() end)
+    -- Same rule as upsert_agent, and it reached every column here for the
+    -- same reason: `cached_tools` was fixed alone because that is the column
+    -- whose loss was noticed, while a registration omitting `credential_ref`
+    -- or `default_headers` was quietly clearing those too -- and an unset
+    -- credential_ref is what makes the NEXT sync anonymous and half-empty.
     on conflict (name) do update
-       set kind            = excluded.kind,
-           url             = excluded.url,
-           credential_ref  = excluded.credential_ref,
-           emits_citations = excluded.emits_citations,
-           serves_agents   = excluded.serves_agents,
-           default_headers = excluded.default_headers,
-           -- Registration and re-sync are the same call, so a registration
-           -- that omits `cached_tools` must not erase the tools a sync found.
-           -- `excluded` carries the DEFAULT ('[]') for an omitted key, not
-           -- "no change" -- which is how re-registering a server to correct
-           -- its url emptied its tool list and left every agent bound to it
-           -- with nothing to call.
+       set kind            = case when p_spec ? 'kind'
+                                  then excluded.kind
+                                  else agentic.tool_servers.kind end,
+           url             = case when p_spec ? 'url'
+                                  then excluded.url
+                                  else agentic.tool_servers.url end,
+           credential_ref  = case when p_spec ? 'credential_ref'
+                                  then excluded.credential_ref
+                                  else agentic.tool_servers.credential_ref end,
+           emits_citations = case when p_spec ? 'emits_citations'
+                                  then excluded.emits_citations
+                                  else agentic.tool_servers.emits_citations end,
+           serves_agents   = case when p_spec ? 'serves_agents'
+                                  then excluded.serves_agents
+                                  else agentic.tool_servers.serves_agents end,
+           default_headers = case when p_spec ? 'default_headers'
+                                  then excluded.default_headers
+                                  else agentic.tool_servers.default_headers end,
            cached_tools    = case when p_spec ? 'cached_tools'
                                   then excluded.cached_tools
                                   else agentic.tool_servers.cached_tools end,
@@ -830,9 +893,22 @@ from agentic.agents
 where category = 'extractor'
 order by extracts_source, extracts_doctype;
 
+-- The classification columns are in the view because the runtime reads agents
+-- through it, and they are the columns that say what an agent IS FOR. Left out
+-- (as they were, having been added to the table later) a client can see every
+-- agent and sort them by nothing -- the state the classification block was
+-- added to end, undone one layer along.
+--
+-- extracts_source/extracts_doctype belong here for the same reason and were
+-- missed on the first pass anyway, which is the argument for checking this
+-- mechanically rather than carefully: they are how a caller answers "which
+-- extractor owns this document", and surface.sql's round-trip check found them
+-- the first time it ran.
 create view agentic.agents_api as
     select id, name, system_prompt, model, tools, structured_output_schema,
-           chained_action, summarizer_agent_id, context_policy, created_at
+           chained_action, summarizer_agent_id, context_policy,
+           audience, category, tags, extracts_source, extracts_doctype,
+           created_at
       from agentic.agents;
 
 grant select on agentic.sessions, agentic.runs, agentic.messages,

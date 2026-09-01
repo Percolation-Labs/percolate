@@ -158,10 +158,28 @@ $$ language plpgsql;
 
 -- Current form. It reached this shape in section 20f (Validation -- refuse at registration, not at 3am.), which explains
 -- the failure that produced it. Defined here, where it is first needed.
+--
+-- The lint (§25) runs here too, and this is the one place it can run: a
+-- definition arrives by INSERT whether it came from define_yaml, a migration,
+-- or a hand-written JSON spec, so the trigger is the only gate all three pass.
 create or replace function workflow.check_spec_before_insert() returns trigger as $$
+declare v_bad text;
 begin
     perform workflow.validate_spec(new.spec);
     perform workflow.validate_matrix_steps(new.spec);
+
+    select string_agg(format('  %s: %s', l.step_key, l.detail), E'\n' order by l.step_key)
+      into v_bad
+      from workflow.lint_spec(new.spec) l where l.severity = 'error';
+    if v_bad is not null then
+        raise exception E'this workflow cannot run as written:\n%', v_bad;
+    end if;
+
+    for v_bad in select format('%s: %s', l.step_key, l.detail)
+                   from workflow.lint_spec(new.spec) l where l.severity = 'warning'
+    loop
+        raise warning 'workflow lint: %', v_bad;
+    end loop;
     return new;
 end;
 $$ language plpgsql;
@@ -346,7 +364,7 @@ create trigger trg_log_task_transition
     for each row execute function workflow.log_task_transition();
 
 -- ------------------------------------------------------------
--- 7. Payload-ref enforcement
+-- 7. Payload size, and the artifact ref that makes it survivable
 -- ------------------------------------------------------------
 -- The limit is a SETTING, not a literal, and the default was raised from 8KB
 -- to 64KB after a real workflow hit it: a 768-dimension embedding is ~10KB as
@@ -355,28 +373,81 @@ create trigger trg_log_task_transition
 --
 -- The guard's purpose is keeping multi-megabyte payloads out of the task
 -- table, and 8KB was tight enough to reject ordinary structured values --
--- which pushes authors toward the $ref escape hatch for things that do not
--- warrant object storage, or (worse) toward not using the engine.
+-- which pushes authors toward object storage for things that do not warrant
+-- it, or (worse) toward not using the engine.
 --
 -- Still a hard limit rather than a warning: an unbounded payload column is how
--- a task table becomes unqueryable, and $ref remains the right answer for
--- anything genuinely large.
+-- a task table becomes unqueryable, and an artifact ref is the right answer
+-- for anything genuinely large. See outputs.md for the four output classes;
+-- this section owns the fourth.
+--
+-- THE REF IS A SIBLING OF `result`, NOT A VALUE INSIDE IT:
+--
+--     {"status": 200, "result": {...small...}, "$artifact": "<resource uuid>"}
+--
+-- Three things fall out of that placement, and the first one is why the
+-- previous spelling never worked. It said "return {"$ref": "s3://..."}", and
+-- the checks below use the jsonb `?` operator, which is TOP-LEVEL ONLY --
+-- while YAML.md says every step nests its payload under `result`. Probed at a
+-- 64KB cap: {"$ref": ...} at the top passed the check and broke every
+-- {{steps.<id>.result}} reading it; {"result": {"$ref": ...}} kept the
+-- templates working and was refused as oversized. No shape satisfied both,
+-- which is a better account of "the worker never implemented $ref" than
+-- "nobody got to it". As a sibling there is nothing to reconcile: `?` already
+-- looks exactly where the ref now is.
+--
+--   1. {{steps.<id>.result}} is untouched, and {{steps.<id>.$artifact}}
+--      resolves the ref -- resolve_args' template character class already
+--      admits `$`, so this needed no resolver change.
+--   2. `output_schema` validates `result` and never sees the engine's key, so
+--      a contract with additionalProperties:false stays writable.
+--   3. A step that produced ONLY bytes writes no `result` at all, and
+--      {{steps.<id>.result}} then fails loudly -- which is correct, because
+--      there is no value.
+--
+-- The old size BYPASS is gone rather than re-spelled. `not (output ? '$ref')`
+-- exempted a payload that was over the limit AND carried a ref -- that is, one
+-- that offloaded its bytes and then inlined them anyway. A genuine ref is
+-- about thirty bytes and was never going to trip a 64KB cap, so the exemption
+-- had no legitimate caller and admitted precisely the case the rule exists to
+-- reject. The limit is now unconditional.
+--
+-- Registering the bytes lives in world-model-ingestion/integration-workflow.sql,
+-- because `content` loads after this file and a workflow engine that cannot be
+-- installed without a content plane is not the engine this collection specs.
+create or replace function workflow.artifact_ref(p_payload jsonb) returns uuid as $$
+    -- The extractor the engine itself uses, so "is this an artifact ref" has
+    -- one definition rather than a `?` test repeated at four call sites.
+    -- Returns null for a payload that carries no ref OR carries something that
+    -- is not a uuid: a malformed ref is not a ref, and the size check that
+    -- calls this must not be satisfiable by writing {"$artifact": "yes"}.
+    select case
+        when jsonb_typeof(p_payload -> '$artifact') = 'string'
+         and (p_payload ->> '$artifact') ~
+             '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+        then (p_payload ->> '$artifact')::uuid
+    end;
+$$ language sql immutable;
+
 create or replace function workflow.enforce_payload_ref_size() returns trigger as $$
 declare
     v_max int := coalesce(
         nullif(current_setting('workflow.max_payload_bytes', true), '')::int,
         65536);
 begin
-    if new.input is not null and pg_column_size(new.input) > v_max and not (new.input ? '$ref') then
+    if new.input is not null and pg_column_size(new.input) > v_max then
         raise exception
-            'task %: input payload is % bytes, over the % byte limit, and is not an S3 ref ($ref). '
-            'Raise workflow.max_payload_bytes, or pass a $ref to object storage.',
+            'task %: input payload is % bytes, over the % byte limit. '
+            'Put the bytes in object storage and pass a "$artifact" ref beside '
+            'the payload, or raise workflow.max_payload_bytes deliberately.',
             new.id, pg_column_size(new.input), v_max;
     end if;
-    if new.output is not null and pg_column_size(new.output) > v_max and not (new.output ? '$ref') then
+    if new.output is not null and pg_column_size(new.output) > v_max then
         raise exception
-            'task %: output payload is % bytes, over the % byte limit, and is not an S3 ref ($ref). '
-            'Raise workflow.max_payload_bytes, or return a $ref to object storage.',
+            'task %: output payload is % bytes, over the % byte limit. '
+            'Put the bytes in object storage (workflow.register_artifact) and '
+            'return {"result": ..., "$artifact": "<resource id>"}, or raise '
+            'workflow.max_payload_bytes deliberately.',
             new.id, pg_column_size(new.output), v_max;
     end if;
     return new;
@@ -851,13 +922,50 @@ begin
         end if;
     end if;
 
-    if v_out is not null and pg_column_size(v_out) > v_max and not (v_out ? '$ref') then
+    -- An artifact ref that is not one. Both of these are terminal and both
+    -- say what to write instead, because the alternative is storing a string
+    -- nothing can dereference and finding out three steps later.
+    --
+    -- Deliberately NOT checked here: whether the resource exists. That would
+    -- make complete_task depend on `content`, and the engine has to stay
+    -- installable without a content plane (see section 7). Registration
+    -- returns a real id; a fabricated one fails at deref, where the reader has
+    -- the context to say what it was looking for.
+    if v_out ? '$ref' then
+        perform workflow.fail_task(p_task_id, jsonb_build_object(
+            'error', '"$ref" is the old spelling and never worked: it collided with '
+                     'the {"result": ...} nesting every step uses, and with $ref in '
+                     'output_schema. Register the bytes (workflow.register_artifact) '
+                     'and return {"result": ..., "$artifact": "<resource id>"} -- the '
+                     'ref is a SIBLING of result, not a value inside it.',
+            'got', v_out -> '$ref'), true);
+        return;
+    end if;
+    if v_out ? '$artifact' and workflow.artifact_ref(v_out) is null then
+        perform workflow.fail_task(p_task_id, jsonb_build_object(
+            'error', '"$artifact" must be a resource uuid returned by '
+                     'workflow.register_artifact, not an s3:// URI or a name. A bucket '
+                     'path in a payload is unscoped, undeduped and unservable, and '
+                     'carries a bucket name into a row that is supposed to stay '
+                     'inspectable.',
+            'got', v_out -> '$artifact'), true);
+        return;
+    end if;
+
+    -- Unconditional: the old `and not (v_out ? '$ref')` exempted the one case
+    -- worth rejecting (see the trigger in section 7). A step that offloaded
+    -- its bytes returns a ~30-byte ref beside a small result and is nowhere
+    -- near the cap; a step that inlined a megabyte is over it whether or not
+    -- it also names an artifact.
+    if v_out is not null and pg_column_size(v_out) > v_max then
         perform workflow.fail_task(p_task_id, jsonb_build_object(
             'error', format(
-                'output is %s bytes, over the %s byte limit, and is not a $ref. This is '
-                'terminal: the same response will be the same size on every attempt. '
-                'Return {"$ref": "s3://..."} instead, or raise workflow.max_payload_bytes '
-                'deliberately.', pg_column_size(v_out), v_max),
+                'output is %s bytes, over the %s byte limit. This is terminal: the '
+                'same response will be the same size on every attempt. Register the '
+                'bytes (workflow.register_artifact) and return '
+                '{"result": ..., "$artifact": "<resource id>"}, or raise '
+                'workflow.max_payload_bytes deliberately.',
+                pg_column_size(v_out), v_max),
             'bytes', pg_column_size(v_out), 'limit', v_max), true);
         return;
     end if;
@@ -908,6 +1016,22 @@ begin
     if v_lease is not null then
         return;
     end if;
+
+    -- The SAME repair complete_task applies to output, applied to error --
+    -- which it was not, for as long as both existed. `error` is jsonb and the
+    -- worker hands it a JSON document serialised into a string, so the column
+    -- held `"{\"error\": \"connection failed\"}"` and the documented way to
+    -- read a failure, `error->>'error'`, returned NULL. A run that failed for a
+    -- reason the engine had recorded reported no reason at all: the text was
+    -- there, one indirection away, and every accessor in every dashboard
+    -- reading it the obvious way got nothing.
+    --
+    -- Found by asking the engine why a run failed and being told nothing.
+    -- Same producer as the output bug, same encoding mistake, same fix already
+    -- written -- and never wired to this path, which is §23c's failure shape
+    -- exactly: a repair that lands where somebody was looking and not where
+    -- the same problem also lives.
+    p_error := workflow.normalize_output(p_task_id, p_error);
 
     if not p_terminal and t.attempts < t.max_attempts and not t.cancel_requested then
         -- claimed_by is cleared on requeue (§23). A ready task that still names
@@ -1060,7 +1184,18 @@ begin
 
     update workflow.tasks set status = 'waiting_external' where id = p_task_id;
 
-    v_child := workflow.start_workflow(p_workflow_name, p_input);
+    -- The child inherits the parent's trace. Omitting the argument -- which is
+    -- what this line did -- gives the child run a FRESH trace_id from the
+    -- column default, so a sub-workflow was a broken trace: parent_task_id
+    -- recorded the causal link in the database while the two halves sat in
+    -- different traces in any collector reading them. The one place in this
+    -- engine where a run is provably caused by another run is the one place
+    -- the trace was not carried across.
+    v_child := workflow.start_workflow(
+        p_workflow_name, p_input, null,
+        (select r.trace_id from workflow.runs r
+           join workflow.tasks t on t.run_id = r.id
+          where t.id = p_task_id));
 
     update workflow.runs set parent_task_id = p_task_id where id = v_child;
     update workflow.tasks set child_run_id = v_child where id = p_task_id;
@@ -1569,6 +1704,11 @@ grant execute on function workflow.add_task(uuid, text, text, uuid[], text, json
 grant execute on function workflow.get_task_context(uuid, text) to worker;
 
 -- Scheduled maintenance (pg_cron, or an operator). Not the worker's job.
+-- artifact_ref is the one definition of "is this an artifact ref"; a worker
+-- deciding whether a prior step offloaded its bytes asks this rather than
+-- re-implementing the key test.
+grant execute on function workflow.artifact_ref(jsonb) to worker, authenticated;
+
 grant execute on function workflow.promote_due_timers() to scheduler;
 grant execute on function workflow.reap_stale_tasks() to scheduler;
 
@@ -3478,9 +3618,14 @@ begin
     select p_task_id, t.run_id, t.status, t.status,
            jsonb_build_object(
              'event', 'output_normalized',
-             'why', 'output arrived double-encoded: a JSON document serialised into a '
-                    'string. Repaired so {{steps.<id>.result}} resolves; the producer '
-                    'should pass the object to complete_task(uuid, jsonb), not its text.',
+             -- Reached from complete_task's output AND fail_task's error, so
+             -- the sentence names both rather than the first one it was
+             -- written for. One event name for both on purpose: it is one
+             -- producer defect, and encoding_drift() should count it once.
+             'why', 'a result arrived double-encoded: a JSON document serialised into '
+                    'a string. Repaired so {{steps.<id>.result}} resolves and so '
+                    'error->>''error'' is readable; the producer should pass the object '
+                    'to complete_task/fail_task(uuid, jsonb), not its text.',
              'queue', t.queue, 'kind', t.kind, 'claimed_by', t.claimed_by)
     from workflow.tasks t where t.id = p_task_id;
 
@@ -4401,16 +4546,163 @@ Stops any step that has not started and triggers saga compensation for the ones
 that completed, in reverse order. A run that has already finished is left
 alone -- cancelling it is a no-op, not an error.$c$;
 
-comment on view workflow.runs_api is
-$c$One row per workflow run, filtered to the runs you may see.
-status is pending, running, completed, failed or cancelled. Filter it the
-PostgREST way -- ?status=eq.running, ?id=eq.<uuid>, ?order=created_at.desc --
-and use ?select= to narrow the columns. This is the read side of
-start_workflow: check a run here by the id that returned.$c$;
+-- The two *_api VIEWS are commented in integration-rbac.sql instead, beside
+-- where they are created, and the asymmetry is the point. The paragraph above
+-- holds for FUNCTIONS: cancel_run is redefined by that file and keeps its
+-- comment, because pg_description is keyed on an oid CREATE OR REPLACE does
+-- not change. A view that does not exist yet has no oid to key on, so the same
+-- move fails outright -- `relation "workflow.runs_api" does not exist`, at
+-- CREATE EXTENSION, on an empty database. Found by installing into one.
 
-comment on view workflow.tasks_api is
-$c$One row per step of a workflow run -- the per-step detail behind a run's status.
-Filter by ?run_id=eq.<uuid> to see how a single run is progressing. status
-distinguishes ready, running, completed and failed; attempts against
-max_attempts shows what has been retried, and error carries why the last
-attempt failed.$c$;
+-- ============================================================
+-- 25. workflow.lint_spec() -- refuse at authoring time what cannot work.
+--
+-- validate_spec (§1b) checks the GRAPH: steps exist, keys are unique,
+-- dependencies resolve, nothing is unreachable. That is everything about the
+-- shape of a workflow and nothing about its CONTENT, and the gap was measured
+-- rather than guessed: every one of these was accepted by define_yaml --
+--
+--     p8ql: 'THIS IS NOT A QUERY AT ALL'          accepted, failed at run time
+--     sql:  {function: no_such_function}          accepted, failed at run time
+--     agent: there_is_no_such_agent               accepted, then queued FOREVER
+--     '{{steps.NOSUCHSTEP.result}}'               accepted, resolves to null
+--
+-- The first two at least fail loudly on first execution. The third does not
+-- fail at all: the task sits `ready` waiting for a runtime that will never
+-- recognise it. The fourth is the worst -- an unresolvable reference becomes a
+-- null argument, and a step that runs with null where it expected a value
+-- reports success.
+--
+-- All four are decidable from the document plus the catalog, with no process
+-- running and nothing executed. So they are decided here.
+--
+-- Severity, and why it is not all-or-nothing. A p8ql string is static text: it
+-- can never become valid, so it is an `error`. An unregistered function or a
+-- missing agent is a REFERENCE TO DATA that may legitimately arrive after the
+-- workflow that names it -- authoring order is not deployment order -- so
+-- those are `warning`s. Refusing them would make "define the workflow, then
+-- register the function" impossible, which is a real and reasonable order.
+-- ============================================================
+
+create or replace function workflow.lint_spec(p_spec jsonb)
+returns table(step_key text, severity text, detail text) as $$
+declare
+    v_step  jsonb;
+    v_keys  text[];
+    v_deps  text[];
+    v_ref   text;
+    v_head  text;
+begin
+    select array_agg(s->>'key') into v_keys
+    from jsonb_array_elements(p_spec->'steps') s;
+
+    for v_step in select * from jsonb_array_elements(p_spec->'steps') loop
+        step_key := v_step->>'key';
+        select coalesce(array_agg(d), '{}') into v_deps
+        from jsonb_array_elements_text(coalesce(v_step->'depends_on','[]'::jsonb)) d;
+
+        -- (a) p8ql that cannot parse.
+        --
+        -- Note the shape this reads, which is not the shape the AUTHOR wrote:
+        -- a `p8ql:` step compiles to kind `sql` calling the allow-listed
+        -- `p8ql` function with the query as its first argument. There is no
+        -- `kind: p8ql` in a stored spec, and a lint written against the YAML's
+        -- vocabulary silently matches nothing.
+        if v_step->>'kind' = 'sql'
+           and v_step->'input'->>'function' in ('p8ql', 'p8ql_vec')
+           and to_regprocedure('aiq_parse(text)') is not null then
+            declare v_p jsonb; v_q text;
+            begin
+                v_q := v_step->'input'->'args'->>0;
+                -- A query that is itself a template resolves at dispatch and
+                -- cannot be parsed now; skipped rather than guessed at.
+                if v_q is not null and v_q !~ '\{\{' then
+                    execute 'select aiq_parse($1)' into v_p using v_q;
+                    if not coalesce((v_p->>'ok')::boolean, false) then
+                        severity := 'error';
+                        detail := 'p8ql does not parse: ' || coalesce(v_p->>'error','?');
+                        return next;
+                    end if;
+                end if;
+            exception when others then
+                severity := 'warning';
+                detail := 'p8ql could not be checked: ' || sqlerrm;
+                return next;
+            end;
+        end if;
+
+        -- (b) and (c) template references. Unknown step is an error; a known
+        -- step that is not a DECLARED DEPENDENCY is also an error, and the
+        -- sharper of the two: the reference resolves against run context, so
+        -- reading a step you did not wait for returns null exactly when the
+        -- race goes the wrong way -- intermittently, and as success.
+        --
+        -- Scanned over the step's whole JSON text rather than per field,
+        -- because a reference can appear in an arg, a url, a header or three
+        -- levels down a request body, and enumerating those places is a list
+        -- that goes stale the next time a step kind is added.
+        for v_ref in
+            select m[1] from regexp_matches(v_step::text,
+                '\{\{\s*steps\.([a-zA-Z0-9_-]+)', 'g') m
+        loop
+            if not (v_ref = any(v_keys)) then
+                severity := 'error';
+                detail := format('references {{steps.%s...}}, which is not a step '
+                                 'in this workflow', v_ref);
+                return next;
+            elsif not (v_ref = any(v_deps)) then
+                severity := 'error';
+                detail := format('reads {{steps.%s...}} without depending on %L -- '
+                                 'it resolves to null whenever this step runs first',
+                                 v_ref, v_ref);
+                return next;
+            end if;
+        end loop;
+
+        -- (d) a sql step naming a function nobody registered. Warning, not
+        -- error: authoring order is not deployment order, and defining a
+        -- workflow before registering its function is a reasonable sequence.
+        if v_step->>'kind' = 'sql'
+           and not exists (select 1 from workflow.step_functions f
+                            where f.name = v_step->'input'->>'function') then
+            severity := 'warning';
+            detail := format('sql step calls %L, which is not registered '
+                             '(workflow.register_step_function)',
+                             v_step->'input'->>'function');
+            return next;
+        end if;
+
+        -- (e) an agent step naming an agent that is not a row -- the one whose
+        -- run-time failure mode is SILENCE: the task queues `ready` and waits
+        -- for a runtime that will never recognise the name.
+        --
+        -- Recognised by the url template, because that is all there is to
+        -- recognise it by: `agent:` compiles to an ordinary http_call whose
+        -- only remaining trace of having been an agent step is that it points
+        -- at {{env.P8_AGENT_URL}}. Worth saying plainly -- the compiled form
+        -- discards the authored intent, so anything downstream that wants to
+        -- reason about agent steps is reading a convention, not a field.
+        if v_step->>'kind' = 'http_call'
+           and v_step->'input'->>'url' like '%P8_AGENT_URL%'
+           and to_regclass('agentic.agents') is not null
+           and not exists (select 1 from agentic.agents a
+                            where a.name = v_step->'input'->'body'->>'model') then
+            severity := 'warning';
+            detail := format('agent step names %L, which is not in agentic.agents -- '
+                             'this task will queue and wait rather than fail',
+                             v_step->'input'->'body'->>'model');
+            return next;
+        end if;
+    end loop;
+end;
+$$ language plpgsql stable;
+
+comment on function workflow.lint_spec(jsonb) is
+$c$Check a workflow spec's CONTENT, not just its graph shape.
+Returns one row per problem: step_key, severity (error or warning) and detail.
+validate_spec already refuses a bad graph; this catches a p8ql string that
+cannot parse, a template reading a step it does not depend on, a sql step
+naming an unregistered function, and an agent step naming an agent that does
+not exist. Errors are refused by define_yaml; warnings are raised and the
+definition stands, because a function or an agent may legitimately be
+registered after the workflow that names it.$c$;

@@ -1,25 +1,60 @@
-# The three surfaces
+# The surfaces
 
 ```bash
-./run.sh              # all three, in order
+./run.sh              # all of them, in order
 ./run.sh query        # one
 DSN="postgres://…" ./run.sh
 ```
 
-This repository has exactly three test surfaces, and they are not one concern
-among many — they are **the** concern. Everything else in the collection is
-composed out of them: ingestion is workflows over content, the graph is queries
-over RBAC-scoped rows, an agent is a workflow that calls a query. A defect in
-one of the three does not stay in one of the three.
+Three of these are not one concern among many — they are **the** concern.
+Everything else in the collection is composed out of them: ingestion is
+workflows over content, the graph is queries over RBAC-scoped rows, an agent is
+a workflow that calls a query. A defect in one of the three does not stay in
+one of the three.
+
+`agentic/` is the fourth and it is a different kind of entry, added when that
+subsystem stopped being unexercised and gained a worked binding
+(`specs/agentic/reference/`). It asserts nothing the three cover; it covers the
+one thing composing them introduced — a **binding**, which is a row naming a
+server by name and a tool by name, with no foreign key able to hold either.
 
 | Directory | Surface | Its characteristic failure |
 |---|---|---|
 | `rbac/` | `user-rbac`, and the RLS it imposes on all four other subsystems | Returning **more** rows than it should. The only surface where a bug is a breach, and the only one whose failure no happy-path assertion will ever notice. |
 | `query/` | `ai-query-layer` — seven modes over three index families | A **wrong answer**, not an error. Nothing crashes; the caller simply gets something other than what the spec promised. |
 | `workflow/` | `workflow-engine` — retries, sagas, compensation, cancellation, crash recovery | A **partial** failure that reports success. Every interesting workflow bug found here has left every task marked `done`. |
+| `agentic/` | the tool binding — servers, discovered tools, and who may author an agent | A registration that **looks complete and is missing what it bound**. Every assertion here corresponds to a column or a tool list silently dropped on the way into a row that came back looking correct. |
 
 RBAC runs first, deliberately: if row-level security is not actually switched
 on, every later assertion about who-sees-what is meaningless.
+
+`query/` is the largest of the four because the graph half of it was, until
+recently, the least exercised: `04-graph-identity.sql`, `05-graph-traversal.sql`
+and `06-graph-tenancy.sql` execute the eight criteria
+`specs/ai-query-layer/graph-identity.md` lists under "Verification" — a section
+that opens "A design is correct if all of these hold" and which nothing had ever
+run. Two of the eight passed unchanged. The rest failed, or passed for the wrong
+reason, and the corrections are recorded next to the criteria they belong to.
+
+`05` and `06` read a committed fixture (`../init/04-graph-sample.sql`) rather
+than building their own, because a walk is only interesting over a graph with a
+cycle, a hub, a node reachable two ways and a node reachable no way. `04` builds
+its own, because it tests the write path and a write path has to be exercised
+with writes.
+
+`07`–`09` are the other half of the same debt. `07` is the escape hatch:
+`aiq.sql_passthrough` runs SQL the caller wrote, `brief.md` §3 calls the wrong
+design for it "an RLS bypass and privilege escalation primitive", and nothing
+had ever tried to write through it — so every assertion there is an attempt and
+the pass condition is a refusal, with four of the nine shapes deliberately
+written to walk past the leading-keyword check the function itself calls "a
+courtesy, NOT the security boundary". `08` and `09` execute `TEXT`, `SEMANTIC`
+and `SEARCH`, which had never returned a row under assertion: `surface.sql`
+reported them present on the strength of two registration rows, behind which
+the corpus held zero chunks and the model registry zero models. They read
+`../init/05-corpus-sample.sql`, whose vectors are literals rather than model
+output — a corpus needing a live embedding server to be reproducible is the
+same failure as a fixture living in somebody's psql session.
 
 ## What belongs here, and what does not
 

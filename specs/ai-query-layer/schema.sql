@@ -64,8 +64,19 @@ create table aiq.node_keys (
 -- Canonical keys are unique per (org, type). Short keys and aliases are
 -- deliberately NOT unique -- 'bakhmut' may be canonical for a place and an
 -- event, and short-key lookup may legitimately return several nodes.
+--
+-- NULLS NOT DISTINCT, and it is the whole guarantee rather than a detail.
+-- org_id IS NULL means shared reference data, which integration-rbac.sql §1
+-- calls "a real category here, not a loophole" and which every public company
+-- in a deployment will be. Under the default NULLS DISTINCT, two NULLs never
+-- conflict -- so this index enforced canonical-key uniqueness for exactly the
+-- tenants that have one and not at all for the shared tier. Measured: two
+-- companies both took the canonical key 'acme', and LOOKUP "ACME" -- the
+-- dialect's most common call, documented as an exact match -- returned two
+-- different nodes with no way to tell which was meant.
 create unique index idx_node_keys_canonical
-    on aiq.node_keys (org_id, key, entity_type) where kind = 'canonical';
+    on aiq.node_keys (org_id, key, entity_type) nulls not distinct
+    where kind = 'canonical';
 create index idx_node_keys_lookup on aiq.node_keys (key);
 -- FUZZY lives here and ONLY here: a trigram index on this thin key table,
 -- never on the data plane (graph-identity.md "Scale").
@@ -121,9 +132,15 @@ begin
         select 1 from aiq.relation_types
         where src_type = v_src_type and relation = new.relation and dst_type = v_dst_type
     ) then
+        -- `%s` here, not `%`: RAISE takes % as the placeholder, so the
+        -- original spelling appended a literal 's' to every value and the
+        -- message read `relation (companys, competes_withs, persons)`. An
+        -- error that misnames the types it is complaining about sends the
+        -- reader looking for an entity type that does not exist.
         raise exception
-            'relation (%s, %s, %s) is not in the catalogue -- add it to aiq.relation_types first',
-            v_src_type, new.relation, v_dst_type;
+            'relation (%, %, %) is not in the catalogue -- add it to aiq.relation_types first',
+            coalesce(v_src_type, '<no node>'), new.relation,
+            coalesce(v_dst_type, '<no node>');
     end if;
     return new;
 end;
@@ -195,8 +212,34 @@ create or replace function aiq.register_entity_table(
     p_include_where text default 'true'
 ) returns void as $$
 declare
-    v_tbl_short text := split_part(p_source_table, '.', 2);
+    -- Named after the ENTITY TYPE, not after the source table's short name.
+    --
+    -- The short name was `split_part(p_source_table, '.', 2)`, which is not
+    -- unique: registering `s1.thing` as `t_one` and `s2.thing` as `t_two`
+    -- generated `aiq.project_thing_ins` twice, and the second CREATE OR
+    -- REPLACE silently rewrote the first with the other type's entity_type
+    -- baked in. Rows inserted into s1.thing were then projected as `t_two`.
+    -- Confirmed by running it: identity for a whole table came back wrong,
+    -- with nothing raised anywhere. entity_type is the registry's primary
+    -- key, so it is the only name that cannot collide.
+    v_ins   text := quote_ident('project_' || p_entity_type || '_ins');
+    v_del   text := quote_ident('project_' || p_entity_type || '_del');
+    v_other text;
 begin
+    -- One table, one entity type. Two types over one table cannot both work
+    -- anyway -- the trigger names are fixed, so the second registration's
+    -- triggers replace the first's and only one type ever projects -- and the
+    -- failure is silent. Refusing is the honest form of the same limit.
+    select entity_type into v_other from aiq.entity_registry
+     where source_table = p_source_table and entity_type <> p_entity_type;
+    if v_other is not null then
+        raise exception
+            '% is already registered as entity type % -- one table projects into '
+            'one entity type. Drop the other registration first, or project the '
+            'second view of this table from its own view or table.',
+            p_source_table, v_other;
+    end if;
+
     insert into aiq.entity_registry
         (entity_type, source_table, key_expr, summary_expr, org_expr, include_where)
     values (p_entity_type, p_source_table, p_key_expr, p_summary_expr, p_org_expr, p_include_where)
@@ -212,15 +255,35 @@ begin
     -- table. This is the concrete cost of D6's statement-level requirement,
     -- and it is worth paying: the alternative is a row-level trigger and a
     -- projection per row.
+    --
+    -- The function has FOUR statements, not two, and the two added ones are
+    -- both evictions. A projection that only ever inserts keeps a registry
+    -- that only ever grows, and both halves of that were real: an UPDATE that
+    -- made a row fail the inclusion predicate left its node and key in place
+    -- (invariant 3 broken by the projection itself, and the drift check duly
+    -- reported the node it had just created), and a rename left the old
+    -- canonical key behind, so the previous name went on resolving forever
+    -- and the node ended up with two keys each claiming to be the derived one.
     execute format($f$
-        create or replace function aiq.project_%1$s_ins() returns trigger as $b$
+        create or replace function aiq.%1$s() returns trigger as $b$
         begin
+            -- 1. Rows that belong: upsert identity.
             insert into aiq.nodes (entity_type, entity_id, org_id, summary)
             select %2$L, n.id, %3$s, %4$s from new_rows n where %5$s
             on conflict (entity_type, entity_id) do update
                 set summary = excluded.summary, org_id = excluded.org_id,
                     updated_at = now();
 
+            -- 2. Rows that no longer belong: evict. coalesce(..., false)
+            --    rather than `not (...)` because a predicate that evaluates to
+            --    NULL is not satisfied, and three-valued logic here would put
+            --    the stale node back exactly where it was.
+            delete from aiq.nodes nd
+            where nd.entity_type = %2$L
+              and nd.entity_id in (select n.id from new_rows n
+                                    where not coalesce((%5$s), false));
+
+            -- 3. The canonical key.
             insert into aiq.node_keys (node_id, entity_type, key, kind, org_id)
             select nd.id, %2$L, lower(trim(%6$s)), 'canonical', %3$s
             from new_rows n
@@ -230,46 +293,63 @@ begin
             -- unique index, so leaving a stale copy on an existing key row
             -- silently corrupts that scoping after a tenancy change.
             on conflict (node_id, key, kind) do update set org_id = excluded.org_id;
+
+            -- 4. Superseded canonical keys. Runs AFTER the insert, so a
+            --    key_expr that evaluates to NULL aborts on the not-null
+            --    constraint above rather than deleting the name the node had.
+            --    Short keys and aliases are editorial and are not touched:
+            --    a rename is not a reason to forget that somebody taught the
+            --    graph a synonym.
+            delete from aiq.node_keys k
+            using aiq.nodes nd, new_rows n
+            where k.node_id = nd.id
+              and nd.entity_type = %2$L and nd.entity_id = n.id
+              and k.kind = 'canonical'
+              and k.key is distinct from lower(trim(%6$s));
             return null;
         end;
         $b$ language plpgsql;
-    $f$, v_tbl_short, p_entity_type, p_org_expr, p_summary_expr, p_include_where, p_key_expr);
+    $f$, v_ins, p_entity_type, p_org_expr, p_summary_expr, p_include_where, p_key_expr);
 
     execute format($f$
-        create or replace function aiq.project_%1$s_del() returns trigger as $b$
+        create or replace function aiq.%1$s() returns trigger as $b$
         begin
             delete from aiq.nodes
             where entity_type = %2$L and entity_id in (select id from old_rows);
             return null;
         end;
         $b$ language plpgsql;
-    $f$, v_tbl_short, p_entity_type);
+    $f$, v_del, p_entity_type);
 
     execute format('drop trigger if exists trg_aiq_project_ins on %s', p_source_table);
     execute format($f$
         create trigger trg_aiq_project_ins
             after insert on %1$s
             referencing new table as new_rows
-            for each statement execute function aiq.project_%2$s_ins();
-    $f$, p_source_table, v_tbl_short);
+            for each statement execute function aiq.%2$s();
+    $f$, p_source_table, v_ins);
 
     execute format('drop trigger if exists trg_aiq_project_upd on %s', p_source_table);
     execute format($f$
         create trigger trg_aiq_project_upd
             after update on %1$s
             referencing new table as new_rows
-            for each statement execute function aiq.project_%2$s_ins();
-    $f$, p_source_table, v_tbl_short);
+            for each statement execute function aiq.%2$s();
+    $f$, p_source_table, v_ins);
 
     execute format('drop trigger if exists trg_aiq_project_del on %s', p_source_table);
     execute format($f$
         create trigger trg_aiq_project_del
             after delete on %1$s
             referencing old table as old_rows
-            for each statement execute function aiq.project_%2$s_del();
-    $f$, p_source_table, v_tbl_short);
+            for each statement execute function aiq.%2$s();
+    $f$, p_source_table, v_del);
 end;
-$$ language plpgsql;
+-- `drop trigger if exists` raises a NOTICE per trigger it did not find, so a
+-- first registration emitted three lines of "does not exist, skipping" that
+-- say nothing and bury anything that does. WARNING and above still get
+-- through, which is everything a caller of this function needs to see.
+$$ language plpgsql set client_min_messages = warning;
 
 -- Rebuild + drift detection (D7). The rebuild MUST use the same predicate as
 -- the live trigger -- both read it from entity_registry, so they cannot drift
@@ -315,7 +395,12 @@ begin
           and not exists (select 1 from %2$s n where n.id = nd.entity_id and %3$s)
     $q$, r.entity_type, r.source_table, r.include_where);
 
-    get diagnostics v_count = row_count;
+    -- Returns how many nodes this type HAS now, not how many rows the last
+    -- statement touched. `get diagnostics row_count` after the eviction
+    -- DELETE meant a rebuild that had just projected ten nodes returned 0,
+    -- which reads as "did nothing" to the bulk-load caller that asked for it.
+    execute format('select count(*) from aiq.nodes where entity_type = %L',
+                   p_entity_type) into v_count;
     return v_count;
 end;
 $$ language plpgsql;
@@ -339,6 +424,125 @@ begin
         except
         select 'orphan_node'::text, n.id from %2$s n where %3$s
     $q$, r.entity_type, r.source_table, r.include_where);
+end;
+$$ language plpgsql;
+
+-- ------------------------------------------------------------
+-- 5b. The org-membership seam.
+--
+-- This lives in the CORE schema and not in integration-rbac.sql, where its
+-- policies live and where it was first written, for a reason found by building
+-- a pristine database from the generated extension script: `aiq.schema_graph`
+-- -- a core §13 facet -- scopes the sample keys it shows to the caller's orgs,
+-- and a `language sql` function is validated at CREATE time. The integration
+-- file is applied AFTER this one, so the facet could not be created at all on a
+-- fresh install: SCHEMA "graph" was missing from every new database and present
+-- in every database where somebody had loaded the file by hand. Existence is
+-- not currency, and this is the shape currency.sh exists to catch.
+--
+-- The design point it was written with is unchanged and still applies: this
+-- layer does not invent a second notion of tenancy. user-rbac has no org model
+-- yet (specs/README.md defers tenant management deliberately), so the predicate
+-- is expressed against a single function that a real deployment replaces.
+-- Shipping a permissive default silently would be the worst option; this errs
+-- closed for org-scoped rows when no membership source exists.
+--
+-- Returns SETOF rather than an array, deliberately: `org_id = any (select ...)`
+-- against an array-returning function compares uuid to uuid[] and fails, while
+-- the array form `= any (f())` gives up the InitPlan hoisting that
+-- user-rbac/schema.sql §9 measured as the difference between evaluating a
+-- predicate once per query and once per row scanned. SETOF gives both --
+-- `in (select ...)` type-checks and plans as a hashed SubPlan.
+-- ------------------------------------------------------------
+create or replace function aiq.current_org_ids() returns setof uuid as $$
+    -- Reads the same request-scoped GUC mechanism as rbac.current_user_id():
+    -- PostgREST sets request.jwt.claims per request, so an org claim rides in
+    -- the verified token rather than being supplied as a spoofable argument.
+    select (value #>> '{}')::uuid
+    from jsonb_array_elements(
+        coalesce(
+            nullif(current_setting('request.jwt.claims', true), '')::jsonb -> 'orgs',
+            '[]'::jsonb
+        )
+    );
+$$ language sql stable;
+
+-- ------------------------------------------------------------
+-- 6b. Aliases and short keys -- the only supported write path into node_keys.
+--
+-- Invariant 5 says application code never writes nodes or node_keys except
+-- through the projection. The projection writes exactly one row per source
+-- row, the CANONICAL key from key_expr, because that is all a source row can
+-- derive. The other two kinds are editorial: 'kiev' is an alias for 'kyiv'
+-- because somebody decided so, and no expression over the typed table
+-- produces it.
+--
+-- So two thirds of LOOKUP's cascade (graph-identity.md "Keys": exact
+-- canonical, then short, then fuzzy over both) had no write path the
+-- invariant permitted -- the branches existed, were tested with hand-inserted
+-- rows, and no caller could reach them without breaking the rule the schema
+-- states. This is that path: the invariant's exception, named and narrow,
+-- rather than an unwritten convention that inserting into node_keys is fine
+-- if you are careful.
+--
+-- It refuses to write a canonical key. Canonical belongs to the projection,
+-- and a second canonical key on one node is not a synonym -- it is two names
+-- each claiming to be the derived one. The (org_id, key, entity_type) unique
+-- index does not prevent it, because that index scopes uniqueness ACROSS
+-- nodes, not within one.
+--
+-- Not granted to `authenticated`: naming is an editorial act with the same
+-- blast radius as registration (an alias silently re-points every LOOKUP that
+-- uses it), so it stays with the role that runs migrations, like
+-- register_entity_table above.
+-- ------------------------------------------------------------
+create or replace function aiq.add_node_key(
+    p_node_key text, p_key text, p_kind text default 'alias'
+) returns uuid as $$
+declare
+    v_node_id uuid;
+    v_n       int;
+    v_norm    text := lower(trim(p_key));
+begin
+    if p_kind = 'canonical' then
+        raise exception
+            'canonical keys come from the projection (entity_registry.key_expr), '
+            'not from add_node_key -- change key_expr and rebuild, or add this '
+            'name as a short key or an alias';
+    elsif p_kind not in ('short','alias') then
+        raise exception 'kind must be short or alias, not %', p_kind;
+    end if;
+    if v_norm is null or v_norm = '' then
+        raise exception 'an empty key matches nothing and would sit in the '
+                        'trigram index forever';
+    end if;
+
+    -- Resolved through the ordinary cascade, so an alias can be hung off a
+    -- node found by its short name. Ambiguity is refused rather than resolved
+    -- by picking one: attaching a name to the wrong node is not recoverable by
+    -- reading the row back, since it looks exactly like the right one.
+    -- (array_agg(...))[1] rather than min(): there is no min(uuid) in PG19,
+    -- and the aggregate is only here to make "how many" and "which one" one
+    -- pass over a result that is nearly always a single row.
+    select count(*), (array_agg(l.node_id))[1] into v_n, v_node_id
+    from aiq.lookup(p_node_key) l;
+    if v_n = 0 then
+        raise exception 'no node is named % -- add_node_key names an existing '
+                        'node, it does not create one', p_node_key;
+    elsif v_n > 1 then
+        raise exception '% resolves to % nodes -- name the one you mean by its '
+                        'canonical key', p_node_key, v_n;
+    end if;
+
+    -- entity_type and org_id are COPIED from the node for the same reason the
+    -- projection copies them: the canonical-key unique index reads them
+    -- without a join, and a hand-supplied value could disagree with the node.
+    insert into aiq.node_keys (node_id, entity_type, key, kind, org_id)
+    select v_node_id, n.entity_type, v_norm, p_kind, n.org_id
+    from aiq.nodes n where n.id = v_node_id
+    on conflict (node_id, key, kind) do update set org_id = excluded.org_id;
+
+    return v_node_id;
 end;
 $$ language plpgsql;
 
@@ -429,31 +633,59 @@ create or replace function aiq.lookup_many(
     p_keys text[], p_fuzzy boolean default false, p_limit int default 20
 ) returns table(input_key text, node_id uuid, entity_type text, entity_id uuid,
                 key text, match_kind text, score real) as $$
+    -- LEFT join lateral, so a key that matched nothing comes back as a row
+    -- with a null node_id rather than not coming back at all. The comment
+    -- above has always said "which of these did you not find" is usually the
+    -- question worth asking; the inner join meant input_key could only ever
+    -- report keys that HAD been found, which is the one case where the caller
+    -- can already tell.
     select k.key_in, l.node_id, l.entity_type, l.entity_id, l.key,
            l.match_kind, l.score
-    from unnest(p_keys) as k(key_in),
-         lateral aiq.lookup(k.key_in, p_fuzzy, p_limit) l;
+    from unnest(p_keys) as k(key_in)
+    left join lateral aiq.lookup(k.key_in, p_fuzzy, p_limit) l on true;
 $$ language sql stable;
 
 -- GRAPH depth 1: native SQL/PGQ. Confirmed working on PG19 beta3.
+-- The `key` column, and why it is not optional.
+--
+-- This function returned `neighbor_id` and `summary` and no key, and the
+-- worked example in USAGE.md reads fine because its summaries happen to BE
+-- names ("Acme Robotics", "Dana Whitfield"). Run it against a graph whose
+-- summaries are what summaries are for -- a band label, a status, a one-line
+-- description -- and the answer is a column of UUIDs. Asked "which pairs moved
+-- with sterling", the query layer returned eight ids and nothing that could be
+-- said back to a person.
+--
+-- What made that unrecoverable rather than merely inconvenient: the dialect
+-- has no mode that takes an id. LOOKUP resolves a key to a node; nothing
+-- resolves a node back to a key. So a GRAPH result could not be turned into
+-- names by any further p8ql query, only by dropping to SQL against node_keys
+-- -- from a mode whose entire purpose is naming things.
+--
+-- graph-identity.md's rule is that a node is NAMED by its canonical key and
+-- traversal happens by id. Both halves are load-bearing, and the read path was
+-- keeping only the second.
 create or replace function aiq.graph_neighbors(
     p_node_id uuid, p_relation text default null, p_limit int default 100
-) returns table(neighbor_id uuid, entity_type text, summary text,
+) returns table(neighbor_id uuid, key text, entity_type text, summary text,
                 relation text, weight real, direction text) as $$
     select * from (
-        select b.id, b.entity_type, b.summary, e.relation, e.weight, 'out'::text
+        select b.id, kb.key, b.entity_type, b.summary, e.relation, e.weight, 'out'::text
         from graph_table (aiq.knowledge_graph
             match (a is node) -[e is related]-> (b is node)
             columns (a.id as a_id, b.id as b_id, e.relation as relation, e.weight as weight)
         ) g
         join aiq.nodes b on b.id = g.b_id
         join aiq.edges e on e.src_id = g.a_id and e.dst_id = g.b_id and e.relation = g.relation
+        left join lateral (select nk.key from aiq.node_keys nk
+                            where nk.node_id = b.id and nk.kind = 'canonical'
+                            limit 1) kb on true
         where g.a_id = p_node_id and (p_relation is null or g.relation = p_relation)
         union all
         -- The reverse question is first-class: no inverse edge is stored, so
         -- it is answered by walking dst_id, and the label comes from the
         -- catalogue at read time (graph-identity.md "Edge table").
-        select a.id, a.entity_type, a.summary,
+        select a.id, ka.key, a.entity_type, a.summary,
                coalesce(rt.inverse_label, e.relation || '_by'), e.weight, 'in'::text
         from aiq.edges e
         join aiq.nodes a on a.id = e.src_id
@@ -461,7 +693,18 @@ create or replace function aiq.graph_neighbors(
         left join aiq.relation_types rt
                on rt.src_type = a.entity_type and rt.relation = e.relation
               and rt.dst_type = b2.entity_type
-        where e.dst_id = p_node_id and (p_relation is null or e.relation = p_relation)
+        left join lateral (select nk.key from aiq.node_keys nk
+                            where nk.node_id = a.id and nk.kind = 'canonical'
+                            limit 1) ka on true
+        -- The inverse label is matched too, and this is a round-trip fix
+        -- rather than a convenience. The row above REPORTS `employs` for an
+        -- inbound `works_at`; asking `GRAPH "ACME" TYPE employs` then returned
+        -- nothing, so the dialect was displaying a relation name it refused to
+        -- accept back. From this node's point of view both names name the same
+        -- edge, and a caller that reads one should be able to write it.
+        where e.dst_id = p_node_id
+          and (p_relation is null or e.relation = p_relation
+               or coalesce(rt.inverse_label, e.relation || '_by') = p_relation)
     ) x
     limit p_limit;
 $$ language sql stable;
@@ -470,24 +713,44 @@ $$ language sql stable;
 -- patterns outright ("element pattern quantifier is not supported") -- not a
 -- beta gap to wait out, deliberately scoped out of the initial implementation
 -- (brief.md §3). Depth- AND degree-capped, per graph-identity.md "Non-goals".
+drop function if exists aiq.graph_walk(uuid, int, text, int);
 create or replace function aiq.graph_walk(
     p_node_id uuid, p_depth int default 2, p_relation text default null,
     p_max_nodes int default 500
-) returns table(node_id uuid, entity_type text, summary text,
-                depth int, path_relations text[]) as $$
+) returns table(node_id uuid, key text, entity_type text, summary text,
+                depth int, path_relations text[], path_weight real) as $$
     with recursive walk as (
         select n.id, n.entity_type, n.summary, 0 as depth,
-               array[]::text[] as rels, array[n.id] as seen
+               array[]::text[] as rels, array[n.id] as seen, 1.0::real as score
         from aiq.nodes n where n.id = p_node_id
         union all
+        -- path_weight is the PRODUCT of the edge weights along the path, not
+        -- their sum or their minimum. brief.md §3.6 puts a coherence score in
+        -- edges.weight and says a walk should not treat every edge as equally
+        -- believed; a product is what makes a two-hop path through one
+        -- barely-promoted 0.35 edge rank below two strong hops, which is the
+        -- example that section actually gives. Sum would reward length, and
+        -- min would make a long chain of near-certainties indistinguishable
+        -- from a single one.
+        --
+        -- Until this existed §3.6's claim that "graph_walk orders by
+        -- accumulated weight along the path" was simply false: the walk
+        -- ordered by node id and ignored weight entirely, so the whole
+        -- ingestion pipeline's scoring was discarded at the read step -- the
+        -- exact failure that section is about.
         select nx.id, nx.entity_type, nx.summary, w.depth + 1,
-               w.rels || e.relation, w.seen || nx.id
+               w.rels || e.relation, w.seen || nx.id, (w.score * e.weight)::real
         from walk w
         join aiq.edges e on (e.src_id = w.id or e.dst_id = w.id)
         join aiq.nodes nx on nx.id = case when e.src_id = w.id then e.dst_id else e.src_id end
         where w.depth < p_depth
           and not nx.id = any(w.seen)          -- cycle guard
-          and (p_relation is null or e.relation = p_relation)
+          -- Same round-trip rule as graph_neighbors: a relation may be named
+          -- by its catalogue name or by the inverse label the read path shows.
+          and (p_relation is null or e.relation = p_relation
+               or exists (select 1 from aiq.relation_types rt
+                           where rt.relation = e.relation
+                             and rt.inverse_label = p_relation))
     )
     -- DISTINCT ON (id) ... ORDER BY depth: a node reachable by several paths
     -- otherwise appears once PER PATH. Confirmed on the fixture: 'Acme
@@ -502,37 +765,61 @@ create or replace function aiq.graph_walk(
     -- this function, and it should not be a boolean flag on this function --
     -- the result shape differs, and callers of the two want different limits.
     -- Left unbuilt until a real consumer needs it.
-    select distinct on (id) id, entity_type, summary, depth, rels
-    from walk where depth > 0
-    order by id, depth
+    -- The same `key` graph_neighbors carries, and for the same reason: a
+    -- walk that returns ids is a walk whose result cannot be spoken.
+    --
+    -- The cap is applied to an ORDERED result, which it previously was not.
+    -- `limit p_max_nodes` over a DISTINCT ON's node-id order dropped an
+    -- arbitrary subset -- a walk capped at 3 returned three nodes chosen by
+    -- uuid. Nearest first, then best-corroborated, so a capped walk keeps the
+    -- part of the neighbourhood the caller would have kept.
+    select * from (
+        select distinct on (w.id) w.id, k.key, w.entity_type, w.summary,
+               w.depth, w.rels, w.score
+        from walk w
+        left join lateral (select nk.key from aiq.node_keys nk
+                            where nk.node_id = w.id and nk.kind = 'canonical'
+                            limit 1) k on true
+        where w.depth > 0
+        order by w.id, w.depth, w.score desc
+    ) d
+    order by d.depth, d.score desc, d.id
     limit p_max_nodes;
 $$ language sql stable;
 
--- SEMANTIC: pgvector over one entity type's chunk table. Registered per type
--- rather than hardcoded, because the embedding table belongs to the consumer
--- (world-model-ingestion owns resource_chunks), not to this layer.
+-- SEMANTIC's corpus registry: which table a `FROM <name>` names, for the
+-- vector modes. Registered per corpus rather than hardcoded, because the
+-- content belongs to the consumer (world-model-ingestion owns
+-- resource_chunks), not to this layer.
 create table aiq.semantic_sources (
     name          text primary key,
-    source_table  text not null,       -- schema-qualified, has (id, content, embedding)
+    source_table  text not null,       -- schema-qualified, has (id, content)
     content_col   text not null default 'content',
+    -- Kept, and no longer read by anything. It described the superseded
+    -- storage shape below, where the vector was a column on the consumer's own
+    -- table. §10 moved embeddings into per-MODEL spaces owned by this schema,
+    -- which is what makes two models over one corpus possible at all; a column
+    -- on the chunk table can hold exactly one model's output.
     embedding_col text not null default 'embedding',
     link_expr     text                 -- optional SQL expr -> owning node's entity_id
 );
 
-create or replace function aiq.semantic(
-    p_source text, p_query vector, p_limit int default 10
-) returns table(chunk_id uuid, content text, distance float8) as $$
-declare s aiq.semantic_sources;
-begin
-    select * into s from aiq.semantic_sources where name = p_source;
-    if not found then raise exception 'semantic source % not registered -- SCHEMA "graph" lists the registered ones', p_source; end if;
-    return query execute format(
-        'select c.id, c.%I::text, (c.%I <=> $1)::float8 as distance
-         from %s c order by c.%I <=> $1 limit $2',
-        s.content_col, s.embedding_col, s.source_table, s.embedding_col
-    ) using p_query, p_limit;
-end;
-$$ language plpgsql stable;
+-- The superseded implementation, removed rather than left to be found.
+--
+-- `aiq.semantic(source, vector, limit)` read `<source_table>.<embedding_col>`
+-- -- an embedding column on the consumer's own chunk table. §10 replaced that
+-- storage model with one table per registered MODEL, and this function was
+-- never updated, never called by the dispatch (which routes SEMANTIC to
+-- semantic_in), and never declared in surface.sql. It had therefore been
+-- broken for as long as the schema has shipped: calling it against the
+-- registered `chunks` source raises `column c.embedding does not exist`,
+-- because content.resource_chunks has no such column and never did.
+--
+-- Two implementations of one mode, one of them unreachable and non-working, is
+-- worse than one: it is a function an agent can find in the catalog, call, and
+-- receive a schema error from. The drop is explicit because `create or replace`
+-- cannot remove it from a database that already installed it.
+drop function if exists aiq.semantic(text, vector, int);
 
 -- ============================================================
 -- 8. Verified properties (measured on PG19 beta3, not asserted).
@@ -572,6 +859,52 @@ $$ language plpgsql stable;
 --
 --  * A hard FK (events.primary_company_id) is absent from aiq.edges and still
 --    answerable by an indexed join -- the "two memories" claim (D4), concrete.
+--
+-- ------------------------------------------------------------
+-- 8b. What a second, exhaustive pass measured -- and what it corrected.
+--
+-- The results above were measured against a fixture that lived in a psql
+-- session and was never committed, so nothing could re-run them. That fixture
+-- is now dev/init/04-graph-sample.sql, and the properties above are now
+-- assertions in dev/tests/query/04-06 rather than paragraphs. Running the
+-- whole surface rather than the happy path changed several of them:
+--
+--  * "LOOKUP is an index probe, NOT an Append of typed-table scans" is not
+--    assertable in that form at any fixture size worth shipping: with 22 keys
+--    the planner reads the table sequentially and is correct to. The
+--    size-independent statements are that the predicate is index-servable and
+--    that the plan touches no registered source table -- which is what
+--    invariant 6 actually claims. Recorded because the original phrasing would
+--    have had to be neutered to pass, and a neutered assertion is worse than
+--    none.
+--
+--  * The projection was insert-only. An UPDATE that made a row fail the
+--    inclusion predicate left its node, its key, and its edges in place --
+--    invariant 3 broken by the projection itself -- and a rename ADDED a
+--    canonical key rather than replacing one, so the old name resolved
+--    forever. Both are fixed above; both were invisible to any assertion that
+--    only inserts.
+--
+--  * The canonical-key unique index was NULLS DISTINCT, so it enforced nothing
+--    at all for shared reference data (org_id is null), which is most of a
+--    real deployment. Two rows took the key 'acme' and LOOKUP returned both.
+--
+--  * Generated projection functions were named after the source table's SHORT
+--    name, so two registered tables called `thing` in different schemas shared
+--    one function and one of them projected under the other's entity_type.
+--
+--  * GRAPH resolved its seed key with fuzzy matching, always, and took the
+--    first row: a typo walked a different node's neighbourhood and the answer
+--    said nothing about it. The seed is now exact and reported.
+--
+--  * The walk ignored edges.weight entirely, contradicting brief.md §3.6's
+--    claim to be coherence-ranked, and applied its row cap to a uuid-ordered
+--    result.
+--
+--  * SQL/PGQ is RLS-filtered through the property graph, which was worth
+--    checking rather than assuming: a property graph is a separate privilege
+--    object compiled to joins, and neither fact settles whether the base
+--    tables' policies still apply. They do (dev/tests/query/06 §3).
 -- ============================================================
 
 -- ------------------------------------------------------------
@@ -611,7 +944,10 @@ returns jsonb as $$
 declare
     p        jsonb;
     v_node   uuid;
+    v_n      int;
+    v_seed   jsonb;
     v_out    jsonb;
+    v_unresolved jsonb := '[]'::jsonb;
 begin
     if to_regprocedure('aiq_parse(text)') is null then
         raise exception
@@ -632,20 +968,140 @@ begin
         -- The dialect takes a list, so the dispatch does too. Resolving five
         -- names is one round trip and one plan, not five -- which is the
         -- normal case for an agent holding several entities at once.
-        select coalesce(jsonb_agg(to_jsonb(l)), '[]'::jsonb) into v_out
+        --
+        -- A MISS IS NOT A ROW. lookup_many LEFT JOINs deliberately, so a key
+        -- that matched nothing comes back as a row of nulls with input_key
+        -- echoed -- useful to a SQL caller, who can filter, and actively
+        -- misleading here: through this JSON envelope `rows` is non-empty and
+        -- a miss is indistinguishable from a hit to anything that does not
+        -- inspect the fields. `LOOKUP "sterling"` against a graph holding no
+        -- such node returned one row, and a model reading it concluded it had
+        -- found something. USAGE.md documented the opposite -- "absent rather
+        -- than returned as an empty row" -- so the two halves of this system
+        -- disagreed in writing, each with its reasoning stated next to it.
+        --
+        -- Both intents survive by separating them: matches in `rows`, the
+        -- names that resolved to nothing in `unresolved`. The set difference
+        -- USAGE.md promises is then handed over directly instead of being left
+        -- as an exercise, and an empty result is empty.
+        select coalesce(jsonb_agg(to_jsonb(l)) filter (where l.node_id is not null),
+                        '[]'::jsonb),
+               coalesce(jsonb_agg(distinct l.input_key) filter (where l.node_id is null),
+                        '[]'::jsonb)
+          into v_out, v_unresolved
         from aiq.lookup_many(
             (select array_agg(value) from jsonb_array_elements_text(p->'args')),
             (p->>'fuzzy')::boolean, (p->>'limit')::int) l;
 
     when 'GRAPH' then
+        -- Four things are checked before anything is walked, and all four are
+        -- the same rule the dialect already states for USING: a modifier the
+        -- caller wrote and the engine ignored, or a value the engine quietly
+        -- reinterpreted, is how a query comes to mean something other than
+        -- what it says. Each of these was measured doing exactly that.
+
+        -- (a) FROM names a CORPUS -- which chunk table TEXT/SEMANTIC/SEARCH
+        --     read. A walk has no corpus; it starts at a node. The parser
+        --     accepts `GRAPH "acme" FROM chunks` and the walk ignored it,
+        --     which is the same silent drop USING is refused for. Ideally the
+        --     parser would refuse it, next to the USING rule it already
+        --     enforces; until the crate is rebuilt this is the backstop, and
+        --     it fails in the same direction.
+        if p->>'source' is not null then
+            raise exception
+                'FROM <source> applies only to TEXT, SEMANTIC and SEARCH -- a '
+                'walk starts at a node, not in a corpus. Drop `FROM %`.',
+                p->>'source';
+        end if;
+
+        -- (b) DEPTH below 1 asked for something and got depth 1. `GRAPH "x"
+        --     DEPTH 0` returned the full neighbour list, because the dispatch
+        --     routed depth <= 1 to graph_neighbors without looking at what
+        --     the caller actually wrote.
+        if (p->>'depth')::int < 1 then
+            raise exception
+                'DEPTH must be at least 1 -- DEPTH % asked for no traversal and '
+                'would have been served a depth-1 one', p->>'depth';
+        end if;
+
+        -- (c) ...and DEPTH above the cap. graph-identity.md's non-goals list
+        --     "unbounded traversal" and nothing enforced a bound: DEPTH 1000
+        --     was accepted and run. 5 is a working ceiling rather than a
+        --     measured one -- the documented discipline is lazy-then-load at
+        --     depth 2 (brief.md §2) -- and it is enforced HERE rather than in
+        --     graph_walk so a deliberate deep analytic walk can still call the
+        --     function directly.
+        if (p->>'depth')::int > 5 then
+            raise exception
+                'DEPTH % exceeds the dialect''s ceiling of 5. The documented '
+                'pattern is a shallow walk, then LOOKUP of what looks worth '
+                'loading; call aiq.graph_walk() directly if you really want '
+                'depth %.', p->>'depth', p->>'depth';
+        end if;
+
+        -- (d) A relation nobody ever catalogued is a typo, always -- the write
+        --     path refuses one, so the read path should not answer it with an
+        --     empty result. `TYPE not_a_relation` returned [], which on this
+        --     surface is indistinguishable from "nothing is related".
+        if p->>'relation' is not null
+           and not exists (select 1 from aiq.relation_types rt
+                            where rt.relation = p->>'relation'
+                               or rt.inverse_label = p->>'relation') then
+            raise exception
+                'no relation named % is in the catalogue -- SCHEMA "graph" lists '
+                'the registered ones', p->>'relation';
+        end if;
+
         -- Resolve the key ONCE, here, then traverse by id: the dialect names
         -- nodes by key, but traversal never parses names
         -- (graph-identity.md "Edges -- canonical, written directly").
-        select node_id into v_node from aiq.lookup(p->>'arg', true, 1) limit 1;
-        if v_node is null then
-            return jsonb_build_object('mode','GRAPH','rows','[]'::jsonb,
-                'error', format('no node matches key %L', p->>'arg'));
+        --
+        -- EXACT, and this is a correction. The resolution was
+        -- `aiq.lookup(arg, true, 1) limit 1` -- fuzzy, always, take whatever
+        -- comes first. So `GRAPH "ACMEE"` walked Acme's neighbourhood and the
+        -- answer said nothing about it, and `GRAPH "borealis"` -- a short key
+        -- that graph-identity.md's own Bakhmut example says belongs to two
+        -- nodes -- picked one of them by coin flip. Neither the typo nor the
+        -- ambiguity was visible in the result.
+        --
+        -- The cascade LOOKUP already runs (canonical, then short, then alias)
+        -- is what a seed needs; trigram matching is not, and the dialect has
+        -- no FUZZY GRAPH to ask for it with -- `FUZZY` is refused on every
+        -- mode but LOOKUP. On a miss the near matches come back as
+        -- suggestions, so the affordance survives without the guess.
+        select count(*), (array_agg(l.node_id))[1]
+          into v_n, v_node
+          from aiq.lookup(p->>'arg', false, 50) l;
+
+        if v_n = 0 then
+            return jsonb_build_object('mode','GRAPH','plan',p,'rows','[]'::jsonb,
+                'error', format('no node matches key %L', p->>'arg'),
+                'did_you_mean', coalesce((
+                    select jsonb_agg(jsonb_build_object(
+                               'key', f.key, 'entity_type', f.entity_type,
+                               'score', f.score))
+                    from aiq.lookup(p->>'arg', true, 5) f), '[]'::jsonb));
+        elsif v_n > 1 then
+            return jsonb_build_object('mode','GRAPH','plan',p,'rows','[]'::jsonb,
+                'error', format(
+                    '%L names %s nodes -- name the one you mean by its canonical key',
+                    p->>'arg', v_n),
+                'candidates', (
+                    select jsonb_agg(jsonb_build_object(
+                               'key', c.key, 'entity_type', c.entity_type,
+                               'match_kind', c.match_kind))
+                    from aiq.lookup(p->>'arg', false, 50) c));
         end if;
+
+        -- Which node was walked, reported alongside the rows. A walk names its
+        -- seed by key and answers by id, and the result carried neither -- so
+        -- nothing downstream could check that the string it wrote resolved to
+        -- the node it meant.
+        select jsonb_build_object('node_id', s.node_id, 'key', s.key,
+                                  'entity_type', s.entity_type,
+                                  'match_kind', s.match_kind)
+          into v_seed
+          from aiq.lookup(p->>'arg', false, 1) s limit 1;
 
         if (p->>'depth')::int <= 1 then
             select coalesce(jsonb_agg(to_jsonb(g)), '[]'::jsonb) into v_out
@@ -655,6 +1111,7 @@ begin
             from aiq.graph_walk(v_node, (p->>'depth')::int, p->>'relation',
                                 (p->>'limit')::int) w;
         end if;
+        return jsonb_build_object('mode','GRAPH','plan',p,'seed',v_seed,'rows',v_out);
 
     when 'SEMANTIC' then
         -- The embedding is supplied by the caller, not computed here:
@@ -668,8 +1125,14 @@ begin
                 'SEMANTIC requires p_embedding -- embed ''%'' with your model and pass the vector',
                 p->>'arg';
         end if;
+        -- `FROM <source>` is passed through, which it was not: the parser
+        -- REQUIRES it on SEMANTIC and the dispatch dropped it, so every
+        -- SEMANTIC query searched every registered corpus regardless of the
+        -- one the caller was made to name. See semantic_in's own comment for
+        -- what that leaked.
         select coalesce(jsonb_agg(to_jsonb(s)), '[]'::jsonb) into v_out
-        from aiq.semantic_in(p_embedding, p->>'model', (p->>'limit')::int) s;
+        from aiq.semantic_in(p->>'source', p_embedding, p->>'model',
+                             (p->>'limit')::int) s;
 
     when 'TEXT' then
         -- Lexical only. Needs no embedding at all, which is exactly why it
@@ -707,7 +1170,14 @@ begin
         raise exception 'unhandled mode %', p->>'mode';
     end case;
 
-    return jsonb_build_object('mode', p->>'mode', 'plan', p, 'rows', v_out);
+    -- `unresolved` only appears where it means something. A key absent from
+    -- the envelope is a mode that does not resolve names; a key present and
+    -- empty is "every name you gave me resolved". Emitting it always, empty,
+    -- for SEMANTIC and TEXT would make the second reading unavailable.
+    return jsonb_build_object('mode', p->>'mode', 'plan', p, 'rows', v_out)
+        || case when p->>'mode' = 'LOOKUP'
+                then jsonb_build_object('unresolved', v_unresolved)
+                else '{}'::jsonb end;
 end;
 $$ language plpgsql stable;
 
@@ -737,6 +1207,37 @@ $$ language plpgsql stable;
 -- is what makes migrating models (or A/B-ing them) possible without a
 -- destructive rewrite: embed into the new space alongside the old, compare,
 -- switch the default, drop the old space when nothing references it.
+--
+-- THE CONSEQUENCE FOR TENANCY, which is not obvious from any of the above and
+-- was measured rather than reasoned: a space is keyed by MODEL, so it holds
+-- every registered corpus's chunks together, and it has no way to know which
+-- consumer table a chunk_id came from -- `chunk_id` deliberately carries no
+-- foreign key, because one space serves many corpora. A generated space
+-- therefore cannot carry a row policy of its own.
+--
+-- Two things follow, and only the first is fixed.
+--
+--  1. THE MODE MUST SCOPE ITSELF. aiq.semantic_in() joins the space to the
+--     table registered under the corpus named in `FROM`, which both restricts
+--     the search to that corpus and puts the consumer's policies in the path
+--     (the mode is SECURITY INVOKER, so the join reads as the caller). Before
+--     that join, SEMANTIC returned chunk ids and cosine distances for rows the
+--     caller could not read: on the committed fixture, a caller holding org
+--     B's claim saw five of six chunks and SEMANTIC returned all six.
+--
+--  2. THE SPACE ITSELF IS STILL READABLE, and this is a known, open exposure
+--     rather than a decision. integration-rbac.sql grants SELECT on this
+--     schema's tables -- and sets ALTER DEFAULT PRIVILEGES so spaces
+--     registered later are covered -- precisely because the modes are SECURITY
+--     INVOKER and must read them as the caller; withholding the grant would
+--     break every SEMANTIC call. So `select * from aiq.emb_<model>` still
+--     hands any authenticated caller chunk ids and raw vectors for content it
+--     cannot read, and raw vectors are not innocuous (embedding inversion is a
+--     published attack). Closing it needs per-source row policies generated
+--     onto each space from aiq.semantic_sources, refreshed as corpora are
+--     registered. That is real machinery and it is not built.
+--     dev/tests/query/09 §5 pins the current state so that building it is a
+--     deliberate act that updates this paragraph.
 -- ============================================================
 
 create table aiq.embedding_models (
@@ -782,16 +1283,68 @@ begin
 end;
 $$ language plpgsql;
 
--- SEMANTIC against a named model (or the default when null). The caller still
--- supplies the vector -- embedding generation is an external model call (§4),
--- and which model produced that vector is now explicit rather than implied.
+-- SEMANTIC against a named corpus and a named model (or the default model when
+-- null). The caller still supplies the vector -- embedding generation is an
+-- external model call (§4), and which model produced that vector is now
+-- explicit rather than implied.
+--
+-- THE SOURCE IS FIRST AND IT IS NOT OPTIONAL, and that is a security fix, not
+-- a signature preference.
+--
+-- This function took (vector, model, limit) and searched the whole embedding
+-- space. The space is keyed by MODEL, not by corpus, so it holds every
+-- registered corpus's chunks together; and `aiq.emb_*` tables carry no
+-- row-level policy, because a generated space has no way to know which
+-- consumer table a chunk_id came from. So the mode returned chunk ids and
+-- cosine distances for rows the caller could not read.
+--
+-- Measured, on the committed fixture: a caller holding org B's claim can see
+-- five of six chunks -- content's own RLS correctly hides org A's memo -- and
+-- SEMANTIC returned all six, org A's memo included, at rank three. The text
+-- did not come back, but the id, the existence and the similarity did, and a
+-- similarity oracle over private content that answers an arbitrary probe
+-- vector is the whole attack, not a precursor to it.
+--
+-- The dialect made this worse rather than causing it: the parser REQUIRES
+-- `FROM <source>` on SEMANTIC ("SEMANTIC, TEXT and SEARCH each require FROM
+-- <source>"), and the dispatch then dropped it on the floor and searched
+-- everything. The caller was compelled to name a corpus that was not used.
+--
+-- The fix is the join, and it fixes both halves at once: joining the space to
+-- the registered source table scopes the search to the corpus the caller
+-- named, AND puts the consumer's own RLS in the path, because this function is
+-- SECURITY INVOKER and the join reads as the caller.
+--
+-- The cost is honest to state: an HNSW scan feeding a join that may discard
+-- rows means the index can be walked further than `limit` rows to fill the
+-- result. That is the price of a filtered vector search and it is the correct
+-- price to pay; the alternative is a fast wrong answer.
+--
+-- What this does NOT fix, and what dev/tests/query/09 pins: `aiq.emb_*` is
+-- still directly SELECT-able by `authenticated`, because integration-rbac.sql
+-- grants the schema's tables so that SECURITY INVOKER modes can read them. A
+-- caller who queries the space directly still sees chunk ids and raw vectors
+-- for content they cannot read. Closing that needs per-source policies on
+-- generated spaces, which is real machinery and is not built.
+drop function if exists aiq.semantic_in(vector, text, int);
 create or replace function aiq.semantic_in(
-    p_query vector, p_model text default null, p_limit int default 10
+    p_source text, p_query vector, p_model text default null, p_limit int default 10
 ) returns table(chunk_id uuid, distance float8, model text) as $$
 declare
     m aiq.embedding_models;
+    src aiq.semantic_sources;
     v_tbl text;
 begin
+    if p_source is null then
+        raise exception
+            'SEMANTIC needs the corpus it is searching -- name one with '
+            'FROM <source>. Without it a vector search reads every registered '
+            'corpus and cannot be filtered by the consumer''s own policies.';
+    end if;
+    select * into src from aiq.semantic_sources where name = p_source;
+    if not found then
+        raise exception 'semantic source % not registered -- SCHEMA "graph" lists the registered ones', p_source;
+    end if;
     if p_model is null then
         select * into m from aiq.embedding_models where is_default;
         if not found then raise exception
@@ -811,10 +1364,16 @@ begin
             vector_dims(p_query), m.name, m.dim;
     end if;
 
+    -- The join is the filter. `c` is the consumer's table, read as the caller,
+    -- so the consumer's policies decide which chunks may rank at all -- and
+    -- ranks are computed after it, so a chunk the caller cannot see does not
+    -- silently occupy a position and shift everyone else's fused score.
     v_tbl := 'emb_' || replace(m.name, '-', '_');
     return query execute format(
         'select e.chunk_id, (e.embedding <=> $1)::float8, %L
-         from aiq.%I e order by e.embedding <=> $1 limit $2', m.name, v_tbl)
+         from aiq.%I e
+         join %s c on c.id = e.chunk_id
+         order by e.embedding <=> $1 limit $2', m.name, v_tbl, src.source_table)
         using p_query, p_limit;
 end;
 $$ language plpgsql stable;
@@ -930,8 +1489,11 @@ begin
         from aiq.lexical($1, $2, $4 * 4) l
     ),
     sem as (
+        -- The SAME source name feeds both halves, so `SEARCH "..." FROM x`
+        -- means one corpus and not two. It must therefore be registered in
+        -- both registries; the semantic branch says so by name if it is not.
         select s.chunk_id, row_number() over (order by s.distance asc)::int as rnk
-        from aiq.semantic_in($3, $6, $4 * 4) s
+        from aiq.semantic_in($1, $3, $6, $4 * 4) s
     )
     -- Content is fetched by id AFTER the fusion, not carried through the
     -- lexical branch: a chunk matched only semantically has no row in `lex`,
@@ -1649,11 +2211,44 @@ returns jsonb as $$
                 'enforced_by', 'a trigger validates (src_type, relation, dst_type) '
                                'against aiq.relation_types; an unlisted triple is refused',
                 'resolve_ids', 'nodes are found by key: select node_id from aiq.lookup(''<key>'')'),
+            -- `sample_keys`, and the dead end it closes.
+            --
+            -- Every mode except SCHEMA requires the caller to ALREADY HOLD a
+            -- key (USAGE.md says so outright), and until now nothing anywhere
+            -- showed one. So the discovery path terminated: SCHEMA "graph"
+            -- said an `fx_pair` entity type exists and a `same_band` relation
+            -- runs between them, and left the caller to invent the name of an
+            -- instance.
+            --
+            -- Observed, on the first real question ever put to the sample
+            -- agent: it read both schema facets correctly, then guessed
+            -- `sterling`, `gbp`, `gbp_usd` and `gbpusd`, got four empty
+            -- results, and gave up. The keys were `usd/gbp`. Three example
+            -- keys would have ended it at the first call -- the shape of a key
+            -- is the one thing a naming convention cannot be reasoned out of.
+            --
+            -- Scoped explicitly, because this function is SECURITY DEFINER and
+            -- therefore does NOT get the RLS that protects aiq.nodes: the
+            -- predicate below is the nodes_org_scoped policy written out by
+            -- hand. Without it the facet would be a cross-tenant key
+            -- disclosure dressed as documentation.
             'entity_types', coalesce((select jsonb_agg(jsonb_build_object(
-                    'entity_type', entity_type, 'source_table', source_table,
-                    'key_expr', key_expr, 'include_where', include_where) order by entity_type)
-                from aiq.entity_registry
-                where p_name is null or entity_type = p_name), '[]'::jsonb),
+                    'entity_type', r.entity_type, 'source_table', r.source_table,
+                    'key_expr', r.key_expr, 'include_where', r.include_where,
+                    'sample_keys', coalesce((
+                        select jsonb_agg(k.key order by k.key)
+                        from (select nk.key
+                                from aiq.node_keys nk
+                                join aiq.nodes n on n.id = nk.node_id
+                               where n.entity_type = r.entity_type
+                                 and nk.kind = 'canonical'
+                                 and (n.org_id is null
+                                      or n.org_id in (select aiq.current_org_ids()))
+                               order by nk.key
+                               limit 3) k), '[]'::jsonb))
+                    order by r.entity_type)
+                from aiq.entity_registry r
+                where p_name is null or r.entity_type = p_name), '[]'::jsonb),
             'relations', coalesce((select jsonb_agg(jsonb_build_object(
                     'src_type', src_type, 'relation', relation, 'dst_type', dst_type,
                     'inverse_label', inverse_label, 'description', description)
@@ -1718,6 +2313,27 @@ select aiq.register_schema_example('p8ql', 'fused', 'p8ql',
 select aiq.register_schema_example('p8ql', 'self', 'p8ql',
     'SCHEMA "workflow"',
     'The query that produced this document.', 50);
+
+-- The `graph` facet had a document and no examples, which is the half of it
+-- most likely to be read and the half that rots. Registered as kind `p8ql`, so
+-- every read runs them through the real parser: an example that stops parsing
+-- is served as `verified: false` rather than as authority.
+select aiq.register_schema_example('graph', 'neighbours', 'p8ql',
+    'GRAPH "ACME"',
+    'Depth 1 is native SQL/PGQ. Both directions come back; an inbound edge is '
+    'labelled with the catalogue''s inverse label, and that label works as a '
+    'TYPE filter too.', 10);
+select aiq.register_schema_example('graph', 'typed-walk', 'p8ql',
+    'GRAPH "ACME" DEPTH 2 TYPE competes_with',
+    'DEPTH above 1 falls back to WITH RECURSIVE -- PG19 has no quantified path '
+    'patterns. One row per node at its shortest depth, ordered by depth then by '
+    'the product of the edge weights along the path.', 20);
+select aiq.register_schema_example('graph', 'seed-then-load', 'p8ql',
+    'LOOKUP "acme", "borealis"',
+    'The seed of a walk is resolved exactly -- canonical, then short, then '
+    'alias, never trigram. LOOKUP first when a name might be ambiguous: it '
+    'returns every node that answers to it, and reports the names it did not '
+    'find as rows with a null node_id.', 30);
 
 select aiq.register_schema_example('workflow', 'sql-only', 'workflow_yaml',
 $y$name: reindex_nightly

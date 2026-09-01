@@ -17,7 +17,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # The order is deliberate: RBAC first, because if row-level security is not
 # actually on, every later assertion about who-sees-what is meaningless.
-SURFACES=("${@:-rbac query workflow}")
+# `agentic` runs last: it binds the other three rather than adding a concern
+# of its own, so a failure there is worth reading only once they are green.
+SURFACES=("${@:-rbac query workflow agentic}")
 
 run_sql() {
     if [ -n "$DSN" ]; then

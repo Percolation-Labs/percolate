@@ -68,8 +68,26 @@ alter view workflow.tasks_api owner to api_viewer;
 revoke create on schema workflow from api_viewer;
 
 grant select on workflow.runs_api, workflow.tasks_api to authenticated;
+
 -- No base-table grant to authenticated at all: reads are the views, writes
 -- are the functions in (b). Same shape as user-rbac.
+
+-- Tool descriptions for the two read views, here rather than with the rest of
+-- the set in schema.sql §24: this is the first point at which these views
+-- exist. See that section for why the function comments do not have to move.
+comment on view workflow.runs_api is
+$c$One row per workflow run, filtered to the runs you may see.
+status is pending, running, completed, failed or cancelled. Filter it the
+PostgREST way -- ?status=eq.running, ?id=eq.<uuid>, ?order=created_at.desc --
+and use ?select= to narrow the columns. This is the read side of
+start_workflow: check a run here by the id that returned.$c$;
+
+comment on view workflow.tasks_api is
+$c$One row per step of a workflow run -- the per-step detail behind a run's status.
+Filter by ?run_id=eq.<uuid> to see how a single run is progressing. status
+distinguishes ready, running, completed and failed; attempts against
+max_attempts shows what has been retried, and error carries why the last
+attempt failed.$c$;
 
 -- (d) Self-check, mirroring user-rbac/schema.sql §10 -- the invariants that
 -- silently degrade rather than fail loudly are the ones worth verifying.

@@ -1,5 +1,5 @@
 -- ============================================================
--- world-model-ingestion <-> ai-query-layer + user-rbac integration.
+-- world-model-ingestion <-> ai-query-layer + user-rbac + workflow integration.
 --
 -- Applied last, after every other schema. Same boundary discipline as the
 -- other integration files: content/schema.sql alone is a content store with no
@@ -115,6 +115,164 @@ select workflow.register_step_function(
     'Report orphaned files and unchunked resources');
 
 -- ------------------------------------------------------------
+-- 5b. Workflow artifacts -- the fourth output class, given a home.
+--
+-- workflow-engine/outputs.md: a step produces rows, a validated assistant
+-- message, an inline payload, or BYTES. Bytes are the one the engine cannot
+-- hold. Its answer is a ref beside the payload --
+-- {"result": ..., "$artifact": "<resource id>"} -- and this section is what
+-- makes that id mean something.
+--
+-- A RESOURCE ID, NOT AN s3:// URI, and the difference is the whole point. A
+-- bucket path in a JSONB column is a string with no owner: not RLS-scoped, not
+-- checksummed, not deduped, not servable, not garbage-collected, and it drags
+-- a bucket name into a row that is supposed to stay inspectable and
+-- replayable -- the same argument that makes credential_ref a NAME. A resource
+-- id is all of those things already, because content/schema.sql built them for
+-- uploads and an artifact is an upload the system performed on its own behalf.
+--
+-- Nothing new is stored to make the link. The task's output holds the resource
+-- id (forward) and the resource's metadata holds the task id (back), each on
+-- the row that owns it. A join table would be a third copy of a fact two rows
+-- already carry.
+-- ------------------------------------------------------------
+-- WHERE NOT EXISTS rather than ON CONFLICT, and not as a style choice:
+-- channels is UNIQUE (org_id, name) with a NULLABLE org_id, so two global
+-- channels of the same name do not collide -- NULLs are distinct in a unique
+-- index unless it is declared NULLS NOT DISTINCT, and this one is not. An
+-- ON CONFLICT here raises "no unique or exclusion constraint matching"
+-- (it does; that is how this comment got written), and the version that
+-- compiles would silently insert a second row on the next install, leaving
+-- register_upload's lookup to pick one of them arbitrarily.
+insert into content.channels (name, kind, config)
+select 'workflow_artifacts', 'file_upload',
+       -- No ingest_workflow: registering an artifact must not start an
+       -- ingestion run. That key is what makes an upload chunk itself, and a
+       -- rendered PDF that a step just produced is output, not intake. A
+       -- channel with none configured registers content and starts nothing,
+       -- which content.register_upload documents as a legitimate choice.
+       '{"description": "bytes produced by a workflow step, refd from tasks.output"}'::jsonb
+where not exists (
+    select 1 from content.channels where name = 'workflow_artifacts' and org_id is null);
+
+create or replace function workflow.register_artifact(
+    p_task_id      uuid,
+    p_checksum     text,
+    p_bucket       text,
+    p_object_key   text,
+    p_size_bytes   bigint,
+    p_content_type text default null,
+    p_title        text default null,
+    p_org_id       uuid default null
+) returns uuid as $$
+declare
+    t      workflow.tasks;
+    v_res  uuid;
+    v_file uuid;
+begin
+    select * into t from workflow.tasks where id = p_task_id;
+    if not found then
+        raise exception
+            'no task % -- an artifact belongs to the task that produced it, and the '
+            'task id is what makes the ref traceable back to a step', p_task_id;
+    end if;
+
+    -- external_id is the TASK id, so a retry converges on one resource instead
+    -- of leaving a trail of orphans -- the same idempotency the engine already
+    -- gets from tasks.idempotency_key. Bytes are deduped independently by
+    -- checksum, so two tasks writing identical output share one files row and
+    -- still get a resource each.
+    v_res := content.register_upload(
+        p_channel      => 'workflow_artifacts',
+        p_checksum     => p_checksum,
+        p_bucket       => p_bucket,
+        p_object_key   => p_object_key,
+        p_size_bytes   => p_size_bytes,
+        p_content_type => p_content_type,
+        p_title        => coalesce(p_title, t.step_key),
+        p_org_id       => p_org_id,
+        p_metadata     => jsonb_build_object('workflow', jsonb_build_object(
+                              'run_id', t.run_id, 'task_id', t.id,
+                              'step_key', t.step_key, 'attempt', t.attempts)),
+        p_external_id  => p_task_id::text,
+        p_trace_id     => (select trace_id from workflow.runs where id = t.run_id));
+
+    -- register_upload's ON CONFLICT touches updated_at and nothing else, which
+    -- is right for a puller re-seeing the same item and WRONG here: attempt 2
+    -- of a task can legitimately produce different bytes, and leaving the
+    -- resource pointed at attempt 1's file would be a failure that reports
+    -- success. Repoint it, and mark it stored -- an artifact is retrievable
+    -- the moment it lands and has no chunking stage to wait for.
+    select id into v_file from content.files where checksum = p_checksum;
+    update content.resources
+       set file_id = v_file, status = 'stored', updated_at = now()
+     where id = v_res
+       and (file_id is distinct from v_file or status <> 'stored');
+
+    return v_res;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- The read side. Wraps content.resolve_file so a caller never needs a grant on
+-- content.files -- which is granted to nobody, because content-hash dedup
+-- leaves it with no single owner. Scoping therefore happens on the RESOURCE,
+-- inside resolve_file, exactly as it does for an ordinary upload: an artifact
+-- from another tenant's run is not visible here.
+--
+-- Returns jsonb, not a table, for the same reason workflow.p8ql does:
+-- call_step_function wraps a step function's result as to_jsonb(fn(...)), and
+-- a set-returning function under that produces "one row if there was one and
+-- nothing at all otherwise" -- which a step would store as {"result": null}
+-- and call success. RAISING instead makes an unreadable artifact a terminal
+-- step failure (sqlstate P0001 is on execute_sql_step's do-not-retry list),
+-- which is right: a ref that does not resolve resolves no better next time.
+create or replace function workflow.artifact(p_resource_id uuid) returns jsonb as $$
+declare v_out jsonb;
+begin
+    select to_jsonb(f) into v_out from content.resolve_file(p_resource_id) f;
+    if v_out is null then
+        raise exception
+            'artifact % is not resolvable -- either no such resource, or it belongs '
+            'to an org this caller cannot see. An artifact is scoped by its resource, '
+            'not by the bucket it happens to sit in.', p_resource_id;
+    end if;
+    return v_out;
+end;
+$$ language plpgsql stable;
+
+-- Both directions of the link, as one join, so "what did this run produce" and
+-- "which step produced this file" are the same query read from either end.
+create or replace view workflow.v_artifacts as
+select t.run_id,
+       t.id             as task_id,
+       t.step_key,
+       r.id             as resource_id,
+       r.title,
+       r.status,
+       f.checksum,
+       f.bucket,
+       f.object_key,
+       f.content_type,
+       f.size_bytes,
+       r.ingested_at
+from workflow.tasks t
+join content.resources r
+  on r.id = workflow.artifact_ref(t.output)
+left join content.files f on f.id = r.file_id;
+
+grant execute on function workflow.register_artifact(uuid,text,text,text,bigint,text,text,uuid)
+    to worker, authenticated;
+grant execute on function workflow.artifact(uuid) to worker, authenticated;
+grant select on workflow.v_artifacts to authenticated;
+
+-- Registered so a downstream step can be handed an artifact by id and resolve
+-- it in-database, which is what keeps class 4 from needing a worker just to
+-- look something up: {{steps.render.$artifact}} is an ordinary argument.
+select workflow.register_step_function(
+    'artifact', 'workflow.artifact', array['uuid'], 30000,
+    'Resolve a workflow artifact ref to its bucket, key, type and size');
+
+-- ------------------------------------------------------------
 -- 6. Self-check.
 -- ------------------------------------------------------------
 do $$
@@ -140,5 +298,17 @@ begin
         raise exception 'the "chunks" source is not registered -- TEXT/SEMANTIC/SEARCH have no corpus';
     end if;
 
-    raise notice 'world-model-ingestion self-check passed: files unexposed; chunks corpus registered';
+    -- An artifact channel with an ingest_workflow would start an ingestion run
+    -- every time a step offloaded its output -- an infinite-ish source of runs
+    -- nobody asked for, and the kind of thing that is only ever noticed by the
+    -- bill. Cheap to assert, impossible to spot by reading.
+    if exists (select 1 from content.channels
+               where name = 'workflow_artifacts' and config ? 'ingest_workflow') then
+        raise exception
+            'the workflow_artifacts channel has an ingest_workflow configured -- '
+            'every artifact a step produces would start an ingestion run. Artifacts '
+            'are step OUTPUT, not intake.';
+    end if;
+
+    raise notice 'world-model-ingestion self-check passed: files unexposed; chunks corpus registered; artifact channel inert';
 end $$;

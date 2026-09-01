@@ -31,10 +31,13 @@
 --    An audit run reported clean while `POST /files` claimed a scraper that
 --    did not exist; that is the gap, precisely.
 --
--- 2. THE AGENTIC SUBSYSTEM. Every other subsystem has a block below. This one
---    has none -- no agentic schema, no sessions/runs/messages/agents tables,
---    no functions. It is the least-exercised corner of the collection and the
---    audit is silent about it rather than reassuring.
+-- 2. WAS: "the agentic subsystem has no block below". It has one now, and
+--    this note is kept rather than deleted because the debt only half
+--    closed. The tables, functions and the sample binding are checked; the
+--    turn itself is not, and cannot be from here -- an agent run is an LLM
+--    call and a tool call, and neither is a catalog lookup. `docker compose
+--    up` producing a registered agent is asserted below; that agent
+--    answering anything is asserted nowhere in this repository.
 --
 -- Both are debts, not decisions. `meta/skills/spec-driven-development` says
 -- the audit should exist before the thing it describes.
@@ -45,7 +48,10 @@
 
 create temporary table expected (
     subsystem text,
-    kind      text,     -- schema | table | function | policy | extension | registration
+    kind      text,     -- schema | table | view | column | function | policy
+                      -- | extension | registration | agent | tool_server
+                      -- | entity_type | graph_example | property_graph
+                      -- | corpus | embedding_space | channel
     name      text,
     detail    text,
     why       text      -- the spec sentence this row exists to keep honest
@@ -126,6 +132,16 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('workflow-engine','function','workflow.resolve_args','jsonb,uuid,jsonb','§20a: {{item.*}} is a third namespace'),
 ('workflow-engine','column','workflow.tasks.matrix_parent_id',null,'§20: a child points at the matrix that produced it'),
 
+-- ---------- workflow-engine: artifacts, output class 4 (outputs.md) ----
+-- The registration and read halves live in world-model-ingestion's
+-- integration file (content loads after the engine), but the capability is
+-- the engine's, so it is asserted with the engine.
+('workflow-engine','function','workflow.artifact_ref','jsonb','outputs.md §4: one definition of "is this an artifact ref"'),
+('workflow-engine','function','workflow.register_artifact','uuid,text,text,text,bigint,text,text,uuid','outputs.md §4: bytes become a resource id, never an s3:// URI'),
+('workflow-engine','function','workflow.artifact','uuid','outputs.md §4: a ref resolves in-database, so class 4 needs no worker to read'),
+('workflow-engine','view','workflow.v_artifacts','','outputs.md §4: which step produced which file, from either end'),
+('workflow-engine','registration','step:artifact',null,'outputs.md §4: {{steps.x.$artifact}} is an ordinary step argument'),
+
 -- ---------- ai-query-layer ---------------------------------------------
 ('ai-query-layer','schema','aiq',null,'brief.md: one query dialect'),
 ('ai-query-layer','table','aiq.nodes',null,'graph-identity.md: write-time node registry'),
@@ -136,13 +152,24 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','function','aiq.lookup','text,boolean,integer','§7: LOOKUP / FUZZY'),
 ('ai-query-layer','function','aiq.graph_neighbors','uuid,text,integer','§7: GRAPH depth 1'),
 ('ai-query-layer','function','aiq.graph_walk','uuid,integer,text,integer','§7: GRAPH depth n>1'),
-('ai-query-layer','function','aiq.semantic_in','vector,text,integer','§10: SEMANTIC, model-scoped'),
+('ai-query-layer','function','aiq.semantic_in','text,vector,text,integer','§10: SEMANTIC, model-scoped -- source-qualified, per schema.sql'),
 ('ai-query-layer','function','aiq.lexical','text,text,integer','§11: TEXT'),
 ('ai-query-layer','function','aiq.search','text,text,vector,text,integer,integer','§11: SEARCH / RRF'),
 ('ai-query-layer','function','aiq.lookup_many','text[],boolean,integer','§7: LOOKUP takes a list of keys'),
 ('ai-query-layer','function','aiq.sql_passthrough','text','§12: the escape hatch'),
 ('ai-query-layer','function','aiq.check_drift','text','graph-identity.md D7'),
 ('ai-query-layer','function','aiq.rebuild_entity_type','text','graph-identity.md: rebuild'),
+('ai-query-layer','function','aiq.register_entity_table','text,text,text,text,text,text','graph-identity.md D6: a consumer gets projection by registering, not by hand-writing three triggers'),
+('ai-query-layer','table','aiq.entity_registry',null,'graph-identity.md "Inclusion policy": rebuild and live projection read ONE predicate'),
+('ai-query-layer','table','aiq.relation_types',null,'graph-identity.md "Catalogue": an unlisted triple is refused at write'),
+-- Aliases and short keys are two thirds of LOOKUP's cascade and invariant 5
+-- forbids writing node_keys directly, so the absence of this function meant
+-- those branches could only be reached by breaking the rule the schema states.
+('ai-query-layer','function','aiq.add_node_key','text,text,text','graph-identity.md "Keys": the named exception to invariant 5'),
+-- The graph itself is a catalog object with its own privilege, separate from
+-- the tables it reads. An audit that checks the tables and not this one passes
+-- clean against a deployment where GRAPH mode returns "permission denied".
+('ai-query-layer','property_graph','aiq.knowledge_graph',null,'graph-identity.md D8: SQL/PGQ is the read-only overlay'),
 
 -- ---------- world-model-ingestion --------------------------------------
 ('world-model-ingestion','schema','content',null,'brief.md §2-§3: the content plane'),
@@ -156,6 +183,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('world-model-ingestion','function','content.resolve_file','uuid','brief.md §3.5: proxied reads'),
 ('world-model-ingestion','function','content.record_chunks','uuid,jsonb','brief.md §3: chunking writes back'),
 ('world-model-ingestion','function','content.check_drift','','brief.md §3: reconciliation is definition-of-done'),
+('world-model-ingestion','channel','workflow_artifacts',null,'outputs.md §4: step output has a channel, with no ingest_workflow on it'),
 
 -- ---------- workflow-engine: schedules (schema.sql §19) ----------------
 -- pg_cron is deliberately NOT asserted here. It is one caller of tick(), not
@@ -167,6 +195,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('workflow-engine','function','workflow.cron_matches','text,timestamptz,text','§19: 5-field cron, in the schedule''s timezone'),
 ('workflow-engine','function','workflow.schedule_workflow','text,text,text,jsonb,text,text','§19: POST /rpc/schedule_workflow'),
 ('workflow-engine','function','workflow.set_schedule_enabled','text,boolean','§19: disable without losing history'),
+('workflow-engine','function','workflow.lint_spec','jsonb','§25: a p8ql string that cannot parse is refused at authoring time, not at 3am'),
 ('workflow-engine','function','workflow.unschedule_workflow','text','§19: the destructive one'),
 
 -- ---------- agentic ----------------------------------------------------
@@ -185,6 +214,39 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('agentic','function','agentic.persist_turn','jsonb','brief.md §4: one call per turn, not N inserts'),
 ('agentic','function','agentic.upsert_agent','jsonb','brief.md §2: agents are declared, not deployed'),
 ('agentic','function','agentic.upsert_tool_server','jsonb','brief.md §5.2'),
+('agentic','column','agentic.tool_servers.default_headers',null,'reference/README §1: one url is not one OpenAPI document'),
+('agentic','function','agentic.may_author','text,regclass','reference/README §5: the first agent is registered by a migration, not a user'),
+('agentic','view','agentic.agents_pickable',null,'schema.sql §9: a table sized for thousands needs the audience filter'),
+-- The sample itself. A registered agent bound to servers that were never
+-- registered is the failure this repository keeps finding one layer down --
+-- a demo that lives only in a running container -- so the audit asserts the
+-- rows, not just the tables they sit in.
+('agentic','agent','percolate',null,'reference/percolate.yaml: the sample agent ships as data'),
+('agentic','tool_server','p8-query',null,'reference/query_mcp.py: the MCP binding'),
+('agentic','tool_server','p8-workflow',null,'reference/percolate.yaml: the OpenAPI binding over PostgREST'),
+
+-- ---------- the corpus, as data ----------------------------------------
+-- `lexical:chunks` and `semantic:chunks` are checked below and were passing
+-- against a corpus of ZERO chunks and a model registry of ZERO models: three
+-- of the seven modes had never returned a row to anybody and the audit called
+-- them present. A registration is not a corpus, and these rows are the
+-- difference.
+('ai-query-layer','corpus','chunks',null,'dev/init/05-corpus-sample.sql: TEXT, SEMANTIC and SEARCH need something to search'),
+('ai-query-layer','embedding_space','demo-quad-a',null,'§10: a registered model is a TABLE, not just a row in the registry'),
+('ai-query-layer','embedding_space','demo-quad-b',null,'§10: two models of one dimension are two spaces -- the claim needs two to be checkable'),
+
+-- ---------- the worked graph, as data ----------------------------------
+-- Same reasoning as the agentic sample above, and found the same way. Every
+-- measured claim in ai-query-layer/schema.sql §8 and every worked result in
+-- USAGE.md's GRAPH section was produced against a fixture that existed only in
+-- a psql session -- `specs/agentic/reference/README.md` still quotes output
+-- from an `fx_pair` entity type that appears in no file in this repository.
+-- These rows assert that `docker compose up` produces the graph the documents
+-- describe, not merely the tables it could live in.
+('ai-query-layer','entity_type','company',null,'dev/init/04-graph-sample.sql: the sample graph ships as data'),
+('ai-query-layer','entity_type','person',null,'dev/init/04-graph-sample.sql: a walk that crosses entity types'),
+('ai-query-layer','entity_type','event',null,'dev/init/04-graph-sample.sql: the hard FK that is not an edge'),
+('ai-query-layer','graph_example','graph',null,'§13a: the facet an agent reads before writing its first edge shipped with no examples'),
 
 -- ---------- registrations the docs depend on ---------------------------
 ('cross','registration','lexical:chunks',null,'USAGE.md tells readers TEXT searches "chunks"'),
@@ -219,6 +281,43 @@ select e.*,
         where c.table_schema = split_part(e.name, '.', 1)
           and c.table_name   = split_part(e.name, '.', 2)
           and c.column_name  = split_part(e.name, '.', 3))
+    -- Two kinds that check DATA, not catalog. Everything else in this file
+    -- asks whether a capability exists; these ask whether the sample that
+    -- demonstrates it was actually installed, because a subsystem whose only
+    -- worked example lives in somebody's shell is the exact failure
+    -- dev/init/02-seed.sql's header describes.
+    when 'agent'       then exists (select 1 from agentic.agents where name = e.name)
+    when 'tool_server' then exists (select 1 from agentic.tool_servers where name = e.name)
+    -- A registered entity type with no nodes is a registration nobody ran, so
+    -- the check is on the projected rows, not on the registry row.
+    when 'entity_type' then exists (select 1 from aiq.entity_registry r
+                                     where r.entity_type = e.name)
+                        and exists (select 1 from aiq.nodes n
+                                     where n.entity_type = e.name)
+    when 'graph_example' then exists (select 1 from aiq.schema_examples
+                                       where facet = e.name)
+    -- Registered AND populated. The registration alone is what passed while
+    -- the corpus behind it was empty.
+    when 'corpus' then exists (select 1 from aiq.lexical_sources where name = e.name)
+                   and exists (select 1 from aiq.semantic_sources where name = e.name)
+                   and (select count(*) from content.resource_chunks) > 0
+    -- The registry row AND the generated storage table it promises.
+    when 'embedding_space' then exists (select 1 from aiq.embedding_models where name = e.name)
+                            and to_regclass('aiq.emb_' || replace(e.name,'-','_')) is not null
+    -- PG19 puts property graphs in pg_class with their own relkind ('g'),
+    -- which is why they cannot be found by the 'table' branch above.
+    when 'property_graph' then exists (
+        select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+        where n.nspname = split_part(e.name, '.', 1)
+          and c.relname = split_part(e.name, '.', 2)
+          and c.relkind = 'g')
+    -- A channel is a row, and this one has to be both present and INERT: an
+    -- ingest_workflow on the artifacts channel would start an ingestion run
+    -- every time a step offloaded its output. Checking existence alone would
+    -- pass on the configuration that breaks it.
+    when 'channel' then exists (
+        select 1 from content.channels
+        where name = e.name and not (config ? 'ingest_workflow'))
     when 'registration' then case split_part(e.name, ':', 1)
         when 'lexical'  then exists (select 1 from aiq.lexical_sources  where name = split_part(e.name,':',2))
         when 'semantic' then exists (select 1 from aiq.semantic_sources where name = split_part(e.name,':',2))
@@ -255,4 +354,196 @@ begin
     end if;
     raise notice 'SURFACE COMPLETE: all % declared capabilities present',
         (select count(*) from surface);
+end $$;
+
+
+-- ============================================================
+-- THE ROUND TRIP
+--
+-- Everything above asks whether a capability EXISTS. This asks a different
+-- question, and it is the one that would have caught the most defects per line
+-- of any check in this repository: **can every column of a table be written
+-- through the documented write path, and read back through the documented read
+-- path?**
+--
+-- The failure it exists to prevent has happened four times, always the same way
+-- and never noisily. A column is added to a table -- `audience`, `category`,
+-- `tags`, `default_headers` -- and the `upsert_*` function that is the only
+-- supported way to write that table is not updated, nor is the `*_api` view
+-- that is the only supported way to read it. Nothing breaks. The column exists,
+-- the tests pass, and the audit above is satisfied because the TABLE is
+-- present. And then:
+--
+--   * an agent authored as user-facing is accepted, reported as created, and
+--     silently stored as `internal` -- invisible in the one view a client picks
+--     from, because upsert_agent could not express the column;
+--   * a tool server is registered with the header that selects its OpenAPI
+--     document, the runtime reading tool_servers_api cannot see it, and
+--     discovery binds the wrong schema and looks correct.
+--
+-- Both were found by a person using the system, long after the column landed.
+-- Both are decidable from the catalog in milliseconds.
+--
+-- The rule: every column is IN the contract, or is DECLARED as deliberately
+-- outside it with a reason. There is no third state. Adding a column therefore
+-- forces a decision about its contract, instead of defaulting to "invisible and
+-- unwritable" -- which is the state that produced every one of these.
+-- ============================================================
+
+create temporary table api_exclusions (
+    api_view    text,
+    column_name text,
+    kind        text,     -- secret | internal
+    why         text
+);
+
+-- `secret` is not a stronger `internal`. It is a different assertion, checked
+-- in the opposite direction: an internal column merely MAY not appear, while a
+-- secret column MUST NOT -- and the check below fails loudly if one ever does.
+-- These four are the reason the distinction is worth carrying.
+insert into api_exclusions (api_view, column_name, kind, why) values
+('rbac.users_api',          'password_hash', 'secret', 'a bcrypt hash still enables offline attack; verification stays server-side'),
+('rbac.users_api',          'mfa_secret',    'secret', 'the TOTP seed IS the second factor'),
+('rbac.api_keys_api',       'key_hash',      'secret', 'the stored half of a credential'),
+('rbac.refresh_tokens_api', 'token_hash',    'secret', 'the stored half of a credential'),
+
+('rbac.refresh_tokens_api', 'replaced_by', 'internal', 'rotation chain, internal to refresh'),
+('aiq.edges_api',           'provenance',  'internal', 'authoring metadata, not part of the read contract'),
+
+-- updated_at is excluded everywhere it exists. Listed per view rather than
+-- pattern-matched on the name: a rule with an unwritten exception is how the
+-- next column gets excluded by accident, which is the whole subject here.
+('agentic.agents_api',       'updated_at', 'internal', 'mutation timestamp, not contract'),
+('agentic.runs_api',         'updated_at', 'internal', 'mutation timestamp, not contract'),
+('agentic.sessions_api',     'updated_at', 'internal', 'mutation timestamp, not contract'),
+('agentic.tool_servers_api', 'updated_at', 'internal', 'mutation timestamp, not contract'),
+
+('workflow.runs_api', 'parent_task_id',   'internal', 'engine linkage; the parent/child relation is served by run_meta'),
+('workflow.runs_api', 'cancel_requested', 'internal', 'engine flag; cancellation is an action, not a field to poll'),
+
+-- tasks_api is the state a caller may see; everything else is the state machine.
+('workflow.tasks_api', 'pending_deps',          'internal', 'scheduler bookkeeping'),
+('workflow.tasks_api', 'claimed_by',            'internal', 'lease holder'),
+('workflow.tasks_api', 'claimed_at',            'internal', 'lease start'),
+('workflow.tasks_api', 'heartbeat_at',          'internal', 'lease liveness'),
+('workflow.tasks_api', 'cancel_requested',      'internal', 'engine flag'),
+('workflow.tasks_api', 'idempotency_key',       'internal', 'dedupe key'),
+('workflow.tasks_api', 'rate_key',              'internal', 'rate-limit bucket'),
+('workflow.tasks_api', 'input',                 'internal', 'may carry the target of a resolved credential_ref; the OUTPUT is the contract'),
+('workflow.tasks_api', 'wait_signal',           'internal', 'the signal name a task blocks on'),
+('workflow.tasks_api', 'child_run_id',          'internal', 'sub-workflow linkage'),
+('workflow.tasks_api', 'saga_group',            'internal', 'compensation grouping'),
+('workflow.tasks_api', 'compensation_task_key', 'internal', 'compensation target'),
+('workflow.tasks_api', 'compensated_at',        'internal', 'compensation bookkeeping'),
+('workflow.tasks_api', 'compensates_task_id',   'internal', 'compensation linkage'),
+('workflow.tasks_api', 'decision_output_hash',  'internal', 'replay guard'),
+('workflow.tasks_api', 'matrix_parent_id',      'internal', 'fan-out linkage'),
+('workflow.tasks_api', 'tolerate_failure',      'internal', 'engine flag');
+
+-- ------------------------------------------------------------
+-- (a) READ: every table column is in its *_api view, or declared out of it.
+-- ------------------------------------------------------------
+create temporary view read_contract as
+select v.schemaname || '.' || v.viewname as api_view,
+       c.column_name,
+       exists (select 1 from information_schema.columns vc
+                where vc.table_schema = v.schemaname
+                  and vc.table_name   = v.viewname
+                  and vc.column_name  = c.column_name) as in_view,
+       x.kind, x.why
+  from pg_views v
+  join information_schema.columns c
+    on c.table_schema = v.schemaname
+   and c.table_name   = left(v.viewname, length(v.viewname) - 4)
+  left join api_exclusions x
+    on x.api_view    = v.schemaname || '.' || v.viewname
+   and x.column_name = c.column_name
+ where v.viewname like '%\_api'
+   and v.schemaname in ('agentic','aiq','workflow','content','rbac');
+
+\echo
+\echo '=== ROUND TRIP: READ PATH ==='
+select case when in_view and kind = 'secret'  then 'LEAKED SECRET'
+            when in_view                      then 'STALE EXCLUSION'
+            else 'UNDECLARED' end as problem,
+       api_view, column_name,
+       coalesce(why, '(no decision recorded -- add it to the view, or declare it out)') as note
+from read_contract
+where (not in_view and kind is null) or (in_view and kind is not null)
+order by 1, 2, 3;
+
+-- ------------------------------------------------------------
+-- (b) WRITE: every table column is settable through its upsert_* function.
+--
+-- Checked by reading the function body for the jsonb key, which is crude and is
+-- the honest amount of rigour available here: the documented write path IS
+-- `p_spec->>'<column>'`, so the column name appearing as a key in the source is
+-- the contract. A false PASS would take someone naming a column in a comment
+-- and not implementing it; a false FAILURE cannot happen.
+-- ------------------------------------------------------------
+create temporary table write_paths (tbl text, fn text, unsettable text[], why text);
+insert into write_paths values
+('agentic.agents', 'agentic.upsert_agent',
+ '{id,created_at,updated_at}',
+ 'identity and timestamps are the database''s to assign, never the author''s'),
+('agentic.tool_servers', 'agentic.upsert_tool_server',
+ '{id,created_at,updated_at,synced_at}',
+ 'synced_at is stamped BY the sync, from the presence of cached_tools -- an author setting it would be claiming a fetch that never happened');
+
+create temporary view write_contract as
+select w.fn, c.column_name,
+       coalesce(p.prosrc ~ ('p_spec\s*->>?\s*''' || c.column_name || ''''), false) as settable,
+       c.column_name = any(w.unsettable) as declared_out,
+       w.why
+  from write_paths w
+  join information_schema.columns c
+    on c.table_schema = split_part(w.tbl, '.', 1)
+   and c.table_name   = split_part(w.tbl, '.', 2)
+  join pg_proc p
+    on p.proname     = split_part(w.fn, '.', 2)
+   and p.pronamespace = split_part(w.fn, '.', 1)::regnamespace;
+
+\echo
+\echo '=== ROUND TRIP: WRITE PATH ==='
+select case when settable then 'STALE EXCLUSION' else 'UNWRITABLE' end as problem,
+       fn, column_name,
+       case when settable then why
+            else 'the only supported way to write this table cannot set this column' end as note
+from write_contract
+where (not settable and not declared_out) or (settable and declared_out)
+order by 1, 2, 3;
+
+\echo
+do $$
+declare v_read int; v_write int; v_leak int;
+begin
+    select count(*) into v_read from read_contract
+     where (not in_view and kind is null) or (in_view and kind is not null);
+    select count(*) into v_leak from read_contract where in_view and kind = 'secret';
+    select count(*) into v_write from write_contract
+     where (not settable and not declared_out) or (settable and declared_out);
+
+    if v_leak > 0 then
+        raise exception
+            'SECRET EXPOSED: % column(s) declared as secrets are readable through an '
+            '*_api view. This is the one failure in this file that is a breach rather '
+            'than a gap.', v_leak;
+    end if;
+
+    if v_read + v_write > 0 then
+        raise exception
+            'ROUND TRIP INCOMPLETE: % column(s) sit outside the read contract and % '
+            'outside the write contract with no decision recorded. Put the column in '
+            'the view or the function, or declare it excluded with a reason -- '
+            'silently unreachable is the state this check exists to end.',
+            v_read, v_write;
+    end if;
+
+    raise notice
+        'ROUND TRIP COMPLETE: every column of every table with a documented read or '
+        'write path is in that contract or declared out of it (% read exclusions, of '
+        'which % are secrets; % write exclusions)',
+        (select count(*) from api_exclusions),
+        (select count(*) from api_exclusions where kind = 'secret'),
+        (select sum(coalesce(array_length(unsettable, 1), 0)) from write_paths);
 end $$;
