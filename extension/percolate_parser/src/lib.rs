@@ -778,7 +778,19 @@ pub mod pg_test {
 
 use serde::Deserialize;
 
+// deny_unknown_fields, on every struct an author writes into.
+//
+// A key this compiler does not know is either a typo or a feature it predates,
+// and serde's default -- drop it -- makes both silent. That is how an
+// `output_schema` declared on a step compiled clean and simply was not there at
+// runtime: the author wrote a contract, got a green run, and reasonably
+// concluded it was enforced.
+//
+// This is the durable half of that fix. The engine-side check in define_yaml is
+// the half that works on a deployment whose .so is already old, which is
+// exactly the situation that produced the bug.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WfDoc {
     name: String,
     #[serde(default)]
@@ -787,6 +799,7 @@ struct WfDoc {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WfStep {
     id: String,
     #[serde(default)]
@@ -808,12 +821,44 @@ struct WfStep {
     // ...or a matrix, which is not an action but a fan-out OVER one.
     #[serde(default)]
     matrix: Option<WfMatrix>,
+    // The three kinds the engine has always supported and the compiler could
+    // not express -- found by trying to author a human-in-the-loop workflow
+    // and being refused. `SCHEMA "workflow"` reported all eight legal kinds
+    // while this file accepted five, so the capability document contradicted
+    // the tool it described.
+    #[serde(default)]
+    signal: Option<serde_yaml::Value>,      // true -> named after the step id
+    #[serde(default)]
+    timer: Option<f64>,                     // seconds, measured from readiness
+    #[serde(default)]
+    workflow: Option<String>,               // a sub_workflow, by name
 
     // agent steps
     #[serde(default)]
     input: Option<serde_yaml::Value>,
     #[serde(default)]
     session: Option<String>,
+    // FEATURE 1a. A workflow could not ORIGINATE a session: `session:` resolved
+    // only if the CALLER put an id in the run input -- the same circularity as
+    // BUG 1, since the natural key derives from the run and the run could not
+    // see itself. `session_group` asks the engine to mint one, stable for the
+    // life of the run, so several agent steps share a conversation by naming
+    // the same group and stay stateless by declaring none. Two groups in one
+    // run are two independent threads.
+    #[serde(default)]
+    session_group: Option<String>,
+    // FEATURE 1b. jsonpath was hard-coded to the assistant text, so anything
+    // else the runtime returned -- a session id it issued, token counts, tool
+    // traces -- was discarded before reaching runs.context, and
+    // {{steps.<id>.session}} could never resolve. The default is unchanged.
+    #[serde(default)]
+    jsonpath: Option<String>,
+    // Declaring the shape an agent must return is what makes N agent results
+    // combinable: a fan-in over them can read a column instead of inspecting
+    // each answer. Checked by the engine on completion, and a violation is
+    // RETRYABLE -- asking a model again is a real remedy.
+    #[serde(default)]
+    output_schema: Option<serde_yaml::Value>,
 
     // saga
     #[serde(default)]
@@ -823,6 +868,7 @@ struct WfStep {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SqlStep {
     function: String,
     #[serde(default)]
@@ -835,6 +881,7 @@ struct SqlStep {
 // rule that every high-level step must remain expressible in raw steps applies
 // to the thing being fanned out as much as to the fan-out.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WfMatrix {
     // exactly one of rows / items
     #[serde(default)]
@@ -846,6 +893,15 @@ struct WfMatrix {
     // "missing field" message that does not say why it matters.
     #[serde(default)]
     max_fanout: Option<i64>,
+    // A fan-out over real sources meets an absent record, a rate limit or an
+    // oversized response on essentially every run. `continue_on: failed` makes
+    // a failed child satisfy its dependents instead of cancelling them;
+    // `min_success` is the floor that keeps that from silently averaging over
+    // survivors -- a fraction (<= 1) or an absolute count (> 1).
+    #[serde(default)]
+    continue_on: Option<String>,
+    #[serde(default)]
+    min_success: Option<f64>,
     template: WfTemplate,
 }
 
@@ -853,6 +909,7 @@ struct WfMatrix {
 // has no `needs` (it depends on nothing but the expansion) and no `id` (it is
 // keyed <step>[<i>] by the engine).
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WfTemplate {
     #[serde(default)]
     queue: Option<String>,
@@ -870,6 +927,10 @@ struct WfTemplate {
     input: Option<serde_yaml::Value>,
     #[serde(default)]
     session: Option<String>,
+    #[serde(default)]
+    session_group: Option<String>,
+    #[serde(default)]
+    jsonpath: Option<String>,
     #[serde(default)]
     rate_key: Option<String>,
     // Rejected, not ignored. serde drops unknown keys, so without this field a
@@ -896,6 +957,8 @@ struct Action<'a> {
     queue: &'a Option<String>,
     input: &'a Option<serde_yaml::Value>,
     session: &'a Option<String>,
+    session_group: &'a Option<String>,
+    jsonpath: &'a Option<String>,
 }
 
 fn resolve_action(what: &str, a: &Action) -> Result<(&'static str, String, serde_json::Value), String> {
@@ -934,25 +997,102 @@ fn resolve_action(what: &str, a: &Action) -> Result<(&'static str, String, serde
         // An agent step is a REST call to the Agent Runtime with the agent
         // NAMED, not defined -- the agent itself is a row in agentic.agents,
         // so changing its prompt or tools never touches this workflow.
-        "agent" => ("http_call",
-            a.queue.clone().unwrap_or_else(|| "http".into()),
-            serde_json::json!({
+        "agent" => {
+            // An explicit `session:` still wins -- a caller threading an id it
+            // already holds is the case that always worked. Otherwise a
+            // declared session_group asks the ENGINE for one; declaring
+            // neither stays stateless, which is the right default.
+            let session = match (a.session, a.session_group) {
+                (Some(s), _) => Some(s.clone()),
+                (None, Some(_)) => Some("{{run.$session}}".to_string()),
+                _ => None,
+            };
+            let mut input = serde_json::json!({
                 "url": "{{env.P8_AGENT_URL}}/v1/chat/completions",
                 "method": "POST",
                 "credential_ref": "P8_API_KEY",
                 "timeout_ms": 120000,
                 "body": {
                     "model": a.agent.clone().unwrap(),
-                    "session": a.session.clone(),
+                    "session": session,
                     "messages": [{"role": "user",
                                   "content": a.input.as_ref().map(y2j)
                                       .unwrap_or(serde_json::Value::Null)}]
                 },
-                "jsonpath": "choices.0.message.content"
-            })),
+                // The assistant text is what almost every step wants, so it
+                // stays the default. Override to capture the whole envelope --
+                // a session id the runtime issued, token counts, tool traces.
+                "jsonpath": a.jsonpath.clone()
+                    .unwrap_or_else(|| "choices.0.message.content".into())
+            });
+            // Carried on the task so get_task_context can bind {{run.$session}}
+            // to THIS step's thread rather than the run's default one.
+            if let Some(g) = a.session_group {
+                input["session_group"] = serde_json::json!(g);
+            }
+            ("http_call", a.queue.clone().unwrap_or_else(|| "http".into()), input)
+        }
         _ => ("work", a.queue.clone().unwrap_or_else(|| "default".into()),
               a.input.as_ref().map(y2j).unwrap_or(serde_json::json!({}))),
     })
+}
+
+// The three control kinds: wait for a person, wait for a clock, run another
+// workflow. None of them ACTS, which is why they sit outside resolve_action's
+// exactly-one-of rule rather than inside it.
+fn compile_control(id: &str, s: &WfStep) -> Result<(&'static str, String, serde_json::Value), String> {
+    let chosen: Vec<&str> = [
+        s.signal.is_some().then_some("signal"),
+        s.timer.is_some().then_some("timer"),
+        s.workflow.is_some().then_some("workflow"),
+    ].into_iter().flatten().collect();
+    if chosen.len() != 1 {
+        return Err(format!(
+            "step '{}' has {} -- signal, timer and workflow are alternatives, not a set",
+            id, chosen.join(" + ")));
+    }
+    let acted: Vec<&str> = [
+        s.p8ql.is_some().then_some("p8ql"), s.sql.is_some().then_some("sql"),
+        s.rest.is_some().then_some("rest"), s.agent.is_some().then_some("agent"),
+        s.work.unwrap_or(false).then_some("work"),
+    ].into_iter().flatten().collect();
+    if !acted.is_empty() {
+        return Err(format!(
+            "step '{}' is a {} step and also declares `{}`. A control step waits; it does \
+             not act.", id, chosen[0], acted.join(" + ")));
+    }
+
+    // Every one of these runs in-database or waits, so none is claimed from a
+    // queue: 'none' is the same label p8ql and sql steps carry.
+    match chosen[0] {
+        "signal" => {
+            // `signal: true` is named after the step; `signal: approved_by_ops`
+            // names it explicitly, for when one run waits on two different
+            // things and the step ids are not the vocabulary the signaller uses.
+            let name = match s.signal.as_ref().unwrap() {
+                serde_yaml::Value::Bool(true) => id.to_string(),
+                serde_yaml::Value::String(n) => n.clone(),
+                other => return Err(format!(
+                    "step '{}' has signal: {:?} -- write `signal: true` to wait on the \
+                     step's own name, or `signal: <name>`", id, other)),
+            };
+            Ok(("signal", "none".to_string(), serde_json::json!({"signal": name})))
+        }
+        "timer" => {
+            let secs = s.timer.unwrap();
+            if secs <= 0.0 {
+                return Err(format!("step '{}' has timer: {}, which waits for nothing", id, secs));
+            }
+            Ok(("timer", "none".to_string(), serde_json::json!({"delay_seconds": secs})))
+        }
+        _ => {
+            let name = s.workflow.clone().unwrap();
+            Ok(("sub_workflow", "none".to_string(), serde_json::json!({
+                "workflow": name,
+                "input": s.input.as_ref().map(y2j).unwrap_or(serde_json::json!({}))
+            })))
+        }
+    }
 }
 
 // A matrix compiles to ONE task row of kind 'matrix'. The engine
@@ -1016,12 +1156,41 @@ fn compile_matrix(id: &str, m: &WfMatrix, s: &WfStep)
             agent: &m.template.agent, work: m.template.work,
             queue: &m.template.queue, input: &m.template.input,
             session: &m.template.session,
+            session_group: &m.template.session_group, jsonpath: &m.template.jsonpath,
         })?;
+
+    if let Some(c) = &m.continue_on {
+        if c != "failed" {
+            return Err(format!(
+                "matrix step '{}' has continue_on: '{}'. The only value is `failed` -- \
+                 there is nothing else a child can do that a parent might tolerate.",
+                id, c));
+        }
+    }
+    if let Some(ms) = m.min_success {
+        if ms <= 0.0 {
+            return Err(format!(
+                "matrix step '{}' has min_success {}, which requires nothing", id, ms));
+        }
+        if m.continue_on.is_none() {
+            return Err(format!(
+                "matrix step '{}' sets min_success without continue_on: failed. Without \
+                 continue_on the first failed child cancels the successors, so a threshold \
+                 could never be reached -- and reading this spec would suggest otherwise.",
+                id));
+        }
+    }
 
     let mut input = serde_json::json!({
         "max_fanout": max_fanout,
         "template": {"queue": tqueue, "kind": tkind, "input": tinput},
     });
+    if let Some(c) = &m.continue_on {
+        input["continue_on"] = serde_json::json!(c);
+    }
+    if let Some(ms) = m.min_success {
+        input["min_success"] = serde_json::json!(ms);
+    }
     if let Some(rk) = &m.template.rate_key {
         input["template"]["rate_key"] = serde_json::json!(rk);
     }
@@ -1060,23 +1229,69 @@ pub fn compile_workflow(yaml: &str) -> Result<serde_json::Value, String> {
             }
         }
 
+        let kind_is_agent = s.agent.is_some();
         let (kind, queue, input) = if let Some(m) = &s.matrix {
             compile_matrix(&s.id, m, s)?
+        } else if s.signal.is_some() || s.timer.is_some() || s.workflow.is_some() {
+            compile_control(&s.id, s)?
         } else {
             resolve_action(&format!("step '{}'", s.id), &Action {
                 p8ql: &s.p8ql, sql: &s.sql, rest: &s.rest, agent: &s.agent,
                 work: s.work, queue: &s.queue, input: &s.input, session: &s.session,
+                session_group: &s.session_group, jsonpath: &s.jsonpath,
             })?
         };
+
+        // Agent-only keys, refused elsewhere rather than ignored. deny_unknown_fields
+        // stops a TYPO being dropped; this stops a REAL key being dropped because
+        // it means nothing for the kind it was written on -- the same silent
+        // class, one level up. It is also the rule the query dialect already
+        // applies to USING, DEPTH and TYPE: a modifier that means nothing where
+        // it is written is an error, because silently discarding it is how a
+        // document quietly means something other than what it says.
+        for (key, present) in [("session", s.session.is_some()),
+                               ("session_group", s.session_group.is_some()),
+                               ("jsonpath", s.jsonpath.is_some())] {
+            if present && kind_is_agent == false {
+                return Err(format!(
+                    "step '{}' declares `{}`, which applies only to an `agent:` step. \
+                     For a `rest:` step, jsonpath belongs inside the rest block.",
+                    s.id, key));
+            }
+        }
 
         let mut step = serde_json::json!({
             "key": s.id, "kind": kind, "queue": queue, "input": input
         });
+        if let Some(sc) = &s.output_schema {
+            if kind == "sql" || kind == "matrix" {
+                return Err(format!(
+                    "step '{}' declares output_schema on a {} step. The shape check is for \
+                     output this engine did not produce -- a model's answer or a remote \
+                     response; a registered function's return type is already known.",
+                    s.id, kind));
+            }
+            step["input"]["output_schema"] = y2j(sc);
+        }
         if !s.needs.is_empty() {
             step["depends_on"] = serde_json::json!(s.needs);
         }
+        // saga_group is emitted INDEPENDENTLY of compensate_with, and tying
+        // the two together was a real bug found by running a saga: the step
+        // that FAILS is usually the one with nothing to undo, so it declares
+        // saga_group and no compensate_with -- and it was losing its group
+        // membership in compilation. fail_task keys the rollback off exactly
+        // that field, so the member whose failure starts the saga was the one
+        // member the engine could not see.
         if let Some(c) = &s.compensate_with {
+            if !ids.contains(&c.as_str()) {
+                return Err(format!(
+                    "step '{}' compensates with '{}', which is not a step in this workflow",
+                    s.id, c));
+            }
             step["compensation_task_key"] = serde_json::json!(c);
+        }
+        if s.saga_group.is_some() || s.compensate_with.is_some() {
             step["saga_group"] = serde_json::json!(
                 s.saga_group.clone().unwrap_or_else(|| "default".into()));
         }
