@@ -11,11 +11,9 @@
 -- fails to run it -- most often because the job's role cannot open a
 -- connection. `cron.job` looks perfect in that state.
 --
--- Run at least ~70 seconds after the stack comes up, so a tick has had a
--- chance to happen:
---
---     docker exec -e PGPASSWORD=p8 p8-experiment-pg19 \
---       psql -U p8 -d p8experiment -f /tmp/03-cron-tick.sql
+-- Safe to run at any point after the stack comes up: the first assertion
+-- waits up to 100 seconds for a tick, because pg_cron's finest granularity is
+-- a minute and a freshly created database has not reached one yet.
 
 \set ON_ERROR_STOP on
 
@@ -62,11 +60,30 @@ declare
     v_runs    int;
     v_failed  text;
     v_latest  timestamptz;
+    v_waited  int := 0;
 begin
-    select count(*), max(start_time) into v_runs, v_latest
-      from cron.job_run_details d
-      join cron.job j on j.jobid = d.jobid
-     where j.jobname = 'workflow-tick';
+    -- WAIT FOR THE FIRST TICK RATHER THAN REQUIRING THE CALLER TO.
+    --
+    -- The header says to run this ~70 seconds after the stack comes up, and
+    -- `dev/tests/run.sh` runs every file the moment the database answers -- so
+    -- on a freshly created database this failed with "has never run" against a
+    -- perfectly healthy pg_cron that simply had not reached the top of a
+    -- minute yet. A precondition a test states and its runner cannot honour is
+    -- a test that fails for the wrong reason, which is worse than no test:
+    -- someone learns to expect this file to be red.
+    --
+    -- pg_cron's finest granularity is one minute, so the bound is 100 seconds
+    -- and it costs nothing on a stack that has been up. The failure below is
+    -- unchanged -- it just means it now.
+    loop
+        select count(*), max(start_time) into v_runs, v_latest
+          from cron.job_run_details d
+          join cron.job j on j.jobid = d.jobid
+         where j.jobname = 'workflow-tick';
+        exit when v_runs > 0 or v_waited >= 100;
+        perform pg_sleep(5);
+        v_waited := v_waited + 5;
+    end loop;
 
     if v_runs = 0 then
         raise exception

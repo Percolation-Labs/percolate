@@ -129,6 +129,17 @@ insert into workflow.definitions (name, spec) values
      "input":{"function":"content_drift","args":[]}}
  ]}');
 
+-- tick() returns how many runs it started ACROSS EVERY SCHEDULE, and this file
+-- asserts exact counts -- so it has to be the only schedule that can fire.
+-- It was not: world-model-ingestion registers `content-reconcile` at
+-- `*/5 * * * *`, and the instant chosen below is 09:05, which that matches.
+-- The assertion "started exactly 1" then failed on a CORRECT database, and
+-- read as a scheduler bug rather than as a test that assumed it was alone.
+--
+-- Disabled rather than deleted, and inside the transaction this file rolls
+-- back, so the deployment's own schedules are untouched either way.
+update workflow.schedules set enabled = false;
+
 -- ---------------------------------------------------------------------
 -- 3. A schedule is a row, and the ticker starts runs from it.
 -- ---------------------------------------------------------------------

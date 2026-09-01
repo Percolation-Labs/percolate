@@ -48,8 +48,12 @@ search, that the shorthand and the hand-written pair produce **byte-identical
 stored specs** (the diff test `YAML.md` sets for promoting any shorthand), and
 that a workflow embedding with one model while searching another space is
 refused — a wrong answer with no run-time symptom, since two 768-dimension
-models are the same width and only the width was ever checked. Nothing in it
-touches the network: the failures it pins are all authoring-time.
+models are the same width and only the width was ever checked. It also pins the
+two places a step can hide: a marker inside a `matrix` template is expanded and,
+unexpanded, refused, which the first version of both the expander and the lint
+missed by checking the step kind they expected rather than where the shape can
+occur. Nothing in it touches the network: the failures it pins are all
+authoring-time.
 
 `07`–`09` are the other half of the same debt. `07` is the escape hatch:
 `aiq.sql_passthrough` runs SQL the caller wrote, `brief.md` §3 calls the wrong

@@ -400,4 +400,91 @@ begin
     raise notice 'workflow/09: the step, the desugar and the models it may name are all discoverable before authoring';
 end $$;
 
+-- ---------------------------------------------------------------------
+-- 9. THE OTHER PLACE A STEP CAN HIDE.
+--
+-- A matrix template is a step in every way except that it has no key, so a
+-- marker can sit there too. The first version of the expander walked top-level
+-- steps only: `template: {embed: ...}` compiled clean, stored an http_call
+-- with no url, and failed at dispatch once per child with a message about a
+-- document nobody wrote. Per-row embedding -- fan out over chunks, embed each
+-- one -- is the obvious use, so this was reachable, not theoretical.
+-- ---------------------------------------------------------------------
+do $$
+declare
+    v_t jsonb;
+    v_n int;
+begin
+    perform workflow.define_yaml($y$
+name: t_embed_matrix_template
+steps:
+  - id: fan
+    matrix:
+      items: [{text: a}, {text: b}]
+      max_fanout: 10
+      template:
+        embed: {text: '{{item.text}}', model: t-embed-a}
+$y$);
+    select spec#>'{steps,0,input,template,input}' into v_t
+      from workflow.definitions where name = 't_embed_matrix_template';
+
+    if not (v_t ? 'url') then
+        raise exception 'a matrix template''s embed step was never expanded: %', v_t;
+    end if;
+    -- {{item.*}} is bound at EXPANSION, not here, so the template must still
+    -- carry it verbatim -- an expander that resolved it would be substituting
+    -- a row that does not exist yet.
+    if v_t#>>'{body,prompt}' <> '{{item.text}}' then
+        raise exception 'the row template was altered during expansion: %', v_t#>>'{body,prompt}';
+    end if;
+
+    -- and the lint refuses the unexpanded shape wherever it appears, which is
+    -- the half that covers a spec inserted as JSON.
+    select count(*) into v_n from workflow.lint_spec($j$
+    {"steps": [{"key":"fan","kind":"matrix","queue":"none",
+                "input":{"max_fanout":10,"items":[],
+                         "template":{"kind":"http_call","queue":"http",
+                                     "input":{"embed":{"text":"x","model":null}}}}}]}
+    $j$) where severity = 'error';
+    if v_n <> 1 then
+        raise exception 'an unexpanded marker in a matrix template was not refused (% errors)', v_n;
+    end if;
+
+    raise notice 'workflow/09: a matrix template embeds per row, and an unexpanded one is refused wherever it sits';
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 10. ONE VECTOR PER QUERY.
+--
+-- p8ql_vec takes one embedding. A step referencing two embed steps is saying
+-- something it cannot mean, and the first version of the pairing pass picked
+-- whichever reference the scan saw last -- silently choosing a space, which is
+-- the exact failure the pass exists to remove.
+-- ---------------------------------------------------------------------
+do $$
+declare v_ok boolean := false;
+begin
+    begin
+        perform workflow.define_yaml($y$
+name: t_embed_two_vectors
+steps:
+  - id: qa
+    embed: {text: 'a', model: t-embed-a}
+  - id: qb
+    embed: {text: 'b', model: t-embed-b}
+  - id: retrieve
+    needs: [qa, qb]
+    sql:
+      function: p8ql_vec
+      args: ['SEARCH "x {{steps.qb.result}}" FROM chunks', '{{steps.qa.result}}']
+$y$);
+    exception when others then
+        v_ok := sqlerrm like '%reads vectors from two embed steps%';
+    end;
+    if not v_ok then
+        raise exception 'a query reading two embeddings was accepted, and one space was chosen for it';
+    end if;
+    raise notice 'workflow/09: a query reading two embeddings is refused, not resolved by scan order';
+end $$;
+
 rollback;

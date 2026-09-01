@@ -2056,7 +2056,7 @@ grant select on workflow.step_functions to authenticated;
 --
 --     name: classify_recent
 --     steps:
---       - id: find
+--       - id: find                        -- two tasks: SEARCH needs a vector
 --         p8ql: 'SEARCH "safety recall" FROM chunks LIMIT 5'
 --       - id: judge
 --         needs: [find]
@@ -4846,8 +4846,16 @@ begin
         -- nowhere. The message names the missing INTEGRATION rather than the
         -- missing key, because that is the actual condition on a database
         -- carrying the engine and not the query layer.
-        if v_step->>'kind' = 'http_call'
-           and v_step->'input' ? 'embed' and not (v_step->'input' ? 'url') then
+        -- Both places a marker can be. The template was missed at first, and
+        -- the miss is instructive: the check was written against the step KIND
+        -- it expected rather than against where the shape can occur, so a
+        -- matrix fanning out an embed passed the lint, stored clean, and
+        -- failed N times at dispatch.
+        if (v_step->>'kind' = 'http_call'
+            and v_step->'input' ? 'embed' and not (v_step->'input' ? 'url'))
+        or (v_step->>'kind' = 'matrix'
+            and v_step#>'{input,template,input}' ? 'embed'
+            and not (v_step#>'{input,template,input}' ? 'url')) then
             severity := 'error';
             detail := 'this embed step was never expanded -- it has no url. '
                       'workflow.define_yaml fills one in from aiq.embedding_models; '
@@ -4857,6 +4865,14 @@ begin
         end if;
 
         -- (g) a vector query with no vector.
+        --
+        -- This rule has a prior instance in THIS FILE, which is the argument
+        -- for it. §18's define_yaml comment has always illustrated authoring
+        -- with `p8ql: 'SEARCH "safety recall" FROM chunks LIMIT 5'` -- a
+        -- workflow that, until the compiler learned to emit the embed step,
+        -- compiled clean and died at dispatch on `SEARCH ... needs
+        -- p_embedding`. The function's own doc comment documented a workflow
+        -- that could not run, and nothing in the collection could see it.
         --
         -- SEMANTIC and SEARCH rank against an embedding, so the one-argument
         -- p8ql registration cannot serve them: aiq.query raises at dispatch.
