@@ -44,7 +44,21 @@ B="$ROOT/extension/percolate_parser/target-$(docker version -f '{{.Server.Arch}}
 
 # the glob must catch percolate_parser--0.1.0.sql, whose name has no dot
 # immediately after the stem -- "percolate_parser.*" silently misses it
-cp "$B"/usr/share/postgresql/19/extension/percolate_parser* dist/
+#
+# Guarded, because the parser BUILD above is skipped when dist/ already holds
+# the .so while this copy was not: a cleaned target/ tree with a populated
+# dist/ is an ordinary state (the .so survives in git-ignored dist/, the build
+# tree does not), and it made the script abort on a `cp` for files that were
+# already sitting in dist/ from the run that produced them.
+if [ -d "$B/usr/share/postgresql/19/extension" ]; then
+  cp "$B"/usr/share/postgresql/19/extension/percolate_parser* dist/
+elif [ ! -f dist/percolate_parser--0.1.0.sql ] || [ ! -f dist/percolate_parser.control ]; then
+  echo "no parser build tree at $B and dist/ has no percolate_parser SQL --" >&2
+  echo "run with REBUILD_PARSER=1 to compile it" >&2
+  exit 1
+else
+  echo "==> reusing dist/percolate_parser SQL (no build tree to copy from)"
+fi
 cp "$ROOT/extension/percolate/percolate.control" dist/
 cp "$ROOT/extension/percolate/sql/percolate--0.1.0.sql" dist/
 

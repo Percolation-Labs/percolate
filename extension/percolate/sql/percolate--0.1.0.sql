@@ -1471,6 +1471,47 @@ $$ language sql;
 -- transition, run failure and saga compensation -- so a dead worker is now
 -- just a failure like any other, and the only thing this function decides is
 -- which tasks are dead.
+-- ---------------------------------------------------------------------------
+-- Queue depth, for an autoscaler.
+--
+-- One function rather than a table grant, and that is the whole point. An
+-- autoscaler runs OUTSIDE the database and outside the namespace it scales:
+-- KEDA's operator holds this credential and reads it across every namespace
+-- it serves. Handing that position `select on workflow.tasks` widens further
+-- than it looks -- the RLS policy on tasks reads workflow.runs, so the grant
+-- cascades to a second table, and the role that was defined by holding NO
+-- table privileges now holds two. Measured, on a live cluster: granting
+-- select on tasks alone produces `permission denied for table runs`.
+--
+-- EXECUTE on one STABLE SECURITY DEFINER function has none of that. It is
+-- also the seam where the count can be made correct once, for everyone.
+--
+-- IT COUNTS `running` AS WELL AS CLAIMABLE-`ready`, and the obvious version
+-- that counts only `ready` is wrong in a way that appears solely under long
+-- tasks: a pool of ten pods each three minutes into a task reports depth 0,
+-- the autoscaler reads that as idle, and it scales the pods out from under
+-- work in flight. The arithmetic stays right because an autoscaler's target
+-- is PER REPLICA -- N pods each holding one task report depth N against a
+-- target of 1, which resolves to N. Work drains, both counts reach zero, and
+-- the pool scales to zero with no special case anywhere.
+--
+-- `run_after <= now()` is equally deliberate: a task backing off between
+-- retries is not work anyone can do yet, and holding a pod for it burns money
+-- until the backoff expires.
+--
+-- The residual inaccuracy is a task `running` on a pod that died, which
+-- inflates depth until reap_stale_tasks() returns it to `ready`. Bounded by
+-- that reaper RUNNING -- with no clock there is no bound, and a pool never
+-- scales to zero. Also measured.
+-- ---------------------------------------------------------------------------
+create or replace function workflow.queue_depth(p_queue text)
+returns bigint as $$
+    select count(*) from workflow.tasks
+    where queue = p_queue
+      and (status = 'running'
+           or (status = 'ready' and run_after <= now()));
+$$ language sql stable;
+
 create or replace function workflow.reap_stale_tasks() returns int as $$
 declare v_rec record; v_n int := 0;
 begin
@@ -1622,6 +1663,8 @@ alter function workflow.begin_compensation(uuid, text)
     security definer set search_path = pg_catalog, public;
 alter function workflow.promote_due_timers()
     security definer set search_path = pg_catalog, public;
+alter function workflow.queue_depth(text)
+    security definer set search_path = workflow, pg_catalog;
 alter function workflow.reap_stale_tasks()
     security definer set search_path = pg_catalog, public;
 
@@ -1718,6 +1761,8 @@ grant usage on schema workflow to worker, scheduler, authenticated;
 -- rbac.current_user_id() -- five tables and a cross-schema function, just to
 -- finish one task. Routing everything through SECURITY DEFINER functions
 -- reduces that to this list, and removes the forge-the-audit-log problem.
+-- Read-only, and the only thing an autoscaler needs.
+grant execute on function workflow.queue_depth(text) to worker;
 grant execute on function workflow.claim_task(text, text) to worker;
 grant execute on function workflow.claim_tasks(text, text, int) to worker;
 grant execute on function workflow.claim_task_rate_limited(text, text) to worker;
@@ -2068,6 +2113,7 @@ declare
     v_ver    int;
     v_caps   jsonb;
     v_stale  text[];
+    v_spec   jsonb;
 begin
     if to_regprocedure('p8_compile_workflow(text)') is null then
         raise exception
@@ -2114,10 +2160,25 @@ begin
 
     v_name := c#>>'{workflow,name}';
     v_ver  := coalesce((c#>>'{workflow,version}')::int, 1);
+    v_spec := c#>'{workflow,spec}';
+
+    -- An `embed:` step -- and the embed half of a SEMANTIC/SEARCH `p8ql:` step
+    -- -- compiles to a MARKER, not a call: the compiler knows the text and at
+    -- most a model name, and the url, request shape and response path are rows
+    -- in the model registry. Filling them in HERE rather than at dispatch is
+    -- what makes the stored definition say which model it meant; a run does not
+    -- re-decide because someone moved is_default in between.
+    --
+    -- Conditional because ai-query-layer may not be installed -- the engine is
+    -- deployable on its own, and this file may not reference aiq. A marker that
+    -- survives is refused by the lint below, with the missing integration named.
+    if to_regprocedure('aiq.expand_embed_steps(jsonb)') is not null then
+        execute 'select aiq.expand_embed_steps($1)' into v_spec using v_spec;
+    end if;
 
     insert into workflow.definitions (name, version, spec)
     values (v_name, coalesce((select max(version) + 1 from workflow.definitions where name = v_name), v_ver),
-            c#>'{workflow,spec}')
+            v_spec)
     returning id into v_id;
     return v_id;
 end;
@@ -2709,73 +2770,129 @@ create index if not exists idx_tasks_matrix_parent
 -- ------------------------------------------------------------
 -- Current form. It reached this shape in section 22a (BUG 1 -- the run cannot see itself.), which explains
 -- the failure that produced it. Defined here, where it is first needed.
+-- ONE reference, resolved. Split out of resolve_args when an argument stopped
+-- being either a whole reference or a literal: a query string carries text
+-- AROUND its references ('SEARCH "{{run.question}}" FROM chunks'), so the same
+-- resolution now has two callers -- one that wants the jsonb value and one
+-- that wants it rendered into a longer string.
+create or replace function workflow.resolve_template_ref(
+    p_ref text, p_run_id uuid, p_item jsonb)
+returns jsonb as $$
+declare
+    r      workflow.runs;
+    v_meta jsonb;
+    v_head text;
+    v_rest text;
+    v_val  jsonb;
+begin
+    select * into r from workflow.runs where id = p_run_id;
+    v_head := split_part(p_ref, '.', 1);
+    v_rest := substr(p_ref, length(v_head) + 2);
+
+    if v_head = 'steps' then
+        v_val := r.context #> string_to_array(v_rest, '.');
+    elsif v_head = 'run' then
+        if left(v_rest, 1) = '$' then
+            v_meta := workflow.run_meta(p_run_id);
+            v_val := v_meta -> v_rest;
+            if v_val is null then
+                raise exception
+                    'unknown engine field ''run.%''. Available: %',
+                    v_rest, (select string_agg(k, ', ' order by k)
+                             from jsonb_object_keys(v_meta) k);
+            end if;
+        else
+            v_val := r.input #> string_to_array(v_rest, '.');
+            -- The natural thing to type for a run's own id is {{run.id}}. Say
+            -- what to write instead of resolving to nothing and failing eight
+            -- tasks later.
+            if v_val is null and workflow.run_meta(p_run_id) ? ('$' || v_rest) then
+                raise exception
+                    'template ''run.%'' resolved to nothing. {{run.*}} reads the '
+                    'run INPUT; the run''s own % is {{run.$%}} -- the $ prefix is '
+                    'reserved for engine fields so an input key named ''%'' cannot '
+                    'shadow it.', v_rest, v_rest, v_rest, v_rest;
+            end if;
+        end if;
+    elsif v_head = 'item' then
+        if p_item is null then
+            raise exception
+                'template ''%'' names the item namespace, but this task is not a '
+                'matrix fan-out child -- {{item.*}} is only bound on tasks '
+                'expanded from a matrix step', p_ref;
+        end if;
+        v_val := p_item #> string_to_array(v_rest, '.');
+    else
+        raise exception
+            'unknown template namespace ''%'' in a sql step argument '
+            '-- expected steps, run or item', v_head;
+    end if;
+
+    if v_val is null then
+        raise exception 'template ''%'' resolved to nothing', p_ref;
+    end if;
+    return v_val;
+end;
+$$ language plpgsql stable;
+
+-- Two shapes, and the difference is not a preference.
+--
+-- A WHOLE-STRING reference is a value: '{{steps.embed.result}}' is a vector,
+-- and it must arrive as an array rather than as a string that looks like one.
+-- That rule was the whole of this function, and it was written as "here an
+-- argument is a value, not a template".
+--
+-- An EMBEDDED reference is text, and leaving it alone was a defect this
+-- collection's own headline example demonstrated. `p8ql_vec` takes the query
+-- as its first argument, and the documented hybrid pipeline passes
+-- 'SEARCH "{{run.question}}" FROM chunks LIMIT 3'. Not a whole-string
+-- reference, so it was substituted nowhere and reached aiq.query verbatim --
+-- and SEARCH feeds that text to the LEXICAL half. Full-text search for the
+-- literal string {{run.question}} matches nothing, every lexical rank comes
+-- back null, and the fusion quietly degrades to semantic-only. It returns
+-- rows. It looks like it worked. That is the failure mode this repository
+-- exists to catch, sitting in the example that opens YAML.md.
+--
+-- So: whole-string keeps its native type, embedded interpolates as text. That
+-- is not a new rule -- it is the rule the WORKER already applies to a url and
+-- the one YAML.md states for {{item.*}} ("a whole-string reference keeps its
+-- native type; one embedded in a URL is interpolated as text"). The database
+-- half was the odd one out, and silently.
 create or replace function workflow.resolve_args(p_args jsonb, p_run_id uuid, p_item jsonb)
 returns jsonb as $$
 declare
-    r        workflow.runs;
-    v_meta   jsonb;
     v_out    jsonb := '[]'::jsonb;
     v_arg    jsonb;
     v_txt    text;
+    v_new    text;
     v_ref    text;
-    v_head   text;
-    v_rest   text;
     v_val    jsonb;
+    v_m      text[];
 begin
-    select * into r from workflow.runs where id = p_run_id;
-
     for v_arg in select * from jsonb_array_elements(coalesce(p_args, '[]'::jsonb))
     loop
         v_txt := v_arg #>> '{}';
         -- `$` joins the character class so {{run.$id}} is a whole-string
-        -- reference like any other. Partial interpolation stays the worker's
-        -- job; here an argument is a value, not a template.
+        -- reference like any other.
         if v_txt is not null and v_txt ~ '^\s*\{\{\s*[a-zA-Z0-9_.$]+\s*\}\}\s*$' then
-            v_ref  := trim(both from replace(replace(v_txt, '{{', ''), '}}', ''));
-            v_head := split_part(v_ref, '.', 1);
-            v_rest := substr(v_ref, length(v_head) + 2);
-            if v_head = 'steps' then
-                v_val := r.context #> string_to_array(v_rest, '.');
-            elsif v_head = 'run' then
-                if left(v_rest, 1) = '$' then
-                    v_meta := workflow.run_meta(p_run_id);
-                    v_val := v_meta -> v_rest;
-                    if v_val is null then
-                        raise exception
-                            'unknown engine field ''run.%''. Available: %',
-                            v_rest, (select string_agg(k, ', ' order by k)
-                                     from jsonb_object_keys(v_meta) k);
-                    end if;
-                else
-                    v_val := r.input #> string_to_array(v_rest, '.');
-                    -- The natural thing to type for a run's own id is
-                    -- {{run.id}}. Say what to write instead of resolving to
-                    -- nothing and failing eight tasks later.
-                    if v_val is null and workflow.run_meta(p_run_id) ? ('$' || v_rest) then
-                        raise exception
-                            'template ''run.%'' resolved to nothing. {{run.*}} reads the '
-                            'run INPUT; the run''s own % is {{run.$%}} -- the $ prefix is '
-                            'reserved for engine fields so an input key named ''%'' cannot '
-                            'shadow it.', v_rest, v_rest, v_rest, v_rest;
-                    end if;
-                end if;
-            elsif v_head = 'item' then
-                if p_item is null then
-                    raise exception
-                        'template ''%'' names the item namespace, but this task is not a '
-                        'matrix fan-out child -- {{item.*}} is only bound on tasks '
-                        'expanded from a matrix step', v_ref;
-                end if;
-                v_val := p_item #> string_to_array(v_rest, '.');
-            else
-                raise exception
-                    'unknown template namespace ''%'' in a sql step argument '
-                    '-- expected steps, run or item', v_head;
-            end if;
-            if v_val is null then
-                raise exception 'template ''%'' resolved to nothing', v_ref;
-            end if;
-            v_out := v_out || jsonb_build_array(v_val);
+            v_ref := trim(both from replace(replace(v_txt, '{{', ''), '}}', ''));
+            v_out := v_out || jsonb_build_array(
+                workflow.resolve_template_ref(v_ref, p_run_id, p_item));
+
+        elsif v_txt is not null and v_txt ~ '\{\{\s*[a-zA-Z0-9_.$]+\s*\}\}' then
+            v_new := v_txt;
+            for v_m in
+                select regexp_matches(v_txt, '(\{\{\s*([a-zA-Z0-9_.$]+)\s*\}\})', 'g')
+            loop
+                v_val := workflow.resolve_template_ref(v_m[2], p_run_id, p_item);
+                -- `#>> '{}'` renders a string without its quotes and anything
+                -- else as its JSON text. replace() on the matched text rather
+                -- than regexp_replace on a rebuilt pattern, because a resolved
+                -- value containing & or \ is data, not a substitution rule.
+                v_new := replace(v_new, v_m[1], v_val #>> '{}');
+            end loop;
+            v_out := v_out || jsonb_build_array(to_jsonb(v_new));
+
         else
             v_out := v_out || jsonb_build_array(v_arg);
         end if;
@@ -3532,6 +3649,7 @@ revoke execute on function workflow.expand_matrix(uuid) from public;
 grant execute on function workflow.matrix_rows(uuid) to worker, authenticated;
 grant execute on function workflow.matrix_outputs(uuid) to worker, authenticated;
 grant execute on function workflow.resolve_args(jsonb, uuid, jsonb) to worker, authenticated;
+grant execute on function workflow.resolve_template_ref(text, uuid, jsonb) to worker, authenticated;
 
 -- Registered in the allow-list, so a fan-in needs no user code at all:
 --   - id: gather
@@ -4262,6 +4380,7 @@ begin
             ('sql',          E'name: c\nsteps:\n  - id: s\n    sql: {function: f}'),
             ('p8ql',         E'name: c\nsteps:\n  - id: s\n    p8ql: ''LOOKUP "x"'''),
             ('rest',         E'name: c\nsteps:\n  - id: s\n    rest: {url: http://x}'),
+            ('embed',        E'name: c\nsteps:\n  - id: s\n    embed: hello'),
             ('agent',        E'name: c\nsteps:\n  - id: s\n    agent: a'),
             ('work',         E'name: c\nsteps:\n  - id: s\n    work: true'),
             ('matrix',       E'name: c\nsteps:\n  - id: s\n    matrix:\n      items: []\n      max_fanout: 1\n      template: {work: true}'),
@@ -4286,6 +4405,17 @@ begin
         E'name: c\nsteps:\n  - id: s\n    rest: {url: http://x}\n    output_schema: {type: object}';
     v_out := v_out || jsonb_build_object('output_schema',
         coalesce(v_res#>'{workflow,spec,steps,0,input}' ? 'output_schema', false));
+
+    -- The vector desugar is the other feature compile-success cannot probe,
+    -- and for the opposite reason to output_schema: a compiler that has never
+    -- heard of it accepts the document AND emits a step -- just one, calling
+    -- the one-argument p8ql, which fails at dispatch on a query that is
+    -- correct as written. So the probe counts the ROWS, which is the only
+    -- place the difference exists.
+    execute 'select p8_compile_workflow($1)' into v_res using
+        E'name: c\nsteps:\n  - id: s\n    p8ql: ''SEARCH "x" FROM chunks''';
+    v_out := v_out || jsonb_build_object('p8ql_vector_desugar',
+        coalesce(jsonb_array_length(v_res#>'{workflow,spec,steps}') = 2, false));
 
     return jsonb_build_object('available', true, 'accepts', v_out,
         'missing', coalesce((select jsonb_agg(k order by k)
@@ -4718,6 +4848,60 @@ begin
                              'this task will queue and wait rather than fail',
                              v_step->'input'->'body'->>'model');
             return next;
+        end if;
+
+        -- (f) an embed marker nothing expanded.
+        --
+        -- `embed:` compiles to an http_call with NO URL on purpose, and
+        -- workflow.define_yaml fills it in from the model registry
+        -- (aiq.expand_embed_steps). A spec can reach this table three ways --
+        -- define_yaml, a migration, hand-written JSON -- and the other two skip
+        -- the expander entirely, so without this the marker would be stored,
+        -- dispatched, and handed to a worker as a request to POST nothing to
+        -- nowhere. The message names the missing INTEGRATION rather than the
+        -- missing key, because that is the actual condition on a database
+        -- carrying the engine and not the query layer.
+        if v_step->>'kind' = 'http_call'
+           and v_step->'input' ? 'embed' and not (v_step->'input' ? 'url') then
+            severity := 'error';
+            detail := 'this embed step was never expanded -- it has no url. '
+                      'workflow.define_yaml fills one in from aiq.embedding_models; '
+                      'a spec inserted as JSON, or one defined on a database without '
+                      'ai-query-layer''s integration installed, does not get that.';
+            return next;
+        end if;
+
+        -- (g) a vector query with no vector.
+        --
+        -- SEMANTIC and SEARCH rank against an embedding, so the one-argument
+        -- p8ql registration cannot serve them: aiq.query raises at dispatch.
+        -- Catching it here matters most when the two halves are out of step --
+        -- a compiler predating the desugar emits exactly this shape from a
+        -- document that is correct as written -- and the error then arrives at
+        -- authoring time with the step key on it rather than mid-run.
+        if v_step->>'kind' = 'sql'
+           and v_step->'input'->>'function' = 'p8ql'
+           and to_regprocedure('aiq_parse(text)') is not null then
+            declare v_pv jsonb; v_qv text;
+            begin
+                v_qv := v_step->'input'->'args'->>0;
+                if v_qv is not null then
+                    execute 'select aiq_parse($1)' into v_pv using v_qv;
+                    if coalesce((v_pv->>'ok')::boolean, false)
+                       and v_pv->>'mode' in ('SEMANTIC','SEARCH') then
+                        severity := 'error';
+                        detail := format(
+                            '%s ranks against an embedding and this step passes none. '
+                            'Written as `p8ql:` it compiles to an embed step and this one; '
+                            'a compiler that predates that emits what is here. Rebuild the '
+                            'percolate extension, or write the embed step by hand and call '
+                            'p8ql_vec.', v_pv->>'mode');
+                        return next;
+                    end if;
+                end if;
+            exception when others then
+                null;   -- (a) already reports a query that cannot be checked
+            end;
         end if;
     end loop;
 end;
@@ -7289,7 +7473,16 @@ create table aiq.embedding_models (
     name        text primary key,          -- 'nomic-embed-text', 'text-embedding-3-small'
     dim         int  not null check (dim > 0),
     provider    text not null,             -- 'ollama' | 'openai' | ...
-    endpoint    text,                      -- resolved by the worker, not called from SQL
+    -- Resolved by the WORKER, not called from SQL -- and it may be written as
+    -- a `{{env.X}}` reference ('{{env.LLM_URL}}/api/embeddings'), because the
+    -- worker resolves that namespace and the database deliberately cannot.
+    -- That is what lets one registry row serve dev, staging and production
+    -- without a per-deployment UPDATE.
+    endpoint    text,
+    -- The env var name the worker reads a bearer token from, for a hosted
+    -- provider. Never the token: a secret in a table is a secret in every
+    -- backup, every logical replica and every pg_dump.
+    credential_ref text,
     distance_op text not null default 'vector_cosine_ops'
                     check (distance_op in ('vector_cosine_ops','vector_l2_ops','vector_ip_ops')),
     is_default  boolean not null default false,
@@ -7302,6 +7495,50 @@ create table aiq.embedding_models (
 -- two defaults and a coin-flip about which one SEMANTIC uses.
 create unique index idx_embedding_models_one_default
     on aiq.embedding_models ((true)) where is_default;
+
+-- ------------------------------------------------------------
+-- 10a. What an embedding CALL looks like -- one row per provider.
+--
+-- `provider` above was a label: it recorded which service produced a space and
+-- nothing could act on it. Everything needed to actually make the call -- the
+-- request body's shape and where the vector sits in the response -- lived in
+-- whatever YAML an author happened to write, which is how two workflows in one
+-- deployment end up embedding differently against the same model.
+--
+-- It is a TABLE rather than code in the worker for the reason the rest of this
+-- collection is tables: a new provider is then a row, insertable by a
+-- deployment that cannot rebuild an image. Both shipped rows were written from
+-- the providers' published request formats; a deployment whose gateway differs
+-- overrides the row rather than forking anything.
+--
+-- The template is deliberately ONE LEVEL DEEP, and that is a limit worth
+-- naming rather than discovering: `{{model}}` and `{{text}}` are substituted
+-- as whole VALUES of top-level keys, never inside a longer string. Substituting
+-- into arbitrary nested JSON text would mean escaping author-supplied text into
+-- a JSON literal by hand, and hand-rolled JSON escaping is a defect waiting for
+-- a quote character. Both providers' bodies are flat objects, so the limit
+-- costs nothing today and fails loudly rather than silently if it ever does.
+--
+-- `{{text}}` may itself arrive holding a workflow template ('{{run.question}}')
+-- -- it is left intact, and the worker resolves it at dispatch like any other
+-- REST body. Two template layers, resolved in the right order by the two halves
+-- that own them.
+-- ------------------------------------------------------------
+create table aiq.embedding_providers (
+    provider         text primary key,
+    request_template jsonb not null,
+    response_path    text  not null,   -- dotted path, the worker's `jsonpath`
+    method           text  not null default 'POST',
+    notes            text
+);
+
+insert into aiq.embedding_providers (provider, request_template, response_path, notes) values
+    ('ollama', '{"model": "{{model}}", "prompt": "{{text}}"}'::jsonb, 'embedding',
+     'POST /api/embeddings -- one vector, at the top level under "embedding".'),
+    ('openai', '{"model": "{{model}}", "input": "{{text}}"}'::jsonb, 'data.0.embedding',
+     'POST /v1/embeddings -- a list, because the API embeds a batch; a single '
+     'text still comes back as data[0]. Needs credential_ref on the model row.')
+on conflict (provider) do nothing;
 
 -- Each registered model gets its own storage table + HNSW index, generated
 -- from the registry so the dimension and operator class can never drift from
@@ -8100,6 +8337,29 @@ begin
             'agents', coalesce((select jsonb_agg(jsonb_build_object(
                     'name', name, 'model', model) order by name)
                 from agentic.agents), '[]'::jsonb),
+            -- What an `embed:` step -- and therefore a SEMANTIC or SEARCH
+            -- `p8ql:` step, which compiles to one -- may name. It belongs in
+            -- THIS facet and not only in `graph`, on the rule the queues note
+            -- above was written for: an author is told what they may write in
+            -- the document they are writing, not sent to a second facet to
+            -- find out whether the step they just authored can run.
+            --
+            -- `callable` is the half a registration can get wrong: a model row
+            -- with no endpoint, or a provider with no request shape, is
+            -- registered as a SPACE and unusable as a STEP -- and the two
+            -- registrations are made in different places by different people.
+            'embedding_models', coalesce((select jsonb_agg(jsonb_build_object(
+                    'name', m.name, 'dim', m.dim, 'provider', m.provider,
+                    'is_default', m.is_default,
+                    'callable', (m.endpoint is not null and p.provider is not null))
+                    order by m.name)
+                from aiq.embedding_models m
+                left join aiq.embedding_providers p on p.provider = m.provider), '[]'::jsonb),
+            'embedding_note', 'An `embed:` step names a model, never a url: the endpoint, '
+                              'request shape and response path come from aiq.embedding_models '
+                              'and aiq.embedding_providers, and define_yaml writes them in. '
+                              'A SEMANTIC or SEARCH `p8ql:` step compiles to one of these '
+                              'plus the search, and the model is pinned into both halves.',
             -- Everything a template can name. {{run.*}} reads the run INPUT;
             -- the run's own identity is under the reserved $ prefix, because
             -- an input key called `id` is not unusual and shadowing it would
@@ -8387,21 +8647,30 @@ steps:
     sql: {function: rebuild_graph_index, args: [company]}
 $y$, 'A workflow of only sql steps completes with nothing running anywhere.', 10);
 
-select aiq.register_schema_example('workflow', 'rest-then-search', 'workflow_yaml',
+select aiq.register_schema_example('workflow', 'search', 'workflow_yaml',
 $y$name: hybrid_research
 steps:
-  - id: embed
-    rest:
-      url: http://localhost:11435/api/embeddings
-      method: POST
-      body: {model: nomic-embed-text, prompt: '{{run.question}}'}
-      jsonpath: embedding
   - id: retrieve
-    needs: [embed]
+    p8ql: 'SEARCH "{{run.question}}" FROM chunks LIMIT 3'
+$y$, 'A vector mode still runs as two tasks -- a sql step cannot embed text, because that '
+     'is a model call -- but the compiler writes the embed step, and define_yaml pins the '
+     'model into both halves. Compile it and look: there are two steps, and the query in '
+     'the stored spec carries USING.', 20);
+
+select aiq.register_schema_example('workflow', 'search-spelled-out', 'workflow_yaml',
+$y$name: hybrid_research_raw
+steps:
+  - id: q
+    embed: {text: '{{run.question}}', model: nomic-embed-text}
+  - id: retrieve
+    needs: [q]
     sql:
       function: p8ql_vec
-      args: ['SEARCH "{{run.question}}" FROM chunks LIMIT 3', '{{steps.embed.result}}']
-$y$, 'Vector modes take two steps: a sql step cannot embed text, because that is a model call.', 20);
+      args: ['SEARCH "{{run.question}}" FROM chunks USING nomic-embed-text LIMIT 3',
+             '{{steps.q.result}}']
+$y$, 'The same two tasks, written by hand. Worth knowing they are the same rows: the '
+     'shorthand is not a second execution path, and reaching for this form costs nothing '
+     'when a pipeline embeds once and searches twice.', 25);
 
 select aiq.register_schema_example('workflow', 'matrix-fanout', 'workflow_yaml',
 $y$name: edgar_restatements
@@ -8741,6 +9010,209 @@ select workflow.register_step_function(
 select workflow.register_step_function(
     'p8ql_vec', 'workflow.p8ql', array['text','jsonb'], 30000,
     'P8QL with an embedding produced by a prior step');
+
+-- ============================================================
+-- Embed steps: the half of a vector search the database cannot do.
+--
+-- The two arities above are the mechanism, and for a long time they were also
+-- the interface: an author wrote the `rest:` call to a model by hand, then
+-- passed {{steps.embed.result}} into p8ql_vec. That has two defects, and only
+-- the first is ergonomic.
+--
+--  1. The url, the request body's shape and the path to the vector in the
+--     response are deployment facts written into a document that outlives
+--     deployments. Two workflows in one database embed differently against the
+--     same model because two people wrote two `rest:` blocks.
+--
+--  2. NOTHING TIED THE TWO HALVES TOGETHER. The embed step names a model, the
+--     query names a space with USING (or takes the default), and if those two
+--     disagree the run does not fail -- aiq.semantic_in only checks the
+--     DIMENSION, so two 768-dim models produce a cosine distance that is a
+--     number and not an answer. §10 says this in the strongest terms it has
+--     ("meaningless, not merely imprecise") and then left the workflow author
+--     to hold both ends of it by hand.
+--
+-- So the compiler emits a MARKER -- an http_call whose input is
+-- {"embed": {"text": ..., "model": ...}} and no url -- and this function turns
+-- it into an ordinary REST call at DEFINITION time, from the registry. Three
+-- consequences worth stating:
+--
+--   * The shipped worker needs no new handler. After expansion this is an
+--     http_call like any other, on the queue the author named, with retry,
+--     backoff, the reaper and tracing already applying. An `embed:` step is
+--     not a new deployable and not a new execution path.
+--   * The model is resolved ONCE and pinned into BOTH halves -- written into
+--     the query as `USING <model>` if it was not already there, and refused if
+--     it was there and disagrees. The invariant the two-step form could not
+--     hold is now unstatable in a stored definition.
+--   * It resolves at definition time rather than dispatch, so the answer is
+--     visible in workflow.definitions.spec. A run does not re-decide which
+--     model it meant because someone moved is_default in between.
+-- ============================================================
+create or replace function aiq.expand_embed_steps(p_spec jsonb)
+returns jsonb as $$
+declare
+    v_steps   jsonb := '[]'::jsonb;
+    v_out     jsonb;
+    v_step    jsonb;
+    v_models  jsonb := '{}'::jsonb;   -- embed step key -> the model it resolved to
+    v_text    text;
+    v_named   text;
+    v_body    jsonb;
+    v_input   jsonb;
+    v_ref     text;
+    v_plan    jsonb;
+    v_query   text;
+    v_model   text;
+    m         aiq.embedding_models;
+    p         aiq.embedding_providers;
+begin
+    if p_spec is null or p_spec->'steps' is null then
+        return p_spec;
+    end if;
+
+    -- Pass 1: every marker becomes a REST call.
+    for v_step in select * from jsonb_array_elements(p_spec->'steps') loop
+        if v_step->>'kind' = 'http_call'
+           and v_step->'input' ? 'embed' and not (v_step->'input' ? 'url') then
+
+            v_text  := v_step->'input'->'embed'->>'text';
+            v_named := v_step->'input'->'embed'->>'model';
+
+            if v_named is null then
+                select * into m from aiq.embedding_models where is_default;
+                if not found then
+                    raise exception
+                        'step ''%'' embeds text but this deployment has no default embedding '
+                        'model. Name one with `embed: {text: ..., model: <name>}` (or '
+                        'USING <model> in the query), or set is_default on a row in '
+                        'aiq.embedding_models.', v_step->>'key';
+                end if;
+            else
+                select * into m from aiq.embedding_models where name = v_named;
+                if not found then
+                    raise exception
+                        'step ''%'' embeds with model ''%'', which is not registered. '
+                        'SCHEMA "graph" lists the registered ones.',
+                        v_step->>'key', v_named;
+                end if;
+            end if;
+
+            select * into p from aiq.embedding_providers where provider = m.provider;
+            if not found then
+                raise exception
+                    'embedding model ''%'' is served by provider ''%'', which has no row in '
+                    'aiq.embedding_providers -- so nothing here knows what its request '
+                    'body looks like or where the vector sits in its response.',
+                    m.name, m.provider;
+            end if;
+
+            -- Refused rather than defaulted: a guessed url is a step that 404s
+            -- on every run of every workflow that ever names this model, and
+            -- the message would name the endpoint rather than the omission.
+            if m.endpoint is null then
+                raise exception
+                    'embedding model ''%'' has no endpoint, so step ''%'' has nowhere to send '
+                    'its text. Set aiq.embedding_models.endpoint -- it may be written as '
+                    '''{{env.LLM_URL}}/api/embeddings'', which the worker resolves.',
+                    m.name, v_step->>'key';
+            end if;
+
+            -- Whole VALUES only (§10a): the author's text becomes a jsonb
+            -- string via to_jsonb, so quotes, newlines and braces in it are
+            -- escaped by the database rather than by a regex of ours.
+            select jsonb_object_agg(k,
+                       case when v = '"{{text}}"'::jsonb  then to_jsonb(v_text)
+                            when v = '"{{model}}"'::jsonb then to_jsonb(m.name)
+                            else v end)
+              into v_body
+              from jsonb_each(p.request_template) e(k, v);
+
+            v_input := jsonb_build_object(
+                'url',        m.endpoint,
+                'method',     p.method,
+                'body',       v_body,
+                'jsonpath',   p.response_path,
+                'timeout_ms', 30000,
+                -- Kept beside the call, not consumed by it. It is what makes a
+                -- task row say what it IS -- "the embedding of {{run.question}}
+                -- in nomic-embed-text" -- rather than leaving a reader to infer
+                -- an intent from a url and a body.
+                'embed',      jsonb_build_object('text', v_text, 'model', m.name));
+
+            if m.credential_ref is not null then
+                v_input := v_input || jsonb_build_object('credential_ref', m.credential_ref);
+            end if;
+
+            v_step   := jsonb_set(v_step, '{input}', v_input);
+            v_models := v_models || jsonb_build_object(v_step->>'key', m.name);
+        end if;
+        v_steps := v_steps || jsonb_build_array(v_step);
+    end loop;
+
+    -- Pass 2: pin the model into the query that consumes each vector.
+    --
+    -- The pairing is read off the DATA FLOW -- a p8ql step whose arguments
+    -- reference {{steps.<an embed step>.result}} -- rather than off a marker
+    -- the compiler left behind. That is deliberate: it makes the check apply
+    -- to the hand-written two-step form exactly as it applies to the sugar,
+    -- so the raw spelling is not the one that quietly keeps the old defect.
+    v_out := '[]'::jsonb;
+    for v_step in select * from jsonb_array_elements(v_steps) loop
+        if v_step->>'kind' = 'sql'
+           and coalesce(v_step->'input'->>'function', '') in ('p8ql', 'p8ql_vec') then
+
+            v_query := v_step->'input'->'args'->>0;
+            v_model := null;
+            for v_ref in
+                select m2[1] from regexp_matches(v_step::text,
+                    '\{\{\s*steps\.([a-zA-Z0-9_-]+)\.result\s*\}\}', 'g') m2
+            loop
+                if v_models ? v_ref then v_model := v_models->>v_ref; end if;
+            end loop;
+
+            if v_query is not null and v_model is not null then
+                execute 'select aiq_parse($1)' into v_plan using v_query;
+
+                -- A query that does not parse is the lint's to report, with
+                -- the step key and the parser's own message. Saying it twice,
+                -- here, in a function about embeddings, would put the worst
+                -- version of that message in front of the author.
+                if coalesce((v_plan->>'ok')::boolean, false)
+                   and v_plan->>'mode' in ('SEMANTIC', 'SEARCH') then
+
+                    if v_plan->>'model' is null then
+                        -- USING is order-independent in the dialect, so
+                        -- appending is legal whatever else the query carries.
+                        v_step := jsonb_set(v_step, '{input,args,0}',
+                            to_jsonb(v_query || ' USING ' || v_model));
+
+                    elsif v_plan->>'model' <> v_model then
+                        raise exception
+                            'step ''%'' searches the ''%'' space but is handed a vector produced '
+                            'by ''%''. Nothing downstream can catch this: cosine distance '
+                            'between two embedding spaces is a number, not an answer, and '
+                            'the dimension check passes whenever the two models happen to '
+                            'be the same width.',
+                            v_step->>'key', v_plan->>'model', v_model;
+                    end if;
+                end if;
+            end if;
+        end if;
+        v_out := v_out || jsonb_build_array(v_step);
+    end loop;
+
+    return jsonb_set(p_spec, '{steps}', v_out);
+end;
+$$ language plpgsql stable;
+
+grant execute on function aiq.expand_embed_steps(jsonb) to authenticated;
+
+comment on function aiq.expand_embed_steps(jsonb) is
+    'Turn every `embed:` marker in a compiled workflow spec into an ordinary REST '
+    'call from aiq.embedding_models + aiq.embedding_providers, and pin the model it '
+    'resolved to into the query that consumes the vector. Called by '
+    'workflow.define_yaml; an unexpanded marker is refused by the lint.';
 
 
 -- ============================================================
