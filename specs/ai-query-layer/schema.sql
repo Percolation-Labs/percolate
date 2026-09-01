@@ -1407,6 +1407,22 @@ begin
         if not found then raise exception 'embedding model % not registered -- SCHEMA "graph" lists the registered ones', p_model; end if;
     end if;
 
+    -- A model row and a model SPACE are two registrations, and only the first
+    -- is this table. Registering the row and forgetting
+    -- aiq.register_embedding_space() produced `relation "aiq.emb_x" does not
+    -- exist` from inside a generated query -- a message naming an internal
+    -- table, at query time, for a registration that was never made. It is the
+    -- mirror of the case the workflow compiler already refuses (a space with
+    -- no endpoint, so it can be searched and not embedded into), and it
+    -- deserves the same treatment: say which registration is missing.
+    v_tbl := 'emb_' || replace(m.name, '-', '_');
+    if to_regclass('aiq.' || quote_ident(v_tbl)) is null then
+        raise exception
+            'embedding model % is registered but its space does not exist -- '
+            'nothing can have been embedded into it. Create it with '
+            'aiq.register_embedding_space(''%'').', m.name, m.name;
+    end if;
+
     -- Dimension mismatch is caught HERE with a message naming both sides,
     -- rather than surfacing as pgvector's bare "expected N dimensions".
     -- Querying the wrong space is the single easiest mistake to make once
@@ -1421,7 +1437,6 @@ begin
     -- so the consumer's policies decide which chunks may rank at all -- and
     -- ranks are computed after it, so a chunk the caller cannot see does not
     -- silently occupy a position and shift everyone else's fused score.
-    v_tbl := 'emb_' || replace(m.name, '-', '_');
     return query execute format(
         'select e.chunk_id, (e.embedding <=> $1)::float8, %L
          from aiq.%I e
@@ -2122,11 +2137,18 @@ begin
             'embedding_models', coalesce((select jsonb_agg(jsonb_build_object(
                     'name', m.name, 'dim', m.dim, 'provider', m.provider,
                     'is_default', m.is_default,
-                    'callable', (m.endpoint is not null and p.provider is not null))
+                    'callable', (m.endpoint is not null and p.provider is not null),
+                    'space_exists', to_regclass('aiq.' ||
+                        quote_ident('emb_' || replace(m.name, '-', '_'))) is not null)
                     order by m.name)
                 from aiq.embedding_models m
                 left join aiq.embedding_providers p on p.provider = m.provider), '[]'::jsonb),
-            'embedding_note', 'An `embed:` step names a model, never a url: the endpoint, '
+            'embedding_note', 'Two registrations, and they fail differently: `callable` is '
+                              'the endpoint and provider an embed STEP needs, `space_exists` '
+                              'is the table a SEARCH reads. A model can be one without the '
+                              'other, and each missing half is refused by name rather than '
+                              'surfacing as a 404 or a missing relation. '
+                              'An `embed:` step names a model, never a url: the endpoint, '
                               'request shape and response path come from aiq.embedding_models '
                               'and aiq.embedding_providers, and define_yaml writes them in. '
                               'A SEMANTIC or SEARCH `p8ql:` step compiles to one of these '

@@ -2867,7 +2867,9 @@ declare
     v_new    text;
     v_ref    text;
     v_val    jsonb;
-    v_m      text[];
+    v_pos    int;
+    v_start  int;
+    v_end    int;
 begin
     for v_arg in select * from jsonb_array_elements(coalesce(p_args, '[]'::jsonb))
     loop
@@ -2880,18 +2882,33 @@ begin
                 workflow.resolve_template_ref(v_ref, p_run_id, p_item));
 
         elsif v_txt is not null and v_txt ~ '\{\{\s*[a-zA-Z0-9_.$]+\s*\}\}' then
-            v_new := v_txt;
-            for v_m in
-                select regexp_matches(v_txt, '(\{\{\s*([a-zA-Z0-9_.$]+)\s*\}\})', 'g')
+            -- ONE PASS OVER THE ORIGINAL, never over what was substituted.
+            --
+            -- The first version replaced each reference in turn with
+            -- replace(), which re-scans the whole string -- so a VALUE that
+            -- happened to look like a template was substituted on a later
+            -- iteration. Measured: run input {"a": "{{run.b}}", "b": "SECRET"}
+            -- and the argument '{{run.a}} then {{run.b}}' resolved to
+            -- "SECRET then SECRET". The caller's DATA became a template, and
+            -- the run input is caller-supplied, which is the whole problem.
+            -- Values are data. Data is never re-read as instructions.
+            v_new := '';
+            v_pos := 1;
             loop
-                v_val := workflow.resolve_template_ref(v_m[2], p_run_id, p_item);
+                v_start := regexp_instr(v_txt, '\{\{\s*[a-zA-Z0-9_.$]+\s*\}\}', v_pos);
+                exit when v_start = 0;
+                v_end := regexp_instr(v_txt, '\{\{\s*[a-zA-Z0-9_.$]+\s*\}\}',
+                                      v_pos, 1, 1);   -- position AFTER the match
+                v_ref := trim(both from replace(replace(
+                             substr(v_txt, v_start, v_end - v_start), '{{', ''), '}}', ''));
+                v_val := workflow.resolve_template_ref(v_ref, p_run_id, p_item);
                 -- `#>> '{}'` renders a string without its quotes and anything
-                -- else as its JSON text. replace() on the matched text rather
-                -- than regexp_replace on a rebuilt pattern, because a resolved
-                -- value containing & or \ is data, not a substitution rule.
-                v_new := replace(v_new, v_m[1], v_val #>> '{}');
+                -- else as its JSON text.
+                v_new := v_new || substr(v_txt, v_pos, v_start - v_pos)
+                                || (v_val #>> '{}');
+                v_pos := v_end;
             end loop;
-            v_out := v_out || jsonb_build_array(to_jsonb(v_new));
+            v_out := v_out || jsonb_build_array(to_jsonb(v_new || substr(v_txt, v_pos)));
 
         else
             v_out := v_out || jsonb_build_array(v_arg);
@@ -4929,6 +4946,32 @@ begin
             exception when others then
                 null;   -- (a) already reports a query that cannot be checked
             end;
+        end if;
+
+        -- (h) a compensation step that waits for a forward step.
+        --
+        -- A compensation is kept out of the forward graph and created only if
+        -- the rollback happens -- but nothing it DEPENDS on is: those are
+        -- ordinary steps and they run on every run, including the ones that
+        -- succeed. The vector sugar makes this easy to reach without noticing,
+        -- because a one-line `p8ql: 'SEARCH ...'` compensation quietly adds a
+        -- model call to the happy path, but the shape predates it: any
+        -- `needs:` on a compensation step does the same thing.
+        --
+        -- A warning, not an error, because it WORKS -- verified by running a
+        -- saga to rollback: the compensation resolved {{steps.<its embed>.result}}
+        -- and executed. What it does not do is what the author expects, and
+        -- the cost lands on runs that never fail.
+        if v_step->>'key' = any(workflow.compensation_keys(p_spec))
+           and coalesce(jsonb_array_length(v_step->'depends_on'), 0) > 0 then
+            severity := 'warning';
+            detail := format(
+                'is a compensation step and depends on %s, which is not one -- that step '
+                'runs in the FORWARD graph, on every run, including the runs that never '
+                'roll back',
+                (select string_agg(format('%L', d), ', ')
+                   from jsonb_array_elements_text(v_step->'depends_on') d));
+            return next;
         end if;
     end loop;
 end;
@@ -7663,6 +7706,22 @@ begin
         if not found then raise exception 'embedding model % not registered -- SCHEMA "graph" lists the registered ones', p_model; end if;
     end if;
 
+    -- A model row and a model SPACE are two registrations, and only the first
+    -- is this table. Registering the row and forgetting
+    -- aiq.register_embedding_space() produced `relation "aiq.emb_x" does not
+    -- exist` from inside a generated query -- a message naming an internal
+    -- table, at query time, for a registration that was never made. It is the
+    -- mirror of the case the workflow compiler already refuses (a space with
+    -- no endpoint, so it can be searched and not embedded into), and it
+    -- deserves the same treatment: say which registration is missing.
+    v_tbl := 'emb_' || replace(m.name, '-', '_');
+    if to_regclass('aiq.' || quote_ident(v_tbl)) is null then
+        raise exception
+            'embedding model % is registered but its space does not exist -- '
+            'nothing can have been embedded into it. Create it with '
+            'aiq.register_embedding_space(''%'').', m.name, m.name;
+    end if;
+
     -- Dimension mismatch is caught HERE with a message naming both sides,
     -- rather than surfacing as pgvector's bare "expected N dimensions".
     -- Querying the wrong space is the single easiest mistake to make once
@@ -7677,7 +7736,6 @@ begin
     -- so the consumer's policies decide which chunks may rank at all -- and
     -- ranks are computed after it, so a chunk the caller cannot see does not
     -- silently occupy a position and shift everyone else's fused score.
-    v_tbl := 'emb_' || replace(m.name, '-', '_');
     return query execute format(
         'select e.chunk_id, (e.embedding <=> $1)::float8, %L
          from aiq.%I e
@@ -8378,11 +8436,18 @@ begin
             'embedding_models', coalesce((select jsonb_agg(jsonb_build_object(
                     'name', m.name, 'dim', m.dim, 'provider', m.provider,
                     'is_default', m.is_default,
-                    'callable', (m.endpoint is not null and p.provider is not null))
+                    'callable', (m.endpoint is not null and p.provider is not null),
+                    'space_exists', to_regclass('aiq.' ||
+                        quote_ident('emb_' || replace(m.name, '-', '_'))) is not null)
                     order by m.name)
                 from aiq.embedding_models m
                 left join aiq.embedding_providers p on p.provider = m.provider), '[]'::jsonb),
-            'embedding_note', 'An `embed:` step names a model, never a url: the endpoint, '
+            'embedding_note', 'Two registrations, and they fail differently: `callable` is '
+                              'the endpoint and provider an embed STEP needs, `space_exists` '
+                              'is the table a SEARCH reads. A model can be one without the '
+                              'other, and each missing half is refused by name rather than '
+                              'surfacing as a 404 or a missing relation. '
+                              'An `embed:` step names a model, never a url: the endpoint, '
                               'request shape and response path come from aiq.embedding_models '
                               'and aiq.embedding_providers, and define_yaml writes them in. '
                               'A SEMANTIC or SEARCH `p8ql:` step compiles to one of these '
@@ -9255,10 +9320,27 @@ begin
                    and v_plan->>'mode' in ('SEMANTIC', 'SEARCH') then
 
                     if v_plan->>'model' is null then
-                        -- USING is order-independent in the dialect, so
-                        -- appending is legal whatever else the query carries.
-                        v_step := jsonb_set(v_step, '{input,args,0}',
-                            to_jsonb(v_query || ' USING ' || v_model));
+                        -- USING takes ONE token, and a registered name is free
+                        -- text -- so a model called 'weird model' pinned as
+                        -- `USING weird model` made the author's own query stop
+                        -- parsing, and the lint then reported `unexpected token
+                        -- 'model'` about a query that was correct as written.
+                        -- The tokenizer treats a quoted run as one token, so
+                        -- quoting is the fix; it is applied only where it is
+                        -- needed, so the ordinary case still pins the bare name
+                        -- the hand-written form would have.
+                        if v_model ~ '[\s,]' then
+                            if v_model like '%"%' then
+                                raise exception
+                                    'embedding model ''%'' cannot be named in a query: it '
+                                    'contains a space and a double quote, and USING takes '
+                                    'one token. Rename the model.', v_model;
+                            end if;
+                            v_query := v_query || ' USING "' || v_model || '"';
+                        else
+                            v_query := v_query || ' USING ' || v_model;
+                        end if;
+                        v_step := jsonb_set(v_step, '{input,args,0}', to_jsonb(v_query));
 
                     elsif v_plan->>'model' <> v_model then
                         raise exception

@@ -52,7 +52,12 @@ models are the same width and only the width was ever checked. It also pins the
 two places a step can hide: a marker inside a `matrix` template is expanded and,
 unexpanded, refused, which the first version of both the expander and the lint
 missed by checking the step kind they expected rather than where the shape can
-occur. Nothing in it touches the network: the failures it pins are all
+occur. §11-§14 are the second pass over the same surface, and every one of them
+was found by attacking it rather than by reading it: a registered name spliced
+into a grammar that takes one token, a resolved value re-read as a template
+because the interpolator re-scanned its own output, a model registered as a
+call but never as a space, and a compensation whose dependency runs on every
+run. Nothing in it touches the network: the failures it pins are all
 authoring-time.
 
 `07`–`09` are the other half of the same debt. `07` is the escape hatch:

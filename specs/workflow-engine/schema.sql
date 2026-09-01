@@ -2841,7 +2841,9 @@ declare
     v_new    text;
     v_ref    text;
     v_val    jsonb;
-    v_m      text[];
+    v_pos    int;
+    v_start  int;
+    v_end    int;
 begin
     for v_arg in select * from jsonb_array_elements(coalesce(p_args, '[]'::jsonb))
     loop
@@ -2854,18 +2856,33 @@ begin
                 workflow.resolve_template_ref(v_ref, p_run_id, p_item));
 
         elsif v_txt is not null and v_txt ~ '\{\{\s*[a-zA-Z0-9_.$]+\s*\}\}' then
-            v_new := v_txt;
-            for v_m in
-                select regexp_matches(v_txt, '(\{\{\s*([a-zA-Z0-9_.$]+)\s*\}\})', 'g')
+            -- ONE PASS OVER THE ORIGINAL, never over what was substituted.
+            --
+            -- The first version replaced each reference in turn with
+            -- replace(), which re-scans the whole string -- so a VALUE that
+            -- happened to look like a template was substituted on a later
+            -- iteration. Measured: run input {"a": "{{run.b}}", "b": "SECRET"}
+            -- and the argument '{{run.a}} then {{run.b}}' resolved to
+            -- "SECRET then SECRET". The caller's DATA became a template, and
+            -- the run input is caller-supplied, which is the whole problem.
+            -- Values are data. Data is never re-read as instructions.
+            v_new := '';
+            v_pos := 1;
             loop
-                v_val := workflow.resolve_template_ref(v_m[2], p_run_id, p_item);
+                v_start := regexp_instr(v_txt, '\{\{\s*[a-zA-Z0-9_.$]+\s*\}\}', v_pos);
+                exit when v_start = 0;
+                v_end := regexp_instr(v_txt, '\{\{\s*[a-zA-Z0-9_.$]+\s*\}\}',
+                                      v_pos, 1, 1);   -- position AFTER the match
+                v_ref := trim(both from replace(replace(
+                             substr(v_txt, v_start, v_end - v_start), '{{', ''), '}}', ''));
+                v_val := workflow.resolve_template_ref(v_ref, p_run_id, p_item);
                 -- `#>> '{}'` renders a string without its quotes and anything
-                -- else as its JSON text. replace() on the matched text rather
-                -- than regexp_replace on a rebuilt pattern, because a resolved
-                -- value containing & or \ is data, not a substitution rule.
-                v_new := replace(v_new, v_m[1], v_val #>> '{}');
+                -- else as its JSON text.
+                v_new := v_new || substr(v_txt, v_pos, v_start - v_pos)
+                                || (v_val #>> '{}');
+                v_pos := v_end;
             end loop;
-            v_out := v_out || jsonb_build_array(to_jsonb(v_new));
+            v_out := v_out || jsonb_build_array(to_jsonb(v_new || substr(v_txt, v_pos)));
 
         else
             v_out := v_out || jsonb_build_array(v_arg);
@@ -4903,6 +4920,32 @@ begin
             exception when others then
                 null;   -- (a) already reports a query that cannot be checked
             end;
+        end if;
+
+        -- (h) a compensation step that waits for a forward step.
+        --
+        -- A compensation is kept out of the forward graph and created only if
+        -- the rollback happens -- but nothing it DEPENDS on is: those are
+        -- ordinary steps and they run on every run, including the ones that
+        -- succeed. The vector sugar makes this easy to reach without noticing,
+        -- because a one-line `p8ql: 'SEARCH ...'` compensation quietly adds a
+        -- model call to the happy path, but the shape predates it: any
+        -- `needs:` on a compensation step does the same thing.
+        --
+        -- A warning, not an error, because it WORKS -- verified by running a
+        -- saga to rollback: the compensation resolved {{steps.<its embed>.result}}
+        -- and executed. What it does not do is what the author expects, and
+        -- the cost lands on runs that never fail.
+        if v_step->>'key' = any(workflow.compensation_keys(p_spec))
+           and coalesce(jsonb_array_length(v_step->'depends_on'), 0) > 0 then
+            severity := 'warning';
+            detail := format(
+                'is a compensation step and depends on %s, which is not one -- that step '
+                'runs in the FORWARD graph, on every run, including the runs that never '
+                'roll back',
+                (select string_agg(format('%L', d), ', ')
+                   from jsonb_array_elements_text(v_step->'depends_on') d));
+            return next;
         end if;
     end loop;
 end;

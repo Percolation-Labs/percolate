@@ -487,4 +487,146 @@ $y$);
     raise notice 'workflow/09: a query reading two embeddings is refused, not resolved by scan order';
 end $$;
 
+-- ---------------------------------------------------------------------
+-- 11. A MODEL NAME IS FREE TEXT; `USING` TAKES ONE TOKEN.
+--
+-- Pinning writes the model into a query the AUTHOR wrote, so a name that is
+-- not a bare token broke that author's query: `USING weird model` stopped
+-- parsing, and the lint reported `unexpected token 'model'` about a step that
+-- was correct as written -- an error describing the wrong problem, which is
+-- the failure this collection least wants to ship.
+-- ---------------------------------------------------------------------
+do $$
+declare
+    v_q text;
+    v_p jsonb;
+begin
+    insert into aiq.embedding_models (name, dim, provider, endpoint, is_default)
+    values ('t embed spaced', 768, 'ollama', 'http://x/api/embeddings', false);
+
+    perform workflow.define_yaml($y$
+name: t_embed_spaced
+steps:
+  - id: retrieve
+    p8ql: 'SEARCH "x" FROM chunks'
+    queue: http
+$y$);
+    -- ^ no USING, so the default is pinned; make the spaced model the default
+    --   for exactly this assertion instead.
+    update aiq.embedding_models set is_default = false;
+    update aiq.embedding_models set is_default = true where name = 't embed spaced';
+    perform workflow.define_yaml($y$
+name: t_embed_spaced2
+steps:
+  - id: retrieve
+    p8ql: 'SEARCH "x" FROM chunks'
+$y$);
+    select spec#>>'{steps,1,input,args,0}' into v_q
+      from workflow.definitions where name = 't_embed_spaced2';
+
+    execute 'select aiq_parse($1)' into v_p using v_q;
+    if not coalesce((v_p->>'ok')::boolean, false) then
+        raise exception 'pinning a spaced model name broke the query: % -- %', v_q, v_p->>'error';
+    end if;
+    if v_p->>'model' <> 't embed spaced' then
+        raise exception 'the pinned model did not parse back to itself: %', v_p->>'model';
+    end if;
+
+    update aiq.embedding_models set is_default = false;
+    update aiq.embedding_models set is_default = true where name = 't-embed-a';
+    raise notice 'workflow/09: a model name that is not a bare token is quoted into the query, not spliced into it';
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 12. A VALUE IS DATA, EVEN WHEN IT LOOKS LIKE A TEMPLATE.
+--
+-- The first version of embedded interpolation replaced one reference at a
+-- time with replace(), which re-scans the whole string -- so a resolved VALUE
+-- containing `{{...}}` was substituted on a later pass. The run input is
+-- caller-supplied, so that is caller data being re-read as an instruction.
+-- ---------------------------------------------------------------------
+do $$
+declare
+    v_run uuid;
+    v_out jsonb;
+begin
+    insert into workflow.definitions (name, spec) values
+    ('t_embed_inject', '{"steps":[{"key":"s","kind":"sql","queue":"none",
+                                   "input":{"function":"content_drift","args":[]}}]}');
+    v_run := workflow.start_workflow('t_embed_inject',
+                 '{"a": "{{run.b}}", "b": "SECRET"}'::jsonb);
+
+    v_out := workflow.resolve_args($j$["{{run.a}} then {{run.b}}"]$j$, v_run);
+    if v_out->>0 <> '{{run.b}} then SECRET' then
+        raise exception
+            'a resolved value was re-read as a template: %', v_out->>0;
+    end if;
+    raise notice 'workflow/09: a resolved value that looks like a template is left alone -- data is never re-read as an instruction';
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 13. TWO REGISTRATIONS, TWO FAILURES.
+--
+-- A model row is the CALL; aiq.register_embedding_space() is the SPACE. §4
+-- covers a space that cannot be called. This is the mirror -- a call whose
+-- space was never created -- which surfaced as `relation "aiq.emb_x" does not
+-- exist` from inside a generated query, naming an internal table for a
+-- registration nobody made.
+-- ---------------------------------------------------------------------
+do $$
+declare v_msg text;
+begin
+    insert into aiq.embedding_models (name, dim, provider, endpoint)
+    values ('t-embed-nospace', 4, 'ollama', 'http://x/api/embeddings');
+    begin
+        perform aiq.query('SEMANTIC "x" FROM chunks USING t-embed-nospace LIMIT 1',
+                          '[1,0,0,0]'::vector);
+        raise exception 'searching a model with no space did not raise';
+    exception when others then
+        v_msg := sqlerrm;
+        if v_msg not like '%register_embedding_space%' then raise; end if;
+    end;
+    raise notice 'workflow/09: a model registered as a call but never as a space says which registration is missing';
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 14. A COMPENSATION THAT WAITS FOR A FORWARD STEP.
+--
+-- A compensation is created only if the rollback happens; nothing it DEPENDS
+-- on is. Those are ordinary steps and they run on every run. A one-line
+-- vector query as a compensation therefore adds a model call to the happy
+-- path -- it works (verified by running a saga to rollback), it is just not
+-- what the author is picturing, so it warns rather than refuses.
+-- ---------------------------------------------------------------------
+do $$
+declare v_n int;
+begin
+    perform workflow.define_yaml($y$
+name: t_embed_saga
+steps:
+  - id: charge
+    rest: {url: 'http://x/charge', method: POST}
+    compensate_with: unwind
+    saga_group: booking
+  - id: book
+    needs: [charge]
+    rest: {url: 'http://x/book', method: POST}
+    saga_group: booking
+  - id: unwind
+    p8ql: 'SEARCH "refund policy" FROM chunks LIMIT 1'
+$y$);
+    select count(*) into v_n
+      from workflow.lint_spec((select spec from workflow.definitions where name = 't_embed_saga')) l
+     where l.severity = 'warning' and l.step_key = 'unwind';
+    if v_n <> 1 then
+        raise exception
+            'a compensation depending on a forward step was not flagged (% warnings)', v_n;
+    end if;
+    -- and it is a WARNING: the definition stands, because it does work.
+    if not exists (select 1 from workflow.definitions where name = 't_embed_saga') then
+        raise exception 'the warning was treated as an error';
+    end if;
+    raise notice 'workflow/09: a compensation waiting on a forward step is flagged, and still allowed';
+end $$;
+
 rollback;

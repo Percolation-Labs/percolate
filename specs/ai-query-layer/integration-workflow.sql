@@ -263,10 +263,27 @@ begin
                    and v_plan->>'mode' in ('SEMANTIC', 'SEARCH') then
 
                     if v_plan->>'model' is null then
-                        -- USING is order-independent in the dialect, so
-                        -- appending is legal whatever else the query carries.
-                        v_step := jsonb_set(v_step, '{input,args,0}',
-                            to_jsonb(v_query || ' USING ' || v_model));
+                        -- USING takes ONE token, and a registered name is free
+                        -- text -- so a model called 'weird model' pinned as
+                        -- `USING weird model` made the author's own query stop
+                        -- parsing, and the lint then reported `unexpected token
+                        -- 'model'` about a query that was correct as written.
+                        -- The tokenizer treats a quoted run as one token, so
+                        -- quoting is the fix; it is applied only where it is
+                        -- needed, so the ordinary case still pins the bare name
+                        -- the hand-written form would have.
+                        if v_model ~ '[\s,]' then
+                            if v_model like '%"%' then
+                                raise exception
+                                    'embedding model ''%'' cannot be named in a query: it '
+                                    'contains a space and a double quote, and USING takes '
+                                    'one token. Rename the model.', v_model;
+                            end if;
+                            v_query := v_query || ' USING "' || v_model || '"';
+                        else
+                            v_query := v_query || ' USING ' || v_model;
+                        end if;
+                        v_step := jsonb_set(v_step, '{input,args,0}', to_jsonb(v_query));
 
                     elsif v_plan->>'model' <> v_model then
                         raise exception
