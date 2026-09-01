@@ -96,6 +96,19 @@ services:
     ports:
       - "8081:8081"
 
+  # Fault injection for workflow tests. Every failure this collection has hit
+  # in real traffic, on demand, at a URL -- so a test of the retry branch does
+  # not need SEC EDGAR to be having a bad day. See faultsrv/README.md.
+  faultsrv:
+    image: python:3.12-alpine
+    container_name: p8-faultsrv
+    command: python /app.py
+    volumes:
+      - ./faultsrv/app.py:/app.py:ro
+    ports:
+      - "8099:8099"
+    restart: unless-stopped
+
   minio:
     image: minio/minio:latest
     container_name: p8-minio

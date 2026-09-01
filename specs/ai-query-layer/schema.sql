@@ -1433,7 +1433,31 @@ begin
     return jsonb_build_object(
         'declared', v_grammar,
         'derived', jsonb_build_object(
+            -- SUPPORTED vs AUTHORABLE, and the split was found the hard way.
+            -- step_kinds is derived from the engine's check constraint, so it
+            -- was true about the ENGINE and false about what a person can
+            -- write: an agent read all eight kinds as legal, authored a
+            -- `signal` step, and the compiler refused it. Deriving from the
+            -- catalog protects against drift; it does not protect against
+            -- describing the wrong layer. A capability document has to be
+            -- derived from the layer the reader will act THROUGH.
             'step_kinds', coalesce(to_jsonb(v_kinds), '[]'::jsonb),
+            -- Not a list of what the compiler is SUPPOSED to accept -- what
+            -- the installed one actually does, probed with a canary per
+            -- feature. The two halves of this system can ship out of step, and
+            -- when they do the compile error describes a syntax problem in a
+            -- document whose syntax is correct. Someone lost an afternoon to
+            -- that; this is so nobody loses a second.
+            'compiler', workflow.compiler_capabilities(),
+            'authorable_in_yaml', to_jsonb(array[
+                'work','sql','http_call','matrix','signal','timer','sub_workflow']),
+            'engine_only', coalesce((
+                select jsonb_agg(k) from unnest(v_kinds) k
+                where k <> all(array['work','sql','http_call','matrix',
+                                     'signal','timer','sub_workflow'])), '[]'::jsonb),
+            'kinds_note', 'step_kinds is what the ENGINE accepts; authorable_in_yaml is '
+                          'what the compiler accepts. Anything in engine_only is reachable '
+                          'only by inserting a spec as JSON.',
             'step_functions', coalesce((select jsonb_agg(jsonb_build_object(
                     'name', name, 'arg_types', to_jsonb(arg_types),
                     'timeout_ms', timeout_ms, 'description', description) order by name)
@@ -1469,6 +1493,47 @@ begin
             'agents', coalesce((select jsonb_agg(jsonb_build_object(
                     'name', name, 'model', model) order by name)
                 from agentic.agents), '[]'::jsonb),
+            -- Everything a template can name. {{run.*}} reads the run INPUT;
+            -- the run's own identity is under the reserved $ prefix, because
+            -- an input key called `id` is not unusual and shadowing it would
+            -- make the same template mean different things per caller. This
+            -- block exists because the natural thing to write -- {{run.id}} --
+            -- silently resolved to nothing and failed 8 of 18 tasks in a real
+            -- pipeline.
+            'templates', jsonb_build_object(
+                'run',   '{{run.<key>}} -- from the run input passed to start_workflow',
+                -- The field NAMES, not a sample from whatever ran last: a
+                -- facet that reads from live rows is empty on a fresh install,
+                -- which is exactly when someone is reading it.
+                'engine', jsonb_build_object(
+                    '{{run.$id}}',          'this run''s uuid -- unreachable before this existed, '
+                                            'and unpassable as input because the caller does not '
+                                            'know it until start_workflow returns',
+                    '{{run.$trace_id}}',    'the W3C trace id shared by every task in the run',
+                    '{{run.$external_id}}', 'the idempotency key, if one was given',
+                    '{{run.$definition}}',  'the workflow name',
+                    '{{run.$version}}',     'the definition version this run was expanded from',
+                    '{{run.$started_at}}',  'when the run began, ISO-8601 UTC',
+                    '{{run.$session}}',     'an engine-minted conversation id, stable for the run '
+                                            '-- see `sessions` below'),
+                'steps', '{{steps.<id>.result}} -- a completed step''s output. EVERY step '
+                         'kind nests its payload under `result`, so this is the one idiom '
+                         'to learn.',
+                'item',  '{{item.<col>}} -- one matrix row; bound only on fan-out children, '
+                         'and substituted at expansion so a worker never sees it',
+                'env',   '{{env.<VAR>}} -- resolved by the WORKER only; sql steps have no '
+                         'env, because the database has no business reading the '
+                         'deployment''s environment',
+                'when',  'run/steps/env resolve at DISPATCH; item and run.$* are bound by '
+                         'the engine before the worker sees them'),
+            'sessions', jsonb_build_object(
+                'how', 'An agent step declaring `session_group: <name>` gets an '
+                       'engine-minted session id, stable for the life of the run, bound to '
+                       '{{run.$session}}. Steps naming the same group share one '
+                       'conversation; declaring none stays stateless.',
+                'why', 'A workflow could not originate a session: `session:` only resolved '
+                       'if the CALLER supplied an id, and the natural key derives from the '
+                       'run -- which the run could not see.'),
             'limits', jsonb_build_object(
                 'max_payload_bytes', coalesce(
                     nullif(current_setting('workflow.max_payload_bytes', true), '')::int, 65536),
@@ -1569,6 +1634,21 @@ returns jsonb as $$
             'traversal', 'GRAPH "<key>" [DEPTH n] [TYPE <relation>] -- the key is resolved '
                          'once and the walk proceeds by id, never by name.'),
         'derived', jsonb_build_object(
+            -- How to WRITE one, not just which ones exist. The catalogue told
+            -- an author that `competes_with` runs company -> company and
+            -- nothing about the table it goes in -- so the first edge written
+            -- from this document guessed the column names and failed.
+            'edge_write', jsonb_build_object(
+                'table', 'aiq.edges',
+                'columns', jsonb_build_object(
+                    'src_id', 'uuid -> aiq.nodes.id  (NOT src_node_id)',
+                    'dst_id', 'uuid -> aiq.nodes.id',
+                    'relation', 'text, must exist in the catalogue below',
+                    'weight', 'real, default 1.0',
+                    'provenance', 'jsonb, default {}'),
+                'enforced_by', 'a trigger validates (src_type, relation, dst_type) '
+                               'against aiq.relation_types; an unlisted triple is refused',
+                'resolve_ids', 'nodes are found by key: select node_id from aiq.lookup(''<key>'')'),
             'entity_types', coalesce((select jsonb_agg(jsonb_build_object(
                     'entity_type', entity_type, 'source_table', source_table,
                     'key_expr', key_expr, 'include_where', include_where) order by entity_type)
