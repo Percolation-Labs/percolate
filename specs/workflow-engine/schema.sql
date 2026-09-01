@@ -699,19 +699,102 @@ returns workflow.tasks as $$
     select workflow.claim_task(p_queue, p_worker_id);
 $$ language sql;
 
-create or replace function workflow.heartbeat_task(p_task_id uuid)
+-- THE LEASE FENCE (§23). Returns null when the caller may act on the task, or
+-- the reason it may not -- and records the refusal, because a worker whose
+-- completion is silently dropped looks exactly like a worker that never ran.
+--
+-- Two distinct callers get refused here and they are not the same problem:
+--
+--   * A task in a terminal state. Completing a done task cannot change its
+--     outcome but CAN still rewrite runs.context, which is what makes it
+--     dangerous rather than merely redundant -- see §23.
+--   * A caller that is not the current lease holder. This is the crash-recovery
+--     case: the reaper handed the task to somebody else, and the original
+--     worker was slow rather than dead.
+--
+-- p_worker_id is optional because the in-database paths (execute_sql_step,
+-- expand_matrix) have no worker identity and cannot lie about one. A worker
+-- that passes its id gets the full fence; one that does not still gets the
+-- terminal-state half. get_task_context already hands every worker the
+-- `claimed_by` it should send back, so passing it is not new information.
+create or replace function workflow.lease_violation(
+    p_task_id uuid, p_worker_id text, p_op text)
+returns text as $$
+declare t workflow.tasks; v_why text;
+begin
+    select * into t from workflow.tasks where id = p_task_id;
+    if not found then
+        return format('no task %s', p_task_id);
+    end if;
+
+    if t.status in ('done', 'failed', 'cancelled') then
+        v_why := format('task is already %s', t.status);
+
+    -- The revoked lease, and the reason this test is on `attempts` rather than
+    -- on claimed_by. A reaped task is requeued with claimed_by cleared and a
+    -- backoff, so for the length of that backoff it is `ready` and unclaimed --
+    -- and a check that only compared worker ids would pass vacuously, letting
+    -- the worker whose lease was just revoked complete it after all. Whether the
+    -- zombie won would then depend on whether a replacement had claimed yet,
+    -- which is a race deciding whose answer is authoritative.
+    --
+    -- attempts > 0 means "somebody has held this lease", and a task that is not
+    -- `running` is a task nobody holds. Together: the lease was revoked, and the
+    -- caller is talking about a lease that no longer exists. attempts = 0 is
+    -- left open deliberately -- that is a task nobody ever claimed, which is how
+    -- every in-database path and every test drives the engine directly.
+    elsif t.status <> 'running' and t.attempts > 0 then
+        v_why := format('the lease was revoked -- task is %s after %s attempt(s)',
+                        t.status, t.attempts);
+
+    elsif p_worker_id is not null and t.claimed_by is not null
+          and p_worker_id is distinct from t.claimed_by then
+        v_why := format('the lease is held by %s, not %s', t.claimed_by, p_worker_id);
+    else
+        return null;
+    end if;
+
+    insert into workflow.task_events (task_id, run_id, from_status, to_status, detail)
+    values (p_task_id, t.run_id, t.status, t.status, jsonb_build_object(
+        'event', 'lease_violation',
+        'op', p_op,
+        'why', v_why,
+        'caller', p_worker_id,
+        'holder', t.claimed_by,
+        'queue', t.queue,
+        'attempts', t.attempts));
+    return v_why;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- Returns false to mean "stop working" -- which is now true for three reasons,
+-- not one: the run was cancelled, the task reached a terminal state, or this
+-- worker's lease was reaped and given to somebody else. A partitioned worker
+-- asking "should I keep going?" is exactly the caller that must be told no.
+create or replace function workflow.heartbeat_task(
+    p_task_id uuid, p_worker_id text default null)
 returns boolean as $$
+declare v_ok boolean;
+begin
+    if workflow.lease_violation(p_task_id, p_worker_id, 'heartbeat') is not null then
+        return false;
+    end if;
     update workflow.tasks set heartbeat_at = now()
     where id = p_task_id and status = 'running'
-    returning not cancel_requested;
-$$ language sql;
+    returning not cancel_requested into v_ok;
+    return coalesce(v_ok, false);
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
 
 -- Current form. It reached this shape in section 21h (Completion, final form: repair, validate, then store.), which explains
 -- the failure that produced it. Defined here, where it is first needed.
-create or replace function workflow.complete_task(p_task_id uuid, p_output jsonb)
+drop function if exists workflow.complete_task(uuid, jsonb);
+create or replace function workflow.complete_task(
+    p_task_id uuid, p_output jsonb, p_worker_id text default null)
 returns void as $$
 declare
     t        workflow.tasks;
+    v_lease  text;
     v_out    jsonb;
     v_res    jsonb;
     v_schema jsonb;
@@ -727,6 +810,13 @@ begin
     if exists (select 1 from workflow.runs where id = t.run_id and status = 'cancelled') then
         update workflow.tasks set status = 'cancelled'
         where id = p_task_id and status in ('running', 'ready');
+        return;
+    end if;
+
+    -- §23: the lease fence. Placed after the cancelled-run branch, which is
+    -- idempotent and correct for any caller, and before anything that writes.
+    v_lease := workflow.lease_violation(p_task_id, p_worker_id, 'complete');
+    if v_lease is not null then
         return;
     end if;
 
@@ -800,16 +890,32 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 --
 -- Defaulted to false so every existing call site keeps its previous behaviour.
 drop function if exists workflow.fail_task(uuid, jsonb);
+drop function if exists workflow.fail_task(uuid, jsonb, boolean);
 -- Current form. It reached this shape in section 21e (A fan-out that survives a failed child.), which explains
 -- the failure that produced it. Defined here, where it is first needed.
 create or replace function workflow.fail_task(
-    p_task_id uuid, p_error jsonb, p_terminal boolean default false)
+    p_task_id uuid, p_error jsonb, p_terminal boolean default false,
+    p_worker_id text default null)
 returns void as $$
-declare t workflow.tasks;
+declare t workflow.tasks; v_lease text;
 begin
     select * into t from workflow.tasks where id = p_task_id;
+
+    -- §23, same fence as complete_task: a worker that lost its lease must not
+    -- be able to fail a task somebody else is currently running, which would
+    -- burn an attempt belonging to the live holder.
+    v_lease := workflow.lease_violation(p_task_id, p_worker_id, 'fail');
+    if v_lease is not null then
+        return;
+    end if;
+
     if not p_terminal and t.attempts < t.max_attempts and not t.cancel_requested then
+        -- claimed_by is cleared on requeue (§23). A ready task that still names
+        -- a worker is not merely untidy: the lease fence reads claimed_by, so a
+        -- stale one would let the previous holder act on a task it no longer
+        -- owns -- the exact hole the fence exists to close.
         update workflow.tasks set status = 'ready', error = p_error,
+            claimed_by = null, claimed_at = null,
             run_after = now() + (power(2, t.attempts) * interval '1 second')
         where id = p_task_id;
         return;
@@ -1049,13 +1155,16 @@ $$ language plpgsql;
 -- 12. Decision tasks — same fixes applied: dependency locking +
 --     cancelled-run guard, still atomic (branch + complete in one call).
 -- ------------------------------------------------------------
+drop function if exists workflow.complete_decision_task(uuid, jsonb, jsonb);
 create or replace function workflow.complete_decision_task(
     p_task_id uuid,
     p_output jsonb,
-    p_new_tasks jsonb default '[]'::jsonb
+    p_new_tasks jsonb default '[]'::jsonb,
     -- [{step_key, queue, depends_on: [uuid,...], kind, input, rate_key}]
+    p_worker_id text default null
 ) returns void as $$
 declare
+    v_holder text;
     v_run_id uuid;
     v_item jsonb;
     v_new_id uuid;
@@ -1071,6 +1180,21 @@ begin
     if exists (select 1 from workflow.runs where id = v_run_id and status = 'cancelled') then
         update workflow.tasks set status = 'cancelled' where id = p_task_id and status = 'running';
         return;   -- fix #4: run was cancelled while this decision was executing
+    end if;
+
+    -- §23's lease fence, minus the terminal-state half. A decision task is the
+    -- one completion path where re-calling on a `done` task is legitimate --
+    -- that is what replay IS, and the determinism guard below is the check that
+    -- matters there. What must still be refused is a worker acting on a lease
+    -- that was reaped and handed to somebody else, since two live workers
+    -- branching a run independently is the one thing this function must never
+    -- allow.
+    if p_worker_id is not null then
+        select claimed_by into v_holder from workflow.tasks where id = p_task_id;
+        if v_holder is not null and v_holder is distinct from p_worker_id then
+            perform workflow.lease_violation(p_task_id, p_worker_id, 'decide');
+            return;
+        end if;
     end if;
 
     -- Determinism guard (research finding: "pure decision" was a
@@ -1128,7 +1252,14 @@ begin
         end if;
     end loop;
 
-    update workflow.tasks set status = 'done', output = p_output, completed_at = now(),
+    -- clock_timestamp(), not now() -- §21c. This function kept the transaction
+    -- timestamp after complete_task was fixed, which is the "a fix lands in one
+    -- of two copies" failure the consolidation pass exists to stop, one function
+    -- over. completed_at is the saga's ORDERING column: every task finishing in
+    -- one transaction shares now(), so a decision task inside a saga group
+    -- compensated in forward order.
+    update workflow.tasks set status = 'done', output = p_output,
+        completed_at = clock_timestamp(),
         decision_output_hash = v_new_hash
     where id = p_task_id;
     perform workflow.check_run_completion(v_run_id);
@@ -1139,9 +1270,14 @@ $$ language plpgsql;
 -- ------------------------------------------------------------
 -- 13. Timers
 -- ------------------------------------------------------------
+-- completed_at is set here for the same §21c reason: it is the saga ordering
+-- column, and a timer that fired was previously left with it NULL. A NULL sorts
+-- first under `order by completed_at desc`, so a timer inside a saga group was
+-- compensated before everything that ran after it.
 create or replace function workflow.promote_due_timers() returns int as $$
     with due as (
-        update workflow.tasks set status = 'done', output = '{"fired": true}'::jsonb
+        update workflow.tasks set status = 'done', output = '{"fired": true}'::jsonb,
+            completed_at = clock_timestamp()
         where kind = 'timer' and status = 'ready' and run_after <= now()
         returning id
     )
@@ -1152,24 +1288,47 @@ $$ language sql;
 -- ------------------------------------------------------------
 -- 14. Reaper
 -- ------------------------------------------------------------
+-- Current form (§23). The previous version returned every stale task straight
+-- to `ready` and touched nothing else, which had two consequences neither the
+-- spec nor a test had ever observed, because nothing had ever called it.
+--
+--   * `max_attempts` was not a budget. A task whose worker dies every time was
+--     reaped and re-claimed without limit -- measured at attempts=10 against
+--     max_attempts=5, still claimable, run still `running`. Worse, it was
+--     INVISIBLE: each claim refreshes heartbeat_at, so v_stuck_tasks never saw
+--     it. A task consuming a worker slot forever while every dashboard reads
+--     green is this collection's defining failure shape.
+--   * There was no backoff, so a crash loop ran at claim speed.
+--
+-- Both are fixed by not having a second retry policy. `fail_task(.., false)`
+-- IS the retry policy -- attempt budget, exponential backoff, terminal
+-- transition, run failure and saga compensation -- so a dead worker is now
+-- just a failure like any other, and the only thing this function decides is
+-- which tasks are dead.
 create or replace function workflow.reap_stale_tasks() returns int as $$
-    with cfg as (
-        select distinct t.queue, coalesce(qc.stale_timeout, interval '2 minutes') as timeout
+declare v_rec record; v_n int := 0;
+begin
+    for v_rec in
+        select t.id, t.claimed_by, t.attempts, t.max_attempts,
+               coalesce(qc.stale_timeout, interval '2 minutes') as timeout
         from workflow.tasks t
         left join workflow.queue_config qc on qc.queue = t.queue
         where t.status = 'running'
-    ),
-    dead as (
-        update workflow.tasks t
-        set status = 'ready', claimed_by = null, claimed_at = null
-        from cfg
-        where t.queue = cfg.queue
-          and t.status = 'running'
-          and t.heartbeat_at < now() - cfg.timeout
-        returning t.id
-    )
-    select count(*)::int from dead;
-$$ language sql;
+          and t.heartbeat_at < now() - coalesce(qc.stale_timeout, interval '2 minutes')
+    loop
+        perform workflow.fail_task(v_rec.id, jsonb_build_object(
+            'error', format(
+                'worker %s stopped heartbeating for longer than %s; the lease was '
+                'reaped on attempt %s of %s',
+                coalesce(v_rec.claimed_by, '(unclaimed)'), v_rec.timeout,
+                v_rec.attempts, v_rec.max_attempts),
+            'reaped', true,
+            'reaped_from', v_rec.claimed_by), false);
+        v_n := v_n + 1;
+    end loop;
+    return v_n;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
 -- select cron.schedule('reap-stale-tasks', '*/1 * * * *', $$select workflow.reap_stale_tasks()$$);
 
 -- ------------------------------------------------------------
@@ -1199,6 +1358,22 @@ create view workflow.v_stuck_tasks as
 -- Reports on the COMPENSATION tasks (the work that undoes), not merely on
 -- forward tasks that have been marked as having had a compensation created --
 -- the same distinction the check_compensation_completion bug turned on.
+-- §23. A refused call is a fact about the deployment, not a nuisance: repeated
+-- lease violations from one queue mean workers are dying, or a stale_timeout is
+-- shorter than the work. Silently dropping them is what made the reaper's own
+-- defects invisible for as long as they were.
+create view workflow.v_lease_violations as
+    select e.detail->>'queue'  as queue,
+           e.detail->>'op'     as op,
+           e.detail->>'why'    as why,
+           e.detail->>'caller' as caller,
+           e.detail->>'holder' as holder,
+           count(*)            as refusals,
+           max(e.at)           as last_seen
+    from workflow.task_events e
+    where e.detail->>'event' = 'lease_violation'
+    group by 1,2,3,4,5 order by 6 desc;
+
 create view workflow.v_compensation_status as
     select f.run_id, f.saga_group,
            count(*) as total_compensatable,
@@ -1259,13 +1434,13 @@ alter function workflow.claim_tasks(text, text, int)
     security definer set search_path = pg_catalog, public;
 alter function workflow.claim_task_rate_limited(text, text)
     security definer set search_path = pg_catalog, public;
-alter function workflow.heartbeat_task(uuid)
+alter function workflow.heartbeat_task(uuid, text)
     security definer set search_path = pg_catalog, public;
-alter function workflow.complete_task(uuid, jsonb)
+alter function workflow.complete_task(uuid, jsonb, text)
     security definer set search_path = pg_catalog, public;
-alter function workflow.fail_task(uuid, jsonb, boolean)
+alter function workflow.fail_task(uuid, jsonb, boolean, text)
     security definer set search_path = pg_catalog, public;
-alter function workflow.complete_decision_task(uuid, jsonb, jsonb)
+alter function workflow.complete_decision_task(uuid, jsonb, jsonb, text)
     security definer set search_path = pg_catalog, public;
 alter function workflow.signal_task(uuid, text, jsonb)
     security definer set search_path = pg_catalog, public;
@@ -1380,10 +1555,10 @@ grant usage on schema workflow to worker, scheduler, authenticated;
 grant execute on function workflow.claim_task(text, text) to worker;
 grant execute on function workflow.claim_tasks(text, text, int) to worker;
 grant execute on function workflow.claim_task_rate_limited(text, text) to worker;
-grant execute on function workflow.heartbeat_task(uuid) to worker;
-grant execute on function workflow.complete_task(uuid, jsonb) to worker;
-grant execute on function workflow.fail_task(uuid, jsonb, boolean) to worker;
-grant execute on function workflow.complete_decision_task(uuid, jsonb, jsonb) to worker;
+grant execute on function workflow.heartbeat_task(uuid, text) to worker;
+grant execute on function workflow.complete_task(uuid, jsonb, text) to worker;
+grant execute on function workflow.fail_task(uuid, jsonb, boolean, text) to worker;
+grant execute on function workflow.complete_decision_task(uuid, jsonb, jsonb, text) to worker;
 grant execute on function workflow.start_child_workflow(uuid, text, jsonb) to worker;
 grant execute on function workflow.add_task(uuid, text, text, uuid[], text, jsonb, text) to worker;
 grant execute on function workflow.get_task_context(uuid, text) to worker;
@@ -2978,7 +3153,7 @@ $$ language sql stable security definer set search_path = pg_catalog, public;
 -- and where the eventual {{items.<step>}} namespace will read it from, when a
 -- second consumer justifies building one.
 -- ------------------------------------------------------------
--- workflow.complete_task(uuid,jsonb) is defined in section 10.
+-- workflow.complete_task(uuid,jsonb,text) is defined in section 10.
 -- This section explains why it has the shape it does; the body is not repeated,
 -- because two copies of a function is how a fix lands in only one of them.
 
@@ -3131,7 +3306,7 @@ $$ language plpgsql;
 -- and 69KB of JSON in a task row is exactly the TOAST and replication weight
 -- the cap exists to keep out. The gap is the offload, not the number.
 -- ------------------------------------------------------------
--- workflow.complete_task(uuid,jsonb) is defined in section 10.
+-- workflow.complete_task(uuid,jsonb,text) is defined in section 10.
 -- This section explains why it has the shape it does; the body is not repeated,
 -- because two copies of a function is how a fix lands in only one of them.
 
@@ -3369,7 +3544,7 @@ $$ language sql stable security definer set search_path = pg_catalog, public;
 -- The tie-break on id is not decoration either: two steps CAN still share a
 -- microsecond, and a stable order beats an arbitrary one.
 -- ------------------------------------------------------------
--- workflow.complete_task(uuid,jsonb) is defined in section 10.
+-- workflow.complete_task(uuid,jsonb,text) is defined in section 10.
 -- This section explains why it has the shape it does; the body is not repeated,
 -- because two copies of a function is how a fix lands in only one of them.
 
@@ -3696,7 +3871,7 @@ comment on function workflow.validate_shape(jsonb, jsonb) is
 -- real remedy, where re-fetching an oversized response or re-requesting a 404
 -- is not.
 -- ------------------------------------------------------------
--- workflow.complete_task(uuid,jsonb) is defined in section 10.
+-- workflow.complete_task(uuid,jsonb,text) is defined in section 10.
 -- This section explains why it has the shape it does; the body is not repeated,
 -- because two copies of a function is how a fix lands in only one of them.
 
@@ -4030,3 +4205,125 @@ $$ language plpgsql immutable;
 -- workflow.get_task_context(uuid,text) is defined in section 16.
 -- This section explains why it has the shape it does; the body is not repeated,
 -- because two copies of a function is how a fix lands in only one of them.
+
+-- ------------------------------------------------------------
+-- 23. Crash recovery, the first time anything ran it.
+--
+-- FOUND BY: a coverage pass with `track_functions='all'` over a clean install
+-- plus the whole suite. 47 of 62 workflow functions had been invoked; 15 had
+-- not, and three of the fifteen were `heartbeat_task`, `reap_stale_tasks` and
+-- `complete_decision_task` -- between them the entire crash-recovery and
+-- replay story, described in spec.md §3 and §4 in the present tense, reported
+-- present by the surface audit, and never once executed by anything.
+--
+-- Executing them found two defects and confirmed a third by reading. The
+-- shape they share is worth naming before the details: **the engine had no
+-- concept of a lease**. It knew a task was `running` and which worker string
+-- had claimed it, and nothing anywhere checked that the worker asking to
+-- finish a task was the worker still entitled to.
+--
+-- 23a. THE ZOMBIE. A worker that is slow is indistinguishable from a worker
+-- that is dead, and the difference only appears afterwards.
+--
+--     worker A claims task a                     -> running, claimed_by=A
+--     A is partitioned; heartbeats stop
+--     reap_stale_tasks()                         -> ready, claimed_by=null
+--     worker B claims task a                     -> running, claimed_by=B
+--     A comes back and calls complete_task(a, …)
+--
+-- Reproduced against a live PG19 beta3 instance, and every step of what
+-- followed was wrong:
+--
+--     after zombie A completes: status=done claimed_by=worker-B
+--                               context={"a": {"result": "STALE-from-A"}}
+--     successor b status: ready
+--     after real owner B completes:
+--                               context={"a": {"result": "FRESH-from-B"}}
+--
+-- A's stale answer was published and the successor was released with it; then
+-- B's real answer silently overwrote the same key AFTER a downstream step had
+-- already read the other one. So `{{steps.a.result}}` resolved to two
+-- different values over the life of one run, both workers did the work, and
+-- nothing was logged. `complete_task` ended in an unqualified
+-- `update workflow.tasks set status = 'done' where id = p_task_id` -- no
+-- status guard, no ownership guard -- so this was not an edge case, it was the
+-- only behaviour there was.
+--
+-- The fix is `workflow.lease_violation()`, applied by complete_task, fail_task
+-- and heartbeat_task. Three things about its shape are deliberate:
+--
+--   * It tests `attempts > 0 and status <> 'running'`, not just worker ids.
+--     A reaped task spends its backoff `ready` and unclaimed, and an id
+--     comparison passes vacuously against a null holder -- so whether the
+--     zombie won would have depended on whether a replacement had claimed
+--     yet. That is a race deciding whose answer is authoritative.
+--   * `attempts = 0` is left open. That is a task nobody ever claimed, which
+--     is how every in-database path (execute_sql_step, expand_matrix) and
+--     every test drives the engine, and none of them can lie about an
+--     identity they do not have.
+--   * A refusal is RECORDED, as a `lease_violation` task_event behind
+--     `v_lease_violations`. A completion that vanishes silently looks exactly
+--     like a worker that never ran -- the same argument §21a makes for
+--     recording output repairs rather than quietly performing them.
+--
+-- `heartbeat_task` returning false now means "stop" for three reasons rather
+-- than one: the run was cancelled, the task is terminal, or your lease was
+-- reaped. A partitioned worker asking whether to keep going is precisely the
+-- caller that has to be told no.
+--
+-- 23b. THE REAPER HAD ITS OWN RETRY POLICY, AND IT DISAGREED WITH THE REAL ONE.
+--
+-- `reap_stale_tasks` returned stale tasks straight to `ready` and touched
+-- nothing else. Measured:
+--
+--     after 10 crash cycles: attempts=10 status=ready (max_attempts=5)
+--     still claimable? t     run status: running
+--     visible in v_stuck_tasks? 0
+--
+-- `max_attempts` was a budget for errors and not for crashes, so a task whose
+-- worker dies every time was reaped and re-claimed without limit, with no
+-- backoff, at claim speed. And it was INVISIBLE: every claim refreshes
+-- heartbeat_at, so the one view whose job is to notice never saw it. A task
+-- consuming a worker slot forever while every dashboard reads green is this
+-- collection's defining failure shape, arriving through the function that
+-- exists to prevent it.
+--
+-- The fix is to delete the second policy rather than repair it: the reaper now
+-- calls `fail_task(id, …, false)`, which already owns the attempt budget, the
+-- exponential backoff, the terminal transition, the run failure and saga
+-- compensation. A dead worker is a failure like any other, and the only thing
+-- the reaper decides is which tasks are dead. `fail_task` additionally clears
+-- `claimed_by` on requeue, which it never did -- a `ready` task still naming a
+-- worker is what 23a's fence would otherwise have read.
+--
+-- 23c. AND §21c HAD SURVIVED IN THE COPY NOBODY RAN.
+--
+-- `complete_task` was fixed to stamp `completed_at` with `clock_timestamp()`
+-- because `now()` is the transaction timestamp, shared by every step finishing
+-- in one transaction, and `completed_at` is the column `begin_compensation`
+-- orders by. `complete_decision_task` still used `now()`, and
+-- `promote_due_timers` set no `completed_at` at all -- a NULL, which sorts
+-- first under `order by completed_at desc`. So a decision or a timer inside a
+-- saga group compensated in forward order, which is the exact bug §21c
+-- reports as fixed. Both now stamp `clock_timestamp()`.
+--
+-- This is the failure mode the consolidation pass was about, one function over
+-- instead of one copy over: a fix that lands where somebody was looking and
+-- not where the same code also lives. The defence is the same -- one
+-- definition per function -- and it does not help across two functions that
+-- merely ought to agree. `06-recovery.sql` asserts the agreement directly.
+--
+-- WHAT THIS DOES NOT CLOSE. The fence is strongest when a worker names itself,
+-- and the shipped worker does not yet pass `p_worker_id` -- `get_task_context`
+-- already hands it the `claimed_by` it should send back, so this is a
+-- percolate-core change, not new information. Without it the revoked-lease and
+-- terminal-state halves still hold (they need no identity), and only the
+-- two-live-workers case in 23a degrades to first-writer-wins. The parameter
+-- defaults to null for exactly that reason: this had to be deployable ahead of
+-- the worker that uses it.
+-- ------------------------------------------------------------
+-- workflow.complete_task(uuid,jsonb,text), workflow.fail_task(uuid,jsonb,boolean,text),
+-- workflow.heartbeat_task(uuid,text), workflow.lease_violation(uuid,text,text) and
+-- workflow.reap_stale_tasks() are defined in sections 10, 13 and 14.
+-- This section explains why they have the shape they do; the bodies are not
+-- repeated, because two copies of a function is how a fix lands in only one of them.

@@ -95,8 +95,10 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('workflow-engine','function','workflow.start_workflow','text,jsonb,text,text','spec.md §4'),
 ('workflow-engine','function','workflow.claim_task','text,text','spec.md: SKIP LOCKED claiming'),
 ('workflow-engine','function','workflow.get_task_context','uuid,text','§16: a worker must see its run input'),
-('workflow-engine','function','workflow.complete_task','uuid,jsonb','spec.md §4'),
-('workflow-engine','function','workflow.fail_task','uuid,jsonb,boolean','§16: terminal vs retryable'),
+('workflow-engine','function','workflow.complete_task','uuid,jsonb,text','spec.md §4'),
+('workflow-engine','function','workflow.lease_violation','uuid,text,text','§23: the lease fence'),
+('workflow-engine','view','workflow.v_lease_violations','','§23: refusals are visible'),
+('workflow-engine','function','workflow.fail_task','uuid,jsonb,boolean,text','§16: terminal vs retryable'),
 ('workflow-engine','function','workflow.begin_compensation','uuid,text','spec.md: saga'),
 ('workflow-engine','function','workflow.reap_stale_tasks','','spec.md: crash recovery'),
 ('workflow-engine','function','workflow.define_yaml','text','YAML.md: workflows are authored as YAML'),
@@ -200,6 +202,14 @@ select e.*,
     when 'extension' then exists (select 1 from pg_extension where extname = e.name)
     when 'schema'    then exists (select 1 from pg_namespace where nspname = e.name)
     when 'table'     then to_regclass(e.name) is not null
+    -- Views were not a kind until §23 declared one. to_regclass would have
+    -- accepted a view under 'table', which is why the case is separate: an
+    -- audit that cannot tell a view from a table cannot notice a view being
+    -- replaced by a table, or the reverse.
+    when 'view'      then exists (
+        select 1 from pg_views
+        where schemaname = split_part(e.name, '.', 1)
+          and viewname   = split_part(e.name, '.', 2))
     when 'function'  then to_regprocedure(e.name || '(' || coalesce(e.detail,'') || ')') is not null
     -- schema.table.column. Added for workflow.tasks.matrix_parent_id: a
     -- capability can also be a column, and a table check passes happily on a
