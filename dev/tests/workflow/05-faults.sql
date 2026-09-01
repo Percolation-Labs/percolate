@@ -647,6 +647,74 @@ begin
     end if;
 end $$;
 
+-- ---------------------------------------------------------------------
+-- 9. A feature the compiler cannot emit must not compile CLEAN (22c).
+--
+-- The first version of the skew check ran only when compilation FAILED, which
+-- caught every missing step KIND -- those fail loudly -- and missed the one
+-- that matters most. `output_schema` is not a step kind, so a compiler that has
+-- never heard of it drops the key, the document compiles clean, and the
+-- declared contract simply is not there at runtime. An author who writes a
+-- contract and gets a green run reasonably concludes it is enforced.
+-- ---------------------------------------------------------------------
+do $$
+declare v_caps jsonb; v_missing text; v_yaml text; v_err text; v_ok boolean;
+begin
+    v_caps := workflow.compiler_capabilities();
+    if not (v_caps->>'available')::boolean then
+        raise notice 'workflow/05: no compiler installed -- skew check not applicable';
+        return;
+    end if;
+
+    -- Pick something this build genuinely cannot emit. On a current build there
+    -- is nothing missing and the assertion is vacuous, which is correct: the
+    -- check exists for the skewed case.
+    select f into v_missing from jsonb_array_elements_text(v_caps->'missing') f limit 1;
+    if v_missing is null then
+        raise notice 'workflow/05: compiler is current -- nothing to skew against';
+        return;
+    end if;
+
+    v_yaml := E'name: t_skew\nsteps:\n  - id: a\n    rest: {url: http://x}\n    '
+              || v_missing || E': {}';
+    execute 'select coalesce((p8_compile_workflow($1)->>''ok'')::boolean,false)'
+        into v_ok using v_yaml;
+
+    begin
+        perform workflow.define_yaml(v_yaml);
+        raise exception
+            'define_yaml accepted a document declaring %, which this build cannot emit. '
+            'compiled_clean=% -- a silently dropped contract is worse than an unsupported '
+            'feature, because nothing anywhere says so.', v_missing, v_ok;
+    exception when others then
+        v_err := sqlerrm;
+    end;
+
+    if v_err not like '%version skew%' then
+        raise exception 'the refusal does not name it as skew: %', v_err;
+    end if;
+    -- And when it compiled clean, the message has to say THAT -- otherwise it
+    -- reads as a syntax complaint about a document whose syntax is fine.
+    if v_ok and v_err not like '%COMPILED CLEAN%' then
+        raise exception
+            'a silently-dropped feature was reported as if the compiler had rejected it: %',
+            v_err;
+    end if;
+end $$;
+
+-- The reporter's other note, generalised: the run-namespace logic must live in
+-- exactly ONE place, or a fix to it lands in one arity and not the other.
+do $$
+begin
+    if pg_get_functiondef(to_regprocedure('workflow.resolve_args(jsonb,uuid)')::oid)
+       not like '%resolve_args(p_args, p_run_id, null::jsonb)%' then
+        raise exception
+            'resolve_args(jsonb,uuid) has its own copy of the namespace logic again. Two '
+            'copies means a fix lands in one arity and not the other -- which is exactly '
+            'how {{run.id}} stayed broken in half the engine.';
+    end if;
+end $$;
+
 rollback;
 
 do $$ begin
@@ -660,4 +728,6 @@ do $$ begin
     raise notice 'workflow/05: a run can see itself via {{run.$*}}, in both resolvers, without shadowing caller input';
     raise notice 'workflow/05: registration checks the role that will EXECUTE, and says what to grant';
     raise notice 'workflow/05: the installed compiler is probed, so version skew reads as skew and not as bad syntax';
+    raise notice 'workflow/05: a feature the compiler cannot emit is refused even when it compiles CLEAN';
+    raise notice 'workflow/05: the run-namespace logic lives in exactly one place';
 end $$;

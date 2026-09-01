@@ -778,7 +778,19 @@ pub mod pg_test {
 
 use serde::Deserialize;
 
+// deny_unknown_fields, on every struct an author writes into.
+//
+// A key this compiler does not know is either a typo or a feature it predates,
+// and serde's default -- drop it -- makes both silent. That is how an
+// `output_schema` declared on a step compiled clean and simply was not there at
+// runtime: the author wrote a contract, got a green run, and reasonably
+// concluded it was enforced.
+//
+// This is the durable half of that fix. The engine-side check in define_yaml is
+// the half that works on a deployment whose .so is already old, which is
+// exactly the situation that produced the bug.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WfDoc {
     name: String,
     #[serde(default)]
@@ -787,6 +799,7 @@ struct WfDoc {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WfStep {
     id: String,
     #[serde(default)]
@@ -855,6 +868,7 @@ struct WfStep {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SqlStep {
     function: String,
     #[serde(default)]
@@ -867,6 +881,7 @@ struct SqlStep {
 // rule that every high-level step must remain expressible in raw steps applies
 // to the thing being fanned out as much as to the fan-out.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WfMatrix {
     // exactly one of rows / items
     #[serde(default)]
@@ -894,6 +909,7 @@ struct WfMatrix {
 // has no `needs` (it depends on nothing but the expansion) and no `id` (it is
 // keyed <step>[<i>] by the engine).
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WfTemplate {
     #[serde(default)]
     queue: Option<String>,
@@ -1213,6 +1229,7 @@ pub fn compile_workflow(yaml: &str) -> Result<serde_json::Value, String> {
             }
         }
 
+        let kind_is_agent = s.agent.is_some();
         let (kind, queue, input) = if let Some(m) = &s.matrix {
             compile_matrix(&s.id, m, s)?
         } else if s.signal.is_some() || s.timer.is_some() || s.workflow.is_some() {
@@ -1224,6 +1241,24 @@ pub fn compile_workflow(yaml: &str) -> Result<serde_json::Value, String> {
                 session_group: &s.session_group, jsonpath: &s.jsonpath,
             })?
         };
+
+        // Agent-only keys, refused elsewhere rather than ignored. deny_unknown_fields
+        // stops a TYPO being dropped; this stops a REAL key being dropped because
+        // it means nothing for the kind it was written on -- the same silent
+        // class, one level up. It is also the rule the query dialect already
+        // applies to USING, DEPTH and TYPE: a modifier that means nothing where
+        // it is written is an error, because silently discarding it is how a
+        // document quietly means something other than what it says.
+        for (key, present) in [("session", s.session.is_some()),
+                               ("session_group", s.session_group.is_some()),
+                               ("jsonpath", s.jsonpath.is_some())] {
+            if present && kind_is_agent == false {
+                return Err(format!(
+                    "step '{}' declares `{}`, which applies only to an `agent:` step. \
+                     For a `rest:` step, jsonpath belongs inside the rest block.",
+                    s.id, key));
+            }
+        }
 
         let mut step = serde_json::json!({
             "key": s.id, "kind": kind, "queue": queue, "input": input

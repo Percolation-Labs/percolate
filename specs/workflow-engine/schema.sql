@@ -1,4 +1,27 @@
 -- ============================================================
+-- HOW TO READ THIS FILE
+--
+-- One definition per function, placed where it is first needed. A later
+-- section that discusses a function explains WHY it has the shape it does and
+-- points at the body rather than repeating it.
+--
+-- That convention was bought the hard way. This file grew by appending: each
+-- fix was written next to the failure that produced it, as `create or
+-- replace`, and the file accumulated superseded bodies that never executed --
+-- 1,013 dead lines across seventeen functions, one of them defined five times.
+-- Behaviour stayed correct, because the last definition wins. That is exactly
+-- what made it dangerous: nothing told a maintainer which copy was live, and a
+-- fix applied to a superseded one is silently a no-op.
+--
+-- `extension/percolate/build-sql.py` now refuses to assemble a spec file that
+-- defines the same signature twice, so this cannot come back quietly.
+--
+-- Sections are chronological: §1-19 are the engine as designed, §20-22 are what
+-- running it against live sources and real pipelines changed. Reading them in
+-- order is reading the argument.
+-- ============================================================
+
+-- ============================================================
 -- DB-native workflow engine — final canonical schema
 --
 -- History folded into this single file:
@@ -133,9 +156,12 @@ begin
 end;
 $$ language plpgsql;
 
+-- Current form. It reached this shape in section 20f (Validation -- refuse at registration, not at 3am.), which explains
+-- the failure that produced it. Defined here, where it is first needed.
 create or replace function workflow.check_spec_before_insert() returns trigger as $$
 begin
     perform workflow.validate_spec(new.spec);
+    perform workflow.validate_matrix_steps(new.spec);
     return new;
 end;
 $$ language plpgsql;
@@ -367,13 +393,47 @@ create trigger trg_enforce_payload_ref_size
 --    recurses for free since cancelling a row fires this same
 --    trigger again for that row).
 -- ------------------------------------------------------------
+-- Current form. It reached this shape in section 21e (A fan-out that survives a failed child.), which explains
+-- the failure that produced it. Defined here, where it is first needed.
 create or replace function workflow.cascade_task_status() returns trigger as $$
+declare
+    v_satisfies boolean;
+    v_remaining int;
 begin
     if new.status is not distinct from old.status then
         return new;
     end if;
 
-    if new.status = 'done' then
+    -- A terminal state SATISFIES a dependent if it succeeded, or if it failed
+    -- and this task was expanded under continue_on.
+    v_satisfies := new.status = 'done'
+                   or (new.status in ('failed', 'cancelled') and new.tolerate_failure);
+
+    if v_satisfies then
+        -- Already cascaded once (§20i): pending_deps is decremented on the
+        -- transition into a terminal state and never re-incremented, so a
+        -- second decrement is always wrong.
+        if old.completed_at is not null then
+            return new;
+        end if;
+
+        -- THE GATE. Evaluated when the last child of a matrix resolves, and
+        -- BEFORE anything downstream is released.
+        if new.matrix_parent_id is not null then
+            select count(*) into v_remaining from workflow.tasks
+            where matrix_parent_id = new.matrix_parent_id
+              and status not in ('done', 'failed', 'cancelled');
+
+            if v_remaining = 0 and not workflow.matrix_gate_passes(new.matrix_parent_id) then
+                update workflow.tasks t2 set status = 'cancelled'
+                where t2.status in ('pending', 'ready', 'waiting_external')
+                  and t2.id in (select task_id from workflow.task_dependencies
+                                where depends_on_task_id = new.matrix_parent_id);
+                update workflow.runs set status = 'failed' where id = new.run_id;
+                return new;
+            end if;
+        end if;
+
         update workflow.tasks t
         set pending_deps = pending_deps - 1
         where t.id in (select task_id from workflow.task_dependencies where depends_on_task_id = new.id);
@@ -389,8 +449,6 @@ begin
           and t.id in (select task_id from workflow.task_dependencies where depends_on_task_id = new.id);
 
     elsif new.status in ('cancelled', 'failed') then
-        -- cascade to direct dependents; their own transition to 'cancelled'
-        -- fires this trigger again on their row, cascading to any depth
         update workflow.tasks t2
         set status = 'cancelled'
         where t2.status in ('pending', 'ready', 'waiting_external')
@@ -399,7 +457,7 @@ begin
 
     return new;
 end;
-$$ language plpgsql;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
 
 create trigger trg_cascade_task_status
     after update of status on workflow.tasks
@@ -431,13 +489,9 @@ create trigger trg_notify_new_ready
     after insert on workflow.tasks
     for each row execute function workflow.notify_new_ready();
 
-create or replace function workflow.check_run_completion(p_run_id uuid) returns void as $$
-    update workflow.runs r
-    set status = 'completed', completed_at = now()
-    where r.id = p_run_id
-      and r.status = 'running'
-      and not exists (select 1 from workflow.tasks t where t.run_id = p_run_id and t.status <> 'done');
-$$ language sql;
+-- workflow.check_run_completion(uuid) is defined in section 21e.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.
 
 -- Saga: flips compensation_state once every compensation task for a
 -- run's saga groups has resolved. Cheap no-op call from workflow.complete_task/
@@ -483,22 +537,35 @@ $$ language sql;
 -- caller (e.g. a FastAPI request already inside a trace) instead of always
 -- starting a disconnected new one -- specs/README.md's OTel ground rule.
 -- Omit it and the run gets a fresh trace_id via the column default.
+-- Current form. It reached this shape in section 21k (A dead run is not an idempotent hit.), which explains
+-- the failure that produced it. Defined here, where it is first needed.
 create or replace function workflow.start_workflow(p_name text, p_input jsonb, p_external_id text default null, p_trace_id text default null)
 returns uuid as $$
 declare
     v_def       workflow.definitions;
     v_run_id    uuid;
+    v_status    text;
     v_step      jsonb;
-    v_step_ids  jsonb := '{}'::jsonb;   -- step_key -> task id (as text)
+    v_step_ids  jsonb := '{}'::jsonb;
     v_new_id    uuid;
     v_dep_key   text;
     v_dep_id    uuid;
     v_count     int;
+    v_comp      text[];
 begin
     if p_external_id is not null then
-        select id into v_run_id from workflow.runs where external_id = p_external_id;
+        select id, status into v_run_id, v_status
+        from workflow.runs where external_id = p_external_id;
+
         if v_run_id is not null then
-            return v_run_id;   -- idempotent: already started
+            if v_status in ('running', 'completed') then
+                return v_run_id;      -- the work happened; do not repeat it
+            end if;
+            raise exception
+                'external_id % already belongs to run %, which is %. That run did not '
+                'complete, so returning it would report work that never happened -- and '
+                'external_id is unique, so this key cannot start a second run. Use a new '
+                'external_id to retry.', p_external_id, v_run_id, v_status;
         end if;
     end if;
 
@@ -507,105 +574,96 @@ begin
         raise exception 'no workflow_def found for name %', p_name;
     end if;
 
+    v_comp := workflow.compensation_keys(v_def.spec);
+
     insert into workflow.runs (workflow_def_id, input, external_id, trace_id)
     values (v_def.id, p_input, p_external_id, coalesce(p_trace_id, encode(gen_random_bytes(16), 'hex')))
     returning id into v_run_id;
 
-    -- pass 1: create every step row, deps wired in pass 2
     for v_step in select * from jsonb_array_elements(v_def.spec->'steps')
     loop
+        continue when (v_step->>'key') = any(v_comp);
         insert into workflow.tasks (run_id, step_key, queue, kind, pending_deps, status,
-                                    wait_signal, input, rate_key,
-                                    saga_group, compensation_task_key)
+                                    wait_signal, input, rate_key, saga_group, compensation_task_key)
         values (
             v_run_id, v_step->>'key', coalesce(v_step->>'queue', 'default'),
             coalesce(v_step->>'kind', 'work'), 0, 'pending',
-            -- wait_signal was NEVER populated here, which made the entire
-            -- signal mechanism inert: signal_task() matches on
-            -- (run_id, wait_signal, status), and with wait_signal null it can
-            -- never match, so a `kind: signal` step waits forever. Confirmed
-            -- by running it -- the task sat in waiting_external and no signal
-            -- could ever resolve it. Defaults to the step's own key, so
-            -- {"key":"approval","kind":"signal"} is signalled as 'approval'
-            -- without needing a redundant "signal" field.
             case when coalesce(v_step->>'kind','work') = 'signal'
-                 then coalesce(v_step->>'signal', v_step->>'key') end,
-            -- Same class of omission: a step spec could declare input,
-            -- rate_key, saga_group and compensation_task_key and they were all
-            -- silently dropped, so saga/compensation and per-step rate limiting
-            -- were unreachable through start_workflow() -- only through
-            -- add_task(). Carried through now.
-            v_step->'input',
-            v_step->>'rate_key',
-            v_step->>'saga_group',
-            v_step->>'compensation_task_key'
-        )
+                 then coalesce(v_step->'input'->>'signal', v_step->>'signal', v_step->>'key') end,
+            v_step->'input', v_step->>'rate_key',
+            v_step->>'saga_group', v_step->>'compensation_task_key')
         returning id into v_new_id;
         v_step_ids := v_step_ids || jsonb_build_object(v_step->>'key', v_new_id::text);
     end loop;
 
-    -- pass 2: wire deps now that all ids exist; set real pending_deps
-    -- and flip roots ready/waiting_external directly (bypassing the
-    -- insert-time trigger, which saw pending_deps=0 for everyone in pass 1)
     for v_step in select * from jsonb_array_elements(v_def.spec->'steps')
     loop
+        continue when (v_step->>'key') = any(v_comp);
         v_new_id := (v_step_ids ->> (v_step->>'key'))::uuid;
         v_count := 0;
-
         for v_dep_key in select jsonb_array_elements_text(coalesce(v_step->'depends_on', '[]'::jsonb))
         loop
+            if v_dep_key = any(v_comp) then
+                raise exception
+                    'step % depends on %, which is a compensation step. A compensation '
+                    'runs only when its saga rolls back, so nothing in the forward graph '
+                    'can wait for it.', v_step->>'key', v_dep_key;
+            end if;
             v_dep_id := (v_step_ids ->> v_dep_key)::uuid;
             insert into workflow.task_dependencies (task_id, depends_on_task_id)
-            values (v_new_id, v_dep_id)
-            on conflict do nothing;
+            values (v_new_id, v_dep_id) on conflict do nothing;
             v_count := v_count + 1;
         end loop;
-
         update workflow.tasks
         set pending_deps = v_count,
-            status = case
-                when v_count > 0 then 'pending'
-                when kind = 'signal' then 'waiting_external'
-                else 'ready'
-            end
+            status = case when v_count > 0 then 'pending'
+                          when kind = 'signal' then 'waiting_external'
+                          else 'ready' end
         where id = v_new_id;
     end loop;
 
-    -- Kick any `sql` steps that are ready. THIS is the right place and the
-    -- only one: the dependency graph is not valid until pass 2 finishes, and
-    -- a root step is already 'ready' from mark_roots_ready, so the
-    -- ready-transition trigger never sees an edge to fire on. Everything
-    -- downstream is reached by that trigger via ordinary cascade; this call
-    -- only starts the ones that begin the run. Safe when there are none --
-    -- drain_sql_steps returns 0 without touching anything.
     perform workflow.drain_sql_steps(v_run_id);
-
     return v_run_id;
 end;
-$$ language plpgsql;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
 
 -- ------------------------------------------------------------
 -- 10. Client API
 -- ------------------------------------------------------------
 
+-- Current form. It reached this shape in section 21b (Rate limiting stops being decoration.), which explains
+-- the failure that produced it. Defined here, where it is first needed.
 create or replace function workflow.claim_task(p_queue text, p_worker_id text)
 returns workflow.tasks as $$
-declare t workflow.tasks;
+declare
+    t           workflow.tasks;
+    v_lookahead int;
 begin
-    update workflow.tasks
-    set status = 'running', claimed_by = p_worker_id,
-        claimed_at = now(), heartbeat_at = now(), attempts = attempts + 1
-    where id = (
-        select id from workflow.tasks
+    -- Look past a throttled task rather than stalling behind it: one
+    -- rate-limited source must not block an unrelated one sharing a queue.
+    select coalesce(rate_lookahead, 20) into v_lookahead
+    from workflow.queue_config where queue = p_queue;
+    v_lookahead := coalesce(v_lookahead, 20);
+
+    for t in
+        select * from workflow.tasks
         where queue = p_queue and status = 'ready' and run_after <= now()
         order by priority desc, created_at
         for update skip locked
-        limit 1
-    )
-    returning * into t;
-    return t;
+        limit v_lookahead
+    loop
+        if t.rate_key is null or workflow.try_consume_rate_limit(t.rate_key) then
+            update workflow.tasks
+            set status = 'running', claimed_by = p_worker_id,
+                claimed_at = now(), heartbeat_at = now(), attempts = attempts + 1
+            where id = t.id
+            returning * into t;
+            return t;
+        end if;
+    end loop;
+    return null;
 end;
-$$ language plpgsql;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
 
 create or replace function workflow.claim_tasks(p_queue text, p_worker_id text, p_batch_size int default 10)
 returns setof workflow.tasks as $$
@@ -658,34 +716,88 @@ returns boolean as $$
     returning not cancel_requested;
 $$ language sql;
 
+-- Current form. It reached this shape in section 21h (Completion, final form: repair, validate, then store.), which explains
+-- the failure that produced it. Defined here, where it is first needed.
 create or replace function workflow.complete_task(p_task_id uuid, p_output jsonb)
 returns void as $$
-declare v_run_id uuid;
+declare
+    t        workflow.tasks;
+    v_out    jsonb;
+    v_res    jsonb;
+    v_schema jsonb;
+    v_why    text;
+    v_max    int := coalesce(
+        nullif(current_setting('workflow.max_payload_bytes', true), '')::int, 65536);
 begin
-    -- CONTEXT FIRST, THEN STATUS. The order matters and is not stylistic:
-    -- flipping the task to 'done' fires the cascade, which can mark a `sql`
-    -- step ready, which auto-executes it IN THE SAME STATEMENT (§17). If the
-    -- run's context has not been written yet, that step resolves
-    -- {{steps.<this>.result}} against a context that does not contain this
-    -- step's output and fails with 'template resolved to nothing'.
-    -- Reproduced exactly that way: an embed step completed, and the P8QL step
-    -- consuming its vector failed on the very output that had just been
-    -- produced.
-    select run_id into v_run_id from workflow.tasks where id = p_task_id;
+    select * into t from workflow.tasks where id = p_task_id;
 
-    update workflow.runs r
-    set context = context || jsonb_build_object(
-            (select step_key from workflow.tasks where id = p_task_id), p_output),
-        updated_at = now()
-    where r.id = v_run_id;
+    -- 21k: no work lands under a cancelled run. complete_decision_task and
+    -- add_task have always refused; this path never did, so a worker finishing
+    -- in-flight work resurrected a cancelled graph one step at a time.
+    if exists (select 1 from workflow.runs where id = t.run_id and status = 'cancelled') then
+        update workflow.tasks set status = 'cancelled'
+        where id = p_task_id and status in ('running', 'ready');
+        return;
+    end if;
 
-    update workflow.tasks set status = 'done', output = p_output, completed_at = now()
+    v_out := workflow.normalize_output(p_task_id, p_output);          -- 21a
+
+    v_schema := t.input->'output_schema';
+    if v_schema is not null then
+        v_res := coalesce(v_out->'result', v_out);
+        -- A model returns its structured answer as message CONTENT, i.e. a
+        -- string. Parse it before checking the shape, and treat unparseable
+        -- output as a shape failure rather than a crash -- it is the same
+        -- class of problem and the same remedy.
+        if jsonb_typeof(v_res) = 'string' then
+            begin
+                v_res := (v_res #>> '{}')::jsonb;
+                v_out := jsonb_set(coalesce(v_out, '{}'::jsonb), '{result}', v_res);
+            exception when others then
+                perform workflow.fail_task(p_task_id, jsonb_build_object(
+                    'error', 'output_schema was declared, but the result is not JSON',
+                    'shape_violation', true, 'got', left(v_res #>> '{}', 400)), false);
+                return;
+            end;
+        end if;
+
+        v_why := workflow.validate_shape(v_res, v_schema);
+        if v_why is not null then
+            perform workflow.fail_task(p_task_id, jsonb_build_object(
+                'error', format('output does not match the declared shape: %s', v_why),
+                'shape_violation', true,
+                'schema', v_schema, 'got', v_res), false);   -- retryable, on purpose
+            return;
+        end if;
+    end if;
+
+    if v_out is not null and pg_column_size(v_out) > v_max and not (v_out ? '$ref') then
+        perform workflow.fail_task(p_task_id, jsonb_build_object(
+            'error', format(
+                'output is %s bytes, over the %s byte limit, and is not a $ref. This is '
+                'terminal: the same response will be the same size on every attempt. '
+                'Return {"$ref": "s3://..."} instead, or raise workflow.max_payload_bytes '
+                'deliberately.', pg_column_size(v_out), v_max),
+            'bytes', pg_column_size(v_out), 'limit', v_max), true);
+        return;
+    end if;
+
+    if t.matrix_parent_id is null then
+        update workflow.runs r
+        set context = context || jsonb_build_object(t.step_key, v_out), updated_at = now()
+        where r.id = t.run_id;
+    else
+        update workflow.runs set updated_at = now() where id = t.run_id;
+    end if;
+
+    update workflow.tasks set status = 'done', output = v_out,
+        completed_at = clock_timestamp()
     where id = p_task_id;
 
-    perform workflow.check_run_completion(v_run_id);
-    perform workflow.check_compensation_completion(v_run_id);
+    perform workflow.check_run_completion(t.run_id);
+    perform workflow.check_compensation_completion(t.run_id);
 end;
-$$ language plpgsql;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
 
 -- p_terminal: "do not retry this, no matter how many attempts remain."
 --
@@ -698,6 +810,8 @@ $$ language plpgsql;
 --
 -- Defaulted to false so every existing call site keeps its previous behaviour.
 drop function if exists workflow.fail_task(uuid, jsonb);
+-- Current form. It reached this shape in section 21e (A fan-out that survives a failed child.), which explains
+-- the failure that produced it. Defined here, where it is first needed.
 create or replace function workflow.fail_task(
     p_task_id uuid, p_error jsonb, p_terminal boolean default false)
 returns void as $$
@@ -708,14 +822,27 @@ begin
         update workflow.tasks set status = 'ready', error = p_error,
             run_after = now() + (power(2, t.attempts) * interval '1 second')
         where id = p_task_id;
-    else
-        update workflow.tasks set status = 'failed', error = p_error where id = p_task_id;
-        update workflow.runs set status = 'failed' where id = t.run_id;
-        -- dependent cascade now handled entirely by trg_cascade_task_status
-        perform workflow.check_compensation_completion(t.run_id);
+        return;
     end if;
+
+    update workflow.tasks
+    set status = 'failed', error = p_error,
+        completed_at = case when t.tolerate_failure then clock_timestamp() else completed_at end
+    where id = p_task_id;
+
+    if not t.tolerate_failure then
+        update workflow.runs set status = 'failed' where id = t.run_id;
+    end if;
+
+    if t.saga_group is not null and t.compensates_task_id is null
+       and (select compensation_state from workflow.runs where id = t.run_id)
+           is distinct from 'compensating' then
+        perform workflow.begin_compensation(t.run_id, t.saga_group);
+    end if;
+
+    perform workflow.check_compensation_completion(t.run_id);
 end;
-$$ language plpgsql;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
 
 -- ------------------------------------------------------------
 -- Saga / compensation: the largest gap found by the theory
@@ -729,41 +856,65 @@ $$ language plpgsql;
 -- retried, and (by saga theory) may run even when there's nothing
 -- to undo, so they must no-op safely in that case.
 -- ------------------------------------------------------------
+-- Current form. It reached this shape in section 21d (Saga compensation, which did not work in four ways.), which explains
+-- the failure that produced it. Defined here, where it is first needed.
 create or replace function workflow.begin_compensation(p_run_id uuid, p_saga_group text)
 returns void as $$
 declare
-    v_task          workflow.tasks;
-    v_prev_comp_id  uuid := null;
-    v_new_id        uuid;
+    v_task         workflow.tasks;
+    v_spec         jsonb;
+    v_step         jsonb;
+    v_prev_comp_id uuid := null;
+    v_new_id       uuid;
 begin
     update workflow.runs set compensation_state = 'compensating' where id = p_run_id;
+
+    select d.spec into v_spec
+    from workflow.runs r join workflow.definitions d on d.id = r.workflow_def_id
+    where r.id = p_run_id;
 
     for v_task in
         select * from workflow.tasks
         where run_id = p_run_id and saga_group = p_saga_group
           and status = 'done' and compensation_task_key is not null and compensated_at is null
-        order by completed_at desc
+        order by completed_at desc, id desc          -- 21c: clock_timestamp, stable tie-break
     loop
+        select s into v_step from jsonb_array_elements(v_spec->'steps') s
+        where s->>'key' = v_task.compensation_task_key;
+
+        if v_step is null then
+            raise exception
+                'step % declares compensation %, which is not a step in this workflow',
+                v_task.step_key, v_task.compensation_task_key;
+        end if;
+
         v_new_id := workflow.add_task(
             p_run_id,
-            v_task.compensation_task_key || ':' || v_task.id,   -- unique per compensated instance
-            v_task.queue,
+            v_task.compensation_task_key || ':' || v_task.id,
+            coalesce(v_step->>'queue', v_task.queue),
             case when v_prev_comp_id is not null then array[v_prev_comp_id] else '{}'::uuid[] end,
-            'work',
-            v_task.output    -- the compensation sees what the forward step produced
+            coalesce(v_step->>'kind', 'work'),
+            -- The step's own input, with what the forward step produced
+            -- attached: a refund needs the charge id, and the declared input
+            -- is where a `sql` compensation's function and args live.
+            coalesce(v_step->'input', '{}'::jsonb)
+                || jsonb_build_object('compensates', jsonb_build_object(
+                       'step_key', v_task.step_key, 'output', v_task.output)),
+            v_step->>'rate_key'
         );
-        -- Tag the new task as a compensation and record WHICH forward task it
-        -- undoes. check_compensation_completion() keys off this; without it,
-        -- that function cannot distinguish a compensation task from a forward
-        -- one and completes the saga before any compensation has run.
+
         update workflow.tasks set compensates_task_id = v_task.id where id = v_new_id;
         update workflow.tasks set compensated_at = now() where id = v_task.id;
         v_prev_comp_id := v_new_id;
     end loop;
 
+    -- A `sql` compensation is INSERTED ready, and the autorun trigger fires
+    -- only on a transition INTO ready -- the same hazard §20 hit with matrix
+    -- children. Without this an in-database rollback never starts.
+    perform workflow.drain_sql_steps(p_run_id);
     perform workflow.check_compensation_completion(p_run_id);
 end;
-$$ language plpgsql;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
 
 create or replace function workflow.signal_task(p_run_id uuid, p_signal text, p_payload jsonb)
 returns void as $$
@@ -792,23 +943,41 @@ begin
 end;
 $$ language plpgsql;
 
+-- Current form. It reached this shape in section 21g (Sub-workflows had never executed.), which explains
+-- the failure that produced it. Defined here, where it is first needed.
 create or replace function workflow.start_child_workflow(p_task_id uuid, p_workflow_name text, p_input jsonb)
 returns uuid as $$
 declare
-    v_def_id uuid;
-    v_child_run_id uuid;
+    v_child  uuid;
+    v_status text;
+    v_ctx    jsonb;
 begin
-    select id into v_def_id from workflow.definitions where name = p_workflow_name order by version desc limit 1;
-    insert into workflow.runs (workflow_def_id, parent_task_id, input)
-    values (v_def_id, p_task_id, p_input)
-    returning id into v_child_run_id;
+    if not exists (select 1 from workflow.definitions where name = p_workflow_name) then
+        raise exception
+            'sub_workflow step names workflow %, which is not registered', p_workflow_name;
+    end if;
 
-    update workflow.tasks set child_run_id = v_child_run_id, status = 'waiting_external'
-    where id = p_task_id;
+    update workflow.tasks set status = 'waiting_external' where id = p_task_id;
 
-    return v_child_run_id;
+    v_child := workflow.start_workflow(p_workflow_name, p_input);
+
+    update workflow.runs set parent_task_id = p_task_id where id = v_child;
+    update workflow.tasks set child_run_id = v_child where id = p_task_id;
+
+    -- A child of only sql/p8ql/matrix steps is already finished. Its
+    -- completion trigger fired before the link above existed, so resolve the
+    -- parent here rather than leaving it blocked on a run that is over.
+    select status, context into v_status, v_ctx from workflow.runs where id = v_child;
+    if v_status = 'completed' then
+        perform workflow.complete_task(p_task_id, jsonb_build_object('result', v_ctx));
+    elsif v_status in ('failed', 'cancelled') then
+        perform workflow.fail_task(p_task_id,
+            jsonb_build_object('child_run_status', v_status, 'child_run_id', v_child), true);
+    end if;
+
+    return v_child;
 end;
-$$ language plpgsql;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
 
 create or replace function workflow.resolve_parent_on_child_completion() returns trigger as $$
 begin
@@ -1151,11 +1320,14 @@ alter function workflow.cascade_task_status()
 -- cross-tenant read primitive: any worker could pass any task_id and get that
 -- run's input. The claim is the authorization, exactly as the grant is the
 -- authorization for claim_task itself.
+-- Current form. It reached this shape in section 22d (`{{run.$*}}` is bound before the worker ever sees it.), which explains
+-- the failure that produced it. Defined here, where it is first needed.
 create or replace function workflow.get_task_context(p_task_id uuid, p_worker_id text)
 returns jsonb as $$
 declare
     v_task workflow.tasks;
     v_run  workflow.runs;
+    v_meta jsonb;
 begin
     select * into v_task from workflow.tasks where id = p_task_id;
     if not found then
@@ -1169,17 +1341,31 @@ begin
 
     select * into v_run from workflow.runs where id = v_task.run_id;
 
+    -- {{run.$session}} binds to THIS step's thread: the group is a property of
+    -- the step, so the template reads the same everywhere and two groups in one
+    -- run are two independent conversations.
+    v_meta := workflow.run_meta(v_task.run_id)
+              || case when v_task.input ? 'session_group'
+                      then jsonb_build_object('$session',
+                             workflow.run_session(v_task.run_id,
+                               v_task.input->>'session_group')::text)
+                      else '{}'::jsonb end;
+
     return jsonb_build_object(
         'run_id',      v_run.id,
-        'run_input',   coalesce(v_run.input, '{}'::jsonb),
+        -- Still merged, so a worker that DOES admit `$` sees them as ordinary
+        -- run input. The substitution below is what makes it work on one that
+        -- does not.
+        'run_input',   coalesce(v_run.input, '{}'::jsonb) || v_meta,
         'context',     coalesce(v_run.context, '{}'::jsonb),
-        'task_input',  coalesce(v_task.input, '{}'::jsonb),
+        'task_input',  workflow.substitute_meta(
+                           coalesce(v_task.input, '{}'::jsonb), v_meta),
+        'run_meta',    v_meta,
         'step_key',    v_task.step_key,
-        -- The worker dispatches to a handler by KIND, so it has to be told
-        -- what it just claimed. Omitted at first, which forced the worker to
-        -- guess from the shape of the input -- exactly the kind of inference
-        -- that silently does the wrong thing when a task is malformed.
         'kind',        v_task.kind,
+        'item',        v_task.input->'item',
+        'matrix_parent_step', (select m.step_key from workflow.tasks m
+                               where m.id = v_task.matrix_parent_id),
         'attempt',     v_task.attempts,
         'trace_id',    v_run.trace_id,
         'span_id',     v_task.span_id
@@ -1307,14 +1493,44 @@ create table workflow.step_functions (
 
 -- Registering is deliberately owner-only (no grant below): it decides what a
 -- workflow author is allowed to cause to run.
+-- Current form. It reached this shape in section 22b (BUG 2 -- registration checked the wrong role's privileges.), which explains
+-- the failure that produced it. Defined here, where it is first needed.
 create or replace function workflow.register_step_function(
     p_name text, p_fn text, p_arg_types text[] default '{}',
     p_timeout_ms int default 30000, p_description text default null
 ) returns void as $$
+declare
+    v_sig     text := p_fn || '(' || array_to_string(p_arg_types, ',') || ')';
+    v_oid     oid;
+    v_definer name;
+    v_nsp     text;
 begin
-    if to_regprocedure(p_fn || '(' || array_to_string(p_arg_types, ',') || ')') is null then
-        raise exception 'function %(%) does not exist', p_fn, array_to_string(p_arg_types, ',');
+    v_oid := to_regprocedure(v_sig);
+    if v_oid is null then
+        raise exception 'function % does not exist', v_sig;
     end if;
+
+    -- Whoever owns execute_sql_step is who will run this at dispatch.
+    select pg_get_userbyid(proowner) into v_definer
+    from pg_proc where oid = to_regprocedure('workflow.execute_sql_step(uuid)');
+
+    select n.nspname into v_nsp
+    from pg_proc p join pg_namespace n on n.oid = p.pronamespace where p.oid = v_oid;
+
+    if not has_schema_privilege(v_definer, v_nsp, 'USAGE') then
+        raise exception
+            'function % is not reachable by %, which is the role that will execute it '
+            '(execute_sql_step is SECURITY DEFINER). Registration would succeed and every '
+            'invocation would fail with "permission denied for schema %". Run: '
+            'grant usage on schema % to %;',
+            v_sig, v_definer, v_nsp, quote_ident(v_nsp), quote_ident(v_definer::text);
+    end if;
+    if not has_function_privilege(v_definer, v_oid, 'EXECUTE') then
+        raise exception
+            'function % exists and its schema is reachable, but % cannot execute it. Run: '
+            'grant execute on function % to %;', v_sig, v_definer, v_sig, quote_ident(v_definer::text);
+    end if;
+
     insert into workflow.step_functions (name, fn, arg_types, timeout_ms, description)
     values (p_name, p_fn, p_arg_types, p_timeout_ms, p_description)
     on conflict (name) do update set fn = excluded.fn, arg_types = excluded.arg_types,
@@ -1334,61 +1550,18 @@ $$ language plpgsql;
 -- Deliberately narrower than the worker's resolver: no {{env.*}}, because the
 -- database has no business reading the deployment's environment, and that is
 -- precisely the sort of ambient authority this collection keeps removing.
-create or replace function workflow.resolve_args(p_args jsonb, p_run_id uuid)
-returns jsonb as $$
-declare
-    r        workflow.runs;
-    v_out    jsonb := '[]'::jsonb;
-    v_arg    jsonb;
-    v_txt    text;
-    v_ref    text;
-    v_head   text;
-    v_rest   text;
-    v_val    jsonb;
-begin
-    select * into r from workflow.runs where id = p_run_id;
+-- workflow.resolve_args(jsonb,uuid) is defined in section 20a.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.
 
-    for v_arg in select * from jsonb_array_elements(coalesce(p_args, '[]'::jsonb))
-    loop
-        v_txt := v_arg #>> '{}';
-        -- Only a WHOLE-string reference is substituted, and it keeps its
-        -- native type. Partial interpolation inside a larger string is the
-        -- worker's job; here an argument is a value, not a template.
-        if v_txt is not null and v_txt ~ '^\s*\{\{\s*[a-zA-Z0-9_.]+\s*\}\}\s*$' then
-            v_ref  := trim(both from replace(replace(v_txt, '{{', ''), '}}', ''));
-            v_head := split_part(v_ref, '.', 1);
-            v_rest := substr(v_ref, length(v_head) + 2);
-            if v_head = 'steps' then
-                v_val := r.context #> string_to_array(v_rest, '.');
-            elsif v_head = 'run' then
-                v_val := r.input #> string_to_array(v_rest, '.');
-            else
-                raise exception
-                    'unknown template namespace ''%'' in a sql step argument '
-                    '-- expected steps or run', v_head;
-            end if;
-            if v_val is null then
-                raise exception 'template ''%'' resolved to nothing', v_ref;
-            end if;
-            v_out := v_out || jsonb_build_array(v_val);
-        else
-            v_out := v_out || jsonb_build_array(v_arg);
-        end if;
-    end loop;
-    return v_out;
-end;
-$$ language plpgsql stable;
-
+-- Current form. It reached this shape in section 20b (One place that calls an allow-listed function.), which explains
+-- the failure that produced it. Defined here, where it is first needed.
 create or replace function workflow.execute_sql_step(p_task_id uuid)
 returns boolean as $$
 declare
-    t        workflow.tasks;
-    r        workflow.runs;
-    f        workflow.step_functions;
-    v_spec   jsonb;
-    v_args   jsonb;
-    v_sql    text;
-    v_out    jsonb;
+    t      workflow.tasks;
+    v_spec jsonb;
+    v_out  jsonb;
 begin
     select * into t from workflow.tasks where id = p_task_id;
     if not found or t.status <> 'ready' or t.kind <> 'sql' then
@@ -1399,46 +1572,21 @@ begin
            claimed_at = now(), heartbeat_at = now(), attempts = attempts + 1
     where id = p_task_id;
 
-    select * into r from workflow.runs where id = t.run_id;
     v_spec := coalesce(t.input, '{}'::jsonb);
 
+    -- The run this step belongs to, published transaction-locally so an
+    -- allow-listed function can tell "my own run" from "a run id somebody
+    -- typed into a step spec". Needed the moment a step function takes a task
+    -- id -- matrix_outputs does -- because a workflow author could otherwise
+    -- name another tenant's matrix task and read its results. Transaction-local
+    -- (set_config's third argument), so it cannot leak into a pooled
+    -- connection's next transaction; the same hazard rbac.current_user_id()
+    -- was hardened against.
+    perform set_config('workflow.current_run_id', t.run_id::text, true);
+
     begin      -- subtransaction: a failure here must not abort the caller
-        select * into f from workflow.step_functions where name = v_spec->>'function';
-        if not found then
-            raise exception
-                'sql step names function ''%'', which is not registered. Register it with '
-                'workflow.register_step_function() -- steps may not supply arbitrary SQL.',
-                v_spec->>'function';
-        end if;
-
-        perform set_config('statement_timeout', f.timeout_ms::text, true);
-
-        -- Arguments are passed as parameters, never interpolated: a step's
-        -- args are data from the run, and building SQL text out of them would
-        -- be injection with extra steps.
-        v_args := workflow.resolve_args(coalesce(v_spec->'args', '[]'::jsonb), t.run_id);
-        -- Each argument is extracted according to its REGISTERED type, not
-        -- uniformly as text. Getting this wrong surfaces as
-        -- "function f(text, text) does not exist" -- which reads as a missing
-        -- function rather than a coercion problem, and cost real time.
-        --   text   -> $1->>i      (JSON string to text)
-        --   jsonb  -> $1->i       (the JSON value itself, structure intact)
-        --   other  -> ($1->>i)::type
-        if jsonb_array_length(v_args) = 0 then
-            execute format('select to_jsonb(%s())', f.fn) into v_out;
-        else
-            v_sql := format('select to_jsonb(%s(%s))', f.fn, (
-                select string_agg(
-                    case lower(coalesce(f.arg_types[i], 'text'))
-                        when 'text'  then format('$1->>%s', i - 1)
-                        when 'jsonb' then format('$1->%s', i - 1)
-                        when 'json'  then format('($1->%s)::json', i - 1)
-                        else format('($1->>%s)::%s', i - 1, f.arg_types[i])
-                    end, ',' order by i)
-                from generate_series(1, jsonb_array_length(v_args)) i));
-            execute v_sql into v_out using v_args;
-        end if;
-
+        v_out := workflow.call_step_function(
+            v_spec->>'function', v_spec->'args', t.run_id, t.input->'item');
         perform workflow.complete_task(p_task_id, jsonb_build_object('result', v_out));
         return true;
     exception when others then
@@ -1455,17 +1603,28 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- Run every ready `sql` task for one run, until none remain. Chained sql steps
 -- therefore complete in one call: index -> rollup -> notify needs no round trip.
 -- Bounded, because a definition cycle would otherwise spin here.
+-- Current form. It reached this shape in section 21i (Timers and sub-workflows start themselves.), which explains
+-- the failure that produced it. Defined here, where it is first needed.
 create or replace function workflow.drain_sql_steps(p_run_id uuid, p_max int default 50)
 returns int as $$
-declare v_id uuid; v_done int := 0;
+declare v_id uuid; v_kind text; v_done int := 0;
 begin
     loop
-        select id into v_id from workflow.tasks
-        where run_id = p_run_id and kind = 'sql' and status = 'ready'
+        select id, kind into v_id, v_kind from workflow.tasks
+        where run_id = p_run_id and kind in ('sql','matrix','sub_workflow') and status = 'ready'
           and run_after <= now()
+        order by kind, created_at
         limit 1;
         exit when v_id is null or v_done >= p_max;
-        perform workflow.execute_sql_step(v_id);
+        if v_kind = 'sql' then
+            perform workflow.execute_sql_step(v_id);
+        elsif v_kind = 'matrix' then
+            perform workflow.expand_matrix(v_id);
+        else
+            perform workflow.start_child_workflow(v_id,
+                (select input->>'workflow' from workflow.tasks where id = v_id),
+                coalesce((select input->'input' from workflow.tasks where id = v_id), '{}'::jsonb));
+        end if;
         v_done := v_done + 1;
     end loop;
     return v_done;
@@ -1493,11 +1652,26 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- Re-entry is safe: execute_sql_step() moves the row to 'running' before doing
 -- any work, so the recursive fire sees a non-ready row and stops. A chain of
 -- sql steps runs to completion through ordinary cascade.
+-- Current form. It reached this shape in section 21i (Timers and sub-workflows start themselves.), which explains
+-- the failure that produced it. Defined here, where it is first needed.
 create or replace function workflow.autorun_sql_steps() returns trigger as $$
 begin
-    if new.kind = 'sql' and new.status = 'ready'
-       and old.status is distinct from 'ready' then
-        perform workflow.execute_sql_step(new.id);
+    if new.status = 'ready' and old.status is distinct from 'ready' then
+        if new.kind = 'sql' then
+            perform workflow.execute_sql_step(new.id);
+        elsif new.kind = 'matrix' then
+            perform workflow.expand_matrix(new.id);
+        elsif new.kind = 'sub_workflow' then
+            perform workflow.start_child_workflow(
+                new.id, new.input->>'workflow',
+                coalesce(new.input->'input', '{}'::jsonb));
+        elsif new.kind = 'timer' and (new.input ? 'delay_seconds') then
+            -- Measured from readiness, not from the run's start.
+            update workflow.tasks
+            set run_after = clock_timestamp()
+                          + ((new.input->>'delay_seconds')::numeric * interval '1 second')
+            where id = new.id and run_after <= clock_timestamp();
+        end if;
     end if;
     return null;
 end;
@@ -1547,42 +1721,71 @@ grant select on workflow.step_functions to authenticated;
 -- running to define a workflow.
 -- ============================================================
 
+-- Current form. It reached this shape in section 22c (BUG 3 -- the two halves can ship out of step, silently.), which explains
+-- the failure that produced it. Defined here, where it is first needed.
 create or replace function workflow.define_yaml(p_yaml text)
 returns uuid as $$
 declare
-    c      jsonb;
-    v_id   uuid;
-    v_name text;
-    v_ver  int;
+    c        jsonb;
+    v_id     uuid;
+    v_name   text;
+    v_ver    int;
+    v_caps   jsonb;
+    v_stale  text[];
 begin
     if to_regprocedure('p8_compile_workflow(text)') is null then
         raise exception
             'workflow.define_yaml needs the percolate extension (p8_compile_workflow). '
-            'This should be impossible -- the function is part of the same extension '
-            'as this one.';
+            'Install it, or insert the spec into workflow.definitions as JSON.';
     end if;
 
-    c := p8_compile_workflow(p_yaml);
-    if not (c->>'ok')::boolean then
-        -- The compiler's message names the offending step, so surface it as-is
-        -- rather than wrapping it in something vaguer.
+    execute 'select p8_compile_workflow($1)' into c using p_yaml;
+
+    -- THE SKEW CHECK RUNS ON SUCCESS TOO, and the first version of it did not.
+    -- That was the whole bug: a missing STEP KIND fails loudly, so checking only
+    -- the failure branch caught those -- but `output_schema` is not a step kind.
+    -- serde drops the unknown key, the document compiles CLEAN, and the declared
+    -- contract is simply absent. An author who writes a contract and gets a
+    -- green run reasonably concludes it is enforced.
+    --
+    -- A silently dropped contract is worse than an unsupported feature, so this
+    -- refuses rather than warns. The engine's own comment on the probe said
+    -- "compiling is not evidence -- the emitted SPEC is", and then the code
+    -- went on to treat compiling as evidence.
+    v_caps := workflow.compiler_capabilities();
+    if (v_caps->>'available')::boolean then
+        select array_agg(f) into v_stale
+        from jsonb_array_elements_text(v_caps->'missing') f
+        where p_yaml ~ ('(^|\n)[[:space:]]*' || f || '[[:space:]]*:');
+    end if;
+
+    if v_stale is not null then
+        raise exception
+            'this document declares %, which the INSTALLED compiler cannot emit. The SQL '
+            'schema supports it and the compiled extension predates it -- a version skew, '
+            'not a syntax error.%  Rebuild the percolate extension, or write the spec as '
+            'JSON. (workflow.compiler_capabilities() lists everything missing.)',
+            array_to_string(v_stale, ', '),
+            case when coalesce((c->>'ok')::boolean, false)
+                 then ' It COMPILED CLEAN: the key was dropped and the contract would not '
+                      'have existed at runtime, with nothing to tell you.'
+                 else ' The compiler said: ' || coalesce(c->>'error', '?') || '.' end;
+    end if;
+
+    if not coalesce((c->>'ok')::boolean, false) then
         raise exception 'workflow YAML did not compile: %', c->>'error';
     end if;
 
-    v_name := c->'workflow'->>'name';
-    v_ver  := coalesce((c->'workflow'->>'version')::int, 1);
+    v_name := c#>>'{workflow,name}';
+    v_ver  := coalesce((c#>>'{workflow,version}')::int, 1);
 
-    -- validate_spec() still runs via the insert trigger: the compiler checks
-    -- that every `needs` names a real step, the engine checks reachability and
-    -- cycles. Two different questions, both worth asking.
     insert into workflow.definitions (name, version, spec)
-    values (v_name, v_ver, c->'workflow'->'spec')
-    on conflict (name, version) do update set spec = excluded.spec
+    values (v_name, coalesce((select max(version) + 1 from workflow.definitions where name = v_name), v_ver),
+            c#>'{workflow,spec}')
     returning id into v_id;
-
     return v_id;
 end;
-$$ language plpgsql;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
 
 -- P8QL as a step. This is what makes a query a first-class workflow node with
 -- no process behind it -- it is an ordinary §17 sql step whose registered
@@ -1811,6 +2014,8 @@ $$ language plpgsql stable;
 -- Returns the number of runs STARTED, so a caller (or a monitoring query) can
 -- tell "the ticker ran and nothing was due" from "the ticker is not running",
 -- which last_tick_at also answers per schedule.
+-- Current form. It reached this shape in section 21j (A scheduled run belongs to whoever scheduled it.), which explains
+-- the failure that produced it. Defined here, where it is first needed.
 create or replace function workflow.tick(p_now timestamptz default now())
 returns int as $$
 declare
@@ -1859,6 +2064,16 @@ begin
                 'schedule:' || s.name || ':' ||
                     to_char(v_minute at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI"Z"'),
                 null);
+
+            -- 21j: authority follows provenance. A schedule already has an
+            -- owner, set from the verified JWT of whoever created it, and the
+            -- runs it starts are that person's. Without this every scheduled
+            -- run is unowned -- and assert_run_access correctly treats unowned
+            -- as owned by nobody -- so a scheduled workflow that waits for
+            -- approval could never be approved, by anyone.
+            update workflow.runs
+               set owner_id = s.owner_id
+             where id = v_run_id and owner_id is null and s.owner_id is not null;
 
             update workflow.schedules
                set last_tick_at  = v_minute,
@@ -2156,10 +2371,13 @@ create index if not exists idx_tasks_matrix_parent
 -- delegates, so every existing caller and the surface-audit row for
 -- resolve_args(jsonb,uuid) stay valid.
 -- ------------------------------------------------------------
+-- Current form. It reached this shape in section 22a (BUG 1 -- the run cannot see itself.), which explains
+-- the failure that produced it. Defined here, where it is first needed.
 create or replace function workflow.resolve_args(p_args jsonb, p_run_id uuid, p_item jsonb)
 returns jsonb as $$
 declare
     r        workflow.runs;
+    v_meta   jsonb;
     v_out    jsonb := '[]'::jsonb;
     v_arg    jsonb;
     v_txt    text;
@@ -2173,18 +2391,39 @@ begin
     for v_arg in select * from jsonb_array_elements(coalesce(p_args, '[]'::jsonb))
     loop
         v_txt := v_arg #>> '{}';
-        if v_txt is not null and v_txt ~ '^\s*\{\{\s*[a-zA-Z0-9_.]+\s*\}\}\s*$' then
+        -- `$` joins the character class so {{run.$id}} is a whole-string
+        -- reference like any other. Partial interpolation stays the worker's
+        -- job; here an argument is a value, not a template.
+        if v_txt is not null and v_txt ~ '^\s*\{\{\s*[a-zA-Z0-9_.$]+\s*\}\}\s*$' then
             v_ref  := trim(both from replace(replace(v_txt, '{{', ''), '}}', ''));
             v_head := split_part(v_ref, '.', 1);
             v_rest := substr(v_ref, length(v_head) + 2);
             if v_head = 'steps' then
                 v_val := r.context #> string_to_array(v_rest, '.');
             elsif v_head = 'run' then
-                v_val := r.input #> string_to_array(v_rest, '.');
+                if left(v_rest, 1) = '$' then
+                    v_meta := workflow.run_meta(p_run_id);
+                    v_val := v_meta -> v_rest;
+                    if v_val is null then
+                        raise exception
+                            'unknown engine field ''run.%''. Available: %',
+                            v_rest, (select string_agg(k, ', ' order by k)
+                                     from jsonb_object_keys(v_meta) k);
+                    end if;
+                else
+                    v_val := r.input #> string_to_array(v_rest, '.');
+                    -- The natural thing to type for a run's own id is
+                    -- {{run.id}}. Say what to write instead of resolving to
+                    -- nothing and failing eight tasks later.
+                    if v_val is null and workflow.run_meta(p_run_id) ? ('$' || v_rest) then
+                        raise exception
+                            'template ''run.%'' resolved to nothing. {{run.*}} reads the '
+                            'run INPUT; the run''s own % is {{run.$%}} -- the $ prefix is '
+                            'reserved for engine fields so an input key named ''%'' cannot '
+                            'shadow it.', v_rest, v_rest, v_rest, v_rest;
+                    end if;
+                end if;
             elsif v_head = 'item' then
-                -- Naming {{item.x}} in a step that is not a fan-out child is
-                -- an authoring error, and it must not read as "the row had no
-                -- such column" -- those need different fixes.
                 if p_item is null then
                     raise exception
                         'template ''%'' names the item namespace, but this task is not a '
@@ -2280,49 +2519,9 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- execute_sql_step, re-expressed over the shared caller. Behaviour is
 -- unchanged except that a `sql` step which is itself a matrix child can now
 -- name {{item.*}} in its args.
-create or replace function workflow.execute_sql_step(p_task_id uuid)
-returns boolean as $$
-declare
-    t      workflow.tasks;
-    v_spec jsonb;
-    v_out  jsonb;
-begin
-    select * into t from workflow.tasks where id = p_task_id;
-    if not found or t.status <> 'ready' or t.kind <> 'sql' then
-        return false;
-    end if;
-
-    update workflow.tasks set status = 'running', claimed_by = 'in-database',
-           claimed_at = now(), heartbeat_at = now(), attempts = attempts + 1
-    where id = p_task_id;
-
-    v_spec := coalesce(t.input, '{}'::jsonb);
-
-    -- The run this step belongs to, published transaction-locally so an
-    -- allow-listed function can tell "my own run" from "a run id somebody
-    -- typed into a step spec". Needed the moment a step function takes a task
-    -- id -- matrix_outputs does -- because a workflow author could otherwise
-    -- name another tenant's matrix task and read its results. Transaction-local
-    -- (set_config's third argument), so it cannot leak into a pooled
-    -- connection's next transaction; the same hazard rbac.current_user_id()
-    -- was hardened against.
-    perform set_config('workflow.current_run_id', t.run_id::text, true);
-
-    begin      -- subtransaction: a failure here must not abort the caller
-        v_out := workflow.call_step_function(
-            v_spec->>'function', v_spec->'args', t.run_id, t.input->'item');
-        perform workflow.complete_task(p_task_id, jsonb_build_object('result', v_out));
-        return true;
-    exception when others then
-        perform workflow.fail_task(p_task_id,
-            jsonb_build_object('error', sqlerrm, 'sqlstate', sqlstate),
-            -- A missing registration or a bad signature will fail identically
-            -- on every retry; a deadlock or timeout will not.
-            sqlstate in ('42883','42P01','P0001'));
-        return true;
-    end;
-end;
-$$ language plpgsql security definer set search_path = pg_catalog, public;
+-- workflow.execute_sql_step(uuid) is defined in section 17.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.
 
 -- ------------------------------------------------------------
 -- 20a-bis. `{{item.*}}` is substituted AT EXPANSION, and the first version of
@@ -2789,38 +2988,9 @@ $$ language sql stable security definer set search_path = pg_catalog, public;
 -- and where the eventual {{items.<step>}} namespace will read it from, when a
 -- second consumer justifies building one.
 -- ------------------------------------------------------------
-create or replace function workflow.complete_task(p_task_id uuid, p_output jsonb)
-returns void as $$
-declare
-    v_run_id uuid;
-    v_matrix uuid;
-begin
-    -- CONTEXT FIRST, THEN STATUS. The order matters and is not stylistic:
-    -- flipping the task to 'done' fires the cascade, which can mark a `sql`
-    -- step ready, which auto-executes it IN THE SAME STATEMENT (§17). If the
-    -- run's context has not been written yet, that step resolves
-    -- {{steps.<this>.result}} against a context that does not contain this
-    -- step's output and fails with 'template resolved to nothing'.
-    select run_id, matrix_parent_id into v_run_id, v_matrix
-    from workflow.tasks where id = p_task_id;
-
-    if v_matrix is null then
-        update workflow.runs r
-        set context = context || jsonb_build_object(
-                (select step_key from workflow.tasks where id = p_task_id), p_output),
-            updated_at = now()
-        where r.id = v_run_id;
-    else
-        update workflow.runs set updated_at = now() where id = v_run_id;
-    end if;
-
-    update workflow.tasks set status = 'done', output = p_output, completed_at = now()
-    where id = p_task_id;
-
-    perform workflow.check_run_completion(v_run_id);
-    perform workflow.check_compensation_completion(v_run_id);
-end;
-$$ language plpgsql security definer set search_path = pg_catalog, public;
+-- workflow.complete_task(uuid,jsonb) is defined in section 10.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.
 
 -- ------------------------------------------------------------
 -- 20e. A worker has to be able to see its row.
@@ -2832,43 +3002,9 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- `null` when the task is not a fan-out child, which is what makes the
 -- worker's "you named item on a non-child" error possible at all.
 -- ------------------------------------------------------------
-create or replace function workflow.get_task_context(p_task_id uuid, p_worker_id text)
-returns jsonb as $$
-declare
-    v_task workflow.tasks;
-    v_run  workflow.runs;
-begin
-    select * into v_task from workflow.tasks where id = p_task_id;
-    if not found then
-        raise exception 'task % not found', p_task_id;
-    end if;
-    if v_task.claimed_by is distinct from p_worker_id or v_task.status <> 'running' then
-        raise exception
-            'task % is not currently claimed by % -- a worker may only read the context of a task it holds',
-            p_task_id, p_worker_id;
-    end if;
-
-    select * into v_run from workflow.runs where id = v_task.run_id;
-
-    return jsonb_build_object(
-        'run_id',      v_run.id,
-        'run_input',   coalesce(v_run.input, '{}'::jsonb),
-        'context',     coalesce(v_run.context, '{}'::jsonb),
-        'task_input',  coalesce(v_task.input, '{}'::jsonb),
-        'step_key',    v_task.step_key,
-        -- The worker dispatches to a handler by KIND, so it has to be told
-        -- what it just claimed.
-        'kind',        v_task.kind,
-        -- -> {{item.*}}. Null on every task that is not a matrix child.
-        'item',        v_task.input->'item',
-        'matrix_parent_step', (select m.step_key from workflow.tasks m
-                               where m.id = v_task.matrix_parent_id),
-        'attempt',     v_task.attempts,
-        'trace_id',    v_run.trace_id,
-        'span_id',     v_task.span_id
-    );
-end;
-$$ language plpgsql stable security definer set search_path = pg_catalog, public;
+-- workflow.get_task_context(uuid,text) is defined in section 16.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.
 
 -- ------------------------------------------------------------
 -- 20f. Validation -- refuse at registration, not at 3am.
@@ -2946,13 +3082,9 @@ begin
 end;
 $$ language plpgsql;
 
-create or replace function workflow.check_spec_before_insert() returns trigger as $$
-begin
-    perform workflow.validate_spec(new.spec);
-    perform workflow.validate_matrix_steps(new.spec);
-    return new;
-end;
-$$ language plpgsql;
+-- workflow.check_spec_before_insert() is defined in section 1b.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.
 
 -- ------------------------------------------------------------
 -- 20g. Making it automatic -- the same two hooks `sql` steps use.
@@ -2966,40 +3098,13 @@ $$ language plpgsql;
 -- drain_sql_steps keeps its name and its surface-audit row; what it drains is
 -- now "the kinds that run in-database", which is what it always meant.
 -- ------------------------------------------------------------
-create or replace function workflow.autorun_sql_steps() returns trigger as $$
-begin
-    if new.status = 'ready' and old.status is distinct from 'ready' then
-        if new.kind = 'sql' then
-            perform workflow.execute_sql_step(new.id);
-        elsif new.kind = 'matrix' then
-            perform workflow.expand_matrix(new.id);
-        end if;
-    end if;
-    return null;
-end;
-$$ language plpgsql security definer set search_path = pg_catalog, public;
+-- workflow.autorun_sql_steps() is defined in section 17.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.
 
-create or replace function workflow.drain_sql_steps(p_run_id uuid, p_max int default 50)
-returns int as $$
-declare v_id uuid; v_kind text; v_done int := 0;
-begin
-    loop
-        select id, kind into v_id, v_kind from workflow.tasks
-        where run_id = p_run_id and kind in ('sql','matrix') and status = 'ready'
-          and run_after <= now()
-        order by kind, created_at
-        limit 1;
-        exit when v_id is null or v_done >= p_max;
-        if v_kind = 'sql' then
-            perform workflow.execute_sql_step(v_id);
-        else
-            perform workflow.expand_matrix(v_id);
-        end if;
-        v_done := v_done + 1;
-    end loop;
-    return v_done;
-end;
-$$ language plpgsql security definer set search_path = pg_catalog, public;
+-- workflow.drain_sql_steps(uuid,int) is defined in section 17.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.
 
 -- ------------------------------------------------------------
 -- 20h-bis. An output that cannot be stored is a TERMINAL failure.
@@ -3036,56 +3141,9 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- and 69KB of JSON in a task row is exactly the TOAST and replication weight
 -- the cap exists to keep out. The gap is the offload, not the number.
 -- ------------------------------------------------------------
-create or replace function workflow.complete_task(p_task_id uuid, p_output jsonb)
-returns void as $$
-declare
-    v_run_id uuid;
-    v_matrix uuid;
-    v_max    int := coalesce(
-        nullif(current_setting('workflow.max_payload_bytes', true), '')::int, 65536);
-begin
-    select run_id, matrix_parent_id into v_run_id, v_matrix
-    from workflow.tasks where id = p_task_id;
-
-    -- Checked before anything is written, so a rejected output leaves no
-    -- partial trace in runs.context either.
-    if p_output is not null and pg_column_size(p_output) > v_max
-       and not (p_output ? '$ref') then
-        perform workflow.fail_task(p_task_id, jsonb_build_object(
-            'error', format(
-                'output is %s bytes, over the %s byte limit, and is not a $ref. This is '
-                'terminal: the same response will be the same size on every attempt. '
-                'Return {"$ref": "s3://..."} instead, or raise workflow.max_payload_bytes '
-                'deliberately.', pg_column_size(p_output), v_max),
-            'bytes', pg_column_size(p_output),
-            'limit', v_max),
-            true);   -- terminal
-        return;
-    end if;
-
-    -- CONTEXT FIRST, THEN STATUS. The order matters and is not stylistic:
-    -- flipping the task to 'done' fires the cascade, which can mark a `sql`
-    -- step ready, which auto-executes it IN THE SAME STATEMENT (§17). If the
-    -- run's context has not been written yet, that step resolves
-    -- {{steps.<this>.result}} against a context that does not contain this
-    -- step's output and fails with 'template resolved to nothing'.
-    if v_matrix is null then
-        update workflow.runs r
-        set context = context || jsonb_build_object(
-                (select step_key from workflow.tasks where id = p_task_id), p_output),
-            updated_at = now()
-        where r.id = v_run_id;
-    else
-        update workflow.runs set updated_at = now() where id = v_run_id;
-    end if;
-
-    update workflow.tasks set status = 'done', output = p_output, completed_at = now()
-    where id = p_task_id;
-
-    perform workflow.check_run_completion(v_run_id);
-    perform workflow.check_compensation_completion(v_run_id);
-end;
-$$ language plpgsql security definer set search_path = pg_catalog, public;
+-- workflow.complete_task(uuid,jsonb) is defined in section 10.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.
 
 -- ------------------------------------------------------------
 -- 20i. A task that completes twice must not decrement twice.
@@ -3111,43 +3169,9 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- REPLACE resets the security attribute, and §16's self-check would (rightly)
 -- refuse the install if this silently became SECURITY INVOKER.
 -- ------------------------------------------------------------
-create or replace function workflow.cascade_task_status() returns trigger as $$
-begin
-    if new.status is not distinct from old.status then
-        return new;
-    end if;
-
-    if new.status = 'done' then
-        if old.completed_at is not null then
-            return new;   -- already cascaded on the first completion
-        end if;
-
-        update workflow.tasks t
-        set pending_deps = pending_deps - 1
-        where t.id in (select task_id from workflow.task_dependencies where depends_on_task_id = new.id);
-
-        update workflow.tasks t
-        set status = case when t.kind = 'signal' then 'waiting_external' else 'ready' end
-        where t.pending_deps = 0 and t.status = 'pending'
-          and t.id in (select task_id from workflow.task_dependencies where depends_on_task_id = new.id);
-
-        perform pg_notify('task_ready', t.queue)
-        from workflow.tasks t
-        where t.status = 'ready'
-          and t.id in (select task_id from workflow.task_dependencies where depends_on_task_id = new.id);
-
-    elsif new.status in ('cancelled', 'failed') then
-        -- cascade to direct dependents; their own transition to 'cancelled'
-        -- fires this trigger again on their row, cascading to any depth
-        update workflow.tasks t2
-        set status = 'cancelled'
-        where t2.status in ('pending', 'ready', 'waiting_external')
-          and t2.id in (select task_id from workflow.task_dependencies where depends_on_task_id = new.id);
-    end if;
-
-    return new;
-end;
-$$ language plpgsql security definer set search_path = pg_catalog, public;
+-- workflow.cascade_task_status() is defined in section 8.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.
 
 -- ------------------------------------------------------------
 -- 20h. Grants. Same shape as §17: nothing here needs a table grant, because
@@ -3330,37 +3354,9 @@ $$ language sql stable security definer set search_path = pg_catalog, public;
 -- Behaviour is identical for a task with no rate_key, so nothing that worked
 -- before changes.
 -- ------------------------------------------------------------
-create or replace function workflow.claim_task(p_queue text, p_worker_id text)
-returns workflow.tasks as $$
-declare
-    t           workflow.tasks;
-    v_lookahead int;
-begin
-    -- Look past a throttled task rather than stalling behind it: one
-    -- rate-limited source must not block an unrelated one sharing a queue.
-    select coalesce(rate_lookahead, 20) into v_lookahead
-    from workflow.queue_config where queue = p_queue;
-    v_lookahead := coalesce(v_lookahead, 20);
-
-    for t in
-        select * from workflow.tasks
-        where queue = p_queue and status = 'ready' and run_after <= now()
-        order by priority desc, created_at
-        for update skip locked
-        limit v_lookahead
-    loop
-        if t.rate_key is null or workflow.try_consume_rate_limit(t.rate_key) then
-            update workflow.tasks
-            set status = 'running', claimed_by = p_worker_id,
-                claimed_at = now(), heartbeat_at = now(), attempts = attempts + 1
-            where id = t.id
-            returning * into t;
-            return t;
-        end if;
-    end loop;
-    return null;
-end;
-$$ language plpgsql security definer set search_path = pg_catalog, public;
+-- workflow.claim_task(text,text) is defined in section 10.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.
 
 -- ------------------------------------------------------------
 -- 21c. Saga LIFO ordering was a no-op.
@@ -3383,54 +3379,9 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- The tie-break on id is not decoration either: two steps CAN still share a
 -- microsecond, and a stable order beats an arbitrary one.
 -- ------------------------------------------------------------
-create or replace function workflow.complete_task(p_task_id uuid, p_output jsonb)
-returns void as $$
-declare
-    v_run_id uuid;
-    v_matrix uuid;
-    v_out    jsonb;
-    v_max    int := coalesce(
-        nullif(current_setting('workflow.max_payload_bytes', true), '')::int, 65536);
-begin
-    select run_id, matrix_parent_id into v_run_id, v_matrix
-    from workflow.tasks where id = p_task_id;
-
-    -- 21a: repair a double-encoded document before anything reads it, so the
-    -- recorded output and runs.context agree with the contract.
-    v_out := workflow.normalize_output(p_task_id, p_output);
-
-    if v_out is not null and pg_column_size(v_out) > v_max and not (v_out ? '$ref') then
-        perform workflow.fail_task(p_task_id, jsonb_build_object(
-            'error', format(
-                'output is %s bytes, over the %s byte limit, and is not a $ref. This is '
-                'terminal: the same response will be the same size on every attempt. '
-                'Return {"$ref": "s3://..."} instead, or raise workflow.max_payload_bytes '
-                'deliberately.', pg_column_size(v_out), v_max),
-            'bytes', pg_column_size(v_out), 'limit', v_max), true);
-        return;
-    end if;
-
-    -- CONTEXT FIRST, THEN STATUS -- flipping to 'done' fires the cascade,
-    -- which can auto-run a `sql` step in the same statement, and that step
-    -- resolves {{steps.<this>.result}} against the context written here.
-    if v_matrix is null then
-        update workflow.runs r
-        set context = context || jsonb_build_object(
-                (select step_key from workflow.tasks where id = p_task_id), v_out),
-            updated_at = now()
-        where r.id = v_run_id;
-    else
-        update workflow.runs set updated_at = now() where id = v_run_id;
-    end if;
-
-    update workflow.tasks set status = 'done', output = v_out,
-        completed_at = clock_timestamp()          -- 21c
-    where id = p_task_id;
-
-    perform workflow.check_run_completion(v_run_id);
-    perform workflow.check_compensation_completion(v_run_id);
-end;
-$$ language plpgsql security definer set search_path = pg_catalog, public;
+-- workflow.complete_task(uuid,jsonb) is defined in section 10.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.
 
 -- ------------------------------------------------------------
 -- 21d. Saga compensation, which did not work in four ways.
@@ -3486,184 +3437,20 @@ returns text[] as $$
     where s->>'compensation_task_key' is not null;
 $$ language sql immutable;
 
-create or replace function workflow.start_workflow(p_name text, p_input jsonb, p_external_id text default null, p_trace_id text default null)
-returns uuid as $$
-declare
-    v_def       workflow.definitions;
-    v_run_id    uuid;
-    v_step      jsonb;
-    v_step_ids  jsonb := '{}'::jsonb;
-    v_new_id    uuid;
-    v_dep_key   text;
-    v_dep_id    uuid;
-    v_count     int;
-    v_comp      text[];
-begin
-    if p_external_id is not null then
-        select id into v_run_id from workflow.runs where external_id = p_external_id;
-        if v_run_id is not null then
-            return v_run_id;
-        end if;
-    end if;
-
-    select * into v_def from workflow.definitions where name = p_name order by version desc limit 1;
-    if v_def.id is null then
-        raise exception 'no workflow_def found for name %', p_name;
-    end if;
-
-    -- 21d(1): compensation steps are not part of the forward graph.
-    v_comp := workflow.compensation_keys(v_def.spec);
-
-    insert into workflow.runs (workflow_def_id, input, external_id, trace_id)
-    values (v_def.id, p_input, p_external_id, coalesce(p_trace_id, encode(gen_random_bytes(16), 'hex')))
-    returning id into v_run_id;
-
-    for v_step in select * from jsonb_array_elements(v_def.spec->'steps')
-    loop
-        continue when (v_step->>'key') = any(v_comp);
-
-        insert into workflow.tasks (run_id, step_key, queue, kind, pending_deps, status,
-                                    wait_signal, input, rate_key,
-                                    saga_group, compensation_task_key)
-        values (
-            v_run_id, v_step->>'key', coalesce(v_step->>'queue', 'default'),
-            coalesce(v_step->>'kind', 'work'), 0, 'pending',
-            case when coalesce(v_step->>'kind','work') = 'signal'
-                 then coalesce(v_step->>'signal', v_step->>'key') end,
-            v_step->'input', v_step->>'rate_key',
-            v_step->>'saga_group', v_step->>'compensation_task_key'
-        )
-        returning id into v_new_id;
-        v_step_ids := v_step_ids || jsonb_build_object(v_step->>'key', v_new_id::text);
-    end loop;
-
-    for v_step in select * from jsonb_array_elements(v_def.spec->'steps')
-    loop
-        continue when (v_step->>'key') = any(v_comp);
-        v_new_id := (v_step_ids ->> (v_step->>'key'))::uuid;
-        v_count := 0;
-
-        for v_dep_key in select jsonb_array_elements_text(coalesce(v_step->'depends_on', '[]'::jsonb))
-        loop
-            -- A forward step may not depend on a compensation step: the
-            -- compensation does not exist until something fails, so the
-            -- dependency could never resolve. Named rather than left to stall.
-            if v_dep_key = any(v_comp) then
-                raise exception
-                    'step % depends on %, which is a compensation step. A compensation '
-                    'runs only when its saga rolls back, so nothing in the forward graph '
-                    'can wait for it.', v_step->>'key', v_dep_key;
-            end if;
-            v_dep_id := (v_step_ids ->> v_dep_key)::uuid;
-            insert into workflow.task_dependencies (task_id, depends_on_task_id)
-            values (v_new_id, v_dep_id) on conflict do nothing;
-            v_count := v_count + 1;
-        end loop;
-
-        update workflow.tasks
-        set pending_deps = v_count,
-            status = case
-                when v_count > 0 then 'pending'
-                when kind = 'signal' then 'waiting_external'
-                else 'ready'
-            end
-        where id = v_new_id;
-    end loop;
-
-    perform workflow.drain_sql_steps(v_run_id);
-    return v_run_id;
-end;
-$$ language plpgsql security definer set search_path = pg_catalog, public;
+-- workflow.start_workflow(text,jsonb,text,text) is defined in section 9.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.
 
 -- 21d(3): the compensation runs as the step the author actually wrote.
-create or replace function workflow.begin_compensation(p_run_id uuid, p_saga_group text)
-returns void as $$
-declare
-    v_task         workflow.tasks;
-    v_spec         jsonb;
-    v_step         jsonb;
-    v_prev_comp_id uuid := null;
-    v_new_id       uuid;
-begin
-    update workflow.runs set compensation_state = 'compensating' where id = p_run_id;
-
-    select d.spec into v_spec
-    from workflow.runs r join workflow.definitions d on d.id = r.workflow_def_id
-    where r.id = p_run_id;
-
-    for v_task in
-        select * from workflow.tasks
-        where run_id = p_run_id and saga_group = p_saga_group
-          and status = 'done' and compensation_task_key is not null and compensated_at is null
-        order by completed_at desc, id desc          -- 21c: clock_timestamp, stable tie-break
-    loop
-        select s into v_step from jsonb_array_elements(v_spec->'steps') s
-        where s->>'key' = v_task.compensation_task_key;
-
-        if v_step is null then
-            raise exception
-                'step % declares compensation %, which is not a step in this workflow',
-                v_task.step_key, v_task.compensation_task_key;
-        end if;
-
-        v_new_id := workflow.add_task(
-            p_run_id,
-            v_task.compensation_task_key || ':' || v_task.id,
-            coalesce(v_step->>'queue', v_task.queue),
-            case when v_prev_comp_id is not null then array[v_prev_comp_id] else '{}'::uuid[] end,
-            coalesce(v_step->>'kind', 'work'),
-            -- The step's own input, with what the forward step produced
-            -- attached: a refund needs the charge id, and the declared input
-            -- is where a `sql` compensation's function and args live.
-            coalesce(v_step->'input', '{}'::jsonb)
-                || jsonb_build_object('compensates', jsonb_build_object(
-                       'step_key', v_task.step_key, 'output', v_task.output)),
-            v_step->>'rate_key'
-        );
-
-        update workflow.tasks set compensates_task_id = v_task.id where id = v_new_id;
-        update workflow.tasks set compensated_at = now() where id = v_task.id;
-        v_prev_comp_id := v_new_id;
-    end loop;
-
-    -- A `sql` compensation is INSERTED ready, and the autorun trigger fires
-    -- only on a transition INTO ready -- the same hazard §20 hit with matrix
-    -- children. Without this an in-database rollback never starts.
-    perform workflow.drain_sql_steps(p_run_id);
-    perform workflow.check_compensation_completion(p_run_id);
-end;
-$$ language plpgsql security definer set search_path = pg_catalog, public;
+-- workflow.begin_compensation(uuid,text) is defined in section 10.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.
 
 -- 21d(2): terminal failure inside a saga group starts the rollback. This is
 -- what §6 always said happened.
-create or replace function workflow.fail_task(
-    p_task_id uuid, p_error jsonb, p_terminal boolean default false)
-returns void as $$
-declare t workflow.tasks;
-begin
-    select * into t from workflow.tasks where id = p_task_id;
-    if not p_terminal and t.attempts < t.max_attempts and not t.cancel_requested then
-        update workflow.tasks set status = 'ready', error = p_error,
-            run_after = now() + (power(2, t.attempts) * interval '1 second')
-        where id = p_task_id;
-        return;
-    end if;
-
-    update workflow.tasks set status = 'failed', error = p_error where id = p_task_id;
-    update workflow.runs set status = 'failed' where id = t.run_id;
-
-    -- Only a forward member of a saga triggers a rollback. A COMPENSATION that
-    -- fails must not start another one -- that is an infinite rollback, and it
-    -- is why this keys off compensates_task_id being null.
-    if t.saga_group is not null and t.compensates_task_id is null
-       and (select compensation_state from workflow.runs where id = t.run_id)
-           is distinct from 'compensating' then
-        perform workflow.begin_compensation(t.run_id, t.saga_group);
-    end if;
-
-    perform workflow.check_compensation_completion(t.run_id);
-end;
-$$ language plpgsql security definer set search_path = pg_catalog, public;
+-- workflow.fail_task(uuid,jsonb,boolean) is defined in section 10.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.
 
 -- ------------------------------------------------------------
 -- 21e. A fan-out that survives a failed child.
@@ -3738,104 +3525,16 @@ begin
 end;
 $$ language plpgsql stable security definer set search_path = pg_catalog, public;
 
-create or replace function workflow.cascade_task_status() returns trigger as $$
-declare
-    v_satisfies boolean;
-    v_remaining int;
-begin
-    if new.status is not distinct from old.status then
-        return new;
-    end if;
-
-    -- A terminal state SATISFIES a dependent if it succeeded, or if it failed
-    -- and this task was expanded under continue_on.
-    v_satisfies := new.status = 'done'
-                   or (new.status in ('failed', 'cancelled') and new.tolerate_failure);
-
-    if v_satisfies then
-        -- Already cascaded once (§20i): pending_deps is decremented on the
-        -- transition into a terminal state and never re-incremented, so a
-        -- second decrement is always wrong.
-        if old.completed_at is not null then
-            return new;
-        end if;
-
-        -- THE GATE. Evaluated when the last child of a matrix resolves, and
-        -- BEFORE anything downstream is released.
-        if new.matrix_parent_id is not null then
-            select count(*) into v_remaining from workflow.tasks
-            where matrix_parent_id = new.matrix_parent_id
-              and status not in ('done', 'failed', 'cancelled');
-
-            if v_remaining = 0 and not workflow.matrix_gate_passes(new.matrix_parent_id) then
-                update workflow.tasks t2 set status = 'cancelled'
-                where t2.status in ('pending', 'ready', 'waiting_external')
-                  and t2.id in (select task_id from workflow.task_dependencies
-                                where depends_on_task_id = new.matrix_parent_id);
-                update workflow.runs set status = 'failed' where id = new.run_id;
-                return new;
-            end if;
-        end if;
-
-        update workflow.tasks t
-        set pending_deps = pending_deps - 1
-        where t.id in (select task_id from workflow.task_dependencies where depends_on_task_id = new.id);
-
-        update workflow.tasks t
-        set status = case when t.kind = 'signal' then 'waiting_external' else 'ready' end
-        where t.pending_deps = 0 and t.status = 'pending'
-          and t.id in (select task_id from workflow.task_dependencies where depends_on_task_id = new.id);
-
-        perform pg_notify('task_ready', t.queue)
-        from workflow.tasks t
-        where t.status = 'ready'
-          and t.id in (select task_id from workflow.task_dependencies where depends_on_task_id = new.id);
-
-    elsif new.status in ('cancelled', 'failed') then
-        update workflow.tasks t2
-        set status = 'cancelled'
-        where t2.status in ('pending', 'ready', 'waiting_external')
-          and t2.id in (select task_id from workflow.task_dependencies where depends_on_task_id = new.id);
-    end if;
-
-    return new;
-end;
-$$ language plpgsql security definer set search_path = pg_catalog, public;
+-- workflow.cascade_task_status() is defined in section 8.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.
 
 -- A tolerated failure is terminal for THIS task and neutral for the run: it
 -- must not mark the run failed, and it needs completed_at so the
 -- double-decrement guard above sees it.
-create or replace function workflow.fail_task(
-    p_task_id uuid, p_error jsonb, p_terminal boolean default false)
-returns void as $$
-declare t workflow.tasks;
-begin
-    select * into t from workflow.tasks where id = p_task_id;
-    if not p_terminal and t.attempts < t.max_attempts and not t.cancel_requested then
-        update workflow.tasks set status = 'ready', error = p_error,
-            run_after = now() + (power(2, t.attempts) * interval '1 second')
-        where id = p_task_id;
-        return;
-    end if;
-
-    update workflow.tasks
-    set status = 'failed', error = p_error,
-        completed_at = case when t.tolerate_failure then clock_timestamp() else completed_at end
-    where id = p_task_id;
-
-    if not t.tolerate_failure then
-        update workflow.runs set status = 'failed' where id = t.run_id;
-    end if;
-
-    if t.saga_group is not null and t.compensates_task_id is null
-       and (select compensation_state from workflow.runs where id = t.run_id)
-           is distinct from 'compensating' then
-        perform workflow.begin_compensation(t.run_id, t.saga_group);
-    end if;
-
-    perform workflow.check_compensation_completion(t.run_id);
-end;
-$$ language plpgsql security definer set search_path = pg_catalog, public;
+-- workflow.fail_task(uuid,jsonb,boolean) is defined in section 10.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.
 
 -- A run whose only unfinished tasks are tolerated failures IS finished.
 -- Without this a fan-out with continue_on could never reach 'completed' --
@@ -3989,39 +3688,9 @@ comment on function workflow.validate_shape(jsonb, jsonb) is
 -- child that had already finished. The parent link is therefore established
 -- first where it can be, and an already-finished child is resolved explicitly.
 -- ------------------------------------------------------------
-create or replace function workflow.start_child_workflow(p_task_id uuid, p_workflow_name text, p_input jsonb)
-returns uuid as $$
-declare
-    v_child  uuid;
-    v_status text;
-    v_ctx    jsonb;
-begin
-    if not exists (select 1 from workflow.definitions where name = p_workflow_name) then
-        raise exception
-            'sub_workflow step names workflow %, which is not registered', p_workflow_name;
-    end if;
-
-    update workflow.tasks set status = 'waiting_external' where id = p_task_id;
-
-    v_child := workflow.start_workflow(p_workflow_name, p_input);
-
-    update workflow.runs set parent_task_id = p_task_id where id = v_child;
-    update workflow.tasks set child_run_id = v_child where id = p_task_id;
-
-    -- A child of only sql/p8ql/matrix steps is already finished. Its
-    -- completion trigger fired before the link above existed, so resolve the
-    -- parent here rather than leaving it blocked on a run that is over.
-    select status, context into v_status, v_ctx from workflow.runs where id = v_child;
-    if v_status = 'completed' then
-        perform workflow.complete_task(p_task_id, jsonb_build_object('result', v_ctx));
-    elsif v_status in ('failed', 'cancelled') then
-        perform workflow.fail_task(p_task_id,
-            jsonb_build_object('child_run_status', v_status, 'child_run_id', v_child), true);
-    end if;
-
-    return v_child;
-end;
-$$ language plpgsql security definer set search_path = pg_catalog, public;
+-- workflow.start_child_workflow(uuid,text,jsonb) is defined in section 10.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.
 
 -- ------------------------------------------------------------
 -- 21h. Completion, final form: repair, validate, then store.
@@ -4037,86 +3706,9 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- real remedy, where re-fetching an oversized response or re-requesting a 404
 -- is not.
 -- ------------------------------------------------------------
-create or replace function workflow.complete_task(p_task_id uuid, p_output jsonb)
-returns void as $$
-declare
-    t        workflow.tasks;
-    v_out    jsonb;
-    v_res    jsonb;
-    v_schema jsonb;
-    v_why    text;
-    v_max    int := coalesce(
-        nullif(current_setting('workflow.max_payload_bytes', true), '')::int, 65536);
-begin
-    select * into t from workflow.tasks where id = p_task_id;
-
-    -- 21k: no work lands under a cancelled run. complete_decision_task and
-    -- add_task have always refused; this path never did, so a worker finishing
-    -- in-flight work resurrected a cancelled graph one step at a time.
-    if exists (select 1 from workflow.runs where id = t.run_id and status = 'cancelled') then
-        update workflow.tasks set status = 'cancelled'
-        where id = p_task_id and status in ('running', 'ready');
-        return;
-    end if;
-
-    v_out := workflow.normalize_output(p_task_id, p_output);          -- 21a
-
-    v_schema := t.input->'output_schema';
-    if v_schema is not null then
-        v_res := coalesce(v_out->'result', v_out);
-        -- A model returns its structured answer as message CONTENT, i.e. a
-        -- string. Parse it before checking the shape, and treat unparseable
-        -- output as a shape failure rather than a crash -- it is the same
-        -- class of problem and the same remedy.
-        if jsonb_typeof(v_res) = 'string' then
-            begin
-                v_res := (v_res #>> '{}')::jsonb;
-                v_out := jsonb_set(coalesce(v_out, '{}'::jsonb), '{result}', v_res);
-            exception when others then
-                perform workflow.fail_task(p_task_id, jsonb_build_object(
-                    'error', 'output_schema was declared, but the result is not JSON',
-                    'shape_violation', true, 'got', left(v_res #>> '{}', 400)), false);
-                return;
-            end;
-        end if;
-
-        v_why := workflow.validate_shape(v_res, v_schema);
-        if v_why is not null then
-            perform workflow.fail_task(p_task_id, jsonb_build_object(
-                'error', format('output does not match the declared shape: %s', v_why),
-                'shape_violation', true,
-                'schema', v_schema, 'got', v_res), false);   -- retryable, on purpose
-            return;
-        end if;
-    end if;
-
-    if v_out is not null and pg_column_size(v_out) > v_max and not (v_out ? '$ref') then
-        perform workflow.fail_task(p_task_id, jsonb_build_object(
-            'error', format(
-                'output is %s bytes, over the %s byte limit, and is not a $ref. This is '
-                'terminal: the same response will be the same size on every attempt. '
-                'Return {"$ref": "s3://..."} instead, or raise workflow.max_payload_bytes '
-                'deliberately.', pg_column_size(v_out), v_max),
-            'bytes', pg_column_size(v_out), 'limit', v_max), true);
-        return;
-    end if;
-
-    if t.matrix_parent_id is null then
-        update workflow.runs r
-        set context = context || jsonb_build_object(t.step_key, v_out), updated_at = now()
-        where r.id = t.run_id;
-    else
-        update workflow.runs set updated_at = now() where id = t.run_id;
-    end if;
-
-    update workflow.tasks set status = 'done', output = v_out,
-        completed_at = clock_timestamp()
-    where id = p_task_id;
-
-    perform workflow.check_run_completion(t.run_id);
-    perform workflow.check_compensation_completion(t.run_id);
-end;
-$$ language plpgsql security definer set search_path = pg_catalog, public;
+-- workflow.complete_task(uuid,jsonb) is defined in section 10.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.
 
 -- ------------------------------------------------------------
 -- 21i. Timers and sub-workflows start themselves.
@@ -4127,54 +3719,13 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- dependencies finish is not a timer, it is a coincidence. The delay begins
 -- when the step becomes ready, which is what "wait 30s after the fetch" means.
 -- ------------------------------------------------------------
-create or replace function workflow.autorun_sql_steps() returns trigger as $$
-begin
-    if new.status = 'ready' and old.status is distinct from 'ready' then
-        if new.kind = 'sql' then
-            perform workflow.execute_sql_step(new.id);
-        elsif new.kind = 'matrix' then
-            perform workflow.expand_matrix(new.id);
-        elsif new.kind = 'sub_workflow' then
-            perform workflow.start_child_workflow(
-                new.id, new.input->>'workflow',
-                coalesce(new.input->'input', '{}'::jsonb));
-        elsif new.kind = 'timer' and (new.input ? 'delay_seconds') then
-            -- Measured from readiness, not from the run's start.
-            update workflow.tasks
-            set run_after = clock_timestamp()
-                          + ((new.input->>'delay_seconds')::numeric * interval '1 second')
-            where id = new.id and run_after <= clock_timestamp();
-        end if;
-    end if;
-    return null;
-end;
-$$ language plpgsql security definer set search_path = pg_catalog, public;
+-- workflow.autorun_sql_steps() is defined in section 17.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.
 
-create or replace function workflow.drain_sql_steps(p_run_id uuid, p_max int default 50)
-returns int as $$
-declare v_id uuid; v_kind text; v_done int := 0;
-begin
-    loop
-        select id, kind into v_id, v_kind from workflow.tasks
-        where run_id = p_run_id and kind in ('sql','matrix','sub_workflow') and status = 'ready'
-          and run_after <= now()
-        order by kind, created_at
-        limit 1;
-        exit when v_id is null or v_done >= p_max;
-        if v_kind = 'sql' then
-            perform workflow.execute_sql_step(v_id);
-        elsif v_kind = 'matrix' then
-            perform workflow.expand_matrix(v_id);
-        else
-            perform workflow.start_child_workflow(v_id,
-                (select input->>'workflow' from workflow.tasks where id = v_id),
-                coalesce((select input->'input' from workflow.tasks where id = v_id), '{}'::jsonb));
-        end if;
-        v_done := v_done + 1;
-    end loop;
-    return v_done;
-end;
-$$ language plpgsql security definer set search_path = pg_catalog, public;
+-- workflow.drain_sql_steps(uuid,int) is defined in section 17.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.
 
 -- ------------------------------------------------------------
 -- 21j. A scheduled run belongs to whoever scheduled it.
@@ -4196,90 +3747,9 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- is that person's run. Carrying the identity across is what was missing --
 -- authority should follow provenance, not be granted around it.
 -- ------------------------------------------------------------
-create or replace function workflow.tick(p_now timestamptz default now())
-returns int as $$
-declare
-    v_minute  timestamptz := date_trunc('minute', p_now);
-    s         workflow.schedules;
-    v_run_id  uuid;
-    v_started int := 0;
-    v_active  boolean;
-begin
-    for s in
-        select * from workflow.schedules
-         where enabled
-           -- Dedupe by minute: two overlapping ticks, or a ticker that fires
-           -- twice in the same minute, cannot double-start anything.
-           and (last_tick_at is null or last_tick_at < v_minute)
-         order by name
-         for update skip locked
-    loop
-        begin
-            if not workflow.cron_matches(s.cron_expr, v_minute, s.timezone) then
-                update workflow.schedules set last_tick_at = v_minute where id = s.id;
-                continue;
-            end if;
-
-            if s.overlap_policy = 'skip' and s.last_run_id is not null then
-                select exists (
-                    select 1 from workflow.runs r
-                     where r.id = s.last_run_id and r.status = 'running'
-                ) into v_active;
-                if v_active then
-                    update workflow.schedules
-                       set last_tick_at = v_minute, skip_count = skip_count + 1
-                     where id = s.id;
-                    continue;
-                end if;
-            end if;
-
-            -- The external_id is the schedule and the minute, which makes a
-            -- fire idempotent through the engine's OWN idempotency rather
-            -- than a second mechanism here: if this transaction is retried,
-            -- start_workflow() returns the existing run instead of a second
-            -- one.
-            v_run_id := workflow.start_workflow(
-                s.workflow_name,
-                s.input,
-                'schedule:' || s.name || ':' ||
-                    to_char(v_minute at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI"Z"'),
-                null);
-
-            -- 21j: authority follows provenance. A schedule already has an
-            -- owner, set from the verified JWT of whoever created it, and the
-            -- runs it starts are that person's. Without this every scheduled
-            -- run is unowned -- and assert_run_access correctly treats unowned
-            -- as owned by nobody -- so a scheduled workflow that waits for
-            -- approval could never be approved, by anyone.
-            update workflow.runs
-               set owner_id = s.owner_id
-             where id = v_run_id and owner_id is null and s.owner_id is not null;
-
-            update workflow.schedules
-               set last_tick_at  = v_minute,
-                   last_fired_at = v_minute,
-                   last_run_id   = v_run_id,
-                   fire_count    = fire_count + 1,
-                   last_error    = null,
-                   last_error_at = null
-             where id = s.id;
-            v_started := v_started + 1;
-
-        exception when others then
-            -- One broken schedule must not stop the other schedules from
-            -- firing. The subtransaction rolls back, the record of WHY does
-            -- not: this update runs after the rollback.
-            update workflow.schedules
-               set last_tick_at  = v_minute,
-                   last_error    = sqlerrm,
-                   last_error_at = now()
-             where id = s.id;
-        end;
-    end loop;
-
-    return v_started;
-end;
-$$ language plpgsql security definer set search_path = pg_catalog, public;
+-- workflow.tick(timestamptz) is defined in section 19.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.
 
 -- ------------------------------------------------------------
 -- 21k. A dead run is not an idempotent hit.
@@ -4311,93 +3781,9 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- resurrected a cancelled run's graph one step at a time. The signal path had
 -- the same hole.
 -- ------------------------------------------------------------
-create or replace function workflow.start_workflow(p_name text, p_input jsonb, p_external_id text default null, p_trace_id text default null)
-returns uuid as $$
-declare
-    v_def       workflow.definitions;
-    v_run_id    uuid;
-    v_status    text;
-    v_step      jsonb;
-    v_step_ids  jsonb := '{}'::jsonb;
-    v_new_id    uuid;
-    v_dep_key   text;
-    v_dep_id    uuid;
-    v_count     int;
-    v_comp      text[];
-begin
-    if p_external_id is not null then
-        select id, status into v_run_id, v_status
-        from workflow.runs where external_id = p_external_id;
-
-        if v_run_id is not null then
-            if v_status in ('running', 'completed') then
-                return v_run_id;      -- the work happened; do not repeat it
-            end if;
-            raise exception
-                'external_id % already belongs to run %, which is %. That run did not '
-                'complete, so returning it would report work that never happened -- and '
-                'external_id is unique, so this key cannot start a second run. Use a new '
-                'external_id to retry.', p_external_id, v_run_id, v_status;
-        end if;
-    end if;
-
-    select * into v_def from workflow.definitions where name = p_name order by version desc limit 1;
-    if v_def.id is null then
-        raise exception 'no workflow_def found for name %', p_name;
-    end if;
-
-    v_comp := workflow.compensation_keys(v_def.spec);
-
-    insert into workflow.runs (workflow_def_id, input, external_id, trace_id)
-    values (v_def.id, p_input, p_external_id, coalesce(p_trace_id, encode(gen_random_bytes(16), 'hex')))
-    returning id into v_run_id;
-
-    for v_step in select * from jsonb_array_elements(v_def.spec->'steps')
-    loop
-        continue when (v_step->>'key') = any(v_comp);
-        insert into workflow.tasks (run_id, step_key, queue, kind, pending_deps, status,
-                                    wait_signal, input, rate_key, saga_group, compensation_task_key)
-        values (
-            v_run_id, v_step->>'key', coalesce(v_step->>'queue', 'default'),
-            coalesce(v_step->>'kind', 'work'), 0, 'pending',
-            case when coalesce(v_step->>'kind','work') = 'signal'
-                 then coalesce(v_step->'input'->>'signal', v_step->>'signal', v_step->>'key') end,
-            v_step->'input', v_step->>'rate_key',
-            v_step->>'saga_group', v_step->>'compensation_task_key')
-        returning id into v_new_id;
-        v_step_ids := v_step_ids || jsonb_build_object(v_step->>'key', v_new_id::text);
-    end loop;
-
-    for v_step in select * from jsonb_array_elements(v_def.spec->'steps')
-    loop
-        continue when (v_step->>'key') = any(v_comp);
-        v_new_id := (v_step_ids ->> (v_step->>'key'))::uuid;
-        v_count := 0;
-        for v_dep_key in select jsonb_array_elements_text(coalesce(v_step->'depends_on', '[]'::jsonb))
-        loop
-            if v_dep_key = any(v_comp) then
-                raise exception
-                    'step % depends on %, which is a compensation step. A compensation '
-                    'runs only when its saga rolls back, so nothing in the forward graph '
-                    'can wait for it.', v_step->>'key', v_dep_key;
-            end if;
-            v_dep_id := (v_step_ids ->> v_dep_key)::uuid;
-            insert into workflow.task_dependencies (task_id, depends_on_task_id)
-            values (v_new_id, v_dep_id) on conflict do nothing;
-            v_count := v_count + 1;
-        end loop;
-        update workflow.tasks
-        set pending_deps = v_count,
-            status = case when v_count > 0 then 'pending'
-                          when kind = 'signal' then 'waiting_external'
-                          else 'ready' end
-        where id = v_new_id;
-    end loop;
-
-    perform workflow.drain_sql_steps(v_run_id);
-    return v_run_id;
-end;
-$$ language plpgsql security definer set search_path = pg_catalog, public;
+-- workflow.start_workflow(text,jsonb,text,text) is defined in section 9.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.
 
 -- ============================================================
 -- 22. Reported by building a real pipeline against this engine.
@@ -4461,132 +3847,18 @@ returns uuid as $$
     select md5(p_run_id::text || ':' || coalesce(p_group, ''))::uuid;
 $$ language sql immutable;
 
-create or replace function workflow.resolve_args(p_args jsonb, p_run_id uuid, p_item jsonb)
-returns jsonb as $$
-declare
-    r        workflow.runs;
-    v_meta   jsonb;
-    v_out    jsonb := '[]'::jsonb;
-    v_arg    jsonb;
-    v_txt    text;
-    v_ref    text;
-    v_head   text;
-    v_rest   text;
-    v_val    jsonb;
-begin
-    select * into r from workflow.runs where id = p_run_id;
-
-    for v_arg in select * from jsonb_array_elements(coalesce(p_args, '[]'::jsonb))
-    loop
-        v_txt := v_arg #>> '{}';
-        -- `$` joins the character class so {{run.$id}} is a whole-string
-        -- reference like any other. Partial interpolation stays the worker's
-        -- job; here an argument is a value, not a template.
-        if v_txt is not null and v_txt ~ '^\s*\{\{\s*[a-zA-Z0-9_.$]+\s*\}\}\s*$' then
-            v_ref  := trim(both from replace(replace(v_txt, '{{', ''), '}}', ''));
-            v_head := split_part(v_ref, '.', 1);
-            v_rest := substr(v_ref, length(v_head) + 2);
-            if v_head = 'steps' then
-                v_val := r.context #> string_to_array(v_rest, '.');
-            elsif v_head = 'run' then
-                if left(v_rest, 1) = '$' then
-                    v_meta := workflow.run_meta(p_run_id);
-                    v_val := v_meta -> v_rest;
-                    if v_val is null then
-                        raise exception
-                            'unknown engine field ''run.%''. Available: %',
-                            v_rest, (select string_agg(k, ', ' order by k)
-                                     from jsonb_object_keys(v_meta) k);
-                    end if;
-                else
-                    v_val := r.input #> string_to_array(v_rest, '.');
-                    -- The natural thing to type for a run's own id is
-                    -- {{run.id}}. Say what to write instead of resolving to
-                    -- nothing and failing eight tasks later.
-                    if v_val is null and workflow.run_meta(p_run_id) ? ('$' || v_rest) then
-                        raise exception
-                            'template ''run.%'' resolved to nothing. {{run.*}} reads the '
-                            'run INPUT; the run''s own % is {{run.$%}} -- the $ prefix is '
-                            'reserved for engine fields so an input key named ''%'' cannot '
-                            'shadow it.', v_rest, v_rest, v_rest, v_rest;
-                    end if;
-                end if;
-            elsif v_head = 'item' then
-                if p_item is null then
-                    raise exception
-                        'template ''%'' names the item namespace, but this task is not a '
-                        'matrix fan-out child -- {{item.*}} is only bound on tasks '
-                        'expanded from a matrix step', v_ref;
-                end if;
-                v_val := p_item #> string_to_array(v_rest, '.');
-            else
-                raise exception
-                    'unknown template namespace ''%'' in a sql step argument '
-                    '-- expected steps, run or item', v_head;
-            end if;
-            if v_val is null then
-                raise exception 'template ''%'' resolved to nothing', v_ref;
-            end if;
-            v_out := v_out || jsonb_build_array(v_val);
-        else
-            v_out := v_out || jsonb_build_array(v_arg);
-        end if;
-    end loop;
-    return v_out;
-end;
-$$ language plpgsql stable;
+-- workflow.resolve_args(jsonb,uuid,jsonb) is defined in section 20a.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.
 
 -- The worker resolves {{run.*}} out of the `run_input` it is handed, and it is
 -- a shipped image that will not learn a new namespace. Merging the $-prefixed
 -- fields INTO run_input makes {{run.$id}} work in a `rest` step with no client
 -- change at all -- and it cannot shadow anything, because that is what the
 -- reserved prefix is for.
-create or replace function workflow.get_task_context(p_task_id uuid, p_worker_id text)
-returns jsonb as $$
-declare
-    v_task workflow.tasks;
-    v_run  workflow.runs;
-begin
-    select * into v_task from workflow.tasks where id = p_task_id;
-    if not found then
-        raise exception 'task % not found', p_task_id;
-    end if;
-    if v_task.claimed_by is distinct from p_worker_id or v_task.status <> 'running' then
-        raise exception
-            'task % is not currently claimed by % -- a worker may only read the context of a task it holds',
-            p_task_id, p_worker_id;
-    end if;
-
-    select * into v_run from workflow.runs where id = v_task.run_id;
-
-    return jsonb_build_object(
-        'run_id',      v_run.id,
-        -- FEATURE 1a: {{run.$session}} binds to THIS step's thread. The group
-        -- is a property of the step, so the template stays the same everywhere
-        -- and two groups in one run are two independent conversations. Merged
-        -- into run_input because the worker resolves {{run.*}} out of it and is
-        -- a shipped image that will not learn a namespace -- the reserved $
-        -- prefix is what makes that safe.
-        'run_input',   coalesce(v_run.input, '{}'::jsonb)
-                       || workflow.run_meta(v_task.run_id)
-                       || case when v_task.input ? 'session_group'
-                               then jsonb_build_object('$session',
-                                      workflow.run_session(v_task.run_id,
-                                        v_task.input->>'session_group')::text)
-                               else '{}'::jsonb end,
-        'context',     coalesce(v_run.context, '{}'::jsonb),
-        'task_input',  coalesce(v_task.input, '{}'::jsonb),
-        'step_key',    v_task.step_key,
-        'kind',        v_task.kind,
-        'item',        v_task.input->'item',
-        'matrix_parent_step', (select m.step_key from workflow.tasks m
-                               where m.id = v_task.matrix_parent_id),
-        'attempt',     v_task.attempts,
-        'trace_id',    v_run.trace_id,
-        'span_id',     v_task.span_id
-    );
-end;
-$$ language plpgsql stable security definer set search_path = pg_catalog, public;
+-- workflow.get_task_context(uuid,text) is defined in section 16.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.
 
 -- ------------------------------------------------------------
 -- 22b. BUG 2 -- registration checked the wrong role's privileges.
@@ -4609,48 +3881,9 @@ $$ language plpgsql stable security definer set search_path = pg_catalog, public
 -- The definer is looked up rather than hardcoded: this file must not assume it
 -- is installed as any particular role.
 -- ------------------------------------------------------------
-create or replace function workflow.register_step_function(
-    p_name text, p_fn text, p_arg_types text[] default '{}',
-    p_timeout_ms int default 30000, p_description text default null
-) returns void as $$
-declare
-    v_sig     text := p_fn || '(' || array_to_string(p_arg_types, ',') || ')';
-    v_oid     oid;
-    v_definer name;
-    v_nsp     text;
-begin
-    v_oid := to_regprocedure(v_sig);
-    if v_oid is null then
-        raise exception 'function % does not exist', v_sig;
-    end if;
-
-    -- Whoever owns execute_sql_step is who will run this at dispatch.
-    select pg_get_userbyid(proowner) into v_definer
-    from pg_proc where oid = to_regprocedure('workflow.execute_sql_step(uuid)');
-
-    select n.nspname into v_nsp
-    from pg_proc p join pg_namespace n on n.oid = p.pronamespace where p.oid = v_oid;
-
-    if not has_schema_privilege(v_definer, v_nsp, 'USAGE') then
-        raise exception
-            'function % is not reachable by %, which is the role that will execute it '
-            '(execute_sql_step is SECURITY DEFINER). Registration would succeed and every '
-            'invocation would fail with "permission denied for schema %". Run: '
-            'grant usage on schema % to %;',
-            v_sig, v_definer, v_nsp, quote_ident(v_nsp), quote_ident(v_definer::text);
-    end if;
-    if not has_function_privilege(v_definer, v_oid, 'EXECUTE') then
-        raise exception
-            'function % exists and its schema is reachable, but % cannot execute it. Run: '
-            'grant execute on function % to %;', v_sig, v_definer, v_sig, quote_ident(v_definer::text);
-    end if;
-
-    insert into workflow.step_functions (name, fn, arg_types, timeout_ms, description)
-    values (p_name, p_fn, p_arg_types, p_timeout_ms, p_description)
-    on conflict (name) do update set fn = excluded.fn, arg_types = excluded.arg_types,
-        timeout_ms = excluded.timeout_ms, description = excluded.description;
-end;
-$$ language plpgsql;
+-- workflow.register_step_function(text,text,text[],int,text) is defined in section 17.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.
 
 -- ------------------------------------------------------------
 -- 22c. BUG 3 -- the two halves can ship out of step, silently.
@@ -4723,51 +3956,9 @@ $$ language plpgsql stable security definer set search_path = pg_catalog, public
 -- that mentions the one-of rule on a document using a feature the installed
 -- compiler does not have is not a syntax error, and saying so is the whole
 -- difference between "my YAML is wrong" and "my extension is old".
-create or replace function workflow.define_yaml(p_yaml text)
-returns uuid as $$
-declare
-    c        jsonb;
-    v_id     uuid;
-    v_name   text;
-    v_ver    int;
-    v_caps   jsonb;
-    v_stale  text[];
-begin
-    if to_regprocedure('p8_compile_workflow(text)') is null then
-        raise exception
-            'workflow.define_yaml needs the percolate extension (p8_compile_workflow). '
-            'Install it, or insert the spec into workflow.definitions as JSON.';
-    end if;
-
-    execute 'select p8_compile_workflow($1)' into c using p_yaml;
-
-    if not coalesce((c->>'ok')::boolean, false) then
-        v_caps := workflow.compiler_capabilities();
-        select array_agg(f) into v_stale
-        from jsonb_array_elements_text(v_caps->'missing') f
-        where p_yaml ~ ('(^|[[:space:]])' || f || '[[:space:]]*:');
-
-        if v_stale is not null then
-            raise exception
-                'workflow YAML did not compile: %.  This document uses %, which the '
-                'INSTALLED compiler does not accept -- the SQL schema supports it and the '
-                'compiled extension predates it. This is a version skew, not a syntax '
-                'error. Rebuild the percolate extension, or write the spec as JSON.',
-                c->>'error', array_to_string(v_stale, ', ');
-        end if;
-        raise exception 'workflow YAML did not compile: %', c->>'error';
-    end if;
-
-    v_name := c#>>'{workflow,name}';
-    v_ver  := coalesce((c#>>'{workflow,version}')::int, 1);
-
-    insert into workflow.definitions (name, version, spec)
-    values (v_name, coalesce((select max(version) + 1 from workflow.definitions where name = v_name), v_ver),
-            c#>'{workflow,spec}')
-    returning id into v_id;
-    return v_id;
-end;
-$$ language plpgsql security definer set search_path = pg_catalog, public;
+-- workflow.define_yaml(text) is defined in section 18.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.
 
 -- ------------------------------------------------------------
 -- 22d. `{{run.$*}}` is bound before the worker ever sees it.
@@ -4846,53 +4037,6 @@ begin
 end;
 $$ language plpgsql immutable;
 
-create or replace function workflow.get_task_context(p_task_id uuid, p_worker_id text)
-returns jsonb as $$
-declare
-    v_task workflow.tasks;
-    v_run  workflow.runs;
-    v_meta jsonb;
-begin
-    select * into v_task from workflow.tasks where id = p_task_id;
-    if not found then
-        raise exception 'task % not found', p_task_id;
-    end if;
-    if v_task.claimed_by is distinct from p_worker_id or v_task.status <> 'running' then
-        raise exception
-            'task % is not currently claimed by % -- a worker may only read the context of a task it holds',
-            p_task_id, p_worker_id;
-    end if;
-
-    select * into v_run from workflow.runs where id = v_task.run_id;
-
-    -- {{run.$session}} binds to THIS step's thread: the group is a property of
-    -- the step, so the template reads the same everywhere and two groups in one
-    -- run are two independent conversations.
-    v_meta := workflow.run_meta(v_task.run_id)
-              || case when v_task.input ? 'session_group'
-                      then jsonb_build_object('$session',
-                             workflow.run_session(v_task.run_id,
-                               v_task.input->>'session_group')::text)
-                      else '{}'::jsonb end;
-
-    return jsonb_build_object(
-        'run_id',      v_run.id,
-        -- Still merged, so a worker that DOES admit `$` sees them as ordinary
-        -- run input. The substitution below is what makes it work on one that
-        -- does not.
-        'run_input',   coalesce(v_run.input, '{}'::jsonb) || v_meta,
-        'context',     coalesce(v_run.context, '{}'::jsonb),
-        'task_input',  workflow.substitute_meta(
-                           coalesce(v_task.input, '{}'::jsonb), v_meta),
-        'run_meta',    v_meta,
-        'step_key',    v_task.step_key,
-        'kind',        v_task.kind,
-        'item',        v_task.input->'item',
-        'matrix_parent_step', (select m.step_key from workflow.tasks m
-                               where m.id = v_task.matrix_parent_id),
-        'attempt',     v_task.attempts,
-        'trace_id',    v_run.trace_id,
-        'span_id',     v_task.span_id
-    );
-end;
-$$ language plpgsql stable security definer set search_path = pg_catalog, public;
+-- workflow.get_task_context(uuid,text) is defined in section 16.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.

@@ -15,6 +15,42 @@ import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+
+def check_single_definition(path, text):
+    """Refuse to build a spec file that defines the same function twice.
+
+    schema.sql grew by appending: each fix was written next to the failure that
+    produced it, as `create or replace`, which meant the file accumulated
+    superseded bodies that never executed -- 1,013 dead lines and seventeen
+    functions with two to five definitions each. Behaviour stayed correct
+    because the last definition wins, and that is exactly what made it
+    dangerous: a maintainer fixing a bug has no way to tell which copy is live,
+    and a fix applied to a superseded one is silently a no-op.
+
+    Signature-aware, because two arities of one name are two functions.
+    """
+    sigs = {}
+    for m in re.finditer(
+            r'^create or replace function\s+([a-z_]+\.[a-z_]+)\s*\(([^)]*)\)',
+            text, re.M | re.S):
+        name, args = m.group(1), m.group(2)
+        types = []
+        for a in args.split(','):
+            a = re.sub(r'\s+default\s+.*$', '', a.strip(), flags=re.I)
+            if a:
+                parts = a.split()
+                types.append(parts[-1] if len(parts) > 1 else a)
+        sig = f"{name}({','.join(types)})"
+        sigs.setdefault(sig, []).append(text[:m.start()].count('\n') + 1)
+    dupes = {k: v for k, v in sigs.items() if len(v) > 1}
+    if dupes:
+        detail = "; ".join(f"{k} at lines {v}" for k, v in sorted(dupes.items()))
+        raise SystemExit(
+            f"{path}: a function is defined more than once -- {detail}.\n"
+            "Only the last definition runs. Keep one body, at the point it is first "
+            "needed, and let the later section explain why it has that shape.")
+
 VERSION = "0.1.0"
 
 # Not arbitrary: the two cores are MUTUALLY dependent (rbac.attempt_login needs
@@ -64,8 +100,10 @@ def main() -> int:
             return 1
         # Required extensions are declared in percolate.control, so the schema
         # files no longer create them and cannot disagree about versions.
+        raw = src.read_text()
+        check_single_definition(rel, raw)
         body = re.sub(r"^create extension if not exists [a-z_]+;.*$", "",
-                      src.read_text(), flags=re.M)
+                      raw, flags=re.M)
         parts.append(
             f"\n-- ============================================================\n"
             f"-- {rel}\n--   {why}\n"
