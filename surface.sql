@@ -72,6 +72,20 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('user-rbac','function','rbac.has_permission','uuid,text,text','spec.md §2: one authz function'),
 ('user-rbac','function','rbac.verify_api_key','text','spec.md §4.6: API-key path'),
 
+-- ---------- ai-query-layer: SCHEMA facets (schema.sql §13) --------------
+('ai-query-layer','function','aiq.schema','text,text','§13: the mode answerable before you know anything'),
+('ai-query-layer','function','aiq.render_facet','text,text','§13b: one place a facet is produced'),
+('ai-query-layer','function','aiq.verify_example','text,text','§13a: examples are run, not trusted'),
+('ai-query-layer','function','aiq.capture_schema_revisions','','§13b: the version is a hash, a change is a row'),
+('ai-query-layer','function','aiq.schema_drift','','§13b: a read-only gate on an uncaptured schema'),
+('ai-query-layer','table','aiq.schema_facets',null,'§13: a facet is a registration, not a branch'),
+('ai-query-layer','table','aiq.schema_examples',null,'§13a: the example corpus is data'),
+('ai-query-layer','table','aiq.schema_revisions',null,'§13b: versioned and maintained with updates'),
+('ai-query-layer','function','aiq.schema_p8ql','text','§13d: the dialect, from what parses it'),
+('ai-query-layer','function','aiq.schema_workflow','text','§13e: enough to author a workflow unaided'),
+('ai-query-layer','function','aiq.schema_sql','text','§13f: caller-scoped, deliberately'),
+('ai-query-layer','function','aiq.schema_graph','text','§13g: the edge catalogue the trigger enforces'),
+
 -- ---------- workflow-engine --------------------------------------------
 ('workflow-engine','schema','workflow',null,'spec.md: Postgres owns orchestration state'),
 ('workflow-engine','table','workflow.definitions',null,'spec.md §2'),
