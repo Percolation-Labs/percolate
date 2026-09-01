@@ -163,7 +163,7 @@ than committed, for the same reason those vectors are literals: a fixture you
 cannot regenerate is a fixture nobody can check, and a PDF in git is 40KB of
 bytes a reviewer has to take on trust.
 
-Five defects came out of running it, all recorded in
+Seven defects came out of running it, all recorded in
 `../../specs/world-model-ingestion/ingestion.md` §7 — including a `rate_key`
 that names a bucket with no row, which parks the task forever while the worker
 beside it reports an empty queue.
