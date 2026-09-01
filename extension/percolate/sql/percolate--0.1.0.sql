@@ -2042,6 +2042,885 @@ grant execute on function workflow.cron_matches(text, timestamptz, text) to auth
 
 revoke execute on function workflow.assert_schedule_access(text, text) from public;
 
+-- ============================================================
+-- 20. `matrix` steps -- fan-out is a SELECT, and it commits with its parent.
+--
+-- The problem this solves is Argo Workflows' `withParam`. Argo expands a
+-- matrix by having a controller pod read a JSON array out of a previous
+-- step's output and template one pod per element. It works, and it costs
+-- three processes and a serialisation round trip before any real work starts:
+-- the step that emits the array, the controller that reads it, and the pods it
+-- creates. It also leaves a window open -- the emitting step is `done` and its
+-- children do not exist yet -- in which a controller crash strands the
+-- fan-out with nothing to resume from.
+--
+-- Percolate already had both halves of the alternative and had not put them
+-- together. `kind='sql'` (§17) runs a query with no process; §12's
+-- complete_decision_task atomically completes a task AND inserts the tasks it
+-- decided on. A matrix step is those two facts in one function: the work to do
+-- IS a query result, and the row set, the children, and the parent's
+-- completion all land in one transaction.
+--
+-- Zero processes expand the matrix. The parent cannot be `done` while its
+-- children are missing, because they are inserted by the statement that
+-- completes it.
+--
+-- ------------------------------------------------------------------
+-- THE FAN-IN IS NOT FREE, AND THE DESIGN NOTE THAT SAID IT WAS WAS WRONG.
+--
+-- The claim this section was written against was: "the fan-in is already
+-- handled -- pending_deps is an AND-join, so an aggregate step depending on
+-- the matrix simply waits." That is false against this engine, and running it
+-- says so immediately. A static successor declares `depends_on: [fan]`, so its
+-- one edge points at the MATRIX task -- which completes at expansion time,
+-- before a single child has run. The aggregate would fire instantly, over
+-- nothing.
+--
+-- So expansion does three things, not two: it inserts the children, it
+-- REWIRES every successor of the matrix step to depend on the children
+-- instead of only on the matrix task (edge inserted, pending_deps
+-- incremented), and only then completes the parent. The cascade then
+-- decrements the successor's original edge to the matrix task by one, leaving
+-- exactly N outstanding. The AND-join is real, but it had to be built.
+--
+-- ------------------------------------------------------------------
+-- WHERE THE ROW SET IS RECORDED, AND WHY NOT WHERE IT WAS SUPPOSED TO BE.
+--
+-- A decision task in this engine is contractually a pure function of a
+-- recorded input snapshot (§12). A query over live tables is not pure --
+-- a watchlist changes between runs. The intended resolution was "the matrix's
+-- row set IS the snapshot: record it as the task's output at expansion time,
+-- and replay reads the recorded set rather than re-running the query."
+--
+-- That resolution does not survive §7's payload cap. Five thousand rows do
+-- not fit in a 64KB output, and making the matrix step the one kind of task
+-- that writes a multi-megabyte payload -- or a $ref to object storage, for a
+-- set the database already holds -- is a worse answer than the one the
+-- schema hands you for free:
+--
+--   THE CHILDREN ARE THE SNAPSHOT. Each row is recorded, durably and
+--   individually, as `input->'item'` on the child task it produced. The set is
+--   `select input->'item' from workflow.tasks where matrix_parent_id = ...`,
+--   in insertion order, and each row is inside the payload cap by
+--   construction because it is one row.
+--
+-- The matrix task's own output therefore records the DIGEST -- the count and a
+-- hash over the ordered row set -- which is all a determinism check needs, and
+-- reuses `decision_output_hash` unchanged. A re-expansion that produces a
+-- different row set is refused by name rather than silently fanning out over a
+-- changed world; a re-expansion that produces the same one is a no-op.
+--
+-- ------------------------------------------------------------------
+-- MATRIX ROWS COME FROM A REGISTERED FUNCTION, NOT AN INLINE SELECT.
+--
+-- The obvious spelling is an inline `sql: | select ...` in the step. It is
+-- refused here for exactly the reason §17 refuses it for `sql` steps: this
+-- executes SECURITY DEFINER, so a step that could supply a statement would be
+-- a privilege-escalation primitive with a YAML front end. A matrix names a
+-- function in the SAME allow-list (`workflow.step_functions`) that `sql` steps
+-- use, and the function returns a JSON array of objects. Registration stays an
+-- owner-only act, so authoring a matrix never widens what can be executed.
+--
+-- The cost is real -- a new fan-out shape needs a migration, not just a YAML
+-- edit -- and it is the correct cost. A literal `items: [...]` list covers the
+-- small static case without a registration.
+--
+-- ------------------------------------------------------------------
+-- DELIBERATELY NOT HERE (each has a reason, not an omission):
+--
+--   * AGGREGATION OVER CHILDREN. There is no `{{items.<step>}}` namespace and
+--     no gather step. Children do NOT write into `runs.context` -- see
+--     complete_task below -- because 5,000 outputs in one JSONB column is a
+--     row that is rewritten in full on every child completion, which is
+--     quadratic write amplification on the hottest path in the schema. The
+--     pattern that works today is the one the worked pipelines actually want:
+--     children write to a domain table, and the successor is a `sql` step over
+--     that table. Promote a real aggregation namespace on the second consumer
+--     that cannot be expressed that way, per
+--     meta/skills/spec-driven-development §5.
+--   * PARTIAL-FAILURE TOLERANCE (`continue_on: failed`, `min_success`). One
+--     failed child currently cascade-cancels the successors, which for an
+--     11,200-fetch matrix against a public API means one 404 kills the run.
+--     This is the first thing to build next and it is a known sharp edge, not
+--     a solved one.
+--   * A PER-MATRIX PARALLELISM CAP. `rate_key` plus queue_config already
+--     throttle the children; a second concurrency mechanism needs a case the
+--     first one cannot express.
+--   * NESTED MATRIX. A matrix inside a matrix template is REJECTED at
+--     validation rather than silently mis-wired: a child has no static
+--     successors to rewire, so its grandchildren would never be joined to the
+--     rollup. Refusing by name beats a run that completes early and looks fine.
+-- ============================================================
+
+alter table workflow.tasks drop constraint if exists tasks_kind_check;
+alter table workflow.tasks add constraint tasks_kind_check
+    check (kind in ('work','decision','timer','signal','sub_workflow','http_call','sql','matrix'));
+
+-- Set on a CHILD, pointing at the matrix task that produced it. Three jobs:
+-- it is how expansion finds what it already created (the re-expansion guard),
+-- it is how the recorded row set is read back, and it is what complete_task
+-- keys off to keep fan-out children out of runs.context.
+alter table workflow.tasks
+    add column if not exists matrix_parent_id uuid references workflow.tasks(id);
+
+create index if not exists idx_tasks_matrix_parent
+    on workflow.tasks (matrix_parent_id, created_at)
+    where matrix_parent_id is not null;
+
+-- ------------------------------------------------------------
+-- 20a. `{{item.*}}` -- a third namespace, and where it lives.
+--
+-- A fan-out child's whole reason to exist is one row, so it needs a way to
+-- name it. The row is NOT substituted into the child's input at expansion
+-- time: §"Templates" in YAML.md is explicit that resolving at author time
+-- makes the recorded task input a lie about what was sent, and pre-baking
+-- 5,000 URLs would make it a lie 5,000 times over. Instead the row is stored
+-- verbatim as `input->'item'` and resolved at dispatch, exactly like
+-- {{run.*}} and {{steps.*}}.
+--
+-- The 3-argument form carries the item; the 2-argument form is kept and
+-- delegates, so every existing caller and the surface-audit row for
+-- resolve_args(jsonb,uuid) stay valid.
+-- ------------------------------------------------------------
+create or replace function workflow.resolve_args(p_args jsonb, p_run_id uuid, p_item jsonb)
+returns jsonb as $$
+declare
+    r        workflow.runs;
+    v_out    jsonb := '[]'::jsonb;
+    v_arg    jsonb;
+    v_txt    text;
+    v_ref    text;
+    v_head   text;
+    v_rest   text;
+    v_val    jsonb;
+begin
+    select * into r from workflow.runs where id = p_run_id;
+
+    for v_arg in select * from jsonb_array_elements(coalesce(p_args, '[]'::jsonb))
+    loop
+        v_txt := v_arg #>> '{}';
+        if v_txt is not null and v_txt ~ '^\s*\{\{\s*[a-zA-Z0-9_.]+\s*\}\}\s*$' then
+            v_ref  := trim(both from replace(replace(v_txt, '{{', ''), '}}', ''));
+            v_head := split_part(v_ref, '.', 1);
+            v_rest := substr(v_ref, length(v_head) + 2);
+            if v_head = 'steps' then
+                v_val := r.context #> string_to_array(v_rest, '.');
+            elsif v_head = 'run' then
+                v_val := r.input #> string_to_array(v_rest, '.');
+            elsif v_head = 'item' then
+                -- Naming {{item.x}} in a step that is not a fan-out child is
+                -- an authoring error, and it must not read as "the row had no
+                -- such column" -- those need different fixes.
+                if p_item is null then
+                    raise exception
+                        'template ''%'' names the item namespace, but this task is not a '
+                        'matrix fan-out child -- {{item.*}} is only bound on tasks '
+                        'expanded from a matrix step', v_ref;
+                end if;
+                v_val := p_item #> string_to_array(v_rest, '.');
+            else
+                raise exception
+                    'unknown template namespace ''%'' in a sql step argument '
+                    '-- expected steps, run or item', v_head;
+            end if;
+            if v_val is null then
+                raise exception 'template ''%'' resolved to nothing', v_ref;
+            end if;
+            v_out := v_out || jsonb_build_array(v_val);
+        else
+            v_out := v_out || jsonb_build_array(v_arg);
+        end if;
+    end loop;
+    return v_out;
+end;
+$$ language plpgsql stable;
+
+create or replace function workflow.resolve_args(p_args jsonb, p_run_id uuid)
+returns jsonb as $$
+    select workflow.resolve_args(p_args, p_run_id, null::jsonb);
+$$ language sql stable;
+
+-- ------------------------------------------------------------
+-- 20b. One place that calls an allow-listed function.
+--
+-- execute_sql_step (§17) built the call by hand: look the name up in
+-- workflow.step_functions, set the statement timeout, extract each argument
+-- according to its REGISTERED type rather than uniformly as text, and
+-- to_jsonb the result. A matrix step needs precisely the same four things to
+-- get its row set, and a second hand-rolled copy of that argument-coercion
+-- logic is the kind of duplication that drifts silently -- the text/jsonb
+-- distinction below already cost real debugging time once.
+--
+-- So it moves here and both callers use it. The subtransaction and the
+-- fail_task decision stay with the callers, because what a failure MEANS
+-- differs: a bad `sql` step fails its own task, a bad matrix query must fail
+-- before any child exists.
+-- ------------------------------------------------------------
+create or replace function workflow.call_step_function(
+    p_name text, p_args jsonb, p_run_id uuid, p_item jsonb default null
+) returns jsonb as $$
+declare
+    f      workflow.step_functions;
+    v_args jsonb;
+    v_sql  text;
+    v_out  jsonb;
+begin
+    select * into f from workflow.step_functions where name = p_name;
+    if not found then
+        raise exception
+            'step names function ''%'', which is not registered. Register it with '
+            'workflow.register_step_function() -- steps may not supply arbitrary SQL.',
+            p_name;
+    end if;
+
+    perform set_config('statement_timeout', f.timeout_ms::text, true);
+
+    -- Arguments are passed as parameters, never interpolated: a step's args
+    -- are data from the run, and building SQL text out of them would be
+    -- injection with extra steps.
+    v_args := workflow.resolve_args(coalesce(p_args, '[]'::jsonb), p_run_id, p_item);
+
+    -- Each argument is extracted according to its REGISTERED type, not
+    -- uniformly as text. Getting this wrong surfaces as "function f(text,
+    -- text) does not exist" -- which reads as a missing function rather than
+    -- a coercion problem.
+    if jsonb_array_length(v_args) = 0 then
+        execute format('select to_jsonb(%s())', f.fn) into v_out;
+    else
+        v_sql := format('select to_jsonb(%s(%s))', f.fn, (
+            select string_agg(
+                case lower(coalesce(f.arg_types[i], 'text'))
+                    when 'text'  then format('$1->>%s', i - 1)
+                    when 'jsonb' then format('$1->%s', i - 1)
+                    when 'json'  then format('($1->%s)::json', i - 1)
+                    else format('($1->>%s)::%s', i - 1, f.arg_types[i])
+                end, ',' order by i)
+            from generate_series(1, jsonb_array_length(v_args)) i));
+        execute v_sql into v_out using v_args;
+    end if;
+
+    return v_out;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- execute_sql_step, re-expressed over the shared caller. Behaviour is
+-- unchanged except that a `sql` step which is itself a matrix child can now
+-- name {{item.*}} in its args.
+create or replace function workflow.execute_sql_step(p_task_id uuid)
+returns boolean as $$
+declare
+    t      workflow.tasks;
+    v_spec jsonb;
+    v_out  jsonb;
+begin
+    select * into t from workflow.tasks where id = p_task_id;
+    if not found or t.status <> 'ready' or t.kind <> 'sql' then
+        return false;
+    end if;
+
+    update workflow.tasks set status = 'running', claimed_by = 'in-database',
+           claimed_at = now(), heartbeat_at = now(), attempts = attempts + 1
+    where id = p_task_id;
+
+    v_spec := coalesce(t.input, '{}'::jsonb);
+
+    begin      -- subtransaction: a failure here must not abort the caller
+        v_out := workflow.call_step_function(
+            v_spec->>'function', v_spec->'args', t.run_id, t.input->'item');
+        perform workflow.complete_task(p_task_id, jsonb_build_object('result', v_out));
+        return true;
+    exception when others then
+        perform workflow.fail_task(p_task_id,
+            jsonb_build_object('error', sqlerrm, 'sqlstate', sqlstate),
+            -- A missing registration or a bad signature will fail identically
+            -- on every retry; a deadlock or timeout will not.
+            sqlstate in ('42883','42P01','P0001'));
+        return true;
+    end;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
+-- 20c. Expansion -- the whole mechanism, in one transaction.
+--
+-- Step spec (the `input` of a `kind: matrix` step):
+--
+--   {
+--     "rows":  {"function": "<registered>", "args": [...]},   -- OR
+--     "items": [ {...}, {...} ],                              -- a literal set
+--     "max_fanout": 5000,
+--     "template": {
+--        "queue":  "edgar-xbrl",
+--        "kind":   "http_call",
+--        "input":  {"url": ".../CIK{{item.cik}}/...", "jsonpath": "units.USD"},
+--        "rate_key": "sec-edgar"
+--     }
+--   }
+--
+-- Children are keyed `<matrix_key>[<i>]`, which is why validate_spec below
+-- refuses a declared step key containing '[' -- the two namespaces must not
+-- be able to collide.
+--
+-- Returns the number of children created. Zero is a legitimate answer, not an
+-- error: an empty row set means there was nothing to do, the matrix task
+-- completes, and its successors run with no children to wait for. A matrix
+-- that fails on an empty result would make "nothing changed since last time"
+-- an incident.
+-- ------------------------------------------------------------
+create or replace function workflow.expand_matrix(p_task_id uuid)
+returns int as $$
+declare
+    t           workflow.tasks;
+    v_spec      jsonb;
+    v_rows      jsonb;
+    v_max       int;
+    v_tmpl      jsonb;
+    v_row       jsonb;
+    v_i         int := 0;
+    v_child     uuid;
+    v_children  uuid[] := '{}';
+    v_succ      uuid;
+    v_added     int;
+    v_hash      text;
+    v_prior     text;
+begin
+    select * into t from workflow.tasks where id = p_task_id;
+    -- run_after is checked here and not in execute_sql_step's equivalent, and
+    -- that asymmetry is load-bearing. fail_task's retry path sets a task back
+    -- to 'ready' with a future run_after -- which is an UPDATE into ready, so
+    -- the autorun trigger fires again immediately. Without this guard a matrix
+    -- whose expansion failed re-expands on the spot, burning every attempt in
+    -- one transaction while backoff does nothing.
+    if not found or t.status <> 'ready' or t.kind <> 'matrix' or t.run_after > now() then
+        return 0;
+    end if;
+
+    -- Same guard as add_task: no new work under a cancelled run, and a matrix
+    -- is the largest possible way to violate that.
+    if exists (select 1 from workflow.runs where id = t.run_id and status = 'cancelled') then
+        update workflow.tasks set status = 'cancelled' where id = p_task_id;
+        return 0;
+    end if;
+
+    update workflow.tasks set status = 'running', claimed_by = 'in-database',
+           claimed_at = now(), heartbeat_at = now(), attempts = attempts + 1
+    where id = p_task_id;
+
+    v_spec := coalesce(t.input, '{}'::jsonb);
+    v_tmpl := v_spec->'template';
+    v_max  := (v_spec->>'max_fanout')::int;
+
+    begin      -- subtransaction: a bad matrix must not abort the transaction
+               -- of whichever worker happened to complete the step before it
+        if v_tmpl is null or jsonb_typeof(v_tmpl) <> 'object' then
+            raise exception 'matrix step ''%'' has no template object', t.step_key;
+        end if;
+        if v_max is null or v_max < 1 then
+            raise exception
+                'matrix step ''%'' declares no max_fanout. A matrix needs a ceiling: a '
+                'cross join with a forgotten WHERE inserts the cartesian product as task '
+                'rows, and the failure should be this task, not the database.', t.step_key;
+        end if;
+
+        -- The row set. Exactly one source, checked rather than preferred, so
+        -- a spec carrying both is a named error instead of a silent choice.
+        if (v_spec ? 'rows') = (v_spec ? 'items') then
+            raise exception
+                'matrix step ''%'' must declare exactly one of `rows` (a registered '
+                'function) or `items` (a literal list)', t.step_key;
+        end if;
+
+        if v_spec ? 'items' then
+            v_rows := v_spec->'items';
+        else
+            v_rows := workflow.call_step_function(
+                v_spec#>>'{rows,function}', v_spec#>'{rows,args}', t.run_id, t.input->'item');
+        end if;
+
+        if v_rows is null or jsonb_typeof(v_rows) <> 'array' then
+            raise exception
+                'matrix step ''%'' produced % where a JSON array of row objects was '
+                'expected -- a matrix function must return jsonb shaped like '
+                '[{"col": ...}, ...]', t.step_key, coalesce(jsonb_typeof(v_rows), 'null');
+        end if;
+
+        if jsonb_array_length(v_rows) > v_max then
+            raise exception
+                'matrix step ''%'' would expand to % tasks, over its declared max_fanout '
+                'of %. Narrow the query or raise the ceiling deliberately.',
+                t.step_key, jsonb_array_length(v_rows), v_max;
+        end if;
+
+        -- The digest, over the ORDERED row set. This is what makes a matrix a
+        -- decision task in the §12 sense without storing the set twice: the
+        -- rows themselves are recorded on the children, and this is the thing
+        -- a re-expansion is checked against.
+        v_hash := md5(v_rows::text);
+        select decision_output_hash into v_prior from workflow.tasks where id = p_task_id;
+
+        -- Re-expansion. Children existing means a previous expansion COMMITTED
+        -- (insert, rewire and completion are one transaction, so a crash
+        -- mid-expansion leaves nothing behind). Re-running it must not
+        -- double-insert, and must not quietly fan out over a world that has
+        -- changed underneath the run.
+        if exists (select 1 from workflow.tasks where matrix_parent_id = p_task_id) then
+            if v_prior is distinct from v_hash then
+                raise exception
+                    'matrix step ''%'' re-expanded to a DIFFERENT row set (recorded hash '
+                    '%, now %). The row set is this task''s recorded snapshot; a fan-out '
+                    're-expanded against changed source tables is not a replay of this '
+                    'run, it is a different run wearing the same id.',
+                    t.step_key, v_prior, v_hash;
+            end if;
+            -- completed_at is deliberately NOT touched: it is the marker
+            -- 20i uses to know this task has already cascaded, and rewriting
+            -- it here would re-decrement every successor's pending_deps.
+            update workflow.tasks set status = 'done' where id = p_task_id;
+            return (select count(*)::int from workflow.tasks where matrix_parent_id = p_task_id);
+        end if;
+
+        -- 1. The children. Each carries its row verbatim as input->'item';
+        --    the template's own {{...}} references are left untouched and
+        --    resolve at dispatch, like every other step's.
+        for v_row in select * from jsonb_array_elements(v_rows)
+        loop
+            insert into workflow.tasks (
+                run_id, step_key, queue, kind, input, rate_key,
+                pending_deps, status, matrix_parent_id, parent_span_id,
+                saga_group, compensation_task_key)
+            values (
+                t.run_id,
+                t.step_key || '[' || v_i || ']',
+                coalesce(v_tmpl->>'queue', t.queue),
+                coalesce(v_tmpl->>'kind', 'work'),
+                coalesce(v_tmpl->'input', '{}'::jsonb) || jsonb_build_object('item', v_row),
+                v_tmpl->>'rate_key',
+                0, 'ready', p_task_id, t.span_id,
+                v_tmpl->>'saga_group',
+                v_tmpl->>'compensation_task_key')
+            on conflict (run_id, step_key) do nothing
+            returning id into v_child;
+
+            if v_child is null then
+                raise exception
+                    'matrix step ''%'' collided on child key %[%] -- a declared step key '
+                    'must not shadow a fan-out child key', t.step_key, t.step_key, v_i;
+            end if;
+            v_children := v_children || v_child;
+            v_i := v_i + 1;
+        end loop;
+
+        -- 2. THE REWIRE. Every successor of the matrix step gains an edge to
+        --    every child. This is what turns pending_deps into a real AND-join
+        --    over the fan-out; without it the successor's single edge to the
+        --    matrix task is satisfied the instant the matrix completes, and
+        --    the aggregate runs over nothing.
+        --
+        --    The successor row is locked first, for the same reason add_task
+        --    locks its dependencies (fix #1): a concurrent completion racing
+        --    this increment would otherwise leave the successor permanently
+        --    stuck at a pending_deps that never reaches zero.
+        if array_length(v_children, 1) > 0 then
+            for v_succ in
+                select task_id from workflow.task_dependencies
+                where depends_on_task_id = p_task_id
+                order by task_id
+            loop
+                perform 1 from workflow.tasks where id = v_succ for update;
+
+                insert into workflow.task_dependencies (task_id, depends_on_task_id)
+                select v_succ, c from unnest(v_children) c
+                on conflict do nothing;
+                get diagnostics v_added = row_count;
+
+                update workflow.tasks set pending_deps = pending_deps + v_added
+                where id = v_succ;
+            end loop;
+        end if;
+
+        -- 3. Complete the parent. The cascade then decrements each successor's
+        --    ORIGINAL edge to this task by one, leaving exactly N outstanding
+        --    -- or zero, for an empty matrix, which correctly releases the
+        --    successor immediately.
+        --
+        --    The digest goes into runs.context under the step key, so
+        --    {{steps.<key>.fanout}} is available downstream. The rows do not:
+        --    they are on the children.
+        perform workflow.complete_task(p_task_id, jsonb_build_object(
+            'fanout',    coalesce(array_length(v_children, 1), 0),
+            'rows_hash', v_hash,
+            'source',    coalesce(v_spec#>>'{rows,function}', 'items')));
+        update workflow.tasks set decision_output_hash = v_hash where id = p_task_id;
+
+        -- 4. `sql` children need a kick. The autorun trigger (§17) fires ON
+        --    UPDATE INTO ready only, and these were INSERTED ready -- so
+        --    without this a matrix of sql steps would sit there forever. Found
+        --    exactly that way.
+        for v_child in
+            select id from workflow.tasks
+            where matrix_parent_id = p_task_id and kind = 'sql' and status = 'ready'
+            order by created_at, step_key
+        loop
+            perform workflow.execute_sql_step(v_child);
+        end loop;
+
+        return coalesce(array_length(v_children, 1), 0);
+    exception when others then
+        perform workflow.fail_task(p_task_id,
+            jsonb_build_object('error', sqlerrm, 'sqlstate', sqlstate),
+            -- A malformed spec, an unregistered function or a blown ceiling
+            -- fails identically on every retry. A deadlock or timeout does not.
+            sqlstate in ('42883','42P01','P0001'));
+        return 0;
+    end;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- Read the recorded row set back, in expansion order. This is the "snapshot"
+-- that §12's purity contract is about -- it is a query, not a column, because
+-- the rows live where they are individually useful.
+create or replace function workflow.matrix_rows(p_task_id uuid)
+returns jsonb as $$
+    select coalesce(jsonb_agg(t.input->'item' order by t.created_at, t.step_key), '[]'::jsonb)
+    from workflow.tasks t
+    where t.matrix_parent_id = p_task_id;
+$$ language sql stable security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
+-- 20d. Children stay out of runs.context.
+--
+-- complete_task writes every output into runs.context under its step key, so
+-- that {{steps.<key>.result}} works. For a fan-out that is the wrong shape at
+-- both ends. runs.context is ONE jsonb column, rewritten in full on every
+-- completion -- so N children make it N sequential rewrites of a value that
+-- grows to N outputs, which is quadratic write amplification on the hottest
+-- path in the schema, and blows §7's payload thinking to boot. And nothing
+-- can read it usefully anyway: `fan[0]`, `fan[1]` ... are not names an author
+-- writes.
+--
+-- So a matrix child completes without touching context. Its output is on its
+-- own row, where a `sql` successor can aggregate over it in one statement --
+-- and where the eventual {{items.<step>}} namespace will read it from, when a
+-- second consumer justifies building one.
+-- ------------------------------------------------------------
+create or replace function workflow.complete_task(p_task_id uuid, p_output jsonb)
+returns void as $$
+declare
+    v_run_id uuid;
+    v_matrix uuid;
+begin
+    -- CONTEXT FIRST, THEN STATUS. The order matters and is not stylistic:
+    -- flipping the task to 'done' fires the cascade, which can mark a `sql`
+    -- step ready, which auto-executes it IN THE SAME STATEMENT (§17). If the
+    -- run's context has not been written yet, that step resolves
+    -- {{steps.<this>.result}} against a context that does not contain this
+    -- step's output and fails with 'template resolved to nothing'.
+    select run_id, matrix_parent_id into v_run_id, v_matrix
+    from workflow.tasks where id = p_task_id;
+
+    if v_matrix is null then
+        update workflow.runs r
+        set context = context || jsonb_build_object(
+                (select step_key from workflow.tasks where id = p_task_id), p_output),
+            updated_at = now()
+        where r.id = v_run_id;
+    else
+        update workflow.runs set updated_at = now() where id = v_run_id;
+    end if;
+
+    update workflow.tasks set status = 'done', output = p_output, completed_at = now()
+    where id = p_task_id;
+
+    perform workflow.check_run_completion(v_run_id);
+    perform workflow.check_compensation_completion(v_run_id);
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
+-- 20e. A worker has to be able to see its row.
+--
+-- get_task_context returns task_input, and the item is inside it -- but a
+-- worker resolving {{item.cik}} should not have to know that {{run.*}} comes
+-- from one key and {{item.*}} from a nested field of another. The three
+-- namespaces are peers in the template language, so they are peers here.
+-- `null` when the task is not a fan-out child, which is what makes the
+-- worker's "you named item on a non-child" error possible at all.
+-- ------------------------------------------------------------
+create or replace function workflow.get_task_context(p_task_id uuid, p_worker_id text)
+returns jsonb as $$
+declare
+    v_task workflow.tasks;
+    v_run  workflow.runs;
+begin
+    select * into v_task from workflow.tasks where id = p_task_id;
+    if not found then
+        raise exception 'task % not found', p_task_id;
+    end if;
+    if v_task.claimed_by is distinct from p_worker_id or v_task.status <> 'running' then
+        raise exception
+            'task % is not currently claimed by % -- a worker may only read the context of a task it holds',
+            p_task_id, p_worker_id;
+    end if;
+
+    select * into v_run from workflow.runs where id = v_task.run_id;
+
+    return jsonb_build_object(
+        'run_id',      v_run.id,
+        'run_input',   coalesce(v_run.input, '{}'::jsonb),
+        'context',     coalesce(v_run.context, '{}'::jsonb),
+        'task_input',  coalesce(v_task.input, '{}'::jsonb),
+        'step_key',    v_task.step_key,
+        -- The worker dispatches to a handler by KIND, so it has to be told
+        -- what it just claimed.
+        'kind',        v_task.kind,
+        -- -> {{item.*}}. Null on every task that is not a matrix child.
+        'item',        v_task.input->'item',
+        'matrix_parent_step', (select m.step_key from workflow.tasks m
+                               where m.id = v_task.matrix_parent_id),
+        'attempt',     v_task.attempts,
+        'trace_id',    v_run.trace_id,
+        'span_id',     v_task.span_id
+    );
+end;
+$$ language plpgsql stable security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
+-- 20f. Validation -- refuse at registration, not at 3am.
+--
+-- validate_spec (§1b) asks one question: is this GRAPH sound. Whether a
+-- matrix step is well FORMED is a different question, and answering it inside
+-- validate_spec's body would mean re-pasting eighty lines of reachability
+-- closure to add a type check. Two functions, one trigger, and the trigger is
+-- the enforcement point -- which is where it has always actually been.
+-- ------------------------------------------------------------
+create or replace function workflow.validate_matrix_steps(p_spec jsonb) returns void as $$
+declare
+    v_step jsonb;
+    v_in   jsonb;
+    v_tk   text;
+    v_key  text;
+begin
+    if not exists (
+        select 1 from jsonb_array_elements(p_spec->'steps') s
+        where s->>'kind' = 'matrix')
+    then
+        return;
+    end if;
+
+    -- Children are keyed `<matrix_key>[<i>]`, so a declared key containing a
+    -- bracket could shadow one. Cheap to forbid, and the alternative failure
+    -- is a duplicate-key collision mid-expansion, after some children exist.
+    for v_key in select s->>'key' from jsonb_array_elements(p_spec->'steps') s loop
+        if v_key like '%[%' then
+            raise exception
+                'step key ''%'' contains ''['', which is reserved for matrix fan-out '
+                'child keys (<step>[<i>])', v_key;
+        end if;
+    end loop;
+
+    for v_step in
+        select * from jsonb_array_elements(p_spec->'steps') s where s->>'kind' = 'matrix'
+    loop
+        v_in := coalesce(v_step->'input', '{}'::jsonb);
+        v_tk := coalesce(v_in#>>'{template,kind}', 'work');
+
+        if (v_in ? 'rows') = (v_in ? 'items') then
+            raise exception
+                'matrix step ''%'' must declare exactly one of `rows` or `items`',
+                v_step->>'key';
+        end if;
+        if jsonb_typeof(v_in->'template') is distinct from 'object' then
+            raise exception 'matrix step ''%'' has no template object', v_step->>'key';
+        end if;
+        if (v_in->>'max_fanout') is null or (v_in->>'max_fanout')::int < 1 then
+            raise exception
+                'matrix step ''%'' declares no max_fanout. Declaring the ceiling is the '
+                'point: a cross join with a forgotten WHERE is the obvious way to hurt '
+                'yourself here, and it should fail the task rather than the database.',
+                v_step->>'key';
+        end if;
+
+        -- A child has no static successors to rewire, so a matrix inside a
+        -- matrix would produce grandchildren that no aggregate ever waits on
+        -- -- a run that completes early and looks fine. Refused by name.
+        if v_tk = 'matrix' then
+            raise exception
+                'matrix step ''%'' templates another matrix. Nested fan-out is not '
+                'supported: the grandchildren would never be joined to this step''s '
+                'successors, so the run would complete before they finished.',
+                v_step->>'key';
+        end if;
+        if v_tk in ('signal', 'decision') then
+            raise exception
+                'matrix step ''%'' templates kind ''%'', which has no meaning per-row '
+                '-- a signal is addressed by name and a decision must be uniquely keyed',
+                v_step->>'key', v_tk;
+        end if;
+    end loop;
+end;
+$$ language plpgsql;
+
+create or replace function workflow.check_spec_before_insert() returns trigger as $$
+begin
+    perform workflow.validate_spec(new.spec);
+    perform workflow.validate_matrix_steps(new.spec);
+    return new;
+end;
+$$ language plpgsql;
+
+-- ------------------------------------------------------------
+-- 20g. Making it automatic -- the same two hooks `sql` steps use.
+--
+-- A matrix step deploys nothing, so like a `sql` step it must run the moment
+-- it becomes ready. Both entry points are the same two: the ON UPDATE trigger
+-- for anything unblocked by a cascade, and the drain call in start_workflow
+-- for a matrix that is itself a root (where no transition into ready ever
+-- happens, because mark_roots_ready sets it on insert).
+--
+-- drain_sql_steps keeps its name and its surface-audit row; what it drains is
+-- now "the kinds that run in-database", which is what it always meant.
+-- ------------------------------------------------------------
+create or replace function workflow.autorun_sql_steps() returns trigger as $$
+begin
+    if new.status = 'ready' and old.status is distinct from 'ready' then
+        if new.kind = 'sql' then
+            perform workflow.execute_sql_step(new.id);
+        elsif new.kind = 'matrix' then
+            perform workflow.expand_matrix(new.id);
+        end if;
+    end if;
+    return null;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+create or replace function workflow.drain_sql_steps(p_run_id uuid, p_max int default 50)
+returns int as $$
+declare v_id uuid; v_kind text; v_done int := 0;
+begin
+    loop
+        select id, kind into v_id, v_kind from workflow.tasks
+        where run_id = p_run_id and kind in ('sql','matrix') and status = 'ready'
+          and run_after <= now()
+        order by kind, created_at
+        limit 1;
+        exit when v_id is null or v_done >= p_max;
+        if v_kind = 'sql' then
+            perform workflow.execute_sql_step(v_id);
+        else
+            perform workflow.expand_matrix(v_id);
+        end if;
+        v_done := v_done + 1;
+    end loop;
+    return v_done;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
+-- 20i. A task that completes twice must not decrement twice.
+--
+-- NOT a matrix bug, found by a matrix test. §7 of dev/tests/workflow/04
+-- forces a re-expansion the way a reaper would (done -> ready -> done). The
+-- second completion fired trg_cascade_task_status again, decrementing every
+-- successor's pending_deps a second time -- so the rollup went from 3
+-- outstanding children to 2, and would have fired one child early. The run
+-- would have reported `completed` with a result computed over an incomplete
+-- fan-out, which is this repo's worst failure shape.
+--
+-- The general statement: pending_deps is decremented on the TRANSITION into
+-- done, and the done -> ready transition never re-increments it, so a second
+-- decrement is always wrong. completed_at is the marker -- it is null on a
+-- first completion and set on any subsequent one.
+--
+-- This was reachable before matrix steps existed (any double
+-- complete_task on the same task), just not by any path anything took. The
+-- fan-out re-expansion path takes it deliberately.
+--
+-- The SECURITY DEFINER clause is restated here and is not optional: CREATE OR
+-- REPLACE resets the security attribute, and §16's self-check would (rightly)
+-- refuse the install if this silently became SECURITY INVOKER.
+-- ------------------------------------------------------------
+create or replace function workflow.cascade_task_status() returns trigger as $$
+begin
+    if new.status is not distinct from old.status then
+        return new;
+    end if;
+
+    if new.status = 'done' then
+        if old.completed_at is not null then
+            return new;   -- already cascaded on the first completion
+        end if;
+
+        update workflow.tasks t
+        set pending_deps = pending_deps - 1
+        where t.id in (select task_id from workflow.task_dependencies where depends_on_task_id = new.id);
+
+        update workflow.tasks t
+        set status = case when t.kind = 'signal' then 'waiting_external' else 'ready' end
+        where t.pending_deps = 0 and t.status = 'pending'
+          and t.id in (select task_id from workflow.task_dependencies where depends_on_task_id = new.id);
+
+        perform pg_notify('task_ready', t.queue)
+        from workflow.tasks t
+        where t.status = 'ready'
+          and t.id in (select task_id from workflow.task_dependencies where depends_on_task_id = new.id);
+
+    elsif new.status in ('cancelled', 'failed') then
+        -- cascade to direct dependents; their own transition to 'cancelled'
+        -- fires this trigger again on their row, cascading to any depth
+        update workflow.tasks t2
+        set status = 'cancelled'
+        where t2.status in ('pending', 'ready', 'waiting_external')
+          and t2.id in (select task_id from workflow.task_dependencies where depends_on_task_id = new.id);
+    end if;
+
+    return new;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
+-- 20h. Grants. Same shape as §17: nothing here needs a table grant, because
+-- every one of these is SECURITY DEFINER and the worker's whole interaction
+-- is function calls.
+-- ------------------------------------------------------------
+-- expand_matrix is granted to NOBODY, and that is the interesting one.
+-- Expansion is trigger-driven and reached from drain_sql_steps, both of which
+-- are SECURITY DEFINER and therefore need no grant. Handing it to a user
+-- identity would be a SECURITY DEFINER function that inserts up to max_fanout
+-- task rows into a run chosen by the caller -- the exact shape
+-- integration-rbac.sql's header calls out as confirmed exploitable elsewhere
+-- in this schema. `worker` does not get it either: a worker never claims a
+-- matrix task (they run in-database on queue 'none'), so the grant would be a
+-- privilege it holds and never uses, which is precisely the kind that survives
+-- long enough to be useful to an attacker.
+revoke execute on function workflow.expand_matrix(uuid) from public;
+-- matrix_rows reads a run's recorded snapshot, so it is user-facing and gets
+-- the authorization check every user-facing SECURITY DEFINER function in this
+-- collection gets. The check lives in integration-rbac.sql (f), next to
+-- assert_run_access; this grant is what that file re-authorizes.
+grant execute on function workflow.matrix_rows(uuid) to worker, authenticated;
+grant execute on function workflow.resolve_args(jsonb, uuid, jsonb) to worker, authenticated;
+-- call_step_function is DELIBERATELY not granted. It is the allow-list
+-- dispatcher, reachable only through execute_sql_step and expand_matrix,
+-- which decide WHICH task's arguments get passed to it. Granting it directly
+-- would let any caller invoke any registered function with arguments of its
+-- own choosing -- the allow-list without the workflow around it.
+revoke execute on function workflow.call_step_function(text, jsonb, uuid, jsonb) from public;
+
+do $$
+declare v_bad text;
+begin
+    select string_agg(p.proname, ', ') into v_bad
+    from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'workflow'
+      and p.proname in ('expand_matrix','call_step_function','complete_task',
+                        'get_task_context','execute_sql_step','drain_sql_steps')
+      and not p.prosecdef;
+    if v_bad is not null then
+        raise exception 'MATRIX-PATH FUNCTIONS ARE NOT SECURITY DEFINER: %', v_bad;
+    end if;
+    raise notice 'workflow-engine 20: matrix path self-check passed';
+end $$;
+
 
 -- ============================================================
 -- user-rbac/schema.sql
@@ -3103,6 +3982,35 @@ begin
     where run_id = p_run_id and wait_signal = p_signal and status = 'waiting_external';
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- schema.sql §20's matrix_rows() reads the recorded row set of a fan-out --
+-- a run's input data, one row per child. It is SECURITY DEFINER (it reads
+-- workflow.tasks, which no user role can touch directly) and it is granted to
+-- `authenticated`, which by this section's own rule means it MUST check the
+-- caller's authority over the run rather than trusting the task id it was
+-- handed. Without this, any authenticated user who could guess or observe a
+-- task id would read another tenant's watchlist, AOI grid or sponsor set.
+--
+-- Redefined here rather than checked in schema.sql for the same reason
+-- cancel_run is: rbac.current_user_id() does not exist until user-rbac loads,
+-- and the engine must install standalone.
+create or replace function workflow.matrix_rows(p_task_id uuid)
+returns jsonb as $$
+declare v_run uuid;
+begin
+    select run_id into v_run from workflow.tasks where id = p_task_id;
+    if not found then
+        raise exception 'task % not found', p_task_id;
+    end if;
+    perform workflow.assert_run_access(v_run, 'read');
+
+    return (select coalesce(jsonb_agg(t.input->'item' order by t.created_at, t.step_key),
+                            '[]'::jsonb)
+            from workflow.tasks t where t.matrix_parent_id = p_task_id);
+end;
+$$ language plpgsql stable security definer set search_path = pg_catalog, public;
+
+grant execute on function workflow.matrix_rows(uuid) to worker, authenticated;
 
 revoke execute on function workflow.cancel_run_unchecked(uuid) from public;
 revoke execute on function workflow.assert_run_access(uuid, text) from public;

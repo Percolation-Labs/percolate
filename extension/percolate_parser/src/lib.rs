@@ -644,6 +644,9 @@ struct WfStep {
     agent: Option<String>,
     #[serde(default)]
     work: Option<bool>,
+    // ...or a matrix, which is not an action but a fan-out OVER one.
+    #[serde(default)]
+    matrix: Option<WfMatrix>,
 
     // agent steps
     #[serde(default)]
@@ -665,8 +668,215 @@ struct SqlStep {
     args: Vec<serde_yaml::Value>,
 }
 
+// A matrix step: a row set, a ceiling, and ONE ordinary step spelled once and
+// run per row. The template is deliberately the same vocabulary as a top-level
+// step (rest/sql/p8ql/agent/work) rather than a second syntax -- YAML.md's
+// rule that every high-level step must remain expressible in raw steps applies
+// to the thing being fanned out as much as to the fan-out.
+#[derive(Deserialize)]
+struct WfMatrix {
+    // exactly one of rows / items
+    #[serde(default)]
+    rows: Option<SqlStep>,
+    #[serde(default)]
+    items: Option<Vec<serde_yaml::Value>>,
+    // NOT optional in practice -- see the check in compile_workflow. Declared
+    // Option only so a missing one is a named error rather than a serde
+    // "missing field" message that does not say why it matters.
+    #[serde(default)]
+    max_fanout: Option<i64>,
+    template: WfTemplate,
+}
+
+// The same action fields a step has, minus the graph and saga ones: a child
+// has no `needs` (it depends on nothing but the expansion) and no `id` (it is
+// keyed <step>[<i>] by the engine).
+#[derive(Deserialize)]
+struct WfTemplate {
+    #[serde(default)]
+    queue: Option<String>,
+    #[serde(default)]
+    p8ql: Option<String>,
+    #[serde(default)]
+    sql: Option<SqlStep>,
+    #[serde(default)]
+    rest: Option<serde_yaml::Value>,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    work: Option<bool>,
+    #[serde(default)]
+    input: Option<serde_yaml::Value>,
+    #[serde(default)]
+    session: Option<String>,
+    #[serde(default)]
+    rate_key: Option<String>,
+    // Rejected, not ignored. serde drops unknown keys, so without this field a
+    // nested matrix compiles to "template has no action" -- a true statement
+    // that tells the author nothing about what they actually wrote.
+    #[serde(default)]
+    matrix: Option<serde_yaml::Value>,
+}
+
 fn y2j(v: &serde_yaml::Value) -> serde_json::Value {
     serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
+}
+
+// The action half of a step, borrowed rather than owned so a top-level step
+// and a matrix template can be resolved by the same code. They must be: a
+// matrix child is an ordinary step, and a second copy of this match is a
+// second place for the vocabularies to drift apart.
+struct Action<'a> {
+    p8ql: &'a Option<String>,
+    sql: &'a Option<SqlStep>,
+    rest: &'a Option<serde_yaml::Value>,
+    agent: &'a Option<String>,
+    work: Option<bool>,
+    queue: &'a Option<String>,
+    input: &'a Option<serde_yaml::Value>,
+    session: &'a Option<String>,
+}
+
+fn resolve_action(what: &str, a: &Action) -> Result<(&'static str, String, serde_json::Value), String> {
+    let chosen: Vec<&str> = [
+        a.p8ql.is_some().then_some("p8ql"),
+        a.sql.is_some().then_some("sql"),
+        a.rest.is_some().then_some("rest"),
+        a.agent.is_some().then_some("agent"),
+        a.work.unwrap_or(false).then_some("work"),
+    ].into_iter().flatten().collect();
+    if chosen.len() != 1 {
+        return Err(format!(
+            "{} must have exactly one of p8ql/sql/rest/agent/work, found {}",
+            what,
+            if chosen.is_empty() { "none".to_string() } else { chosen.join(" + ") }
+        ));
+    }
+
+    Ok(match chosen[0] {
+        // P8QL runs in-database as an allow-listed sql step. No queue, no
+        // process: 'none' is a label, nothing polls it.
+        "p8ql" => ("sql", "none".to_string(), serde_json::json!({
+            "function": "p8ql",
+            "args": [a.p8ql.clone().unwrap()]
+        })),
+        "sql" => {
+            let sq = a.sql.as_ref().unwrap();
+            ("sql", "none".to_string(), serde_json::json!({
+                "function": sq.function,
+                "args": sq.args.iter().map(y2j).collect::<Vec<_>>()
+            }))
+        }
+        "rest" => ("http_call",
+            a.queue.clone().unwrap_or_else(|| "http".into()),
+            y2j(a.rest.as_ref().unwrap())),
+        // An agent step is a REST call to the Agent Runtime with the agent
+        // NAMED, not defined -- the agent itself is a row in agentic.agents,
+        // so changing its prompt or tools never touches this workflow.
+        "agent" => ("http_call",
+            a.queue.clone().unwrap_or_else(|| "http".into()),
+            serde_json::json!({
+                "url": "{{env.P8_AGENT_URL}}/v1/chat/completions",
+                "method": "POST",
+                "credential_ref": "P8_API_KEY",
+                "timeout_ms": 120000,
+                "body": {
+                    "model": a.agent.clone().unwrap(),
+                    "session": a.session.clone(),
+                    "messages": [{"role": "user",
+                                  "content": a.input.as_ref().map(y2j)
+                                      .unwrap_or(serde_json::Value::Null)}]
+                },
+                "jsonpath": "choices.0.message.content"
+            })),
+        _ => ("work", a.queue.clone().unwrap_or_else(|| "default".into()),
+              a.input.as_ref().map(y2j).unwrap_or(serde_json::json!({}))),
+    })
+}
+
+// A matrix compiles to ONE task row of kind 'matrix'. The engine
+// (workflow.expand_matrix, schema.sql §20) turns it into N children inside the
+// transaction that completes it, rewires the successors onto them, and records
+// each row on the child it produced.
+//
+// The checks below duplicate the engine's on purpose, and the duplication is
+// the point rather than an oversight -- YAML.md §"What the compiler checks":
+// the compiler catches it at AUTHORING time with the step id in the message,
+// the engine catches it at REGISTRATION time because a spec can also arrive as
+// JSON without passing through here. `max_fanout` is the one that matters
+// most: a cross join with a forgotten WHERE is the obvious way to hurt
+// yourself with this feature, and the ceiling should be a thing you had to
+// write down.
+fn compile_matrix(id: &str, m: &WfMatrix, s: &WfStep)
+    -> Result<(&'static str, String, serde_json::Value), String>
+{
+    let acted: Vec<&str> = [
+        s.p8ql.is_some().then_some("p8ql"),
+        s.sql.is_some().then_some("sql"),
+        s.rest.is_some().then_some("rest"),
+        s.agent.is_some().then_some("agent"),
+        s.work.unwrap_or(false).then_some("work"),
+    ].into_iter().flatten().collect();
+    if !acted.is_empty() {
+        return Err(format!(
+            "step '{}' has both `matrix` and `{}`. A matrix does not act; it fans out \
+             over the action in its `template`.", id, acted.join(" + ")));
+    }
+
+    if m.rows.is_some() == m.items.is_some() {
+        return Err(format!(
+            "matrix step '{}' must declare exactly one of `rows` (a registered function) \
+             or `items` (a literal list)", id));
+    }
+    let max_fanout = m.max_fanout.ok_or_else(|| format!(
+        "matrix step '{}' declares no `max_fanout`. A matrix needs a ceiling: a cross join \
+         with a forgotten WHERE expands to the cartesian product, and that should fail this \
+         step rather than the database.", id))?;
+    if max_fanout < 1 {
+        return Err(format!("matrix step '{}' has max_fanout {}, which expands to nothing",
+                           id, max_fanout));
+    }
+
+    // A child has no static successors to rewire, so a matrix inside a matrix
+    // would produce grandchildren that nothing waits on -- a run that reports
+    // completion before they finish. The engine refuses it too
+    // (workflow.validate_matrix_steps); this is the copy that names the step.
+    if m.template.matrix.is_some() {
+        return Err(format!(
+            "matrix step '{}' templates another matrix. Nested fan-out is not supported: \
+             the grandchildren would never be joined to this step's successors, so the run \
+             would complete before they finished.", id));
+    }
+
+    let (tkind, tqueue, tinput) = resolve_action(
+        &format!("the matrix template of step '{}'", id),
+        &Action {
+            p8ql: &m.template.p8ql, sql: &m.template.sql, rest: &m.template.rest,
+            agent: &m.template.agent, work: m.template.work,
+            queue: &m.template.queue, input: &m.template.input,
+            session: &m.template.session,
+        })?;
+
+    let mut input = serde_json::json!({
+        "max_fanout": max_fanout,
+        "template": {"queue": tqueue, "kind": tkind, "input": tinput},
+    });
+    if let Some(rk) = &m.template.rate_key {
+        input["template"]["rate_key"] = serde_json::json!(rk);
+    }
+    if let Some(r) = &m.rows {
+        input["rows"] = serde_json::json!({
+            "function": r.function,
+            "args": r.args.iter().map(y2j).collect::<Vec<_>>()
+        });
+    } else {
+        input["items"] = serde_json::json!(
+            m.items.as_ref().unwrap().iter().map(y2j).collect::<Vec<_>>());
+    }
+
+    // Expansion happens in-database, so the matrix task itself is claimed by
+    // nobody -- 'none' is the same label p8ql and sql steps carry.
+    Ok(("matrix", s.queue.clone().unwrap_or_else(|| "none".into()), input))
 }
 
 pub fn compile_workflow(yaml: &str) -> Result<serde_json::Value, String> {
@@ -689,60 +899,13 @@ pub fn compile_workflow(yaml: &str) -> Result<serde_json::Value, String> {
             }
         }
 
-        let chosen: Vec<&str> = [
-            s.p8ql.is_some().then_some("p8ql"),
-            s.sql.is_some().then_some("sql"),
-            s.rest.is_some().then_some("rest"),
-            s.agent.is_some().then_some("agent"),
-            s.work.unwrap_or(false).then_some("work"),
-        ].into_iter().flatten().collect();
-        if chosen.len() != 1 {
-            return Err(format!(
-                "step '{}' must have exactly one of p8ql/sql/rest/agent/work, found {}",
-                s.id,
-                if chosen.is_empty() { "none".to_string() } else { chosen.join(" + ") }
-            ));
-        }
-
-        let (kind, queue, input) = match chosen[0] {
-            // P8QL runs in-database as an allow-listed sql step. No queue, no
-            // process: 'none' is a label, nothing polls it.
-            "p8ql" => ("sql", "none".to_string(), serde_json::json!({
-                "function": "p8ql",
-                "args": [s.p8ql.clone().unwrap()]
-            })),
-            "sql" => {
-                let sq = s.sql.as_ref().unwrap();
-                ("sql", "none".to_string(), serde_json::json!({
-                    "function": sq.function,
-                    "args": sq.args.iter().map(y2j).collect::<Vec<_>>()
-                }))
-            }
-            "rest" => ("http_call",
-                s.queue.clone().unwrap_or_else(|| "http".into()),
-                y2j(s.rest.as_ref().unwrap())),
-            // An agent step is a REST call to the Agent Runtime with the agent
-            // NAMED, not defined -- the agent itself is a row in
-            // agentic.agents, so changing its prompt or tools never touches
-            // this workflow.
-            "agent" => ("http_call",
-                s.queue.clone().unwrap_or_else(|| "http".into()),
-                serde_json::json!({
-                    "url": "{{env.P8_AGENT_URL}}/v1/chat/completions",
-                    "method": "POST",
-                    "credential_ref": "P8_API_KEY",
-                    "timeout_ms": 120000,
-                    "body": {
-                        "model": s.agent.clone().unwrap(),
-                        "session": s.session.clone(),
-                        "messages": [{"role": "user",
-                                      "content": s.input.as_ref().map(y2j)
-                                          .unwrap_or(serde_json::Value::Null)}]
-                    },
-                    "jsonpath": "choices.0.message.content"
-                })),
-            _ => ("work", s.queue.clone().unwrap_or_else(|| "default".into()),
-                  s.input.as_ref().map(y2j).unwrap_or(serde_json::json!({}))),
+        let (kind, queue, input) = if let Some(m) = &s.matrix {
+            compile_matrix(&s.id, m, s)?
+        } else {
+            resolve_action(&format!("step '{}'", s.id), &Action {
+                p8ql: &s.p8ql, sql: &s.sql, rest: &s.rest, agent: &s.agent,
+                work: s.work, queue: &s.queue, input: &s.input, session: &s.session,
+            })?
         };
 
         let mut step = serde_json::json!({

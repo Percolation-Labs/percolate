@@ -89,6 +89,14 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('workflow-engine','function','workflow.execute_sql_step','uuid','§17: sql steps run with no process'),
 ('workflow-engine','function','workflow.resolve_args','jsonb,uuid','§17: sql steps consume prior output'),
 
+-- ---------- workflow-engine: matrix fan-out (schema.sql §20) -----------
+('workflow-engine','function','workflow.expand_matrix','uuid','§20: fan-out is a SELECT, expanded with no process'),
+('workflow-engine','function','workflow.matrix_rows','uuid','§20: the children ARE the recorded row set'),
+('workflow-engine','function','workflow.call_step_function','text,jsonb,uuid,jsonb','§20b: one allow-list dispatcher, two callers'),
+('workflow-engine','function','workflow.validate_matrix_steps','jsonb','§20f: a matrix without a ceiling is refused at registration'),
+('workflow-engine','function','workflow.resolve_args','jsonb,uuid,jsonb','§20a: {{item.*}} is a third namespace'),
+('workflow-engine','column','workflow.tasks.matrix_parent_id',null,'§20: a child points at the matrix that produced it'),
+
 -- ---------- ai-query-layer ---------------------------------------------
 ('ai-query-layer','schema','aiq',null,'brief.md: one query dialect'),
 ('ai-query-layer','table','aiq.nodes',null,'graph-identity.md: write-time node registry'),
@@ -166,6 +174,14 @@ select e.*,
     when 'schema'    then exists (select 1 from pg_namespace where nspname = e.name)
     when 'table'     then to_regclass(e.name) is not null
     when 'function'  then to_regprocedure(e.name || '(' || coalesce(e.detail,'') || ')') is not null
+    -- schema.table.column. Added for workflow.tasks.matrix_parent_id: a
+    -- capability can also be a column, and a table check passes happily on a
+    -- table that is missing the one field the spec sentence is about.
+    when 'column'    then exists (
+        select 1 from information_schema.columns c
+        where c.table_schema = split_part(e.name, '.', 1)
+          and c.table_name   = split_part(e.name, '.', 2)
+          and c.column_name  = split_part(e.name, '.', 3))
     when 'registration' then case split_part(e.name, ':', 1)
         when 'lexical'  then exists (select 1 from aiq.lexical_sources  where name = split_part(e.name,':',2))
         when 'semantic' then exists (select 1 from aiq.semantic_sources where name = split_part(e.name,':',2))

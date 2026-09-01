@@ -257,6 +257,35 @@ begin
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
+-- schema.sql §20's matrix_rows() reads the recorded row set of a fan-out --
+-- a run's input data, one row per child. It is SECURITY DEFINER (it reads
+-- workflow.tasks, which no user role can touch directly) and it is granted to
+-- `authenticated`, which by this section's own rule means it MUST check the
+-- caller's authority over the run rather than trusting the task id it was
+-- handed. Without this, any authenticated user who could guess or observe a
+-- task id would read another tenant's watchlist, AOI grid or sponsor set.
+--
+-- Redefined here rather than checked in schema.sql for the same reason
+-- cancel_run is: rbac.current_user_id() does not exist until user-rbac loads,
+-- and the engine must install standalone.
+create or replace function workflow.matrix_rows(p_task_id uuid)
+returns jsonb as $$
+declare v_run uuid;
+begin
+    select run_id into v_run from workflow.tasks where id = p_task_id;
+    if not found then
+        raise exception 'task % not found', p_task_id;
+    end if;
+    perform workflow.assert_run_access(v_run, 'read');
+
+    return (select coalesce(jsonb_agg(t.input->'item' order by t.created_at, t.step_key),
+                            '[]'::jsonb)
+            from workflow.tasks t where t.matrix_parent_id = p_task_id);
+end;
+$$ language plpgsql stable security definer set search_path = pg_catalog, public;
+
+grant execute on function workflow.matrix_rows(uuid) to worker, authenticated;
+
 revoke execute on function workflow.cancel_run_unchecked(uuid) from public;
 revoke execute on function workflow.assert_run_access(uuid, text) from public;
 grant execute on function workflow.cancel_run(uuid) to authenticated;
