@@ -154,6 +154,45 @@ create table rbac.role_permissions (
 -- One function every module's RLS policy calls. Add a new module
 -- (resource search, agentic tools) by inserting rows here, not by
 -- writing new authz code.
+--
+-- SECURITY DEFINER, and this is load-bearing rather than incidental: without
+-- it the function recurses until the backend blows its stack. The cycle is
+-- two hops and neither hop looks wrong on its own --
+--
+--   any table's policy  ->  has_permission(uid, 'x', 'select')
+--                       ->  select from rbac.user_roles      (as the CALLER)
+--                       ->  user_roles_self_or_admin policy  (§9b, below)
+--                       ->  has_permission(uid, 'user_roles', 'select')
+--                       ->  select from rbac.user_roles  ->  ...
+--
+-- Postgres cannot see this as a policy cycle -- its own "infinite recursion
+-- detected in policy for relation" check only catches a policy that names its
+-- own table directly, and here the self-reference is laundered through a
+-- function -- so the failure is `stack depth limit exceeded` from inside
+-- has_permission, with nothing naming RLS at all.
+--
+-- Reproduced against the live PG19 beta3 stack via dev/tests/rbac/01: it needs
+-- a caller who does NOT own the row being scanned AND does not hold the
+-- permission, which is why the happy path hid it. A user reading their own
+-- rows short-circuits on the first disjunct and never evaluates the second.
+-- That is exactly the population RLS exists to constrain, so every consumer
+-- table adopting the documented policy shape (§2's comment) was broken for
+-- precisely the callers it was protecting against, and passing for everyone
+-- else. It fails closed -- an error, not extra rows -- but it fails.
+--
+-- app_owner owns this function and owns user_roles/role_permissions, and a
+-- table owner bypasses RLS by default (§9b's three facts, fact 1), so running
+-- as the definer breaks the cycle at the first hop. `set search_path` is the
+-- collection's unconditional rule for any SECURITY DEFINER function
+-- (specs/README.md ground rules, CVE-2018-1058).
+--
+-- The tradeoff this accepts, stated rather than discovered: as a definer the
+-- function answers for ANY p_user_id, so a caller holding a user's uuid can
+-- learn whether that user has a given permission. It returns a boolean about
+-- role grants and never a row, and the parameter is deliberately kept because
+-- spec.md §11's per-resource-sharing work needs to ask the question about
+-- somebody else. Narrowing it to self-or-admin belongs with that work, not
+-- here, where it would be a second authorization rule invented in passing.
 create or replace function rbac.has_permission(p_user_id uuid, p_resource text, p_action text)
 returns boolean as $$
     select exists (
@@ -163,7 +202,7 @@ returns boolean as $$
           and rp.resource = p_resource
           and rp.action = p_action
     );
-$$ language sql stable;
+$$ language sql stable security definer set search_path = pg_catalog, public;
 
 -- Convenience: current user id from the JWT claims PostgREST already
 -- exposes via current_setting -- use this directly inside RLS policies.

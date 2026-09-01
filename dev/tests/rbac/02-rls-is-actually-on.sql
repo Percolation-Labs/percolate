@@ -183,4 +183,43 @@ begin
     raise notice 'rbac/02: base tables are not reachable, only the *_api views';
 end $$;
 
+-- ---------------------------------------------------------------------
+-- 7. THE FUNCTION EVERY POLICY CALLS DOES NOT ITSELF GO THROUGH RLS.
+--
+-- has_permission() reads rbac.user_roles, and rbac.user_roles has a policy
+-- that calls has_permission(). As SECURITY INVOKER that is a cycle Postgres
+-- cannot see -- its own "infinite recursion detected in policy" check only
+-- catches a policy naming its own table directly, and here the self-reference
+-- is laundered through a function. The backend blows its stack instead, from
+-- inside has_permission, with nothing in the error naming RLS at all.
+--
+-- 01-rls-isolation.sql is what actually catches a regression here, by
+-- selecting as a user who neither owns the row nor holds the permission --
+-- the only caller shape that reaches the second disjunct. This assertion adds
+-- the diagnosis: `stack depth limit exceeded` is a long way from "somebody
+-- dropped SECURITY DEFINER", and without this the next person debugs the
+-- symptom rather than reading the cause.
+-- ---------------------------------------------------------------------
+do $$
+declare v_secdef boolean; v_config text[];
+begin
+    select prosecdef, proconfig into v_secdef, v_config
+    from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'rbac' and p.proname = 'has_permission';
+
+    if not v_secdef then
+        raise exception 'rbac.has_permission is SECURITY INVOKER -- it will recurse '
+                        'through user_roles'' own policy until the backend runs out of '
+                        'stack, for every caller who does not already own the row being '
+                        'scanned. That is exactly the population RLS exists to constrain.';
+    end if;
+    if v_config is null or not (v_config::text like '%search_path%') then
+        raise exception 'rbac.has_permission is SECURITY DEFINER with no pinned '
+                        'search_path -- the CVE-2018-1058 hardening this collection '
+                        'applies unconditionally (specs/README.md ground rules)';
+    end if;
+    raise notice 'rbac/02: has_permission runs as definer with a pinned search_path, '
+                 'so the policy that calls it cannot recurse into itself';
+end $$;
+
 rollback;

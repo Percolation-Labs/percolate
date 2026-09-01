@@ -680,34 +680,24 @@ returns setof workflow.tasks as $$
     returning *;
 $$ language sql;
 
+-- SUPERSEDED, kept as an alias rather than a second body.
+--
+-- This was the rate-limited claim, opted into by a worker that knew to call it.
+-- That was the defect: the shipped worker called plain claim_task, so the token
+-- bucket and this function both existed and neither ever ran -- rate limiting
+-- was inert while looking present (§21, and `05-faults.sql` now asserts the
+-- throttle works "with any worker"). The fix was to move the lookahead-skip
+-- INTO claim_task, so the throttle is not opt-in.
+--
+-- Which left the two functions with byte-identical bodies. That is the exact
+-- defect the consolidation pass removed everywhere else in this file --
+-- superseded copies that behave correctly right up until somebody fixes one of
+-- them -- so it is delegated rather than duplicated. It stays for callers
+-- written against the old name; new callers use claim_task.
 create or replace function workflow.claim_task_rate_limited(p_queue text, p_worker_id text)
 returns workflow.tasks as $$
-declare
-    t workflow.tasks;
-    v_lookahead int;
-begin
-    select coalesce(rate_lookahead, 20) into v_lookahead from workflow.queue_config where queue = p_queue;
-    v_lookahead := coalesce(v_lookahead, 20);
-
-    for t in
-        select * from workflow.tasks
-        where queue = p_queue and status = 'ready' and run_after <= now()
-        order by priority desc, created_at
-        for update skip locked
-        limit v_lookahead
-    loop
-        if t.rate_key is null or workflow.try_consume_rate_limit(t.rate_key) then
-            update workflow.tasks
-            set status = 'running', claimed_by = p_worker_id,
-                claimed_at = now(), heartbeat_at = now(), attempts = attempts + 1
-            where id = t.id
-            returning * into t;
-            return t;
-        end if;
-    end loop;
-    return null;
-end;
-$$ language plpgsql;
+    select workflow.claim_task(p_queue, p_worker_id);
+$$ language sql;
 
 create or replace function workflow.heartbeat_task(p_task_id uuid)
 returns boolean as $$
