@@ -37,6 +37,27 @@ create table if not exists content.connectors (
     credentials    text[] not null default '{}',
 
     -- ------------------------------------------------------------------
+    -- VALUATION (percolate-source-catalogue §17). Stored as scoring
+    -- dimensions rather than as a decision, so a change of segment is a
+    -- re-score rather than a re-argument. Each 0-5.
+    --
+    -- `clock_field` splits §17's C dimension in two, and the split came from
+    -- checking: The Gazette scores C=5 but its feed exposes only `published`
+    -- and `updated` -- the forward date is in notice prose. CISA KEV hands
+    -- you `dueDate` as a typed field across 1,687 rows. Both are "has a
+    -- clock"; only one is cheap.
+    -- ------------------------------------------------------------------
+    tier           text check (tier in ('A','B','C')),
+    score_clock    int check (score_clock between 0 and 5),
+    clock_field    text,          -- path to the forward date, null = in prose
+    score_exclusivity int check (score_exclusivity between 0 and 5),
+    score_resolvability int check (score_resolvability between 0 and 5),
+    score_licence  int check (score_licence between 0 and 5),
+    score_beat     int check (score_beat between 0 and 5),
+    noise_tax      int check (noise_tax between 0 and 5),
+    licence        text,
+
+    -- ------------------------------------------------------------------
     -- OBSERVED. Written only by the runner, never by a registrant.
     -- ------------------------------------------------------------------
     last_run_at    timestamptz,
@@ -175,6 +196,10 @@ select id, category, url,
        auth->>'type'   as auth_type,
        paging->>'type' as paging_type,
        credentials, rate_limit, quota,
+       tier, licence, clock_field,
+       coalesce(score_clock,0)+coalesce(score_exclusivity,0)+coalesce(score_resolvability,0)
+         +coalesce(score_licence,0)+coalesce(score_beat,0) as score,
+       noise_tax,
        max_pages, enabled, health, health_since, consecutive_failures,
        last_run_at, last_status, last_http, last_records, last_layout,
        observed_rate, gotcha
@@ -198,6 +223,19 @@ where enabled and health in ('gone','needs_credential','blocked','degraded')
 order by (health in ('gone','needs_credential','blocked')) desc, consecutive_failures desc;
 
 -- What this deployment needs before it can run everything registered.
+-- Build order: score first, noise tax as the tie-break, per §19.1's
+-- "priority is not the score column, it's score + noise tax".
+create or replace view content.v_build_order as
+select id, category, tier,
+       coalesce(score_clock,0)+coalesce(score_exclusivity,0)+coalesce(score_resolvability,0)
+         +coalesce(score_licence,0)+coalesce(score_beat,0) as score,
+       noise_tax,
+       (clock_field is not null) as clock_is_a_field,
+       health, licence
+from content.connectors
+where enabled and tier is not null
+order by score desc, noise_tax asc;
+
 create or replace view content.v_required_credentials as
 select unnest(credentials) as credential_ref,
        count(*) as sources,
@@ -207,7 +245,8 @@ from content.connectors where enabled group by 1 order by 2 desc;
 grant usage on schema content to authenticated, web_anon;
 grant select, insert, update, delete on content.connectors to authenticated;
 grant select on content.v_connectors, content.v_connectors_attention,
-                content.v_required_credentials to authenticated, web_anon;
+                content.v_required_credentials, content.v_build_order
+             to authenticated, web_anon;
 grant select on content.connectors to web_anon;
 grant execute on function content.due_connectors(int) to authenticated, web_anon;
 grant execute on function content.report_connector_run(text,text,int,text,text,int,jsonb) to authenticated;
