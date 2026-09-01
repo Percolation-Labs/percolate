@@ -69,6 +69,40 @@ ORDER = [
     ("agentic/schema.sql",                      "agents, sessions, runs, messages -- the conversation plane"),
 ]
 
+# Every specs/*/*.sql file is either in ORDER above or named here, with the
+# reason. Nothing may be in neither -- main() asserts it.
+#
+# This list exists because the audit that found the omission was not the build:
+# `dev/currency.sh` diffed the live stack against a pristine install and
+# reported content.connectors* as ORPHAN -- present in the database, absent
+# from the specs' own extension script. It had been loaded by hand and was not
+# in the product at all. A file being missing from ORDER looked identical to a
+# file being deliberately excluded, so neither was a decision.
+NOT_SHIPPED = {
+    "user-rbac/roles.sql":
+        "cluster-level CREATE ROLE; a non-superuser extension script cannot run it. "
+        "Applied once by a DBA -- see the HEADER below.",
+    "ai-query-layer/dev-helpers.sql":
+        "dev conveniences, deliberately not part of what anyone installs.",
+    "workflow-engine/pools.sql":
+        "pools.md \u00a713 is explicit that the data model is verified and the control "
+        "loop is a proposal. Shipping the schema for a manager that does not exist "
+        "would put a table in the product with nothing on the other end of it.",
+    "world-model-ingestion/connectors.sql":
+        "UNDECIDED, and the only entry here that is a real question. sources.md "
+        "\u00a717 demonstrates registering 304 sources through it over PostgREST "
+        "against a live stack, so it behaves like a shipped surface -- but its rows "
+        "reach nothing: \u00a717.4 records that connectors and channels are two "
+        "descriptions of a source with no join between them, and the runner writes "
+        "to a filesystem rather than to content.resources. Ship it once it lands "
+        "bytes in the content plane, not before.",
+    "world-model-ingestion/tradecraft.sql":
+        "grading and corroboration over evidence classes. Core-eligible under "
+        "SKILL.md \u00a75's transcribed-standard rule (Admiralty, ICD 203, Bellingcat "
+        "are citable), but nothing consumes it yet and the second consumer is the "
+        "promotion test. Held out until something calls it.",
+}
+
 HEADER = f"""-- ============================================================
 -- percolate {VERSION} -- the whole schema, as one extension script.
 --
@@ -91,7 +125,36 @@ HEADER = f"""-- ============================================================
 """
 
 
+def check_every_spec_is_accounted_for() -> None:
+    """Refuse to build while a spec schema is in neither ORDER nor NOT_SHIPPED.
+
+    The failure this prevents: a new specs/<system>/schema.sql is written,
+    reviewed, tested against a hand-loaded dev database, and never added to
+    ORDER -- so `CREATE EXTENSION percolate` does not contain it and nothing
+    says so. That is not hypothetical; it is what happened to
+    world-model-ingestion/connectors.sql.
+    """
+    shipped = {rel for rel, _ in ORDER}
+    known = shipped | set(NOT_SHIPPED)
+    found = {
+        str(p.relative_to(ROOT / "specs"))
+        for p in sorted((ROOT / "specs").glob("*/*.sql"))
+    }
+    unaccounted = sorted(found - known)
+    if unaccounted:
+        raise SystemExit(
+            "these spec schemas are in neither ORDER nor NOT_SHIPPED: "
+            + ", ".join(unaccounted)
+            + ".\nAdd them to ORDER to ship them, or to NOT_SHIPPED with the reason. "
+            "A file in neither is not a decision, it is an omission.")
+    missing = sorted(known - found)
+    if missing:
+        raise SystemExit(
+            "these are listed but do not exist: " + ", ".join(missing))
+
+
 def main() -> int:
+    check_every_spec_is_accounted_for()
     parts = [HEADER]
     for rel, why in ORDER:
         src = ROOT / "specs" / rel

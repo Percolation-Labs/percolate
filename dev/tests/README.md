@@ -35,6 +35,26 @@ guarantee is quietly removed**, not by exercising a path that already works.
 Before adding one, break the thing it protects and confirm the test notices —
 an assertion that cannot fail is documentation wearing a test's clothes.
 
+## The third question, which neither of these asks
+
+`run.sh` asks whether the database still BEHAVES as the specs promise.
+`../../surface.sql` asks whether every promised capability EXISTS. Both passed
+clean against a stack whose `aiq.query()` had no `SCHEMA` route and whose
+`percolate_parser.so` was missing six step kinds, because **existence is not
+currency** and nothing was asking the third question:
+
+```bash
+../currency.sh          # is the database RUNNING what the specs SAY?
+```
+
+It builds a pristine database from the committed extension script and diffs
+`pg_proc` against the target -- body hash, `prosecdef` and `search_path` -- so
+Postgres does the dollar-quote parsing instead of a regex that would be wrong
+about this schema's nested `$q$`/`$f$` tags. Its first run on the dev stack
+found seven stale `aiq.*` bodies, one function that had silently lost
+`SECURITY DEFINER`, and `content.connectors*` present in the database and
+absent from the product.
+
 `scenarios/` is upstream of this directory. Exploration happens there; what
 turns out to be worth re-running forever gets pinned here.
 

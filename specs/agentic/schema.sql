@@ -62,6 +62,21 @@ create table agentic.tool_servers (
     -- claim that namespace, and a server merely *named* `agent` produced it by
     -- accident through collision-prefixing.
     serves_agents   boolean not null default false,
+    -- Non-secret headers sent on BOTH the registration fetch and every
+    -- subsequent call. Not a general escape hatch and explicitly not where a
+    -- secret goes -- that is `credential_ref`, one column up, and the check
+    -- constraint below refuses the two header names that would carry one.
+    --
+    -- It exists because a base url does not always identify an OpenAPI
+    -- document. This collection's own REST surface is the case that proved it:
+    -- one PostgREST serves five schemas from one url and picks between them
+    -- with `Accept-Profile`, so `http://postgrest:3000` resolves to the
+    -- `content` document and the workflow operations an agent needs are
+    -- invisible -- a bound server that looks correctly registered and is
+    -- missing every tool the agent was given. §5.2's adapter is required to
+    -- carry no per-service knowledge, so it cannot be taught to send that
+    -- header; the row has to.
+    default_headers jsonb not null default '{}'::jsonb,
     -- Synced at registration and refreshed by a scheduled workflow-engine
     -- task; NOT re-fetched per agent invocation.
     cached_tools    jsonb not null default '[]'::jsonb,
@@ -69,6 +84,15 @@ create table agentic.tool_servers (
     created_at      timestamptz not null default now(),
     updated_at      timestamptz not null default now()
 );
+
+-- The one thing default_headers must never become. A secret in a header is
+-- the same secret in a row that credential_ref exists to keep out, and it
+-- would arrive there by an entirely reasonable-looking registration, so it is
+-- refused by the table rather than by a convention in a reviewer's head.
+alter table agentic.tool_servers add constraint tool_servers_headers_not_secrets
+    check (not exists (
+        select 1 from jsonb_object_keys(default_headers) k
+        where lower(k) in ('authorization', 'proxy-authorization', 'cookie')));
 
 create trigger trg_tool_servers_updated
     before update on agentic.tool_servers
