@@ -31,6 +31,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from ..core import as_service
+from .artifacts import offload
 from .http import http_call
 from .templates import TerminalError
 
@@ -70,9 +71,18 @@ async def run_once(queue: str, worker_id: str) -> bool:
                 f"@handler({kind!r}), or point this worker at a different queue")
         out = await fn(ctx.get("task_input") or {}, ctx)
         async with as_service() as conn:
+            # Between the handler and complete_task, so it covers every step
+            # kind rather than only http_call. An oversized output used to be a
+            # terminal failure naming a remedy that had no implementation on
+            # this side; now the bytes go to object storage and the task
+            # completes carrying a "$artifact" ref instead of a "result".
+            out = await offload(conn, task_id, out)
             await conn.execute(
                 "select workflow.complete_task($1, $2::jsonb)", task_id, json.dumps(out))
-        print(f"[{worker_id}]   ok", flush=True)
+        if isinstance(out, dict) and "$artifact" in out:
+            print(f"[{worker_id}]   ok -- offloaded to {out['$artifact']}", flush=True)
+        else:
+            print(f"[{worker_id}]   ok", flush=True)
     except TerminalError as e:
         print(f"[{worker_id}]   terminal: {e}", flush=True)
         async with as_service() as conn:

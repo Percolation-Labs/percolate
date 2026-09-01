@@ -19,6 +19,31 @@ percolate agent serve            # agents, streaming, delegation
 percolate agent --help           # the runtime's own operator commands
 ```
 
+### Output too large to store
+
+`workflow.tasks.output` is capped (`workflow.max_payload_bytes`, 64KB by
+default), and an oversized result used to fail the task terminally. The worker
+now stores it and completes:
+
+```json
+{"status": 200, "$artifact": "9f3c…-uuid"}
+```
+
+The ref is a **sibling** of `result`, not a value inside it — the engine's size
+check reads top-level keys while every step nests its payload under `result`,
+so a ref inside `result` is invisible to the check and a ref at the top breaks
+every `{{steps.<id>.result}}` reading it. And there is no `result` left: a value
+too large to carry is not a value, so the next step reads
+`{{steps.<id>.$artifact}}`, or resolves it in-database with
+`sql: {function: artifact, args: ['{{steps.<id>.$artifact}}']}`.
+
+It is a **resource id**, not an `s3://` URI — a row in `content.resources`, so
+the artifact is RLS-scoped, checksum-deduped, servable and visible to
+`content.check_drift`. Needs `percolate-core[content]` for object storage; the
+image installs `[all]`, so the shipped worker always has it, and a minimal
+install fails with the one command that fixes it. Asserted end to end by
+[`dev/offload.py`](dev/offload.py).
+
 [`docs-sample.md`](docs-sample.md) is the one to read next: a real REST call to
 the Agent Runtime, the events it streams back, the rows it leaves behind, and
 every header and option a caller can send — captured output, not illustration.
@@ -30,7 +55,7 @@ every header and option a caller can send — captured output, not illustration.
 | Module | Extra | What it is |
 |---|---|---|
 | `percolate_core.core` | — | connecting **as the caller**, configuration, credential resolution |
-| `percolate_core.worker` | — | the step loop and the `@handler` registry |
+| `percolate_core.worker` | — | the step loop, the `@handler` registry, and artifact offload |
 | `percolate_core.content` | `content` | the Content Server |
 | `percolate_core.agentic` | `agent` | the Agent Runtime |
 
