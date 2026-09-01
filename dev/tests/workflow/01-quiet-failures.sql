@@ -75,7 +75,7 @@ begin
     end if;
 
     -- 5. THE DEPENDENT STEP IS ONLY NOW READY.
-    if (select status from workflow.tasks where run_id = v_run and step_key = 'second') <> 'ready' then
+    if (select status from workflow.tasks where run_id = v_run and step_key = 'second') is distinct from 'ready' then
         raise exception 'dependent step did not become ready after its dependency completed';
     end if;
 

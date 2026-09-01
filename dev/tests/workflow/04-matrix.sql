@@ -144,7 +144,7 @@ begin
     -- the caller's identity (see below) and this test has none.
     if (select jsonb_agg(t.input->'item' order by t.created_at, t.step_key)
         from workflow.tasks t where t.matrix_parent_id = v_fan.id)
-       <> '[{"cik":"0000320193","concept":"Revenues"},
+       is distinct from '[{"cik":"0000320193","concept":"Revenues"},
             {"cik":"0000789019","concept":"Revenues"},
             {"cik":"0001018724","concept":"Revenues"}]'::jsonb then
         raise exception 'the children do not hold the recorded snapshot in order';
@@ -263,7 +263,7 @@ begin
     -- ...but the output is on the child's own row, where a `sql` successor
     -- can aggregate over it in one statement.
     if (select output->>'result' from workflow.tasks
-        where run_id = v_run and step_key = 'fan[0]') <> 'ok' then
+        where run_id = v_run and step_key = 'fan[0]') is distinct from 'ok' then
         raise exception 'the child output was not recorded on the child';
     end if;
 end $$;
@@ -306,20 +306,20 @@ begin
     -- Second child: still not enough.
     select id into v_kid from workflow.tasks where run_id = v_run and step_key = 'fan[1]';
     perform workflow.complete_task(v_kid, '{"result":"ok"}'::jsonb);
-    if (select status from workflow.tasks where id = v_rollup.id) <> 'pending' then
+    if (select status from workflow.tasks where id = v_rollup.id) is distinct from 'pending' then
         raise exception 'rollup released before every child finished';
     end if;
 
     -- Third: now.
     select id into v_kid from workflow.tasks where run_id = v_run and step_key = 'fan[2]';
     perform workflow.complete_task(v_kid, '{"result":"ok"}'::jsonb);
-    if (select status from workflow.tasks where id = v_rollup.id) <> 'ready' then
+    if (select status from workflow.tasks where id = v_rollup.id) is distinct from 'ready' then
         raise exception 'rollup did not become ready once the fan-out drained: %',
             (select status from workflow.tasks where id = v_rollup.id);
     end if;
 
     -- And the run is not complete while rollup is outstanding.
-    if (select status from workflow.runs where id = v_run) <> 'running' then
+    if (select status from workflow.runs where id = v_run) is distinct from 'running' then
         raise exception 'the run reported completion with rollup still to do';
     end if;
 end $$;
@@ -351,7 +351,7 @@ begin
     if v_st <> 'ready' then
         raise exception 'an empty matrix must release its successor immediately, got %', v_st;
     end if;
-    if (select (context#>>'{fan,result,fanout}')::int from workflow.runs where id = v_run) <> 0 then
+    if (select (context#>>'{fan,result,fanout}')::int from workflow.runs where id = v_run) is distinct from 0 then
         raise exception 'an empty matrix did not record fanout 0';
     end if;
 end $$;
@@ -392,7 +392,7 @@ begin
         raise exception 'a blown ceiling was retried (% attempts)', v_fan.attempts;
     end if;
     if (select status from workflow.tasks where run_id = v_run and step_key = 'rollup')
-       <> 'cancelled' then
+       is distinct from 'cancelled' then
         raise exception 'the successor of a failed matrix was not cancelled';
     end if;
 end $$;
@@ -427,7 +427,7 @@ begin
             (select jsonb_agg(jsonb_build_object('k',step_key,'s',status,'e',error))
              from workflow.tasks where run_id = v_run);
     end if;
-    if (select status from workflow.runs where id = v_run) <> 'completed' then
+    if (select status from workflow.runs where id = v_run) is distinct from 'completed' then
         raise exception 'a fan-out of sql steps did not complete with nothing deployed';
     end if;
 end $$;
@@ -494,7 +494,7 @@ begin
 
     update workflow.tasks set status = 'ready', run_after = now() where id = v_fan;
 
-    if (select status from workflow.tasks where id = v_fan) <> 'done' then
+    if (select status from workflow.tasks where id = v_fan) is distinct from 'done' then
         raise exception 'an identical re-expansion did not resolve as done: %',
             (select status from workflow.tasks where id = v_fan);
     end if;
@@ -503,7 +503,7 @@ begin
             (select count(*) from workflow.tasks where matrix_parent_id = v_fan);
     end if;
     -- And it did not double-count the successor's dependencies either.
-    if (select pending_deps from workflow.tasks where run_id = v_run and step_key='rollup') <> 3 then
+    if (select pending_deps from workflow.tasks where run_id = v_run and step_key='rollup') is distinct from 3 then
         raise exception 'a re-expansion double-counted the fan-in: pending_deps=%',
             (select pending_deps from workflow.tasks where run_id = v_run and step_key='rollup');
     end if;
@@ -634,7 +634,7 @@ declare v_run uuid; v jsonb;
 begin
     v_run := workflow.start_workflow('t_mx_gather', '{}'::jsonb);
 
-    if (select status from workflow.runs where id = v_run) <> 'completed' then
+    if (select status from workflow.runs where id = v_run) is distinct from 'completed' then
         raise exception 'the gather run did not complete: %',
             (select jsonb_agg(jsonb_build_object('k',step_key,'s',status,'e',error))
              from workflow.tasks where run_id = v_run);
@@ -748,7 +748,7 @@ begin
         raise exception 'the compiler''s own output does not run on this engine: %',
             coalesce(v_o, '<null>');
     end if;
-    if (select status from workflow.runs where id = v_run) <> 'completed' then
+    if (select status from workflow.runs where id = v_run) is distinct from 'completed' then
         raise exception 'a compiled matrix workflow did not complete';
     end if;
 end $$;

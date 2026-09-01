@@ -128,10 +128,10 @@ begin
     if v_err not like '%stopped heartbeating%' or v_err not like '%doomed-%' then
         raise exception 'the reaped failure does not say who died: %', v_err;
     end if;
-    if (select status from workflow.runs where id = v_run) <> 'failed' then
+    if (select status from workflow.runs where id = v_run) is distinct from 'failed' then
         raise exception 'the run survived a task that exhausted its crash budget';
     end if;
-    if (select status from workflow.tasks where run_id = v_run and step_key = 'b') <> 'cancelled' then
+    if (select status from workflow.tasks where run_id = v_run and step_key = 'b') is distinct from 'cancelled' then
         raise exception 'the successor of a terminally-crashed task was not cancelled';
     end if;
     raise notice 'workflow/06: a crash loop is bounded by max_attempts, fails the run, '
@@ -175,7 +175,7 @@ begin
     if (select status from workflow.tasks where id = v_a) = 'done' then
         raise exception 'a revoked worker completed the task it no longer held';
     end if;
-    if (select status from workflow.tasks where run_id = v_run and step_key = 'b') <> 'pending' then
+    if (select status from workflow.tasks where run_id = v_run and step_key = 'b') is distinct from 'pending' then
         raise exception 'the successor was released by a worker that had been reaped';
     end if;
 
@@ -290,7 +290,7 @@ begin
         raise exception 'the reaper killed a task whose worker had just checked in -- '
                         'long work is now impossible';
     end if;
-    if (select status from workflow.tasks where id = v_a) <> 'running' then
+    if (select status from workflow.tasks where id = v_a) is distinct from 'running' then
         raise exception 'a heartbeating task did not stay running';
     end if;
     raise notice 'workflow/06: a heartbeat protects long work from the reaper';
@@ -356,7 +356,7 @@ begin
         if sqlerrm like 'PRIVILEGE ESCALATION%' then raise; end if;
     end;
 
-    if (select status from workflow.runs where id = v_run) <> 'running' then
+    if (select status from workflow.runs where id = v_run) is distinct from 'running' then
         raise exception 'the run was cancelled despite the authorisation failure';
     end if;
     raise notice 'workflow/06: cancel_run refuses a caller who owns neither the run '
@@ -381,10 +381,10 @@ begin
     perform workflow.complete_decision_task(v_d, '{"branch":"left"}'::jsonb,
         '[{"step_key":"left_a","queue":"td","kind":"work","input":{"x":1}}]'::jsonb);
 
-    if (select status from workflow.tasks where run_id = v_run and step_key = 'left_a') <> 'ready' then
+    if (select status from workflow.tasks where run_id = v_run and step_key = 'left_a') is distinct from 'ready' then
         raise exception 'the branch the decision chose was not created ready';
     end if;
-    if (select status from workflow.tasks where run_id = v_run and step_key = 'after') <> 'ready' then
+    if (select status from workflow.tasks where run_id = v_run and step_key = 'after') is distinct from 'ready' then
         raise exception 'the decision did not release its declared successor';
     end if;
 
@@ -505,7 +505,7 @@ begin
     perform workflow.complete_task(v_first, '{"result":"ok"}'::jsonb);
 
     select id into v_wait from workflow.tasks where run_id = v_run and step_key = 'wait';
-    if (select status from workflow.tasks where id = v_wait) <> 'ready' then
+    if (select status from workflow.tasks where id = v_wait) is distinct from 'ready' then
         raise exception 'the timer did not become ready when its dependency completed';
     end if;
 
@@ -521,14 +521,14 @@ begin
         raise exception 'a due timer was not promoted -- the run waits forever '
                         'while reporting running (% fired)', v_fired;
     end if;
-    if (select status from workflow.tasks where id = v_wait) <> 'done' then
+    if (select status from workflow.tasks where id = v_wait) is distinct from 'done' then
         raise exception 'a promoted timer is not done';
     end if;
     if (select completed_at from workflow.tasks where id = v_wait) is null then
         raise exception 'a fired timer recorded no completed_at, so it sorts first '
                         'in a saga compensation (§21c)';
     end if;
-    if (select status from workflow.tasks where run_id = v_run and step_key = 'last') <> 'ready' then
+    if (select status from workflow.tasks where run_id = v_run and step_key = 'last') is distinct from 'ready' then
         raise exception 'a fired timer did not release the step waiting on it';
     end if;
     raise notice 'workflow/06: a timer fires only when due, and firing releases what '
@@ -556,24 +556,24 @@ begin
     update workflow.runs set owner_id = v_owner where id = v_run;
     perform set_config('request.jwt.claims', json_build_object('sub', v_owner::text)::text, true);
 
-    if (select status from workflow.tasks where id = v_await) <> 'waiting_external' then
+    if (select status from workflow.tasks where id = v_await) is distinct from 'waiting_external' then
         raise exception 'a signal step did not park in waiting_external, it is %',
             (select status from workflow.tasks where id = v_await);
     end if;
-    if (select status from workflow.tasks where run_id = v_run and step_key = 'then') <> 'pending' then
+    if (select status from workflow.tasks where run_id = v_run and step_key = 'then') is distinct from 'pending' then
         raise exception 'the step after an unsignalled wait was released early';
     end if;
 
     perform workflow.signal_task(v_run, 'approved', '{"by":"a human"}'::jsonb);
 
-    if (select status from workflow.tasks where id = v_await) <> 'done' then
+    if (select status from workflow.tasks where id = v_await) is distinct from 'done' then
         raise exception 'signal_task did not resolve the waiting task';
     end if;
     if (select completed_at from workflow.tasks where id = v_await) is null then
         raise exception 'a signalled task recorded no completed_at -- the third path '
                         'to mark a task done without the column a saga orders by (§21c)';
     end if;
-    if (select status from workflow.tasks where run_id = v_run and step_key = 'then') <> 'ready' then
+    if (select status from workflow.tasks where run_id = v_run and step_key = 'then') is distinct from 'ready' then
         raise exception 'the signalled step did not release its successor';
     end if;
     perform set_config('request.jwt.claims', '', true);

@@ -152,7 +152,7 @@ begin
     end if;
 
     -- 3a. Both halves survive into runs.context, and each means what it says.
-    if (select context #>> '{render,result,rows}' from workflow.runs where id = v_run) <> '12' then
+    if (select context #>> '{render,result,rows}' from workflow.runs where id = v_run) is distinct from '12' then
         raise exception 'the inline result did not survive alongside the ref';
     end if;
     if (select workflow.artifact_ref(context->'render') from workflow.runs where id = v_run)

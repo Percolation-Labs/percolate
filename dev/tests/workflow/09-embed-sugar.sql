@@ -652,7 +652,7 @@ steps:
     rate_key: t-embed-budget
 $y$);
     if (select spec#>>'{steps,0,rate_key}' from workflow.definitions
-         where name = 't_embed_rate') <> 't-embed-budget' then
+         where name = 't_embed_rate') is distinct from 't-embed-budget' then
         raise exception 'rate_key did not survive compilation';
     end if;
 

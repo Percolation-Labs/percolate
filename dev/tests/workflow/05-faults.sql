@@ -144,7 +144,7 @@ begin
     -- The same step, answering correctly on the next attempt.
     update workflow.tasks set status = 'running' where id = v_t;
     perform workflow.complete_task(v_t, '{"result":{"verdict":"SAFETY"}}'::jsonb);
-    if (select status from workflow.tasks where id = v_t) <> 'done' then
+    if (select status from workflow.tasks where id = v_t) is distinct from 'done' then
         raise exception 'a conforming retry did not complete';
     end if;
 
@@ -152,7 +152,7 @@ begin
     -- parsed before the shape is checked, or every structured agent step fails.
     update workflow.tasks set status = 'running', output = null where id = v_t;
     perform workflow.complete_task(v_t, jsonb_build_object('result', '{"verdict":"FINANCE"}'));
-    if (select output#>>'{result,verdict}' from workflow.tasks where id = v_t) <> 'FINANCE' then
+    if (select output#>>'{result,verdict}' from workflow.tasks where id = v_t) is distinct from 'FINANCE' then
         raise exception 'a JSON-in-a-string model answer was not parsed before validation';
     end if;
 end $$;
@@ -194,16 +194,16 @@ begin
     -- cancelling it. Skipping the cancel without decrementing leaves the
     -- aggregate blocked forever -- a stall instead of a cancellation, which is
     -- worse because nothing reports it.
-    if (select status from workflow.tasks where id = v_agg) <> 'pending' then
+    if (select status from workflow.tasks where id = v_agg) is distinct from 'pending' then
         raise exception 'the aggregate was released after one of four children';
     end if;
-    if (select pending_deps from workflow.tasks where id = v_agg) <> 3 then
+    if (select pending_deps from workflow.tasks where id = v_agg) is distinct from 3 then
         raise exception
             'a tolerated failure did not decrement its dependent: pending_deps=%',
             (select pending_deps from workflow.tasks where id = v_agg);
     end if;
     -- ...and it must not fail the run.
-    if (select status from workflow.runs where id = v_run) <> 'running' then
+    if (select status from workflow.runs where id = v_run) is distinct from 'running' then
         raise exception 'a tolerated child failure failed the whole run';
     end if;
 
@@ -214,7 +214,7 @@ begin
     select id into v_kid from workflow.tasks where run_id = v_run and step_key = 'fan[3]';
     perform workflow.complete_task(v_kid, '{"result":"ok"}'::jsonb);
 
-    if (select status from workflow.tasks where id = v_agg) <> 'ready' then
+    if (select status from workflow.tasks where id = v_agg) is distinct from 'ready' then
         raise exception 'the aggregate was not released at exactly the min_success floor: %',
             (select status from workflow.tasks where id = v_agg);
     end if;
@@ -245,7 +245,7 @@ begin
     select id into v_kid from workflow.tasks where run_id = v_run and step_key = 'fan[0]';
     perform workflow.fail_task(v_kid, '{"error":"boom"}'::jsonb, true);
 
-    if (select status from workflow.tasks where run_id = v_run and step_key='agg') <> 'cancelled' then
+    if (select status from workflow.tasks where run_id = v_run and step_key='agg') is distinct from 'cancelled' then
         raise exception 'the aggregate ran below its min_success floor: %',
             (select status from workflow.tasks where run_id = v_run and step_key='agg');
     end if;
@@ -293,7 +293,7 @@ begin
     end if;
 
     -- (2) Terminal failure inside the group starts the rollback by itself.
-    if (select compensation_state from workflow.runs where id = v_run) <> 'compensated' then
+    if (select compensation_state from workflow.runs where id = v_run) is distinct from 'compensated' then
         raise exception
             'compensation did not trigger (state %). spec.md 6 describes it as automatic '
             'on terminal failure; it was wired to nothing.',
@@ -341,7 +341,7 @@ begin
     update workflow.tasks set status = 'running', compensated_at = null where id = v_comp;
     perform workflow.fail_task(v_comp, '{"error":"rollback failed"}'::jsonb, true);
     -- If this returned, no infinite recursion occurred.
-    if (select status from workflow.tasks where id = v_comp) <> 'failed' then
+    if (select status from workflow.tasks where id = v_comp) is distinct from 'failed' then
         raise exception 'a failed compensation did not settle';
     end if;
 end $$;
@@ -455,17 +455,17 @@ begin
             'the child run has no tasks -- start_child_workflow inserted a run row without '
             'expanding its graph, so composition could never have worked';
     end if;
-    if (select status from workflow.runs where id = v_child) <> 'completed' then
+    if (select status from workflow.runs where id = v_child) is distinct from 'completed' then
         raise exception 'the child run did not complete: %',
             (select status from workflow.runs where id = v_child);
     end if;
     -- The child of only in-database steps finishes INSIDE start_workflow,
     -- before the parent link exists -- so the parent has to be resolved
     -- explicitly or it waits forever on a run that is already over.
-    if (select status from workflow.tasks where run_id = v_run and step_key = 'call') <> 'done' then
+    if (select status from workflow.tasks where run_id = v_run and step_key = 'call') is distinct from 'done' then
         raise exception 'the parent was not resolved by its already-finished child';
     end if;
-    if (select string_agg(action, ',' order by seq) from t_f_ledger) <> 'CHILD,AFTER' then
+    if (select string_agg(action, ',' order by seq) from t_f_ledger) is distinct from 'CHILD,AFTER' then
         raise exception 'the sub-workflow did not run before its dependant: %',
             (select string_agg(action, ',' order by seq) from t_f_ledger);
     end if;

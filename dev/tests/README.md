@@ -28,6 +28,17 @@ server by name and a tool by name, with no foreign key able to hold either.
 RBAC runs first, deliberately: if row-level security is not actually switched
 on, every later assertion about who-sees-what is meaningless.
 
+`rbac/03-auth-path.sql` is newer than the other two and was written by asking a
+different question: not "is this right?" but **"has this ever run?"**. A
+cross-reference of every capability `surface.sql` declares against every name
+these tests mention found the whole auth path — signup, login, throttling,
+API keys — declared, shipped, and never once executed. The first transaction to
+call `create_user_with_password` and `login` in sequence found that the account
+signup creates cannot log in, and the first to call `login` twelve times with a
+wrong password found that the rate limiter and the audit log were both being
+rolled back by the failure they existed to record. Neither is subtle. Both
+survived because existing is not running.
+
 `query/` is the largest of the four because the graph half of it was, until
 recently, the least exercised: `04-graph-identity.sql`, `05-graph-traversal.sql`
 and `06-graph-tenancy.sql` execute the eight criteria

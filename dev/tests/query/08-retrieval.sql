@@ -121,7 +121,7 @@ begin
     end if;
     -- and the mode reports WHICH space answered, so a caller can tell
     if (select model from aiq.semantic_in('chunks','[1,0,0,0]','demo-quad-b',1))
-       <> 'demo-quad-b' then
+       is distinct from 'demo-quad-b' then
         raise exception 'the result does not name the space it came from';
     end if;
     raise notice 'query/08: two 4-dim models, one probe, two different answers';
@@ -130,7 +130,7 @@ end $$;
 -- The default space is used when none is named, and there can be only one.
 do $$
 begin
-    if (select model from aiq.semantic_in('chunks','[1,0,0,0]', null, 1)) <> 'demo-quad-a' then
+    if (select model from aiq.semantic_in('chunks','[1,0,0,0]', null, 1)) is distinct from 'demo-quad-a' then
         raise exception 'the default embedding model is not the one flagged default';
     end if;
     begin

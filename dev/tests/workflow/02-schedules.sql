@@ -196,7 +196,7 @@ begin
 
     -- And because the only step is a `sql` step, it has already executed --
     -- with nothing deployed anywhere.
-    if (select status from workflow.tasks where run_id = v_run and step_key = 'drift') <> 'done' then
+    if (select status from workflow.tasks where run_id = v_run and step_key = 'drift') is distinct from 'done' then
         raise exception 'the sql step in a scheduled run did not execute in-database';
     end if;
 
@@ -215,7 +215,7 @@ begin
         raise exception 'a second run was created for the same scheduled minute';
     end if;
 
-    if (select fire_count from workflow.schedules where name = 't_hourly') <> 1 then
+    if (select fire_count from workflow.schedules where name = 't_hourly') is distinct from 1 then
         raise exception 'fire_count does not match the number of runs started';
     end if;
 end $$;
@@ -249,7 +249,7 @@ begin
     if v_started <> 0 then
         raise exception 'overlap_policy=skip started a run while the previous one was running';
     end if;
-    if (select skip_count from workflow.schedules where name = 't_every_minute') <> 1 then
+    if (select skip_count from workflow.schedules where name = 't_every_minute') is distinct from 1 then
         raise exception 'a skip must be counted, not silent';
     end if;
 
@@ -339,7 +339,7 @@ begin
     if v_first <> v_second then
         raise exception 'schedule_workflow created a second schedule for the same name';
     end if;
-    if (select cron_expr from workflow.schedules where name = 't_idem') <> '0 2 * * *' then
+    if (select cron_expr from workflow.schedules where name = 't_idem') is distinct from '0 2 * * *' then
         raise exception 'schedule_workflow did not update the existing schedule';
     end if;
 end $$;
@@ -466,7 +466,7 @@ begin
     -- other half of the guarantee.
     perform set_config('request.jwt.claims',
         json_build_object('sub', v_alice::text)::text, true);
-    if (select cron_expr from workflow.schedules_api where name = 't_alices') <> '0 3 * * *' then
+    if (select cron_expr from workflow.schedules_api where name = 't_alices') is distinct from '0 3 * * *' then
         raise exception 'the schedule was modified despite the check';
     end if;
     if (select enabled from workflow.schedules_api where name = 't_alices') is not true then

@@ -54,7 +54,7 @@ begin
     -- ...and the identity resolves back to the typed row by PK, which is the
     -- other half: the registry stores identity, never the payload.
     if (select w.name from aiq.lookup('Widget One') l
-         join demo_t_widget w on w.id = l.entity_id) <> 'Widget One' then
+         join demo_t_widget w on w.id = l.entity_id) is distinct from 'Widget One' then
         raise exception 'the node does not hydrate back to its typed row';
     end if;
     raise notice 'query/04: a node is LOOKUP-able in the transaction that made it';
@@ -226,13 +226,13 @@ begin
     insert into t_s1.thing (nm) values ('from-schema-one');
     insert into t_s2.thing (nm) values ('from-schema-two');
 
-    if (select entity_type from aiq.lookup('from-schema-one')) <> 'ttype_one' then
+    if (select entity_type from aiq.lookup('from-schema-one')) is distinct from 'ttype_one' then
         raise exception
             'a row from t_s1.thing was projected as %, not ttype_one -- two '
             'registered tables sharing a short name share a projection function',
             (select entity_type from aiq.lookup('from-schema-one'));
     end if;
-    if (select entity_type from aiq.lookup('from-schema-two')) <> 'ttype_two' then
+    if (select entity_type from aiq.lookup('from-schema-two')) is distinct from 'ttype_two' then
         raise exception 'the second registration lost its own projection';
     end if;
     raise notice 'query/04: projections are keyed by entity type, not table name';
@@ -445,7 +445,7 @@ begin
        (select node_id from aiq.lookup('Kyiv')) then
         raise exception 'an alias does not resolve to the node it names';
     end if;
-    if (select match_kind from aiq.lookup('kiev')) <> 'alias' then
+    if (select match_kind from aiq.lookup('kiev')) is distinct from 'alias' then
         raise exception 'the cascade does not report which kind matched';
     end if;
 

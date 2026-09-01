@@ -5135,6 +5135,33 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- it didn't (empirically confirmed missing here); added to close that gap.
 -- Public entry point -- EXECUTE granted to `web_anon` in §9 (signup is
 -- inherently unauthenticated).
+-- ------------------------------------------------------------
+-- 1a. SIGNUP MAKES AN ACCOUNT THAT CANNOT LOG IN, and nothing here changes
+--     that. Stated because an absence and a decision look identical.
+--
+-- create_user_with_password() inserts `pending_verification`; verify_password()
+-- requires `active`. Between them the collection ships **nothing**: no
+-- verification-token table, no verify_email(), and no `send_verification_email`
+-- workflow -- that name appears only in spec.md §4.1's example and in a comment
+-- about trace propagation. So the documented front door creates a user who is
+-- refused at the second one, with `invalid credentials`, forever.
+--
+-- Found by writing the first test that ever called both in one transaction
+-- (dev/tests/rbac/03-auth-path.sql). It survived because every other test
+-- creates its users with an INSERT and a status of its own choosing, which is
+-- exactly how a fixture stops standing in for a user.
+--
+-- NOT fixed here, and the reason is scope rather than difficulty: an email
+-- verification design is a token table, an expiry, a resend policy and a
+-- delivery path, and inventing one inside a bug report is how a subsystem
+-- grows a feature nobody specified. What IS fixed is the diagnosability --
+-- attempt_login() now records WHY a login failed (§5) while still telling the
+-- caller nothing -- and the gap is pinned by an assertion, so building
+-- verification is a deliberate act that updates a test rather than a surprise.
+--
+-- The operator's workaround, until then, is the one the status column already
+-- implies: `update rbac.users set status = 'active' where id = ...`.
+-- ------------------------------------------------------------
 create or replace function rbac.create_user_with_password(p_email text, p_plain text)
 returns uuid as $$
 declare v_user_id uuid;
@@ -5408,6 +5435,39 @@ $$ language sql security definer set search_path = pg_catalog, public;
 
 -- security definer: needs to call verify_password() (now internal-only, §9)
 -- and write auth_events without granting either directly to web_anon.
+--
+-- A FAILED LOGIN RETURNS NULL. IT DOES NOT RAISE, AND THAT IS THE WHOLE
+-- SECURITY PROPERTY OF THIS FUNCTION.
+--
+-- It used to raise `invalid credentials`, one statement after consuming a rate
+-- limit token and writing an auth_events row. An exception aborts the
+-- transaction, and PostgREST gives each RPC its own -- so **both of those
+-- writes were rolled back by the failure that caused them**. Measured, not
+-- reasoned: twelve wrong passwords in a row produced `throttled = false`, zero
+-- rows in auth_events, and no bucket row in workflow.rate_limits at all.
+--
+-- Two consequences, and each is worse than it first sounds:
+--
+--   * The token bucket only ever decremented on SUCCESS. §5 above exists
+--     because verify_password() unthrottled is "an unrate-limited
+--     password-guessing oracle" -- and login(), granted to web_anon and
+--     reachable over HTTP, was exactly that. The defence was written, wired,
+--     commented and inert.
+--   * auth_events could record `login_success` and never `login_failed`. The
+--     one event an auth audit exists for was the one event it structurally
+--     could not hold, on a table whose own comment promises "every
+--     auth-relevant event, queryable, no separate logging infra needed".
+--
+-- There is no way to keep both the raise and the writes: Postgres has no
+-- autonomous transaction, and the manifest deliberately ships no dblink or
+-- pg_background to fake one. So the raise is what goes. A wrong password is a
+-- RESULT, not an error -- login() returns no row, the caller reads that as a
+-- 401, and the throttle and the audit commit because nothing aborted.
+--
+-- THROTTLING still raises, deliberately: by then the bucket is empty and
+-- already committed, so there is nothing left to lose to a rollback, and a
+-- caller genuinely needs to tell 429 from 401. The refusals it is built from
+-- are each audited on their way there.
 create or replace function rbac.attempt_login(p_email text, p_plain text)
 returns uuid as $$
 declare v_user_id uuid;
@@ -5429,14 +5489,28 @@ begin
 
     v_user_id := rbac.verify_password(p_email, p_plain);
 
+    -- WHY it failed goes in the audit, never in the answer. The caller cannot
+    -- tell a wrong password from a correct password on an account that is not
+    -- active, deliberately: telling them apart is account enumeration. But an
+    -- operator holding a support ticket that says "my password works and it
+    -- says invalid credentials" has nothing to read, and the answer is usually
+    -- the second case -- create_user_with_password makes a user
+    -- `pending_verification` and NOTHING IN THIS COLLECTION ACTIVATES ONE
+    -- (§1a). Recorded rather than raised, so the audit can answer it and the
+    -- response still cannot.
     insert into rbac.auth_events (user_id, event_type, detail)
-    values (v_user_id, case when v_user_id is null then 'login_failed' else 'login_success' end,
-            jsonb_build_object('email', p_email));
+    values (coalesce(v_user_id, (select id from rbac.users where email = p_email)),
+            case when v_user_id is null then 'login_failed' else 'login_success' end,
+            jsonb_build_object('email', p_email)
+            || case when v_user_id is not null then '{}'::jsonb
+                    else jsonb_build_object('reason', coalesce(
+                        (select case when u.password_hash is null then 'no_password'
+                                     when u.status <> 'active' then 'status_' || u.status
+                                     else 'bad_password' end
+                           from rbac.users u where u.email = p_email),
+                        'no_such_user')) end);
 
-    if v_user_id is null then
-        raise exception 'invalid credentials';
-    end if;
-    return v_user_id;
+    return v_user_id;   -- null means "no", and null is a value that commits
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
@@ -5455,6 +5529,17 @@ declare
     v_token_id uuid;
 begin
     v_user_id := rbac.attempt_login(p_email, p_plain);
+
+    -- NO ROW is the failure, not an exception. attempt_login() explains why at
+    -- length: an exception rolls back the rate-limit token and the auth_events
+    -- row that the failed attempt just wrote, so raising here would restore the
+    -- unthrottled, unaudited password oracle those two writes exist to prevent.
+    -- A caller reads zero rows as 401; 429 still arrives as an exception from
+    -- the throttle, which is the one refusal with nothing left to roll back.
+    if v_user_id is null then
+        return;
+    end if;
+
     v_token_id := rbac.issue_refresh_token(v_user_id, p_device_label, p_raw_token);
     return query select v_user_id, v_token_id;
 end;

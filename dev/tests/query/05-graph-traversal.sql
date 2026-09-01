@@ -140,7 +140,7 @@ begin
         raise exception 'a node reachable by two routes came back % times -- the '
                         'walk is enumerating paths, not nodes', v_n;
     end if;
-    if (select depth from aiq.graph_walk(v_acme, 2) where key = 'ndlr') <> 1 then
+    if (select depth from aiq.graph_walk(v_acme, 2) where key = 'ndlr') is distinct from 1 then
         raise exception 'a node reachable at depth 1 and depth 2 was not reported '
                         'at its shortest distance';
     end if;
@@ -253,7 +253,7 @@ begin
     if (select c.name from aiq.nodes n
           join demo.events ev on ev.id = n.entity_id
           join demo.companies c on c.id = ev.primary_company_id
-         where n.id = v_ev) <> 'Acme Robotics' then
+         where n.id = v_ev) is distinct from 'Acme Robotics' then
         raise exception 'the hard link is not answerable from the node -- the '
                         'other half of "two memories"';
     end if;
@@ -469,7 +469,7 @@ end $$;
 -- ---------------------------------------------------------------------
 do $$
 begin
-    if (select match_kind from aiq.lookup('ACME')) <> 'canonical' then
+    if (select match_kind from aiq.lookup('ACME')) is distinct from 'canonical' then
         raise exception 'an exact canonical key did not match as canonical';
     end if;
     -- 'acme' is a SHORT key for the same node; the cascade stops at canonical
