@@ -61,3 +61,51 @@ def put(data: bytes, content_type: str | None = None) -> tuple[str, str]:
 
 def get(bkt: str, key: str) -> bytes:
     return client().get_object(Bucket=bkt, Key=key)["Body"].read()
+
+
+def put_at(key: str, data: bytes, content_type: str | None = None) -> str:
+    """Store at a CHOSEN key rather than a content-addressed one.
+
+    Every byte this collection stores is content-addressed by `put` above, and
+    that is the right default -- it makes the write idempotent and dedup free.
+    One thing genuinely needs a location instead of a hash: a dataset, whose
+    files are found by globbing a prefix (`s3://…/datasets/sales/*.parquet`).
+    A glob over `objects/ab/abcdef…` cannot say which files are one table.
+
+    So this exists for the tabular path and is deliberately narrow: the caller
+    chooses the key, and the content-addressed copy is written anyway, so
+    nothing here is the only copy of anything.
+    """
+    client().put_object(
+        Bucket=bucket(), Key=key, Body=data,
+        ContentType=content_type or "application/octet-stream")
+    return key
+
+
+def ensure_bucket() -> str:
+    """Create the bucket if it is not there. Called once, at startup.
+
+    `docker compose up` is supposed to be the whole install, and it was not:
+    a clean MinIO volume has no buckets, nothing in the stack created one, and
+    the first upload failed with `NoSuchBucket` from botocore -- a 500 from the
+    Content Server, at the first line of RELEASE-0.1.md's acceptance narrative.
+
+    Done at STARTUP rather than lazily on first write, so a deployment whose
+    credentials cannot create a bucket finds out when it boots rather than when
+    a user uploads. A bucket that already exists is the normal case in
+    production and costs one HEAD.
+    """
+    from botocore.exceptions import ClientError
+
+    name = bucket()
+    try:
+        client().head_bucket(Bucket=name)
+        return name
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") not in ("404", "NoSuchBucket"):
+            # 403 is the interesting one: the bucket exists and this credential
+            # may not see it, which create_bucket would report as a confusing
+            # conflict rather than as the permission problem it is.
+            raise
+    client().create_bucket(Bucket=name)
+    return name

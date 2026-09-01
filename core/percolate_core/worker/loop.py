@@ -33,7 +33,7 @@ from typing import Any
 from ..core import as_service
 from .artifacts import offload
 from .http import http_call
-from .templates import TerminalError
+from .templates import TerminalError, resolve
 
 Handler = Callable[[dict, dict], Awaitable[Any]]
 HANDLERS: dict[str, Handler] = {"http_call": http_call}
@@ -69,7 +69,28 @@ async def run_once(queue: str, worker_id: str) -> bool:
             raise TerminalError(
                 f"no handler registered for kind '{kind}' -- register one with "
                 f"@handler({kind!r}), or point this worker at a different queue")
-        out = await fn(ctx.get("task_input") or {}, ctx)
+
+        spec = ctx.get("task_input") or {}
+        # `work` steps get their templates resolved HERE, and http_call ones do
+        # not, and the asymmetry is deliberate rather than left over.
+        #
+        # YAML.md promises that {{run.x}} / {{steps.x.y}} / {{env.X}} resolve at
+        # dispatch. For http_call that happens inside build_request, on the
+        # nested request spec. For `work` it happened NOWHERE: a step written as
+        # `input: {resource_id: '{{run.resource_id}}'}` reached the handler with
+        # the braces intact, and every handler would have had to know to call
+        # resolve() itself -- which the first one written against this engine
+        # did not, and the failure was a UUID parse error nineteen characters
+        # long, retried five times.
+        #
+        # It is not done for every kind because http_call's payload can legally
+        # CONTAIN braces (a chunk of text on its way to a model), and resolving
+        # an already-resolved value would turn that data into a missing
+        # reference. One pass, at the layer that owns the shape.
+        if kind == "work":
+            spec = resolve(spec, ctx)
+
+        out = await fn(spec, ctx)
         async with as_service() as conn:
             # Between the handler and complete_task, so it covers every step
             # kind rather than only http_call. An oversized output used to be a

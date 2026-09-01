@@ -25,6 +25,19 @@ dependencies = [
 
 [project.optional-dependencies]
 content = ["boto3>=1.35", "fastapi>=0.115", "uvicorn>=0.34"]
+# The ingest worker: it reads the bytes the Content Server wrote, so it needs
+# that extra too. semchunk is the chunker; the parsers are one light library
+# per format and nothing here downloads a model.
+ingest = [
+    "percolate-core[content]",
+    "pydantic>=2.9",
+    "semchunk>=3.0",
+    "pymupdf4llm>=0.0.17",
+    "python-docx>=1.1",
+]
+# Tabular is separate because a deployment that never uploads a CSV should not
+# carry pyarrow (~120MB) and duckdb (~45MB) to find that out.
+tabular = ["pyarrow>=17", "duckdb>=1.0"]
 agent = [
     "pydantic>=2.9",
     "pydantic-ai-slim[openai]>=0.4",
@@ -34,7 +47,7 @@ agent = [
     "pyyaml>=6.0",
     "rich>=13.9",
 ]
-all = ["percolate-core[content,agent]"]
+all = ["percolate-core[content,agent,ingest,tabular]"]
 
 [project.scripts]
 percolate = "percolate_core.cli:app"

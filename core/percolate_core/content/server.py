@@ -112,4 +112,9 @@ async def health():
 
 def serve(host: str = "0.0.0.0", port: int | None = None) -> None:
     import uvicorn
+
+    # Before the socket, not on the first upload: a storage backend this
+    # process cannot write to is a startup failure with a name, not a 500 with
+    # a stack trace in it.
+    print("[content] bucket " + storage.ensure_bucket(), flush=True)
     uvicorn.run(app, host=host, port=port or int(os.environ.get("P8_PORT", "8081")))

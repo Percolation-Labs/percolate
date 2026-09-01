@@ -17,6 +17,8 @@ app = typer.Typer(help="percolate — Postgres-native subsystems", no_args_is_he
 
 _EXTRAS = {
     "content": ("boto3", "fastapi", "uvicorn"),
+    "ingest": ("semchunk", "pymupdf4llm", "pymupdf", "docx", "pydantic"),
+    "tabular": ("pyarrow", "duckdb"),
     "agent": ("pydantic_ai", "fastapi", "uvicorn", "mcp", "yaml", "rich"),
 }
 
@@ -73,6 +75,11 @@ app.add_typer(
     _subcommands("content", "percolate_core.content.cli", "Content Server"),
     name="content",
     help="Content Server: uploads, scraping, ingestion",
+)
+app.add_typer(
+    _subcommands("ingest", "percolate_core.ingest.cli", "Ingest worker"),
+    name="ingest",
+    help="Ingest worker: parse, chunk and embed uploaded files",
 )
 
 

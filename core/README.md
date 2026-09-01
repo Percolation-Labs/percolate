@@ -57,6 +57,7 @@ every header and option a caller can send — captured output, not illustration.
 | `percolate_core.core` | — | connecting **as the caller**, configuration, credential resolution |
 | `percolate_core.worker` | — | the step loop, the `@handler` registry, and artifact offload |
 | `percolate_core.content` | `content` | the Content Server |
+| `percolate_core.ingest` | `ingest` | parsing, chunking and batched embedding for uploaded files |
 | `percolate_core.agentic` | `agent` | the Agent Runtime |
 
 The import package matches the distribution name exactly, so there is no mapping
@@ -73,6 +74,50 @@ root CLI mounts each subpackage's own command group and tolerates its absence,
 so `percolate worker` runs with neither installed and `percolate content` says
 which extra to install — naming the module that was actually missing, rather
 than guessing.
+
+---
+
+## `percolate_core.ingest` — an uploaded file becomes answerable
+
+    pip install 'percolate-core[ingest]'      # + [tabular] for CSV/Parquet
+    percolate ingest serve --queue ingest
+
+The ingestion workflow the Content Server starts has two steps and this runs
+both: **parse** (bytes to markdown to chunks) and **embed** (every chunk of a
+document in one batched call). One library per format and none of them carries
+a model:
+
+| | reader | |
+|---|---|---|
+| pdf | `pymupdf4llm` | the PDF's own structure, no OCR |
+| docx | `python-docx` | headings, lists and tables, in document order |
+| html | stdlib | tags out, block structure kept |
+| audio | any OpenAI-shaped `/audio/transcriptions` | including a local one |
+| csv / xlsx / parquet | `pyarrow` | to Parquet in object storage, never chunked |
+| everything else | — | registered, retrievable, not pretended to be text |
+
+Chunking is `semchunk` with a **700-token** default — generous on purpose,
+because a chunk here is retrieved, shown to a model and cited, and a 250-token
+chunk keeps the sentence that matched and loses the one that explains it.
+
+**Embedding batches, and it is why that step is `work` rather than a
+declarative `matrix:` of `embed:` children.** A step's output is capped at
+`workflow.max_payload_bytes` (64KB) and one 1536-dimension vector is ~31KB of
+JSON, so two vectors do not fit in one task output: any design that carries
+corpus vectors through the engine is limited to batches of one. This writes
+them itself (`aiq.record_embeddings`) and returns a receipt — measured, an
+eight-chunk document went from eight requests to one.
+
+Defaults live here; overrides live in the database, as a channel's or an
+upload's `ingest_policy`, validated by a strict pydantic model so a misspelled
+key is refused rather than ignored. To see what a policy does to a file without
+a database, a stack or a key:
+
+    percolate ingest file ./notice.pdf --policy '{"chunking":{"target_tokens":300}}'
+
+The contract, the per-format argument and the six defects that running it
+found are `specs/world-model-ingestion/ingestion.md` in
+[p8-subsystems](https://github.com/percolating-sirsh/p8-subsystems).
 
 ---
 
