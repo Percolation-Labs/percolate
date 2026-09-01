@@ -459,3 +459,53 @@ grant create on schema workflow to api_viewer;
 alter view workflow.schedules_api owner to api_viewer;
 revoke create on schema workflow from api_viewer;
 grant select on workflow.schedules_api to authenticated;
+
+-- ------------------------------------------------------------
+-- 6. The PUBLIC default, revoked -- because granting is not the same as
+--    scoping, and this collection had only ever done the first one.
+--
+-- EXECUTE on a new function is granted to PUBLIC by Postgres unless you take
+-- it away. Every `grant execute ... to worker` in these schemas therefore read
+-- as "worker may call this" and MEANT "worker and everybody else may call
+-- this" -- the grant materialised an ACL that still carried `=X/app_owner`.
+-- Nobody was misreading the code; the code was missing a line.
+--
+-- Found by enumerating it rather than by reading: every SECURITY DEFINER
+-- function reachable by `web_anon`, `authenticated` or `api_viewer`, checked
+-- against what each one is FOR. Eleven engine internals were reachable by any
+-- logged-in user over PostgREST, and one of them leaked:
+--
+--     POST /rpc/run_meta {"p_run_id": "<someone else's run>"}
+--     -> {"$external_id": "private-external-id", "$trace_id": ..., "$definition": ...}
+--
+-- `run_meta` is the one run-scoped reader without the guard its siblings have.
+-- `matrix_rows` and `matrix_outputs` are authorized against the run precisely
+-- so a caller holding an id from elsewhere gets nothing, and there is a test
+-- that says so; run_meta was written later, for the dispatcher, and never
+-- joined that argument. Rather than add a check it does not need -- it is
+-- called during dispatch, where there is no end-user identity to check
+-- against -- it stops being reachable by an end user at all, which is the
+-- exemption workflow-engine's own rule already grants worker-facing
+-- functions: "their authorization IS the grant."
+-- ------------------------------------------------------------
+revoke execute on function workflow.run_meta(uuid) from public;
+revoke execute on function workflow.check_run_completion(uuid) from public;
+revoke execute on function workflow.autorun_sql_steps() from public;
+revoke execute on function workflow.normalize_output(uuid, jsonb) from public;
+revoke execute on function workflow.matrix_gate_passes(uuid) from public;
+revoke execute on function workflow.encoding_drift() from public;
+revoke execute on function workflow.execute_sql_step(uuid) from public;
+revoke execute on function workflow.drain_sql_steps(uuid, int) from public;
+revoke execute on function workflow.tick(timestamptz) from public;
+-- workflow.register_artifact() is the eleventh and it is NOT revoked here:
+-- content loads after the engine, so naming it in this file fails the install
+-- with "function does not exist". The revoke belongs beside its definition in
+-- world-model-ingestion/integration.sql, which is being rewritten as this
+-- lands; one line, and the enumeration below will report it until it is
+-- written.
+
+-- The explicit grants above stand: worker keeps what it claims and completes,
+-- scheduler keeps the clock. `authenticated` keeps nothing here -- a user
+-- reaches its own runs through workflow.runs_api and the entry points that
+-- authorize against the run.
+grant execute on function workflow.encoding_drift() to worker;

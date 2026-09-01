@@ -4863,16 +4863,32 @@ begin
         -- at {{env.P8_AGENT_URL}}. Worth saying plainly -- the compiled form
         -- discards the authored intent, so anything downstream that wants to
         -- reason about agent steps is reading a convention, not a field.
+        --
+        -- THE TABLE IS NAMED IN DYNAMIC SQL, AND THE `to_regclass` GUARD IS
+        -- WHY IT HAS TO BE. `agentic` loads after this schema and after
+        -- world-model-ingestion, so on a fresh install this function exists
+        -- while agentic.agents does not -- and plpgsql PLANS a whole IF
+        -- condition before evaluating any of it, so the guard could never run
+        -- first. Static, the reference costs nothing until something calls
+        -- define_yaml during installation, and then it fails the entire
+        -- CREATE EXTENSION with `relation "agentic.agents" does not exist`.
+        -- Which is exactly what happened the day an ingestion pipeline started
+        -- installing its own workflow at load time.
         if v_step->>'kind' = 'http_call'
            and v_step->'input'->>'url' like '%P8_AGENT_URL%'
-           and to_regclass('agentic.agents') is not null
-           and not exists (select 1 from agentic.agents a
-                            where a.name = v_step->'input'->'body'->>'model') then
-            severity := 'warning';
-            detail := format('agent step names %L, which is not in agentic.agents -- '
-                             'this task will queue and wait rather than fail',
-                             v_step->'input'->'body'->>'model');
-            return next;
+           and to_regclass('agentic.agents') is not null then
+            declare v_unknown boolean;
+            begin
+                execute 'select not exists (select 1 from agentic.agents a where a.name = $1)'
+                   into v_unknown using v_step->'input'->'body'->>'model';
+                if v_unknown then
+                    severity := 'warning';
+                    detail := format('agent step names %L, which is not in agentic.agents -- '
+                                     'this task will queue and wait rather than fail',
+                                     v_step->'input'->'body'->>'model');
+                    return next;
+                end if;
+            end;
         end if;
 
         -- (f) an embed marker nothing expanded.
