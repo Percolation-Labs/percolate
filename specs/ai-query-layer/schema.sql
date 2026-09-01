@@ -1438,9 +1438,34 @@ begin
                     'name', name, 'arg_types', to_jsonb(arg_types),
                     'timeout_ms', timeout_ms, 'description', description) order by name)
                 from workflow.step_functions), '[]'::jsonb),
-            'queues', coalesce((select jsonb_agg(jsonb_build_object(
-                    'queue', queue, 'stale_timeout', stale_timeout::text) order by queue)
-                from workflow.queue_config), '[]'::jsonb),
+            -- QUEUES ARE UNIONED FROM THREE PLACES, and the first version read
+            -- only queue_config. Running a real fan-out exposed why that was
+            -- useless: queue_config holds per-queue TUNING and is empty on a
+            -- deployment that has not tuned anything, so the facet reported
+            -- `queues: []` on a database with a live worker polling `http`.
+            -- An agent authoring a `rest:` step was told the one queue that
+            -- works does not exist.
+            --
+            -- A queue is not a registry entry; it is a string a worker polls
+            -- and a step names. So the honest answer is every queue anything
+            -- has actually used, with where each was learned from -- and the
+            -- explicit caveat that a worker which has never claimed anything
+            -- is invisible here, because nothing in the database knows it
+            -- exists.
+            'queues', coalesce((
+                select jsonb_agg(jsonb_build_object('queue', q.queue, 'seen_in', q.src)
+                       order by q.queue)
+                from (
+                    select queue, min(src) as src from (
+                        select queue, 'queue_config (tuned)' as src from workflow.queue_config
+                        union all
+                        select distinct queue, 'in use by tasks' from workflow.tasks
+                        where queue <> 'none'
+                    ) u group by queue
+                ) q), '[]'::jsonb),
+            'queues_note', 'Unioned from per-queue tuning config and queues tasks have '
+                           'actually used. A worker polling a queue that has never had a '
+                           'task is not visible: nothing in the database records it.',
             'agents', coalesce((select jsonb_agg(jsonb_build_object(
                     'name', name, 'model', model) order by name)
                 from agentic.agents), '[]'::jsonb),

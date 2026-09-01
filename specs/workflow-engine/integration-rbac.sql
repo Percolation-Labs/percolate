@@ -286,6 +286,46 @@ $$ language plpgsql stable security definer set search_path = pg_catalog, public
 
 grant execute on function workflow.matrix_rows(uuid) to worker, authenticated;
 
+-- matrix_outputs returns the children's OUTPUTS -- the fetched documents, the
+-- model verdicts, whatever the fan-out produced -- so it needs the same check.
+-- It has TWO legitimate callers with different authorities, which is why this
+-- override reads the way it does:
+--
+--   * The ENGINE, running a fan-in step. No JWT, no user identity, and the
+--     authority is "this task belongs to the run I am executing" --
+--     schema.sql §20 checks that against a transaction-local run id, and it is
+--     what stops a workflow author naming another tenant's matrix task.
+--   * A USER or API client calling it directly. Real identity, and the
+--     ordinary ownership check applies.
+--
+-- Either is sufficient; neither alone covers both callers. Getting this wrong
+-- in the obvious direction -- only the user check -- was reproduced: the
+-- fan-in failed with `not authorized to read run ...` on a run it had itself
+-- created.
+create or replace function workflow.matrix_outputs(p_task_id uuid)
+returns jsonb as $$
+declare v_run uuid; v_cur text;
+begin
+    select run_id into v_run from workflow.tasks where id = p_task_id;
+    if not found then
+        raise exception 'task % not found', p_task_id;
+    end if;
+
+    v_cur := nullif(current_setting('workflow.current_run_id', true), '');
+    if v_cur is null or v_cur::uuid <> v_run then
+        perform workflow.assert_run_access(v_run, 'read');
+    end if;
+
+    return (select coalesce(jsonb_agg(jsonb_build_object(
+                'step_key', t.step_key, 'item', t.input->'item',
+                'status', t.status, 'output', t.output)
+            order by t.created_at, t.step_key), '[]'::jsonb)
+            from workflow.tasks t where t.matrix_parent_id = p_task_id);
+end;
+$$ language plpgsql stable security definer set search_path = pg_catalog, public;
+
+grant execute on function workflow.matrix_outputs(uuid) to worker, authenticated;
+
 revoke execute on function workflow.cancel_run_unchecked(uuid) from public;
 revoke execute on function workflow.assert_run_access(uuid, text) from public;
 grant execute on function workflow.cancel_run(uuid) to authenticated;
