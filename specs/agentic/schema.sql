@@ -99,9 +99,55 @@ create table agentic.agents (
     --  "summarize_after_messages": int} -- §9 leaves the numbers open, so
     -- they are per-agent data with a runtime default, not constants.
     context_policy           jsonb not null default '{}'::jsonb,
+
+    -- ------------------------------------------------------------------
+    -- Classification. Not decoration: this table is expected to hold
+    -- THOUSANDS of rows, because the extractor pattern (§5.7) puts one
+    -- specialist agent behind every (source, document type) pair -- the same
+    -- shape as content.connectors holding hundreds of sources.
+    --
+    -- Once that is true, "list the agents" is useless without a filter, and
+    -- an interactive UI that shows a user a thousand machine extractors is
+    -- broken. `audience` is the column that fixes it and it is deliberately
+    -- NOT derived from tags: whether a human may pick an agent is an access
+    -- decision, and inferring it from a free-text tag would make it one a
+    -- typo can change.
+    -- ------------------------------------------------------------------
+    audience                 text not null default 'internal'
+                                 check (audience in ('user','internal','system')),
+    -- What the agent is FOR. Closed, because an open list becomes a synonym
+    -- pile within a month and the whole point is filtering.
+    category                 text not null default 'general'
+                                 check (category in
+                                     ('general','extractor','summariser','classifier',
+                                      'router','critic','tool_user','evaluator')),
+    -- Free-text, for search rather than for control. Never load-bearing.
+    tags                     text[] not null default '{}',
+    -- For category='extractor': which (source, doctype) this specialist owns.
+    -- Unique when set, so two extractors cannot silently claim one source.
+    extracts_source          text,
+    extracts_doctype         text,
+
     created_at               timestamptz not null default now(),
     updated_at               timestamptz not null default now()
 );
+
+-- One specialist per (source, doctype). A second registration is a conflict to
+-- resolve, not a fallback to pick between at runtime.
+create unique index if not exists idx_agents_extractor
+    on agentic.agents (extracts_source, extracts_doctype)
+    where category = 'extractor';
+
+create index if not exists idx_agents_audience on agentic.agents (audience)
+    where audience = 'user';
+create index if not exists idx_agents_category on agentic.agents (category);
+create index if not exists idx_agents_tags     on agentic.agents using gin (tags);
+
+-- An extractor without a declared output shape is a model call with extra
+-- steps: the shape is what makes N extractions combinable and what makes a
+-- bad answer RETRYABLE rather than silently wrong (workflow schema §21).
+alter table agentic.agents add constraint agents_extractor_needs_schema
+    check (category <> 'extractor' or structured_output_schema is not null);
 
 create trigger trg_agents_updated
     before update on agentic.agents
@@ -663,6 +709,28 @@ create view agentic.tool_servers_api as
     select id, name, kind, url, credential_ref, emits_citations, serves_agents,
            cached_tools, synced_at, created_at
       from agentic.tool_servers;
+-- The view an interactive UI reads. `audience = 'user'` is the whole point of
+-- the column: a thousand extractors are invisible here without anyone having
+-- to remember to filter.
+create or replace view agentic.agents_pickable as
+select id, name, category, tags, model, structured_output_schema is not null as has_shape
+from agentic.agents
+where audience = 'user'
+order by category, name;
+
+-- The extractor fleet, as an operations surface. Mirrors
+-- content.v_connectors: what exists, what it covers, and whether it is
+-- contracted.
+create or replace view agentic.v_extractors as
+select name, extracts_source as source, extracts_doctype as doctype,
+       model, tags,
+       structured_output_schema is not null as has_shape,
+       (select count(*) from jsonb_object_keys(
+           coalesce(structured_output_schema->'properties','{}'::jsonb))) as n_slots
+from agentic.agents
+where category = 'extractor'
+order by extracts_source, extracts_doctype;
+
 create view agentic.agents_api as
     select id, name, system_prompt, model, tools, structured_output_schema,
            chained_action, summarizer_agent_id, context_policy, created_at
