@@ -251,8 +251,14 @@ begin
     -- is not a security property.
     perform workflow.assert_run_access(p_run_id, 'signal');
 
+    -- completed_at is stamped for the §21c reason, and this is the definition
+    -- that actually runs: schema.sql defines signal_task too and this file
+    -- REPLACES it to add the authorization check, so the base body is dead in
+    -- any deployment that loads both -- which is every deployment, since both
+    -- files are in build-sql.py's ORDER. The fix was first applied to the
+    -- superseded copy and had no effect; dev/currency.sh is what noticed.
     update workflow.tasks
-    set status = 'done', output = p_payload
+    set status = 'done', output = p_payload, completed_at = clock_timestamp()
     where run_id = p_run_id and wait_signal = p_signal and status = 'waiting_external';
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;

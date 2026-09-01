@@ -50,6 +50,7 @@ def check_single_definition(path, text):
             f"{path}: a function is defined more than once -- {detail}.\n"
             "Only the last definition runs. Keep one body, at the point it is first "
             "needed, and let the later section explain why it has that shape.")
+    return set(sigs)
 
 VERSION = "0.1.0"
 
@@ -125,6 +126,29 @@ HEADER = f"""-- ============================================================
 """
 
 
+def report_cross_file_redefinitions(sigs_by_file) -> None:
+    """Name every function defined in more than one shipped file.
+
+    check_single_definition() guards WITHIN a file. Across files the same
+    shadowing is legitimate and deliberate -- integration-rbac.sql replaces
+    several engine entry points to add authorization -- so this reports rather
+    than refuses. It reports because the trap is real and was walked into: a
+    fix to signal_task's completed_at was applied to schema.sql's copy, which
+    every deployment loads and then immediately overwrites, so the change had
+    no effect and nothing said so. Knowing which definition is live is the
+    difference between editing the function and editing a comment.
+    """
+    seen = {}
+    for rel, sigs in sigs_by_file:
+        for sig in sigs:
+            seen.setdefault(sig, []).append(rel)
+    shadowed = {s: f for s, f in seen.items() if len(f) > 1}
+    if shadowed:
+        print("note: defined in more than one shipped file -- the LAST one wins:")
+        for sig, files in sorted(shadowed.items()):
+            print(f"  {sig}\n      {' -> '.join(files)}   (live: {files[-1]})")
+
+
 def check_every_spec_is_accounted_for() -> None:
     """Refuse to build while a spec schema is in neither ORDER nor NOT_SHIPPED.
 
@@ -156,6 +180,7 @@ def check_every_spec_is_accounted_for() -> None:
 def main() -> int:
     check_every_spec_is_accounted_for()
     parts = [HEADER]
+    sigs_by_file = []
     for rel, why in ORDER:
         src = ROOT / "specs" / rel
         if not src.exists():
@@ -164,7 +189,7 @@ def main() -> int:
         # Required extensions are declared in percolate.control, so the schema
         # files no longer create them and cannot disagree about versions.
         raw = src.read_text()
-        check_single_definition(rel, raw)
+        sigs_by_file.append((rel, check_single_definition(rel, raw)))
         body = re.sub(r"^create extension if not exists [a-z_]+;.*$", "",
                       raw, flags=re.M)
         parts.append(
@@ -172,6 +197,8 @@ def main() -> int:
             f"-- {rel}\n--   {why}\n"
             f"-- ============================================================\n")
         parts.append(body)
+
+    report_cross_file_redefinitions(sigs_by_file)
 
     out = ROOT / f"extension/percolate/sql/percolate--{VERSION}.sql"
     body = "\n".join(parts)

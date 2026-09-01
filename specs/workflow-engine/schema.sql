@@ -1012,10 +1012,15 @@ begin
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
+-- completed_at is stamped here for the same §21c reason as complete_task and
+-- promote_due_timers: it is the column begin_compensation orders by, and this
+-- was the third path that marked a task `done` without it. A signalled task in
+-- a saga group sorted first under `order by completed_at desc` -- compensated
+-- before everything that ran after it -- because a NULL sorts first.
 create or replace function workflow.signal_task(p_run_id uuid, p_signal text, p_payload jsonb)
 returns void as $$
     update workflow.tasks
-    set status = 'done', output = p_payload
+    set status = 'done', output = p_payload, completed_at = clock_timestamp()
     where run_id = p_run_id and wait_signal = p_signal and status = 'waiting_external';
 $$ language sql;
 

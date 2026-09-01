@@ -1038,10 +1038,15 @@ begin
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
+-- completed_at is stamped here for the same §21c reason as complete_task and
+-- promote_due_timers: it is the column begin_compensation orders by, and this
+-- was the third path that marked a task `done` without it. A signalled task in
+-- a saga group sorted first under `order by completed_at desc` -- compensated
+-- before everything that ran after it -- because a NULL sorts first.
 create or replace function workflow.signal_task(p_run_id uuid, p_signal text, p_payload jsonb)
 returns void as $$
     update workflow.tasks
-    set status = 'done', output = p_payload
+    set status = 'done', output = p_payload, completed_at = clock_timestamp()
     where run_id = p_run_id and wait_signal = p_signal and status = 'waiting_external';
 $$ language sql;
 
@@ -5449,8 +5454,14 @@ begin
     -- is not a security property.
     perform workflow.assert_run_access(p_run_id, 'signal');
 
+    -- completed_at is stamped for the §21c reason, and this is the definition
+    -- that actually runs: schema.sql defines signal_task too and this file
+    -- REPLACES it to add the authorization check, so the base body is dead in
+    -- any deployment that loads both -- which is every deployment, since both
+    -- files are in build-sql.py's ORDER. The fix was first applied to the
+    -- superseded copy and had no effect; dev/currency.sh is what noticed.
     update workflow.tasks
-    set status = 'done', output = p_payload
+    set status = 'done', output = p_payload, completed_at = clock_timestamp()
     where run_id = p_run_id and wait_signal = p_signal and status = 'waiting_external';
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
@@ -8315,6 +8326,21 @@ create table agentic.tool_servers (
     -- claim that namespace, and a server merely *named* `agent` produced it by
     -- accident through collision-prefixing.
     serves_agents   boolean not null default false,
+    -- Non-secret headers sent on BOTH the registration fetch and every
+    -- subsequent call. Not a general escape hatch and explicitly not where a
+    -- secret goes -- that is `credential_ref`, one column up, and the check
+    -- constraint below refuses the two header names that would carry one.
+    --
+    -- It exists because a base url does not always identify an OpenAPI
+    -- document. This collection's own REST surface is the case that proved it:
+    -- one PostgREST serves five schemas from one url and picks between them
+    -- with `Accept-Profile`, so `http://postgrest:3000` resolves to the
+    -- `content` document and the workflow operations an agent needs are
+    -- invisible -- a bound server that looks correctly registered and is
+    -- missing every tool the agent was given. §5.2's adapter is required to
+    -- carry no per-service knowledge, so it cannot be taught to send that
+    -- header; the row has to.
+    default_headers jsonb not null default '{}'::jsonb,
     -- Synced at registration and refreshed by a scheduled workflow-engine
     -- task; NOT re-fetched per agent invocation.
     cached_tools    jsonb not null default '[]'::jsonb,
@@ -8322,6 +8348,19 @@ create table agentic.tool_servers (
     created_at      timestamptz not null default now(),
     updated_at      timestamptz not null default now()
 );
+
+-- The one thing default_headers must never become. A secret in a header is
+-- the same secret in a row that credential_ref exists to keep out, and it
+-- would arrive there by an entirely reasonable-looking registration, so it is
+-- refused by the table rather than by a convention in a reviewer's head.
+--
+-- Written against the lowercased document rather than with a subquery over
+-- jsonb_object_keys, because a CHECK constraint may not contain a subquery at
+-- all -- Postgres refuses the natural spelling outright. `?|` tests keys only,
+-- so lowercasing the values along with them changes nothing.
+alter table agentic.tool_servers add constraint tool_servers_headers_not_secrets
+    check (not (lower(default_headers::text)::jsonb
+                ?| array['authorization', 'proxy-authorization', 'cookie']));
 
 create trigger trg_tool_servers_updated
     before update on agentic.tool_servers
@@ -8836,9 +8875,18 @@ begin
         raise exception 'not authorized to author agents';
     end if;
 
+    -- Every column an author can set, including the classification block.
+    -- Leaving audience/category out of this list -- which is how it was first
+    -- written, because they were added to the table later -- does not fail: it
+    -- silently defaults every agent to `internal`/`general`, so an agent
+    -- authored as user-facing is accepted, reported as created, and then never
+    -- appears in `agents_pickable`. A write path that cannot express a column
+    -- the table has is a write path that quietly disagrees with its own schema.
     insert into agentic.agents (name, system_prompt, model, tools,
                                 structured_output_schema, chained_action,
-                                summarizer_agent_id, context_policy)
+                                summarizer_agent_id, context_policy,
+                                audience, category, tags,
+                                extracts_source, extracts_doctype)
     values (p_spec->>'name',
             coalesce(p_spec->>'system_prompt', ''),
             p_spec->>'model',
@@ -8846,7 +8894,13 @@ begin
             p_spec->'structured_output_schema',
             p_spec->'chained_action',
             (p_spec->>'summarizer_agent_id')::uuid,
-            coalesce(p_spec->'context_policy', '{}'::jsonb))
+            coalesce(p_spec->'context_policy', '{}'::jsonb),
+            coalesce(p_spec->>'audience', 'internal'),
+            coalesce(p_spec->>'category', 'general'),
+            coalesce((select array_agg(value)
+                        from jsonb_array_elements_text(p_spec->'tags')), '{}'),
+            p_spec->>'extracts_source',
+            p_spec->>'extracts_doctype')
     on conflict (name) do update
        set system_prompt            = excluded.system_prompt,
            model                    = excluded.model,
@@ -8854,7 +8908,12 @@ begin
            structured_output_schema = excluded.structured_output_schema,
            chained_action           = excluded.chained_action,
            summarizer_agent_id      = excluded.summarizer_agent_id,
-           context_policy           = excluded.context_policy
+           context_policy           = excluded.context_policy,
+           audience                 = excluded.audience,
+           category                 = excluded.category,
+           tags                     = excluded.tags,
+           extracts_source          = excluded.extracts_source,
+           extracts_doctype         = excluded.extracts_doctype
     returning * into v_row;
     return v_row;
 end;
@@ -8874,11 +8933,12 @@ begin
 
     insert into agentic.tool_servers (name, kind, url, credential_ref,
                                       emits_citations, serves_agents,
-                                      cached_tools, synced_at)
+                                      default_headers, cached_tools, synced_at)
     values (p_spec->>'name', p_spec->>'kind', p_spec->>'url',
             p_spec->>'credential_ref',
             coalesce((p_spec->>'emits_citations')::boolean, false),
             coalesce((p_spec->>'serves_agents')::boolean, false),
+            coalesce(p_spec->'default_headers', '{}'::jsonb),
             coalesce(p_spec->'cached_tools', '[]'::jsonb),
             case when p_spec ? 'cached_tools' then now() end)
     on conflict (name) do update
@@ -8887,7 +8947,16 @@ begin
            credential_ref  = excluded.credential_ref,
            emits_citations = excluded.emits_citations,
            serves_agents   = excluded.serves_agents,
-           cached_tools    = excluded.cached_tools,
+           default_headers = excluded.default_headers,
+           -- Registration and re-sync are the same call, so a registration
+           -- that omits `cached_tools` must not erase the tools a sync found.
+           -- `excluded` carries the DEFAULT ('[]') for an omitted key, not
+           -- "no change" -- which is how re-registering a server to correct
+           -- its url emptied its tool list and left every agent bound to it
+           -- with nothing to call.
+           cached_tools    = case when p_spec ? 'cached_tools'
+                                  then excluded.cached_tools
+                                  else agentic.tool_servers.cached_tools end,
            synced_at       = coalesce(excluded.synced_at, agentic.tool_servers.synced_at)
     returning * into v_row;
     return v_row;

@@ -439,8 +439,14 @@ begin
                         'order by completed_at desc and compensates before everything '
                         'that ran after it';
     end if;
-    raise notice 'workflow/06: every path that completes a task stamps the ordering '
-                 'column the saga reads';
+    if (select prosrc from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'workflow' and p.proname = 'signal_task')
+       not like '%completed_at%' then
+        raise exception 'a signalled task records no completed_at -- the third path to '
+                        'mark a task done without the column a saga orders by';
+    end if;
+    raise notice 'workflow/06: all three paths that complete a task outside '
+                 'complete_task stamp the ordering column the saga reads';
 end $$;
 
 -- ---------------------------------------------------------------------
@@ -470,6 +476,110 @@ begin
     end if;
     raise notice 'workflow/06: batched claiming takes the whole queue once and leaves '
                  'nothing for a second claimer';
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 12. THE TWO WAYS A RUN STALLS WITHOUT FAILING.
+--
+-- 05-faults asserts a timer's delay is measured from readiness. It does not
+-- assert that anything ever FIRES it, and promote_due_timers had never been
+-- executed -- a timer that is correctly scheduled and never promoted is a run
+-- that waits forever while reporting `running`. The signal half is the same
+-- shape from the other end: a `signal` step parks in waiting_external, and if
+-- signal_task cannot deliver, nothing says so.
+--
+-- Both belong in this file rather than 05: they are liveness, and a stall that
+-- never fails is the failure this suite exists to catch.
+-- ---------------------------------------------------------------------
+insert into workflow.definitions (name, spec) values
+('t_r_timer', '{"steps":[{"key":"first","kind":"work","queue":"trt"},
+                         {"key":"wait","kind":"timer","queue":"none","depends_on":["first"],
+                          "input":{"delay_seconds":1}},
+                         {"key":"last","kind":"work","queue":"trt","depends_on":["wait"]}]}');
+
+do $$
+declare v_run uuid; v_first uuid; v_wait uuid; v_fired int;
+begin
+    v_run := workflow.start_workflow('t_r_timer', '{}'::jsonb);
+    select id into v_first from workflow.tasks where run_id = v_run and step_key = 'first';
+    perform workflow.complete_task(v_first, '{"result":"ok"}'::jsonb);
+
+    select id into v_wait from workflow.tasks where run_id = v_run and step_key = 'wait';
+    if (select status from workflow.tasks where id = v_wait) <> 'ready' then
+        raise exception 'the timer did not become ready when its dependency completed';
+    end if;
+
+    -- Not yet due: promoting now would make every delay a lie.
+    if workflow.promote_due_timers() <> 0 then
+        raise exception 'a timer fired before its delay elapsed';
+    end if;
+
+    -- Due. The clock is driven rather than waited on, same as 02-schedules.
+    update workflow.tasks set run_after = now() - interval '1 second' where id = v_wait;
+    v_fired := workflow.promote_due_timers();
+    if v_fired <> 1 then
+        raise exception 'a due timer was not promoted -- the run waits forever '
+                        'while reporting running (% fired)', v_fired;
+    end if;
+    if (select status from workflow.tasks where id = v_wait) <> 'done' then
+        raise exception 'a promoted timer is not done';
+    end if;
+    if (select completed_at from workflow.tasks where id = v_wait) is null then
+        raise exception 'a fired timer recorded no completed_at, so it sorts first '
+                        'in a saga compensation (§21c)';
+    end if;
+    if (select status from workflow.tasks where run_id = v_run and step_key = 'last') <> 'ready' then
+        raise exception 'a fired timer did not release the step waiting on it';
+    end if;
+    raise notice 'workflow/06: a timer fires only when due, and firing releases what '
+                 'was waiting on it';
+end $$;
+
+insert into workflow.definitions (name, spec) values
+('t_r_signal', '{"steps":[{"key":"await","kind":"signal","queue":"none",
+                           "input":{"signal":"approved"}},
+                          {"key":"then","kind":"work","queue":"trs","depends_on":["await"]}]}');
+
+do $$
+declare v_run uuid; v_await uuid; v_owner uuid;
+begin
+    v_run := workflow.start_workflow('t_r_signal', '{}'::jsonb);
+    select id into v_await from workflow.tasks where run_id = v_run and step_key = 'await';
+
+    -- signal_task is authorised, like cancel_run. An unowned run is
+    -- system-owned and takes an explicit permission rather than bare
+    -- ownership (§21j), so drive this as a real caller with a real identity --
+    -- which also asserts that the delivery path an approval button uses is the
+    -- authorised one.
+    v_owner := gen_random_uuid();
+    insert into rbac.users (id, email) values (v_owner, 'recovery-signaller@test.com');
+    update workflow.runs set owner_id = v_owner where id = v_run;
+    perform set_config('request.jwt.claims', json_build_object('sub', v_owner::text)::text, true);
+
+    if (select status from workflow.tasks where id = v_await) <> 'waiting_external' then
+        raise exception 'a signal step did not park in waiting_external, it is %',
+            (select status from workflow.tasks where id = v_await);
+    end if;
+    if (select status from workflow.tasks where run_id = v_run and step_key = 'then') <> 'pending' then
+        raise exception 'the step after an unsignalled wait was released early';
+    end if;
+
+    perform workflow.signal_task(v_run, 'approved', '{"by":"a human"}'::jsonb);
+
+    if (select status from workflow.tasks where id = v_await) <> 'done' then
+        raise exception 'signal_task did not resolve the waiting task';
+    end if;
+    if (select completed_at from workflow.tasks where id = v_await) is null then
+        raise exception 'a signalled task recorded no completed_at -- the third path '
+                        'to mark a task done without the column a saga orders by (§21c)';
+    end if;
+    if (select status from workflow.tasks where run_id = v_run and step_key = 'then') <> 'ready' then
+        raise exception 'the signalled step did not release its successor';
+    end if;
+    perform set_config('request.jwt.claims', '', true);
+    raise notice 'workflow/06: a signal step waits for the outside world and is '
+                 'released by it, through the authorised path -- the '
+                 'human-in-the-loop primitive, executed';
 end $$;
 
 rollback;
