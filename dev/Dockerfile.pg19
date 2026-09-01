@@ -49,7 +49,20 @@ RUN cd /tmp && git clone --branch v1.6.7 https://github.com/citusdata/pg_cron.gi
 # percolate is pure SQL generated from specs/ by
 # extension/percolate/build-sql.py.
 # ---------------------------------------------------------------------------
-COPY dist/percolate_parser.so /usr/lib/postgresql/19/lib/
+# TARGETARCH is set by buildx per platform ("amd64" / "arm64"), so one
+# Dockerfile produces a real multi-arch image. A shared library cannot be
+# multi-arch inside one file -- it is compiled against one ABI -- so the .so is
+# named per platform and the right one is selected here. Getting this wrong is
+# not subtle at runtime, but it IS subtle at build time: a single-arch image
+# built on an Apple laptop and pushed as `19` runs nowhere in a typical amd64
+# cluster, which is how this image spent its first release arm64-only.
+ARG TARGETARCH
+COPY dist/percolate_parser-${TARGETARCH}.so /usr/lib/postgresql/19/lib/percolate_parser.so
 COPY dist/percolate_parser.control dist/percolate_parser--0.1.0.sql \
      dist/percolate.control dist/percolate--0.1.0.sql \
      /usr/share/postgresql/19/extension/
+
+# The bootstrap, so `docker run` gives a system rather than an empty database
+# with an available extension. See the file for why it is shell and not SQL,
+# and for why dev/'s bind mount shadows it rather than colliding with it.
+COPY image-init/00-percolate.sh /docker-entrypoint-initdb.d/00-percolate.sh

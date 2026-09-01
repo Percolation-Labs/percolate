@@ -1,7 +1,18 @@
-FROM pg19-stack-db:latest AS base
+# Builds percolate_parser.so for ONE platform. Run it once per architecture.
+#
+# Self-contained on purpose. This used to be `FROM pg19-stack-db:latest` -- a
+# LOCAL tag produced by Dockerfile.pg19, which needs dist/percolate_parser.so,
+# which is what this file produces. The cycle was invisible on a machine that
+# had already built everything once and fatal on any other, including a CI
+# runner. Starting from the public base breaks it, and is also what lets
+# `--platform linux/amd64` work: the toolchain is installed for whatever
+# platform the build is running as, rather than inherited from whatever was
+# lying around.
+FROM postgres:19beta3-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl build-essential pkg-config libssl-dev clang libclang-dev \
+    git ca-certificates postgresql-server-dev-19 \
     && rm -rf /var/lib/apt/lists/*
 
 ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
