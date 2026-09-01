@@ -2876,6 +2876,28 @@ begin
                 v_ref := trim(both from replace(replace(
                              substr(v_txt, v_start, v_end - v_start), '{{', ''), '}}', ''));
                 v_val := workflow.resolve_template_ref(v_ref, p_run_id, p_item);
+                -- A JSON null is a VALUE, so resolve_template_ref lets it
+                -- through -- its guard is `is null`, which jsonb 'null' is
+                -- not. Rendering it is where that stops being harmless:
+                -- `#>> '{}'` on jsonb 'null' returns SQL NULL, and `text ||
+                -- NULL` is NULL, so ONE null reference silently annihilated
+                -- the entire argument. Measured: run input {"q": null} and
+                -- the argument 'SEARCH "{{run.q}}" FROM chunks' resolving to
+                -- NULL rather than to a query.
+                --
+                -- Raised rather than rendered as the four characters "null",
+                -- because a search for the literal string null is the same
+                -- silent-degradation class this interpolation was added to
+                -- close. A whole-string reference still passes jsonb null
+                -- through untouched: there it is an argument, and whether a
+                -- null argument is legal is the callee's question.
+                if jsonb_typeof(v_val) = 'null' then
+                    raise exception
+                        'template ''%'' is null, and this argument is text around it '
+                        '(%). A null cannot be rendered into a string without changing '
+                        'what the string says -- pass it as the whole argument if the '
+                        'function accepts null.', v_ref, left(v_txt, 60);
+                end if;
                 -- `#>> '{}'` renders a string without its quotes and anything
                 -- else as its JSON text.
                 v_new := v_new || substr(v_txt, v_pos, v_start - v_pos)
@@ -4372,6 +4394,7 @@ begin
             ('p8ql',         E'name: c\nsteps:\n  - id: s\n    p8ql: ''LOOKUP "x"'''),
             ('rest',         E'name: c\nsteps:\n  - id: s\n    rest: {url: http://x}'),
             ('embed',        E'name: c\nsteps:\n  - id: s\n    embed: hello'),
+            ('rate_key',     E'name: c\nsteps:\n  - id: s\n    rest: {url: http://x}\n    rate_key: k'),
             ('agent',        E'name: c\nsteps:\n  - id: s\n    agent: a'),
             ('work',         E'name: c\nsteps:\n  - id: s\n    work: true'),
             ('matrix',       E'name: c\nsteps:\n  - id: s\n    matrix:\n      items: []\n      max_fanout: 1\n      template: {work: true}'),

@@ -629,4 +629,87 @@ $y$);
     raise notice 'workflow/09: a compensation waiting on a forward step is flagged, and still allowed';
 end $$;
 
+-- ---------------------------------------------------------------------
+-- 15. THE THROTTLE WAS REACHABLE ONLY FROM A FAN-OUT.
+--
+-- `start_workflow` has always read `rate_key` off a step and written it to the
+-- task, and `claim_task` has always consumed it -- but the compiler accepted
+-- the key only inside a `matrix:` template. So the one call in this system
+-- that is always rate-limited, an embedding endpoint, could be throttled only
+-- if it happened to be a fan-out child. Same class as signal/timer/
+-- sub_workflow: an engine capability with no way to reach it from YAML.
+-- ---------------------------------------------------------------------
+do $$
+declare
+    v_run uuid;
+    v_key text;
+begin
+    perform workflow.define_yaml($y$
+name: t_embed_rate
+steps:
+  - id: q
+    embed: {text: 'throttled', model: t-embed-a}
+    rate_key: t-embed-budget
+$y$);
+    if (select spec#>>'{steps,0,rate_key}' from workflow.definitions
+         where name = 't_embed_rate') <> 't-embed-budget' then
+        raise exception 'rate_key did not survive compilation';
+    end if;
+
+    v_run := workflow.start_workflow('t_embed_rate', '{}'::jsonb);
+    select rate_key into v_key from workflow.tasks where run_id = v_run and step_key = 'q';
+    if v_key is distinct from 't-embed-budget' then
+        raise exception
+            'the task carries rate_key ''%'' -- the spec had one and start_workflow dropped it',
+            v_key;
+    end if;
+
+    -- and the probe reports it, so a compiler that predates this says so
+    -- rather than dropping the key and leaving the step unthrottled.
+    if not coalesce((workflow.compiler_capabilities()#>>'{accepts,rate_key}')::boolean, false) then
+        raise exception 'the installed compiler cannot author rate_key';
+    end if;
+
+    raise notice 'workflow/09: a step outside a matrix can name a throttle, and it reaches the task row';
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 16. HOW BIG AN EMBEDDING FITS.
+--
+-- A vector is the one step output whose size is known in advance -- dimension
+-- times the width of a float -- and it is checked against the same payload cap
+-- as everything else. Measured rather than reasoned, at full float precision,
+-- because the remedy the cap's own message names does NOT apply here: an
+-- artifact ref resolves to a resource id, and p8ql_vec takes the array. A
+-- vector that does not fit is a model you cannot use at this cap.
+-- ---------------------------------------------------------------------
+do $$
+declare
+    v_cap   int := coalesce(nullif(current_setting('workflow.max_payload_bytes', true), '')::int, 65536);
+    v_768   int;
+    v_3072  int;
+begin
+    select length((select jsonb_agg(random()) from generate_series(1, 768))::text) into v_768;
+    select length((select jsonb_agg(random()) from generate_series(1, 3072))::text) into v_3072;
+
+    if v_768 >= v_cap then
+        raise exception
+            'a 768-dimension embedding is % bytes against a % byte cap -- the ordinary '
+            'case no longer fits, which breaks every vector workflow', v_768, v_cap;
+    end if;
+    if v_3072 >= v_cap then
+        raise notice
+            'workflow/09: NOTE a 3072-dimension embedding is % bytes against a % byte cap '
+            'and no longer fits -- raise workflow.max_payload_bytes for such a model',
+            v_3072, v_cap;
+    end if;
+    -- round() before the message, not a width specifier inside it: plpgsql's
+    -- raise knows exactly one placeholder, `%`, and anything after it is
+    -- literal text. `%.1f` prints the whole numeric and then ".1f".
+    raise notice
+        'workflow/09: an embedding is ~% bytes per dimension, so the % byte cap holds '
+        'about % dimensions',
+        round(v_3072::numeric / 3072, 2), v_cap, (v_cap / (v_3072::numeric / 3072))::int;
+end $$;
+
 rollback;

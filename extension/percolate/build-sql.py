@@ -52,6 +52,32 @@ def check_single_definition(path, text):
             "needed, and let the later section explain why it has that shape.")
     return set(sigs)
 
+def check_raise_format(path, text):
+    """Refuse a RAISE whose message uses a specifier only format() understands.
+
+    plpgsql's RAISE knows exactly one placeholder -- `%` -- and prints anything
+    after it literally. `%L` therefore emits the value followed by the letter L,
+    which is how `register_embedding_space(no-space4L)` reached a user-facing
+    error message. Twice, in one session, by the same author, which is the
+    argument for checking it here rather than remembering it.
+
+    Only inside RAISE: `%L` and `%I` are correct and necessary in format().
+    """
+    bad = []
+    for m in re.finditer(r'raise\s+(?:exception|warning|notice)\b(.*?);', text,
+                         re.S | re.I):
+        body = re.sub(r'format\s*\(.*?\)', '', m.group(1), flags=re.S)
+        hit = re.search(r'%[LI]\b', body)
+        if hit:
+            bad.append((text[:m.start()].count('\n') + 1, hit.group(0)))
+    if bad:
+        detail = "; ".join(f"{spec} at line {line}" for line, spec in bad)
+        raise SystemExit(
+            f"{path}: a RAISE message uses a format()-only specifier -- {detail}.\n"
+            "RAISE has one placeholder, `%`; anything after it is literal text, so "
+            "`%L` prints the value and then an L. Quote it yourself: ''%''.")
+
+
 VERSION = "0.1.0"
 
 # Not arbitrary: the two cores are MUTUALLY dependent (rbac.attempt_login needs
@@ -189,6 +215,7 @@ def main() -> int:
         # Required extensions are declared in percolate.control, so the schema
         # files no longer create them and cannot disagree about versions.
         raw = src.read_text()
+        check_raise_format(rel, raw)
         sigs_by_file.append((rel, check_single_definition(rel, raw)))
         body = re.sub(r"^create extension if not exists [a-z_]+;.*$", "",
                       raw, flags=re.M)

@@ -549,6 +549,7 @@ fn p8_workflow_grammar() -> pgrx::JsonB {
             "id": "required, unique within the document; becomes the task's step_key",
             "needs": "list of step ids this one waits for -- an AND-join",
             "queue": "which worker pool claims it; in-database kinds ignore it",
+            "rate_key": "a shared throttle this task consumes before being claimed -- workflow.queue_config holds the rate; two steps naming the same key share one budget",
             "compensate_with": "step id to run in reverse order if a saga member fails",
             "saga_group": "groups tasks compensated together"
         },
@@ -818,6 +819,18 @@ struct WfStep {
     needs: Vec<String>,
     #[serde(default)]
     queue: Option<String>,
+    // Which shared throttle this task consumes before it is claimed.
+    //
+    // start_workflow has ALWAYS read `rate_key` off a step and written it to
+    // the task, and claim_task has always consumed it -- but the compiler
+    // accepted the key only inside a `matrix:` template, so the one place you
+    // could throttle anything was a fan-out. An embedding endpoint or a model
+    // API is the canonical rate-limited call and is usually not a fan-out at
+    // all. Same class as `signal`/`timer`/`sub_workflow` (§22c): an engine
+    // capability the author could not reach, found by trying to write the
+    // obvious document.
+    #[serde(default)]
+    rate_key: Option<String>,
 
     // exactly one of these
     #[serde(default)]
@@ -1431,6 +1444,9 @@ pub fn compile_workflow(yaml: &str) -> Result<serde_json::Value, String> {
         let mut step = serde_json::json!({
             "key": s.id, "kind": kind, "queue": queue, "input": input
         });
+        if let Some(rk) = &s.rate_key {
+            step["rate_key"] = serde_json::json!(rk);
+        }
         if let Some(sc) = &s.output_schema {
             if kind == "sql" || kind == "matrix" {
                 return Err(format!(

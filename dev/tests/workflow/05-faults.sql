@@ -111,7 +111,7 @@ begin
                 raise exception 'rejected %: %', v_case.why, v_got;
             end if;
         elsif v_got is null or v_got not like '%' || v_case.expect || '%' then
-            raise exception 'accepted %s (or said the wrong thing): %',
+            raise exception 'accepted % (or said the wrong thing): %',
                 v_case.why, coalesce(v_got, '<conformed>');
         end if;
     end loop;
@@ -490,7 +490,7 @@ begin
         raise exception 'the timer is already due -- its delay was never applied';
     end if;
     if v_after < v_created + interval '25 seconds' then
-        raise exception 'the timer delay is short: run_after is only %s after creation',
+        raise exception 'the timer delay is short: run_after is only % after creation',
             v_after - v_created;
     end if;
 end $$;
