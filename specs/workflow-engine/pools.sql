@@ -292,38 +292,28 @@ create trigger pools_notify_delete   after delete on workflow.pools
     for each row execute function workflow.pools_notify_delete();
 
 -- ----------------------------------------------------------------------------
--- 6. The scaler query -- the one function KEDA calls
+-- 6. The scaler query -- MOVED
 --
--- It counts `running` as well as `ready`, and that is not an accident.
+-- workflow.queue_depth(text) is no longer defined here. It lives in
+-- workflow-engine/schema.sql, next to workflow.tasks, and ships in the
+-- extension.
 --
--- The obvious implementation counts claimable work -- status = 'ready' -- and
--- is wrong in a way that only appears under long tasks: a pool of ten pods
--- each three minutes into a task reports depth 0, KEDA reads that as idle, and
--- scales the pods out from under work in flight.
+-- It moved because it turned out not to be a pool's function at all. The Helm
+-- chart in get-percolate autoscales on queue depth with no manager and no
+-- pools table anywhere, and its KEDA trigger could not read the number: as
+-- `worker` it got `permission denied for table tasks`, and once granted that,
+-- `permission denied for table runs` -- the RLS policy on tasks reads runs.
+-- Two tables, to answer one number, for a credential the KEDA operator holds
+-- across every namespace it serves.
 --
--- Counting in-flight work fixes it, and the arithmetic stays right because
--- KEDA's target is PER REPLICA: N pods each holding one task report depth N
--- against a target of 1, resolving to N. Work drains, both counts reach zero,
--- and the pool scales to zero -- with no special case anywhere.
+-- So the thing on the other end of queue_depth() is any autoscaler at all, not
+-- this file's manager, and it belongs with the queue it counts. What stays
+-- here is everything that genuinely presumes a manager.
 --
--- run_after <= now() is equally deliberate: a task backing off between retries
--- is not work anyone can do yet, and holding a pod for it burns money until
--- the backoff expires. Excluded, the pool scales to zero and KEDA reactivates
--- it when the timestamp passes.
---
--- The residual inaccuracy is a task `running` on a pod that died, which
--- inflates depth until reap_stale_tasks() returns it to `ready` at
--- queue_config.stale_timeout. Bounded by that timeout, and it errs toward
--- over-provisioning rather than dropped work -- the right way round.
+-- The reasoning about WHAT it counts -- `running` as well as claimable-`ready`,
+-- because a pool of pods mid-task must not read as idle -- is unchanged and now
+-- lives with the function. pools.md §6.1 is still where the argument is made.
 -- ----------------------------------------------------------------------------
-create or replace function workflow.queue_depth(p_queue text)
-returns bigint
-language sql stable security definer set search_path = workflow, pg_catalog as $$
-    select count(*) from workflow.tasks
-    where queue = p_queue
-      and (status = 'running'
-           or (status = 'ready' and run_after <= now()));
-$$;
 
 -- ----------------------------------------------------------------------------
 -- 7. Operational views
