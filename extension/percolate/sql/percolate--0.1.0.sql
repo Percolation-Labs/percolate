@@ -9662,6 +9662,87 @@ create index idx_chunks_resource on content.resource_chunks (resource_id, ordina
 -- as any worker. Writing the rows is a transaction, so a half-registered
 -- upload (object stored, no resource row) cannot happen through this path.
 -- ------------------------------------------------------------
+-- 4a. The authorization check these writers did not have.
+--
+-- workflow-engine/integration-rbac.sql states the rule for this whole
+-- collection, in those words: "SECURITY DEFINER deliberately bypasses RLS, so
+-- every SECURITY DEFINER function reachable by an end user MUST do its own
+-- authorization check. Worker-facing functions are exempt because EXECUTE on
+-- them is granted only to `worker`, which is infrastructure, not a user
+-- identity -- their authorization IS the grant."
+--
+-- The three writers below are SECURITY DEFINER, granted to `authenticated`,
+-- and had no check of any kind. Measured, as an ordinary logged-in user of one
+-- org holding nothing but another org's resource uuid:
+--
+--     org B can SEE org A's resource: false
+--     org B REWROTE org A's chunks
+--     org B PLANTED a resource in org A's channel
+--
+-- record_chunks() DELETEs every chunk of the resource it is handed and inserts
+-- what it is given, so that is destruction and content injection in one call,
+-- into the corpus SEMANTIC and SEARCH read. An agent asking its own tenant's
+-- documents a question would retrieve the attacker's text and act on it. The
+-- read path was scoped correctly the whole time -- resolve_file() carries the
+-- org predicate and the RLS on resources works -- which is what made it look
+-- fine: every test asked what a tenant could READ.
+--
+-- The org comes from the CALLER for a user and from the ARGUMENT for
+-- infrastructure, which is the same split rbac's issue_refresh_token bug
+-- produced: a caller-supplied "who is this" argument is exactly as spoofable
+-- as any other, unless the role supplying it is the deployment rather than a
+-- person.
+-- ------------------------------------------------------------
+-- ONE PREDICATE, used by the read path and the write path.
+--
+-- It exists as a boolean because three callers want three different things
+-- from it: register_* wants an error naming the org, record_chunks wants one
+-- answer for "not yours" and "no such thing", and resolve_file wants no rows.
+--
+-- Sharing it also settles an asymmetry that was worse than either half. The
+-- read predicate was written inline in resolve_file() and had no exemption for
+-- a claimless connection, while the write check needed one -- so a service
+-- connection could WRITE an org's content and not READ it, and the worker that
+-- ingests a document could record its chunks but not resolve the file it was
+-- meant to chunk. Whichever answer is right, it cannot be two answers.
+create or replace function content.may_access_org(p_org_id uuid)
+returns boolean as $$
+    -- IDENTITY COMES FROM THE VERIFIED TOKEN, NOT FROM THE ROLE, and the first
+    -- version of this check got that wrong in the most instructive way: it
+    -- asked `pg_has_role(current_user, 'worker', ...)`, and inside a SECURITY
+    -- DEFINER function current_user is the DEFINER. Every caller looked like
+    -- app_owner, so the check exempted everyone and the probe that found the
+    -- hole walked straight through the fix. session_user is no better -- every
+    -- PostgREST request shares one login role, `authenticator`.
+    --
+    -- So the signal is the one aiq.current_org_ids() itself documents: an org
+    -- claim rides in the request-scoped GUC PostgREST sets from a verified JWT.
+    -- No claims at all means no request identity -- a service connection, a
+    -- migration, psql -- which is the same exemption workflow's worker-facing
+    -- functions get from their grant being the authorization.
+    --
+    -- A null org is the single-tenant case and the fixture case: it is readable
+    -- by everyone under resources_org_scoped, so writing it is not a
+    -- cross-tenant act.
+    select nullif(current_setting('request.jwt.claims', true), '') is null
+        or p_org_id is null
+        or p_org_id in (select aiq.current_org_ids());
+$$ language sql stable security definer set search_path = pg_catalog, public;
+
+create or replace function content.assert_org_write(p_org_id uuid, p_what text)
+returns void as $$
+begin
+    if not content.may_access_org(p_org_id) then
+        raise exception 'not authorized to % for that organization', p_what;
+    end if;
+end;
+$$ language plpgsql stable security definer set search_path = pg_catalog, public;
+
+grant execute on function content.may_access_org(uuid) to authenticated, worker;
+
+grant execute on function content.assert_org_write(uuid, text) to authenticated, worker;
+
+-- ------------------------------------------------------------
 
 -- Register an uploaded object. Returns the resource id.
 --
@@ -9698,8 +9779,17 @@ declare
     v_workflow text;
     v_run      uuid;
 begin
+    perform content.assert_org_write(p_org_id, 'register content');
+
+    -- ORDER BY, because (org_id, name) is unique but this predicate matches
+    -- TWO rows when a public channel and an org channel share a name -- and
+    -- `select into` with no order takes whichever the plan produced. The
+    -- org-specific channel wins; the public one is the fallback it was meant
+    -- to be.
     select id into v_channel from content.channels
-    where name = p_channel and (org_id is not distinct from p_org_id or org_id is null);
+    where name = p_channel and (org_id is not distinct from p_org_id or org_id is null)
+    order by (org_id is not distinct from p_org_id) desc
+    limit 1;
     if v_channel is null then
         raise exception 'no channel named % for this org -- create one first', p_channel;
     end if;
@@ -9757,8 +9847,12 @@ create or replace function content.register_fetched(
 ) returns uuid as $$
 declare v_channel uuid; v_res uuid;
 begin
+    perform content.assert_org_write(p_org_id, 'register content');
+
     select id into v_channel from content.channels
-    where name = p_channel and (org_id is not distinct from p_org_id or org_id is null);
+    where name = p_channel and (org_id is not distinct from p_org_id or org_id is null)
+    order by (org_id is not distinct from p_org_id) desc
+    limit 1;
     if v_channel is null then
         raise exception 'no channel named % for this org', p_channel;
     end if;
@@ -9799,7 +9893,7 @@ returns table(bucket text, object_key text, content_type text, size_bytes bigint
     from content.resources r
     join content.files f on f.id = r.file_id
     where r.id = p_resource_id
-      and (r.org_id is null or r.org_id in (select aiq.current_org_ids()));
+      and content.may_access_org(r.org_id);
 $$ language sql stable security definer set search_path = pg_catalog, public;
 
 -- Record chunks produced by the ingestion workflow, and flip the resource
@@ -9807,15 +9901,43 @@ $$ language sql stable security definer set search_path = pg_catalog, public;
 -- observably half-chunked.
 create or replace function content.record_chunks(p_resource_id uuid, p_chunks jsonb)
 returns int as $$
-declare v_count int;
+declare
+    v_count int;
+    v_org   uuid;
 begin
+    -- The org is READ OFF THE RESOURCE, never taken as an argument: this
+    -- function's only parameter that identifies a tenant is the resource id,
+    -- and a resource id is a bearer token for nothing.
+    --
+    -- ONE MESSAGE for "no such resource" and "not yours", because a caller who
+    -- may not have it must not learn whether it exists -- the rule
+    -- resolve_file() states and follows by returning no rows. `not found` is
+    -- the plpgsql variable and not a local flag: `select ... , true into v_org,
+    -- v_found` leaves v_found NULL on no rows, `if not NULL` is false, and the
+    -- first version of this check fell straight through it into a foreign-key
+    -- error that named the missing row.
+    select r.org_id into v_org from content.resources r where r.id = p_resource_id;
+    if not found or not content.may_access_org(v_org) then
+        raise exception 'no such resource, or it is not yours';
+    end if;
+
     delete from content.resource_chunks where resource_id = p_resource_id;
 
-    insert into content.resource_chunks (resource_id, ordinal, content, token_count, metadata)
+    -- start_offset/end_offset are read from the chunk when the chunker
+    -- produced them and left null when it did not. The columns have existed
+    -- since this table was written -- "so a citation can point at a span
+    -- rather than just a chunk" -- and nothing had ever filled them, because
+    -- the only chunker was hypothetical. semchunk returns offsets on request
+    -- (ingestion.md §4), so the citation this schema promised is now
+    -- reachable rather than aspirational.
+    insert into content.resource_chunks
+        (resource_id, ordinal, content, token_count, start_offset, end_offset, metadata)
     select p_resource_id,
            (ord - 1)::int,
            c->>'content',
            (c->>'token_count')::int,
+           (c->>'start_offset')::int,
+           (c->>'end_offset')::int,
            coalesce(c->'metadata', '{}'::jsonb)
     from jsonb_array_elements(p_chunks) with ordinality t(c, ord);
     get diagnostics v_count = row_count;

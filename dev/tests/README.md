@@ -23,13 +23,18 @@ server by name and a tool by name, with no foreign key able to hold either.
 | `rbac/` | `user-rbac`, and the RLS it imposes on all four other subsystems | Returning **more** rows than it should. The only surface where a bug is a breach, and the only one whose failure no happy-path assertion will ever notice. |
 | `query/` | `ai-query-layer` — seven modes over three index families | A **wrong answer**, not an error. Nothing crashes; the caller simply gets something other than what the spec promised. |
 | `workflow/` | `workflow-engine` — retries, sagas, compensation, cancellation, crash recovery | A **partial** failure that reports success. Every interesting workflow bug found here has left every task marked `done`. |
+| `content/` | `world-model-ingestion` — channels, files, resources, chunks, and the drift check over them | A **write** nobody checked. The read path was scoped from the start, so every question anyone asked got the right answer; the first test to ask what a tenant could WRITE found it could rewrite another tenant's chunks. |
 | `agentic/` | the tool binding — servers, discovered tools, and who may author an agent | A registration that **looks complete and is missing what it bound**. Every assertion here corresponds to a column or a tool list silently dropped on the way into a row that came back looking correct. |
 
 RBAC runs first, deliberately: if row-level security is not actually switched
 on, every later assertion about who-sees-what is meaningless.
 
-`rbac/03-auth-path.sql` is newer than the other two and was written by asking a
-different question: not "is this right?" but **"has this ever run?"**. A
+`content/` and `rbac/03-auth-path.sql` are newer than the rest and were written
+by asking a different question: not "is this right?" but **"has this ever
+run?"**. `world-model-ingestion` was marked *Built* and had no test directory at
+all; the first transaction to exercise its write path found that any logged-in
+user could rewrite any other tenant's chunks with nothing but a resource uuid —
+into the corpus `SEMANTIC` and `SEARCH` read. A
 cross-reference of every capability `surface.sql` declares against every name
 these tests mention found the whole auth path — signup, login, throttling,
 API keys — declared, shipped, and never once executed. The first transaction to
