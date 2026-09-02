@@ -65,11 +65,16 @@ struct Graph {
     nodes: Map<String, Value>,
     edges: Vec<Value>,
     defects: Vec<Value>,
+    /// The step being expanded, so a defect about a SHARED node can say whose
+    /// use of it is at fault. Two steps on one queue produce two
+    /// `unconfigured_queue` defects against one node, and without this the
+    /// document hung both on whichever step reached the queue first.
+    step: Option<String>,
 }
 
 impl Graph {
     fn new() -> Self {
-        Graph { nodes: Map::new(), edges: Vec::new(), defects: Vec::new() }
+        Graph { nodes: Map::new(), edges: Vec::new(), defects: Vec::new(), step: None }
     }
 
     /// Add a node, or return the existing one. Ids are `kind:name`, so the same
@@ -124,10 +129,14 @@ impl Graph {
     /// a shrug, "nothing sizes a pool for this queue, so the task waits for a
     /// worker that autoscaling will never start" is a decision.
     fn defect(&mut self, severity: &str, code: &str, node: &str, message: &str, consequence: &str) {
-        self.defects.push(json!({
+        let mut d = json!({
             "severity": severity, "code": code, "node": node,
             "message": message, "consequence": consequence,
-        }));
+        });
+        if let Some(k) = &self.step {
+            d["step"] = json!(k);
+        }
+        self.defects.push(d);
     }
 }
 
@@ -215,6 +224,33 @@ fn endpoint_of(url: &str) -> String {
 // steps of the same kind would differ in it, it describes the pipeline.
 // ---------------------------------------------------------------------------
 
+/// Every `{{env.NAME}}` a step's input mentions.
+///
+/// THE PLAN CAN SAY WHAT A STEP NEEDS AND NOT WHETHER IT IS THERE. The env
+/// belongs to the WORKER -- deliberately, since it is where credentials live
+/// and the database is not allowed to hold them -- so a plan built inside
+/// Postgres can list the names and cannot resolve one. That is worth listing
+/// anyway: the most common failure of a working plan is an agent step against
+/// a deployment with no Agent Runtime configured, and the run's error for it
+/// (`template {{env.P8_AGENT_URL}} resolved to nothing`) arrives after the
+/// fetch it depended on has already spent somebody's rate limit.
+fn requires_env(input: &Value) -> Vec<String> {
+    let text = input.to_string();
+    let mut out: Vec<String> = Vec::new();
+    let mut rest = text.as_str();
+    while let Some(i) = rest.find("{{env.") {
+        rest = &rest[i + 6..];
+        let end = rest.find("}}").unwrap_or(rest.len());
+        let name: String = rest[..end].trim().to_string();
+        if !name.is_empty() && !out.contains(&name) {
+            out.push(name);
+        }
+        rest = &rest[end.min(rest.len())..];
+    }
+    out.sort();
+    out
+}
+
 fn step_detail(kind: &str, input: &Value) -> Value {
     let mut d = Map::new();
     match kind {
@@ -263,6 +299,31 @@ fn step_detail(kind: &str, input: &Value) -> Value {
                     if let Some(v) = input.get(k) {
                         d.insert(k.into(), v.clone());
                     }
+                }
+                // HEADERS ARE PART OF THE PLAN, and finding that out cost a
+                // run: data.sec.gov returns 403 to a request with no
+                // User-Agent, so the header is the difference between a
+                // pipeline that works and one that fails at its first step. A
+                // plan that hides it hides the reason.
+                //
+                // Values are shown because a header that says nothing is worth
+                // nothing -- except for the four names a secret is ever
+                // spelled with. `credential_ref` is where a secret belongs and
+                // this schema cannot stop somebody putting one here anyway, so
+                // the redaction is by NAME, applied before the value is ever
+                // copied.
+                if let Some(Value::Object(h)) = input.get("headers") {
+                    let mut safe = Map::new();
+                    for (k, v) in h {
+                        let lower = k.to_lowercase();
+                        if matches!(lower.as_str(), "authorization" | "proxy-authorization"
+                                                  | "cookie" | "x-api-key") {
+                            safe.insert(k.clone(), json!("<redacted>"));
+                        } else {
+                            safe.insert(k.clone(), v.clone());
+                        }
+                    }
+                    d.insert("headers".into(), Value::Object(safe));
                 }
                 // A body is the request, not the plan -- except the model
                 // name, which is the one thing in it that says what the call
@@ -315,6 +376,10 @@ fn step_detail(kind: &str, input: &Value) -> Value {
             }
         }
     }
+    let env = requires_env(input);
+    if !env.is_empty() {
+        d.insert("requires_env".into(), json!(env));
+    }
     if d.is_empty() { Value::Null } else { Value::Object(d) }
 }
 
@@ -358,6 +423,7 @@ pub fn plan_graph(spec: &Value, catalog: &Value) -> Value {
             Some(k) => k,
             None => continue,
         };
+        g.step = Some(key.clone());
         let kind = str_of(s, "kind").unwrap_or_else(|| "unknown".into());
         let queue = str_of(s, "queue").unwrap_or_else(|| "none".into());
         let empty = json!({});
@@ -472,6 +538,7 @@ pub fn plan_graph(spec: &Value, catalog: &Value) -> Value {
         }
     }
 
+    g.step = None;
     rank_steps(&mut g, &steps);
 
     let (errors, warnings) = g.defects.iter().fold((0, 0), |(e, w), d| {
@@ -1187,8 +1254,15 @@ pub fn plan_document(spec: &Value, catalog: &Value) -> Value {
 
         let defects: Vec<Value> = g["defects"].as_array().unwrap_or(&empty).iter()
             .filter(|d| {
-                let n = d["node"].as_str().unwrap_or("");
-                n == id || mine.iter().any(|c| c == n)
+                // A defect that names a step belongs to that step and to no
+                // other, however many steps reach the node it is about.
+                match d.get("step").and_then(Value::as_str) {
+                    Some(k) => format!("step:{k}") == id,
+                    None => {
+                        let n = d["node"].as_str().unwrap_or("");
+                        n == id || mine.iter().any(|c| c == n)
+                    }
+                }
             })
             .map(|d| json!({"severity": d["severity"], "code": d["code"],
                             "message": d["message"]}))
