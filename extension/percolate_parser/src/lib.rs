@@ -563,7 +563,8 @@ fn p8_workflow_grammar() -> pgrx::JsonB {
             {"key": "p8ql", "compiles_to": "kind: sql", "runs_on": "nobody -- inside Postgres",
              "purpose": "A dialect query as a step. No process, no queue wait. In SEMANTIC or SEARCH mode it compiles to TWO tasks -- see `desugaring` below -- because those rank against a vector and the database makes no model calls."},
             {"key": "sql", "compiles_to": "kind: sql", "runs_on": "nobody -- inside Postgres",
-             "purpose": "Call an allow-listed function by name. Steps may not supply arbitrary SQL; see workflow.step_functions for what is callable."},
+             "purpose": "Run SQL. `sql: \"select ...\"` runs the statement you wrote, read-only unless the step declares `write: true`; `sql: {function, args}` calls a name from workflow.step_functions, which keeps a per-function timeout and a description. A statement's {{templates}} are substituted as quoted LITERALS, so a table name cannot be templated. A deployment running percolate.sql_policy = 'registered' accepts only the second form.",
+             "example": "sql: \"select fy, val from sec.facts where cik = '{{run.cik}}'\""},
             {"key": "rest", "compiles_to": "kind: http_call", "runs_on": "the worker's built-in handler",
              "purpose": "A durable outbound HTTP call. Retries, backoff and the reaper apply unchanged."},
             {"key": "embed", "compiles_to": "kind: http_call", "runs_on": "the worker's built-in handler",
@@ -845,7 +846,7 @@ struct WfStep {
     #[serde(default)]
     p8ql: Option<String>,
     #[serde(default)]
-    sql: Option<SqlStep>,
+    sql: Option<serde_yaml::Value>,
     #[serde(default)]
     rest: Option<serde_yaml::Value>,
     // `embed:` is a REST call whose url, body shape and response path the
@@ -906,12 +907,95 @@ struct WfStep {
     saga_group: Option<String>,
 }
 
+// `sql:` HAS TWO SPELLINGS AND THE SHORT ONE IS THE DEFAULT.
+//
+//     sql: "select fy, val from sec.facts where cik = '{{run.cik}}'"
+//     sql: {statement: "delete from staging where run_id = '{{run.$id}}'", write: true}
+//     sql: {function: sec_land_facts, args: ['{{steps.fetch.result}}']}
+//
+// The first is what an author writes. The third is the allow-listed form, which
+// stops being mandatory and stays available: a deployment that runs
+// `percolate.sql_policy = 'registered'` accepts only that one, and the engine's
+// own steps use it because a per-function timeout and a description are worth
+// having for operations a deployment blesses.
+//
+// Hand-parsed rather than an untagged enum, for the reason parse_embed gives:
+// serde's untagged error is "data did not match any variant", which tells an
+// author nothing about which of three spellings they were closest to.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SqlStep {
+struct SqlFnStep {
     function: String,
     #[serde(default)]
     args: Vec<serde_yaml::Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SqlStatementStep {
+    statement: String,
+    /// Says the step changes the database. Not a security control -- a step
+    /// runs as the engine owner either way -- but the engine refuses a write
+    /// from a step that did not declare one, so a plan can be read for which
+    /// steps mutate without opening every statement.
+    #[serde(default)]
+    write: Option<bool>,
+    #[serde(default)]
+    timeout_ms: Option<i64>,
+}
+
+fn parse_sql(what: &str, v: &serde_yaml::Value) -> Result<serde_json::Value, String> {
+    match v {
+        serde_yaml::Value::String(stmt) => {
+            if stmt.trim().is_empty() {
+                return Err(format!("{what}: `sql:` is an empty statement"));
+            }
+            Ok(serde_json::json!({"statement": stmt}))
+        }
+        serde_yaml::Value::Mapping(m) => {
+            let has = |k: &str| m.contains_key(serde_yaml::Value::String(k.into()));
+            match (has("statement"), has("function")) {
+                (true, true) => Err(format!(
+                    "{what}: `sql:` carries both `statement` and `function`. A step either \
+                     runs SQL you wrote or names one the deployment registered, not both.")),
+                (false, false) => Err(format!(
+                    "{what}: `sql:` needs `statement` (SQL you wrote) or `function` (a name \
+                     from workflow.step_functions). Write `sql: \"select ...\"` for the \
+                     common case.")),
+                (true, false) => {
+                    let s: SqlStatementStep = serde_yaml::from_value(v.clone())
+                        .map_err(|e| format!("{what}: {e}"))?;
+                    if s.statement.trim().is_empty() {
+                        return Err(format!("{what}: `sql:` is an empty statement"));
+                    }
+                    let mut out = serde_json::json!({"statement": s.statement});
+                    if s.write.unwrap_or(false) {
+                        out["write"] = serde_json::json!(true);
+                    }
+                    if let Some(t) = s.timeout_ms {
+                        if t < 1 {
+                            return Err(format!(
+                                "{what}: `sql:` has timeout_ms {t}, which gives the statement \
+                                 no time to run"));
+                        }
+                        out["timeout_ms"] = serde_json::json!(t);
+                    }
+                    Ok(out)
+                }
+                (false, true) => {
+                    let s: SqlFnStep = serde_yaml::from_value(v.clone())
+                        .map_err(|e| format!("{what}: {e}"))?;
+                    Ok(serde_json::json!({
+                        "function": s.function,
+                        "args": s.args.iter().map(y2j).collect::<Vec<_>>()
+                    }))
+                }
+            }
+        }
+        other => Err(format!(
+            "{what}: `sql:` is {:?}, where a statement string or a \
+             {{function, args}} mapping was expected", other)),
+    }
 }
 
 // `embed:` -- the one action whose ENDPOINT is deployment data.
@@ -1004,9 +1088,13 @@ fn vector_mode_of(query: &str) -> Option<(String, Option<String>)> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WfMatrix {
-    // exactly one of rows / items
+    // exactly one of rows / items. Same two spellings a `sql:` step has -- a
+    // registered function, or the query itself -- because a fan-out over "every
+    // document nobody has processed" is the most natural thing anyone writes
+    // here, and making that one case require a blessed function was most of
+    // what made the allow-list feel like a tax.
     #[serde(default)]
-    rows: Option<SqlStep>,
+    rows: Option<serde_yaml::Value>,
     #[serde(default)]
     items: Option<Vec<serde_yaml::Value>>,
     // NOT optional in practice -- see the check in compile_workflow. Declared
@@ -1064,7 +1152,7 @@ struct WfTemplate {
     #[serde(default)]
     p8ql: Option<String>,
     #[serde(default)]
-    sql: Option<SqlStep>,
+    sql: Option<serde_yaml::Value>,
     #[serde(default)]
     rest: Option<serde_yaml::Value>,
     #[serde(default)]
@@ -1100,7 +1188,7 @@ fn y2j(v: &serde_yaml::Value) -> serde_json::Value {
 // second place for the vocabularies to drift apart.
 struct Action<'a> {
     p8ql: &'a Option<String>,
-    sql: &'a Option<SqlStep>,
+    sql: &'a Option<serde_yaml::Value>,
     rest: &'a Option<serde_yaml::Value>,
     embed: &'a Option<serde_yaml::Value>,
     agent: &'a Option<String>,
@@ -1136,13 +1224,8 @@ fn resolve_action(what: &str, a: &Action) -> Result<(&'static str, String, serde
             "function": "p8ql",
             "args": [a.p8ql.clone().unwrap()]
         })),
-        "sql" => {
-            let sq = a.sql.as_ref().unwrap();
-            ("sql", "none".to_string(), serde_json::json!({
-                "function": sq.function,
-                "args": sq.args.iter().map(y2j).collect::<Vec<_>>()
-            }))
-        }
+        "sql" => ("sql", "none".to_string(),
+                  parse_sql(what, a.sql.as_ref().unwrap())?),
         "rest" => ("http_call",
             a.queue.clone().unwrap_or_else(|| "http".into()),
             y2j(a.rest.as_ref().unwrap())),
@@ -1418,10 +1501,7 @@ fn compile_matrix(id: &str, m: &WfMatrix, s: &WfStep)
         input["template"]["rate_key"] = serde_json::json!(rk);
     }
     if let Some(r) = &m.rows {
-        input["rows"] = serde_json::json!({
-            "function": r.function,
-            "args": r.args.iter().map(y2j).collect::<Vec<_>>()
-        });
+        input["rows"] = parse_sql(&format!("matrix step '{id}'"), r)?;
     } else {
         input["items"] = serde_json::json!(
             m.items.as_ref().unwrap().iter().map(y2j).collect::<Vec<_>>());

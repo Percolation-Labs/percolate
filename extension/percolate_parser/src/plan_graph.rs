@@ -54,7 +54,7 @@ fn lane_of(kind: &str) -> &'static str {
         // Things the deployment configures, which a step reaches THROUGH.
         "agent" | "tool_server" | "tool" | "function" | "llm" => "capability",
         // Things data lives in or is measured against.
-        "source" | "model" | "space" | "entity" => "data",
+        "source" | "model" | "space" | "entity" | "relation" => "data",
         // Things that decide whether a task ever runs.
         "queue" | "rate_key" | "signal" => "control",
         _ => "other",
@@ -255,11 +255,21 @@ fn step_detail(kind: &str, input: &Value) -> Value {
     let mut d = Map::new();
     match kind {
         "sql" => {
-            if let Some(f) = input.get("function") {
-                d.insert("function".into(), f.clone());
-            }
-            if let Some(a) = input.get("args") {
-                d.insert("args".into(), a.clone());
+            if let Some(st) = input.get("statement") {
+                d.insert("statement".into(), st.clone());
+                if input.get("write").and_then(Value::as_bool).unwrap_or(false) {
+                    d.insert("write".into(), json!(true));
+                }
+                if let Some(t) = input.get("timeout_ms") {
+                    d.insert("timeout_ms".into(), t.clone());
+                }
+            } else {
+                if let Some(f) = input.get("function") {
+                    d.insert("function".into(), f.clone());
+                }
+                if let Some(a) = input.get("args") {
+                    d.insert("args".into(), a.clone());
+                }
             }
         }
         "http_call" => {
@@ -569,7 +579,83 @@ pub fn plan_graph(spec: &Value, catalog: &Value) -> Value {
 // data flow is visible without leaving the database.
 // ---------------------------------------------------------------------------
 
+/// The relations a statement names, as a heuristic and labelled as one.
+///
+/// Only bare identifiers after FROM or JOIN are taken: `from (select ...) t`
+/// and `from jsonb_array_elements(x) e` both start with something containing a
+/// bracket and are skipped rather than guessed at, and names introduced by a
+/// CTE in the same statement are removed. What is left is the set of relations
+/// this step reads from something outside itself, which is the useful half.
+///
+/// This replaces a check the registry used to give for free: with `sql:
+/// "select ..."` there is no registered function to look up, and a plan that
+/// said nothing at all about a statement step would be a plan that got worse as
+/// the engine got more expressive. Naming a table that does not exist is a
+/// better check than naming a function that does not exist, because it is the
+/// mistake people actually make.
+fn statement_relations(sql: &str) -> Vec<String> {
+    let lower = sql.to_lowercase();
+    let bytes: Vec<char> = lower.chars().collect();
+    let mut ctes: Vec<String> = Vec::new();
+    let mut found: Vec<String> = Vec::new();
+
+    // Tokenise crudely: identifiers, and everything else as separators.
+    let mut toks: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for c in bytes {
+        if c.is_alphanumeric() || c == '_' || c == '.' || c == '"' {
+            cur.push(c);
+        } else {
+            if !cur.is_empty() { toks.push(std::mem::take(&mut cur)); }
+            if c == '(' { toks.push("(".into()); }
+            if c == ',' { toks.push(",".into()); }
+        }
+    }
+    if !cur.is_empty() { toks.push(cur); }
+
+    for i in 0..toks.len() {
+        // `with x as (`, and `, y as (` for the second CTE onward.
+        if toks[i] == "as" && i >= 1 && i + 1 < toks.len() && toks[i + 1] == "(" {
+            ctes.push(toks[i - 1].clone());
+        }
+        if (toks[i] == "from" || toks[i] == "join") && i + 1 < toks.len() {
+            let t = &toks[i + 1];
+            if t == "(" || t == "," || t.is_empty() { continue; }
+            let name = t.trim_matches('"').to_string();
+            if name.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(true) { continue; }
+            if !found.contains(&name) { found.push(name); }
+        }
+    }
+    found.retain(|n| !ctes.contains(n) && !ctes.contains(&n.split('.').next().unwrap_or("").to_string()));
+    found
+}
+
 fn classify_sql(g: &mut Graph, step_id: &str, key: &str, input: &Value, catalog: &Value) {
+    // A step that carries its own SQL names no function. It still says what it
+    // reads, which is the thing worth checking.
+    if let Some(stmt) = input.get("statement").and_then(Value::as_str) {
+        let known = list(catalog, "relations");
+        for name in statement_relations(stmt) {
+            let resolved = known.iter().find(|r| {
+                **r == name || r.split('.').nth(1).map(|t| t == name).unwrap_or(false)
+            });
+            let rid = g.node_with("relation", resolved.unwrap_or(&name.as_str()), json!({}),
+                                  Value::Null);
+            g.edge(step_id, &rid, "reads");
+            if !known.is_empty() && resolved.is_none() {
+                g.defect(
+                    "warning", "unknown_relation", &rid,
+                    &format!("step '{key}' reads '{name}', which is not a relation this \
+                              caller can see"),
+                    "the statement fails at dispatch with `relation does not exist` -- \
+                     unless the name is one this heuristic misread, which it will say \
+                     nothing more about",
+                );
+            }
+        }
+        return;
+    }
+
     let func = match str_of(input, "function") {
         Some(f) => f,
         None => return,
@@ -777,6 +863,13 @@ fn classify_http(g: &mut Graph, step_id: &str, input: &Value, catalog: &Value) {
 // ---------------------------------------------------------------------------
 
 fn classify_matrix(g: &mut Graph, step_id: &str, key: &str, input: &Value, catalog: &Value) {
+    // A row source that is a statement reaches relations, exactly as a `sql:`
+    // step does -- reusing classify_sql rather than repeating the extraction,
+    // so a fan-out over a query is checked the same way a query is.
+    if input.pointer("/rows/statement").is_some() {
+        let empty = json!({});
+        classify_sql(g, step_id, key, input.get("rows").unwrap_or(&empty), catalog);
+    }
     if let Some(rows) = input.pointer("/rows/function").and_then(Value::as_str) {
         let fid = g.node_with("function", rows, json!({}),
             section(catalog, "functions").and_then(|m| m.get(rows)).cloned()
@@ -1054,8 +1147,10 @@ fn about(kind: &str, detail: &Value, reaches: &Map<String, Value>) -> String {
     let d = |k: &str| detail.get(k).cloned().unwrap_or(Value::Null);
     let s = |k: &str| detail.get(k).and_then(Value::as_str).unwrap_or("").to_string();
     match kind {
-        "query" => {
-            let q = detail.pointer("/args/0").and_then(Value::as_str).unwrap_or("");
+        "query" | "write" => {
+            let q = detail.get("statement").and_then(Value::as_str)
+                .or_else(|| detail.pointer("/args/0").and_then(Value::as_str))
+                .unwrap_or("");
             format!("runs {}", trim(q, 90))
         }
         "function" => format!("calls {}()", s("function")),
@@ -1092,10 +1187,22 @@ fn trim(s: &str, n: usize) -> String {
 /// point of reading the plan.
 fn reader_kind(step_kind: &str, detail: &Value) -> &'static str {
     match step_kind {
-        "sql" => match detail.get("function").and_then(Value::as_str) {
-            Some("p8ql") | Some("p8ql_vec") => "query",
-            _ => "function",
-        },
+        "sql" => {
+            if detail.get("statement").is_some() {
+                // A statement that changes the database is not a query, and the
+                // document should not make a reader open it to find out.
+                if detail.get("write").and_then(Value::as_bool).unwrap_or(false) {
+                    "write"
+                } else {
+                    "query"
+                }
+            } else {
+                match detail.get("function").and_then(Value::as_str) {
+                    Some("p8ql") | Some("p8ql_vec") => "query",
+                    _ => "function",
+                }
+            }
+        }
         "http_call" => {
             if detail.get("agent").is_some() { "agent" }
             else if detail.get("embeds").is_some() { "embed" }
@@ -1603,6 +1710,64 @@ mod tests {
         assert_eq!(steps[2]["defects"][0]["code"], json!("unconfigured_queue"));
         assert!(g.get("defects").is_none(),
                 "every defect here has a step to belong to");
+    }
+
+    #[test]
+    fn a_step_carrying_its_own_sql_reaches_the_relations_it_names() {
+        let mut cat = catalog();
+        cat["relations"] = json!(["content.resource_chunks", "demo_sec.facts"]);
+        let g = plan_graph(
+            &spec_of(json!([{
+                "key": "quarters", "kind": "sql", "queue": "none",
+                "input": {"statement":
+                    "with recent as (select 1) select f.fy, f.val from demo_sec.facts f \
+                     join recent on true where f.cik = '0000320193'"}
+            }])),
+            &cat,
+        );
+        assert!(find(&g, "relation:demo_sec.facts").is_some(),
+                "the table it reads is a node");
+        assert!(find(&g, "relation:recent").is_none(),
+                "a CTE defined in the same statement is not a relation it reaches");
+        assert!(find(&g, "function:p8ql").is_none(),
+                "a statement step names no function, so none is invented");
+        assert_eq!(g["stats"]["errors"], json!(0));
+        assert_eq!(g["stats"]["warnings"], json!(0));
+    }
+
+    #[test]
+    fn a_statement_naming_a_table_nobody_has_is_a_warning() {
+        let mut cat = catalog();
+        cat["relations"] = json!(["demo_sec.facts"]);
+        let g = plan_graph(
+            &spec_of(json!([{
+                "key": "q", "kind": "sql", "queue": "none",
+                "input": {"statement": "select * from demo_sec.factz"}
+            }])),
+            &cat,
+        );
+        assert!(codes(&g).contains(&"unknown_relation".to_string()));
+        // A WARNING, not an error: the extraction is a heuristic over SQL this
+        // crate does not parse, and a checker that refuses a working pipeline
+        // on a guess is worse than one that says nothing.
+        assert_eq!(g["stats"]["errors"], json!(0));
+    }
+
+    #[test]
+    fn the_document_says_which_steps_change_the_database() {
+        let mut cat = catalog();
+        cat["relations"] = json!(["demo_sec.facts"]);
+        let g = plan_document(
+            &spec_of(json!([{
+                "key": "purge", "kind": "sql", "queue": "none",
+                "input": {"statement": "delete from demo_sec.facts where fy < 2020",
+                          "write": true}
+            }])),
+            &cat,
+        );
+        assert_eq!(g["steps"][0]["kind"], json!("write"),
+                   "a mutation must not read as a query");
+        assert_eq!(g["steps"][0]["write"], json!(true));
     }
 
     #[test]

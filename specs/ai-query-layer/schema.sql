@@ -1789,10 +1789,32 @@ begin
     -- reverts on commit or rollback and cannot leak into a pooled connection's
     -- next transaction -- the same pooling hazard rbac.current_user_id() was
     -- hardened against.
-    perform set_config('transaction_read_only', 'on', true);
-
-    execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
-    into v_result;
+    --
+    -- AND IT IS UNWOUND AFTERWARDS, which the first version did not do.
+    --
+    -- Transaction-local means "until this transaction ends", not "until this
+    -- function returns" -- so a caller that ran this and then tried to write in
+    -- the same transaction got `cannot execute UPDATE in a read-only
+    -- transaction`, from a line nowhere near the query. It never bit over
+    -- PostgREST, where every call is its own transaction; it bites the moment
+    -- something composes -- a workflow step that runs a query and then marks
+    -- its own task done, which is exactly what workflow.p8ql now does.
+    --
+    -- Setting it back is not available: `transaction_read_only = off` inside a
+    -- read-only transaction raises 25001. A subtransaction is the only way
+    -- back, so the read runs in one and the block is deliberately unwound --
+    -- the rows are in a plpgsql variable by then, and a variable is not
+    -- transactional.
+    begin
+        perform set_config('transaction_read_only', 'on', true);
+        execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
+        into v_result;
+        raise exception using errcode = 'P0001', message = '__aiq_readonly_done__';
+    exception when others then
+        if sqlerrm <> '__aiq_readonly_done__' then
+            raise;
+        end if;
+    end;
 
     return v_result;
 end;

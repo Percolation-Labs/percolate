@@ -97,7 +97,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('workflow-engine','table','workflow.definitions',null,'spec.md §2'),
 ('workflow-engine','table','workflow.runs',null,'spec.md §2'),
 ('workflow-engine','table','workflow.tasks',null,'spec.md §2'),
-('workflow-engine','table','workflow.step_functions',null,'schema.sql §17: sql steps are allow-listed'),
+('workflow-engine','table','workflow.step_functions',null,'schema.sql §17: the operations a deployment blesses -- a timeout and a description each, and the whole surface under sql_policy = registered'),
 ('workflow-engine','function','workflow.start_workflow','text,jsonb,text,text','spec.md §4'),
 ('workflow-engine','function','workflow.claim_task','text,text','spec.md: SKIP LOCKED claiming'),
 ('workflow-engine','function','workflow.get_task_context','uuid,text','§16: a worker must see its run input'),
@@ -195,6 +195,9 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','function','aiq.register_graph_vocabulary','jsonb','graph-index.md §5.3: an unlisted relation is refused at write, so the vocabulary has to exist'),
 ('ai-query-layer','function','aiq.install_structure_null','text','graph-index.md §1: the null extractor is a row, installed like the ingest workflow'),
 ('ai-query-layer','function','aiq.extractor_call','text,text,text,text,text','graph-index.md §6: the model half -- registered, never yet called'),
+('ai-query-layer','function','aiq.plan_facet','','plan-graph.md §4: the sources and models half of the plan catalog'),
+('ai-query-layer','function','aiq.space_populated','text,text','plan-graph.md §4: which models a corpus is ACTUALLY embedded in, as opposed to registered'),
+('ai-query-layer','view','aiq.v_plan_sources','','plan-graph.md §4: one row per source name, with the columns and spaces a plan expands'),
 
 -- ---------- world-model-ingestion --------------------------------------
 ('world-model-ingestion','schema','content',null,'brief.md §2-§3: the content plane'),
@@ -235,6 +238,16 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('workflow-engine','function','workflow.set_schedule_enabled','text,boolean','§19: disable without losing history'),
 ('workflow-engine','function','workflow.lint_spec','jsonb','§25: a p8ql string that cannot parse is refused at authoring time, not at 3am'),
 ('workflow-engine','function','workflow.unschedule_workflow','text','§19: the destructive one'),
+-- A step may write its own SQL, and the allow-list is a policy rather than the
+-- only door. Every one of these is a promise made in YAML.md and roadmap.md §6.
+('workflow-engine','function','workflow.run_sql','text,boolean,integer','a step carries its own statement, read-only unless it declares otherwise'),
+('workflow-engine','function','workflow.sql_policy','','open or registered -- the lockdown is a setting, not a rebuild'),
+('workflow-engine','function','workflow.resolve_statement','text,uuid,jsonb','a {{template}} in a statement is a quoted literal, so run input cannot become SQL'),
+-- The plan graph: a definition expanded along what it names (plan-graph.md).
+('workflow-engine','function','workflow.plan_catalog','','what this deployment HAS, as one document the graph builder reads'),
+('workflow-engine','function','workflow.plan_graph','text,integer','a definition expanded along the entities it reaches'),
+('workflow-engine','function','workflow.plan_document','text,integer','the same resolution, projected into the pipeline a person reads'),
+('workflow-engine','function','workflow.plan_defects','text','every current definition, defects only -- the deployment gate shape'),
 
 -- ---------- agentic ----------------------------------------------------
 -- The fifth subsystem. It had a complete schema.sql and zero rows here, which
@@ -254,6 +267,9 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('agentic','function','agentic.upsert_tool_server','jsonb','brief.md §5.2'),
 ('agentic','column','agentic.tool_servers.default_headers',null,'reference/README §1: one url is not one OpenAPI document'),
 ('agentic','function','agentic.may_author','text,regclass','reference/README §5: the first agent is registered by a migration, not a user'),
+('agentic','function','agentic.plan_facet','','plan-graph.md §4: the agents and servers half of the plan catalog'),
+('agentic','view','agentic.v_plan_agents','','plan-graph.md §6: an agent expanded -- the whole prompt, because the prompt IS the intent'),
+('agentic','view','agentic.v_plan_servers','','plan-graph.md §6: a server and what each of its tools says it does'),
 ('agentic','view','agentic.agents_pickable',null,'schema.sql §9: a table sized for thousands needs the audience filter'),
 -- The sample itself. A registered agent bound to servers that were never
 -- registered is the failure this repository keeps finding one layer down --
