@@ -28,9 +28,27 @@ class Settings:
       open question: this collection has no secrets vault yet).
     """
 
+    # P8_DSN IS READ TOO, and leaving it out cost a deployment. `core/config.py`
+    # requires P8_DSN -- "every service connects to Postgres" -- and every other
+    # entry point in this package uses it, so a compose file or chart that sets
+    # it has configured the database as far as anyone reading those files can
+    # tell. This runtime read only P8_DATABASE_URL, found it unset, and silently
+    # took the local development default: `agent serve` restart-looped on
+    # `Connect call failed ('127.0.0.1', 5500)` in a stack where every other
+    # service connected fine.
+    #
+    # `core/identity.py` already accepted both names. That it did so in one
+    # place and not the other is the whole defect -- one thing under two names,
+    # agreeing only where somebody happened to write it twice.
+    #
+    # P8_DATABASE_URL still wins when both are set: it is the specific one, and
+    # a deployment that sets it deliberately is pointing this runtime somewhere
+    # other than the shared DSN on purpose.
     database_url: str = field(
-        default_factory=lambda: os.getenv(
-            "P8_DATABASE_URL", "postgresql://p8:p8@localhost:5500/p8agentic"
+        default_factory=lambda: (
+            os.getenv("P8_DATABASE_URL")
+            or os.getenv("P8_DSN")
+            or "postgresql://p8:p8@localhost:5500/p8agentic"
         )
     )
     schema: str = field(default_factory=lambda: os.getenv("P8_SCHEMA", "agentic"))

@@ -379,7 +379,10 @@ def listen(session: str, seconds: float = typer.Option(30.0, help="How long to l
 
 @app.command()
 def gateway(
-    host: str = typer.Option("127.0.0.1"),
+    # 0.0.0.0, like the Content Server's serve() -- see the note on serve()
+    # below. A gateway bound to the container's own loopback is registered as a
+    # tool_servers row that nothing can reach.
+    host: str = typer.Option("0.0.0.0"),
     port: int = typer.Option(8765),
     stateless: bool = typer.Option(True, help="No session affinity between MCP calls."),
 ) -> None:
@@ -403,7 +406,15 @@ def gateway(
 
 @app.command()
 def serve(
-    host: str = typer.Option("127.0.0.1"),
+    # 0.0.0.0, NOT 127.0.0.1, because this is shipped as a container and that
+    # is the container's own loopback. With the old default `agent serve`
+    # started, printed `percolate agent on http://127.0.0.1:8080`, reported
+    # healthy to Docker, and answered nothing on the published port -- a
+    # service that looks fine and is unreachable, which is worse than one that
+    # crashes. `content/cli.py` has always defaulted to 0.0.0.0; one package
+    # giving two answers to the same question is what made this findable only
+    # by running it.
+    host: str = typer.Option("0.0.0.0"),
     port: int = typer.Option(8080),
 ) -> None:
     """Serve the HTTP surface: POST /chat (SSE) and GET /sessions/{id}/events.
