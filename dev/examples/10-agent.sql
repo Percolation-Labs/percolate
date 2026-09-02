@@ -23,11 +23,14 @@ select (agentic.upsert_agent($j${
   "model": "anthropic:claude-sonnet-5",
   "tags": ["harbour", "inspections"],
   "system_prompt": "You answer questions about the fleet. Start with SCHEMA, resolve names with LOOKUP, and use FUZZY LOOKUP when a name misses rather than guessing another spelling.",
-  "tools": [{"server": "harbour-query", "tool": "query"}]
+  "tools": [{"server": "harbour-query", "tools": ["query"]}]
 }$j$::jsonb)).name as agent;
 
-\echo '-- the binding, as stored. Note it names a server and a tool by NAME:'
-select a.name as agent, t->>'server' as server, t->>'tool' as tool
+\echo '-- the binding, as stored. It names a server, and narrows it to an
+-- ALLOWLIST -- a list, not a string: `"tool": "query"` is stored
+-- happily here and then dropped by the runtime, leaving no allowlist
+-- at all, which is every tool the server exposes.'
+select a.name as agent, t->>'server' as server, t->'tools' as allowlist
 from agentic.agents a, jsonb_array_elements(a.tools) t
 where a.name = 'harbourmaster';
 
