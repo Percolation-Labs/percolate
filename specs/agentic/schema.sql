@@ -648,6 +648,68 @@ begin
         raise exception 'not authorized to author agents';
     end if;
 
+    -- THE TOOL BINDING IS SHAPE-CHECKED HERE, because the near-miss spellings
+    -- WIDEN it rather than failing.
+    --
+    -- A binding is {"server": "<name>", "tools": ["a","b"]}, and `tools: null`
+    -- or an absent `tools` deliberately means "every tool this server
+    -- exposes". So `{"server": "p8-query", "tool": "query"}` -- singular, the
+    -- spelling anybody writes for one tool -- was stored verbatim, and the
+    -- runtime, looking for `tools`, found nothing and handed the model the
+    -- server's ENTIRE surface. One character, no error, and an allow-list that
+    -- silently became its opposite. dev/examples/10-agent.sql documented this
+    -- trap in a comment; a comment is not a guard, and the write path is where
+    -- it belongs.
+    --
+    -- Unknown keys are refused for the same reason: every one of them is a
+    -- narrowing the author believes they have expressed.
+    if p_spec ? 'tools' and jsonb_typeof(p_spec->'tools') <> 'null' then
+        if jsonb_typeof(p_spec->'tools') <> 'array' then
+            raise exception
+                'agent %: `tools` is %, where a list of server bindings was expected -- '
+                '[{"server": "<name>", "tools": ["a","b"]}]',
+                p_spec->>'name', jsonb_typeof(p_spec->'tools');
+        end if;
+        declare
+            v_b   jsonb;
+            v_bad text;
+        begin
+            for v_b in select * from jsonb_array_elements(p_spec->'tools') loop
+                if jsonb_typeof(v_b) <> 'object' or not (v_b ? 'server')
+                   or jsonb_typeof(v_b->'server') <> 'string' then
+                    raise exception
+                        'agent %: tool binding % names no server. Each binding is '
+                        '{"server": "<name>", "tools": ["a","b"]}.',
+                        p_spec->>'name', v_b;
+                end if;
+                select string_agg(k, ', ' order by k) into v_bad
+                from jsonb_object_keys(v_b) k
+                where k not in ('server', 'tools');
+                if v_bad is not null then
+                    raise exception
+                        'agent %: tool binding for server %s carries %, which this schema '
+                        'does not read. The allow-list key is `tools` (a list); an entry '
+                        'the runtime does not understand is not ignored, it leaves the '
+                        'agent with EVERY tool that server exposes.',
+                        p_spec->>'name', v_b->>'server', v_bad;
+                end if;
+                if v_b ? 'tools' and jsonb_typeof(v_b->'tools') not in ('array', 'null') then
+                    raise exception
+                        'agent %: the allow-list for server % is %, where a list of tool '
+                        'names (or null for all of them) was expected.',
+                        p_spec->>'name', v_b->>'server', jsonb_typeof(v_b->'tools');
+                end if;
+                if jsonb_typeof(v_b->'tools') = 'array'
+                   and exists (select 1 from jsonb_array_elements(v_b->'tools') e
+                               where jsonb_typeof(e) <> 'string') then
+                    raise exception
+                        'agent %: the allow-list for server % holds a non-string entry: %',
+                        p_spec->>'name', v_b->>'server', v_b->'tools';
+                end if;
+            end loop;
+        end;
+    end if;
+
     -- Every column an author can set, including the classification block.
     -- Leaving audience/category out of this list -- which is how it was first
     -- written, because they were added to the table later -- does not fail: it

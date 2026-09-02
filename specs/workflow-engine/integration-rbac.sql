@@ -298,7 +298,15 @@ begin
     -- returns the ROW SET -- so they are flattened back to it. Kept in step
     -- with the body this overrides; a checked copy that answers a different
     -- question is worse than no copy.
-    return (select coalesce(jsonb_agg(r order by t.created_at, t.step_key, r_ord),
+    --
+    -- Which is exactly what it became: the ordering defect this fixes
+    -- (`fan[10]` sorting before `fan[2]` once created_at ties, as it always
+    -- does inside one expansion) lived in BOTH bodies, and the copy is the one
+    -- that actually runs wherever user-rbac is installed. workflow.child_ordinal
+    -- is in schema.sql so the two cannot drift again on this point.
+    return (select coalesce(jsonb_agg(r order by t.created_at,
+                                      workflow.child_ordinal(t.step_key),
+                                      t.step_key, r_ord),
                             '[]'::jsonb)
             from workflow.tasks t
             cross join lateral jsonb_array_elements(
@@ -345,7 +353,8 @@ begin
                 'step_key', t.step_key, 'item', t.input->'item',
                 'items', t.input->'items',
                 'status', t.status, 'output', t.output)
-            order by t.created_at, t.step_key), '[]'::jsonb)
+            order by t.created_at, workflow.child_ordinal(t.step_key),
+                     t.step_key), '[]'::jsonb)
             from workflow.tasks t where t.matrix_parent_id = p_task_id);
 end;
 $$ language plpgsql stable security definer set search_path = pg_catalog, public;

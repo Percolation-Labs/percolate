@@ -858,6 +858,141 @@ end $$;
 
 rollback;
 
+begin;
+set local role app_owner;
+
+-- ---------------------------------------------------------------------
+-- 12. WHAT A REVIEW OF THIS SECTION FOUND, as assertions.
+--
+-- Four defects, all of them in code that passed every test above, and three of
+-- the four fire only on shapes those tests never used: eleven children, a row
+-- set of scalars, a key missing from a row other than the first. The fourth is
+-- a gate that cannot be satisfied. Each assertion below is the one that would
+-- have caught its defect.
+-- ---------------------------------------------------------------------
+do $$
+declare
+    v_run   uuid;
+    v_fan   uuid;
+    v_seq   text;
+    v_msg   text;
+    v_owner uuid := gen_random_uuid();
+begin
+    -- 12a. ELEVEN CHILDREN, IN THE ORDER THE ROW FUNCTION PRODUCED THEM.
+    --
+    -- matrix_rows ordered by (created_at, step_key). created_at is the
+    -- transaction timestamp -- identical for every child of one expansion --
+    -- so step_key decided, as TEXT: `fan[10]` before `fan[2]`. Ten children or
+    -- fewer never show it, and every test above uses ten or fewer.
+    insert into workflow.definitions (name, spec) values
+    ('t_bx_order', '{"steps":[
+        {"key":"fan", "kind":"matrix", "queue":"none", "input":{
+            "max_fanout": 100,
+            "items": [{"n":0},{"n":1},{"n":2},{"n":3},{"n":4},{"n":5},
+                      {"n":6},{"n":7},{"n":8},{"n":9},{"n":10},{"n":11}],
+            "template": {"queue":"t-bx", "kind":"work", "input":{"n":"{{item.n}}"}}}}
+     ]}');
+    v_run := workflow.start_workflow('t_bx_order', '{}'::jsonb);
+    select id into v_fan from workflow.tasks where run_id = v_run and step_key = 'fan';
+
+    -- Read through matrix_rows, because the ordering is ITS contract -- and as
+    -- the run's owner, since integration-rbac's override authorizes the call.
+    -- A direct query over the children would assert the ordering of a query
+    -- this test wrote, which is not the thing that was wrong.
+    if to_regprocedure('workflow.assert_run_access(uuid,text)') is not null then
+        insert into rbac.users (id, email) values (v_owner, 'batch-order@test.com');
+        update workflow.runs set owner_id = v_owner where id = v_run;
+        perform set_config('request.jwt.claims',
+            json_build_object('sub', v_owner::text)::text, true);
+    end if;
+
+    select string_agg(e->>'n', ' ') into v_seq
+    from jsonb_array_elements(workflow.matrix_rows(v_fan)) e;
+    perform set_config('request.jwt.claims', '', true);
+
+    if v_seq is distinct from '0 1 2 3 4 5 6 7 8 9 10 11' then
+        raise exception
+            'matrix_rows returned twelve children in the wrong order: %. The row set a '
+            'fan-in reads must be the order the row function produced.', v_seq;
+    end if;
+
+    -- 12b. A PARTITION COLUMN MUST BE IN EVERY ROW, NOT IN THE FIRST ONE.
+    --
+    -- Checked against row 0 alone, a row function that omits the key later
+    -- produced `{"tenant": null}` -- one silently separate partition holding
+    -- every key-less row, which is the exact outcome partition_by exists to
+    -- prevent.
+    insert into workflow.definitions (name, spec) values
+    ('t_bx_gappy', '{"steps":[
+        {"key":"fan", "kind":"matrix", "queue":"none", "input":{
+            "max_fanout": 100,
+            "partition_by": ["tenant"],
+            "items": [{"tenant":"a","v":1},{"tenant":"a","v":2},{"v":3}],
+            "template": {"queue":"t-bx", "kind":"work", "input":{}}}}
+     ]}');
+    begin
+        v_run := workflow.start_workflow('t_bx_gappy', '{}'::jsonb);
+        select status into v_msg from workflow.tasks
+         where run_id = v_run and step_key = 'fan';
+        if v_msg <> 'failed' then
+            raise exception
+                'a row missing its partition column expanded anyway (matrix status %) '
+                '-- those rows would have been grouped under a null key', v_msg;
+        end if;
+    end;
+
+    -- 12c. SCALAR ROWS + batch_size IS A NAMED ERROR, NOT `cannot deconstruct
+    --      a scalar`. The same row set is legal unbatched, so the message has
+    --      to name the step and the row, not the internal that failed.
+    insert into workflow.definitions (name, spec) values
+    ('t_bx_scalar', '{"steps":[
+        {"key":"fan", "kind":"matrix", "queue":"none", "input":{
+            "max_fanout": 100, "batch_size": 2,
+            "items": [1, 2, 3],
+            "template": {"queue":"t-bx", "kind":"work", "input":{}}}}
+     ]}');
+    v_run := workflow.start_workflow('t_bx_scalar', '{}'::jsonb);
+    -- The message is on the transition, not the task: fail_task records it in
+    -- task_events.detail and leaves output null (§6).
+    select coalesce(detail#>>'{error,error}', '') into v_msg
+      from workflow.task_events
+     where run_id = v_run and to_status = 'failed'
+     order by at desc limit 1;
+    if v_msg not like '%row 1 of the row set is a number%' then
+        raise exception
+            'a batched scalar row set did not fail with a message naming the row: %',
+            coalesce(nullif(v_msg, ''), '<no error recorded>');
+    end if;
+
+    -- 12d. AN ABSOLUTE min_success UNDER batch_size IS REFUSED AT
+    --      REGISTRATION, because matrix_gate_passes counts CHILDREN: 90 of
+    --      100 rows batched by 10 asks for ninety successes out of ten
+    --      children, which no run can satisfy. The trigger is adding
+    --      batch_size to a step that already worked.
+    begin
+        insert into workflow.definitions (name, spec) values
+        ('t_bx_gate', '{"steps":[
+            {"key":"fan", "kind":"matrix", "queue":"none", "input":{
+                "max_fanout": 500, "batch_size": 10, "min_success": 90,
+                "continue_on": "failed",
+                "items": [{"n":1}],
+                "template": {"queue":"t-bx", "kind":"work", "input":{}}}}
+         ]}');
+        raise exception 'an unsatisfiable min_success/batch_size pair was accepted';
+    exception when others then
+        if sqlerrm not like '%counts children%' then
+            raise exception 'refused for the wrong reason: %', sqlerrm;
+        end if;
+    end;
+
+    raise notice 'workflow/10: twelve children come back in the order the row function produced';
+    raise notice 'workflow/10: a partition column missing from any row fails the step, not just row 0';
+    raise notice 'workflow/10: a batched scalar row set names the row rather than the internal that broke';
+    raise notice 'workflow/10: an absolute min_success under batch_size is refused where it is written';
+end $$;
+
+rollback;
+
 do $$ begin
     raise notice 'workflow/10: batching gives the map half a granularity -- ten workers owning ten rows each, declared on the step';
 end $$;
