@@ -8742,8 +8742,13 @@ grant execute on function workflow.encoding_drift() to worker;
 --   FUZZY LOOKUP     -> pg_trgm over node_keys ONLY, never the data plane
 --   SEMANTIC         -> pgvector over the embedding table for one entity type
 --   GRAPH depth 1    -> GRAPH_TABLE over the property graph below
---   GRAPH depth n>1  -> WITH RECURSIVE over edges (PG19 has no quantified
---                       path patterns; confirmed empirically, brief.md §3)
+--   GRAPH depth n>1  -> WITH RECURSIVE over edges. PG19 has no quantified path
+--                       patterns -- confirmed empirically, brief.md §3 -- but
+--                       that is a narrower fact than "GRAPH_TABLE cannot do
+--                       depth n": a FIXED-LENGTH chain works and carries the
+--                       relations and weights (see graph_walk's note). The
+--                       recursion is kept because the walk is depth-unbounded
+--                       when called directly; the equivalence is asserted.
 --   SEARCH           -> RRF fusion of the lexical and semantic ranks
 --   <ordinary SQL>   -> read-only passthrough, SECURITY INVOKER (brief.md §3);
 --                       no keyword, recognised by how the statement starts
@@ -9434,10 +9439,38 @@ create or replace function aiq.graph_neighbors(
     limit p_limit;
 $$ language sql stable;
 
--- GRAPH depth n>1: WITH RECURSIVE. PG19's GRAPH_TABLE rejects quantified path
--- patterns outright ("element pattern quantifier is not supported") -- not a
--- beta gap to wait out, deliberately scoped out of the initial implementation
--- (brief.md §3). Depth- AND degree-capped, per graph-identity.md "Non-goals".
+-- GRAPH depth n>1: WITH RECURSIVE. Depth- AND degree-capped, per
+-- graph-identity.md "Non-goals".
+--
+-- THE REASON THIS IS NOT SQL/PGQ IS NARROWER THAN IT USED TO SAY, and the
+-- distinction is worth keeping straight because "we have property graphs, use
+-- them" is the right instinct. What PG19 rejects is a QUANTIFIER:
+--
+--     match (a is node) -[e is related]->{1,3} (b is node)
+--     ERROR:  element pattern quantifier is not supported
+--
+-- A FIXED-LENGTH chain is accepted, and carries everything this function
+-- accumulates -- both endpoints, each hop's relation and each hop's weight:
+--
+--     match (a is node) -[e1 is related]- (b is node) -[e2 is related]- (c is node)
+--     columns (a.id, c.id, e1.relation, e2.relation, e1.weight, e2.weight)
+--
+-- So a BOUNDED walk is expressible as a union of N fixed-length patterns, and
+-- the dialect's own ceiling is 5. What is not expressible that way is this
+-- function's actual contract: it takes p_depth with no upper bound, for the
+-- deliberate deep analytic walk the dialect refuses and sends here, and N
+-- patterns cannot be written for an N nobody knows until the call. Generating
+-- them as dynamic SQL would trade a readable recursion for an EXECUTE, and the
+-- cycle guard -- `not nx.id = any(w.seen)` -- would become a quadratic pile of
+-- pairwise inequalities per pattern.
+--
+-- The cost of keeping two mechanisms is that they must agree, which is
+-- failure-modes.md §5's "a second mechanism for a solved problem" waiting to
+-- happen: graph_neighbors answers depth 1 through GRAPH_TABLE and this answers
+-- it through recursion, and nothing compared them. So the equivalence is now
+-- ASSERTED rather than assumed -- `dev/tests/evals/scenarios.yaml` iter-01 and
+-- iter-13 run the same bounded walk both ways and require the node sets to
+-- match, which is the check that makes keeping both honest.
 drop function if exists aiq.graph_walk(uuid, int, text, int);
 create or replace function aiq.graph_walk(
     p_node_id uuid, p_depth int default 2, p_relation text default null,

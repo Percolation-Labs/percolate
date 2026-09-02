@@ -612,63 +612,134 @@ scenarios:
 
   - id: iter-01
     category: iterated-query
-    title: Depth 1 does not contain the answer, and says so by omission
-    asks: "Which corporate group is behind SIG-114?"
-    mechanism: "USAGE.md § GRAPH -- one row per node at its shortest depth"
-    catches: [wrong-answer-not-error]
+    title: The two traversal mechanisms agree at depth 1
+    asks: "Depth 1 goes through the property graph and depth 2 does not. Do they agree?"
+    mechanism: "aiq.graph_neighbors (GRAPH_TABLE over aiq.knowledge_graph) vs aiq.graph_walk (WITH RECURSIVE)"
+    catches: [second-mechanism, wrong-answer-not-error]
+    role: app_owner
     check:
-      - name: the first hop reaches the product only
-        sql: "select jsonb_array_length(aiq.query('GRAPH \"sig-114\" DEPTH 1')->'rows')"
-        is: "1"
-        because: "a walk that returned more at depth 1 than the graph holds would make every later width meaningless"
-      - name: and the parent is not in it
-        sql: "select exists (select 1 from jsonb_array_elements(aiq.query('GRAPH \"sig-114\" DEPTH 1')->'rows') r where r->>'key'='nvra')"
-        is: "false"
-        because: "the whole iteration story needs the first width to be genuinely wrong"
+      - name: the same seed reaches the same node set both ways
+        sql: |
+          select (select coalesce(string_agg(key, ',' order by key), '')
+                    from aiq.graph_neighbors((select node_id from aiq.lookup('tolvaxen'))))
+               = (select coalesce(string_agg(key, ',' order by key), '')
+                    from aiq.graph_walk((select node_id from aiq.lookup('tolvaxen')), 1))
+        is: "true"
+        because: >-
+          THIS IS THE CHECK THAT MAKES TWO MECHANISMS HONEST. `GRAPH DEPTH 1`
+          is answered by GRAPH_TABLE over the property graph; `DEPTH 2` and up
+          by WITH RECURSIVE. Two code paths that must agree about the same
+          question, agreeing only by coincidence, is failure-modes.md §5's
+          "second mechanism for a solved problem" -- and nothing had ever
+          compared them. Depth 1 is the overlap, so it is the place the
+          comparison is possible at all.
+      - name: and neither invents an edge the catalogue does not allow
+        sql: |
+          select count(*) from aiq.graph_neighbors(
+                   (select node_id from aiq.lookup('tolvaxen'))) n
+          where n.relation not in (
+            select relation from aiq.relation_types
+            union select inverse_label from aiq.relation_types)
+        is: "0"
+        because: "the relation a walk REPORTS has to be one the caller can write back as `TYPE`, or the result cannot be fed into the next query -- which was a real round-trip bug, not a hypothetical"
 
   - id: iter-02
     category: iterated-query
-    title: Depth 2 reaches the marketing authorisation holder
-    asks: "Who makes the drug this signal is about?"
-    mechanism: "USAGE.md § GRAPH -- DEPTH n, ordered by depth then path_weight"
-    catches: [wrong-answer-not-error]
+    title: A bounded walk is expressible over the property graph, and matches
+    asks: "PG19 has no path quantifier. Does that mean SQL/PGQ cannot do two hops?"
+    mechanism: "GRAPH_TABLE fixed-length chain vs aiq.graph_walk -- schema.sql's note on graph_walk"
+    catches: [second-mechanism, version-skew]
+    role: app_owner
     check:
-      - name: the immediate sponsor appears
-        sql: "select exists (select 1 from jsonb_array_elements(aiq.query('GRAPH \"sig-114\" DEPTH 2')->'rows') r where r->>'key'='altm')"
+      - name: a quantifier is genuinely rejected
+        sql: |
+          select count(*) from graph_table (aiq.knowledge_graph
+            match (a is node) -[e is related]->{1,3} (b is node)
+            columns (a.id as a_id)) g
+        raises: "quantifier is not supported"
+        because: "this is the fact the implementation is built on, and it is worth re-asserting rather than trusting: if PG19 ever gains quantified paths, the recursion stops being the only option and this check says so"
+      - name: but a FIXED-LENGTH chain is not
+        sql: |
+          select count(*) > 0 from graph_table (aiq.knowledge_graph
+            match (a is node) -[e1 is related]- (b is node) -[e2 is related]- (c is node)
+            columns (a.id as a_id, c.id as c_id)) g
         is: "true"
-        because: "two hops is the ordinary shape of the question and has to work before three is interesting"
-      - name: the parent still does not
-        sql: "select exists (select 1 from jsonb_array_elements(aiq.query('GRAPH \"sig-114\" DEPTH 2')->'rows') r where r->>'key'='nvra')"
-        is: "false"
-        because: "if depth 2 already returned depth-3 nodes the ceiling would not be a ceiling"
+        because: >-
+          The narrower true statement. "GRAPH_TABLE cannot do depth n" is what
+          the spec used to imply and it is wrong -- a bounded walk IS
+          expressible over the property graph, and the reason the recursion
+          stays is that graph_walk's contract is depth-unbounded, not that
+          SQL/PGQ cannot reach two hops.
+      - name: and it finds the same two-hop nodes the recursive walk does
+        sql: |
+          with pgq as (
+            select distinct kc.key
+            from graph_table (aiq.knowledge_graph
+              match (a is node) -[e1 is related]- (b is node) -[e2 is related]- (c is node)
+              columns (a.id as a_id, c.id as c_id)) g
+            join aiq.node_keys ka on ka.node_id = g.a_id and ka.kind = 'canonical'
+            join aiq.node_keys kc on kc.node_id = g.c_id and kc.kind = 'canonical'
+            where ka.key = 'sig-114 hepatic injury' and g.c_id <> g.a_id),
+          rec as (
+            select distinct w.key
+            from aiq.graph_walk((select node_id from aiq.lookup('sig-114')), 2) w)
+          select count(*) from (
+            select key from pgq except select key from rec) missing
+        is: "0"
+        because: "every node the property graph reaches in two hops must be in the recursive walk's answer; a node one mechanism finds and the other does not is the disagreement the pair exists to be checked for"
 
   - id: iter-03
     category: iterated-query
-    title: Depth 3 answers it, and the widening is the cost
-    asks: "Expand until you find the group -- what did that cost?"
-    mechanism: "USAGE.md § GRAPH -- DEPTH ceiling of 5 in the dialect"
-    catches: [rate-ceiling, wrong-answer-not-error]
+    title: A node reachable at several depths is returned at its shortest
+    asks: "How far is this from my seed?"
+    mechanism: "aiq.graph_walk -- DISTINCT ON (id) ORDER BY depth; USAGE.md § GRAPH"
+    catches: [wrong-answer-not-error, wrong-grouping]
+    role: app_owner
     check:
-      - name: the parent is finally reachable
-        sql: "select exists (select 1 from jsonb_array_elements(aiq.query('GRAPH \"sig-114\" DEPTH 3')->'rows') r where r->>'key'='nvra')"
-        is: "true"
-        because: "an agent that cannot reach a three-hop fact has to be told so, not left to widen forever"
-      - name: and it cost eighteen nodes to learn one
-        sql: "select jsonb_array_length(aiq.query('GRAPH \"sig-114\" DEPTH 3')->'rows')"
-        is: "18"
-        because: "iteration is only worth teaching if widening is expensive; a fixture where depth 3 returns three nodes makes the lesson invisible"
+      - name: one row per node, however many paths reach it
+        sql: |
+          select count(*) from (
+            select node_id from aiq.graph_walk(
+                     (select node_id from aiq.lookup('tolvaxen')), 3)
+            group by node_id having count(*) > 1) dupes
+        is: "0"
+        because: "a per-path result set says the same name three times, and an agent counting rows concludes it is three times as related. This is the guarantee -- not the row count, which is a fact about the fixture"
+      - name: and the depth reported is the shortest one
+        sql: |
+          select depth from aiq.graph_walk(
+                   (select node_id from aiq.lookup('sig-114')), 4) w
+          where w.key = 'nvra'
+        is: "3"
+        because: "NVRA is reachable from SIG-114 through two different subsidiaries; reporting the longer route would make `depth` a fact about traversal order rather than about the graph"
 
   - id: iter-04
     category: iterated-query
-    title: A node reachable two ways appears once, at its shortest depth
-    asks: "Novara is reachable through two subsidiaries. Do I get it twice?"
-    mechanism: "USAGE.md § GRAPH -- DISTINCT ON, shortest depth, ordered by path_weight"
-    catches: [wrong-answer-not-error, wrong-grouping]
+    title: A walk is ordered by how strongly the path is believed
+    asks: "Which of these neighbours should I look at first?"
+    mechanism: "aiq.graph_walk -- path_weight is the PRODUCT of edge weights; brief.md §3.6"
+    catches: [wrong-answer-not-error]
+    role: app_owner
     check:
-      - name: exactly one row for the parent
-        sql: "select count(*) from jsonb_array_elements(aiq.query('GRAPH \"tolvaxen\" DEPTH 3')->'rows') r where r->>'key'='nvra'"
-        is: "1"
-        because: "a per-path result set says the same name three times and an agent counting rows concludes it is three times as related"
+      - name: a longer path through strong edges outranks a short weak one
+        sql: |
+          select (select path_weight from aiq.graph_walk(
+                    (select node_id from aiq.lookup('sig-114')), 3) w where w.key='altm')
+               > (select path_weight from aiq.graph_walk(
+                    (select node_id from aiq.lookup('sig-114')), 3) w where w.key='sig-121 rash cluster')
+        is: "true"
+        because: >-
+          `edges.weight` is where the ingestion pipeline's coherence score
+          arrives at the read path. Until path_weight existed, graph_walk
+          ordered by node uuid and ignored weight entirely -- so the whole
+          scoring pipeline was discarded at the final step, which is the exact
+          failure brief.md §3.6 is about. The 0.40 forum claim must rank below
+          the 0.95 authorisation two hops away.
+      - name: and the product is what accumulates, not the sum or the minimum
+        sql: |
+          select round(path_weight::numeric, 4)::text from aiq.graph_walk(
+                   (select node_id from aiq.lookup('sig-114')), 3) w where w.key='nvra'
+        is: "0.8550"
+        because: "1.00 x 0.95 x 0.90. A sum would reward length; a minimum would make a long chain of near-certainties indistinguishable from a single one"
 
   - id: iter-05
     category: iterated-query
@@ -789,10 +860,30 @@ scenarios:
     mechanism: "USAGE.md § GRAPH -- inverse traversal is served from the dst_id index, not a second stored row"
     catches: [wrong-answer-not-error]
     check:
-      - name: four signals point at the hub
-        sql: "select count(*) from jsonb_array_elements(aiq.query('GRAPH \"tolvaxen\" TYPE implicated_in')->'rows') r"
-        is: "4"
-        because: "the reverse question is answered from the index with the catalogue's inverse label; a fixture that stored reverse edges would pass this while the mechanism was broken"
+      - name: every inbound edge is reached, and the count comes from the edges
+        sql: |
+          select (select count(*) from jsonb_array_elements(
+                    aiq.query('GRAPH "tolvaxen" TYPE implicated_in')->'rows') r)
+               = (select count(*) from aiq.edges e
+                    join aiq.nodes d on d.id = e.dst_id
+                   where d.entity_id = '52000000-0000-0000-0000-000000000001'
+                     and e.relation = 'implicates')
+        is: "true"
+        because: >-
+          Compared against the edge table rather than against a number, so
+          adding a signal to the fixture does not turn this red for a reason
+          that has nothing to do with the guarantee. The guarantee is that the
+          reverse question is answered from the dst_id index with the
+          catalogue's inverse label -- a fixture that stored reverse edges would
+          satisfy a hard-coded count while the mechanism was broken.
+      - name: and no reverse edge is stored to make that easy
+        sql: |
+          select count(*) from aiq.edges e
+          join aiq.nodes s on s.id = e.src_id
+          where s.entity_id = '52000000-0000-0000-0000-000000000001'
+            and e.relation = 'implicated_in'
+        is: "0"
+        because: "the inverse label is resolved from the relation catalogue at READ time; an inverse edge in the table would be a second copy of a fact, and the two would drift"
 
 # =============================================================================
 # HUMAN IN THE LOOP -- a run that stops until a person answers, and then acts
