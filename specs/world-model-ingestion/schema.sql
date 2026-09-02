@@ -436,6 +436,38 @@ begin
         raise exception 'no such resource, or it is not yours';
     end if;
 
+    -- AN UNRECOGNISED KEY IS REFUSED, not ignored, and this cost two published
+    -- pages. The writer reads `start_offset`/`end_offset`; the cookbook and a
+    -- recipe both passed `start_char`/`end_char`, the insert quietly took NULL
+    -- for both columns, and the call returned the chunk count -- so a page
+    -- headed "with spans back into the source" demonstrated a feature it was
+    -- not exercising, and anyone who copied it got a corpus whose passages
+    -- cannot be quoted back to the page they came from.
+    --
+    -- This is failure-modes.md §6's dropped-key class ("a deserialiser silently
+    -- drops keys it does not know") one layer below the YAML compiler, which
+    -- already refuses an unknown key on a step and lists the valid ones for
+    -- exactly this reason. `ordinal` is accepted and ignored -- ordering comes
+    -- from array position, and the examples all carry it -- but it is named
+    -- here rather than left to look like a typo.
+    if exists (
+        select 1 from jsonb_array_elements(p_chunks) c,
+                      jsonb_object_keys(c) k
+         where k not in ('content','token_count','start_offset','end_offset',
+                         'metadata','ordinal'))
+    then
+        raise exception
+            'unknown key(s) in a chunk: %. A chunk may carry content, '
+            'token_count, start_offset, end_offset, metadata and ordinal. '
+            'Spans are start_offset/end_offset -- start_char/end_char is the '
+            'usual mistake and used to be accepted and dropped, which recorded '
+            'no span and reported success.',
+            (select string_agg(distinct k, ', ' order by k)
+               from jsonb_array_elements(p_chunks) c, jsonb_object_keys(c) k
+              where k not in ('content','token_count','start_offset','end_offset',
+                              'metadata','ordinal'));
+    end if;
+
     delete from content.resource_chunks where resource_id = p_resource_id;
 
     -- start_offset/end_offset are read from the chunk when the chunker

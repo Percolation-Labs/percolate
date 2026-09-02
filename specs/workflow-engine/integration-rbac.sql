@@ -253,6 +253,7 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 
 create or replace function workflow.signal_task(p_run_id uuid, p_signal text, p_payload jsonb)
 returns void as $$
+declare r record;
 begin
     -- Was equally open, and only *appeared* safe when tested because
     -- wait_signal was never populated (schema.sql's start_workflow bug, fixed
@@ -267,9 +268,23 @@ begin
     -- any deployment that loads both -- which is every deployment, since both
     -- files are in build-sql.py's ORDER. The fix was first applied to the
     -- superseded copy and had no effect; dev/currency.sh is what noticed.
-    update workflow.tasks
-    set status = 'done', output = p_payload, completed_at = clock_timestamp()
-    where run_id = p_run_id and wait_signal = p_signal and status = 'waiting_external';
+    -- The output is merged into runs.context for the same reason complete_task
+    -- merges it: {{steps.<id>.…}} reads from there, so a person's decision that
+    -- stops here is a decision no downstream step can act on. Kept in step with
+    -- schema.sql's copy through the shared workflow.merge_step_context(), which
+    -- is the point of that function existing -- the previous shape had the
+    -- merge written once, at one of the three sites that mark a task done.
+    for r in
+        with signalled as (
+            update workflow.tasks
+            set status = 'done', output = p_payload, completed_at = clock_timestamp()
+            where run_id = p_run_id and wait_signal = p_signal
+              and status = 'waiting_external'
+            returning id, output)
+        select id, output from signalled
+    loop
+        perform workflow.merge_step_context(r.id, r.output);
+    end loop;
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 

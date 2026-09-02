@@ -762,8 +762,31 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 
 -- Current form. It reached this shape in section 21b (Rate limiting stops being decoration.), which explains
 -- the failure that produced it. Defined here, where it is first needed.
+-- SETOF, NOT A BARE COMPOSITE, and the difference is the whole contract for an
+-- empty queue.
+--
+-- `returns workflow.tasks` cannot express "nothing to claim": `return null`
+-- from a composite-returning function is ONE ROW with every column NULL, and
+-- `found` is true. A worker written the obvious way -- claim, and work the row
+-- if you got one -- therefore treats an empty queue as a task arriving, on the
+-- most-called function in this API, and spec.md §4 documented the signature
+-- with no note that emptiness was spelled that way. The reference worker
+-- defends against it (`task_id = row[0] if row else None`), which is evidence
+-- the trap was known at the call site and never fixed at the source.
+--
+-- Same shape `ai-query-layer/USAGE.md` records for `lookup_many`'s LEFT JOIN,
+-- resolved the same way: "rows is non-empty, and a miss is indistinguishable
+-- from a hit to anything that does not inspect the fields." `setof` returning
+-- zero rows says it in the type, and matches `claim_tasks` below, which has
+-- been setof since it was written.
+--
+-- The return type changes, so this is a drop rather than a replace. Callers
+-- using `select * from claim_task(...)` are unaffected; one using
+-- `(claim_task(...)).id` now gets zero rows instead of one NULL, which is the
+-- correction.
+drop function if exists workflow.claim_task(text, text);
 create or replace function workflow.claim_task(p_queue text, p_worker_id text)
-returns workflow.tasks as $$
+returns setof workflow.tasks as $$
 declare
     t           workflow.tasks;
     v_lookahead int;
@@ -787,10 +810,12 @@ begin
                 claimed_at = now(), heartbeat_at = now(), attempts = attempts + 1
             where id = t.id
             returning * into t;
-            return t;
+            return next t;
+            return;
         end if;
     end loop;
-    return null;
+    -- Nothing claimable: no rows, rather than one row of nulls.
+    return;
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
@@ -823,9 +848,10 @@ $$ language sql;
 -- superseded copies that behave correctly right up until somebody fixes one of
 -- them -- so it is delegated rather than duplicated. It stays for callers
 -- written against the old name; new callers use claim_task.
+drop function if exists workflow.claim_task_rate_limited(text, text);
 create or replace function workflow.claim_task_rate_limited(p_queue text, p_worker_id text)
-returns workflow.tasks as $$
-    select workflow.claim_task(p_queue, p_worker_id);
+returns setof workflow.tasks as $$
+    select * from workflow.claim_task(p_queue, p_worker_id);
 $$ language sql;
 
 -- THE LEASE FENCE (§23). Returns null when the caller may act on the task, or
@@ -912,6 +938,45 @@ begin
     where id = p_task_id and status = 'running'
     returning not cancel_requested into v_ok;
     return coalesce(v_ok, false);
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- A task's output reaching runs.context is a property of the TRANSITION INTO
+-- `done`, not of complete_task -- and writing it inline in complete_task is how
+-- it became a property of complete_task alone. `signal_task` and
+-- `promote_due_timers` mark a task done too and merged nothing, so
+-- {{steps.<a signal step>.result}} resolved to nothing and the acting step
+-- failed with a template its author had written correctly. The whole second
+-- half of a human-in-the-loop workflow -- act on what the person said -- was
+-- unreachable from the document, and `dev/examples/08-wait.sql` did not notice
+-- because it waits, resumes, and never reads the payload.
+--
+-- failure-modes.md §5 already names this shape ("when a correction applies to a
+-- property of a state transition, enumerate every path that performs that
+-- transition") and records it reopening three times for `now()` -- at these
+-- same two call sites. So the merge is a function with three callers rather
+-- than a statement with one, and the enumeration is `grep merge_step_context`.
+create or replace function workflow.merge_step_context(p_task_id uuid, p_output jsonb)
+returns void as $$
+declare t workflow.tasks;
+begin
+    select * into t from workflow.tasks where id = p_task_id;
+    if not found then
+        return;
+    end if;
+    -- Matrix children deliberately do NOT write into runs.context: one JSONB
+    -- column rewritten in full per completion is quadratic write amplification
+    -- at fan-out scale, and matrix_outputs() is the handle-and-reader version
+    -- of the same thing. Carried here rather than left at the one call site
+    -- that had it, so the three paths cannot disagree about that either.
+    if t.matrix_parent_id is null then
+        update workflow.runs r
+        set context = context || jsonb_build_object(t.step_key, p_output),
+            updated_at = now()
+        where r.id = t.run_id;
+    else
+        update workflow.runs set updated_at = now() where id = t.run_id;
+    end if;
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
@@ -1028,13 +1093,7 @@ begin
         return;
     end if;
 
-    if t.matrix_parent_id is null then
-        update workflow.runs r
-        set context = context || jsonb_build_object(t.step_key, v_out), updated_at = now()
-        where r.id = t.run_id;
-    else
-        update workflow.runs set updated_at = now() where id = t.run_id;
-    end if;
+    perform workflow.merge_step_context(p_task_id, v_out);
 
     update workflow.tasks set status = 'done', output = v_out,
         completed_at = clock_timestamp()
@@ -1209,10 +1268,29 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- before everything that ran after it -- because a NULL sorts first.
 create or replace function workflow.signal_task(p_run_id uuid, p_signal text, p_payload jsonb)
 returns void as $$
-    update workflow.tasks
-    set status = 'done', output = p_payload, completed_at = clock_timestamp()
-    where run_id = p_run_id and wait_signal = p_signal and status = 'waiting_external';
-$$ language sql;
+declare r record;
+begin
+    for r in
+        with signalled as (
+            update workflow.tasks
+            set status = 'done',
+                -- NESTED UNDER `result`, like every other kind. YAML.md states
+                -- the rule generally -- "{{steps.<id>.result}} is the one idiom
+                -- to learn" -- and `signal` was the kind that stored the
+                -- payload bare, so the documented spelling resolved to nothing
+                -- on the one step whose entire purpose is to be read.
+                output = jsonb_build_object('result', p_payload),
+                completed_at = clock_timestamp()
+            where run_id = p_run_id and wait_signal = p_signal
+              and status = 'waiting_external'
+            returning id, output)
+        select id, output from signalled
+    loop
+        -- And into runs.context, or nothing downstream can read the decision.
+        perform workflow.merge_step_context(r.id, r.output);
+    end loop;
+end;
+$$ language plpgsql;
 
 -- REPLACED by integration-rbac.sql (e), for the same reason and with the same
 -- consequence as signal_task above: that version checks the caller's authority
@@ -1485,14 +1563,26 @@ $$ language plpgsql;
 -- first under `order by completed_at desc`, so a timer inside a saga group was
 -- compensated before everything that ran after it.
 create or replace function workflow.promote_due_timers() returns int as $$
-    with due as (
-        update workflow.tasks set status = 'done', output = '{"fired": true}'::jsonb,
-            completed_at = clock_timestamp()
-        where kind = 'timer' and status = 'ready' and run_after <= now()
-        returning id
-    )
-    select count(*)::int from due;
-$$ language sql;
+declare r record; v_n int := 0;
+begin
+    for r in
+        with due as (
+            -- `result` again: a timer was the second kind whose output did not
+            -- honour the one idiom, so {{steps.<a timer>.result.fired}} was
+            -- unreadable on a step that is otherwise trivially readable.
+            update workflow.tasks set status = 'done',
+                output = '{"result": {"fired": true}}'::jsonb,
+                completed_at = clock_timestamp()
+            where kind = 'timer' and status = 'ready' and run_after <= now()
+            returning id, output)
+        select id, output from due
+    loop
+        perform workflow.merge_step_context(r.id, r.output);
+        v_n := v_n + 1;
+    end loop;
+    return v_n;
+end;
+$$ language plpgsql;
 -- select cron.schedule('promote-timers', '*/10 seconds', $$select workflow.promote_due_timers()$$);
 
 -- ------------------------------------------------------------
@@ -2327,6 +2417,58 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- Re-entry is safe: execute_sql_step() moves the row to 'running' before doing
 -- any work, so the recursive fire sees a non-ready row and stops. A chain of
 -- sql steps runs to completion through ordinary cascade.
+-- A timer's delay is a property of BECOMING READY, and for a root timer that
+-- happens at INSERT -- the one transition the autorun trigger below cannot see.
+--
+-- mark_roots_ready is a BEFORE INSERT trigger that rewrites `status` in the NEW
+-- row, so a timer with no `needs:` is inserted already `ready` and no UPDATE
+-- ever fires. `delay_seconds` was therefore stored on the task and applied to
+-- nothing: run_after stayed at now(), the next promote_due_timers() fired it,
+-- and `timer: 3600` as a document's first step waited zero seconds with every
+-- task ending `done` and the run `completed`. A cooling-off period that does
+-- not cool off, reported as success.
+--
+-- Same class as the ON UPDATE ONLY note below -- "a trigger that fires only on
+-- the transition you did not take" -- failing the quiet way round: not a step
+-- that never starts, but a wait that never waits. `dev/examples/08-wait.sql`
+-- ages run_after by hand before promoting, which reads as a testing
+-- convenience and was in fact a workaround for this, in the file whose job is
+-- to demonstrate that timers work.
+--
+-- A function with two callers rather than a second copy of the arithmetic:
+-- two paths that must agree about a policy and agree only by coincidence is
+-- how this collection keeps re-finding the same bug.
+create or replace function workflow.apply_timer_delay(p_task_id uuid)
+returns void as $$
+    update workflow.tasks
+    set run_after = clock_timestamp()
+                  + ((input->>'delay_seconds')::numeric * interval '1 second')
+    where id = p_task_id and kind = 'timer' and (input ? 'delay_seconds');
+$$ language sql;
+
+-- Unconditional, where the old inline form skipped a row whose run_after was
+-- already in the future. That guard is what would let the INSERT stamp below
+-- win over the later readiness stamp for a NON-root timer, measuring its delay
+-- from the run's start rather than from when it became ready -- the property
+-- the old comment claimed and the new insert path would otherwise remove.
+create or replace function workflow.apply_timer_delay_on_insert() returns trigger as $$
+begin
+    perform workflow.apply_timer_delay(new.id);
+    return null;
+end;
+$$ language plpgsql;
+
+-- Only a timer, and only one inserted already ready. Every other kind stays
+-- strictly on the update path for the reason the next comment gives: during
+-- start_workflow's two-pass construction the graph is not yet valid, so an
+-- insert-time autorun would EXECUTE the whole workflow in arbitrary order.
+-- Stamping a column is not executing, which is why this one is safe and those
+-- are not.
+create trigger trg_apply_timer_delay
+    after insert on workflow.tasks
+    for each row when (new.kind = 'timer' and new.status = 'ready')
+    execute function workflow.apply_timer_delay_on_insert();
+
 -- Current form. It reached this shape in section 21i (Timers and sub-workflows start themselves.), which explains
 -- the failure that produced it. Defined here, where it is first needed.
 create or replace function workflow.autorun_sql_steps() returns trigger as $$
@@ -2340,12 +2482,8 @@ begin
             perform workflow.start_child_workflow(
                 new.id, new.input->>'workflow',
                 coalesce(new.input->'input', '{}'::jsonb));
-        elsif new.kind = 'timer' and (new.input ? 'delay_seconds') then
-            -- Measured from readiness, not from the run's start.
-            update workflow.tasks
-            set run_after = clock_timestamp()
-                          + ((new.input->>'delay_seconds')::numeric * interval '1 second')
-            where id = new.id and run_after <= clock_timestamp();
+        elsif new.kind = 'timer' then
+            perform workflow.apply_timer_delay(new.id);
         end if;
     end if;
     return null;
@@ -5621,6 +5759,19 @@ alone -- cancelling it is a no-op, not an error.$c$;
 -- register the function" impossible, which is a real and reasonable order.
 -- ============================================================
 
+-- Does this text parse as a JSON array or object? A predicate rather than an
+-- inline cast, because the only way to ask Postgres is to try it and catch the
+-- failure, and an exception block inside the lint's own loop would be a third
+-- level of nesting around one boolean.
+create or replace function workflow.parses_as_json_container(p_text text)
+returns boolean as $$
+begin
+    return jsonb_typeof(p_text::jsonb) in ('array', 'object');
+exception when others then
+    return false;
+end;
+$$ language plpgsql immutable;
+
 create or replace function workflow.lint_spec(p_spec jsonb)
 returns table(step_key text, severity text, detail text) as $$
 declare
@@ -5665,6 +5816,63 @@ begin
                 severity := 'warning';
                 detail := 'p8ql could not be checked: ' || sqlerrm;
                 return next;
+            end;
+        end if;
+
+        -- (a2) a jsonb argument written as a QUOTED JSON STRING.
+        --
+        -- `args: ['[{"a":1}]']` is a JSON string, not an array. It reaches a
+        -- step function declared `jsonb` as a scalar and the run fails at
+        -- dispatch with Postgres's own `cannot extract elements from a scalar`
+        -- -- true, and about a value the author cannot see, naming neither the
+        -- argument nor the remedy. YAML.md documents type preservation for
+        -- whole-string REFERENCES and says nothing about literals, so the
+        -- natural thing to type is the wrong one.
+        --
+        -- The allow-list already holds the declared argument types, so this is
+        -- answerable while the author is still looking at the document rather
+        -- than on the third task of a run.
+        if v_step->>'kind' = 'sql' and v_step->'input' ? 'function' then
+            declare
+                v_types text[]; v_arg jsonb; v_i int := 0; v_txt text;
+            begin
+                select arg_types into v_types from workflow.step_functions
+                 where name = v_step->'input'->>'function';
+                for v_arg in
+                    select * from jsonb_array_elements(
+                        coalesce(v_step->'input'->'args', '[]'::jsonb))
+                loop
+                    v_i := v_i + 1;
+                    if v_types is not null and v_types[v_i] = 'jsonb'
+                       and jsonb_typeof(v_arg) = 'string' then
+                        v_txt := ltrim(v_arg #>> '{}');
+                        -- A TEMPLATE IS NOT A LITERAL, and forgetting that made
+                        -- the first version of this rule refuse the shipped
+                        -- `ask_uploads` workflow at install time: p8ql_vec's
+                        -- vector argument is
+                        -- '{{steps.retrieve__embed.result}}', which starts with
+                        -- '{' and resolves at dispatch to a real array. A lint
+                        -- firing on a document the collection itself ships is
+                        -- the loudest possible version of being wrong, so this
+                        -- is written to be sure rather than suspicious: skip
+                        -- anything holding a reference, and flag only text that
+                        -- actually parses as a JSON array or object.
+                        if v_txt not like '%{{%'
+                           and left(v_txt, 1) in ('[', '{')
+                           and workflow.parses_as_json_container(v_txt) then
+                            severity := 'error';
+                            detail := format(
+                                'argument %s of %s is declared jsonb and was '
+                                'written as a quoted JSON string, so it arrives '
+                                'as a scalar and the step fails at dispatch with '
+                                '"cannot extract elements from a scalar". Write '
+                                'it as a real YAML list or mapping under args:, '
+                                'not inside quotes.',
+                                v_i, v_step->'input'->>'function');
+                            return next;
+                        end if;
+                    end if;
+                end loop;
             end;
         end if;
 
