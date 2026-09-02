@@ -19,6 +19,7 @@
 -- What is deliberately NOT here: anything the agent runtime could do itself.
 -- The LLM call, the tool calls, and the SSE fan-out are outside SQL's reach
 -- (brief.md §8); everything else in an agent turn is a row this file owns.
+
 -- ============================================================
 
 do $$
@@ -1003,6 +1004,126 @@ grant execute on function agentic.channel_for(uuid) to authenticated, api_viewer
 
 -- No base-table INSERT/UPDATE/DELETE grant to any PostgREST-facing role: the
 -- write path is the functions above, and nothing else.
+
+-- ============================================================
+-- 9b. The plan-graph facet -- an agent's reach, as data
+--
+-- A read surface like §9 above and numbered under it for that reason: these
+-- two views add no capability, they answer one question about rows §9 already
+-- exposes -- what does this agent reach, and can it.
+--
+-- workflow-engine's plan graph (workflow-engine/plan-graph.md) expands a stored
+-- workflow along the entities it names, and an `agent:` step names one row in
+-- this schema whose own reach is three more joins: the servers it binds, the
+-- tools it is narrowed to on each, and -- through a server with
+-- `serves_agents` -- the agents it may hand work to. Those joins live HERE
+-- rather than in the engine, because the engine must be deployable without
+-- this schema at all: workflow.plan_catalog() calls this function only if it
+-- exists, the same conditional integration define_yaml already uses for
+-- aiq.expand_embed_steps.
+--
+-- Both views read only shared configuration. `agents` and `tool_servers` carry
+-- `for select using (true)` policies (§7), so nothing here can show a caller a
+-- row it could not select directly, and neither view touches `sessions`,
+-- `runs` or `messages` -- the three tables in this schema that are per-user.
+-- ============================================================
+
+create or replace view agentic.v_plan_agents as
+select a.name,
+       a.category,
+       a.audience,
+       a.model,
+       -- THE WHOLE PROMPT, not a preview of it. An agent's intent IS its
+       -- prompt, and this view exists so a plan can be read for intent -- a
+       -- truncation makes every agent look like every other agent, which is
+       -- the failure mode the expansion is for.
+       a.system_prompt,
+       -- The SHAPE it must return, curated to what a reader needs: the
+       -- required keys and each property's type. The full JSON Schema is one
+       -- select away and is mostly boilerplate; what tells you whether N
+       -- results will combine is the key list.
+       case when a.structured_output_schema is null then null else
+           jsonb_build_object(
+               'required', coalesce(a.structured_output_schema->'required', '[]'::jsonb),
+               'properties', coalesce((
+                   select jsonb_object_agg(k, coalesce(v->>'type', 'any'))
+                     from jsonb_each(coalesce(
+                              a.structured_output_schema->'properties', '{}'::jsonb)) e(k, v)), 
+                   '{}'::jsonb))
+       end as output_shape,
+       a.structured_output_schema is not null as has_output_schema,
+       nullif(a.context_policy, '{}'::jsonb) as context_policy,
+       s.name as summarizer,
+       a.tools
+  from agentic.agents a
+  left join agentic.agents s on s.id = a.summarizer_agent_id;
+
+create or replace view agentic.v_plan_servers as
+select t.name,
+       t.kind,
+       t.url,
+       t.emits_citations,
+       t.serves_agents,
+       t.synced_at,
+       -- The tool NAMES discovery wrote, which is what an allow-list is checked
+       -- against. A server that has never synced has `[]` here and a null
+       -- synced_at, and the graph reports those as two different things: an
+       -- empty list means "we asked and it exposes nothing", a null sync means
+       -- "nobody has asked yet", and only the first is evidence about the tools.
+       coalesce((select jsonb_agg(e->>'name' order by e->>'name')
+                   from jsonb_array_elements(t.cached_tools) e
+                  where e ? 'name'), '[]'::jsonb) as tools,
+       -- WHAT EACH TOOL SAYS IT DOES, which is the half of a binding that
+       -- carries intent. The description is the text the MODEL reads before
+       -- deciding to call it, so a plan that shows the tool name and not this
+       -- shows the part nobody needs. Parameters are named, not schema'd: the
+       -- argument names are what make a tool recognisable, and the types are
+       -- one fetch away for anybody who needs them.
+       coalesce((select jsonb_object_agg(e->>'name', jsonb_build_object(
+                            'description', e->>'description',
+                            'params', coalesce((
+                                select jsonb_agg(k order by k)
+                                  from jsonb_object_keys(coalesce(
+                                       e#>'{inputSchema,properties}',
+                                       e#>'{input_schema,properties}',
+                                       '{}'::jsonb)) k), '[]'::jsonb)))
+                   from jsonb_array_elements(t.cached_tools) e
+                  where e ? 'name'), '{}'::jsonb) as tool_detail
+  from agentic.tool_servers t;
+
+-- One object per section, keyed by name, which is the shape p8_plan_graph
+-- reads. Built with jsonb_object_agg rather than handed over as rows because
+-- the graph builder does lookups, not scans -- and because a section that is
+-- ABSENT means "this subsystem is not installed" there, a distinction an empty
+-- rowset could not carry.
+create or replace function agentic.plan_facet()
+returns jsonb
+language sql
+stable
+as $$
+    select jsonb_build_object(
+        'agents', coalesce((
+            select jsonb_object_agg(name, jsonb_strip_nulls(jsonb_build_object(
+                'category', category, 'audience', audience, 'model', model,
+                'system_prompt', system_prompt, 'output_shape', output_shape,
+                'has_output_schema', has_output_schema,
+                'context_policy', context_policy,
+                'summarizer', summarizer, 'tools', tools)))
+              from agentic.v_plan_agents), '{}'::jsonb),
+        'servers', coalesce((
+            select jsonb_object_agg(name, jsonb_build_object(
+                'kind', kind, 'url', url, 'emits_citations', emits_citations,
+                'serves_agents', serves_agents, 'synced_at', synced_at,
+                'tools', tools, 'tool_detail', tool_detail))
+              from agentic.v_plan_servers), '{}'::jsonb));
+$$;
+
+grant select on agentic.v_plan_agents, agentic.v_plan_servers to authenticated;
+grant execute on function agentic.plan_facet() to authenticated;
+
+comment on function agentic.plan_facet() is
+    'The agentic half of workflow.plan_catalog(): every agent and tool server, '
+    'keyed by name, in the shape p8_plan_graph reads. Shared config only.';
 
 -- ------------------------------------------------------------
 -- 10. Invariant self-checks -- the same two this collection has already been

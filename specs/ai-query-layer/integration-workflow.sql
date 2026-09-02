@@ -453,3 +453,140 @@ select workflow.register_step_function(
 -- with it was reach nobody needs. See workflow-engine/integration-rbac.sql §6
 -- for the enumeration this came out of.
 revoke execute on function aiq.land_embeddings(uuid) from public;
+
+-- ============================================================
+-- The plan-graph facet -- which corpus, and which space it is ranked in
+--
+-- The other half of workflow.plan_catalog() (workflow-engine/plan-graph.md).
+-- The engine can see that a step calls `p8ql`; only this schema knows whether
+-- the source that query names is registered, and -- the part no other view in
+-- this collection answers -- WHICH MODELS that corpus has actually been
+-- embedded with.
+--
+-- That last column is why this facet exists at all. `expand_embed_steps` pins
+-- one model into both halves of the sugar path, so `p8ql: 'SEARCH ... FROM
+-- chunks'` cannot rank in a space it did not embed into. The hand-written pair
+-- -- an `embed:` step and a `p8ql:` step the author wired together -- is
+-- outside that guarantee by construction, and its failure is not an error
+-- anywhere: ranking a corpus in a space it has no rows in returns no rows, and
+-- ranking it in the wrong space returns a number. `spaces` is what lets the
+-- plan graph refuse it before the run rather than after the answer.
+-- ============================================================
+
+-- Does this model's space hold any vector belonging to this corpus?
+--
+-- Dynamic because the space table's NAME is derived from the model, so a
+-- static reference would have to exist per model -- and because a model
+-- registered without register_embedding_space() has no table at all, which
+-- must answer false rather than raise. to_regclass is the guard that makes the
+-- second case cheap.
+create or replace function aiq.space_populated(p_model text, p_source_table text)
+returns boolean
+language plpgsql
+stable
+set search_path = pg_catalog, public
+as $$
+declare
+    v_tbl text := 'aiq.' || quote_ident('emb_' || replace(p_model, '-', '_'));
+    v_hit boolean;
+begin
+    if to_regclass(v_tbl) is null then
+        return false;
+    end if;
+    -- LIMIT 1 through the primary key, never a count: this asks whether the
+    -- corpus is represented in the space, and a count of six million vectors
+    -- answers the same question a great deal more slowly.
+    execute format(
+        'select exists (select 1 from %s e join %s c on c.id = e.chunk_id limit 1)',
+        v_tbl, p_source_table) into v_hit;
+    return coalesce(v_hit, false);
+exception
+    -- A registered source whose table has no `id` column is a registration
+    -- defect, not a reason for the whole plan graph to fail. Reported as "no
+    -- space" and left to the source's own audit.
+    when undefined_column or undefined_table then
+        return false;
+end;
+$$;
+
+-- Every registered source, and what is true of it. A name can be registered
+-- both ways -- `chunks` is lexical AND semantic -- so this is a full join
+-- rather than a union: one row per NAME, carrying which modes it supports.
+create or replace view aiq.v_plan_sources as
+select coalesce(s.name, l.name)                as name,
+       coalesce(s.source_table, l.source_table) as source_table,
+       s.name is not null                       as semantic,
+       l.name is not null                       as lexical,
+       coalesce(s.content_col, l.content_col)   as content_col,
+       l.regconfig                              as regconfig,
+       -- The spaces this corpus has rows in. A model's space is a table
+       -- (aiq.emb_<model>, §10) and its rows are per chunk, so "embedded with
+       -- M" is a question about data, not about registration -- which is the
+       -- honest form of it, since registering a model creates an empty table.
+       coalesce((
+           select jsonb_agg(jsonb_build_object('model', m.name, 'dim', m.dim)
+                            order by m.name)
+             from aiq.embedding_models m
+            where aiq.space_populated(m.name, coalesce(s.source_table, l.source_table))
+       ), '[]'::jsonb)                          as spaces,
+       -- THE SHAPE OF WHAT IT READS. Names and types, and nothing else: the
+       -- point of expanding a source is to see how data moves through the
+       -- schema, and constraints, defaults and indexes answer a different
+       -- question at ten times the length. Generated columns are excluded
+       -- because search_tsv is this schema's own bookkeeping, not the
+       -- corpus's shape.
+       coalesce((
+           select jsonb_agg(jsonb_build_object('name', c.column_name,
+                                               'type', c.data_type)
+                            order by c.ordinal_position)
+             from information_schema.columns c
+            where c.table_schema = split_part(coalesce(s.source_table, l.source_table), '.', 1)
+              and c.table_name   = split_part(coalesce(s.source_table, l.source_table), '.', 2)
+              and c.is_generated = 'NEVER'
+       ), '[]'::jsonb)                          as columns
+  from aiq.semantic_sources s
+  full join aiq.lexical_sources l on l.name = s.name;
+
+create or replace function aiq.plan_facet()
+returns jsonb
+language sql
+stable
+as $$
+    select jsonb_build_object(
+        'sources', coalesce((
+            select jsonb_object_agg(name, jsonb_strip_nulls(jsonb_build_object(
+                'table', source_table, 'semantic', semantic,
+                'lexical', lexical, 'content_col', content_col,
+                'regconfig', regconfig, 'columns', columns,
+                -- The model NAMES, for the space check the graph does, and the
+                -- dimensioned form beside it for a reader.
+                'spaces', (select coalesce(jsonb_agg(e->>'model'), '[]'::jsonb)
+                             from jsonb_array_elements(spaces) e),
+                'space_detail', spaces)))
+              from aiq.v_plan_sources), '{}'::jsonb),
+        'models', coalesce((
+            select jsonb_object_agg(m.name, jsonb_strip_nulls(jsonb_build_object(
+                'dim', m.dim, 'provider', m.provider, 'is_default', m.is_default,
+                -- Where the vector comes from. A url with a {{env.X}} in it is
+                -- the registry doing its job, and it belongs in a plan for the
+                -- same reason the model name does.
+                'endpoint', m.endpoint,
+                -- Registered and never created is a real, silent state: the
+                -- embed call succeeds and there is nowhere to land the vector.
+                'space_exists', to_regclass(
+                    'aiq.' || quote_ident('emb_' || replace(m.name, '-', '_'))) is not null)))
+              from aiq.embedding_models m), '{}'::jsonb),
+        'entities', coalesce((
+            select jsonb_object_agg(entity_type, jsonb_build_object(
+                'table', source_table, 'key', key_expr))
+              from aiq.entity_registry), '{}'::jsonb));
+$$;
+
+grant select on aiq.v_plan_sources to authenticated;
+grant execute on function aiq.plan_facet() to authenticated;
+grant execute on function aiq.space_populated(text, text) to authenticated;
+
+comment on function aiq.plan_facet() is
+    'The ai-query-layer half of workflow.plan_catalog(): registered sources and '
+    'the spaces they are actually embedded in, the model registry, and the '
+    'entity registry -- in the shape p8_plan_graph reads.';

@@ -6111,6 +6111,263 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 
 revoke execute on function workflow.seed_load(text, int, text) from public;
 
+-- ============================================================================
+-- The plan graph: a definition, expanded along what it names.
+--
+-- Numbered sections stopped at 25 and this is not one -- like the scale section
+-- above it, it is a capability rather than a correction, and the numbers in
+-- this file record the order failures were found in.
+--
+-- `definitions.spec` is a DAG of steps and nothing else. What a step REACHES
+-- is spread across four schemas: the agent an `agent:` step calls and that
+-- agent's servers and tools (agentic), the corpus a `p8ql:` step ranks and the
+-- space it ranks in (aiq), the function a `sql:` step is allow-listed to run
+-- and the queue and rate key that decide whether it is ever claimed (here).
+-- Every one of those reaches is a place a plan can be wrong in a way that
+-- compiles, registers and starts -- validate_spec checks the graph's SHAPE and
+-- has nothing to say about whether the things it names exist.
+--
+-- This section is the join written down once. `plan_catalog()` collects what
+-- exists, p8_plan_graph (the Rust half, plan_graph.rs) expands the spec against
+-- it, and `plan_defects()` is the audit shape: the reaches that do not resolve,
+-- each with the consequence of leaving it alone.
+--
+-- Two properties are deliberate and worth stating, because both are the kind
+-- that erodes:
+--
+--   The catalog is an ARGUMENT, not a fetch. p8_plan_graph makes no query, so
+--   the graph a caller gets is built from exactly the rows that caller could
+--   see -- RLS, taken once by Postgres in these views, rather than a second
+--   authorization model inside a graph builder.
+--
+--   Every call into the extension is DYNAMIC. `percolate_parser` is a separate
+--   extension and this schema installs without it (define_yaml has said so
+--   since §12). plpgsql plans a whole statement before any guard inside it
+--   runs, so `if to_regprocedure(...) is not null then select p8_plan_graph(...)`
+--   raises at first call on a deployment that does not have it -- the guard has
+--   to sit outside a statement the planner never resolves. EXECUTE is what
+--   makes the check mean what it reads as.
+-- ============================================================================
+
+-- What this deployment HAS, in the shape the graph builder reads: an object
+-- per section, keyed by name. A section that is missing entirely means the
+-- subsystem is not installed, and the builder treats that as "cannot judge"
+-- rather than "everything you named is missing" -- the difference between a
+-- plan graph on an engine-only install being empty of agents and being 40
+-- errors about them.
+create or replace function workflow.plan_catalog()
+returns jsonb
+language plpgsql
+stable
+set search_path = pg_catalog, public
+as $$
+declare
+    v_cat   jsonb;
+    v_facet jsonb;
+begin
+    v_cat := jsonb_build_object(
+        -- WITH THE COMMENT, which is the same text a bound tool carries into
+        -- an LLM's context (§24) -- so what a `sql:` step DOES is answerable
+        -- from the plan instead of from the source. The registry's own
+        -- description first, since somebody wrote it for exactly this, and the
+        -- function's COMMENT behind it.
+        'functions', coalesce((
+            select jsonb_object_agg(f.name, jsonb_strip_nulls(jsonb_build_object(
+                'fn', f.fn, 'arg_types', to_jsonb(f.arg_types),
+                'description', coalesce(f.description,
+                    obj_description(to_regprocedure(
+                        f.fn || '(' || array_to_string(f.arg_types, ',') || ')'), 'pg_proc')),
+                'timeout_ms', f.timeout_ms)))
+              from workflow.step_functions f), '{}'::jsonb),
+        'queues', coalesce((
+            select jsonb_agg(queue order by queue) from workflow.queue_config), '[]'::jsonb),
+        'rate_keys', coalesce((
+            select jsonb_agg(key order by key) from workflow.rate_limits), '[]'::jsonb),
+        -- Names, not (name, version) pairs: a `workflow:` step names a
+        -- workflow and start_workflow resolves the version, so a graph that
+        -- demanded the version would report a defect the engine does not have.
+        'workflows', coalesce((
+            select jsonb_agg(distinct name) from workflow.definitions
+             where deleted_at is null), '[]'::jsonb));
+
+    if to_regprocedure('agentic.plan_facet()') is not null then
+        execute 'select agentic.plan_facet()' into v_facet;
+        v_cat := v_cat || coalesce(v_facet, '{}'::jsonb);
+    end if;
+    if to_regprocedure('aiq.plan_facet()') is not null then
+        execute 'select aiq.plan_facet()' into v_facet;
+        v_cat := v_cat || coalesce(v_facet, '{}'::jsonb);
+    end if;
+    return v_cat;
+end;
+$$;
+
+-- The graph itself. `p_version` null means the current version, which is what
+-- an author asking about "the triage workflow" means -- and a run started
+-- today would use.
+create or replace function workflow.plan_graph(p_name text, p_version int default null)
+returns jsonb
+language plpgsql
+stable
+set search_path = pg_catalog, public
+as $$
+declare
+    v_spec jsonb;
+    v_ver  int;
+    v_out  jsonb;
+begin
+    if to_regprocedure('p8_plan_graph(jsonb,jsonb)') is null then
+        raise exception
+            'workflow.plan_graph needs the percolate extension (p8_plan_graph). '
+            'The catalog half works without it: select workflow.plan_catalog().';
+    end if;
+
+    select d.spec, d.version into v_spec, v_ver
+      from workflow.definitions d
+     where d.name = p_name
+       and (p_version is null or d.version = p_version)
+       and d.deleted_at is null
+     order by d.version desc
+     limit 1;
+
+    if v_spec is null then
+        raise exception 'no workflow definition named % %', p_name,
+            case when p_version is null then '(any version)'
+                 else 'at version ' || p_version end;
+    end if;
+
+    -- The name and version ride INTO the spec so the graph's root node is
+    -- labelled with what it is. The spec itself carries neither -- they are
+    -- columns on the definition, and the builder should not have to be told
+    -- where a workflow's identity lives.
+    execute 'select p8_plan_graph($1, $2)'
+       into v_out
+      using jsonb_build_object('name', p_name, 'version', v_ver) || v_spec,
+            workflow.plan_catalog();
+    return v_out;
+end;
+$$;
+
+-- The same expansion, read rather than traversed.
+--
+-- plan_graph answers "what does this reach, and does it resolve" -- the right
+-- shape for a checker and the wrong one for a person, who wants the pipeline:
+-- step, then what that step says and does, with the agent's prompt, the
+-- corpus's columns and the tool's description sitting where they are USED
+-- rather than in a node list to be joined by eye.
+--
+-- A projection of the graph, never a second resolver. Two views that resolve
+-- separately are two answers to the only question that matters.
+create or replace function workflow.plan_document(p_name text, p_version int default null)
+returns jsonb
+language plpgsql
+stable
+set search_path = pg_catalog, public
+as $$
+declare
+    v_spec jsonb;
+    v_ver  int;
+    v_out  jsonb;
+begin
+    if to_regprocedure('p8_plan_document(jsonb,jsonb)') is null then
+        raise exception
+            'workflow.plan_document needs the percolate extension (p8_plan_document). '
+            'The catalog half works without it: select workflow.plan_catalog().';
+    end if;
+
+    select d.spec, d.version into v_spec, v_ver
+      from workflow.definitions d
+     where d.name = p_name
+       and (p_version is null or d.version = p_version)
+       and d.deleted_at is null
+     order by d.version desc
+     limit 1;
+
+    if v_spec is null then
+        raise exception 'no workflow definition named % %', p_name,
+            case when p_version is null then '(any version)'
+                 else 'at version ' || p_version end;
+    end if;
+
+    execute 'select p8_plan_document($1, $2)'
+       into v_out
+      using jsonb_build_object('name', p_name, 'version', v_ver) || v_spec,
+            workflow.plan_catalog();
+    return v_out;
+end;
+$$;
+
+-- The audit shape. A view would have been the natural spelling and cannot be
+-- one: a view referencing p8_plan_graph fails to CREATE where the parser
+-- extension is absent, which would make an optional dependency a hard one at
+-- load time.
+--
+-- `p_name` null walks every current definition on one catalog -- which is the
+-- form a deployment gate wants, and the reason the catalog is computed once
+-- here rather than per row.
+create or replace function workflow.plan_defects(p_name text default null)
+returns table (
+    workflow    text,
+    version     int,
+    severity    text,
+    code        text,
+    node        text,
+    message     text,
+    consequence text
+)
+language plpgsql
+stable
+set search_path = pg_catalog, public
+as $$
+declare
+    v_cat  jsonb;
+    v_def  record;
+    v_out  jsonb;
+begin
+    if to_regprocedure('p8_plan_graph(jsonb,jsonb)') is null then
+        return;
+    end if;
+    v_cat := workflow.plan_catalog();
+
+    for v_def in
+        select distinct on (d.name) d.name, d.version, d.spec
+          from workflow.definitions d
+         where d.deleted_at is null
+           and (p_name is null or d.name = p_name)
+         order by d.name, d.version desc
+    loop
+        execute 'select p8_plan_graph($1, $2)'
+           into v_out
+          using jsonb_build_object('name', v_def.name, 'version', v_def.version) || v_def.spec,
+                v_cat;
+        return query
+        select v_def.name, v_def.version,
+               x->>'severity', x->>'code', x->>'node', x->>'message', x->>'consequence'
+          from jsonb_array_elements(coalesce(v_out->'defects', '[]'::jsonb)) x;
+    end loop;
+end;
+$$;
+
+-- Read surfaces over configuration only -- no run, no task, no per-tenant row
+-- passes through any of them, which is why these three are granted where every
+-- operator view in §22d is not.
+grant execute on function workflow.plan_catalog() to authenticated;
+grant execute on function workflow.plan_graph(text, int) to authenticated;
+grant execute on function workflow.plan_document(text, int) to authenticated;
+grant execute on function workflow.plan_defects(text) to authenticated;
+
+comment on function workflow.plan_document(text, int) is
+    'A stored definition read as a pipeline: every step in order, carrying what '
+    'it does and the expanded entity it does it to -- the agent and its prompt, '
+    'the corpus and its columns, the tool and its description. A projection of '
+    'workflow.plan_graph().';
+
+comment on function workflow.plan_graph(text, int) is
+    'A stored definition expanded along the entities it names -- agents, tool '
+    'servers, tools, corpora, spaces, models, functions, queues, rate keys -- '
+    'with every reach that does not resolve reported as a defect. See '
+    'specs/workflow-engine/plan-graph.md.';
+
 
 -- ============================================================
 -- user-rbac/schema.sql
@@ -10949,6 +11206,143 @@ select workflow.register_step_function(
 -- for the enumeration this came out of.
 revoke execute on function aiq.land_embeddings(uuid) from public;
 
+-- ============================================================
+-- The plan-graph facet -- which corpus, and which space it is ranked in
+--
+-- The other half of workflow.plan_catalog() (workflow-engine/plan-graph.md).
+-- The engine can see that a step calls `p8ql`; only this schema knows whether
+-- the source that query names is registered, and -- the part no other view in
+-- this collection answers -- WHICH MODELS that corpus has actually been
+-- embedded with.
+--
+-- That last column is why this facet exists at all. `expand_embed_steps` pins
+-- one model into both halves of the sugar path, so `p8ql: 'SEARCH ... FROM
+-- chunks'` cannot rank in a space it did not embed into. The hand-written pair
+-- -- an `embed:` step and a `p8ql:` step the author wired together -- is
+-- outside that guarantee by construction, and its failure is not an error
+-- anywhere: ranking a corpus in a space it has no rows in returns no rows, and
+-- ranking it in the wrong space returns a number. `spaces` is what lets the
+-- plan graph refuse it before the run rather than after the answer.
+-- ============================================================
+
+-- Does this model's space hold any vector belonging to this corpus?
+--
+-- Dynamic because the space table's NAME is derived from the model, so a
+-- static reference would have to exist per model -- and because a model
+-- registered without register_embedding_space() has no table at all, which
+-- must answer false rather than raise. to_regclass is the guard that makes the
+-- second case cheap.
+create or replace function aiq.space_populated(p_model text, p_source_table text)
+returns boolean
+language plpgsql
+stable
+set search_path = pg_catalog, public
+as $$
+declare
+    v_tbl text := 'aiq.' || quote_ident('emb_' || replace(p_model, '-', '_'));
+    v_hit boolean;
+begin
+    if to_regclass(v_tbl) is null then
+        return false;
+    end if;
+    -- LIMIT 1 through the primary key, never a count: this asks whether the
+    -- corpus is represented in the space, and a count of six million vectors
+    -- answers the same question a great deal more slowly.
+    execute format(
+        'select exists (select 1 from %s e join %s c on c.id = e.chunk_id limit 1)',
+        v_tbl, p_source_table) into v_hit;
+    return coalesce(v_hit, false);
+exception
+    -- A registered source whose table has no `id` column is a registration
+    -- defect, not a reason for the whole plan graph to fail. Reported as "no
+    -- space" and left to the source's own audit.
+    when undefined_column or undefined_table then
+        return false;
+end;
+$$;
+
+-- Every registered source, and what is true of it. A name can be registered
+-- both ways -- `chunks` is lexical AND semantic -- so this is a full join
+-- rather than a union: one row per NAME, carrying which modes it supports.
+create or replace view aiq.v_plan_sources as
+select coalesce(s.name, l.name)                as name,
+       coalesce(s.source_table, l.source_table) as source_table,
+       s.name is not null                       as semantic,
+       l.name is not null                       as lexical,
+       coalesce(s.content_col, l.content_col)   as content_col,
+       l.regconfig                              as regconfig,
+       -- The spaces this corpus has rows in. A model's space is a table
+       -- (aiq.emb_<model>, §10) and its rows are per chunk, so "embedded with
+       -- M" is a question about data, not about registration -- which is the
+       -- honest form of it, since registering a model creates an empty table.
+       coalesce((
+           select jsonb_agg(jsonb_build_object('model', m.name, 'dim', m.dim)
+                            order by m.name)
+             from aiq.embedding_models m
+            where aiq.space_populated(m.name, coalesce(s.source_table, l.source_table))
+       ), '[]'::jsonb)                          as spaces,
+       -- THE SHAPE OF WHAT IT READS. Names and types, and nothing else: the
+       -- point of expanding a source is to see how data moves through the
+       -- schema, and constraints, defaults and indexes answer a different
+       -- question at ten times the length. Generated columns are excluded
+       -- because search_tsv is this schema's own bookkeeping, not the
+       -- corpus's shape.
+       coalesce((
+           select jsonb_agg(jsonb_build_object('name', c.column_name,
+                                               'type', c.data_type)
+                            order by c.ordinal_position)
+             from information_schema.columns c
+            where c.table_schema = split_part(coalesce(s.source_table, l.source_table), '.', 1)
+              and c.table_name   = split_part(coalesce(s.source_table, l.source_table), '.', 2)
+              and c.is_generated = 'NEVER'
+       ), '[]'::jsonb)                          as columns
+  from aiq.semantic_sources s
+  full join aiq.lexical_sources l on l.name = s.name;
+
+create or replace function aiq.plan_facet()
+returns jsonb
+language sql
+stable
+as $$
+    select jsonb_build_object(
+        'sources', coalesce((
+            select jsonb_object_agg(name, jsonb_strip_nulls(jsonb_build_object(
+                'table', source_table, 'semantic', semantic,
+                'lexical', lexical, 'content_col', content_col,
+                'regconfig', regconfig, 'columns', columns,
+                -- The model NAMES, for the space check the graph does, and the
+                -- dimensioned form beside it for a reader.
+                'spaces', (select coalesce(jsonb_agg(e->>'model'), '[]'::jsonb)
+                             from jsonb_array_elements(spaces) e),
+                'space_detail', spaces)))
+              from aiq.v_plan_sources), '{}'::jsonb),
+        'models', coalesce((
+            select jsonb_object_agg(m.name, jsonb_strip_nulls(jsonb_build_object(
+                'dim', m.dim, 'provider', m.provider, 'is_default', m.is_default,
+                -- Where the vector comes from. A url with a {{env.X}} in it is
+                -- the registry doing its job, and it belongs in a plan for the
+                -- same reason the model name does.
+                'endpoint', m.endpoint,
+                -- Registered and never created is a real, silent state: the
+                -- embed call succeeds and there is nowhere to land the vector.
+                'space_exists', to_regclass(
+                    'aiq.' || quote_ident('emb_' || replace(m.name, '-', '_'))) is not null)))
+              from aiq.embedding_models m), '{}'::jsonb),
+        'entities', coalesce((
+            select jsonb_object_agg(entity_type, jsonb_build_object(
+                'table', source_table, 'key', key_expr))
+              from aiq.entity_registry), '{}'::jsonb));
+$$;
+
+grant select on aiq.v_plan_sources to authenticated;
+grant execute on function aiq.plan_facet() to authenticated;
+grant execute on function aiq.space_populated(text, text) to authenticated;
+
+comment on function aiq.plan_facet() is
+    'The ai-query-layer half of workflow.plan_catalog(): registered sources and '
+    'the spaces they are actually embedded in, the model registry, and the '
+    'entity registry -- in the shape p8_plan_graph reads.';
+
 
 -- ============================================================
 -- world-model-ingestion/schema.sql
@@ -12287,6 +12681,7 @@ revoke execute on function workflow.register_artifact(uuid, text, text, text, bi
 -- What is deliberately NOT here: anything the agent runtime could do itself.
 -- The LLM call, the tool calls, and the SSE fan-out are outside SQL's reach
 -- (brief.md §8); everything else in an agent turn is a row this file owns.
+
 -- ============================================================
 
 do $$
@@ -13271,6 +13666,126 @@ grant execute on function agentic.channel_for(uuid) to authenticated, api_viewer
 
 -- No base-table INSERT/UPDATE/DELETE grant to any PostgREST-facing role: the
 -- write path is the functions above, and nothing else.
+
+-- ============================================================
+-- 9b. The plan-graph facet -- an agent's reach, as data
+--
+-- A read surface like §9 above and numbered under it for that reason: these
+-- two views add no capability, they answer one question about rows §9 already
+-- exposes -- what does this agent reach, and can it.
+--
+-- workflow-engine's plan graph (workflow-engine/plan-graph.md) expands a stored
+-- workflow along the entities it names, and an `agent:` step names one row in
+-- this schema whose own reach is three more joins: the servers it binds, the
+-- tools it is narrowed to on each, and -- through a server with
+-- `serves_agents` -- the agents it may hand work to. Those joins live HERE
+-- rather than in the engine, because the engine must be deployable without
+-- this schema at all: workflow.plan_catalog() calls this function only if it
+-- exists, the same conditional integration define_yaml already uses for
+-- aiq.expand_embed_steps.
+--
+-- Both views read only shared configuration. `agents` and `tool_servers` carry
+-- `for select using (true)` policies (§7), so nothing here can show a caller a
+-- row it could not select directly, and neither view touches `sessions`,
+-- `runs` or `messages` -- the three tables in this schema that are per-user.
+-- ============================================================
+
+create or replace view agentic.v_plan_agents as
+select a.name,
+       a.category,
+       a.audience,
+       a.model,
+       -- THE WHOLE PROMPT, not a preview of it. An agent's intent IS its
+       -- prompt, and this view exists so a plan can be read for intent -- a
+       -- truncation makes every agent look like every other agent, which is
+       -- the failure mode the expansion is for.
+       a.system_prompt,
+       -- The SHAPE it must return, curated to what a reader needs: the
+       -- required keys and each property's type. The full JSON Schema is one
+       -- select away and is mostly boilerplate; what tells you whether N
+       -- results will combine is the key list.
+       case when a.structured_output_schema is null then null else
+           jsonb_build_object(
+               'required', coalesce(a.structured_output_schema->'required', '[]'::jsonb),
+               'properties', coalesce((
+                   select jsonb_object_agg(k, coalesce(v->>'type', 'any'))
+                     from jsonb_each(coalesce(
+                              a.structured_output_schema->'properties', '{}'::jsonb)) e(k, v)), 
+                   '{}'::jsonb))
+       end as output_shape,
+       a.structured_output_schema is not null as has_output_schema,
+       nullif(a.context_policy, '{}'::jsonb) as context_policy,
+       s.name as summarizer,
+       a.tools
+  from agentic.agents a
+  left join agentic.agents s on s.id = a.summarizer_agent_id;
+
+create or replace view agentic.v_plan_servers as
+select t.name,
+       t.kind,
+       t.url,
+       t.emits_citations,
+       t.serves_agents,
+       t.synced_at,
+       -- The tool NAMES discovery wrote, which is what an allow-list is checked
+       -- against. A server that has never synced has `[]` here and a null
+       -- synced_at, and the graph reports those as two different things: an
+       -- empty list means "we asked and it exposes nothing", a null sync means
+       -- "nobody has asked yet", and only the first is evidence about the tools.
+       coalesce((select jsonb_agg(e->>'name' order by e->>'name')
+                   from jsonb_array_elements(t.cached_tools) e
+                  where e ? 'name'), '[]'::jsonb) as tools,
+       -- WHAT EACH TOOL SAYS IT DOES, which is the half of a binding that
+       -- carries intent. The description is the text the MODEL reads before
+       -- deciding to call it, so a plan that shows the tool name and not this
+       -- shows the part nobody needs. Parameters are named, not schema'd: the
+       -- argument names are what make a tool recognisable, and the types are
+       -- one fetch away for anybody who needs them.
+       coalesce((select jsonb_object_agg(e->>'name', jsonb_build_object(
+                            'description', e->>'description',
+                            'params', coalesce((
+                                select jsonb_agg(k order by k)
+                                  from jsonb_object_keys(coalesce(
+                                       e#>'{inputSchema,properties}',
+                                       e#>'{input_schema,properties}',
+                                       '{}'::jsonb)) k), '[]'::jsonb)))
+                   from jsonb_array_elements(t.cached_tools) e
+                  where e ? 'name'), '{}'::jsonb) as tool_detail
+  from agentic.tool_servers t;
+
+-- One object per section, keyed by name, which is the shape p8_plan_graph
+-- reads. Built with jsonb_object_agg rather than handed over as rows because
+-- the graph builder does lookups, not scans -- and because a section that is
+-- ABSENT means "this subsystem is not installed" there, a distinction an empty
+-- rowset could not carry.
+create or replace function agentic.plan_facet()
+returns jsonb
+language sql
+stable
+as $$
+    select jsonb_build_object(
+        'agents', coalesce((
+            select jsonb_object_agg(name, jsonb_strip_nulls(jsonb_build_object(
+                'category', category, 'audience', audience, 'model', model,
+                'system_prompt', system_prompt, 'output_shape', output_shape,
+                'has_output_schema', has_output_schema,
+                'context_policy', context_policy,
+                'summarizer', summarizer, 'tools', tools)))
+              from agentic.v_plan_agents), '{}'::jsonb),
+        'servers', coalesce((
+            select jsonb_object_agg(name, jsonb_build_object(
+                'kind', kind, 'url', url, 'emits_citations', emits_citations,
+                'serves_agents', serves_agents, 'synced_at', synced_at,
+                'tools', tools, 'tool_detail', tool_detail))
+              from agentic.v_plan_servers), '{}'::jsonb));
+$$;
+
+grant select on agentic.v_plan_agents, agentic.v_plan_servers to authenticated;
+grant execute on function agentic.plan_facet() to authenticated;
+
+comment on function agentic.plan_facet() is
+    'The agentic half of workflow.plan_catalog(): every agent and tool server, '
+    'keyed by name, in the shape p8_plan_graph reads. Shared config only.';
 
 -- ------------------------------------------------------------
 -- 10. Invariant self-checks -- the same two this collection has already been

@@ -6084,3 +6084,260 @@ end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
 revoke execute on function workflow.seed_load(text, int, text) from public;
+
+-- ============================================================================
+-- The plan graph: a definition, expanded along what it names.
+--
+-- Numbered sections stopped at 25 and this is not one -- like the scale section
+-- above it, it is a capability rather than a correction, and the numbers in
+-- this file record the order failures were found in.
+--
+-- `definitions.spec` is a DAG of steps and nothing else. What a step REACHES
+-- is spread across four schemas: the agent an `agent:` step calls and that
+-- agent's servers and tools (agentic), the corpus a `p8ql:` step ranks and the
+-- space it ranks in (aiq), the function a `sql:` step is allow-listed to run
+-- and the queue and rate key that decide whether it is ever claimed (here).
+-- Every one of those reaches is a place a plan can be wrong in a way that
+-- compiles, registers and starts -- validate_spec checks the graph's SHAPE and
+-- has nothing to say about whether the things it names exist.
+--
+-- This section is the join written down once. `plan_catalog()` collects what
+-- exists, p8_plan_graph (the Rust half, plan_graph.rs) expands the spec against
+-- it, and `plan_defects()` is the audit shape: the reaches that do not resolve,
+-- each with the consequence of leaving it alone.
+--
+-- Two properties are deliberate and worth stating, because both are the kind
+-- that erodes:
+--
+--   The catalog is an ARGUMENT, not a fetch. p8_plan_graph makes no query, so
+--   the graph a caller gets is built from exactly the rows that caller could
+--   see -- RLS, taken once by Postgres in these views, rather than a second
+--   authorization model inside a graph builder.
+--
+--   Every call into the extension is DYNAMIC. `percolate_parser` is a separate
+--   extension and this schema installs without it (define_yaml has said so
+--   since §12). plpgsql plans a whole statement before any guard inside it
+--   runs, so `if to_regprocedure(...) is not null then select p8_plan_graph(...)`
+--   raises at first call on a deployment that does not have it -- the guard has
+--   to sit outside a statement the planner never resolves. EXECUTE is what
+--   makes the check mean what it reads as.
+-- ============================================================================
+
+-- What this deployment HAS, in the shape the graph builder reads: an object
+-- per section, keyed by name. A section that is missing entirely means the
+-- subsystem is not installed, and the builder treats that as "cannot judge"
+-- rather than "everything you named is missing" -- the difference between a
+-- plan graph on an engine-only install being empty of agents and being 40
+-- errors about them.
+create or replace function workflow.plan_catalog()
+returns jsonb
+language plpgsql
+stable
+set search_path = pg_catalog, public
+as $$
+declare
+    v_cat   jsonb;
+    v_facet jsonb;
+begin
+    v_cat := jsonb_build_object(
+        -- WITH THE COMMENT, which is the same text a bound tool carries into
+        -- an LLM's context (§24) -- so what a `sql:` step DOES is answerable
+        -- from the plan instead of from the source. The registry's own
+        -- description first, since somebody wrote it for exactly this, and the
+        -- function's COMMENT behind it.
+        'functions', coalesce((
+            select jsonb_object_agg(f.name, jsonb_strip_nulls(jsonb_build_object(
+                'fn', f.fn, 'arg_types', to_jsonb(f.arg_types),
+                'description', coalesce(f.description,
+                    obj_description(to_regprocedure(
+                        f.fn || '(' || array_to_string(f.arg_types, ',') || ')'), 'pg_proc')),
+                'timeout_ms', f.timeout_ms)))
+              from workflow.step_functions f), '{}'::jsonb),
+        'queues', coalesce((
+            select jsonb_agg(queue order by queue) from workflow.queue_config), '[]'::jsonb),
+        'rate_keys', coalesce((
+            select jsonb_agg(key order by key) from workflow.rate_limits), '[]'::jsonb),
+        -- Names, not (name, version) pairs: a `workflow:` step names a
+        -- workflow and start_workflow resolves the version, so a graph that
+        -- demanded the version would report a defect the engine does not have.
+        'workflows', coalesce((
+            select jsonb_agg(distinct name) from workflow.definitions
+             where deleted_at is null), '[]'::jsonb));
+
+    if to_regprocedure('agentic.plan_facet()') is not null then
+        execute 'select agentic.plan_facet()' into v_facet;
+        v_cat := v_cat || coalesce(v_facet, '{}'::jsonb);
+    end if;
+    if to_regprocedure('aiq.plan_facet()') is not null then
+        execute 'select aiq.plan_facet()' into v_facet;
+        v_cat := v_cat || coalesce(v_facet, '{}'::jsonb);
+    end if;
+    return v_cat;
+end;
+$$;
+
+-- The graph itself. `p_version` null means the current version, which is what
+-- an author asking about "the triage workflow" means -- and a run started
+-- today would use.
+create or replace function workflow.plan_graph(p_name text, p_version int default null)
+returns jsonb
+language plpgsql
+stable
+set search_path = pg_catalog, public
+as $$
+declare
+    v_spec jsonb;
+    v_ver  int;
+    v_out  jsonb;
+begin
+    if to_regprocedure('p8_plan_graph(jsonb,jsonb)') is null then
+        raise exception
+            'workflow.plan_graph needs the percolate extension (p8_plan_graph). '
+            'The catalog half works without it: select workflow.plan_catalog().';
+    end if;
+
+    select d.spec, d.version into v_spec, v_ver
+      from workflow.definitions d
+     where d.name = p_name
+       and (p_version is null or d.version = p_version)
+       and d.deleted_at is null
+     order by d.version desc
+     limit 1;
+
+    if v_spec is null then
+        raise exception 'no workflow definition named % %', p_name,
+            case when p_version is null then '(any version)'
+                 else 'at version ' || p_version end;
+    end if;
+
+    -- The name and version ride INTO the spec so the graph's root node is
+    -- labelled with what it is. The spec itself carries neither -- they are
+    -- columns on the definition, and the builder should not have to be told
+    -- where a workflow's identity lives.
+    execute 'select p8_plan_graph($1, $2)'
+       into v_out
+      using jsonb_build_object('name', p_name, 'version', v_ver) || v_spec,
+            workflow.plan_catalog();
+    return v_out;
+end;
+$$;
+
+-- The same expansion, read rather than traversed.
+--
+-- plan_graph answers "what does this reach, and does it resolve" -- the right
+-- shape for a checker and the wrong one for a person, who wants the pipeline:
+-- step, then what that step says and does, with the agent's prompt, the
+-- corpus's columns and the tool's description sitting where they are USED
+-- rather than in a node list to be joined by eye.
+--
+-- A projection of the graph, never a second resolver. Two views that resolve
+-- separately are two answers to the only question that matters.
+create or replace function workflow.plan_document(p_name text, p_version int default null)
+returns jsonb
+language plpgsql
+stable
+set search_path = pg_catalog, public
+as $$
+declare
+    v_spec jsonb;
+    v_ver  int;
+    v_out  jsonb;
+begin
+    if to_regprocedure('p8_plan_document(jsonb,jsonb)') is null then
+        raise exception
+            'workflow.plan_document needs the percolate extension (p8_plan_document). '
+            'The catalog half works without it: select workflow.plan_catalog().';
+    end if;
+
+    select d.spec, d.version into v_spec, v_ver
+      from workflow.definitions d
+     where d.name = p_name
+       and (p_version is null or d.version = p_version)
+       and d.deleted_at is null
+     order by d.version desc
+     limit 1;
+
+    if v_spec is null then
+        raise exception 'no workflow definition named % %', p_name,
+            case when p_version is null then '(any version)'
+                 else 'at version ' || p_version end;
+    end if;
+
+    execute 'select p8_plan_document($1, $2)'
+       into v_out
+      using jsonb_build_object('name', p_name, 'version', v_ver) || v_spec,
+            workflow.plan_catalog();
+    return v_out;
+end;
+$$;
+
+-- The audit shape. A view would have been the natural spelling and cannot be
+-- one: a view referencing p8_plan_graph fails to CREATE where the parser
+-- extension is absent, which would make an optional dependency a hard one at
+-- load time.
+--
+-- `p_name` null walks every current definition on one catalog -- which is the
+-- form a deployment gate wants, and the reason the catalog is computed once
+-- here rather than per row.
+create or replace function workflow.plan_defects(p_name text default null)
+returns table (
+    workflow    text,
+    version     int,
+    severity    text,
+    code        text,
+    node        text,
+    message     text,
+    consequence text
+)
+language plpgsql
+stable
+set search_path = pg_catalog, public
+as $$
+declare
+    v_cat  jsonb;
+    v_def  record;
+    v_out  jsonb;
+begin
+    if to_regprocedure('p8_plan_graph(jsonb,jsonb)') is null then
+        return;
+    end if;
+    v_cat := workflow.plan_catalog();
+
+    for v_def in
+        select distinct on (d.name) d.name, d.version, d.spec
+          from workflow.definitions d
+         where d.deleted_at is null
+           and (p_name is null or d.name = p_name)
+         order by d.name, d.version desc
+    loop
+        execute 'select p8_plan_graph($1, $2)'
+           into v_out
+          using jsonb_build_object('name', v_def.name, 'version', v_def.version) || v_def.spec,
+                v_cat;
+        return query
+        select v_def.name, v_def.version,
+               x->>'severity', x->>'code', x->>'node', x->>'message', x->>'consequence'
+          from jsonb_array_elements(coalesce(v_out->'defects', '[]'::jsonb)) x;
+    end loop;
+end;
+$$;
+
+-- Read surfaces over configuration only -- no run, no task, no per-tenant row
+-- passes through any of them, which is why these three are granted where every
+-- operator view in §22d is not.
+grant execute on function workflow.plan_catalog() to authenticated;
+grant execute on function workflow.plan_graph(text, int) to authenticated;
+grant execute on function workflow.plan_document(text, int) to authenticated;
+grant execute on function workflow.plan_defects(text) to authenticated;
+
+comment on function workflow.plan_document(text, int) is
+    'A stored definition read as a pipeline: every step in order, carrying what '
+    'it does and the expanded entity it does it to -- the agent and its prompt, '
+    'the corpus and its columns, the tool and its description. A projection of '
+    'workflow.plan_graph().';
+
+comment on function workflow.plan_graph(text, int) is
+    'A stored definition expanded along the entities it names -- agents, tool '
+    'servers, tools, corpora, spaces, models, functions, queues, rate keys -- '
+    'with every reach that does not resolve reported as a defect. See '
+    'specs/workflow-engine/plan-graph.md.';
