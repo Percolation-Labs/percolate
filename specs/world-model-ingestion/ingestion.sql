@@ -164,7 +164,6 @@ create or replace function content.land_graph_windows(p_matrix_task uuid)
 returns jsonb as $$
 declare
     v_run     uuid;
-    v_cur     text;
     v_child   record;
     v_graph   jsonb;
     v_nodes   int;
@@ -178,20 +177,10 @@ declare
     v_acc     jsonb := jsonb_build_object('graphs',0,'edges_new',0,'edges_merged',0,
                                           'self_edges_dropped',0);
 begin
-    select run_id into v_run from workflow.tasks where id = p_matrix_task;
-    if not found then
-        raise exception 'task % not found', p_matrix_task;
-    end if;
-    -- The same guard matrix_outputs uses: a step may read the fan-out of its
-    -- OWN run, and a registered function handed an arbitrary task id would be
-    -- a read of someone else's.
-    v_cur := nullif(current_setting('workflow.current_run_id', true), '');
-    if v_cur is null or v_cur::uuid <> v_run then
-        raise exception
-            'task % belongs to run %, which is not the run being executed. Pass '
-            '{{steps.<id>.result.task_id}} rather than a task id from elsewhere.',
-            p_matrix_task, v_run;
-    end if;
+    -- Raises unless this task belongs to the run being executed: a registered
+    -- step function handed an arbitrary task id would otherwise be a read of
+    -- someone else's run. One body, in workflow-engine/schema.sql §20c.
+    v_run := workflow.assert_task_in_current_run(p_matrix_task);
 
     for v_child in
         select t.id, t.step_key, t.output->'result' as payload,

@@ -143,6 +143,13 @@ NOT_SHIPPED = {
         "descriptions of a source with no join between them, and the runner writes "
         "to a filesystem rather than to content.resources. Ship it once it lands "
         "bytes in the content plane, not before.",
+    "trace-field/schema.sql":
+        "not a sixth subsystem -- specs/README.md's scope test records that "
+        "removing it leaves all five doing their jobs, and its proposals compile "
+        "to ordinary workflow.tasks rows. The additions it wants are carried, "
+        "with the trigger that would promote each, in workflow-engine/roadmap.md "
+        "\u00a75; they get built there or deleted there. Shipping the schema now "
+        "would put tables in the product ahead of that decision.",
     "world-model-ingestion/tradecraft.sql":
         "grading and corroboration over evidence classes. Core-eligible under "
         "SKILL.md \u00a75's transcribed-standard rule (Admiralty, ICD 203, Bellingcat "

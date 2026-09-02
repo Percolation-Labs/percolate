@@ -1136,6 +1136,14 @@ begin
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
+-- REPLACED by integration-rbac.sql (e), which adds the authorization check.
+-- This body runs only in an engine-only install; in any deployment that loads
+-- both -- which is every deployment, since both files are in build-sql.py's
+-- ORDER -- the definition below is dead and the one there is live. The note is
+-- here rather than only there because here is where the mistake gets made: the
+-- completed_at fix described next was first applied to THIS copy and had no
+-- effect, and dev/currency.sh is what noticed.
+--
 -- completed_at is stamped here for the same §21c reason as complete_task and
 -- promote_due_timers: it is the column begin_compensation orders by, and this
 -- was the third path that marked a task `done` without it. A signalled task in
@@ -1148,6 +1156,10 @@ returns void as $$
     where run_id = p_run_id and wait_signal = p_signal and status = 'waiting_external';
 $$ language sql;
 
+-- REPLACED by integration-rbac.sql (e), for the same reason and with the same
+-- consequence as signal_task above: that version checks the caller's authority
+-- over the run first, and splits the cascade into cancel_run_unchecked so the
+-- recursive descent into child runs is not a second copy of it. Edit there.
 create or replace function workflow.cancel_run(p_run_id uuid) returns void as $$
 declare v_child uuid;
 begin
@@ -3427,9 +3439,63 @@ begin
 end;
 $$ language plpgsql stable security definer set search_path = pg_catalog, public;
 
+-- The same guard, as a function, because three other files need it.
+--
+-- `aiq.land_embeddings`, `aiq.land_graph_fanout` and `content.land_graph_windows`
+-- are all fan-in step functions handed a matrix task id by a step spec, so all
+-- three need exactly the check above: the task must belong to the run being
+-- executed, or a workflow author can name another tenant's matrix task and read
+-- what it produced. All three had it copy-pasted verbatim, error message
+-- included -- four places to change when the rule or its wording moves, and
+-- four chances to change three. §20d states the rule this violates: two copies
+-- of a function is how a fix lands in only one of them.
+--
+-- It returns the run id because every caller wants it next.
+--
+-- matrix_outputs() above deliberately does NOT call this. integration-rbac.sql
+-- replaces that one with a version that WIDENS the failing branch to "or a run
+-- the caller may read", for the human calling it directly with an identity --
+-- a different rule wearing the same shape, and folding them together would
+-- quietly give a step function the caller's authority as a second way in.
+create or replace function workflow.assert_task_in_current_run(p_task_id uuid)
+returns uuid as $$
+declare v_run uuid; v_cur text;
+begin
+    select run_id into v_run from workflow.tasks where id = p_task_id;
+    if not found then
+        raise exception 'task % not found', p_task_id;
+    end if;
+
+    v_cur := nullif(current_setting('workflow.current_run_id', true), '');
+    if v_cur is null or v_cur::uuid <> v_run then
+        raise exception
+            'task % belongs to run %, which is not the run being executed. Pass '
+            '{{steps.<id>.result.task_id}} rather than a task id from elsewhere.',
+            p_task_id, v_run;
+    end if;
+    return v_run;
+end;
+$$ language plpgsql stable set search_path = pg_catalog, public;
+
+-- SECURITY INVOKER, deliberately, and that is what makes lifting it out of the
+-- three callers a pure refactor rather than a change: inlined, this read ran
+-- with whatever rights the caller had -- app_owner inside the two definer
+-- functions, the caller's own inside aiq.land_embeddings, which is an invoker
+-- function. As a definer it would have granted the read to anyone later handed
+-- EXECUTE. Every real path reaches it through execute_sql_step, which IS
+-- definer, so the effective reader is app_owner either way.
+--
+-- Defined after §16(b)'s blanket `revoke ... from public`, so it says so itself.
+revoke execute on function workflow.assert_task_in_current_run(uuid) from public;
+
 -- Read the recorded row set back, in expansion order. This is the "snapshot"
--- that §12's purity contract is about -- it is a query, not a column, because
--- the rows live where they are individually useful.
+-- that §5's decision-task purity contract is about -- it is a query, not a
+-- column, because the rows live where they are individually useful.
+--
+-- REPLACED by integration-rbac.sql (e), which adds the ownership check this
+-- one cannot make: it is SECURITY DEFINER and granted to `authenticated`, so
+-- without that check a guessed task id reads another tenant's row set. Edit
+-- there; this body is dead wherever user-rbac is loaded.
 create or replace function workflow.matrix_rows(p_task_id uuid)
 returns jsonb as $$
     select coalesce(jsonb_agg(t.input->'item' order by t.created_at, t.step_key), '[]'::jsonb)

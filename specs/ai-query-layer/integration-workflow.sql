@@ -359,7 +359,6 @@ create or replace function aiq.land_embeddings(p_matrix_task uuid)
 returns jsonb as $$
 declare
     v_run     uuid;
-    v_cur     text;
     v_model   text;
     v_tbl     text;
     v_landed  int := 0;   -- accumulated across spaces, not per space
@@ -368,21 +367,10 @@ declare
     v_missing int;
     v_models  text[] := '{}';
 begin
-    select run_id into v_run from workflow.tasks where id = p_matrix_task;
-    if not found then
-        raise exception 'task % not found', p_matrix_task;
-    end if;
-
-    -- The same guard workflow.matrix_outputs() uses, for the same reason: a
-    -- step may read the fan-out of its OWN run. Without it a registered step
-    -- function handed an arbitrary task id is a read of someone else's run.
-    v_cur := nullif(current_setting('workflow.current_run_id', true), '');
-    if v_cur is null or v_cur::uuid <> v_run then
-        raise exception
-            'task % belongs to run %, which is not the run being executed. Pass '
-            '{{steps.<id>.result.task_id}} rather than a task id from elsewhere.',
-            p_matrix_task, v_run;
-    end if;
+    -- Raises unless this task belongs to the run being executed: a registered
+    -- step function handed an arbitrary task id would otherwise be a read of
+    -- someone else's run. One body, in workflow-engine/schema.sql §20c.
+    v_run := workflow.assert_task_in_current_run(p_matrix_task);
 
     select count(*) into v_total from workflow.tasks
      where matrix_parent_id = p_matrix_task;

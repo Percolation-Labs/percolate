@@ -210,30 +210,16 @@ begin
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
+-- The authorization check, and then the cascade -- which is the unchecked form
+-- below, called rather than repeated. The first version inlined the same four
+-- statements here, so the cascade existed twice and the tree walk reached the
+-- copy: a fix to how cancellation propagates would have landed on the parent
+-- run and not on any of its children, which is the worst available shape for
+-- that particular bug. schema.sql §20d states the rule.
 create or replace function workflow.cancel_run(p_run_id uuid) returns void as $$
-declare v_child uuid;
 begin
     perform workflow.assert_run_access(p_run_id, 'cancel');
-
-    update workflow.runs set status = 'cancelled', cancel_requested = true
-    where id = p_run_id and status = 'running';
-
-    update workflow.tasks set cancel_requested = true
-    where run_id = p_run_id and status = 'running';
-
-    update workflow.tasks set status = 'cancelled'
-    where run_id = p_run_id and status in ('pending', 'ready', 'waiting_external');
-
-    -- Child runs are cancelled by the same authority as their parent, not
-    -- re-checked against the caller: a child run is frequently system-owned
-    -- (no owner_id), and re-running the check would fail on exactly the runs
-    -- a legitimate parent cancellation most needs to reach. The parent check
-    -- above is the authorization boundary for the whole tree.
-    for v_child in select child_run_id from workflow.tasks
-                   where run_id = p_run_id and child_run_id is not null
-    loop
-        perform workflow.cancel_run_unchecked(v_child);
-    end loop;
+    perform workflow.cancel_run_unchecked(p_run_id);
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
@@ -242,6 +228,12 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- engine itself. Split out rather than adding a "skip the check" boolean
 -- parameter, because a caller-supplied flag that disables authorization is
 -- precisely the pattern this collection keeps finding to be exploitable.
+--
+-- Child runs are therefore cancelled by the same authority as their parent,
+-- not re-checked against the caller: a child run is frequently system-owned
+-- (no owner_id), and re-running the check would fail on exactly the runs a
+-- legitimate parent cancellation most needs to reach. cancel_run's check is
+-- the authorization boundary for the whole tree.
 create or replace function workflow.cancel_run_unchecked(p_run_id uuid) returns void as $$
 declare v_child uuid;
 begin
