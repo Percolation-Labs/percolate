@@ -74,3 +74,16 @@ jobs:
           GH_TOKEN: ${{ secrets.P8_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+          # The action's Bash gate is deny-by-default and `gh` is not on the
+          # default list, so without this the GH_TOKEN above is inert. A wiring
+          # test got "This command requires approval" for every gh call,
+          # `gh --version` included: the binary never ran, so nothing ever
+          # reached the API to test the token against. The cross-repo reach the
+          # comment above describes did not exist until this line.
+          #
+          # `git` is named even though it already worked, because it is not
+          # obvious whether declaring an allowlist extends the default one or
+          # replaces it. Naming it costs nothing and settles the question.
+          claude_args: |
+            --allowedTools "Bash(gh:*),Bash(git:*)"
