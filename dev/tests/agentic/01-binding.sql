@@ -177,4 +177,52 @@ begin
     raise notice 'agentic authoring: bootstrap branch is unreachable over REST';
 end $$;
 
+-- ---------------------------------------------------------------------
+-- THE NEAR-MISS SPELLINGS OF A TOOL BINDING WIDEN IT, so the write path
+-- refuses them.
+--
+-- A binding is {"server": "<name>", "tools": ["a","b"]}, and an absent or null
+-- `tools` deliberately means "every tool this server exposes". That default is
+-- what makes the singular spelling dangerous: `{"server": "p8-query", "tool":
+-- "query"}` was stored verbatim, the runtime looked for `tools`, found none,
+-- and handed the model the server's entire surface. One character, no error,
+-- and an allow-list that silently became its opposite -- which was documented
+-- in a comment in dev/examples/10-agent.sql, where nobody reads it at
+-- authoring time.
+-- ---------------------------------------------------------------------
+do $$
+declare v_msg text;
+begin
+    begin
+        perform agentic.upsert_agent(jsonb_build_object(
+            'name', 't_ab_widened',
+            'tools', jsonb_build_array(
+                jsonb_build_object('server', 'p8-query', 'tool', 'query'))));
+        raise exception 'the singular `tool` spelling was accepted, which grants every '
+                        'tool the server exposes';
+    exception when others then
+        v_msg := sqlerrm;
+        if v_msg not like '%does not read%' then
+            raise exception 'refused for the wrong reason: %', v_msg;
+        end if;
+    end;
+
+    -- The correct spellings still work, including the deliberate "all tools".
+    perform agentic.upsert_agent(jsonb_build_object(
+        'name', 't_ab_narrow',
+        'tools', jsonb_build_array(
+            jsonb_build_object('server', 'p8-query', 'tools', jsonb_build_array('query')))));
+    perform agentic.upsert_agent(jsonb_build_object(
+        'name', 't_ab_wide',
+        'tools', jsonb_build_array(jsonb_build_object('server', 'p8-query'))));
+
+    if (select tools->0->>'server' from agentic.agents where name = 't_ab_narrow')
+       is distinct from 'p8-query' then
+        raise exception 'a correctly spelled binding did not round-trip';
+    end if;
+
+    raise notice 'agentic authoring: a tool binding that would silently widen the '
+                 'allow-list is refused at the write path';
+end $$;
+
 rollback;

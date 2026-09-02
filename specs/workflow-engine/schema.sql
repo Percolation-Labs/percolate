@@ -3319,6 +3319,16 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- This section explains why it has the shape it does; the body is not repeated,
 -- because two copies of a function is how a fix lands in only one of them.
 
+-- THE THREE-ARGUMENT FORM IS DROPPED, NOT SUPERSEDED.
+--
+-- `create or replace` with a new parameter list creates an OVERLOAD: the old
+-- (jsonb, jsonb, text) body stayed resident in every database that had already
+-- applied this file, and any caller still on that arity silently got it --
+-- a body that cannot resolve {{items}} and does not error, which is the
+-- quietest possible way to be wrong. surface.sql asserts the four-argument
+-- form exists and would not have noticed the stale one beside it.
+drop function if exists workflow.substitute_item(jsonb, jsonb, text);
+
 -- ------------------------------------------------------------
 -- 20a-bis. `{{item.*}}` is substituted AT EXPANSION, and the first version of
 -- this section said the opposite. Reversed by running it.
@@ -3543,6 +3553,9 @@ declare
     v_common    jsonb;
     v_input     jsonb;
     v_ref       text[];
+    v_bad_ord   bigint;
+    v_bad_type  text;
+    v_bad_col   text;
 begin
     select * into t from workflow.tasks where id = p_task_id;
     -- run_after is checked here and not in execute_sql_step's equivalent, and
@@ -3653,18 +3666,60 @@ begin
                 t.step_key, jsonb_array_length(v_rows), v_max;
         end if;
 
-        -- Named columns must exist, checked once over the whole set rather than
-        -- discovered per batch: a partition key that is null everywhere is a
-        -- typo, and it should fail before a single child exists.
+        -- ROWS MUST BE OBJECTS ONCE ANYTHING READS THEIR COLUMNS, and both
+        -- readers are below: partition_by groups on named columns, and a
+        -- batched child folds its rows together with jsonb_each to find the
+        -- ones constant across the batch.
+        --
+        -- A scalar row set -- `items: [1, 2, 3]` -- is perfectly legal
+        -- unbatched: substitute_item does `p_item #> path`, gets null, and the
+        -- author is told '{{item.x}} is not a column of the row set'. Adding
+        -- batch_size to that working step turned the same mistake into
+        -- `cannot deconstruct a scalar` from inside jsonb_each, which names
+        -- neither the step nor the change that caused it. Checked here, once,
+        -- with the ordinal of the row that is wrong.
+        if v_batched and jsonb_array_length(v_rows) > 0 then
+            select x.ord, jsonb_typeof(x.e) into v_bad_ord, v_bad_type
+            from jsonb_array_elements(v_rows) with ordinality x(e, ord)
+            where jsonb_typeof(x.e) <> 'object'
+            order by x.ord
+            limit 1;
+            if v_bad_ord is not null then
+                raise exception
+                    'matrix step ''%'': row % of the row set is a %, and batching or '
+                    'partitioning reads rows BY COLUMN. Return objects shaped like '
+                    '[{"col": ...}, ...], or drop batch_size/partition_by and let each '
+                    'row be its own child.',
+                    t.step_key, v_bad_ord, v_bad_type;
+            end if;
+        end if;
+
+        -- Named columns must exist IN EVERY ROW, not in the first one.
+        --
+        -- This checked `v_rows->0` alone. A row function that omits the key on
+        -- later rows then produced `item->c` = SQL NULL, jsonb_object_agg made
+        -- `{"tenant": null}`, and every key-less row landed in one silently
+        -- separate partition -- which is exactly the "rows that must stay
+        -- together got split" outcome partition_by exists to prevent, with no
+        -- diagnostic anywhere. The comment already claimed the check was over
+        -- the whole set; now it is.
         if v_part is not null and jsonb_array_length(v_rows) > 0 then
-            for v_row in select * from jsonb_array_elements(v_part) loop
-                if not (v_rows->0) ? (v_row #>> '{}') then
+            for v_bad_col in select e #>> '{}' from jsonb_array_elements(v_part) e loop
+                select x.ord into v_bad_ord
+                from jsonb_array_elements(v_rows) with ordinality x(e, ord)
+                where not (x.e ? v_bad_col)
+                order by x.ord
+                limit 1;
+                if v_bad_ord is not null then
                     raise exception
-                        'matrix step ''%'': partition_by names ''%'', which is not a '
-                        'column of the row set. The row has: %',
-                        t.step_key, v_row #>> '{}',
-                        (select string_agg(k, ', ' order by k)
-                         from jsonb_object_keys(v_rows->0) k);
+                        'matrix step ''%'': partition_by names ''%'', which row % of the '
+                        'row set does not carry. That row has: %. Every row must carry '
+                        'every partition column -- the ones that do not would have been '
+                        'grouped together under a null key.',
+                        t.step_key, v_bad_col, v_bad_ord,
+                        coalesce((select string_agg(k, ', ' order by k)
+                                    from jsonb_object_keys(v_rows->(v_bad_ord::int - 1)) k),
+                                 '(no columns)');
                 end if;
             end loop;
         end if;
@@ -3921,6 +3976,26 @@ begin
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
+-- The number expand_matrix put in a child's step_key, as a number.
+--
+-- Every reader of a fan-out's recorded rows wants them in the order the row
+-- function produced, and every one of them had `order by created_at, step_key`
+-- -- where created_at is the transaction timestamp, identical across an
+-- expansion, so the text sort of step_key decided. `fan[10]` sorts before
+-- `fan[2]`, so eleven children were enough to hand back a row set in an order
+-- nothing produced. Every test used ten or fewer.
+--
+-- -1 for a key that carries no bracketed index, so a child named some other
+-- way sorts ahead of the numbered ones deterministically rather than
+-- disappearing into a null.
+create or replace function workflow.child_ordinal(p_step_key text)
+returns bigint
+language sql
+immutable
+as $$
+    select coalesce(nullif(substring(p_step_key from '\[([0-9]+)\]$'), '')::bigint, -1);
+$$;
+
 -- The fan-in, made possible. THE FIRST VERSION OF §20 SHIPPED WITHOUT THIS
 -- AND SAID SO WRONGLY.
 --
@@ -3989,7 +4064,7 @@ begin
                 'step_key', t.step_key, 'item', t.input->'item',
                 'items', t.input->'items',
                 'status', t.status, 'output', t.output)
-            order by t.created_at, t.step_key), '[]'::jsonb)
+            order by t.created_at, workflow.child_ordinal(t.step_key), t.step_key), '[]'::jsonb)
             from workflow.tasks t where t.matrix_parent_id = p_task_id);
 end;
 $$ language plpgsql stable security definer set search_path = pg_catalog, public;
@@ -4059,7 +4134,8 @@ revoke execute on function workflow.assert_task_in_current_run(uuid) from public
 -- caller wanting the batch boundaries wants matrix_outputs.
 create or replace function workflow.matrix_rows(p_task_id uuid)
 returns jsonb as $$
-    select coalesce(jsonb_agg(r order by t.created_at, t.step_key, r_ord), '[]'::jsonb)
+    select coalesce(jsonb_agg(r order by t.created_at, workflow.child_ordinal(t.step_key), t.step_key, r_ord),
+                    '[]'::jsonb)
     from workflow.tasks t
     cross join lateral jsonb_array_elements(
         case when t.input ? 'items' then t.input->'items'
@@ -4161,12 +4237,25 @@ begin
         -- Batching (§20j), refused at registration for the same reason the
         -- ceiling is: a spec can arrive as JSON without passing the compiler,
         -- and `batch_size: 0` is a definition that can only ever fail at 3am.
-        if v_in ? 'batch_size'
-           and ((v_in->>'batch_size') is null or (v_in->>'batch_size')::int < 1) then
-            raise exception
-                'matrix step ''%'' has batch_size %, which gives every child no rows. '
-                'Omit it for one row per child.',
-                v_step->>'key', v_in->>'batch_size';
+        -- THE TYPE IS CHECKED BEFORE THE VALUE, because `::int` runs first
+        -- otherwise. `"batch_size": "ten"` (or 2.5, or true) failed with
+        -- `invalid input syntax for type integer` -- a cast error naming
+        -- neither the step nor the key -- in the one branch written to produce
+        -- a message, and the malformed-value case is exactly what a spec that
+        -- never passed the compiler is most likely to carry.
+        if v_in ? 'batch_size' then
+            if jsonb_typeof(v_in->'batch_size') <> 'number'
+               or (v_in->>'batch_size') !~ '^[0-9]+$' then
+                raise exception
+                    'matrix step ''%'' has batch_size %, where a whole number of rows was '
+                    'expected.', v_step->>'key', v_in->'batch_size';
+            end if;
+            if (v_in->>'batch_size')::int < 1 then
+                raise exception
+                    'matrix step ''%'' has batch_size %, which gives every child no rows. '
+                    'Omit it for one row per child.',
+                    v_step->>'key', v_in->>'batch_size';
+            end if;
         end if;
         if v_in ? 'partition_by'
            and (jsonb_typeof(v_in->'partition_by') <> 'array'
@@ -4176,6 +4265,33 @@ begin
             raise exception
                 'matrix step ''%'' has partition_by %, where a non-empty array of column '
                 'names was expected.', v_step->>'key', v_in->'partition_by';
+        end if;
+
+        -- AN ABSOLUTE min_success CANNOT SURVIVE BATCHING OR PARTITIONING.
+        --
+        -- matrix_gate_passes counts CHILDREN, and both keys change how many
+        -- children a row set becomes: `min_success: 90` over 100 rows with
+        -- `batch_size: 10` needs ninety successes out of ten children, so the
+        -- gate can never pass and every run of the step fails the whole run.
+        -- Adding batch_size to a working step was enough to trigger it, which
+        -- is the worst possible shape for it to have -- the change that breaks
+        -- it is unrelated to the key that breaks.
+        --
+        -- The fraction is unaffected (it is a proportion of whatever the
+        -- children turn out to be), so the remedy is exact and the message can
+        -- name it.
+        if v_in ? 'min_success' and (v_in ? 'batch_size' or v_in ? 'partition_by')
+           and jsonb_typeof(v_in->'min_success') = 'number'
+           and (v_in->>'min_success')::numeric > 1 then
+            raise exception
+                'matrix step ''%'' sets min_success to the COUNT % and also %. The gate '
+                'counts children, and batching decides how many children the rows become '
+                '-- so a count written against rows can be unreachable. Write it as a '
+                'fraction (0 < x <= 1), which means the same thing at any batch size.',
+                v_step->>'key', v_in->>'min_success',
+                case when v_in ? 'batch_size'
+                     then 'batch_size ' || (v_in->>'batch_size')
+                     else 'partition_by ' || (v_in->'partition_by')::text end;
         end if;
 
         -- A child has no static successors to rewire, so a matrix inside a
@@ -5856,15 +5972,18 @@ create or replace function workflow.purge_completed(
     p_older_than  interval default interval '30 days',
     p_batch       int      default 50,      -- RUNS per batch, not tasks
     p_max_batches int      default 1000)
-returns table(batches int, runs_purged bigint, tasks_purged bigint, runs_skipped bigint) as $$
+returns table(batches int, runs_purged bigint, tasks_purged bigint,
+              events_purged bigint, runs_skipped bigint) as $$
 declare
     v_cut     timestamptz := now() - p_older_than;
     v_has_agentic boolean := to_regclass('agentic.runs') is not null;
+    v_sql     text;
     v_ids     uuid[];
     v_n       bigint;
     v_batches int := 0;
     v_runs    bigint := 0;
     v_tasks   bigint := 0;
+    v_events  bigint := 0;
     v_skipped bigint := 0;
 begin
     if p_batch < 1 then
@@ -5874,31 +5993,81 @@ begin
     loop
         exit when v_batches >= p_max_batches;
 
-        -- ELIGIBILITY IS PER RUN, AND EVERY CLAUSE HERE IS A FOREIGN KEY THAT
+        -- ELIGIBILITY IS PER RUN, AND EVERY CLAUSE HERE IS A REFERENCE THAT
         -- WOULD OTHERWISE ABORT THE PURGE MID-BATCH. Found by running it: the
         -- first version deleted tasks and then failed on
         -- schedules_last_run_id_fkey, leaving the run half-purged.
-        select array_agg(r.id) into v_ids
-        from (
-            select r.id
-            from workflow.runs r
-            where r.status in ('completed','failed','cancelled')
-              and coalesce(r.completed_at, r.updated_at) < v_cut
+        --
+        -- THE AGENTIC CLAUSE WAS WRONG IN THREE WAYS AND RIGHT ABOUT THE
+        -- OUTCOME, which took two attempts to see.
+        --
+        -- It excluded any run whose tasks had triggered ANY agent run, saying
+        -- the foreign key would abort the delete. The key is
+        -- `agentic.runs.workflow_task_id ... on delete set null`, so the delete
+        -- looked safe and the clause looked like pure over-caution -- removing
+        -- it was the obvious fix. Removing it fails:
+        --
+        --     new row for relation "runs" violates check constraint
+        --     "scheduled_runs_name_their_task"
+        --
+        -- because agentic.runs also carries `check (trigger_kind <> ''scheduled''
+        -- or workflow_task_id is not null)`. The FK nulls the column, the CHECK
+        -- refuses the null, and the whole purge transaction aborts. A cascade
+        -- action and a constraint on the same column disagree, and neither file
+        -- can see the other.
+        --
+        -- So the guard is back, and now it is (a) narrow -- only a SCHEDULED
+        -- agent run pins its workflow run, because only that row cannot lose
+        -- the reference; an interactive run with a task id nulls out cleanly
+        -- and is no longer excluded, which is most of what the old clause was
+        -- wrongly holding back; (b) dynamic, because plpgsql plans a statement
+        -- whole and the old `not v_has_agentic or not exists (...)` resolved
+        -- agentic.runs at parse time -- raising `relation "agentic.runs" does
+        -- not exist` on an engine-only install, which is exactly the
+        -- deployment the guard was written to protect; and (c) counted, so a
+        -- run held this way appears in runs_skipped rather than quietly never
+        -- shrinking the table.
+        --
+        -- WHAT IS STILL TRUE AND STILL A GAP: a deployment whose workflows run
+        -- scheduled agents accumulates runs that retention cannot touch. That
+        -- is not fixable from this side -- it needs agentic to retire its own
+        -- runs, or that CHECK to tolerate a purged reference. Named here rather
+        -- than left as a mysteriously growing table.
+        v_sql := 'select array_agg(r.id) from ('
+              || ' select r.id from workflow.runs r'
+              || ' where r.status in (''completed'',''failed'',''cancelled'')'
+              || '   and coalesce(r.completed_at, r.updated_at) < $1'
               -- A schedule points at its most recent run. Deleting it would
               -- lose the schedule's own history.
-              and not exists (select 1 from workflow.schedules s where s.last_run_id = r.id)
+              || '   and not exists (select 1 from workflow.schedules s'
+              || '                    where s.last_run_id = r.id)'
               -- A sub_workflow parent task points at its child run.
-              and not exists (select 1 from workflow.tasks t where t.child_run_id = r.id)
-              -- An agent run records the workflow task that triggered it.
-              and (not v_has_agentic or not exists (
-                    select 1 from agentic.runs ar
-                    join workflow.tasks t on t.id = ar.workflow_task_id
-                    where t.run_id = r.id))
-            order by coalesce(r.completed_at, r.updated_at)
-            limit p_batch
-        ) r;
+              || '   and not exists (select 1 from workflow.tasks t'
+              || '                    where t.child_run_id = r.id)'
+              || case when v_has_agentic then
+                    '   and not exists (select 1 from workflow.tasks t'
+                 || '                     join agentic.runs ar on ar.workflow_task_id = t.id'
+                 || '                    where t.run_id = r.id'
+                 || '                      and ar.trigger_kind = ''scheduled'')'
+                 else '' end
+              || ' order by coalesce(r.completed_at, r.updated_at)'
+              || ' limit $2) r';
+        execute v_sql into v_ids using v_cut, p_batch;
 
         exit when v_ids is null;
+
+        -- THE EVENT LOG, WHICH THE FIRST VERSION LEFT BEHIND ENTIRELY.
+        --
+        -- task_events.run_id is a plain uuid with no foreign key (§6), so
+        -- nothing cascaded and nothing complained: purging a 1M-task backlog
+        -- left four to six million orphaned event rows -- one per status
+        -- transition -- and replaced a table that only grew with a table that
+        -- grows faster. Deleted FIRST, by run_id, which idx_task_events_run
+        -- already indexes; deleting after the tasks would leave no way to find
+        -- them.
+        delete from workflow.task_events e where e.run_id = any(v_ids);
+        get diagnostics v_n = row_count;
+        v_events := v_events + v_n;
 
         -- A WHOLE RUN AT A TIME. Tasks reference each other within a run --
         -- compensates_task_id and matrix_parent_id are both NO ACTION -- so a
@@ -5914,14 +6083,30 @@ begin
         v_batches := v_batches + 1;
     end loop;
 
-    -- What was eligible by age and held back by a reference, so an operator
-    -- watching the table not shrink has an answer rather than a mystery.
-    select count(*) into v_skipped
-    from workflow.runs r
-    where r.status in ('completed','failed','cancelled')
-      and coalesce(r.completed_at, r.updated_at) < v_cut;
+    -- WHAT WAS ELIGIBLE BY AGE AND HELD BACK BY A REFERENCE -- which means
+    -- carrying the same clauses, inverted, including the agentic one.
+    --
+    -- Without them this counted every run the loop had not reached, so
+    -- purge_completed(interval '30 days', 50, 1) over a 10,000-run backlog
+    -- reported 9,950 "skipped" runs that were perfectly purgeable and simply
+    -- beyond p_max_batches. An operator reading that concludes references are
+    -- blocking retention when nothing is -- a number that is worse than no
+    -- number, because it answers the question wrongly rather than not at all.
+    v_sql := 'select count(*) from workflow.runs r'
+          || ' where r.status in (''completed'',''failed'',''cancelled'')'
+          || '   and coalesce(r.completed_at, r.updated_at) < $1'
+          || '   and (exists (select 1 from workflow.schedules s where s.last_run_id = r.id)'
+          || '     or exists (select 1 from workflow.tasks t where t.child_run_id = r.id)'
+          || case when v_has_agentic then
+                '     or exists (select 1 from workflow.tasks t'
+             || '                  join agentic.runs ar on ar.workflow_task_id = t.id'
+             || '                 where t.run_id = r.id'
+             || '                   and ar.trigger_kind = ''scheduled'')'
+             else '' end
+          || ')';
+    execute v_sql into v_skipped using v_cut;
 
-    return query select v_batches, v_runs, v_tasks, v_skipped;
+    return query select v_batches, v_runs, v_tasks, v_events, v_skipped;
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
@@ -5954,9 +6139,15 @@ declare
     v_plan  jsonb;
     v_nodes text[];
 begin
+    -- run_after IS PART OF THE DEPTH, because it is part of the plan below.
+    -- Counting bare `status = 'ready'` let a queue of 100,000 backing-off
+    -- tasks satisfy the depth gate and then explain a query whose own filter
+    -- excluded every one of them -- the gate would have passed on a plan for
+    -- zero rows, which is the shallow-queue false pass wearing a different
+    -- hat.
     select t.queue, count(*) into v_queue, v_depth
     from workflow.tasks t
-    where t.status = 'ready'
+    where t.status = 'ready' and t.run_after <= now()
     group by t.queue
     order by count(*) desc
     limit 1;
@@ -5982,6 +6173,22 @@ begin
       into v_nodes
       from jsonb_path_query(v_plan, '$.**."Node Type"') x;
 
+    -- A PLAN THIS GATE COULD NOT READ IS NOT A PASS.
+    --
+    -- With no rows out of jsonb_path_query, v_nodes is NULL, `'Seq Scan' =
+    -- any(NULL)` is NULL rather than false, and the CASE fell through to 'ok'
+    -- -- reporting `index-backed at depth N ()` with an empty node list. The
+    -- one gate in this collection whose whole design is that a false pass is
+    -- unacceptable issued one on its own parse failure, and it would do it
+    -- silently on any PG release that renames the key.
+    if v_nodes is null then
+        return query select
+            'claim'::text, 'inconclusive'::text,
+            format('EXPLAIN returned a plan with no "Node Type" keys, so this gate '
+                   'read nothing. Not a pass: %s', left(v_plan::text, 300));
+        return;
+    end if;
+
     return query select
         'claim'::text,
         case
@@ -6002,7 +6209,7 @@ begin
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
-grant execute on function workflow.check_hot_paths(int) to authenticated;
+revoke execute on function workflow.check_hot_paths(int) from public;
 
 -- ------------------------------------------------------------
 -- 3. Work nobody can claim -- the failure with no error in it.
@@ -6019,7 +6226,21 @@ grant execute on function workflow.check_hot_paths(int) to authenticated;
 -- freshly created unclaimable task is not old yet. It becomes visible there an
 -- hour later, described as something else.
 -- ------------------------------------------------------------
+-- ONE PASS OVER tasks, NOT ONE PER CANDIDATE ROW.
+--
+-- The second branch asked `not exists (select 1 from workflow.tasks c where
+-- c.queue = t.queue and c.claimed_at > now() - '10 minutes')` per candidate,
+-- and there is no index on claimed_at -- so at the million-row depth this
+-- whole section is written for, the diagnostic that exists to make a scale
+-- failure visible would itself have scanned the table once per stuck task.
+-- Hoisted into a CTE: the queues something has claimed from lately are one
+-- aggregate, computed once.
 create or replace view workflow.v_unclaimable as
+with served as (
+    select distinct t.queue
+      from workflow.tasks t
+     where t.claimed_at > now() - interval '10 minutes'
+)
     select t.id, t.run_id, t.queue, t.step_key, t.rate_key,
            'rate_key names no bucket in workflow.rate_limits'::text as reason,
            format('insert into workflow.rate_limits (key, capacity, tokens, refill_rate) '
@@ -6039,9 +6260,7 @@ create or replace view workflow.v_unclaimable as
     where t.status = 'ready'
       and t.run_after <= now()
       and t.created_at < now() - interval '10 minutes'
-      and not exists (
-          select 1 from workflow.tasks c
-          where c.queue = t.queue and c.claimed_at > now() - interval '10 minutes');
+      and t.queue not in (select s.queue from served s);
 
 -- ------------------------------------------------------------
 -- 4. The backlog, as an operator needs it rather than as a count.
@@ -6085,20 +6304,66 @@ create or replace view workflow.v_backlog as
 create or replace view workflow.v_capacity as
     select (select setting::int from pg_settings where name = 'max_connections')      as max_connections,
            (select setting::int from pg_settings where name = 'superuser_reserved_connections') as reserved,
+           -- EVERY BACKEND, DELIBERATELY, AND THE ATTEMPT TO NARROW IT IS
+           -- WORTH KEEPING AS A COMMENT.
+           --
+           -- pg_stat_activity also lists the checkpointer, the walwriter,
+           -- autovacuum workers and pg_cron's launcher, none of which occupy a
+           -- max_connections slot -- so this overstates usage by a handful.
+           -- Filtering `backend_type = 'client backend'` looks like the fix
+           -- and reports ZERO: pg_stat_activity nulls every column but a few
+           -- for a role that owns no backends, and app_owner -- who owns this
+           -- view and every operator reading it -- owns none. The narrowed
+           -- version therefore said `in_use = 0, headroom = 97` on a live
+           -- cluster, which is a headroom view that never warns. Caught by the
+           -- assertion in dev/tests/workflow/12 rather than in production,
+           -- which is the entire argument for that file.
+           --
+           -- Reading it properly needs pg_read_all_stats, and granting a
+           -- predefined role to app_owner to improve an estimate by eight is a
+           -- bad trade. Over-counting is the safe direction for a headroom
+           -- warning: it fires early rather than late.
            (select count(*)::int from pg_stat_activity)                               as in_use,
-           (select setting::int from pg_settings where name = 'max_connections')
-             - (select count(*)::int from pg_stat_activity)                           as headroom,
+           -- RESERVED SLOTS ARE NOT HEADROOM. The incident this view was
+           -- written for is precisely the case where the last free slots were
+           -- the superuser-reserved ones: an operator reading `headroom = 3`
+           -- had zero usable connections and no way in. Floored at zero so an
+           -- over-committed cluster reads as 0 rather than as a negative
+           -- number nobody will parse at 3am.
+           greatest(0,
+             (select setting::int from pg_settings where name = 'max_connections')
+             - (select setting::int from pg_settings where name = 'superuser_reserved_connections')
+             - (select count(*)::int from pg_stat_activity))                          as headroom,
            (select count(distinct claimed_by)::int from workflow.tasks
              where claimed_at > now() - interval '5 minutes')                         as workers_seen,
            case when (select count(*)::float from pg_stat_activity)
                      / nullif((select setting::float from pg_settings
-                                where name = 'max_connections'), 0) > 0.8
+                                where name = 'max_connections')
+                              - (select setting::float from pg_settings
+                                  where name = 'superuser_reserved_connections'), 0) > 0.8
                 then 'connection budget over 80% used -- a pool scaling on queue '
                      'depth can exhaust this long before it exhausts throughput'
                 else null end                                                          as warning;
 
-grant select on workflow.v_backlog, workflow.v_unclaimable, workflow.v_capacity
-    to authenticated;
+-- NOT GRANTED, and the grant that was here was a leak.
+--
+-- workflow.runs and workflow.tasks carry RLS (integration-rbac.sql §2), and a
+-- view is owner-privileged unless it says otherwise -- so a read through one
+-- of these evaluates the policies as app_owner, which owns the tables and
+-- bypasses them. Granted to `authenticated`, v_unclaimable handed every
+-- logged-in user the run_id, step_key and rate_key of every tenant's stuck
+-- work, and v_backlog handed over per-queue depth and worker identity.
+--
+-- Every operator view that came before these three (v_queue_depth,
+-- v_stuck_tasks, v_lease_violations, v_compensation_status) is deliberately
+-- ungranted for exactly this reason: they are read as the owner, by an
+-- operator, not through PostgREST. These three are the same kind of object and
+-- now match. An operator-facing REST surface is a real thing to want and it
+-- needs a `security_invoker` view or a definer function that filters -- not a
+-- grant on a view that was never written to be seen by a caller.
+--
+-- check_hot_paths(int) loses its grant for the same reason: it is SECURITY
+-- DEFINER and returns queue names and backlog depth.
 
 -- ------------------------------------------------------------
 -- 6. Synthetic load, so a scaling test is one call rather than a script.

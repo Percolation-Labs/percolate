@@ -1439,6 +1439,23 @@ fn compile_matrix(id: &str, m: &WfMatrix, s: &WfStep)
                  could never be reached -- and reading this spec would suggest otherwise.",
                 id));
         }
+        // AN ABSOLUTE COUNT CANNOT SURVIVE BATCHING. The gate counts CHILDREN,
+        // and both of these decide how many children a row set becomes:
+        // `min_success: 90` over a hundred rows with `batch_size: 10` asks for
+        // ninety successes out of ten children, so it can never pass and every
+        // run of the step fails. The trigger is adding batch_size to a step
+        // that already worked, which is the worst possible shape for it -- the
+        // key that breaks is not the key that changed. A fraction means the
+        // same thing at any batch size, so the remedy is exact.
+        if ms > 1.0 && (m.batch_size.is_some() || m.partition_by.is_some()) {
+            return Err(format!(
+                "matrix step '{}' sets min_success to the count {} and also {}. The gate \
+                 counts children, and batching decides how many children the rows become, \
+                 so a count written against rows can be unreachable. Write it as a \
+                 fraction (0 < x <= 1), which means the same thing at any batch size.",
+                id, ms,
+                if m.batch_size.is_some() { "batch_size" } else { "partition_by" }));
+        }
     }
 
     // Batching. Checked here so the message names the step; the engine checks

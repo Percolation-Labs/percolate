@@ -26,10 +26,12 @@ select (agentic.upsert_agent($j${
   "tools": [{"server": "harbour-query", "tools": ["query"]}]
 }$j$::jsonb)).name as agent;
 
-\echo '-- the binding, as stored. It names a server, and narrows it to an
--- ALLOWLIST -- a list, not a string: `"tool": "query"` is stored
--- happily here and then dropped by the runtime, leaving no allowlist
--- at all, which is every tool the server exposes.'
+\echo '-- the binding, as stored. It names a server and narrows it to an
+-- ALLOWLIST -- a list, not a string. `"tool": "query"` used to be stored
+-- happily here and then dropped by the runtime, leaving no allowlist at
+-- all, which is every tool the server exposes: a one-character typo that
+-- WIDENS. upsert_agent now refuses the spelling rather than describing it
+-- in a comment nobody reads while authoring.'
 select a.name as agent, t->>'server' as server, t->'tools' as allowlist
 from agentic.agents a, jsonb_array_elements(a.tools) t
 where a.name = 'harbourmaster';

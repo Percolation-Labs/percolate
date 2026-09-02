@@ -48,7 +48,7 @@
 
 create temporary table expected (
     subsystem text,
-    kind      text,     -- schema | table | view | column | function | policy
+    kind      text,     -- schema | table | view | column | function | policy | yaml_feature
                       -- | extension | registration | agent | tool_server
                       -- | entity_type | graph_example | property_graph
                       -- | corpus | embedding_space | channel
@@ -115,7 +115,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('workflow-engine','function','workflow.expand_matrix','uuid','§20: fan-out is a SELECT, expanded with no process'),
 ('workflow-engine','function','workflow.matrix_rows','uuid','§20: the children ARE the recorded row set'),
 ('workflow-engine','function','workflow.matrix_outputs','uuid','§20: a successor must be able to reach its siblings'),
-('workflow-engine','function','workflow.substitute_item','jsonb,jsonb,jsonb,text','§20a-bis: {{item.*}} and {{items}} are bound at expansion, not at dispatch -- the three-argument form was superseded by §20j''s batching and this row went on declaring it'),
+('workflow-engine','function','workflow.substitute_item','jsonb,jsonb,jsonb,text','§20a-bis: {{item.*}} and {{items}} are bound at expansion, not at dispatch'),
 ('workflow-engine','function','workflow.normalize_output','uuid,jsonb','§21a: the output contract is enforced, not just written down'),
 ('workflow-engine','function','workflow.encoding_drift','','§21a: a contract violation is a number, not a rumour'),
 ('workflow-engine','function','workflow.validate_shape','jsonb,jsonb','§21f: agent results combine because their shape is declared'),
@@ -132,6 +132,9 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('workflow-engine','function','workflow.resolve_args','jsonb,uuid,jsonb','§20a: {{item.*}} is a third namespace'),
 ('workflow-engine','function','workflow.resolve_template_ref','text,uuid,jsonb','§20a: one reference resolved, so a query argument can carry text AROUND its templates'),
 ('workflow-engine','column','workflow.tasks.matrix_parent_id',null,'§20: a child points at the matrix that produced it'),
+('workflow-engine','yaml_feature','batching',null,'§20j: batch_size and partition_by are AUTHORABLE, not just executable'),
+('workflow-engine','yaml_feature','matrix',null,'§20: the compiler half of fan-out is installed too'),
+('workflow-engine','yaml_feature','continue_on',null,'§21e: partial-failure tolerance is authorable'),
 
 -- ---------- workflow-engine: artifacts, output class 4 (outputs.md) ----
 -- The registration and read halves live in world-model-ingestion's
@@ -337,6 +340,14 @@ select e.*,
     -- demonstrates it was actually installed, because a subsystem whose only
     -- worked example lives in somebody's shell is the exact failure
     -- dev/init/02-seed.sql's header describes.
+    -- A YAML feature is not a catalog object: it is a claim about the compiled
+    -- PARSER, which ships as a separate .so and can be a release behind the
+    -- SQL it is supposed to author. schema.sql §22c is that failure -- a
+    -- `matrix:` step that YAML.md documented in full and the installed
+    -- compiler refused as bad syntax -- and the fix for the class was to probe
+    -- the compiler instead of guessing. This asks the probe.
+    when 'yaml_feature' then coalesce(
+        (workflow.compiler_capabilities() #>> array['accepts', e.name])::boolean, false)
     when 'agent'       then exists (select 1 from agentic.agents where name = e.name)
     when 'tool_server' then exists (select 1 from agentic.tool_servers where name = e.name)
     -- A registered entity type with no nodes is a registration nobody ran, so
