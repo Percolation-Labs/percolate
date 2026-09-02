@@ -1,0 +1,2421 @@
+---
+# =============================================================================
+# SCENARIO EVALS -- journeys somebody would actually take, run against a live
+# database, each one saying what breaking it would look like.
+#
+# HOW THIS DIFFERS FROM ../run.sh. The SQL suites next door test a MECHANISM
+# against its spec: does `expand_matrix` rewire successors, does RLS filter a
+# walk. This file tests a JOURNEY: somebody wants to know which corporate group
+# is behind a safety signal, and the question is whether the system they were
+# handed answers it. The two find different things -- a mechanism can be
+# correct at every step of a journey that cannot be completed, which is how
+# `signal:` ended up unable to hand a person's decision to the step that acts
+# on it (see `hitl-04`).
+#
+# THE EVAL LANGUAGE. Each scenario is:
+#
+#   id / title / category   what it is
+#   asks                    the question in the user's words, not the schema's
+#   mechanism               the spec section, table or function that answers it
+#   catches                 which failure modes below it would notice
+#   status                  `pass`, or an open finding -- see "Verdicts"
+#   role / claims           the seat it runs from. NOT app_owner for anything
+#                           asserting tenancy: a guarantee tested from the
+#                           owner's seat is a guarantee nobody tested.
+#   setup                   SQL, run first, in the scenario's transaction
+#   check[]                 sql + ONE comparator + `because`
+#
+# Comparators: is / isnt / matches / unmatches / gt / gte / lt / lte / raises.
+# `sql` must return a single value. Everything is compared as text; `is` uses
+# `is distinct from` in the generated SQL, never `<>`, for the reason
+# failure-modes.md §1 gives under "An assertion that cannot fail".
+#
+# `because` is not a comment. It says which guarantee the check protects, so a
+# red line reads as "the human's decision stopped reaching the step that acts
+# on it" rather than "eval 47 failed".
+#
+# VERDICTS. `status: pass` means the journey completes today. Anything else is
+# an open finding, run anyway and not counted as a suite failure -- but the
+# runner reports loudly if one starts passing, because a finding that quietly
+# goes green is either a fix nobody recorded or a check that stopped checking.
+#
+#   pass          the journey completes and the assertions hold
+#   open-defect   the journey does NOT complete; the check pins the defect
+#   open-doc      the behaviour is right and the document describing it is not
+#   not-shipped   the mechanism is deliberately outside the product today
+#
+# ADDING ONE. Same rule as ../README.md: a scenario earns its place by failing
+# when a guarantee is quietly removed. Before adding one, break the thing it
+# protects and confirm it goes red. An assertion nobody has seen fail is
+# documentation wearing a test's clothes.
+# =============================================================================
+
+version: 1
+fixture: fixtures.sql
+
+# -----------------------------------------------------------------------------
+# The vocabulary. Every entry is a class from
+# `specs/workflow-engine/failure-modes.md` or from `dev/tests/README.md`'s
+# per-surface characteristic failure -- not invented here. A scenario citing
+# none is refused by the loader: a check that cannot say what it protects is a
+# check nobody can weigh.
+# -----------------------------------------------------------------------------
+failure_modes:
+  - id: silent-success
+    name: A failure that reports success
+    source: failure-modes.md §1
+    tell: every task `done`, the run `completed`, and the answer missing or wrong
+
+  - id: silent-template
+    name: A template that resolves to nothing, or is never looked at
+    source: failure-modes.md §1
+    tell: a step runs with a literal `{{...}}` or an empty value, and completes
+
+  - id: data-as-instruction
+    name: A resolved value re-read as a template
+    source: failure-modes.md §1
+    tell: caller-supplied input containing braces is substituted on a later pass
+
+  - id: unstated-contract
+    name: A contract between two steps that neither step can state
+    source: failure-modes.md §1
+    tell: both halves are individually valid, nothing compares them, the answer is noise
+
+  - id: inert-feature
+    name: A configured feature that does nothing
+    source: failure-modes.md §1
+    tell: schema, compiler and storage all present; consumption absent
+
+  - id: never-executed
+    name: A capability that has never been executed
+    source: failure-modes.md §1
+    tell: it exists, the audit passes, and nothing has ever called it
+
+  - id: unreachable-capability
+    name: An engine capability with no way to reach it
+    source: failure-modes.md §7
+    tell: the executor consumes it and the authoring layer never offered it
+
+  - id: wrong-answer-not-error
+    name: A wrong answer rather than an error
+    source: dev/tests/README.md, `query/`
+    tell: nothing crashes; the caller gets something other than what was promised
+
+  - id: tenancy-leak
+    name: More rows than the caller is entitled to
+    source: dev/tests/README.md, `rbac/`
+    tell: the only surface where a bug is a breach, and no happy-path check notices
+
+  - id: partial-aggregate
+    name: An aggregate over a partial set
+    source: failure-modes.md §1
+    tell: a gate checked after release, or a threshold measured on the wrong thing
+
+  - id: absent-record
+    name: The record that does not exist
+    source: failure-modes.md §2
+    tell: a 404 from a registry treated as an outage rather than as normal
+
+  - id: empty-success
+    name: A success carrying nothing
+    source: failure-modes.md §2
+    tell: HTTP 200 with an empty body counted as data
+
+  - id: oversized-payload
+    name: A response larger than the payload cap
+    source: failure-modes.md §2
+    tell: retried forever although it is byte-identical every time
+
+  - id: rate-ceiling
+    name: A published rate ceiling, exceeded
+    source: failure-modes.md §2
+    tell: throttling configured, stored, and consumed by nobody
+
+  - id: engine-without-identity
+    name: The engine acting on its own behalf
+    source: failure-modes.md §4
+    tell: an ownership check written for a human refuses the engine
+
+  - id: unowned-resource
+    name: An unowned resource is not everyone's
+    source: failure-modes.md §4
+    tell: owner_id null read as public is a leak; read as nobody's is a weld
+
+  - id: step-names-another-tenant
+    name: A step naming another tenant's data
+    source: failure-modes.md §4
+    tell: any step function taking an id from a spec is an exfiltration path
+
+  - id: work-under-cancelled-run
+    name: Work landing under a cancelled run
+    source: failure-modes.md §5
+    tell: an in-flight worker resurrects a cancelled graph one step at a time
+
+  - id: idempotency-over-dead-run
+    name: Idempotency matching a run that never happened
+    source: failure-modes.md §5
+    tell: a cancelled run returned as "already started"
+
+  - id: two-workers-one-task
+    name: Two workers, one task
+    source: failure-modes.md §5
+    tell: a reaped lease can still complete, and a stale answer is published
+
+  - id: trigger-on-untaken-transition
+    name: A trigger that fires only on the transition you did not take
+    source: failure-modes.md §5
+    tell: an inserted-ready task never starts because the autorun is ON UPDATE
+
+  - id: compensation-in-forward-graph
+    name: A compensation that runs on the happy path
+    source: failure-modes.md §5
+    tell: the refund fires during a successful booking
+
+  - id: version-skew
+    name: The compiler is older than the schema
+    source: failure-modes.md §6
+    tell: a dropped key, a missing kind, or a desugar that emits a different row count
+
+  - id: two-registrations
+    name: Two registrations that look like one
+    source: failure-modes.md §7
+    tell: having one half is indistinguishable from having both until you use the other
+
+  - id: unchecked-rule
+    name: A rule the collection states and does not check
+    source: failure-modes.md §7
+    tell: obeyed where it was written, never applied to the next subsystem
+
+  - id: undocumented-contract
+    name: A contract a third party must implement, described incompletely
+    source: dev/tests/README.md, "what this repo owes the boundary"
+    tell: the shape a worker actually receives is wider than the shape documented
+
+  - id: wrong-grouping
+    name: Analysis that is confidently wrong
+    source: failure-modes.md §3
+    tell: the engine is perfect, the grouping key is wrong, and the run is green
+
+
+scenarios:
+
+# =============================================================================
+# DELEGATION -- one agent handing work to another, inside a workflow.
+#
+# The runtime is not running and does not need to be. Delegation in this system
+# is DATA -- an agent is a row, its tools are a list of names, and a workflow
+# step naming one compiles to an ordinary REST call whose url and auth the
+# compiler fills in. So everything a deployment can get wrong about delegation
+# is visible in Postgres before a single token is spent, which is the point.
+# =============================================================================
+
+  - id: deleg-01
+    category: delegation
+    title: An agent step compiles to a call, not a new execution path
+    asks: "Can I put an agent in a pipeline without deploying anything?"
+    mechanism: "YAML.md § Agent steps -- `agent:` compiles to kind http_call at the Agent Runtime"
+    catches: [unreachable-capability, version-skew]
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_deleg01
+      steps:
+        - id: triage
+          agent: pv_triage
+          input: 'Classify SIG-114'
+      $y$);
+    check:
+      - name: the step is an ordinary http_call
+        sql: "select s->>'kind' from workflow.definitions d, jsonb_array_elements(d.spec->'steps') s where d.name='ev_deleg01'"
+        is: "http_call"
+        because: "an agent step must inherit retry, backoff, the reaper and tracing by BEING a rest step -- a second execution path would inherit none of them"
+      - name: the runtime url is filled in by the compiler
+        sql: "select s->'input'->>'url' from workflow.definitions d, jsonb_array_elements(d.spec->'steps') s where d.name='ev_deleg01'"
+        matches: "P8_AGENT_URL"
+        because: "the endpoint is a deployment fact; an author who had to write it would pin one deployment into a document that outlives it"
+      - name: and so is the credential, by NAME
+        sql: "select s->'input'->>'credential_ref' from workflow.definitions d, jsonb_array_elements(d.spec->'steps') s where d.name='ev_deleg01'"
+        is: "P8_API_KEY"
+        because: "the database must never hold the secret; it holds the name the worker resolves"
+
+  - id: deleg-02
+    category: delegation
+    title: Two steps in one group share one conversation
+    asks: "Can the specialist see what the triage agent already established?"
+    mechanism: "YAML.md § Agent steps -- session_group mints one id per (run, group), bound to {{run.$session}}"
+    catches: [silent-template, inert-feature]
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_deleg02
+      steps:
+        - id: triage
+          agent: pv_triage
+          input: 'Classify SIG-114'
+          session_group: analysis
+        - id: deep
+          needs: [triage]
+          agent: pv_hepatology
+          input: '{{steps.triage.result}}'
+          session_group: analysis
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_deleg02','{}'::jsonb) as run_id;
+      -- A worker may only read the context of a task it HOLDS, so the journey
+      -- has to be walked the way a worker walks it: claim, read, complete,
+      -- claim the next. Reading the context of an unclaimed task is refused,
+      -- which is itself the right behaviour and is asserted in deleg-02b.
+      -- The context has to be READ while the lease is held: completing the
+      -- task ends the lease, and reading it afterwards is refused (deleg-02b).
+      -- So the journey is captured as it happens rather than reconstructed.
+      create temp table t1 as select * from workflow.claim_task('http','w1');
+      create temp table ctx1 as
+        select workflow.get_task_context((select id from t1),'w1') as c;
+      select workflow.complete_task((select id from t1),
+                 '{"status":200,"result":"SAFETY"}'::jsonb, 'w1');
+      create temp table t2 as select * from workflow.claim_task('http','w2');
+      create temp table ctx2 as
+        select workflow.get_task_context((select id from t2),'w2') as c;
+    check:
+      - name: the stored definition does NOT resolve the session
+        sql: "select input->'body'->>'session' from workflow.tasks where run_id=(select run_id from ctx) and step_key='triage'"
+        is: "{{run.$session}}"
+        because: "resolving at author time would make the stored definition a snapshot of one run"
+      - name: the second task claimed is the specialist, released by the first
+        sql: "select step_key from t2"
+        is: "deep"
+        because: "if `deep` were claimable before `triage` completed, the dependency edge would be decoration and the session comparison below would be between two roots"
+      - name: dispatch binds the session to a real id
+        sql: "select ((select c from ctx1) #>> '{task_input,body,session}') ~ '^[0-9a-f-]{36}$'"
+        is: "true"
+        because: "the engine binds every namespace the worker cannot know BEFORE dispatch; a literal template reaching a worker is failure-modes.md §1's first entry"
+      - name: the second step got the same conversation
+        sql: |
+          select ((select c from ctx1) #>> '{task_input,body,session}')
+               = ((select c from ctx2) #>> '{task_input,body,session}')
+        is: "true"
+        because: "two steps declaring the same group must land in one conversation -- otherwise the specialist starts from nothing and the group key is decoration"
+      - name: and the specialist can see what triage concluded
+        sql: "select (select c from ctx2) #>> '{context,triage,result}'"
+        is: "SAFETY"
+        because: "delegation that cannot read the previous turn is two independent calls wearing one conversation's name"
+
+  - id: deleg-02b
+    category: delegation
+    title: A worker may not read the context of a task it does not hold
+    asks: "Can a worker read another worker's task?"
+    mechanism: "workflow.get_task_context(task_id, worker_id) -- the lease is checked on read"
+    catches: [two-workers-one-task, step-names-another-tenant]
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_deleg02b
+      steps:
+        - id: triage
+          agent: pv_triage
+          input: 'Classify'
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_deleg02b','{}'::jsonb) as run_id;
+      create temp table t1 as select * from workflow.claim_task('http','w1');
+    check:
+      - name: another worker's id is refused by name
+        sql: "select workflow.get_task_context((select id from t1),'w-impostor')"
+        raises: "not currently claimed"
+        because: "the context carries the run input and every completed step's output; handing it to a worker that does not hold the task is a disclosure with a plausible-looking call"
+
+
+  - id: deleg-03
+    category: delegation
+    title: Declaring no group stays stateless
+    asks: "Does a classification step accidentally join somebody's conversation?"
+    mechanism: "YAML.md § Agent steps -- declaring neither session nor session_group stays stateless"
+    catches: [tenancy-leak, silent-template]
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_deleg03
+      steps:
+        - id: triage
+          agent: pv_triage
+          input: 'Classify'
+          session_group: analysis
+        - id: solo
+          agent: pv_cardiology
+          input: 'Score in isolation'
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_deleg03','{}'::jsonb) as run_id;
+    check:
+      - name: the ungrouped step carries no session
+        sql: "select coalesce(input->'body'->>'session','(none)') from workflow.tasks where run_id=(select run_id from ctx) and step_key='solo'"
+        is: "(none)"
+        because: "a stateless step joined to a thread carries context nobody asked it to see, and the default has to be the safe one"
+
+  - id: deleg-04
+    category: delegation
+    title: Two groups in one run are two independent threads
+    asks: "Can one run hold two conversations that must not see each other?"
+    mechanism: "YAML.md § Agent steps -- two groups in one run are two independent threads"
+    catches: [tenancy-leak]
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_deleg04
+      steps:
+        - id: hep
+          agent: pv_hepatology
+          input: 'hepatic'
+          session_group: hepatic
+        - id: card
+          agent: pv_cardiology
+          input: 'cardiac'
+          session_group: cardiac
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_deleg04','{}'::jsonb) as run_id;
+      -- Both steps are roots, so both are claimable at once. Which worker gets
+      -- which is the queue's business, so the checks key off step_key rather
+      -- than assuming an order.
+      create temp table cl (worker text, id uuid, step_key text);
+      --
+      -- `claim_task` returns `workflow.tasks`, not `setof`, so an empty queue
+      -- yields ONE ROW OF NULLS rather than no rows -- `found` is true either
+      -- way. The loop therefore tests `r.id is null`, not `not found`. See
+      -- `recov-13`, which pins that as a finding rather than leaving it as a
+      -- trick every caller has to know.
+      do $c$
+      declare r record; i int := 0;
+      begin
+        loop
+          i := i + 1;
+          exit when i > 4;
+          select * into r from workflow.claim_task('http', 'w' || i);
+          exit when r.id is null;
+          insert into cl values ('w' || i, r.id, r.step_key);
+        end loop;
+      end $c$;
+    check:
+      - name: both were claimable
+        sql: "select count(*) from cl"
+        is: "2"
+        because: "two roots must both be ready; if one were not the comparison below would be between a session and a null"
+      - name: the two groups do not collapse into one id
+        sql: |
+          select (workflow.get_task_context((select id from cl where step_key='hep'),  (select worker from cl where step_key='hep'))  #>> '{task_input,body,session}')
+              is distinct from
+                 (workflow.get_task_context((select id from cl where step_key='card'), (select worker from cl where step_key='card')) #>> '{task_input,body,session}')
+        is: "true"
+        because: "if the group key were ignored, a cardiac assessment would be answered with a hepatic transcript in its context and nothing would report it"
+
+  - id: deleg-05
+    category: delegation
+    title: The tool allowlist is a list, and it is narrower than the server
+    asks: "Can I give a specialist one tool of a server that exposes three?"
+    mechanism: "agentic/schema.sql -- agents.tools is a per-server allowlist of tool NAMES"
+    catches: [tenancy-leak, unchecked-rule]
+    check:
+      - name: the server exposes three
+        sql: "select jsonb_array_length(cached_tools) from agentic.tool_servers where name='pv-query'"
+        is: "3"
+        because: "discovery is what a server advertises; narrowing is the agent's business, and the two must stay separable"
+      - name: the specialist is bound to one
+        sql: "select jsonb_array_length(t->'tools') from agentic.agents a, jsonb_array_elements(a.tools) t where a.name='pv_hepatology'"
+        is: "1"
+        because: "a list stored where a list is expected -- a bare string here is accepted by the row and dropped by the runtime, leaving NO allowlist, which is every tool the server exposes"
+      - name: and it is a list, not a string
+        sql: "select jsonb_typeof(t->'tools') from agentic.agents a, jsonb_array_elements(a.tools) t where a.name='pv_hepatology'"
+        is: "array"
+        because: "`\"tool\": \"query\"` stores happily and silently widens the agent to everything"
+
+  - id: deleg-06
+    category: delegation
+    title: Re-registering a server to fix its url does not erase discovery
+    asks: "I typed the port wrong. Do I lose the tool list?"
+    mechanism: "agentic.upsert_tool_server -- resync preserves cached_tools"
+    catches: [silent-success]
+    setup: |
+      select agentic.upsert_tool_server(
+        '{"name":"pv-query","kind":"mcp","url":"http://query-mcp:9090"}'::jsonb);
+    check:
+      - name: the discovered tools survive the correction
+        sql: "select jsonb_array_length(cached_tools) from agentic.tool_servers where name='pv-query'"
+        is: "3"
+        because: "a resync that blanks the tool list leaves every agent bound to names the server no longer reports, and the failure surfaces one delegation later"
+      - name: and the url actually changed
+        sql: "select url from agentic.tool_servers where name='pv-query'"
+        is: "http://query-mcp:9090"
+        because: "preserving everything would make the upsert inert, which is the opposite failure"
+
+  - id: deleg-07
+    category: delegation
+    title: A declared output shape turns prose into a column
+    asks: "Can I combine ten agents' verdicts without parsing ten answers?"
+    mechanism: "YAML.md § Agent steps with a declared output shape -- output_schema"
+    catches: [unstated-contract, version-skew]
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_deleg07
+      steps:
+        - id: classify
+          agent: pv_triage
+          input: 'Classify SIG-114'
+          output_schema:
+            type: object
+            required: [verdict, confidence]
+            properties:
+              verdict:    {type: string, enum: [SAFETY, QUALITY, OTHER]}
+              confidence: {type: number}
+      $y$);
+    check:
+      - name: the shape reaches the stored spec
+        sql: "select s->'input'->'output_schema'->'required'->>0 from workflow.definitions d, jsonb_array_elements(d.spec->'steps') s where d.name='ev_deleg07'"
+        is: "verdict"
+        because: "serde drops an unknown key silently, so a compiler that predates output_schema compiles this clean and enforces nothing -- an author who writes a contract and gets a green run reasonably concludes it is enforced"
+
+  - id: deleg-08
+    category: delegation
+    title: A shape declared on a step that did not produce the output is refused
+    asks: "Can I put output_schema on a sql step?"
+    mechanism: "YAML.md § Agent steps with a declared output shape -- refused on sql and matrix"
+    catches: [unchecked-rule]
+    check:
+      - name: refused by name
+        sql: |
+          select workflow.define_yaml($y$
+          name: ev_deleg08
+          steps:
+            - id: bad
+              sql: {function: calder_echo, args: ['x']}
+              output_schema: {type: object}
+          $y$)
+        raises: "output_schema"
+        because: "a registered function's return type is already known; accepting the key here would make a contract that checks nothing look like one that does"
+
+  - id: deleg-09
+    category: delegation
+    title: A modifier that means nothing where it is written is an error
+    asks: "What if I put session_group on a sql step?"
+    mechanism: "YAML.md § When the compiler is older than the schema -- session/session_group/jsonpath outside an agent step"
+    catches: [silent-template, inert-feature]
+    check:
+      - name: refused rather than dropped
+        sql: |
+          select workflow.define_yaml($y$
+          name: ev_deleg09
+          steps:
+            - id: bad
+              sql: {function: calder_echo, args: ['x']}
+              session_group: analysis
+          $y$)
+        raises: "session_group"
+        because: "silently discarding a key the author wrote is how a document quietly means something other than what it says"
+
+  - id: deleg-10
+    category: delegation
+    title: Capturing the envelope rather than the assistant's text
+    asks: "I want the token counts and the tool trace, not the answer."
+    mechanism: "YAML.md § Agent steps -- jsonpath: '' captures the whole response"
+    catches: [inert-feature]
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_deleg10
+      steps:
+        - id: audit
+          agent: pv_auditor
+          input: 'audit'
+          jsonpath: ''
+      $y$);
+    check:
+      - name: the default path is overridden, not appended
+        sql: "select coalesce(nullif(s->'input'->>'jsonpath',''),'(empty)') from workflow.definitions d, jsonb_array_elements(d.spec->'steps') s where d.name='ev_deleg10'"
+        is: "(empty)"
+        because: "if the override were ignored the envelope would be discarded before reaching runs.context, and the audit step would record the text it exists not to record"
+
+  - id: deleg-11
+    category: delegation
+    title: A delegated run is a child of the run that delegated to it
+    asks: "Can I see the delegation tree afterwards?"
+    mechanism: "agentic.start_run(p_parent_run_id, p_delegated_by) -- the delegation tree IS the span tree"
+    catches: [never-executed, engine-without-identity]
+    role: authenticated
+    claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":["aa000000-0000-0000-0000-0000000000a1"]}'
+    setup: |
+      create temp table s as select (agentic.create_session('SIG-114 assessment')).id as sid;
+      create temp table r1 as select (agentic.start_run('pv_triage',(select sid from s))).id as rid;
+      create temp table r2 as select (agentic.start_run('pv_hepatology',(select sid from s),(select rid from r1))).id as rid;
+    check:
+      - name: the child names its parent
+        sql: "select parent_run_id = (select rid from r1) from agentic.runs_api where id=(select rid from r2)"
+        is: "true"
+        because: "without the edge a delegated run is an orphan, and 'why did this cost forty calls' has no answer"
+      - name: both runs sit in one session
+        sql: "select count(distinct session_id) from agentic.runs_api where id in (select rid from r1 union all select rid from r2)"
+        is: "1"
+        because: "a tool call IS a delegation, and the sub-run has to stay independently queryable inside the conversation it belongs to"
+      - name: and the child's depth is one below its parent's
+        sql: "select depth from agentic.runs_api where id=(select rid from r2)"
+        is: "1"
+        because: "depth is the structural backstop the ceiling in deleg-12 is measured against; a child that inherits its parent's depth makes the ceiling unreachable"
+
+  - id: deleg-12
+    category: delegation
+    title: Delegation cannot recurse forever
+    asks: "What stops an agent loop from delegating until the bill arrives?"
+    mechanism: "agentic.start_run -- delegation depth exceeds the hard limit of 8"
+    catches: [rate-ceiling]
+    role: authenticated
+    claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":["aa000000-0000-0000-0000-0000000000a1"]}'
+    setup: |
+      create temp table s as select (agentic.create_session('deep')).id as sid;
+      create temp table chain (n int, rid uuid);
+      -- A root run is depth 0 and the ceiling is `depth > 8`, so the legal
+      -- chain is a root plus eight delegations -- nine runs. Writing the loop
+      -- to eight and asserting the ninth is refused would have passed for the
+      -- wrong reason, off by one, and is how a ceiling gets asserted one lower
+      -- than it is.
+      do $d$
+      declare v_prev uuid := null; v_id uuid; i int;
+      begin
+        for i in 1..9 loop
+          v_id := (agentic.start_run('pv_triage',
+                     (select sid from s), v_prev)).id;
+          insert into chain values (i, v_id);
+          v_prev := v_id;
+        end loop;
+      end $d$;
+    check:
+      - name: a root plus eight delegations is reachable
+        sql: "select count(*) from chain"
+        is: "9"
+        because: "a ceiling that refuses the ordinary case is a ceiling nobody keeps"
+      - name: and the deepest legal run says so
+        sql: "select depth from agentic.runs_api where id=(select rid from chain where n=9)"
+        is: "8"
+        because: "the ceiling is expressed in `depth`, so a chain that did not actually reach 8 would prove nothing about the refusal below"
+      - name: the next one is refused by name
+        sql: "select (agentic.start_run('pv_triage',(select sid from s),(select rid from chain where n=9))).id"
+        raises: "delegation depth"
+        because: "an unbounded delegation tree is an unbounded bill, and start_run is granted to every authenticated caller -- an app-side limit protects only callers who go through the app"
+
+# =============================================================================
+# ITERATED QUERY -- expanding a graph result gradually until the answer is in
+# it, which is what an agent with a depth ceiling actually has to do.
+#
+# The fixture is built for this. `SIG-114 -> tolvaxen -> ALTM -> NVRA` is three
+# hops, so "which corporate group is behind this signal" is UNANSWERABLE at
+# depth 1, unanswerable at depth 2, and answered at depth 3 -- and the walk
+# widens 1 -> 9 -> 18 on the way, which is the cost of guessing wide instead of
+# expanding. A scenario suite where the first width already contains the answer
+# proves nothing about iteration.
+# =============================================================================
+
+  - id: iter-01
+    category: iterated-query
+    title: Depth 1 does not contain the answer, and says so by omission
+    asks: "Which corporate group is behind SIG-114?"
+    mechanism: "USAGE.md § GRAPH -- one row per node at its shortest depth"
+    catches: [wrong-answer-not-error]
+    check:
+      - name: the first hop reaches the product only
+        sql: "select jsonb_array_length(aiq.query('GRAPH \"sig-114\" DEPTH 1')->'rows')"
+        is: "1"
+        because: "a walk that returned more at depth 1 than the graph holds would make every later width meaningless"
+      - name: and the parent is not in it
+        sql: "select exists (select 1 from jsonb_array_elements(aiq.query('GRAPH \"sig-114\" DEPTH 1')->'rows') r where r->>'key'='nvra')"
+        is: "false"
+        because: "the whole iteration story needs the first width to be genuinely wrong"
+
+  - id: iter-02
+    category: iterated-query
+    title: Depth 2 reaches the marketing authorisation holder
+    asks: "Who makes the drug this signal is about?"
+    mechanism: "USAGE.md § GRAPH -- DEPTH n, ordered by depth then path_weight"
+    catches: [wrong-answer-not-error]
+    check:
+      - name: the immediate sponsor appears
+        sql: "select exists (select 1 from jsonb_array_elements(aiq.query('GRAPH \"sig-114\" DEPTH 2')->'rows') r where r->>'key'='altm')"
+        is: "true"
+        because: "two hops is the ordinary shape of the question and has to work before three is interesting"
+      - name: the parent still does not
+        sql: "select exists (select 1 from jsonb_array_elements(aiq.query('GRAPH \"sig-114\" DEPTH 2')->'rows') r where r->>'key'='nvra')"
+        is: "false"
+        because: "if depth 2 already returned depth-3 nodes the ceiling would not be a ceiling"
+
+  - id: iter-03
+    category: iterated-query
+    title: Depth 3 answers it, and the widening is the cost
+    asks: "Expand until you find the group -- what did that cost?"
+    mechanism: "USAGE.md § GRAPH -- DEPTH ceiling of 5 in the dialect"
+    catches: [rate-ceiling, wrong-answer-not-error]
+    check:
+      - name: the parent is finally reachable
+        sql: "select exists (select 1 from jsonb_array_elements(aiq.query('GRAPH \"sig-114\" DEPTH 3')->'rows') r where r->>'key'='nvra')"
+        is: "true"
+        because: "an agent that cannot reach a three-hop fact has to be told so, not left to widen forever"
+      - name: and it cost eighteen nodes to learn one
+        sql: "select jsonb_array_length(aiq.query('GRAPH \"sig-114\" DEPTH 3')->'rows')"
+        is: "18"
+        because: "iteration is only worth teaching if widening is expensive; a fixture where depth 3 returns three nodes makes the lesson invisible"
+
+  - id: iter-04
+    category: iterated-query
+    title: A node reachable two ways appears once, at its shortest depth
+    asks: "Novara is reachable through two subsidiaries. Do I get it twice?"
+    mechanism: "USAGE.md § GRAPH -- DISTINCT ON, shortest depth, ordered by path_weight"
+    catches: [wrong-answer-not-error, wrong-grouping]
+    check:
+      - name: exactly one row for the parent
+        sql: "select count(*) from jsonb_array_elements(aiq.query('GRAPH \"tolvaxen\" DEPTH 3')->'rows') r where r->>'key'='nvra'"
+        is: "1"
+        because: "a per-path result set says the same name three times and an agent counting rows concludes it is three times as related"
+
+  - id: iter-05
+    category: iterated-query
+    title: A typo is refused, with what it nearly matched
+    asks: "I typed the drug name wrong."
+    mechanism: "USAGE.md § GRAPH -- the seed resolves exactly; did_you_mean on a miss"
+    catches: [wrong-answer-not-error]
+    check:
+      - name: no rows, and an error rather than a guess
+        sql: "select aiq.query('GRAPH \"tolvaxin\" DEPTH 1')->>'error'"
+        matches: "no node matches"
+        because: "GRAPH used to resolve fuzzily and walk whichever node came back first, reporting somebody else's neighbourhood as yours"
+      - name: and a suggestion, so the next call is not another guess
+        sql: "select aiq.query('GRAPH \"tolvaxin\" DEPTH 1')#>>'{did_you_mean,0,key}'"
+        is: "tolvaxa"
+        because: "a naming convention is the one thing that cannot be reasoned out; an agent given a bare miss tries four spellings and gives up"
+
+  - id: iter-06
+    category: iterated-query
+    title: FUZZY LOOKUP is the intended next step, and it is opt-in
+    asks: "Then how do I find it?"
+    mechanism: "USAGE.md § LOOKUP -- fuzzy is off by default, over node_keys only"
+    catches: [wrong-answer-not-error]
+    check:
+      - name: exact lookup returns nothing for the typo
+        sql: "select jsonb_array_length(aiq.query('LOOKUP \"tolvaxin\"')->'rows')"
+        is: "0"
+        because: "a misspelling that silently becomes a different answer is worse than no answer"
+      - name: fuzzy finds it when asked
+        sql: "select aiq.query('FUZZY LOOKUP \"tolvaxin\"')#>>'{rows,0,entity_type}'"
+        is: "product"
+        because: "the recovery path has to exist or the refusal above is a dead end"
+      - name: and the miss is named rather than left as a set difference
+        sql: "select aiq.query('LOOKUP \"tolvaxin\"')->>'unresolved'"
+        matches: "tolvaxin"
+        because: "`rows` non-empty with a row of nulls is indistinguishable from a hit to anything that does not inspect the fields -- a model read exactly that and answered as though it had found the node"
+
+  - id: iter-07
+    category: iterated-query
+    title: One string naming two nodes is refused, not guessed
+    asks: "'altimer' -- the company or the recall?"
+    mechanism: "USAGE.md § GRAPH -- a short key naming two nodes is refused with candidates"
+    catches: [wrong-answer-not-error]
+    check:
+      - name: refused, with both candidates
+        sql: "select aiq.query('GRAPH \"altimer\"')->>'error'"
+        matches: "names 2 nodes"
+        because: "walking whichever came back first answers a question nobody asked and says nothing about the guess"
+      - name: the candidates carry their types so the caller can choose
+        sql: "select jsonb_array_length(aiq.query('GRAPH \"altimer\"')->'candidates')"
+        is: "2"
+        because: "a refusal with no way forward is the dead end iter-05 exists to avoid"
+
+  - id: iter-08
+    category: iterated-query
+    title: Narrowing by relation is cheaper than widening by depth
+    asks: "I only care about who makes what."
+    mechanism: "USAGE.md § GRAPH -- TYPE <rel>, including inverse labels"
+    catches: [rate-ceiling]
+    check:
+      - name: one relation, one hop, one answer
+        sql: "select jsonb_array_length(aiq.query('GRAPH \"tolvaxen\" TYPE made_by')->'rows')"
+        is: "1"
+        because: "an agent taught only to widen burns eighteen nodes on a question one relation answers"
+      - name: the inverse label is usable as a filter too
+        sql: "select jsonb_array_length(aiq.query('GRAPH \"altm\" TYPE makes')->'rows')"
+        gte: "1"
+        because: "the read path displays `makes` and the query layer used to refuse it, so a result could not be fed back into the next query"
+
+  - id: iter-09
+    category: iterated-query
+    title: An unknown relation is refused rather than returning nothing
+    asks: "GRAPH ... TYPE causes -- is that a relation?"
+    mechanism: "USAGE.md § GRAPH -- no such relation in the catalogue"
+    catches: [wrong-answer-not-error]
+    check:
+      - name: named as unknown, and pointed at the catalogue
+        sql: "select aiq.query('GRAPH \"tolvaxen\" TYPE causes')::text"
+        raises: "no relation named causes"
+        because: "an empty result is indistinguishable from 'nothing is related', and an agent would conclude the drug causes nothing"
+
+  - id: iter-10
+    category: iterated-query
+    title: Depth 0 and depth 1000 are both refused
+    asks: "Can I just ask for everything?"
+    mechanism: "USAGE.md § GRAPH -- DEPTH must be at least 1; the dialect ceiling is 5"
+    catches: [rate-ceiling]
+    check:
+      - name: zero is refused rather than served a depth-1 walk
+        sql: "select aiq.query('GRAPH \"tolvaxen\" DEPTH 0')::text"
+        raises: "DEPTH must be at least 1"
+        because: "it used to be served a depth-1 walk, so a caller asking for nothing got something"
+      - name: and the ceiling holds
+        sql: "select aiq.query('GRAPH \"tolvaxen\" DEPTH 1000')::text"
+        raises: "depth"
+        because: "an unbounded walk over a hub is a table scan with a friendly name"
+
+  - id: iter-11
+    category: iterated-query
+    title: A seed with no neighbours is empty, not an error
+    asks: "What is Quillon Bio connected to?"
+    mechanism: "USAGE.md § GRAPH -- an isolated node returns zero rows"
+    catches: [wrong-answer-not-error]
+    check:
+      - name: the seed resolves
+        sql: "select aiq.query('GRAPH \"QUIL\"')#>>'{seed,entity_type}'"
+        is: "sponsor"
+        because: "a resolved seed with no edges and an unresolved key must not look the same to the caller"
+      - name: and returns nothing without complaining
+        sql: "select jsonb_array_length(aiq.query('GRAPH \"QUIL\"')->'rows')"
+        is: "0"
+        because: "'nothing is related' is an answer; raising here would make an agent retry a question already answered"
+
+  - id: iter-12
+    category: iterated-query
+    title: Expanding the hub finds every signal against one product
+    asks: "What is the desk busiest about?"
+    mechanism: "USAGE.md § GRAPH -- inverse traversal is served from the dst_id index, not a second stored row"
+    catches: [wrong-answer-not-error]
+    check:
+      - name: four signals point at the hub
+        sql: "select count(*) from jsonb_array_elements(aiq.query('GRAPH \"tolvaxen\" TYPE implicated_in')->'rows') r"
+        is: "4"
+        because: "the reverse question is answered from the index with the catalogue's inverse label; a fixture that stored reverse edges would pass this while the mechanism was broken"
+
+# =============================================================================
+# HUMAN IN THE LOOP -- a run that stops until a person answers, and then acts
+# on what they said.
+#
+# Two control steps do the waiting and neither needs a process: `timer:` waits
+# for a clock, `signal:` waits for a person. Both were legal ENGINE kinds and
+# unauthorable in YAML until somebody tried to write exactly this, which is
+# failure-modes.md §7's "an engine capability with no way to reach it".
+#
+# The category exists because the second half of the journey -- ACT on what
+# they said -- is the half nothing had ever exercised. `dev/examples/08-wait.sql`
+# waits, resumes, and never reads the payload. hitl-04 reads it.
+# =============================================================================
+
+  - id: hitl-01
+    category: human-in-the-loop
+    title: The run parks on a person, and nothing polls
+    asks: "Hold this until the safety officer decides."
+    mechanism: "YAML.md § Step types -- `signal: true` compiles to kind signal, executed by a person via signal_task"
+    catches: [unreachable-capability, never-executed]
+    claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":[]}'
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_hitl01
+      steps:
+        - id: gather
+          p8ql: 'LOOKUP "sig-114"'
+        - id: officer
+          needs: [gather]
+          signal: true
+        - id: land
+          needs: [officer]
+          sql: {function: calder_echo, args: ['escalated']}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_hitl01','{}'::jsonb) as run_id;
+    check:
+      - name: the evidence step ran with no worker
+        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='gather'"
+        is: "done"
+        because: "a `sql` step runs inside Postgres; if it needed a process the whole point of parking cheaply would be lost"
+      - name: the run is waiting on the person, explicitly
+        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='officer'"
+        is: "waiting_external"
+        because: "`waiting_external` is what distinguishes 'nobody has decided' from 'nobody has picked this up' -- a step stuck in `ready` looks like a starved queue"
+      - name: the step after it has not run
+        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='land'"
+        is: "pending"
+        because: "if a successor of a waiting step could fire, the wait would be decoration and the officer's decision would arrive after the action it authorises"
+      - name: and the run is still open
+        sql: "select status from workflow.runs where id=(select run_id from ctx)"
+        is: "running"
+        because: "a run that completed while a person was still deciding is the silent-success shape in its purest form"
+
+  - id: hitl-02
+    category: human-in-the-loop
+    title: A clock does not release a person's step
+    asks: "Will this time out if nobody answers?"
+    mechanism: "workflow.promote_due_timers -- promotes `timer` tasks only"
+    catches: [inert-feature]
+    claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":[]}'
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_hitl02
+      steps:
+        - id: officer
+          signal: true
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_hitl02','{}'::jsonb) as run_id;
+      update workflow.tasks set run_after = now() - interval '1 day'
+       where run_id = (select run_id from ctx);
+      select workflow.promote_due_timers();
+    check:
+      - name: still waiting, however old it is
+        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='officer'"
+        is: "waiting_external"
+        because: "a detention decision is a person's; timing it out silently converts 'nobody answered' into 'approved by nobody'"
+
+  - id: hitl-03
+    category: human-in-the-loop
+    title: The person who started the run may signal it
+    asks: "The officer opened it. Can they close it?"
+    mechanism: "workflow.assert_run_access -- owner_id is set from the `sub` claim at start_workflow"
+    catches: [engine-without-identity]
+    role: authenticated
+    claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":[]}'
+    setup: |
+      set local role app_owner;
+      select workflow.define_yaml($y$
+      name: ev_hitl03
+      steps:
+        - id: officer
+          signal: true
+      $y$);
+      set local role authenticated;
+      create temp table ctx as
+        select workflow.start_workflow('ev_hitl03','{}'::jsonb) as run_id;
+      select workflow.signal_task((select run_id from ctx),'officer',
+             '{"decision":"escalate"}'::jsonb);
+    check:
+      - name: the run has an owner, taken from the claim
+        sql: "select owner_id::text from workflow.runs_api where id=(select run_id from ctx)"
+        is: "55000000-0000-0000-0000-000000000001"
+        because: "a run with owner_id null is not owned by everyone -- it takes an explicit permission to act on, so an unowned human-in-the-loop run can never be closed"
+      - name: and the owner's signal landed
+        sql: "select status from workflow.tasks_api where run_id=(select run_id from ctx) and step_key='officer'"
+        is: "done"
+        because: "authority follows provenance: whoever created the run is who may answer its questions"
+
+  - id: hitl-04
+    category: human-in-the-loop
+    title: The officer's decision reaches the step that acts on it
+    asks: "Record what they decided."
+    mechanism: "YAML.md § Templates -- every step nests its payload under `result`, read with {{steps.<id>.result}}"
+    catches: [silent-success, never-executed, unreachable-capability]
+    status: open-defect
+    claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":[]}'
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_hitl04
+      steps:
+        - id: officer
+          signal: true
+        - id: land
+          needs: [officer]
+          sql: {function: record_escalation, args: ['{{steps.officer.result}}']}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_hitl04','{}'::jsonb) as run_id;
+      select workflow.signal_task((select run_id from ctx),'officer',
+             '{"signal":"sig-114","decision":"escalate","by":"safety.officer"}'::jsonb);
+    check:
+      - name: the payload IS on the task
+        sql: "select output->>'decision' from workflow.tasks where run_id=(select run_id from ctx) and step_key='officer'"
+        is: "escalate"
+        because: "the signal itself works; what follows is about where the output goes, not whether it exists"
+      - name: and it reaches runs.context, where every template reads from
+        sql: "select context ? 'officer' from workflow.runs where id=(select run_id from ctx)"
+        is: "true"
+        because: >-
+          THIS IS THE FINDING. `complete_task` merges a task's output into
+          runs.context; `signal_task` and `promote_due_timers` set status,
+          output and completed_at and merge nothing. So {{steps.<signal>.…}}
+          resolves to nothing, the acting step fails with `template
+          'steps.officer.result' resolved to nothing`, and the whole point of a
+          human-in-the-loop workflow -- act on what they said -- is unreachable
+          from the document. Exactly failure-modes.md §5's shape: a property of
+          a state transition fixed at the one site that hurt, with the other
+          paths that perform the same transition left behind. The same paragraph
+          already records `now()` reopening this way twice.
+      - name: so the acting step runs rather than failing
+        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='land'"
+        is: "done"
+        because: "an author who wrote the documented idiom gets a failed run whose error names a template they wrote correctly"
+      - name: and the decision is recorded
+        sql: "select count(*) from calder.escalations where decision='escalate'"
+        is: "1"
+        because: "the journey ends when the decision is durable somewhere a person can read it, not when a task turns green"
+
+  - id: hitl-05
+    category: human-in-the-loop
+    title: A stranger cannot answer somebody else's question
+    asks: "Can another user approve my escalation?"
+    mechanism: "workflow.signal_task -> assert_run_access(run, 'signal')"
+    catches: [tenancy-leak, engine-without-identity]
+    role: authenticated
+    claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":[]}'
+    setup: |
+      set local role app_owner;
+      select workflow.define_yaml($y$
+      name: ev_hitl05
+      steps:
+        - id: officer
+          signal: true
+      $y$);
+      set local role authenticated;
+      create temp table ctx as
+        select workflow.start_workflow('ev_hitl05','{}'::jsonb) as run_id;
+    check:
+      # The seat is declared on the CHECK, not left as a set_config in setup:
+      # every statement re-establishes its own identity, so "which user did
+      # this" is answerable by reading the line rather than by tracing what the
+      # statement above it happened to leave behind.
+      - name: refused by name
+        claims: '{"sub":"55000000-0000-0000-0000-000000000002","orgs":[]}'
+        sql: "select workflow.signal_task((select run_id from ctx),'officer','{\"decision\":\"approve\"}'::jsonb)"
+        raises: "not authorized"
+        because: "signal_task was equally open once and only APPEARED safe when tested, because wait_signal was never populated and the UPDATE matched nothing -- a security property that holds because a different feature is broken is not a security property"
+      - name: and the step is untouched
+        role: app_owner
+        claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":[]}'
+        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='officer'"
+        is: "waiting_external"
+        because: "a refused write that still wrote is the worse half of this. Read from the owner's seat deliberately: the stranger cannot see the row at all, so asserting this from THEIR seat would pass whether or not the write happened"
+
+  - id: hitl-06
+    category: human-in-the-loop
+    title: Signalling a name nobody is waiting on changes nothing
+    asks: "I sent the wrong signal name."
+    mechanism: "workflow.signal_task -- the UPDATE is keyed on wait_signal and status"
+    catches: [silent-success]
+    claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":[]}'
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_hitl06
+      steps:
+        - id: officer
+          signal: true
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_hitl06','{}'::jsonb) as run_id;
+      select workflow.signal_task((select run_id from ctx),'not_a_step','{}'::jsonb);
+    check:
+      - name: the real step is still waiting
+        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='officer'"
+        is: "waiting_external"
+        because: "a mis-typed signal that released the wrong step would be an approval nobody gave"
+
+  - id: hitl-07
+    category: human-in-the-loop
+    title: Answering twice does not release the successor twice
+    asks: "The officer clicked approve twice."
+    mechanism: "schema.sql §5 -- pending_deps is decremented on the transition INTO a terminal state and never re-incremented"
+    catches: [silent-success]
+    claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":[]}'
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_hitl07
+      steps:
+        - id: officer
+          signal: true
+        - id: land
+          needs: [officer]
+          sql: {function: calder_echo, args: ['once']}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_hitl07','{}'::jsonb) as run_id;
+      select workflow.signal_task((select run_id from ctx),'officer','{"d":1}'::jsonb);
+      select workflow.signal_task((select run_id from ctx),'officer','{"d":2}'::jsonb);
+    check:
+      - name: the first answer is the one kept
+        sql: "select output->>'d' from workflow.tasks where run_id=(select run_id from ctx) and step_key='officer'"
+        is: "1"
+        because: "the second UPDATE matches nothing because the status is no longer waiting_external -- if it matched, the recorded decision would be whichever click landed last"
+      - name: and the successor ran exactly once
+        sql: "select count(*) from workflow.tasks where run_id=(select run_id from ctx) and step_key='land'"
+        is: "1"
+        because: "a double-decrement of pending_deps releases a dependent early; here it would run the action twice, which for an escalation is two notifications and one audit trail"
+
+  - id: hitl-08
+    category: human-in-the-loop
+    title: A cooling-off period as the FIRST step waits its hour
+    asks: "Wait an hour before asking anyone."
+    mechanism: "schema.sql §21i autorun_sql_steps -- a timer's delay_seconds is applied to run_after"
+    catches: [inert-feature, trigger-on-untaken-transition, silent-success]
+    status: open-defect
+    claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":[]}'
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_hitl08
+      steps:
+        - id: cooling_off
+          timer: 3600
+        - id: officer
+          needs: [cooling_off]
+          signal: true
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_hitl08','{}'::jsonb) as run_id;
+    check:
+      - name: the document's delay reaches the task
+        sql: "select input->>'delay_seconds' from workflow.tasks where run_id=(select run_id from ctx) and kind='timer'"
+        is: "3600.0"
+        because: "the compiler's half works; the finding below is entirely about whether anything consumes it"
+      - name: and the task will not be due for an hour
+        sql: "select round(extract(epoch from (run_after - now()))) from workflow.tasks where run_id=(select run_id from ctx) and kind='timer'"
+        gt: "3000"
+        because: >-
+          THIS IS THE FINDING. `delay_seconds` is applied by
+          `autorun_sql_steps`, which is `after update of status` and fires only
+          on the transition INTO ready. A timer that is a ROOT step is INSERTED
+          already ready, so the trigger never sees it, `run_after` stays at
+          now(), and the next `promote_due_timers()` fires it immediately. The
+          cooling-off period is zero and every task is `done`. It is
+          failure-modes.md §5's own entry -- "a trigger that fires only on the
+          transition you did not take" -- reopened at the timer branch of the
+          same trigger, and it fails the quiet way round: not a step that never
+          starts, but a wait that never waits. hitl-08b shows the non-root case
+          working, which is why nothing noticed;
+          `dev/examples/08-wait.sql` ages `run_after` by hand before promoting
+          and so demonstrates a mechanism it is standing in for.
+      - name: so a tick does not fire it
+        sql: "select workflow.promote_due_timers()"
+        is: "0"
+        because: "a scheduled tick that fires every waiting timer in the deployment on its first pass is the operational shape of this defect"
+
+  - id: hitl-08b
+    category: human-in-the-loop
+    title: A cooling-off period after another step waits correctly
+    asks: "Gather the evidence, then wait an hour, then ask."
+    mechanism: "schema.sql §21i autorun_sql_steps -- measured from readiness, not from the run's start"
+    catches: [inert-feature, trigger-on-untaken-transition]
+    claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":[]}'
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_hitl08b
+      steps:
+        - id: gather
+          p8ql: 'LOOKUP "sig-114"'
+        - id: cooling_off
+          needs: [gather]
+          timer: 3600
+        - id: officer
+          needs: [cooling_off]
+          signal: true
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_hitl08b','{}'::jsonb) as run_id;
+    check:
+      - name: the delay is applied when the step becomes ready
+        sql: "select round(extract(epoch from (run_after - now()))) from workflow.tasks where run_id=(select run_id from ctx) and kind='timer'"
+        gt: "3000"
+        because: "measuring from readiness rather than from the run's start is the right choice -- a run that spent a day in a queue should still get its hour"
+      - name: a tick leaves it alone
+        sql: "select workflow.promote_due_timers()"
+        is: "0"
+        because: "promote_due_timers is the only thing that fires a timer, and it must respect run_after or the column is decoration"
+      - name: nobody claimed it
+        sql: "select coalesce(claimed_by,'(nobody)') from workflow.tasks where run_id=(select run_id from ctx) and kind='timer'"
+        is: "(nobody)"
+        because: "if a timer were claimable it would occupy the queue it was routed to for the whole of its wait"
+      - name: and the person is not yet being asked
+        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='officer'"
+        is: "pending"
+        because: "the order of a cooling-off period and the decision it precedes is the entire content of the policy"
+
+  - id: hitl-09
+    category: human-in-the-loop
+    title: The clock releases it and the person is asked
+    asks: "The hour is up."
+    mechanism: "workflow.promote_due_timers -- a clock, not a worker"
+    catches: [trigger-on-untaken-transition]
+    claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":[]}'
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_hitl09
+      steps:
+        - id: cooling_off
+          timer: 3600
+        - id: officer
+          needs: [cooling_off]
+          signal: true
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_hitl09','{}'::jsonb) as run_id;
+      -- Aged by hand rather than waited out: a test that takes an hour is a
+      -- test nobody runs. (On a root timer this changes nothing today --
+      -- hitl-08 -- but it is how this has to be written once that is fixed.)
+      update workflow.tasks set run_after = now() - interval '1 minute'
+       where run_id = (select run_id from ctx) and kind = 'timer';
+      select workflow.promote_due_timers();
+    check:
+      - name: the timer fired
+        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and kind='timer'"
+        is: "done"
+        because: "ageing the row rather than sleeping an hour is what makes this testable at all -- a test that takes an hour is a test nobody runs"
+      - name: and the person is now being asked
+        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='officer'"
+        is: "waiting_external"
+        because: "the successor of a timer is released by the cascade, not by an ON UPDATE autorun -- a task inserted already-ready is the transition that never fires"
+
+  - id: hitl-10
+    category: human-in-the-loop
+    title: Cancelling while it waits cancels the question
+    asks: "Withdraw the escalation."
+    mechanism: "workflow.cancel_run -- pending, ready and waiting_external all become cancelled"
+    catches: [work-under-cancelled-run]
+    claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":[]}'
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_hitl10
+      steps:
+        - id: officer
+          signal: true
+        - id: land
+          needs: [officer]
+          sql: {function: calder_echo, args: ['acted']}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_hitl10','{}'::jsonb) as run_id;
+      select workflow.cancel_run((select run_id from ctx));
+    check:
+      - name: the waiting step is cancelled, not left waiting forever
+        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='officer'"
+        is: "cancelled"
+        because: "a waiting_external task the cancel did not reach is a question nobody will ever answer and a run nothing will ever close"
+      - name: and so is the action behind it
+        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='land'"
+        is: "cancelled"
+        because: "a prior version cascaded cancellation one hop; grandchildren of a cancelled task stalled forever"
+
+  - id: hitl-11
+    category: human-in-the-loop
+    title: A signal after cancellation does not resurrect the run
+    asks: "The officer clicked approve after we withdrew it."
+    mechanism: "workflow.signal_task -- the UPDATE requires status = waiting_external"
+    catches: [work-under-cancelled-run, idempotency-over-dead-run]
+    claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":[]}'
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_hitl11
+      steps:
+        - id: officer
+          signal: true
+        - id: land
+          needs: [officer]
+          sql: {function: calder_echo, args: ['acted']}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_hitl11','{}'::jsonb) as run_id;
+      select workflow.cancel_run((select run_id from ctx));
+      select workflow.signal_task((select run_id from ctx),'officer','{"decision":"approve"}'::jsonb);
+    check:
+      - name: the run stays cancelled
+        sql: "select status from workflow.runs where id=(select run_id from ctx)"
+        is: "cancelled"
+        because: "a worker finishing in-flight work resurrects a cancelled graph one step at a time unless every completion path checks"
+      - name: and the action never ran
+        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='land'"
+        is: "cancelled"
+        because: "an escalation acted on after being withdrawn is the failure the withdrawal existed to prevent"
+
+  - id: hitl-12
+    category: human-in-the-loop
+    title: A run nobody owns cannot be closed by bare ownership
+    asks: "A scheduled review parked on a person. Who may answer it?"
+    mechanism: "workflow.assert_run_access -- owner_id null takes an explicit permission, never bare ownership"
+    catches: [engine-without-identity, tenancy-leak]
+    role: authenticated
+    claims: '{"sub":"55000000-0000-0000-0000-000000000002","orgs":[]}'
+    setup: |
+      set local role app_owner;
+      select workflow.define_yaml($y$
+      name: ev_hitl12
+      steps:
+        - id: officer
+          signal: true
+      $y$);
+      -- Started with no `sub` claim, the way a scheduler or a migration starts
+      -- one: the run has no owner.
+      select set_config('request.jwt.claims','{}', true);
+      create temp table ctx as
+        select workflow.start_workflow('ev_hitl12','{}'::jsonb) as run_id;
+      set local role authenticated;
+      select set_config('request.jwt.claims',
+             '{"sub":"55000000-0000-0000-0000-000000000002","orgs":[]}', true);
+    check:
+      - name: the run really is unowned
+        role: app_owner
+        sql: "select coalesce(owner_id::text,'(none)') from workflow.runs where id=(select run_id from ctx)"
+        is: "(none)"
+        because: "if the scheduler's identity leaked onto the run, the whole question would be moot and the check below would pass for the wrong reason"
+      - name: and an ordinary user is refused
+        sql: "select workflow.signal_task((select run_id from ctx),'officer','{\"decision\":\"approve\"}'::jsonb)"
+        raises: "not authorized"
+        because: "an unowned resource is not everyone's -- treating owner_id null as public is a leak, and this is the shape where the leak is an approval"
+
+# =============================================================================
+# UPLOAD -- bytes arrive, and become answerable.
+#
+# Postgres never holds the bytes: `register_upload` records that a file exists
+# in object storage, `record_chunks` records what it says. The journey is
+# whether a document somebody uploaded can be found afterwards, by the person
+# entitled to find it and by nobody else.
+#
+# Every resource and chunk here is created INSIDE the scenario and rolled back.
+# The fixture deliberately writes nothing into `content.resource_chunks`,
+# because that corpus is what `dev/tests/query/08-retrieval.sql` ranks against
+# -- an upload is an event, not a fixture.
+# =============================================================================
+
+  - id: upload-01
+    category: upload
+    title: A file becomes answerable with nothing deployed
+    asks: "Upload the PSUR and let me search it."
+    mechanism: "content.register_upload -> content.record_chunks -> aiq.query TEXT FROM chunks"
+    catches: [never-executed]
+    role: authenticated
+    claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":["aa000000-0000-0000-0000-0000000000a1"]}'
+    setup: |
+      create temp table up as select content.register_upload(
+          p_channel      => 'pv-reports',
+          p_checksum     => 'sha256:ev-upload-01',
+          p_bucket       => 'pv',
+          p_object_key   => 'psur/2026/tolvaxen.pdf',
+          p_size_bytes   => 48213,
+          p_content_type => 'application/pdf',
+          p_title        => 'Tolvaxen PSUR 2026',
+          p_org_id       => 'aa000000-0000-0000-0000-0000000000a1',
+          p_external_id  => 'ev-psur-2026-tolvaxen') as rid;
+      select content.record_chunks((select rid from up), $j$[
+        {"ordinal":0,"content":"Hepatic injury reports rose over the reporting period for batch LOT-9931Q.","start_offset":0,"end_offset":74},
+        {"ordinal":1,"content":"No new signal met the criteria for expedited regulatory notification.","start_offset":75,"end_offset":144}
+      ]$j$::jsonb);
+    check:
+      - name: the upload produced a resource
+        sql: "select (select rid from up) is not null"
+        is: "true"
+        because: "the row is the handle everything downstream uses; without it the bytes are in a bucket nobody can name"
+      - name: the chunks carry spans back into the source
+        sql: "select count(*) from content.resource_chunks where resource_id=(select rid from up) and start_offset is not null"
+        is: "2"
+        because: "a chunk with no span cannot be quoted back to the page it came from, and a citation that cannot be checked is a citation nobody should trust"
+      - name: and it is searchable immediately, with no reindex step
+        sql: "select jsonb_array_length(aiq.query('TEXT \"LOT-9931Q\" FROM chunks LIMIT 5')->'rows')"
+        is: "1"
+        because: "the lexical index is a generated column plus GIN, so 'searchable' and 'written' are the same transaction -- an explicit reindex is a step somebody forgets"
+
+  - id: upload-02
+    category: upload
+    title: Re-registering the same external id updates one resource
+    asks: "The poller ran twice."
+    mechanism: "content.register_upload -- external_id is the idempotency key"
+    catches: [idempotency-over-dead-run, silent-success]
+    role: authenticated
+    claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":["aa000000-0000-0000-0000-0000000000a1"]}'
+    setup: |
+      create temp table up as select content.register_upload(
+          'pv-reports','sha256:ev-upload-02','pv','psur/a.pdf',100,'application/pdf',
+          'PSUR A',null,'aa000000-0000-0000-0000-0000000000a1','{}'::jsonb,'ev-psur-a') as rid;
+    check:
+      - name: the same external id returns the same resource
+        sql: |
+          select content.register_upload('pv-reports','sha256:ev-upload-02','pv','psur/a.pdf',
+                 100,'application/pdf','PSUR A',null,
+                 'aa000000-0000-0000-0000-0000000000a1','{}'::jsonb,'ev-psur-a')
+               = (select rid from up)
+        is: "true"
+        because: "a poller with no idempotency key ingests the same document once per poll, and the corpus accumulates one copy per tick"
+
+  - id: upload-03
+    category: upload
+    title: The same bytes with NO external id ingest twice
+    asks: "I retried the upload and forgot the id."
+    mechanism: "content.register_upload -- the checksum dedups the BYTES, only external_id dedups the REGISTRATION"
+    catches: [silent-success]
+    role: authenticated
+    claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":["aa000000-0000-0000-0000-0000000000a1"]}'
+    setup: |
+      create temp table up as select content.register_upload(
+          'pv-reports','sha256:ev-upload-03','pv','psur/b.pdf',100,'application/pdf',
+          'PSUR B',null,'aa000000-0000-0000-0000-0000000000a1') as rid;
+      create temp table up2 as select content.register_upload(
+          'pv-reports','sha256:ev-upload-03','pv','psur/b.pdf',100,'application/pdf',
+          'PSUR B',null,'aa000000-0000-0000-0000-0000000000a1') as rid;
+    check:
+      - name: two resources
+        sql: "select ((select rid from up2) = (select rid from up))"
+        is: "false"
+        because: "this is the documented behaviour and it is the trap: the two dedup keys do different jobs, and only one of them is about the registration"
+      - name: over ONE file
+        sql: |
+          select (select file_id from content.resources where id=(select rid from up2))
+               = (select file_id from content.resources where id=(select rid from up))
+        is: "true"
+        because: "the checksum does its own job correctly -- the bytes are stored once -- which is exactly why the duplicate registration is easy to miss"
+
+  - id: upload-04
+    category: upload
+    title: A channel pointing at a workflow that does not exist fails the upload
+    asks: "What happens if the ingest pipeline is misconfigured?"
+    mechanism: "content.register_upload -- the channel's ingest_workflow is started in the same transaction"
+    catches: [silent-success]
+    role: authenticated
+    claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":["aa000000-0000-0000-0000-0000000000a1"]}'
+    setup: |
+      set local role app_owner;
+      insert into content.channels (id, name, kind, config)
+      values ('11110000-0000-0000-0000-0000000000c9','pv-broken','file_upload',
+              '{"ingest_workflow":"no_such_workflow"}'::jsonb);
+      set local role authenticated;
+    check:
+      - name: the upload is refused rather than accepted and lost
+        sql: |
+          select content.register_upload('pv-broken','sha256:ev-04','pv','x.pdf',1,
+                 'application/pdf','X',null,'aa000000-0000-0000-0000-0000000000a1')
+        raises: "no_such_workflow|not found|no workflow_def"
+        because: "an upload that returns a resource id and starts no pipeline is a document that will never be parsed, with a receipt saying it was accepted"
+      - name: and nothing was left behind
+        role: app_owner
+        sql: "select count(*) from content.files where object_key='x.pdf'"
+        is: "0"
+        because: "a half-registered upload is worse than a refused one: drift will report it forever and nobody knows whether to retry"
+
+  - id: upload-05
+    category: upload
+    title: A tenant cannot rewrite another tenant's chunks
+    asks: "Can I overwrite somebody else's document if I know its uuid?"
+    mechanism: "content.assert_org_write, called by every content writer"
+    catches: [tenancy-leak, unchecked-rule]
+    role: authenticated
+    claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":["aa000000-0000-0000-0000-0000000000a1"]}'
+    setup: |
+      create temp table up as select content.register_upload(
+          'pv-reports','sha256:ev-upload-05','pv','psur/c.pdf',100,'application/pdf',
+          'PSUR C',null,'aa000000-0000-0000-0000-0000000000a1','{}'::jsonb,'ev-psur-c') as rid;
+      select content.record_chunks((select rid from up),
+             '[{"ordinal":0,"content":"org A private finding"}]'::jsonb);
+    check:
+      - name: the other tenant is refused, holding only the uuid
+        claims: '{"sub":"55000000-0000-0000-0000-000000000003","orgs":["bb000000-0000-0000-0000-0000000000b1"]}'
+        sql: "select content.record_chunks((select rid from up), '[{\"ordinal\":0,\"content\":\"planted\"}]'::jsonb)"
+        raises: "not yours|denied|not authorized"
+        because: "record_chunks DELETEs before it inserts, so an unchecked writer is destruction and content injection in one call, into the corpus SEMANTIC and SEARCH read. The read path being right is not evidence about the write path"
+      - name: and the original text is untouched
+        role: app_owner
+        sql: "select content from content.resource_chunks where resource_id=(select rid from up)"
+        is: "org A private finding"
+        because: "a refusal that still deleted is the worse half"
+
+  - id: upload-06
+    category: upload
+    title: A tenant's document does not answer another tenant's search
+    asks: "Whose documents am I searching?"
+    mechanism: "content RLS on resources, joined through resource_chunks"
+    catches: [tenancy-leak]
+    role: authenticated
+    claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":["aa000000-0000-0000-0000-0000000000a1"]}'
+    setup: |
+      create temp table up as select content.register_upload(
+          'pv-reports','sha256:ev-upload-06','pv','psur/d.pdf',100,'application/pdf',
+          'PSUR D',null,'aa000000-0000-0000-0000-0000000000a1','{}'::jsonb,'ev-psur-d') as rid;
+      select content.record_chunks((select rid from up),
+             '[{"ordinal":0,"content":"Westmark exposure to batch LOT-7712Z is confined to one study."}]'::jsonb);
+    check:
+      - name: the owner finds it
+        sql: "select jsonb_array_length(aiq.query('TEXT \"LOT-7712Z\" FROM chunks LIMIT 5')->'rows')"
+        is: "1"
+        because: "a tenancy check that also hides the row from its owner is a broken feature, not a safe one"
+      - name: and the other tenant does not
+        claims: '{"sub":"55000000-0000-0000-0000-000000000003","orgs":["bb000000-0000-0000-0000-0000000000b1"]}'
+        sql: "select jsonb_array_length(aiq.query('TEXT \"LOT-7712Z\" FROM chunks LIMIT 5')->'rows')"
+        is: "0"
+        because: "retrieval over another tenant's corpus is the breach shape: nothing errors, the answer is just somebody else's"
+
+  - id: upload-07
+    category: upload
+    title: Drift finds a document that was accepted and never parsed
+    asks: "Which uploads are stuck?"
+    mechanism: "content.check_drift -- ready-but-empty resources and orphaned files"
+    catches: [silent-success, never-executed]
+    role: app_owner
+    setup: |
+      insert into content.resources (id, channel_id, title, status, org_id)
+      values ('39990000-0000-0000-0000-0000000000d1',
+              '11110000-0000-0000-0000-0000000000c1','Never parsed','ready',null);
+    check:
+      - name: drift reports it, by id and by kind
+        sql: "select count(*) from content.check_drift() d where d.id='39990000-0000-0000-0000-0000000000d1'"
+        gte: "1"
+        because: "an upload whose parse never ran looks identical to one with nothing to say; without drift the corpus silently shrinks and every answer gets quietly worse"
+
+  - id: upload-08
+    category: upload
+    title: A parse that produced nothing is `stored`, not `ready`
+    asks: "The PDF was a scan with no text layer."
+    mechanism: "content.record_ingest -- no chunks means stored, and drift stays clean"
+    catches: [silent-success, empty-success]
+    role: app_owner
+    setup: |
+      create temp table up as select content.register_upload(
+          'pv-reports','sha256:ev-upload-08','pv','scan.pdf',100,'application/pdf',
+          'A scan',null,null,'{}'::jsonb,'ev-scan') as rid;
+      select content.record_ingest((select rid from up),
+             '{"chunks": [], "parser": "pdf", "markdown": null}'::jsonb);
+    check:
+      - name: it is not claimed to be ready
+        sql: "select status from content.resources where id=(select rid from up)"
+        is: "stored"
+        because: "`ready` with no chunks is a document the corpus will never answer from and that nothing will ever retry -- the distinction is what keeps drift honest"
+      - name: and drift is not shouting about it
+        sql: "select count(*) from content.check_drift() d where d.id=(select rid from up)"
+        is: "0"
+        because: "a drift report that lists every legitimately empty document is a report nobody reads"
+
+  - id: upload-09
+    category: upload
+    title: The worker learns where to fetch the bytes, and a user cannot
+    asks: "How does the parser get the file?"
+    mechanism: "content.ingest_target / content.resolve_file -- worker-facing, not granted to authenticated"
+    catches: [tenancy-leak, unchecked-rule]
+    role: app_owner
+    setup: |
+      create temp table up as select content.register_upload(
+          'pv-reports','sha256:ev-upload-09','pv','psur/e.pdf',100,'application/pdf',
+          'PSUR E',null,null,'{}'::jsonb,'ev-psur-e') as rid;
+    check:
+      - name: the target names bucket and key
+        sql: "select content.ingest_target((select rid from up))->>'bucket'"
+        is: "pv"
+        because: "the bytes are never in Postgres; if the row did not carry where they are, the parser would have nothing to open"
+      - name: and an ordinary user may not call it
+        role: authenticated
+        claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":["aa000000-0000-0000-0000-0000000000a1"]}'
+        sql: "select content.ingest_target((select rid from up))"
+        raises: "permission denied"
+        because: "a user-reachable function that resolves any resource id to a bucket path is a pre-signed URL generator for the whole store"
+
+  - id: upload-10
+    category: upload
+    title: Chunks queued for embedding come back in order, with their text
+    asks: "What does the embedding step actually get?"
+    mechanism: "content.chunks_to_embed -- ordinal order, id and text"
+    catches: [wrong-grouping, silent-success]
+    role: app_owner
+    setup: |
+      create temp table up as select content.register_upload(
+          'pv-reports','sha256:ev-upload-10','pv','psur/f.pdf',100,'application/pdf',
+          'PSUR F',null,null,'{}'::jsonb,'ev-psur-f') as rid;
+      select content.record_chunks((select rid from up), $j$[
+        {"ordinal":0,"content":"first"},
+        {"ordinal":1,"content":"second"},
+        {"ordinal":2,"content":"third"}
+      ]$j$::jsonb);
+    check:
+      - name: all three, in ordinal order
+        sql: "select string_agg(e->>'content', ',') from jsonb_array_elements(content.chunks_to_embed((select rid from up))) e"
+        is: "first,second,third"
+        because: "an embed batch that reorders its rows pairs every vector with the wrong chunk, and nothing downstream can notice -- the widths all match"
+      - name: and nothing for a resource with no chunks
+        sql: "select jsonb_array_length(content.chunks_to_embed('39990000-0000-0000-0000-0000000000ff'::uuid))"
+        is: "0"
+        because: "an empty batch has to be empty rather than an error, or every polling pipeline logs a failure on its quiet ticks"
+
+  - id: upload-11
+    category: upload
+    title: A file over the payload cap is refused terminally, with the remedy
+    asks: "The response was 70KB."
+    mechanism: "schema.sql §7 payload trigger -- workflow.max_payload_bytes, and the $artifact ref"
+    catches: [oversized-payload]
+    role: app_owner
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_upload11
+      steps:
+        - id: fetch
+          queue: http
+          rest: {url: 'https://example.invalid/big', method: GET}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_upload11','{}'::jsonb) as run_id;
+      create temp table t as select * from workflow.claim_task('http','w1');
+      select workflow.complete_task((select id from t),
+             jsonb_build_object('status',200,'result', repeat('x', 200000)), 'w1');
+    check:
+      - name: the task is failed, not retrying
+        sql: "select status from workflow.tasks where id=(select id from t)"
+        is: "failed"
+        because: "retrying an oversized response is pure waste -- it is byte-identical every time -- and the worker cannot classify it, because the HTTP call succeeded"
+      - name: and the message names the remedy rather than saying 'too big'
+        sql: "select error->>'error' from workflow.tasks where id=(select id from t)"
+        matches: "register_artifact|artifact|max_payload_bytes"
+        because: "an author told only the size goes looking for a bigger number; the answer is usually a narrower jsonpath or an artifact ref"
+
+  - id: upload-12
+    category: upload
+    title: An artifact is a resource id, not a bucket path
+    asks: "Where do the bytes a step produced go?"
+    mechanism: "workflow.register_artifact -> a row in content.resources; outputs.md"
+    catches: [unowned-resource, tenancy-leak]
+    role: app_owner
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_upload12
+      steps:
+        - id: render
+          queue: reports
+          work: true
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_upload12','{}'::jsonb) as run_id;
+      create temp table t as select * from workflow.claim_task('reports','w1');
+      create temp table a as select workflow.register_artifact(
+          (select id from t), 'sha256:ev-artifact-12', 'pv',
+          'reports/2026/tolvaxen.pdf', 4096, 'application/pdf') as rid;
+    check:
+      - name: registering returns a resource id
+        sql: "select exists (select 1 from content.resources where id=(select rid from a))"
+        is: "true"
+        because: "an s3:// URI in a jsonb column is not RLS-scoped, not checksum-deduped, not servable and not visible to drift -- a resource id is all four"
+      - name: and the bytes are deduped by checksum like any other file
+        sql: "select checksum from content.files f join content.resources r on r.file_id=f.id where r.id=(select rid from a)"
+        is: "sha256:ev-artifact-12"
+        because: "an artifact that skipped the file table would be the one upload path with its own storage rules"
+
+  - id: upload-13
+    category: upload
+    title: A span key the parser spelled differently is dropped in silence
+    asks: "My parser emits start_char. Did the spans land?"
+    mechanism: "content.record_chunks -- reads start_offset / end_offset from each chunk object"
+    catches: [silent-success, undocumented-contract]
+    status: open-defect
+    role: app_owner
+    setup: |
+      create temp table up as select content.register_upload(
+          'pv-reports','sha256:ev-upload-13','pv','psur/g.pdf',100,'application/pdf',
+          'PSUR G',null,null,'{}'::jsonb,'ev-psur-g') as rid;
+      -- The spelling `dev/examples/05-upload.sql` uses, verbatim.
+      create temp table n as select content.record_chunks((select rid from up), $j$[
+        {"ordinal":0,"content":"Hepatic injury reports rose in the period.","start_char":0,"end_char":42}
+      ]$j$::jsonb) as recorded;
+    check:
+      - name: the call reports success
+        sql: "select recorded::text from n"
+        is: "1"
+        because: "this is the half that works, and it is what makes the next check a silent failure rather than a loud one"
+      - name: and the span it was given is on the row
+        sql: "select coalesce(start_offset::text,'(null)') from content.resource_chunks where resource_id=(select rid from up)"
+        is: "0"
+        because: >-
+          THIS IS THE FINDING, and it is live in a published example.
+          `record_chunks` reads `start_offset`/`end_offset` and ignores every
+          other key. `dev/examples/05-upload.sql` -- whose output is quoted on
+          the `Ten things, worked through` docs page under the heading "what the
+          parser produced, WITH SPANS BACK INTO THE SOURCE" -- passes
+          `start_char`/`end_char`. Every span it records is NULL, the call
+          returns the chunk count, and the example reads as a demonstration of
+          a feature it is not exercising. Two halves: the example is wrong, and
+          `record_chunks` accepts an unrecognised key rather than refusing it,
+          which is failure-modes.md §6's "a deserialiser silently drops keys it
+          does not know" one layer down from the YAML compiler that already
+          learned to refuse them. A parser author gets a green count and an
+          uncitable corpus.
+      - name: and the correct spelling does land
+        sql: |
+          select (select start_offset::text from content.resource_chunks
+                   where resource_id = (select rid from up))
+          from (select content.record_chunks((select rid from up), $j$[
+                  {"ordinal":0,"content":"same text","start_offset":7,"end_offset":42}
+                ]$j$::jsonb)) z
+        is: "7"
+        because: "the mechanism is right; only the contract is under-stated -- so the fix is a refusal and a corrected example, not a schema change"
+
+# =============================================================================
+# FILE TO GRAPH -- a document arrives and the world model grows.
+#
+# Chunking makes a document FINDABLE; the graph is what makes it CONNECTED. The
+# journey is: land what an extractor said about a PSUR, and then ask a question
+# about a product and have the answer reach a document nobody linked to it --
+# because both were linked to the same entity.
+#
+# The extractor's output is a LITERAL here, exactly as `graph-demo.sql` does it
+# and for the same reason: the model half costs money and is not where the bugs
+# are. "Given this JSON, does the right graph appear" is entirely testable
+# without one, and that is the half that has been wrong.
+# =============================================================================
+
+  - id: f2g-01
+    category: file-to-graph
+    title: An extracted name binds to a row that was there first
+    asks: "The PSUR names Tolvaxen. Is that the Tolvaxen we already know?"
+    mechanism: "aiq.land_graph -- the resolver decides residence; the model only names and connects"
+    catches: [wrong-answer-not-error, two-registrations]
+    role: app_owner
+    setup: |
+      insert into content.resources (id, channel_id, title, status, metadata)
+      values ('39990000-0000-0000-0000-0000000000f1',
+              '11110000-0000-0000-0000-0000000000c1',
+              'Tolvaxen PSUR 2026','ready','{"doctype":"psur"}'::jsonb);
+      create temp table r as select aiq.land_graph($g${
+        "nodes": [
+          {"k":"document","n":"Tolvaxen PSUR 2026"},
+          {"k":"product", "n":"tolvaxen"},
+          {"k":"sponsor", "n":"ALTM"}
+        ],
+        "edges": [
+          {"s":0,"t":1,"r":"mentions"},
+          {"s":0,"t":2,"r":"mentions"}
+        ]}$g$::jsonb, '39990000-0000-0000-0000-0000000000f1'::uuid) as receipt;
+    check:
+      - name: every named node resolved to a real typed row
+        sql: "select (select receipt from r)#>>'{residence,pg}'"
+        is: "3"
+        because: "if an extracted name landed as a candidate instead of binding, the document would join the graph beside the product rather than at it, and no question about the product would reach it"
+      - name: nothing became a candidate
+        sql: "select (select receipt from r)#>>'{residence,soft}'"
+        is: "0"
+        because: "a candidate is the honest answer for a name nothing knows -- and the wrong answer for one it does"
+      - name: and the edge is incident on the product node the fixture built
+        sql: |
+          select count(*) from aiq.edges e
+          join aiq.nodes n on n.id = e.dst_id
+          where n.entity_type='product' and n.entity_id='52000000-0000-0000-0000-000000000001'
+            and e.provenance->>'tier'='machine'
+        is: "1"
+        because: "binding to the typed node id rather than to a display key is what makes the graph one graph -- D3, and the reason edges never store names"
+
+  - id: f2g-02
+    category: file-to-graph
+    title: A name nothing knows becomes a candidate, not an invented row
+    asks: "The PSUR says 'hepatic injury'. We have no such entity type."
+    mechanism: "aiq.soft_nodes -- a candidate carrying claimed_kind"
+    catches: [wrong-answer-not-error]
+    role: app_owner
+    setup: |
+      insert into content.resources (id, channel_id, title, status)
+      values ('39990000-0000-0000-0000-0000000000f2',
+              '11110000-0000-0000-0000-0000000000c1','PSUR with an unknown kind','ready');
+      create temp table r as select aiq.land_graph($g${
+        "nodes": [
+          {"k":"document","n":"PSUR with an unknown kind"},
+          {"k":"adverse_event","n":"hepatic injury","a":{"grade":"3"}}
+        ],
+        "edges": [{"s":0,"t":1,"r":"mentions"}]}$g$::jsonb,
+        '39990000-0000-0000-0000-0000000000f2'::uuid) as receipt;
+    check:
+      - name: it landed as a candidate
+        sql: "select (select receipt from r)#>>'{residence,soft}'"
+        is: "1"
+        because: "a machine that can create rows in a human's typed table is a machine that can invent a drug"
+      - name: carrying what the model called it
+        sql: "select kind from aiq.soft_nodes where key='hepatic injury'"
+        is: "adverse_event"
+        because: "the claimed kind is the evidence somebody needs to decide whether to promote it or to register a new entity type"
+      - name: and no product row was invented
+        sql: "select count(*) from calder.products where inn='hepatic injury'"
+        is: "0"
+        because: "the residence decision is the whole safety property of machine extraction"
+
+  - id: f2g-03
+    category: file-to-graph
+    title: Two documents meet at one entity
+    asks: "What else do we know about the sponsor this PSUR names?"
+    mechanism: "aiq.land_graph -- two resources, one shared vertex; graph-index.md §7"
+    catches: [wrong-answer-not-error]
+    role: app_owner
+    setup: |
+      insert into content.resources (id, channel_id, title, status) values
+        ('39990000-0000-0000-0000-0000000000f3','11110000-0000-0000-0000-0000000000c1','PSUR one','ready'),
+        ('39990000-0000-0000-0000-0000000000f4','11110000-0000-0000-0000-0000000000c1','Inspection report two','ready');
+      select aiq.land_graph($g${
+        "nodes": [{"k":"document","n":"PSUR one"},{"k":"sponsor","n":"ALTM"}],
+        "edges": [{"s":0,"t":1,"r":"mentions"}]}$g$::jsonb,
+        '39990000-0000-0000-0000-0000000000f3'::uuid);
+      select aiq.land_graph($g${
+        "nodes": [{"k":"document","n":"Inspection report two"},{"k":"sponsor","n":"ALTM"}],
+        "edges": [{"s":0,"t":1,"r":"mentions"}]}$g$::jsonb,
+        '39990000-0000-0000-0000-0000000000f4'::uuid);
+    check:
+      - name: a walk from the sponsor reaches both documents
+        sql: |
+          select count(*) from jsonb_array_elements(
+                   aiq.query('GRAPH "ALTM" TYPE mentions')->'rows') x
+          where x->>'entity_type' = 'document'
+        is: "2"
+        because: "the two documents were never linked to each other, only to the same entity -- that is the entire mechanism, and it is the thing chunking alone cannot do"
+
+  - id: f2g-04
+    category: file-to-graph
+    title: The same edge from two documents is one row with two sources
+    asks: "Two reports say the same thing. Is that stronger?"
+    mechanism: "aiq.upsert_graph -- corroboration merges provenance rather than duplicating the edge"
+    catches: [wrong-grouping]
+    role: app_owner
+    setup: |
+      insert into content.resources (id, channel_id, title, status) values
+        ('39990000-0000-0000-0000-0000000000f5','11110000-0000-0000-0000-0000000000c1','Report five','ready'),
+        ('39990000-0000-0000-0000-0000000000f6','11110000-0000-0000-0000-0000000000c1','Report six','ready');
+      select aiq.land_graph($g${
+        "nodes": [{"k":"product","n":"tolvaxen"},{"k":"sponsor","n":"BRNG"}],
+        "edges": [{"s":0,"t":1,"r":"supplies"}]}$g$::jsonb,
+        '39990000-0000-0000-0000-0000000000f5'::uuid);
+      select aiq.land_graph($g${
+        "nodes": [{"k":"product","n":"tolvaxen"},{"k":"sponsor","n":"BRNG"}],
+        "edges": [{"s":0,"t":1,"r":"supplies"}]}$g$::jsonb,
+        '39990000-0000-0000-0000-0000000000f6'::uuid);
+    check:
+      - name: one edge, not two
+        sql: |
+          select count(*) from aiq.edges e
+          join aiq.nodes s on s.id=e.src_id join aiq.nodes d on d.id=e.dst_id
+          where s.entity_id='52000000-0000-0000-0000-000000000001'
+            and d.entity_id='51000000-0000-0000-0000-000000000003'
+            and e.relation='supplies'
+        is: "1"
+        because: "counting rows is how anything downstream measures strength; two rows for one claim double-counts a single assertion made twice"
+      - name: asserted by two sources
+        sql: |
+          select jsonb_array_length(e.provenance->'sources') from aiq.edges e
+          join aiq.nodes s on s.id=e.src_id join aiq.nodes d on d.id=e.dst_id
+          where s.entity_id='52000000-0000-0000-0000-000000000001'
+            and d.entity_id='51000000-0000-0000-0000-000000000003'
+            and e.relation='supplies'
+        is: "2"
+        because: "corroboration has to be visible or the merge has thrown information away rather than combined it"
+
+  - id: f2g-05
+    category: file-to-graph
+    title: Corroboration by a weaker source does not weaken a stronger claim
+    asks: "A forum post agrees with a registry filing. Does the edge get worse?"
+    mechanism: "aiq.upsert_graph -- weight = greatest(existing, incoming)"
+    catches: [wrong-answer-not-error]
+    role: app_owner
+    setup: |
+      insert into content.resources (id, channel_id, title, status)
+      values ('39990000-0000-0000-0000-0000000000f7','11110000-0000-0000-0000-0000000000c1','Forum post','ready');
+      create temp table before as
+        select weight from aiq.edges e
+        join aiq.nodes s on s.id=e.src_id join aiq.nodes d on d.id=e.dst_id
+        where s.entity_id='52000000-0000-0000-0000-000000000001'
+          and d.entity_id='51000000-0000-0000-0000-000000000002'
+          and e.relation='made_by';
+      select aiq.land_graph($g${
+        "nodes": [{"k":"product","n":"tolvaxen"},{"k":"sponsor","n":"ALTM"}],
+        "edges": [{"s":0,"t":1,"r":"supplies"}]}$g$::jsonb,
+        '39990000-0000-0000-0000-0000000000f7'::uuid);
+    check:
+      - name: the authored edge keeps its weight
+        sql: |
+          select (select weight from before) = (
+            select weight from aiq.edges e
+            join aiq.nodes s on s.id=e.src_id join aiq.nodes d on d.id=e.dst_id
+            where s.entity_id='52000000-0000-0000-0000-000000000001'
+              and d.entity_id='51000000-0000-0000-0000-000000000002'
+              and e.relation='made_by')
+        is: "true"
+        because: "`least` was tried here and quietly demoted every authored edge to the machine prior, reordering every walk through it -- corroboration by a weaker source is not evidence against a stronger one"
+
+  - id: f2g-06
+    category: file-to-graph
+    title: The relation vocabulary is closed, and says why
+    asks: "The extractor invented a relation."
+    mechanism: "aiq.graph_vocabulary -- a closed set; graph-index.md §5.3"
+    catches: [wrong-answer-not-error, version-skew]
+    role: app_owner
+    setup: |
+      insert into content.resources (id, channel_id, title, status)
+      values ('39990000-0000-0000-0000-0000000000f8','11110000-0000-0000-0000-0000000000c1','Invented','ready');
+    check:
+      - name: refused, and told why the set is closed
+        sql: |
+          select aiq.land_graph($g${
+            "nodes": [{"k":"product","n":"tolvaxen"},{"k":"sponsor","n":"ALTM"}],
+            "edges": [{"s":0,"t":1,"r":"causes_harm_to"}]}$g$::jsonb,
+            '39990000-0000-0000-0000-0000000000f8'::uuid)
+        raises: "not in aiq.graph_vocabulary"
+        because: "an extractor that can emit anything cannot be checked, costed, or swapped for a cheaper one -- and a graph that accumulates typos-as-relations cannot be queried by TYPE at all"
+
+  - id: f2g-07
+    category: file-to-graph
+    title: An out-of-range ordinal raises rather than silently dropping an edge
+    asks: "The model referenced node 9 of 3."
+    mechanism: "aiq.upsert_graph -- ordinals index the node list; graph-index.md §10.5"
+    catches: [silent-success]
+    role: app_owner
+    setup: |
+      insert into content.resources (id, channel_id, title, status)
+      values ('39990000-0000-0000-0000-0000000000f9','11110000-0000-0000-0000-0000000000c1','Bad ordinal','ready');
+    check:
+      - name: refused
+        sql: |
+          select aiq.land_graph($g${
+            "nodes": [{"k":"product","n":"tolvaxen"}],
+            "edges": [{"s":0,"t":9,"r":"mentions"}]}$g$::jsonb,
+            '39990000-0000-0000-0000-0000000000f9'::uuid)
+        raises: "ordinal|range|index"
+        because: "an out-of-range ordinal silently skipped is an extraction that reports N edges and lands N-1, with the missing one being whichever the model was least sure about"
+
+  - id: f2g-08
+    category: file-to-graph
+    title: A self-edge is dropped and counted, not landed
+    asks: "The model linked a node to itself."
+    mechanism: "aiq.upsert_graph -- self_edges_dropped in the receipt"
+    catches: [silent-success]
+    role: app_owner
+    setup: |
+      insert into content.resources (id, channel_id, title, status)
+      values ('39990000-0000-0000-0000-0000000000fa','11110000-0000-0000-0000-0000000000c1','Self edge','ready');
+      create temp table r as select aiq.land_graph($g${
+        "nodes": [{"k":"product","n":"tolvaxen"},{"k":"sponsor","n":"ALTM"}],
+        "edges": [{"s":0,"t":0,"r":"is_a"},{"s":0,"t":1,"r":"supplies"}]}$g$::jsonb,
+        '39990000-0000-0000-0000-0000000000fa'::uuid) as receipt;
+    check:
+      - name: the self-edge is dropped
+        sql: "select (select receipt from r)->>'self_edges_dropped'"
+        is: "1"
+        because: "a self-edge makes every walk revisit its own seed; dropping it silently would make the receipt's edge count a lie"
+      - name: and the real edge still landed
+        sql: "select (select receipt from r)->>'edges_new'"
+        is: "1"
+        because: "refusing the whole payload for one bad edge throws away a document's worth of correct extraction"
+
+  - id: f2g-09
+    category: file-to-graph
+    title: A candidate promoted into a real node keeps its edges
+    asks: "We decided 'hepatic injury' really is a signal. Merge it."
+    mechanism: "aiq.promote_soft_node -- one merged edge, provenance from both, nothing left pointing at the evicted candidate"
+    catches: [silent-success, wrong-answer-not-error]
+    role: app_owner
+    setup: |
+      insert into content.resources (id, channel_id, title, status)
+      values ('39990000-0000-0000-0000-0000000000fb','11110000-0000-0000-0000-0000000000c1','Promote me','ready');
+      select aiq.land_graph($g${
+        "nodes": [{"k":"document","n":"Promote me"},
+                  {"k":"adverse_event","n":"hepatic injury"}],
+        "edges": [{"s":0,"t":1,"r":"mentions"}]}$g$::jsonb,
+        '39990000-0000-0000-0000-0000000000fb'::uuid);
+      create temp table sn as select id from aiq.soft_nodes where key='hepatic injury';
+      select aiq.promote_soft_node((select id from sn),
+             (select n.id from aiq.nodes n
+               where n.entity_type='signal'
+                 and n.entity_id='56000000-0000-0000-0000-000000000001'));
+    check:
+      - name: nothing still points at the evicted candidate
+        sql: "select count(*) from aiq.edges where src_id=(select id from sn) or dst_id=(select id from sn)"
+        is: "0"
+        because: "an edge left pointing at a promoted candidate is a dangling half of the merge, invisible to every walk that goes through the real node"
+      - name: and the document now reaches the real signal
+        sql: |
+          select count(*) from aiq.edges e
+          join aiq.nodes d on d.id=e.dst_id
+          where d.entity_type='signal' and d.entity_id='56000000-0000-0000-0000-000000000001'
+            and e.provenance->>'tier'='machine'
+        gte: "1"
+        because: "promotion exists so a human decision about identity is applied once and every prior extraction inherits it"
+
+  - id: f2g-10
+    category: file-to-graph
+    title: A workflow lands a document's graph and asks a question of it
+    asks: "Ingest the PSUR, index it, then tell me which group is exposed."
+    mechanism: "workflow.define_yaml -- a `sql:` step over the landed graph, in one run, with no worker"
+    catches: [silent-success, never-executed]
+    role: app_owner
+    setup: |
+      insert into content.resources (id, channel_id, title, status)
+      values ('39990000-0000-0000-0000-0000000000fc','11110000-0000-0000-0000-0000000000c1','PSUR for the pipeline','ready');
+      select aiq.land_graph($g${
+        "nodes": [{"k":"document","n":"PSUR for the pipeline"},{"k":"product","n":"tolvaxen"}],
+        "edges": [{"s":0,"t":1,"r":"mentions"}]}$g$::jsonb,
+        '39990000-0000-0000-0000-0000000000fc'::uuid);
+      select workflow.define_yaml($y$
+      name: ev_f2g10
+      steps:
+        - id: expand
+          p8ql: 'GRAPH "tolvaxen" DEPTH 2'
+        - id: holders
+          needs: [expand]
+          sql: {function: products_of, args: ['ALTM']}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_f2g10','{}'::jsonb) as run_id;
+    check:
+      - name: the run completed with no worker anywhere
+        sql: "select status from workflow.runs where id=(select run_id from ctx)"
+        is: "completed"
+        because: "both steps are `sql`, executed inside Postgres -- if this needed a process, 'a document becomes answerable' would need a deployment"
+      - name: the walk reached the document the extractor landed
+        sql: |
+          select (select count(*) from jsonb_array_elements(
+                   (select output#>'{result,rows}' from workflow.tasks
+                     where run_id=(select run_id from ctx) and step_key='expand')) x
+                  where x->>'entity_type'='document')
+        gte: "1"
+        because: "this is the seam: a graph written by the ingestion path, read by the query path, inside a workflow -- and every bug this repo has found has lived in a seam"
+      - name: and the sponsor's holdings came back
+        sql: "select jsonb_array_length(output->'result') from workflow.tasks where run_id=(select run_id from ctx) and step_key='holders'"
+        gte: "2"
+        because: "a fan-in that returns an empty array on a populated graph is the silent-success shape, and `[]` is exactly what a wrong join returns"
+
+# =============================================================================
+# COLLECTION -- polling somebody else's API, and landing the records.
+#
+# The shape a real pipeline meets on every run: the width comes from a query,
+# most calls succeed, some 404 because the record does not exist, one 200s with
+# an empty body, and the source publishes a rate ceiling that getting wrong
+# gets you blocked rather than throttled. failure-modes.md §2 is titled
+# "ordinary reality, treated as an outage" for this category specifically.
+#
+# No network is touched. Whether an HTTP client works is not what has bugs
+# here; what has bugs is what the engine does with the answers.
+# =============================================================================
+
+  - id: coll-01
+    category: collection
+    title: The width of the fan-out comes from a query, not from the document
+    asks: "Poll the registry for every product we market."
+    mechanism: "YAML.md § Matrix fan-out -- rows: names a registered function; expansion is in-transaction"
+    catches: [silent-success, trigger-on-untaken-transition]
+    role: app_owner
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_coll01
+      steps:
+        - id: fan
+          matrix:
+            rows: {function: registry_targets}
+            max_fanout: 100
+            template:
+              queue: http
+              rest: {url: 'http://p8-faultsrv:8099/{{item.path}}', method: GET}
+        - id: tally
+          needs: [fan]
+          sql: {function: tally_children, args: ['{{steps.fan.result.task_id}}']}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_coll01','{}'::jsonb) as run_id;
+    check:
+      - name: one child per row the query returned
+        sql: "select count(*) from workflow.tasks where run_id=(select run_id from ctx) and step_key like 'fan[%'"
+        is: "4"
+        because: "the four marketed shared-tier products are what the fixture holds; a width baked into the document would not move when the data does, which is the whole reason `rows:` is a query"
+      - name: and the children exist in the transaction that completed the parent
+        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='fan'"
+        is: "done"
+        because: "Argo's controller leaves a window in which the parent is done and the children do not exist, so a crash strands the fan-out with nothing to resume from. That transaction boundary -- not the syntax -- is the difference"
+
+  - id: coll-02
+    category: collection
+    title: Each child carries its own row, resolved, not a template
+    asks: "What did each call actually request?"
+    mechanism: "YAML.md § {{item.*}} is bound at expansion"
+    catches: [silent-template]
+    role: app_owner
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_coll02
+      steps:
+        - id: fan
+          matrix:
+            rows: {function: registry_targets}
+            max_fanout: 100
+            template:
+              queue: http
+              rest: {url: 'http://p8-faultsrv:8099/r/{{item.ref}}', method: GET}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_coll02','{}'::jsonb) as run_id;
+    check:
+      - name: no child holds an unresolved template
+        sql: "select count(*) from workflow.tasks where run_id=(select run_id from ctx) and step_key like 'fan[%' and input->>'url' like '%{{%'"
+        is: "0"
+        because: "deferring {{item.*}} to dispatch put `item` into the contract of a shipped worker that knows three namespaces -- all six children of the headline example failed with `unknown template namespace 'item'`"
+      - name: and the recorded input says precisely what will be sent
+        sql: "select count(distinct input->>'url') from workflow.tasks where run_id=(select run_id from ctx) and step_key like 'fan[%'"
+        is: "4"
+        because: "a recorded input reading `{{item.ref}}` forces a reader to join to input->'item' to learn what was requested; four identical urls would mean the substitution silently used one row for all of them"
+      - name: while the row itself is kept verbatim beside it
+        sql: "select count(*) from workflow.tasks where run_id=(select run_id from ctx) and step_key like 'fan[%' and input ? 'item'"
+        is: "4"
+        because: "the fan-in reads rows through `item`; substituting and discarding would make the snapshot unrecoverable"
+
+  - id: coll-03
+    category: collection
+    title: Naming a column the rows do not have fails before any child exists
+    asks: "I typo'd the column name."
+    mechanism: "expand_matrix -- the template is resolved against the row set at expansion"
+    catches: [silent-template, silent-success]
+    role: app_owner
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_coll03
+      steps:
+        - id: fan
+          matrix:
+            rows: {function: registry_targets}
+            max_fanout: 100
+            template:
+              queue: http
+              rest: {url: 'http://p8-faultsrv:8099/r/{{item.reff}}', method: GET}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_coll03','{}'::jsonb) as run_id;
+    check:
+      - name: the matrix step failed rather than fanning out
+        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='fan'"
+        is: "failed"
+        because: "a literal `{{item.reff}}` in a URL is a 404 nobody can explain, once per child, on a run that otherwise looks healthy"
+      - name: and no children were created
+        sql: "select count(*) from workflow.tasks where run_id=(select run_id from ctx) and step_key like 'fan[%'"
+        is: "0"
+        because: "failing after N children exist means N wasted calls against somebody else's rate limit before anyone reads the error"
+
+  - id: coll-04
+    category: collection
+    title: A ceiling on the fan-out, refused at authoring time
+    asks: "What stops a forgotten WHERE from inserting a cartesian product?"
+    mechanism: "YAML.md § max_fanout is mandatory -- refused by the compiler, by validate_matrix_steps, and at expansion"
+    catches: [rate-ceiling]
+    role: app_owner
+    check:
+      - name: a matrix with no ceiling is refused while you are authoring
+        sql: |
+          select workflow.define_yaml($y$
+          name: ev_coll04
+          steps:
+            - id: fan
+              matrix:
+                rows: {function: registry_targets}
+                template:
+                  sql: {function: calder_echo, args: ['x']}
+          $y$)
+        raises: "max_fanout"
+        because: "three gates exist because a spec can arrive three ways; this is the one that costs nothing, and a cartesian product inserted as task rows is not recoverable by fixing the query afterwards"
+
+  - id: coll-05
+    category: collection
+    title: Sixty cheap rows become six tasks, not sixty
+    asks: "Landing a record takes four milliseconds. Must each one be a task?"
+    mechanism: "YAML.md § Batching -- batch_size rows per child, partition_by keeps rows together"
+    catches: [rate-ceiling, wrong-grouping]
+    role: app_owner
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_coll05
+      steps:
+        - id: fan
+          matrix:
+            rows: {function: unprocessed_cases}
+            max_fanout: 500
+            batch_size: 10
+            partition_by: [product]
+            template:
+              sql: {function: land_cases, args: ['{{items}}']}
+        - id: tally
+          needs: [fan]
+          sql: {function: tally_children, args: ['{{steps.fan.result.task_id}}']}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_coll05','{}'::jsonb) as run_id;
+    check:
+      - name: three partitions of twenty, capped at ten, is six children
+        sql: "select count(*) from workflow.tasks where run_id=(select run_id from ctx) and step_key like 'fan[%'"
+        is: "6"
+        because: "a hundred four-millisecond writes as a hundred tasks costs a hundred claims, heartbeats, completions and cascade cycles -- the engine costing more than the job"
+      - name: and no partition was split across two products
+        sql: "select count(*) from workflow.tasks where run_id=(select run_id from ctx) and step_key like 'fan[%' and jsonb_array_length(input->'items') > 10"
+        is: "0"
+        because: "partition_by partitions FIRST and then caps each partition; capping first would put two products in one child and make {{item.product}} address one of them"
+      - name: every row was landed exactly once
+        sql: "select count(*) from calder.case_reports where processed"
+        is: "60"
+        because: "chunking is arithmetic over a row set, and off-by-one arithmetic produces a run that completes with fifty of sixty rows processed and nothing anywhere saying so"
+      - name: and the fan-in counted children, not rows
+        sql: "select output#>>'{result,children}' from workflow.tasks where run_id=(select run_id from ctx) and step_key='tally'"
+        is: "6"
+        because: "the aggregate is released once per child; a fan-in released after five of six is the partial-aggregate shape"
+
+  - id: coll-06
+    category: collection
+    title: A varying column addressed on a batch fails, rather than using the first row
+    asks: "Can I put {{item.seriousness}} in a batched call?"
+    mechanism: "YAML.md § Batching -- {{item.<col>}} works for a column CONSTANT across the batch"
+    catches: [silent-success, wrong-grouping]
+    role: app_owner
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_coll06
+      steps:
+        - id: fan
+          matrix:
+            rows: {function: unprocessed_cases}
+            max_fanout: 500
+            batch_size: 10
+            partition_by: [product]
+            template:
+              queue: http
+              rest: {url: 'http://p8-faultsrv:8099/s/{{item.seriousness}}', method: GET}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_coll06','{}'::jsonb) as run_id;
+    check:
+      - name: the step failed before any child existed
+        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='fan'"
+        is: "failed"
+        because: "silently substituting the first row's value is a task that processes ten rows and addresses one of them -- which looks correct in every test written at a batch size of one"
+      - name: and the message names the column
+        sql: "select error->>'error' from workflow.tasks where run_id=(select run_id from ctx) and step_key='fan'"
+        matches: "seriousness"
+        because: "the remedy is either partition_by or a different template, and both need to know which column was the problem"
+
+  - id: coll-07
+    category: collection
+    title: A record that does not exist does not cancel the report
+    asks: "The registry has no entry for one of our products."
+    mechanism: "YAML.md § Surviving a failed child -- continue_on: failed with a min_success floor"
+    catches: [absent-record, partial-aggregate]
+    role: app_owner
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_coll07
+      steps:
+        - id: fan
+          matrix:
+            rows: {function: registry_targets}
+            max_fanout: 100
+            continue_on: failed
+            min_success: 0.5
+            template:
+              queue: http
+              rest: {url: 'http://p8-faultsrv:8099/{{item.path}}', method: GET}
+        - id: tally
+          needs: [fan]
+          sql: {function: tally_children, args: ['{{steps.fan.result.task_id}}']}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_coll07','{}'::jsonb) as run_id;
+      -- One 404, three successes -- the exact shape that killed two real
+      -- fan-outs on their first six-wide run.
+      create temp table kids as
+        select id, row_number() over (order by step_key) as n
+        from workflow.tasks
+        where run_id=(select run_id from ctx) and step_key like 'fan[%';
+      select workflow.fail_task((select id from kids where n=1),
+             '{"error":"404 not found"}'::jsonb, true);
+      select workflow.complete_task((select id from kids where n=2), '{"status":200,"result":{}}'::jsonb);
+      select workflow.complete_task((select id from kids where n=3), '{"status":200,"result":{}}'::jsonb);
+      select workflow.complete_task((select id from kids where n=4), '{"status":200,"result":{}}'::jsonb);
+    check:
+      - name: the aggregate still ran
+        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='tally'"
+        is: "done"
+        because: "under a pure AND-join one 404 cancels the report -- a 404 from a registry is not a failure of the pipeline, it is what registries look like"
+      - name: and it can see which child failed
+        sql: "select output#>>'{result,failed}' from workflow.tasks where run_id=(select run_id from ctx) and step_key='tally'"
+        is: "1"
+        because: "tolerating a failure without telling the aggregate which one is how a report gets written over three quarters of the data and says nothing"
+
+  - id: coll-08
+    category: collection
+    title: Below the floor, the report does not run
+    asks: "Three of four calls failed. Is that a report?"
+    mechanism: "YAML.md § Surviving a failed child -- min_success is checked BEFORE the successor is released"
+    catches: [partial-aggregate, silent-success]
+    role: app_owner
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_coll08
+      steps:
+        - id: fan
+          matrix:
+            rows: {function: registry_targets}
+            max_fanout: 100
+            continue_on: failed
+            min_success: 0.9
+            template:
+              queue: http
+              rest: {url: 'http://p8-faultsrv:8099/{{item.path}}', method: GET}
+        - id: tally
+          needs: [fan]
+          sql: {function: tally_children, args: ['{{steps.fan.result.task_id}}']}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_coll08','{}'::jsonb) as run_id;
+      create temp table kids as
+        select id, row_number() over (order by step_key) as n
+        from workflow.tasks
+        where run_id=(select run_id from ctx) and step_key like 'fan[%';
+      select workflow.fail_task((select id from kids where n=1), '{"error":"404"}'::jsonb, true);
+      select workflow.fail_task((select id from kids where n=2), '{"error":"404"}'::jsonb, true);
+      select workflow.fail_task((select id from kids where n=3), '{"error":"404"}'::jsonb, true);
+      select workflow.complete_task((select id from kids where n=4), '{"status":200,"result":{}}'::jsonb);
+    check:
+      - name: the aggregate did not produce a number
+        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='tally'"
+        isnt: "done"
+        because: "a `sql` successor auto-runs inside the statement that marks it ready, so checking the floor after release produces output from a task that was then cancelled -- the gate has to be evaluated before the release"
+      - name: and the run says it failed
+        sql: "select status from workflow.runs where id=(select run_id from ctx)"
+        isnt: "completed"
+        because: "a run over a quarter of the data reporting `completed` is this whole suite's subject in one row"
+
+  - id: coll-09
+    category: collection
+    title: A 200 carrying nothing counts as transport, not as data
+    asks: "The registry returned {} for two of them."
+    mechanism: "YAML.md § min_success is a TRANSPORT floor"
+    catches: [empty-success, partial-aggregate]
+    role: app_owner
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_coll09
+      steps:
+        - id: fan
+          matrix:
+            rows: {function: registry_targets}
+            max_fanout: 100
+            continue_on: failed
+            min_success: 0.9
+            template:
+              queue: http
+              rest: {url: 'http://p8-faultsrv:8099/empty', method: GET}
+        - id: tally
+          needs: [fan]
+          sql: {function: tally_children, args: ['{{steps.fan.result.task_id}}']}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_coll09','{}'::jsonb) as run_id;
+      do $c$
+      declare k record;
+      begin
+        for k in select id from workflow.tasks
+                  where run_id=(select run_id from ctx) and step_key like 'fan[%'
+        loop
+          perform workflow.complete_task(k.id, '{"status":200,"result":{}}'::jsonb);
+        end loop;
+      end $c$;
+    check:
+      - name: every empty 200 counted as a success
+        sql: "select output#>>'{result,done}' from workflow.tasks where run_id=(select run_id from ctx) and step_key='tally'"
+        is: "4"
+        because: "min_success is a transport floor by design, and saying so is the point -- whether the content is useful is the aggregate's job"
+      - name: and the aggregate is the one that can tell
+        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='tally'"
+        is: "done"
+        because: "the engine handing four empty bodies to a report that then says 'nothing changed' is correct; the engine deciding that for it would make an empty poll an incident"
+
+  - id: coll-10
+    category: collection
+    title: A throttle is declarable on an ordinary step, not only inside a fan-out
+    asks: "The registry publishes 10 requests a second."
+    mechanism: "YAML.md § Throttling one -- rate_key is a step key like queue; claim_task refuses a spent budget"
+    catches: [rate-ceiling, inert-feature, unreachable-capability]
+    role: app_owner
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_coll10
+      steps:
+        - id: poll
+          queue: http
+          rate_key: eudra-registry
+          rest: {url: 'http://p8-faultsrv:8099/empty', method: GET}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_coll10','{}'::jsonb) as run_id;
+      insert into workflow.rate_limits (key, capacity, tokens, refill_rate)
+      values ('eudra-registry', 10, 0, 0)
+      on conflict (key) do update set tokens = 0, refill_rate = 0;
+    check:
+      - name: the key reached the task row
+        sql: "select rate_key from workflow.tasks where run_id=(select run_id from ctx) and step_key='poll'"
+        is: "eudra-registry"
+        because: "rate_key was accepted only inside a matrix template until somebody tried this, so the one call in the system that is always rate-limited could be throttled only if it happened to be a fan-out child"
+      - name: and a spent budget makes the task unclaimable
+        sql: "select coalesce((select id from workflow.claim_task('http','w1'))::text,'(nothing)')"
+        is: "(nothing)"
+        because: "throttling has to be enforced where the property lives -- the queue, not the client. Measured 12.94 req/s against a published 10/s ceiling while rate_key was stored on thirty tasks and consumed by nobody"
+
+  - id: coll-11
+    category: collection
+    title: A fetched record is a resource, with an idempotency key
+    asks: "Land what the feed returned."
+    mechanism: "content.register_fetched -- external_id dedups the registration"
+    catches: [idempotency-over-dead-run, silent-success]
+    role: authenticated
+    claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":["aa000000-0000-0000-0000-0000000000a1"]}'
+    setup: |
+      create temp table a as select content.register_fetched(
+          'pv-registry','eudra-2026-0041','Tolvaxen registry entry',
+          'https://registry.example/2026/0041',
+          'aa000000-0000-0000-0000-0000000000a1',
+          '{"status":"authorised"}'::jsonb) as rid;
+      create temp table b as select content.register_fetched(
+          'pv-registry','eudra-2026-0041','Tolvaxen registry entry',
+          'https://registry.example/2026/0041',
+          'aa000000-0000-0000-0000-0000000000a1',
+          '{"status":"authorised"}'::jsonb) as rid;
+    check:
+      - name: polling twice lands one record
+        sql: "select (select rid from a) = (select rid from b)"
+        is: "true"
+        because: "a feed poller runs on a schedule and re-sees most of what it saw last time -- 'nothing changed since last time' is the normal state of a polling pipeline, not an incident"
+      - name: with no bytes and no file row
+        sql: "select coalesce((select file_id::text from content.resources where id=(select rid from a)),'(none)')"
+        is: "(none)"
+        because: "a fetched record has a uri and no object; forcing it through the upload path would invent a checksum for something nobody stored"
+
+  - id: coll-12
+    category: collection
+    title: The batch a poll landed goes in once, however often it is replayed
+    asks: "The task retried. Did the records double?"
+    mechanism: "calder.land_registry_records -- on conflict (registry, external_ref) do update"
+    catches: [idempotency-over-dead-run]
+    role: app_owner
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_coll12
+      steps:
+        - id: land
+          sql:
+            function: land_registry_records
+            args: ['[{"registry":"eudra","ref":"r1"},{"registry":"eudra","ref":"r2"}]']
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_coll12','{}'::jsonb) as run_id;
+      create temp table ctx2 as
+        select workflow.start_workflow('ev_coll12','{}'::jsonb) as run_id;
+    check:
+      - name: two runs, two records
+        sql: "select count(*) from calder.registry_records where registry='eudra'"
+        is: "2"
+        because: "retries are per task, so a retried batch re-does every row in it -- an idempotent handler is a precondition of batching, not a nicety"
+
+  - id: coll-13
+    category: collection
+    title: Registering a source as a ROW is not in the product yet
+    asks: "Can I add a new feed over the API, without a deploy?"
+    mechanism: "world-model-ingestion/connectors.sql -- in build-sql.py's NOT_SHIPPED list, with the reason"
+    catches: [inert-feature, unreachable-capability]
+    status: not-shipped
+    role: app_owner
+    check:
+      - name: the table a spec demonstrates registering 304 sources through
+        sql: "select to_regclass('content.connectors')::text"
+        isnt: null
+        because: >-
+          `sources.md` §17 demonstrates registering 304 sources through
+          `content.connectors` over PostgREST against a live stack, so it reads
+          like a shipped surface. It is deliberately excluded: build-sql.py's
+          NOT_SHIPPED entry says its rows reach nothing -- connectors and
+          channels are two descriptions of a source with no join between them,
+          and the runner writes to a filesystem rather than to
+          content.resources. Recorded as a scenario rather than left as an
+          absence, because a missing thing and a deliberately-excluded thing are
+          the same absence and without somewhere to write the reason nobody
+          re-examines either. It ships once it lands bytes in the content plane.
+      - name: meanwhile a channel is the shipped way to name a source
+        sql: "select count(*) from content.channels where name='pv-registry'"
+        is: "1"
+        because: "the answer to 'add a feed without a deploy' today is a channel row plus a workflow, which is what coll-11 uses -- the gap is the scoring, health and paging vocabulary, not the ability to name a source"

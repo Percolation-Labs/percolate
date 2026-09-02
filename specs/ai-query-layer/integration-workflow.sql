@@ -18,10 +18,38 @@
 -- as: a `rest` step that embeds, then a p8ql step taking
 -- {{steps.embed.result}} as its second argument. LOOKUP, GRAPH and TEXT need
 -- no vector and use the one-argument form.
+-- SQL MODE IS EXECUTED HERE, and for a while it silently was not.
+--
+-- aiq.query deliberately does not run a SQL-mode query: it returns the
+-- statement and a note saying to run it through the SECURITY INVOKER
+-- passthrough, so that function's own security mode stays irrelevant to
+-- caller-supplied SQL (schema.sql §9). As a workflow step that produced a task
+-- marked DONE whose result was the note -- a step that succeeds and answers
+-- nothing, found by writing the obvious `p8ql: "select ..."` in a real pipeline
+-- and getting a green run with no rows.
+--
+-- So the note is honoured rather than returned: the statement goes through
+-- aiq.sql_passthrough, which is SECURITY INVOKER and read-only-enforced. That
+-- keeps the property the note was protecting -- inside a step the invoker is
+-- the engine owner, so the query is as expressive as the rest of the step
+-- path; called directly by an authenticated user it runs as THEM, under RLS.
+-- Routing it through the DEFINER workflow.run_sql instead would have handed
+-- every caller of this function an owner-privileged read of the whole database,
+-- which is the escalation this collection has fixed twice already.
 create or replace function workflow.p8ql(p_query text)
 returns jsonb as $$
-    select aiq.query(p_query);
-$$ language sql;
+declare v_out jsonb;
+begin
+    v_out := aiq.query(p_query);
+    if v_out->>'mode' = 'SQL' then
+        return jsonb_build_object(
+            'mode', 'SQL',
+            'statement', v_out->>'statement',
+            'rows', aiq.sql_passthrough(v_out->>'statement'));
+    end if;
+    return v_out;
+end;
+$$ language plpgsql;
 
 create or replace function workflow.p8ql(p_query text, p_embedding jsonb)
 returns jsonb as $$

@@ -243,19 +243,35 @@ rollback;
 begin;
 set local role app_owner;
 create table t_sp_after (id int);
+-- THE READ-ONLY SETTING NO LONGER OUTLIVES THE CALL, and this assertion is the
+-- inverse of the one it replaces.
+--
+-- It used to read: "the caller could still write after calling the passthrough
+-- -- that is not a security failure, but this file documents the opposite
+-- behaviour". The behaviour was a leak with a note attached: transaction_read_only
+-- is transaction-local, so one passthrough call turned the REST of the caller's
+-- transaction read-only, from a line nowhere near the query.
+--
+-- It never bit over PostgREST, where every call is its own transaction. It bit
+-- the moment something composed: workflow.p8ql now runs SQL mode through here
+-- and then has to mark its own task done. So the read happens inside a
+-- subtransaction that is deliberately unwound -- `transaction_read_only = off`
+-- is refused inside a read-only transaction (25001), and a subtransaction abort
+-- is the only way back.
 do $$
 begin
     perform aiq.sql_passthrough('select 1');
     begin
         insert into t_sp_after values (1);
-        raise exception
-            'the caller could still write after calling the passthrough. That is '
-            'not a security failure -- but this file documents the opposite '
-            'behaviour, and dev/tests/README.md''s rule is that the document and '
-            'the engine change together';
     exception when read_only_sql_transaction then
-        null;   -- the documented behaviour
+        raise exception
+            'the passthrough left the caller''s transaction read-only -- one call '
+            'now makes every later write in that transaction fail, which is the '
+            'leak the subtransaction unwind exists to close';
     end;
-    raise notice 'query/07: the read-only setting is transaction-scoped, as documented';
+    if (select count(*) from t_sp_after) <> 1 then
+        raise exception 'the write after the passthrough did not land';
+    end if;
+    raise notice 'query/07: the read-only setting is unwound with the passthrough''s own subtransaction';
 end $$;
 rollback;

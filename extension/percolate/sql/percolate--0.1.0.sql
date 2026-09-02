@@ -145,6 +145,25 @@ begin
                 raise exception 'step % depends on unknown step %', v_step->>'key', v_dep;
             end if;
         end loop;
+
+        -- A `sql` step names a registered function OR carries its own
+        -- statement. Exactly one, checked here rather than left to dispatch,
+        -- because a spec can arrive as JSON without passing the compiler and
+        -- the failure otherwise is `step names function 'null'` several minutes
+        -- into a run.
+        if v_step->>'kind' = 'sql' then
+            if (v_step->'input' ? 'statement') = (v_step->'input' ? 'function') then
+                raise exception
+                    'sql step ''%'' must carry exactly one of `statement` (its own SQL) or '
+                    '`function` (a name workflow.step_functions holds) -- it has %',
+                    v_step->>'key',
+                    case when v_step->'input' ? 'statement' then 'both' else 'neither' end;
+            end if;
+            if (v_step->'input' ? 'statement')
+               and coalesce(btrim(v_step->'input'->>'statement'), '') = '' then
+                raise exception 'sql step ''%'' carries an empty statement', v_step->>'key';
+            end if;
+        end if;
     end loop;
 
     -- forward reachability closure from root steps (no depends_on)
@@ -1975,6 +1994,223 @@ begin
 end;
 $$ language plpgsql;
 
+-- ============================================================================
+-- SQL A STEP WROTE ITSELF -- the expressive mode, and the policy that closes it
+--
+-- `sql:` used to mean one thing: name a function somebody with owner rights had
+-- registered. That is a sound boundary and a bad default. Authoring a workflow
+-- is granted to `authenticated`; registering a function is not; so every
+-- QUESTION a pipeline wants to ask -- "the last eight quarters for this filer"
+-- -- required a privileged human to write and bless a one-line SELECT. A real
+-- pipeline built against data.sec.gov needed two registrations for five steps,
+-- and only one of them was doing anything a review would care about.
+--
+-- The tax was worst where it bought least. A read is bounded by what the
+-- database will show; making somebody promote it into an owner-executed
+-- registered function is MORE privilege than the question needed, not less.
+--
+-- So a step may now carry a statement:
+--
+--     - id: quarters
+--       sql: "select fy, fp, val from sec.facts where cik = '{{run.cik}}'"
+--
+-- WHAT THIS COSTS, STATED PLAINLY. Workflow SQL runs as the engine owner:
+-- app_owner owns every table and bypasses RLS, and execute_sql_step is
+-- SECURITY DEFINER, so a statement here reads across tenants. Anyone who may
+-- define a workflow may therefore read anything in the database. That is a
+-- deliberate trade for the beta -- expressiveness over isolation, taken with
+-- eyes open -- and the two things that make it survivable are below.
+--
+-- READS CANNOT WRITE, AND THE DATABASE ENFORCES IT, not a parser. A statement
+-- without `write: true` runs with transaction_read_only on, which is the same
+-- boundary aiq.sql_passthrough uses and for the reason stated there: a filter
+-- that decides whether SQL is read-only is a filter to be bypassed; a read-only
+-- transaction is a guarantee. The keyword check beside it is a courtesy that
+-- turns a transaction abort into a sentence.
+--
+-- AND THE OLD BOUNDARY IS STILL THERE, one setting away:
+--
+--     alter database <db> set percolate.sql_policy = 'registered';
+--
+--   open       (default)  a step may carry a statement, or name a function
+--   registered            statements are refused; only the allow-list runs
+--
+-- A third mode -- `scoped`, where a statement runs under the run owner's
+-- identity so RLS applies -- is the one that would make this safe as a
+-- production default, and it is deliberately not built: it needs an execution
+-- identity that survives a scheduled run whose owner has left the company,
+-- which is a decision rather than a function. roadmap.md carries it with the
+-- trigger that would promote it.
+--
+-- The registry does not go away and is not deprecated. It keeps the two jobs it
+-- was always better at than gatekeeping: a per-function timeout, and a
+-- DESCRIPTION -- the same text a bound tool carries into a model's context --
+-- so step_functions stays the answer to "what can a workflow cause to run" for
+-- the operations a deployment wants blessed.
+-- ============================================================================
+
+create or replace function workflow.sql_policy()
+returns text
+language sql
+stable
+as $$
+    -- A GUC rather than a table: this is a deployment decision, it wants to be
+    -- settable per database without a migration, and a policy stored as a row
+    -- is a policy somebody can UPDATE from inside the system it constrains.
+    select lower(coalesce(nullif(current_setting('percolate.sql_policy', true), ''), 'open'));
+$$;
+
+create or replace function workflow.run_sql(
+    p_statement  text,
+    p_write      boolean default false,
+    p_timeout_ms int default 30000)
+returns jsonb as $$
+declare
+    v_out   jsonb;
+    v_count bigint;
+    v_pol   text := workflow.sql_policy();
+begin
+    if v_pol = 'registered' then
+        raise exception
+            'percolate.sql_policy is ''registered'', so a step may not carry its own '
+            'statement. Register the query as a step function and name it, or set the '
+            'policy to ''open'' for this deployment.';
+    elsif v_pol <> 'open' then
+        raise exception
+            'percolate.sql_policy is ''%'', which this build does not implement. The '
+            'modes are ''open'' and ''registered''.', v_pol;
+    end if;
+
+    if coalesce(btrim(p_statement), '') = '' then
+        raise exception 'this sql step carries an empty statement';
+    end if;
+
+    perform set_config('statement_timeout', greatest(p_timeout_ms, 1)::text, true);
+
+    if p_write then
+        -- A write says so in the document. This is not a security control --
+        -- the step runs as the owner either way -- but a plan that cannot tell
+        -- a question from a mutation is a plan nobody can review, and every
+        -- reader of a definition deserves to see which steps change the
+        -- database.
+        execute p_statement;
+        get diagnostics v_count = row_count;
+        return jsonb_build_object('rows_affected', v_count);
+    end if;
+
+    -- The courtesy check: unambiguous, cheap, and it turns an abort into a
+    -- sentence naming the remedy. NOT the boundary.
+    if p_statement ~* '^\s*(insert|update|delete|truncate|drop|alter|create|grant|revoke|copy)\M' then
+        raise exception
+            'this step is a read and its statement starts with %. Declare `write: true` '
+            'on the step if it is meant to change the database.',
+            upper((regexp_match(p_statement, '^\s*([a-zA-Z]+)'))[1]);
+    end if;
+
+    -- THE BOUNDARY, AND THE DOOR BACK OUT OF IT.
+    --
+    -- transaction_read_only is transaction-local, and this runs inside the
+    -- engine's own transaction -- which still has to mark the task done
+    -- afterwards. Left on, the first read-only step would make every subsequent
+    -- write in that transaction fail, complete_task's included, and the engine
+    -- would look broken rather than the step.
+    --
+    -- Setting it back is not available: Postgres refuses `transaction_read_only
+    -- = off` once a transaction is read-only -- `cannot set transaction
+    -- read-write mode inside a read-only transaction`, SQLSTATE 25001. It is a
+    -- one-way door, and the only way through it is a SUBTRANSACTION, whose
+    -- abort rolls the setting back with everything else. So the read runs
+    -- inside one and the block is deliberately unwound: the rows are already in
+    -- a plpgsql variable, which is not transactional and survives.
+    --
+    -- Found by running it. The first version set the GUC back by hand, failed
+    -- with 25001 on the line after the query, retried five times, and reported
+    -- a syntax error's worth of confusion for something that was neither.
+    begin
+        perform set_config('transaction_read_only', 'on', true);
+        execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
+        into v_out;
+        raise exception using errcode = 'P0001',
+                              message = '__percolate_readonly_done__';
+    exception when others then
+        if sqlerrm <> '__percolate_readonly_done__' then
+            raise;
+        end if;
+    end;
+
+    return coalesce(v_out, '[]'::jsonb);
+end;
+$$ language plpgsql volatile security definer set search_path = pg_catalog, public;
+
+-- A TEMPLATE IN A STATEMENT IS A VALUE, NEVER A FRAGMENT.
+--
+-- `where cik = '{{run.cik}}'` is the obvious thing to write and the obvious way
+-- to introduce injection: the run's input is data a caller supplied, and
+-- pasting it into SQL text is exactly the mistake call_step_function avoids by
+-- passing arguments as parameters. A statement cannot be parameterised the same
+-- way -- the whole point is that the author wrote the SQL -- so every reference
+-- is substituted as a QUOTED LITERAL, through quote_nullable, before the
+-- statement is ever planned.
+--
+-- Two consequences, both deliberate. A template resolving to `'; drop table x;
+-- --` becomes a string containing that text and nothing else. And a table or
+-- column name cannot be templated at all: `from {{run.table}}` produces
+-- `from 'sec.facts'`, which is a syntax error rather than a dynamic identifier.
+-- Identifiers being un-templatable is the feature -- a workflow that chooses
+-- its own tables at runtime is one nobody can review, and matrix templates
+-- already cover the case where the ROWS vary.
+create or replace function workflow.resolve_statement(
+    p_statement text, p_run_id uuid, p_item jsonb default null)
+returns text as $$
+declare
+    v_out  text := p_statement;
+    v_ref  text;
+    v_lit  text;
+    v_pat  text;
+begin
+    for v_ref in
+        select distinct m[1]
+          from regexp_matches(p_statement, '\{\{\s*([a-zA-Z0-9_.$-]+)\s*\}\}', 'g') m
+    loop
+        v_lit := quote_nullable(
+            workflow.resolve_template_ref(v_ref, p_run_id, p_item) #>> '{}');
+        -- Backslashes are escaped on BOTH sides for different reasons: in the
+        -- pattern because a ref carries dots, and in the replacement because
+        -- regexp_replace reads \1 as a back-reference and a quoted literal can
+        -- legitimately contain a backslash.
+        v_pat := '\{\{\s*' || regexp_replace(v_ref, '([.$\\])', '\\\1', 'g') || '\s*\}\}';
+
+        -- QUOTES THE AUTHOR ALREADY WROTE ARE CONSUMED, and this is not
+        -- politeness. `where cik = '{{run.cik}}'` is what everyone types --
+        -- it is what the equivalent looks like in every templating language
+        -- they have used -- and substituting a quoted literal into it produces
+        -- `= ''0000320193''`, which is a syntax error pointing at a line the
+        -- author did not write. Found immediately, by writing the obvious thing
+        -- in the test for this feature.
+        --
+        -- So a reference wrapped in single quotes is replaced INCLUDING them.
+        -- Both spellings then mean the same thing, and neither can produce an
+        -- unquoted value -- which is the property that matters.
+        v_out := regexp_replace(v_out, '''' || v_pat || '''',
+                                replace(v_lit, '\', '\\'), 'g');
+        v_out := regexp_replace(v_out, v_pat,
+                                replace(v_lit, '\', '\\'), 'g');
+    end loop;
+    return v_out;
+end;
+$$ language plpgsql stable;
+
+-- Owner-only, like register_step_function and for the mirror-image reason: a
+-- caller reaching this directly would be executing SQL as app_owner with no run
+-- to account it to, which is exactly what the step path keeps inside a workflow.
+revoke execute on function workflow.run_sql(text, boolean, int) from public;
+
+comment on function workflow.run_sql(text, boolean, int) is
+$c$Execute a workflow step's own SQL statement.
+Read-only unless p_write is true, enforced by transaction_read_only rather than
+by inspecting the statement, and refused entirely when percolate.sql_policy is
+'registered'.$c$;
+
 -- Executes one ready `sql` task. Returns true if it did something.
 -- Resolve {{steps.x.y}} / {{run.x}} in a sql step's arguments.
 --
@@ -2022,16 +2258,32 @@ begin
     perform set_config('workflow.current_run_id', t.run_id::text, true);
 
     begin      -- subtransaction: a failure here must not abort the caller
-        v_out := workflow.call_step_function(
-            v_spec->>'function', v_spec->'args', t.run_id, t.input->'item');
+        -- TWO SPELLINGS, ONE KIND. A step either names something the deployment
+        -- registered or carries its own statement; the engine dispatches on
+        -- which, and everything downstream -- retries, the event log, the
+        -- payload cap, the plan -- is identical for both. `statement` is
+        -- checked first because it is the one an author writes by hand and a
+        -- spec carrying both is refused at registration (validate_spec).
+        if v_spec ? 'statement' then
+            v_out := workflow.run_sql(
+                workflow.resolve_statement(v_spec->>'statement', t.run_id,
+                                           t.input->'item'),
+                coalesce((v_spec->>'write')::boolean, false),
+                coalesce((v_spec->>'timeout_ms')::int, 30000));
+        else
+            v_out := workflow.call_step_function(
+                v_spec->>'function', v_spec->'args', t.run_id, t.input->'item');
+        end if;
         perform workflow.complete_task(p_task_id, jsonb_build_object('result', v_out));
         return true;
     exception when others then
         perform workflow.fail_task(p_task_id,
             jsonb_build_object('error', sqlerrm, 'sqlstate', sqlstate),
-            -- A missing registration or a bad signature will fail identically
-            -- on every retry; a deadlock or timeout will not.
-            sqlstate in ('42883','42P01','P0001'));
+            -- A missing registration, a bad signature, a refused policy or a
+            -- statement that does not parse will fail identically on every
+            -- retry; a deadlock or timeout will not. 42601 is a syntax error in
+            -- SQL the author wrote, which is the new member of that set.
+            sqlstate in ('42883','42P01','42601','P0001'));
         return true;
     end;
 end;
@@ -3376,6 +3628,18 @@ begin
 
         if v_spec ? 'items' then
             v_rows := v_spec->'items';
+        elsif v_spec #> '{rows}' ? 'statement' then
+            -- The row source may be the query itself, on the same terms as any
+            -- other statement (schema.sql's "SQL a step wrote itself"), with
+            -- one difference: it is ALWAYS read-only, whatever the step says. A
+            -- row function that mutates while deciding how many children to
+            -- make is re-run by every retry of this expansion, and there is no
+            -- reading of `write: true` on a fan-out source that ends well.
+            v_rows := workflow.run_sql(
+                workflow.resolve_statement(v_spec#>>'{rows,statement}', t.run_id,
+                                           t.input->'item'),
+                false,
+                coalesce((v_spec#>>'{rows,timeout_ms}')::int, 30000));
         else
             v_rows := workflow.call_step_function(
                 v_spec#>>'{rows,function}', v_spec#>'{rows,args}', t.run_id, t.input->'item');
@@ -5337,13 +5601,47 @@ begin
         -- (d) a sql step naming a function nobody registered. Warning, not
         -- error: authoring order is not deployment order, and defining a
         -- workflow before registering its function is a reasonable sequence.
+        --
+        -- Only for the spelling that names one. A step carrying its own
+        -- statement has nothing to look up, and reporting it as unregistered
+        -- was the first thing that broke when statements were allowed --
+        -- every such step drew a warning naming a null function.
         if v_step->>'kind' = 'sql'
+           and not (v_step->'input' ? 'statement')
            and not exists (select 1 from workflow.step_functions f
                             where f.name = v_step->'input'->>'function') then
             severity := 'warning';
             detail := format('sql step calls %L, which is not registered '
                              '(workflow.register_step_function)',
                              v_step->'input'->>'function');
+            return next;
+        end if;
+
+        -- (d2) a statement the deployment's policy will refuse at dispatch.
+        -- Worth catching at authoring time: `registered` is a lockdown a
+        -- deployment chose, and the definition that trips it is usually one
+        -- written against a different environment.
+        if v_step->>'kind' = 'sql'
+           and (v_step->'input' ? 'statement')
+           and workflow.sql_policy() = 'registered' then
+            severity := 'error';
+            detail := 'carries its own SQL, and percolate.sql_policy is '
+                      '''registered'' on this deployment -- register the query as a '
+                      'step function and name it';
+            return next;
+        end if;
+
+        -- (d3) a statement that writes without saying so. The engine refuses it
+        -- at dispatch anyway (transaction_read_only), so this is the same
+        -- refusal moved to where the author is looking.
+        if v_step->>'kind' = 'sql'
+           and (v_step->'input' ? 'statement')
+           and not coalesce((v_step->'input'->>'write')::boolean, false)
+           and v_step->'input'->>'statement' ~*
+               '^\s*(insert|update|delete|truncate|drop|alter|create|grant|revoke|copy)\M' then
+            severity := 'error';
+            detail := 'is a read step whose statement modifies the database -- '
+                      'declare `write: true` on it, or make it a query';
             return next;
         end if;
 
@@ -5923,7 +6221,34 @@ begin
         -- demanded the version would report a defect the engine does not have.
         'workflows', coalesce((
             select jsonb_agg(distinct name) from workflow.definitions
-             where deleted_at is null), '[]'::jsonb));
+             where deleted_at is null), '[]'::jsonb),
+        -- WHAT A STATEMENT MAY NAME. With `sql: "select ..."` there is no
+        -- registered function to check, so the plan checks the relations
+        -- instead -- a better question, since naming a table that does not
+        -- exist is the mistake people actually make.
+        --
+        -- Scoped to what the CALLER can select, like every other section here,
+        -- and to schemas that are not the server's own furniture. An empty list
+        -- means "cannot judge" to the graph builder, exactly as an absent
+        -- section does elsewhere, so a caller with no table privileges gets a
+        -- plan with no relation warnings rather than a plan that is all of them.
+        --
+        -- Read off pg_class BY OID, not through information_schema by name.
+        -- has_table_privilege('cron.job', 'select') has to resolve the name
+        -- first, and resolving it needs USAGE on the schema -- so the name form
+        -- RAISES `permission denied for schema cron` instead of answering
+        -- false, and one unreachable extension schema took the whole catalog
+        -- with it. Found by running the plan-graph test on a database with
+        -- pg_cron installed.
+        'relations', coalesce((
+            select jsonb_agg(n.nspname || '.' || c.relname order by n.nspname, c.relname)
+              from pg_class c
+              join pg_namespace n on n.oid = c.relnamespace
+             where c.relkind in ('r', 'p', 'v', 'm', 'f')
+               and n.nspname not in ('pg_catalog', 'information_schema')
+               and n.nspname not like 'pg\\_%'
+               and has_schema_privilege(n.oid, 'usage')
+               and has_table_privilege(c.oid, 'select')), '[]'::jsonb));
 
     if to_regprocedure('agentic.plan_facet()') is not null then
         execute 'select agentic.plan_facet()' into v_facet;
@@ -9341,10 +9666,32 @@ begin
     -- reverts on commit or rollback and cannot leak into a pooled connection's
     -- next transaction -- the same pooling hazard rbac.current_user_id() was
     -- hardened against.
-    perform set_config('transaction_read_only', 'on', true);
-
-    execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
-    into v_result;
+    --
+    -- AND IT IS UNWOUND AFTERWARDS, which the first version did not do.
+    --
+    -- Transaction-local means "until this transaction ends", not "until this
+    -- function returns" -- so a caller that ran this and then tried to write in
+    -- the same transaction got `cannot execute UPDATE in a read-only
+    -- transaction`, from a line nowhere near the query. It never bit over
+    -- PostgREST, where every call is its own transaction; it bites the moment
+    -- something composes -- a workflow step that runs a query and then marks
+    -- its own task done, which is exactly what workflow.p8ql now does.
+    --
+    -- Setting it back is not available: `transaction_read_only = off` inside a
+    -- read-only transaction raises 25001. A subtransaction is the only way
+    -- back, so the read runs in one and the block is deliberately unwound --
+    -- the rows are in a plpgsql variable by then, and a variable is not
+    -- transactional.
+    begin
+        perform set_config('transaction_read_only', 'on', true);
+        execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
+        into v_result;
+        raise exception using errcode = 'P0001', message = '__aiq_readonly_done__';
+    exception when others then
+        if sqlerrm <> '__aiq_readonly_done__' then
+            raise;
+        end if;
+    end;
 
     return v_result;
 end;
@@ -10496,10 +10843,38 @@ end $$;
 -- as: a `rest` step that embeds, then a p8ql step taking
 -- {{steps.embed.result}} as its second argument. LOOKUP, GRAPH and TEXT need
 -- no vector and use the one-argument form.
+-- SQL MODE IS EXECUTED HERE, and for a while it silently was not.
+--
+-- aiq.query deliberately does not run a SQL-mode query: it returns the
+-- statement and a note saying to run it through the SECURITY INVOKER
+-- passthrough, so that function's own security mode stays irrelevant to
+-- caller-supplied SQL (schema.sql §9). As a workflow step that produced a task
+-- marked DONE whose result was the note -- a step that succeeds and answers
+-- nothing, found by writing the obvious `p8ql: "select ..."` in a real pipeline
+-- and getting a green run with no rows.
+--
+-- So the note is honoured rather than returned: the statement goes through
+-- aiq.sql_passthrough, which is SECURITY INVOKER and read-only-enforced. That
+-- keeps the property the note was protecting -- inside a step the invoker is
+-- the engine owner, so the query is as expressive as the rest of the step
+-- path; called directly by an authenticated user it runs as THEM, under RLS.
+-- Routing it through the DEFINER workflow.run_sql instead would have handed
+-- every caller of this function an owner-privileged read of the whole database,
+-- which is the escalation this collection has fixed twice already.
 create or replace function workflow.p8ql(p_query text)
 returns jsonb as $$
-    select aiq.query(p_query);
-$$ language sql;
+declare v_out jsonb;
+begin
+    v_out := aiq.query(p_query);
+    if v_out->>'mode' = 'SQL' then
+        return jsonb_build_object(
+            'mode', 'SQL',
+            'statement', v_out->>'statement',
+            'rows', aiq.sql_passthrough(v_out->>'statement'));
+    end if;
+    return v_out;
+end;
+$$ language plpgsql;
 
 create or replace function workflow.p8ql(p_query text, p_embedding jsonb)
 returns jsonb as $$
