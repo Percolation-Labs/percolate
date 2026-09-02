@@ -1,5 +1,11 @@
 use pgrx::prelude::*;
 
+// The plan graph -- a compiled spec expanded along the entities it names.
+// Its own file because it is the one thing in this crate that reads a CATALOG
+// as well as a document, and because it is pure enough to be unit-tested
+// without pgrx: see plan_graph.rs's header for why the split falls there.
+mod plan_graph;
+
 ::pgrx::pg_module_magic!(name, version);
 
 // The SCHEMA is deliberately not here. An extension cannot contain both C
@@ -1559,4 +1565,17 @@ fn p8_compile_workflow(yaml: &str) -> pgrx::JsonB {
         Ok(v) => pgrx::JsonB(serde_json::json!({"ok": true, "workflow": v})),
         Err(e) => pgrx::JsonB(serde_json::json!({"ok": false, "error": e})),
     }
+}
+
+/// Expand a stored workflow spec into the graph of everything it reaches.
+///
+/// Two arguments and no query of its own: `spec` is
+/// `workflow.definitions.spec`, `catalog` is what `workflow.plan_catalog()`
+/// assembled from the views. Keeping the catalog an ARGUMENT rather than
+/// fetching it here is what makes this `immutable` -- and, more usefully, is
+/// what makes the answer depend only on what the CALLER was allowed to see,
+/// since those views are ordinary RLS-filtered ones.
+#[pg_extern(immutable, parallel_safe)]
+fn p8_plan_graph(spec: pgrx::JsonB, catalog: pgrx::JsonB) -> pgrx::JsonB {
+    pgrx::JsonB(plan_graph::plan_graph(&spec.0, &catalog.0))
 }

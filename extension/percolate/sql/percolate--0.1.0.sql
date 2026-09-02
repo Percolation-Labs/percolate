@@ -5494,6 +5494,550 @@ not exist. Errors are refused by define_yaml; warnings are raised and the
 definition stands, because a function or an agent may legitimately be
 registered after the workflow that names it.$c$;
 
+-- ============================================================================
+-- Operating at scale: retention, a plan gate, and the failures that are silent.
+--
+-- Everything in this section exists because dev/scale/ found it missing while
+-- measuring the engine, and every one of them was a shell script or an ad-hoc
+-- query first. A scaling property you can only check by remembering to write
+-- the query is a property nobody checks.
+-- ============================================================================
+
+-- ------------------------------------------------------------
+-- 1. Retention. The task table only ever grew.
+--
+-- Nothing in this engine deleted a task, so `workflow.tasks` grew without
+-- bound -- and scale.md found that the autoscaler's own probe changes plan on
+-- the ratio of live rows to total rows, so an unbounded table degrades the
+-- thing that decides how many workers you get.
+--
+-- BATCHED, and that is the whole reason this is a function rather than advice.
+-- Deleting a million task rows in one statement takes tens of minutes: every
+-- row costs an index update per index plus a foreign-key probe into
+-- task_dependencies, and it accumulates in one transaction's WAL. Measured on
+-- the harness: a single-statement delete of 1M rows was still running after 22
+-- minutes. Each batch here commits on its own.
+-- ------------------------------------------------------------
+
+-- KEYED ON completed_at, FALLING BACK TO updated_at, and both halves matter.
+--
+-- completed_at first, because workflow.runs carries a touch trigger: updated_at
+-- means "last modified" and is rewritten by any later write to the row, so
+-- retention keyed on it alone would be retention keyed on when somebody last
+-- looked at the run. completed_at is set once, when the run finished, which is
+-- the question retention is actually asking.
+--
+-- The coalesce is not defensive padding. A run CAN reach a terminal status with
+-- a null completed_at -- found by doing it -- and keyed on completed_at alone
+-- such a run and every task under it would be immortal, invisibly, forever.
+-- updated_at is a sound lower bound on the age of a row nobody is touching.
+--
+-- The old note, kept because the reasoning still applies:
+-- workflow.runs carries a touch trigger, so updated_at means "last modified"
+-- and is rewritten by any later write to the row. Retention keyed on it would
+-- be retention keyed on when somebody last looked at the run. completed_at is
+-- set once, when the run finished, which is the question retention is actually
+-- asking.
+--
+-- THE TERMINAL STATUSES ARE ASSERTED, NOT ASSUMED.
+--
+-- Written first as ('succeeded','failed','cancelled'), which workflow.runs
+-- refuses -- it uses 'completed'. That version would have purged NOTHING,
+-- silently, forever, and reported a clean zero every time it ran. agentic.runs
+-- does use 'succeeded', and both constraints are named runs_status_check, which
+-- is how the wrong vocabulary looked right.
+--
+-- So the names are checked against the constraint that owns them, at load time.
+do $$
+declare v_def text;
+begin
+    select pg_get_constraintdef(k.oid) into v_def
+    from pg_constraint k
+    join pg_class c on c.oid = k.conrelid
+    join pg_namespace n on n.oid = c.relnamespace
+    where k.conname = 'runs_status_check' and n.nspname = 'workflow';
+
+    if v_def is null or v_def not like '%completed%' then
+        raise exception
+            'workflow.purge_completed hard-codes the terminal run statuses and '
+            'workflow.runs no longer admits ''completed'' (constraint: %). '
+            'Purging would silently delete nothing.', coalesce(v_def, '(none)');
+    end if;
+end $$;
+
+drop function if exists workflow.purge_completed(interval, int, int);
+create or replace function workflow.purge_completed(
+    p_older_than  interval default interval '30 days',
+    p_batch       int      default 50,      -- RUNS per batch, not tasks
+    p_max_batches int      default 1000)
+returns table(batches int, runs_purged bigint, tasks_purged bigint, runs_skipped bigint) as $$
+declare
+    v_cut     timestamptz := now() - p_older_than;
+    v_has_agentic boolean := to_regclass('agentic.runs') is not null;
+    v_ids     uuid[];
+    v_n       bigint;
+    v_batches int := 0;
+    v_runs    bigint := 0;
+    v_tasks   bigint := 0;
+    v_skipped bigint := 0;
+begin
+    if p_batch < 1 then
+        raise exception 'p_batch must be positive';
+    end if;
+
+    loop
+        exit when v_batches >= p_max_batches;
+
+        -- ELIGIBILITY IS PER RUN, AND EVERY CLAUSE HERE IS A FOREIGN KEY THAT
+        -- WOULD OTHERWISE ABORT THE PURGE MID-BATCH. Found by running it: the
+        -- first version deleted tasks and then failed on
+        -- schedules_last_run_id_fkey, leaving the run half-purged.
+        select array_agg(r.id) into v_ids
+        from (
+            select r.id
+            from workflow.runs r
+            where r.status in ('completed','failed','cancelled')
+              and coalesce(r.completed_at, r.updated_at) < v_cut
+              -- A schedule points at its most recent run. Deleting it would
+              -- lose the schedule's own history.
+              and not exists (select 1 from workflow.schedules s where s.last_run_id = r.id)
+              -- A sub_workflow parent task points at its child run.
+              and not exists (select 1 from workflow.tasks t where t.child_run_id = r.id)
+              -- An agent run records the workflow task that triggered it.
+              and (not v_has_agentic or not exists (
+                    select 1 from agentic.runs ar
+                    join workflow.tasks t on t.id = ar.workflow_task_id
+                    where t.run_id = r.id))
+            order by coalesce(r.completed_at, r.updated_at)
+            limit p_batch
+        ) r;
+
+        exit when v_ids is null;
+
+        -- A WHOLE RUN AT A TIME. Tasks reference each other within a run --
+        -- compensates_task_id and matrix_parent_id are both NO ACTION -- so a
+        -- batch that split a run would block on its own siblings.
+        delete from workflow.tasks t where t.run_id = any(v_ids);
+        get diagnostics v_n = row_count;
+        v_tasks := v_tasks + v_n;
+
+        delete from workflow.runs r where r.id = any(v_ids);
+        get diagnostics v_n = row_count;
+        v_runs := v_runs + v_n;
+
+        v_batches := v_batches + 1;
+    end loop;
+
+    -- What was eligible by age and held back by a reference, so an operator
+    -- watching the table not shrink has an answer rather than a mystery.
+    select count(*) into v_skipped
+    from workflow.runs r
+    where r.status in ('completed','failed','cancelled')
+      and coalesce(r.completed_at, r.updated_at) < v_cut;
+
+    return query select v_batches, v_runs, v_tasks, v_skipped;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+revoke execute on function workflow.purge_completed(interval, int, int) from public;
+
+-- ------------------------------------------------------------
+-- 2. The plan gate.
+--
+-- THE DEFECT THIS EXISTS FOR: idx_tasks_claimable did not match claim_task's
+-- ORDER BY, so on a deep queue the planner abandoned it for a sequential scan
+-- plus a sort of the entire ready set -- to return twenty rows. 78 claims/s
+-- against 13,965 on the same data. No functional test could see it, because
+-- the engine was correct throughout; only the plan was wrong.
+--
+-- So the assertion is about the PLAN, and it belongs in the database rather
+-- than in a shell script, because the thing it protects is a property of the
+-- schema.
+--
+-- IT REFUSES TO PASS ON A SHALLOW QUEUE, and that is the design. The defect is
+-- invisible below a few thousand ready rows: the planner picks the index
+-- whatever its shape, so a gate that ran on a fixture would have reported
+-- health for the entire life of the bug. Inconclusive is an honest answer and
+-- a false pass is not.
+-- ------------------------------------------------------------
+create or replace function workflow.check_hot_paths(p_min_depth int default 2000)
+returns table(path text, verdict text, detail text) as $$
+declare
+    v_queue text;
+    v_depth bigint;
+    v_plan  jsonb;
+    v_nodes text[];
+begin
+    select t.queue, count(*) into v_queue, v_depth
+    from workflow.tasks t
+    where t.status = 'ready'
+    group by t.queue
+    order by count(*) desc
+    limit 1;
+
+    if v_queue is null or v_depth < p_min_depth then
+        return query select
+            'claim'::text, 'inconclusive'::text,
+            format('deepest queue has %s ready task(s), below the %s needed to '
+                   'judge -- the planner picks the index at any shape when the '
+                   'ready set is small, so a pass here would mean nothing',
+                   coalesce(v_depth, 0), p_min_depth);
+        return;
+    end if;
+
+    execute format(
+        'explain (format json) select * from workflow.tasks
+          where queue = %L and status = ''ready'' and run_after <= now()
+          order by priority desc, created_at
+          for update skip locked limit 20', v_queue)
+    into v_plan;
+
+    select array_agg(distinct x #>> '{}')
+      into v_nodes
+      from jsonb_path_query(v_plan, '$.**."Node Type"') x;
+
+    return query select
+        'claim'::text,
+        case
+            when 'Seq Scan' = any(v_nodes) then 'FAIL'
+            when 'Sort'     = any(v_nodes) then 'FAIL'
+            else 'ok'
+        end,
+        case
+            when 'Seq Scan' = any(v_nodes) or 'Sort' = any(v_nodes) then
+                format('claim_task is scanning and sorting %s ready tasks on queue %L '
+                       'to return 20. The claim index no longer matches its ORDER BY '
+                       '(priority desc, created_at). Plan: %s',
+                       v_depth, v_queue, array_to_string(v_nodes, ' -> '))
+            else
+                format('index-backed at depth %s on queue %L (%s)',
+                       v_depth, v_queue, array_to_string(v_nodes, ' -> '))
+        end;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+grant execute on function workflow.check_hot_paths(int) to authenticated;
+
+-- ------------------------------------------------------------
+-- 3. Work nobody can claim -- the failure with no error in it.
+--
+-- `rate_key` is a REFERENCE to a row in workflow.rate_limits, not a
+-- declaration of one. try_consume_rate_limit does `update ... where key = $1`,
+-- which matches nothing when the bucket does not exist and therefore returns
+-- false -- every time, forever. The task sits in `ready`, no worker ever claims
+-- it, no attempt is recorded, nothing retries, and the worker beside it reports
+-- an empty queue. Measured on this collection's own embed fan-out: six children
+-- in `ready`, no error, no dead task, no signal of any kind.
+--
+-- v_stuck_tasks cannot see it either: it reports tasks that are OLD, and a
+-- freshly created unclaimable task is not old yet. It becomes visible there an
+-- hour later, described as something else.
+-- ------------------------------------------------------------
+create or replace view workflow.v_unclaimable as
+    select t.id, t.run_id, t.queue, t.step_key, t.rate_key,
+           'rate_key names no bucket in workflow.rate_limits'::text as reason,
+           format('insert into workflow.rate_limits (key, capacity, tokens, refill_rate) '
+                  'values (%L, 20, 20, 1);', t.rate_key) as remedy,
+           now() - t.created_at as waiting
+    from workflow.tasks t
+    where t.status = 'ready'
+      and t.rate_key is not null
+      and not exists (select 1 from workflow.rate_limits rl where rl.key = t.rate_key)
+  union all
+    select t.id, t.run_id, t.queue, t.step_key, null::text,
+           'queue has no worker pool and no config'::text,
+           format('no workflow.queue_config row for queue %L, and nothing has '
+                  'claimed from it', t.queue),
+           now() - t.created_at
+    from workflow.tasks t
+    where t.status = 'ready'
+      and t.run_after <= now()
+      and t.created_at < now() - interval '10 minutes'
+      and not exists (
+          select 1 from workflow.tasks c
+          where c.queue = t.queue and c.claimed_at > now() - interval '10 minutes');
+
+-- ------------------------------------------------------------
+-- 4. The backlog, as an operator needs it rather than as a count.
+--
+-- v_queue_depth answers "how many rows are in each state", which is the shape
+-- a dashboard wants and not the shape a decision wants. The question behind
+-- scaling a pool is "how long has the oldest thing been waiting", because that
+-- is the number an SLO is written against -- depth alone cannot distinguish a
+-- queue of 10,000 draining in seconds from a queue of 50 that nothing is
+-- serving.
+-- ------------------------------------------------------------
+create or replace view workflow.v_backlog as
+    select t.queue,
+           count(*) filter (where t.status = 'ready' and t.run_after <= now())  as claimable,
+           count(*) filter (where t.status = 'ready' and t.run_after >  now())  as backing_off,
+           count(*) filter (where t.status = 'running')                          as running,
+           count(*) filter (where t.status = 'waiting_external')                 as waiting_on_a_person,
+           coalesce(max(now() - t.created_at) filter
+               (where t.status = 'ready' and t.run_after <= now()),
+               interval '0')                                                     as oldest_wait,
+           count(distinct t.claimed_by) filter
+               (where t.claimed_at > now() - interval '5 minutes')               as workers_seen,
+           max(t.claimed_at)                                                     as last_claim
+    from workflow.tasks t
+    where t.status in ('ready','running','waiting_external')
+    group by t.queue;
+
+-- ------------------------------------------------------------
+-- 5. Connection headroom -- the ceiling that arrives before throughput does.
+--
+-- Measured on a three-node cluster: thirty worker pods at four connections
+-- each, against max_connections = 100, produced "sorry, too many clients
+-- already" for everybody INCLUDING the operator -- the role was a superuser and
+-- superuser_reserved_connections is 3, and thirty pods reconnecting in a loop
+-- won the race for those three slots. The failure mode of connection
+-- exhaustion is not that work stops; it is that nobody can get in to see why.
+--
+-- Which makes headroom something to watch BEFORE it is gone, and there was
+-- nothing reporting it.
+-- ------------------------------------------------------------
+create or replace view workflow.v_capacity as
+    select (select setting::int from pg_settings where name = 'max_connections')      as max_connections,
+           (select setting::int from pg_settings where name = 'superuser_reserved_connections') as reserved,
+           (select count(*)::int from pg_stat_activity)                               as in_use,
+           (select setting::int from pg_settings where name = 'max_connections')
+             - (select count(*)::int from pg_stat_activity)                           as headroom,
+           (select count(distinct claimed_by)::int from workflow.tasks
+             where claimed_at > now() - interval '5 minutes')                         as workers_seen,
+           case when (select count(*)::float from pg_stat_activity)
+                     / nullif((select setting::float from pg_settings
+                                where name = 'max_connections'), 0) > 0.8
+                then 'connection budget over 80% used -- a pool scaling on queue '
+                     'depth can exhaust this long before it exhausts throughput'
+                else null end                                                          as warning;
+
+grant select on workflow.v_backlog, workflow.v_unclaimable, workflow.v_capacity
+    to authenticated;
+
+-- ------------------------------------------------------------
+-- 6. Synthetic load, so a scaling test is one call rather than a script.
+--
+-- Inserts directly rather than going through start_workflow, deliberately: a
+-- scale probe is measuring the CLAIM path, and routing a million tasks through
+-- the compiler would measure that instead. Owner-only for the same reason
+-- register_step_function is -- it decides what the deployment can be made to do.
+-- ------------------------------------------------------------
+create or replace function workflow.seed_load(
+    p_queue text, p_count int, p_definition text default '__scale_probe')
+returns uuid as $$
+declare v_def uuid; v_run uuid;
+begin
+    insert into workflow.definitions (name, spec)
+    select p_definition, jsonb_build_object('steps', jsonb_build_array(jsonb_build_object(
+               'key','w','kind','work','queue',p_queue)))
+    where not exists (select 1 from workflow.definitions where name = p_definition);
+
+    select id into v_def from workflow.definitions where name = p_definition;
+    insert into workflow.runs (workflow_def_id, status) values (v_def, 'running')
+    returning id into v_run;
+
+    insert into workflow.tasks (run_id, step_key, kind, queue, status, pending_deps, input)
+    select v_run, 'p' || g, 'work', p_queue, 'ready', 0, '{}'::jsonb
+    from generate_series(1, p_count) g;
+
+    return v_run;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+revoke execute on function workflow.seed_load(text, int, text) from public;
+
+-- ============================================================================
+-- The plan graph: a definition, expanded along what it names.
+--
+-- Numbered sections stopped at 25 and this is not one -- like the scale section
+-- above it, it is a capability rather than a correction, and the numbers in
+-- this file record the order failures were found in.
+--
+-- `definitions.spec` is a DAG of steps and nothing else. What a step REACHES
+-- is spread across four schemas: the agent an `agent:` step calls and that
+-- agent's servers and tools (agentic), the corpus a `p8ql:` step ranks and the
+-- space it ranks in (aiq), the function a `sql:` step is allow-listed to run
+-- and the queue and rate key that decide whether it is ever claimed (here).
+-- Every one of those reaches is a place a plan can be wrong in a way that
+-- compiles, registers and starts -- validate_spec checks the graph's SHAPE and
+-- has nothing to say about whether the things it names exist.
+--
+-- This section is the join written down once. `plan_catalog()` collects what
+-- exists, p8_plan_graph (the Rust half, plan_graph.rs) expands the spec against
+-- it, and `plan_defects()` is the audit shape: the reaches that do not resolve,
+-- each with the consequence of leaving it alone.
+--
+-- Two properties are deliberate and worth stating, because both are the kind
+-- that erodes:
+--
+--   The catalog is an ARGUMENT, not a fetch. p8_plan_graph makes no query, so
+--   the graph a caller gets is built from exactly the rows that caller could
+--   see -- RLS, taken once by Postgres in these views, rather than a second
+--   authorization model inside a graph builder.
+--
+--   Every call into the extension is DYNAMIC. `percolate_parser` is a separate
+--   extension and this schema installs without it (define_yaml has said so
+--   since §12). plpgsql plans a whole statement before any guard inside it
+--   runs, so `if to_regprocedure(...) is not null then select p8_plan_graph(...)`
+--   raises at first call on a deployment that does not have it -- the guard has
+--   to sit outside a statement the planner never resolves. EXECUTE is what
+--   makes the check mean what it reads as.
+-- ============================================================================
+
+-- What this deployment HAS, in the shape the graph builder reads: an object
+-- per section, keyed by name. A section that is missing entirely means the
+-- subsystem is not installed, and the builder treats that as "cannot judge"
+-- rather than "everything you named is missing" -- the difference between a
+-- plan graph on an engine-only install being empty of agents and being 40
+-- errors about them.
+create or replace function workflow.plan_catalog()
+returns jsonb
+language plpgsql
+stable
+set search_path = pg_catalog, public
+as $$
+declare
+    v_cat   jsonb;
+    v_facet jsonb;
+begin
+    v_cat := jsonb_build_object(
+        'functions', coalesce((
+            select jsonb_object_agg(name, jsonb_build_object(
+                'fn', fn, 'arg_types', to_jsonb(arg_types)))
+              from workflow.step_functions), '{}'::jsonb),
+        'queues', coalesce((
+            select jsonb_agg(queue order by queue) from workflow.queue_config), '[]'::jsonb),
+        'rate_keys', coalesce((
+            select jsonb_agg(key order by key) from workflow.rate_limits), '[]'::jsonb),
+        -- Names, not (name, version) pairs: a `workflow:` step names a
+        -- workflow and start_workflow resolves the version, so a graph that
+        -- demanded the version would report a defect the engine does not have.
+        'workflows', coalesce((
+            select jsonb_agg(distinct name) from workflow.definitions
+             where deleted_at is null), '[]'::jsonb));
+
+    if to_regprocedure('agentic.plan_facet()') is not null then
+        execute 'select agentic.plan_facet()' into v_facet;
+        v_cat := v_cat || coalesce(v_facet, '{}'::jsonb);
+    end if;
+    if to_regprocedure('aiq.plan_facet()') is not null then
+        execute 'select aiq.plan_facet()' into v_facet;
+        v_cat := v_cat || coalesce(v_facet, '{}'::jsonb);
+    end if;
+    return v_cat;
+end;
+$$;
+
+-- The graph itself. `p_version` null means the current version, which is what
+-- an author asking about "the triage workflow" means -- and a run started
+-- today would use.
+create or replace function workflow.plan_graph(p_name text, p_version int default null)
+returns jsonb
+language plpgsql
+stable
+set search_path = pg_catalog, public
+as $$
+declare
+    v_spec jsonb;
+    v_ver  int;
+    v_out  jsonb;
+begin
+    if to_regprocedure('p8_plan_graph(jsonb,jsonb)') is null then
+        raise exception
+            'workflow.plan_graph needs the percolate extension (p8_plan_graph). '
+            'The catalog half works without it: select workflow.plan_catalog().';
+    end if;
+
+    select d.spec, d.version into v_spec, v_ver
+      from workflow.definitions d
+     where d.name = p_name
+       and (p_version is null or d.version = p_version)
+       and d.deleted_at is null
+     order by d.version desc
+     limit 1;
+
+    if v_spec is null then
+        raise exception 'no workflow definition named % %', p_name,
+            case when p_version is null then '(any version)'
+                 else 'at version ' || p_version end;
+    end if;
+
+    -- The name and version ride INTO the spec so the graph's root node is
+    -- labelled with what it is. The spec itself carries neither -- they are
+    -- columns on the definition, and the builder should not have to be told
+    -- where a workflow's identity lives.
+    execute 'select p8_plan_graph($1, $2)'
+       into v_out
+      using jsonb_build_object('name', p_name, 'version', v_ver) || v_spec,
+            workflow.plan_catalog();
+    return v_out;
+end;
+$$;
+
+-- The audit shape. A view would have been the natural spelling and cannot be
+-- one: a view referencing p8_plan_graph fails to CREATE where the parser
+-- extension is absent, which would make an optional dependency a hard one at
+-- load time.
+--
+-- `p_name` null walks every current definition on one catalog -- which is the
+-- form a deployment gate wants, and the reason the catalog is computed once
+-- here rather than per row.
+create or replace function workflow.plan_defects(p_name text default null)
+returns table (
+    workflow    text,
+    version     int,
+    severity    text,
+    code        text,
+    node        text,
+    message     text,
+    consequence text
+)
+language plpgsql
+stable
+set search_path = pg_catalog, public
+as $$
+declare
+    v_cat  jsonb;
+    v_def  record;
+    v_out  jsonb;
+begin
+    if to_regprocedure('p8_plan_graph(jsonb,jsonb)') is null then
+        return;
+    end if;
+    v_cat := workflow.plan_catalog();
+
+    for v_def in
+        select distinct on (d.name) d.name, d.version, d.spec
+          from workflow.definitions d
+         where d.deleted_at is null
+           and (p_name is null or d.name = p_name)
+         order by d.name, d.version desc
+    loop
+        execute 'select p8_plan_graph($1, $2)'
+           into v_out
+          using jsonb_build_object('name', v_def.name, 'version', v_def.version) || v_def.spec,
+                v_cat;
+        return query
+        select v_def.name, v_def.version,
+               x->>'severity', x->>'code', x->>'node', x->>'message', x->>'consequence'
+          from jsonb_array_elements(coalesce(v_out->'defects', '[]'::jsonb)) x;
+    end loop;
+end;
+$$;
+
+-- Read surfaces over configuration only -- no run, no task, no per-tenant row
+-- passes through any of them, which is why these three are granted where every
+-- operator view in §22d is not.
+grant execute on function workflow.plan_catalog() to authenticated;
+grant execute on function workflow.plan_graph(text, int) to authenticated;
+grant execute on function workflow.plan_defects(text) to authenticated;
+
+comment on function workflow.plan_graph(text, int) is
+    'A stored definition expanded along the entities it names -- agents, tool '
+    'servers, tools, corpora, spaces, models, functions, queues, rate keys -- '
+    'with every reach that does not resolve reported as a defect. See '
+    'specs/workflow-engine/plan-graph.md.';
+
 
 -- ============================================================
 -- user-rbac/schema.sql
@@ -10323,6 +10867,114 @@ select workflow.register_step_function(
 -- for the enumeration this came out of.
 revoke execute on function aiq.land_embeddings(uuid) from public;
 
+-- ============================================================
+-- The plan-graph facet -- which corpus, and which space it is ranked in
+--
+-- The other half of workflow.plan_catalog() (workflow-engine/plan-graph.md).
+-- The engine can see that a step calls `p8ql`; only this schema knows whether
+-- the source that query names is registered, and -- the part no other view in
+-- this collection answers -- WHICH MODELS that corpus has actually been
+-- embedded with.
+--
+-- That last column is why this facet exists at all. `expand_embed_steps` pins
+-- one model into both halves of the sugar path, so `p8ql: 'SEARCH ... FROM
+-- chunks'` cannot rank in a space it did not embed into. The hand-written pair
+-- -- an `embed:` step and a `p8ql:` step the author wired together -- is
+-- outside that guarantee by construction, and its failure is not an error
+-- anywhere: ranking a corpus in a space it has no rows in returns no rows, and
+-- ranking it in the wrong space returns a number. `spaces` is what lets the
+-- plan graph refuse it before the run rather than after the answer.
+-- ============================================================
+
+-- Does this model's space hold any vector belonging to this corpus?
+--
+-- Dynamic because the space table's NAME is derived from the model, so a
+-- static reference would have to exist per model -- and because a model
+-- registered without register_embedding_space() has no table at all, which
+-- must answer false rather than raise. to_regclass is the guard that makes the
+-- second case cheap.
+create or replace function aiq.space_populated(p_model text, p_source_table text)
+returns boolean
+language plpgsql
+stable
+set search_path = pg_catalog, public
+as $$
+declare
+    v_tbl text := 'aiq.' || quote_ident('emb_' || replace(p_model, '-', '_'));
+    v_hit boolean;
+begin
+    if to_regclass(v_tbl) is null then
+        return false;
+    end if;
+    -- LIMIT 1 through the primary key, never a count: this asks whether the
+    -- corpus is represented in the space, and a count of six million vectors
+    -- answers the same question a great deal more slowly.
+    execute format(
+        'select exists (select 1 from %s e join %s c on c.id = e.chunk_id limit 1)',
+        v_tbl, p_source_table) into v_hit;
+    return coalesce(v_hit, false);
+exception
+    -- A registered source whose table has no `id` column is a registration
+    -- defect, not a reason for the whole plan graph to fail. Reported as "no
+    -- space" and left to the source's own audit.
+    when undefined_column or undefined_table then
+        return false;
+end;
+$$;
+
+-- Every registered source, and what is true of it. A name can be registered
+-- both ways -- `chunks` is lexical AND semantic -- so this is a full join
+-- rather than a union: one row per NAME, carrying which modes it supports.
+create or replace view aiq.v_plan_sources as
+select coalesce(s.name, l.name)                as name,
+       coalesce(s.source_table, l.source_table) as source_table,
+       s.name is not null                       as semantic,
+       l.name is not null                       as lexical,
+       -- The spaces this corpus has rows in. A model's space is a table
+       -- (aiq.emb_<model>, §10) and its rows are per chunk, so "embedded with
+       -- M" is a question about data, not about registration -- which is the
+       -- honest form of it, since registering a model creates an empty table.
+       coalesce((
+           select jsonb_agg(m.name order by m.name)
+             from aiq.embedding_models m
+            where aiq.space_populated(m.name, coalesce(s.source_table, l.source_table))
+       ), '[]'::jsonb)                          as spaces
+  from aiq.semantic_sources s
+  full join aiq.lexical_sources l on l.name = s.name;
+
+create or replace function aiq.plan_facet()
+returns jsonb
+language sql
+stable
+as $$
+    select jsonb_build_object(
+        'sources', coalesce((
+            select jsonb_object_agg(name, jsonb_build_object(
+                'table', source_table, 'semantic', semantic,
+                'lexical', lexical, 'spaces', spaces))
+              from aiq.v_plan_sources), '{}'::jsonb),
+        'models', coalesce((
+            select jsonb_object_agg(m.name, jsonb_build_object(
+                'dim', m.dim, 'provider', m.provider, 'is_default', m.is_default,
+                -- Registered and never created is a real, silent state: the
+                -- embed call succeeds and there is nowhere to land the vector.
+                'space_exists', to_regclass(
+                    'aiq.' || quote_ident('emb_' || replace(m.name, '-', '_'))) is not null))
+              from aiq.embedding_models m), '{}'::jsonb),
+        'entities', coalesce((
+            select jsonb_object_agg(entity_type, jsonb_build_object('table', source_table))
+              from aiq.entity_registry), '{}'::jsonb));
+$$;
+
+grant select on aiq.v_plan_sources to authenticated;
+grant execute on function aiq.plan_facet() to authenticated;
+grant execute on function aiq.space_populated(text, text) to authenticated;
+
+comment on function aiq.plan_facet() is
+    'The ai-query-layer half of workflow.plan_catalog(): registered sources and '
+    'the spaces they are actually embedded in, the model registry, and the '
+    'entity registry -- in the shape p8_plan_graph reads.';
+
 
 -- ============================================================
 -- world-model-ingestion/schema.sql
@@ -11661,6 +12313,7 @@ revoke execute on function workflow.register_artifact(uuid, text, text, text, bi
 -- What is deliberately NOT here: anything the agent runtime could do itself.
 -- The LLM call, the tool calls, and the SSE fan-out are outside SQL's reach
 -- (brief.md §8); everything else in an agent turn is a row this file owns.
+
 -- ============================================================
 
 do $$
@@ -12583,6 +13236,94 @@ grant execute on function agentic.channel_for(uuid) to authenticated, api_viewer
 
 -- No base-table INSERT/UPDATE/DELETE grant to any PostgREST-facing role: the
 -- write path is the functions above, and nothing else.
+
+-- ============================================================
+-- 9b. The plan-graph facet -- an agent's reach, as data
+--
+-- A read surface like §9 above and numbered under it for that reason: these
+-- two views add no capability, they answer one question about rows §9 already
+-- exposes -- what does this agent reach, and can it.
+--
+-- workflow-engine's plan graph (workflow-engine/plan-graph.md) expands a stored
+-- workflow along the entities it names, and an `agent:` step names one row in
+-- this schema whose own reach is three more joins: the servers it binds, the
+-- tools it is narrowed to on each, and -- through a server with
+-- `serves_agents` -- the agents it may hand work to. Those joins live HERE
+-- rather than in the engine, because the engine must be deployable without
+-- this schema at all: workflow.plan_catalog() calls this function only if it
+-- exists, the same conditional integration define_yaml already uses for
+-- aiq.expand_embed_steps.
+--
+-- Both views read only shared configuration. `agents` and `tool_servers` carry
+-- `for select using (true)` policies (§7), so nothing here can show a caller a
+-- row it could not select directly, and neither view touches `sessions`,
+-- `runs` or `messages` -- the three tables in this schema that are per-user.
+-- ============================================================
+
+create or replace view agentic.v_plan_agents as
+select a.name,
+       a.category,
+       a.audience,
+       a.model,
+       -- The prompt IS the intent, and a graph that omits it makes every agent
+       -- look alike. Truncated here rather than in the graph builder so the
+       -- limit is one a reader can see and change; the full text is one select
+       -- away for anybody who wants it.
+       left(a.system_prompt, 240) as intent,
+       a.structured_output_schema is not null as has_output_schema,
+       s.name as summarizer,
+       a.tools
+  from agentic.agents a
+  left join agentic.agents s on s.id = a.summarizer_agent_id;
+
+create or replace view agentic.v_plan_servers as
+select t.name,
+       t.kind,
+       t.url,
+       t.emits_citations,
+       t.serves_agents,
+       t.synced_at,
+       -- The tool NAMES discovery wrote, which is what an allow-list is checked
+       -- against. A server that has never synced has `[]` here and a null
+       -- synced_at, and the graph reports those as two different things: an
+       -- empty list means "we asked and it exposes nothing", a null sync means
+       -- "nobody has asked yet", and only the first is evidence about the tools.
+       coalesce((select jsonb_agg(e->>'name' order by e->>'name')
+                   from jsonb_array_elements(t.cached_tools) e
+                  where e ? 'name'), '[]'::jsonb) as tools
+  from agentic.tool_servers t;
+
+-- One object per section, keyed by name, which is the shape p8_plan_graph
+-- reads. Built with jsonb_object_agg rather than handed over as rows because
+-- the graph builder does lookups, not scans -- and because a section that is
+-- ABSENT means "this subsystem is not installed" there, a distinction an empty
+-- rowset could not carry.
+create or replace function agentic.plan_facet()
+returns jsonb
+language sql
+stable
+as $$
+    select jsonb_build_object(
+        'agents', coalesce((
+            select jsonb_object_agg(name, jsonb_build_object(
+                'category', category, 'audience', audience, 'model', model,
+                'intent', intent, 'has_output_schema', has_output_schema,
+                'summarizer', summarizer, 'tools', tools))
+              from agentic.v_plan_agents), '{}'::jsonb),
+        'servers', coalesce((
+            select jsonb_object_agg(name, jsonb_build_object(
+                'kind', kind, 'url', url, 'emits_citations', emits_citations,
+                'serves_agents', serves_agents, 'synced_at', synced_at,
+                'tools', tools))
+              from agentic.v_plan_servers), '{}'::jsonb));
+$$;
+
+grant select on agentic.v_plan_agents, agentic.v_plan_servers to authenticated;
+grant execute on function agentic.plan_facet() to authenticated;
+
+comment on function agentic.plan_facet() is
+    'The agentic half of workflow.plan_catalog(): every agent and tool server, '
+    'keyed by name, in the shape p8_plan_graph reads. Shared config only.';
 
 -- ------------------------------------------------------------
 -- 10. Invariant self-checks -- the same two this collection has already been
@@ -14047,355 +14788,3 @@ begin
     where not exists (
         select 1 from content.channels where name = 'uploads' and org_id is null);
 end $$;
-
--- ============================================================================
--- Operating at scale: retention, a plan gate, and the failures that are silent.
---
--- Everything in this section exists because dev/scale/ found it missing while
--- measuring the engine, and every one of them was a shell script or an ad-hoc
--- query first. A scaling property you can only check by remembering to write
--- the query is a property nobody checks.
--- ============================================================================
-
--- ------------------------------------------------------------
--- 1. Retention. The task table only ever grew.
---
--- Nothing in this engine deleted a task, so `workflow.tasks` grew without
--- bound -- and scale.md found that the autoscaler's own probe changes plan on
--- the ratio of live rows to total rows, so an unbounded table degrades the
--- thing that decides how many workers you get.
---
--- BATCHED, and that is the whole reason this is a function rather than advice.
--- Deleting a million task rows in one statement takes tens of minutes: every
--- row costs an index update per index plus a foreign-key probe into
--- task_dependencies, and it accumulates in one transaction's WAL. Measured on
--- the harness: a single-statement delete of 1M rows was still running after 22
--- minutes. Each batch here commits on its own.
--- ------------------------------------------------------------
-
--- KEYED ON completed_at, FALLING BACK TO updated_at, and both halves matter.
---
--- completed_at first, because workflow.runs carries a touch trigger: updated_at
--- means "last modified" and is rewritten by any later write to the row, so
--- retention keyed on it alone would be retention keyed on when somebody last
--- looked at the run. completed_at is set once, when the run finished, which is
--- the question retention is actually asking.
---
--- The coalesce is not defensive padding. A run CAN reach a terminal status with
--- a null completed_at -- found by doing it -- and keyed on completed_at alone
--- such a run and every task under it would be immortal, invisibly, forever.
--- updated_at is a sound lower bound on the age of a row nobody is touching.
---
--- The old note, kept because the reasoning still applies:
--- workflow.runs carries a touch trigger, so updated_at means "last modified"
--- and is rewritten by any later write to the row. Retention keyed on it would
--- be retention keyed on when somebody last looked at the run. completed_at is
--- set once, when the run finished, which is the question retention is actually
--- asking.
---
--- THE TERMINAL STATUSES ARE ASSERTED, NOT ASSUMED.
---
--- Written first as ('succeeded','failed','cancelled'), which workflow.runs
--- refuses -- it uses 'completed'. That version would have purged NOTHING,
--- silently, forever, and reported a clean zero every time it ran. agentic.runs
--- does use 'succeeded', and both constraints are named runs_status_check, which
--- is how the wrong vocabulary looked right.
---
--- So the names are checked against the constraint that owns them, at load time.
-do $$
-declare v_def text;
-begin
-    select pg_get_constraintdef(k.oid) into v_def
-    from pg_constraint k
-    join pg_class c on c.oid = k.conrelid
-    join pg_namespace n on n.oid = c.relnamespace
-    where k.conname = 'runs_status_check' and n.nspname = 'workflow';
-
-    if v_def is null or v_def not like '%completed%' then
-        raise exception
-            'workflow.purge_completed hard-codes the terminal run statuses and '
-            'workflow.runs no longer admits ''completed'' (constraint: %). '
-            'Purging would silently delete nothing.', coalesce(v_def, '(none)');
-    end if;
-end $$;
-
-drop function if exists workflow.purge_completed(interval, int, int);
-create or replace function workflow.purge_completed(
-    p_older_than  interval default interval '30 days',
-    p_batch       int      default 50,      -- RUNS per batch, not tasks
-    p_max_batches int      default 1000)
-returns table(batches int, runs_purged bigint, tasks_purged bigint, runs_skipped bigint) as $$
-declare
-    v_cut     timestamptz := now() - p_older_than;
-    v_has_agentic boolean := to_regclass('agentic.runs') is not null;
-    v_ids     uuid[];
-    v_n       bigint;
-    v_batches int := 0;
-    v_runs    bigint := 0;
-    v_tasks   bigint := 0;
-    v_skipped bigint := 0;
-begin
-    if p_batch < 1 then
-        raise exception 'p_batch must be positive';
-    end if;
-
-    loop
-        exit when v_batches >= p_max_batches;
-
-        -- ELIGIBILITY IS PER RUN, AND EVERY CLAUSE HERE IS A FOREIGN KEY THAT
-        -- WOULD OTHERWISE ABORT THE PURGE MID-BATCH. Found by running it: the
-        -- first version deleted tasks and then failed on
-        -- schedules_last_run_id_fkey, leaving the run half-purged.
-        select array_agg(r.id) into v_ids
-        from (
-            select r.id
-            from workflow.runs r
-            where r.status in ('completed','failed','cancelled')
-              and coalesce(r.completed_at, r.updated_at) < v_cut
-              -- A schedule points at its most recent run. Deleting it would
-              -- lose the schedule's own history.
-              and not exists (select 1 from workflow.schedules s where s.last_run_id = r.id)
-              -- A sub_workflow parent task points at its child run.
-              and not exists (select 1 from workflow.tasks t where t.child_run_id = r.id)
-              -- An agent run records the workflow task that triggered it.
-              and (not v_has_agentic or not exists (
-                    select 1 from agentic.runs ar
-                    join workflow.tasks t on t.id = ar.workflow_task_id
-                    where t.run_id = r.id))
-            order by coalesce(r.completed_at, r.updated_at)
-            limit p_batch
-        ) r;
-
-        exit when v_ids is null;
-
-        -- A WHOLE RUN AT A TIME. Tasks reference each other within a run --
-        -- compensates_task_id and matrix_parent_id are both NO ACTION -- so a
-        -- batch that split a run would block on its own siblings.
-        delete from workflow.tasks t where t.run_id = any(v_ids);
-        get diagnostics v_n = row_count;
-        v_tasks := v_tasks + v_n;
-
-        delete from workflow.runs r where r.id = any(v_ids);
-        get diagnostics v_n = row_count;
-        v_runs := v_runs + v_n;
-
-        v_batches := v_batches + 1;
-    end loop;
-
-    -- What was eligible by age and held back by a reference, so an operator
-    -- watching the table not shrink has an answer rather than a mystery.
-    select count(*) into v_skipped
-    from workflow.runs r
-    where r.status in ('completed','failed','cancelled')
-      and coalesce(r.completed_at, r.updated_at) < v_cut;
-
-    return query select v_batches, v_runs, v_tasks, v_skipped;
-end;
-$$ language plpgsql security definer set search_path = pg_catalog, public;
-
-revoke execute on function workflow.purge_completed(interval, int, int) from public;
-
--- ------------------------------------------------------------
--- 2. The plan gate.
---
--- THE DEFECT THIS EXISTS FOR: idx_tasks_claimable did not match claim_task's
--- ORDER BY, so on a deep queue the planner abandoned it for a sequential scan
--- plus a sort of the entire ready set -- to return twenty rows. 78 claims/s
--- against 13,965 on the same data. No functional test could see it, because
--- the engine was correct throughout; only the plan was wrong.
---
--- So the assertion is about the PLAN, and it belongs in the database rather
--- than in a shell script, because the thing it protects is a property of the
--- schema.
---
--- IT REFUSES TO PASS ON A SHALLOW QUEUE, and that is the design. The defect is
--- invisible below a few thousand ready rows: the planner picks the index
--- whatever its shape, so a gate that ran on a fixture would have reported
--- health for the entire life of the bug. Inconclusive is an honest answer and
--- a false pass is not.
--- ------------------------------------------------------------
-create or replace function workflow.check_hot_paths(p_min_depth int default 2000)
-returns table(path text, verdict text, detail text) as $$
-declare
-    v_queue text;
-    v_depth bigint;
-    v_plan  jsonb;
-    v_nodes text[];
-begin
-    select t.queue, count(*) into v_queue, v_depth
-    from workflow.tasks t
-    where t.status = 'ready'
-    group by t.queue
-    order by count(*) desc
-    limit 1;
-
-    if v_queue is null or v_depth < p_min_depth then
-        return query select
-            'claim'::text, 'inconclusive'::text,
-            format('deepest queue has %s ready task(s), below the %s needed to '
-                   'judge -- the planner picks the index at any shape when the '
-                   'ready set is small, so a pass here would mean nothing',
-                   coalesce(v_depth, 0), p_min_depth);
-        return;
-    end if;
-
-    execute format(
-        'explain (format json) select * from workflow.tasks
-          where queue = %L and status = ''ready'' and run_after <= now()
-          order by priority desc, created_at
-          for update skip locked limit 20', v_queue)
-    into v_plan;
-
-    select array_agg(distinct x #>> '{}')
-      into v_nodes
-      from jsonb_path_query(v_plan, '$.**."Node Type"') x;
-
-    return query select
-        'claim'::text,
-        case
-            when 'Seq Scan' = any(v_nodes) then 'FAIL'
-            when 'Sort'     = any(v_nodes) then 'FAIL'
-            else 'ok'
-        end,
-        case
-            when 'Seq Scan' = any(v_nodes) or 'Sort' = any(v_nodes) then
-                format('claim_task is scanning and sorting %s ready tasks on queue %L '
-                       'to return 20. The claim index no longer matches its ORDER BY '
-                       '(priority desc, created_at). Plan: %s',
-                       v_depth, v_queue, array_to_string(v_nodes, ' -> '))
-            else
-                format('index-backed at depth %s on queue %L (%s)',
-                       v_depth, v_queue, array_to_string(v_nodes, ' -> '))
-        end;
-end;
-$$ language plpgsql security definer set search_path = pg_catalog, public;
-
-grant execute on function workflow.check_hot_paths(int) to authenticated;
-
--- ------------------------------------------------------------
--- 3. Work nobody can claim -- the failure with no error in it.
---
--- `rate_key` is a REFERENCE to a row in workflow.rate_limits, not a
--- declaration of one. try_consume_rate_limit does `update ... where key = $1`,
--- which matches nothing when the bucket does not exist and therefore returns
--- false -- every time, forever. The task sits in `ready`, no worker ever claims
--- it, no attempt is recorded, nothing retries, and the worker beside it reports
--- an empty queue. Measured on this collection's own embed fan-out: six children
--- in `ready`, no error, no dead task, no signal of any kind.
---
--- v_stuck_tasks cannot see it either: it reports tasks that are OLD, and a
--- freshly created unclaimable task is not old yet. It becomes visible there an
--- hour later, described as something else.
--- ------------------------------------------------------------
-create or replace view workflow.v_unclaimable as
-    select t.id, t.run_id, t.queue, t.step_key, t.rate_key,
-           'rate_key names no bucket in workflow.rate_limits'::text as reason,
-           format('insert into workflow.rate_limits (key, capacity, tokens, refill_rate) '
-                  'values (%L, 20, 20, 1);', t.rate_key) as remedy,
-           now() - t.created_at as waiting
-    from workflow.tasks t
-    where t.status = 'ready'
-      and t.rate_key is not null
-      and not exists (select 1 from workflow.rate_limits rl where rl.key = t.rate_key)
-  union all
-    select t.id, t.run_id, t.queue, t.step_key, null::text,
-           'queue has no worker pool and no config'::text,
-           format('no workflow.queue_config row for queue %L, and nothing has '
-                  'claimed from it', t.queue),
-           now() - t.created_at
-    from workflow.tasks t
-    where t.status = 'ready'
-      and t.run_after <= now()
-      and t.created_at < now() - interval '10 minutes'
-      and not exists (
-          select 1 from workflow.tasks c
-          where c.queue = t.queue and c.claimed_at > now() - interval '10 minutes');
-
--- ------------------------------------------------------------
--- 4. The backlog, as an operator needs it rather than as a count.
---
--- v_queue_depth answers "how many rows are in each state", which is the shape
--- a dashboard wants and not the shape a decision wants. The question behind
--- scaling a pool is "how long has the oldest thing been waiting", because that
--- is the number an SLO is written against -- depth alone cannot distinguish a
--- queue of 10,000 draining in seconds from a queue of 50 that nothing is
--- serving.
--- ------------------------------------------------------------
-create or replace view workflow.v_backlog as
-    select t.queue,
-           count(*) filter (where t.status = 'ready' and t.run_after <= now())  as claimable,
-           count(*) filter (where t.status = 'ready' and t.run_after >  now())  as backing_off,
-           count(*) filter (where t.status = 'running')                          as running,
-           count(*) filter (where t.status = 'waiting_external')                 as waiting_on_a_person,
-           coalesce(max(now() - t.created_at) filter
-               (where t.status = 'ready' and t.run_after <= now()),
-               interval '0')                                                     as oldest_wait,
-           count(distinct t.claimed_by) filter
-               (where t.claimed_at > now() - interval '5 minutes')               as workers_seen,
-           max(t.claimed_at)                                                     as last_claim
-    from workflow.tasks t
-    where t.status in ('ready','running','waiting_external')
-    group by t.queue;
-
--- ------------------------------------------------------------
--- 5. Connection headroom -- the ceiling that arrives before throughput does.
---
--- Measured on a three-node cluster: thirty worker pods at four connections
--- each, against max_connections = 100, produced "sorry, too many clients
--- already" for everybody INCLUDING the operator -- the role was a superuser and
--- superuser_reserved_connections is 3, and thirty pods reconnecting in a loop
--- won the race for those three slots. The failure mode of connection
--- exhaustion is not that work stops; it is that nobody can get in to see why.
---
--- Which makes headroom something to watch BEFORE it is gone, and there was
--- nothing reporting it.
--- ------------------------------------------------------------
-create or replace view workflow.v_capacity as
-    select (select setting::int from pg_settings where name = 'max_connections')      as max_connections,
-           (select setting::int from pg_settings where name = 'superuser_reserved_connections') as reserved,
-           (select count(*)::int from pg_stat_activity)                               as in_use,
-           (select setting::int from pg_settings where name = 'max_connections')
-             - (select count(*)::int from pg_stat_activity)                           as headroom,
-           (select count(distinct claimed_by)::int from workflow.tasks
-             where claimed_at > now() - interval '5 minutes')                         as workers_seen,
-           case when (select count(*)::float from pg_stat_activity)
-                     / nullif((select setting::float from pg_settings
-                                where name = 'max_connections'), 0) > 0.8
-                then 'connection budget over 80% used -- a pool scaling on queue '
-                     'depth can exhaust this long before it exhausts throughput'
-                else null end                                                          as warning;
-
-grant select on workflow.v_backlog, workflow.v_unclaimable, workflow.v_capacity
-    to authenticated;
-
--- ------------------------------------------------------------
--- 6. Synthetic load, so a scaling test is one call rather than a script.
---
--- Inserts directly rather than going through start_workflow, deliberately: a
--- scale probe is measuring the CLAIM path, and routing a million tasks through
--- the compiler would measure that instead. Owner-only for the same reason
--- register_step_function is -- it decides what the deployment can be made to do.
--- ------------------------------------------------------------
-create or replace function workflow.seed_load(
-    p_queue text, p_count int, p_definition text default '__scale_probe')
-returns uuid as $$
-declare v_def uuid; v_run uuid;
-begin
-    insert into workflow.definitions (name, spec)
-    select p_definition, jsonb_build_object('steps', jsonb_build_array(jsonb_build_object(
-               'key','w','kind','work','queue',p_queue)))
-    where not exists (select 1 from workflow.definitions where name = p_definition);
-
-    select id into v_def from workflow.definitions where name = p_definition;
-    insert into workflow.runs (workflow_def_id, status) values (v_def, 'running')
-    returning id into v_run;
-
-    insert into workflow.tasks (run_id, step_key, kind, queue, status, pending_deps, input)
-    select v_run, 'p' || g, 'work', p_queue, 'ready', 0, '{}'::jsonb
-    from generate_series(1, p_count) g;
-
-    return v_run;
-end;
-$$ language plpgsql security definer set search_path = pg_catalog, public;
-
-revoke execute on function workflow.seed_load(text, int, text) from public;
