@@ -1893,9 +1893,16 @@ end $$;
 -- THREE GUARDS, because "execute SQL from a table" is otherwise a
 -- privilege-escalation primitive and a long-transaction generator:
 --
---   1. ALLOW-LIST, not arbitrary SQL. A step names a registered function; it
---      cannot supply a statement. Registration is an admin act (owner-only),
---      so authoring a workflow never widens what can be executed.
+--   1. A POLICY, WHICH DEFAULTS TO OPEN. This guard used to be an allow-list:
+--      a step named a registered function and could not supply a statement, so
+--      authoring a workflow never widened what could be executed. That is a
+--      sound boundary and it made every QUESTION a pipeline wanted to ask into
+--      an owner-only registration, which is why `percolate.sql_policy` now
+--      chooses -- `open` (a step may carry its own SQL, running as the engine
+--      owner) or `registered` (the old rule). See "SQL a step wrote itself"
+--      above for what open mode trades away and roadmap.md §6 for the mode
+--      that would close it without the friction. Under either policy a READ
+--      cannot write: transaction_read_only decides that, not the policy.
 --   2. A SUBTRANSACTION per step. A failing step fails ITSELF -- it must not
 --      abort the transaction of whichever worker happened to complete the
 --      preceding task. Without this, one bad SQL step would roll back an
@@ -2979,19 +2986,24 @@ revoke execute on function workflow.assert_schedule_access(text, text) from publ
 -- changed world; a re-expansion that produces the same one is a no-op.
 --
 -- ------------------------------------------------------------------
--- MATRIX ROWS COME FROM A REGISTERED FUNCTION, NOT AN INLINE SELECT.
+-- MATRIX ROWS COME FROM A QUERY, OR FROM A REGISTERED FUNCTION.
 --
--- The obvious spelling is an inline `sql: | select ...` in the step. It is
--- refused here for exactly the reason §17 refuses it for `sql` steps: this
--- executes SECURITY DEFINER, so a step that could supply a statement would be
--- a privilege-escalation primitive with a YAML front end. A matrix names a
--- function in the SAME allow-list (`workflow.step_functions`) that `sql` steps
--- use, and the function returns a JSON array of objects. Registration stays an
--- owner-only act, so authoring a matrix never widens what can be executed.
+-- This used to be refused: expansion is SECURITY DEFINER, so a step that could
+-- supply a statement was a privilege-escalation primitive with a YAML front
+-- end, and `rows:` had to name a function in the same allow-list `sql` steps
+-- used. The description of what happens is still accurate; it is simply the
+-- trade `percolate.sql_policy = 'open'` now takes everywhere, and a fan-out
+-- over "everything nobody has processed yet" is the most natural thing anyone
+-- writes here -- making that one case need an owner-only registration was most
+-- of what made the allow-list feel like a tax.
 --
--- The cost is real -- a new fan-out shape needs a migration, not just a YAML
--- edit -- and it is the correct cost. A literal `items: [...]` list covers the
--- small static case without a registration.
+-- Two differences from an ordinary statement step, both deliberate. A row
+-- source is ALWAYS READ-ONLY whatever the step says, because it is re-run by
+-- every retry of this expansion and a row function that mutates while deciding
+-- how many children to make has no good reading. And `rows: {function, args}`
+-- stays -- it is what a deployment running `sql_policy = 'registered'` is
+-- restricted to, and a literal `items: [...]` still covers the small static
+-- case with neither.
 --
 -- ------------------------------------------------------------------
 -- DELIBERATELY NOT HERE (each has a reason, not an omission):
@@ -3264,7 +3276,9 @@ begin
     if not found then
         raise exception
             'step names function ''%'', which is not registered. Register it with '
-            'workflow.register_step_function() -- steps may not supply arbitrary SQL.',
+            'workflow.register_step_function(), or write the query directly as '
+            '`sql: "select ..."` -- unless this deployment sets '
+            'percolate.sql_policy = ''registered'', which is the mode that refuses that.',
             p_name;
     end if;
 
