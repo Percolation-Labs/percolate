@@ -141,6 +141,20 @@ absent from the product.
 `scenarios/` is upstream of this directory. Exploration happens there; what
 turns out to be worth re-running forever gets pinned here.
 
+`../examples/` is beside it and is neither. It is ten worked scenarios over one
+fixture, executed against a live database, and it is the source of the output
+quoted on the `Ten things, worked through` page in `get-percolate/docs/`. It is
+not a test suite and must not become one: by the rule above, a test earns its
+place by failing when a guarantee is quietly removed, and every one of those
+ten exercises a path that already works. What it is for is that a cookbook has
+to *state* what a function does, and stating it is what found two of the three
+defects recorded in `world-model-ingestion/ingestion.md` §7 and the one in
+`workflow-engine/YAML.md` — a `p8ql:` step of plain SQL that completes without
+executing, and an upload retried without an `external_id` that ingests twice.
+Writing the examples asked a fourth question the other three do not: not "is
+this right?", not "has this ever run?", but **"is this what a reader would be
+told it does?"**
+
 ## The one test that is not SQL
 
 `content/e2e-ingest.py` uploads five real formats — markdown, PDF, DOCX, WAV
