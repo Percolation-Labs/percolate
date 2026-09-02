@@ -5875,10 +5875,19 @@ declare
     v_facet jsonb;
 begin
     v_cat := jsonb_build_object(
+        -- WITH THE COMMENT, which is the same text a bound tool carries into
+        -- an LLM's context (§24) -- so what a `sql:` step DOES is answerable
+        -- from the plan instead of from the source. The registry's own
+        -- description first, since somebody wrote it for exactly this, and the
+        -- function's COMMENT behind it.
         'functions', coalesce((
-            select jsonb_object_agg(name, jsonb_build_object(
-                'fn', fn, 'arg_types', to_jsonb(arg_types)))
-              from workflow.step_functions), '{}'::jsonb),
+            select jsonb_object_agg(f.name, jsonb_strip_nulls(jsonb_build_object(
+                'fn', f.fn, 'arg_types', to_jsonb(f.arg_types),
+                'description', coalesce(f.description,
+                    obj_description(to_regprocedure(
+                        f.fn || '(' || array_to_string(f.arg_types, ',') || ')'), 'pg_proc')),
+                'timeout_ms', f.timeout_ms)))
+              from workflow.step_functions f), '{}'::jsonb),
         'queues', coalesce((
             select jsonb_agg(queue order by queue) from workflow.queue_config), '[]'::jsonb),
         'rate_keys', coalesce((
@@ -5948,6 +5957,55 @@ begin
 end;
 $$;
 
+-- The same expansion, read rather than traversed.
+--
+-- plan_graph answers "what does this reach, and does it resolve" -- the right
+-- shape for a checker and the wrong one for a person, who wants the pipeline:
+-- step, then what that step says and does, with the agent's prompt, the
+-- corpus's columns and the tool's description sitting where they are USED
+-- rather than in a node list to be joined by eye.
+--
+-- A projection of the graph, never a second resolver. Two views that resolve
+-- separately are two answers to the only question that matters.
+create or replace function workflow.plan_document(p_name text, p_version int default null)
+returns jsonb
+language plpgsql
+stable
+set search_path = pg_catalog, public
+as $$
+declare
+    v_spec jsonb;
+    v_ver  int;
+    v_out  jsonb;
+begin
+    if to_regprocedure('p8_plan_document(jsonb,jsonb)') is null then
+        raise exception
+            'workflow.plan_document needs the percolate extension (p8_plan_document). '
+            'The catalog half works without it: select workflow.plan_catalog().';
+    end if;
+
+    select d.spec, d.version into v_spec, v_ver
+      from workflow.definitions d
+     where d.name = p_name
+       and (p_version is null or d.version = p_version)
+       and d.deleted_at is null
+     order by d.version desc
+     limit 1;
+
+    if v_spec is null then
+        raise exception 'no workflow definition named % %', p_name,
+            case when p_version is null then '(any version)'
+                 else 'at version ' || p_version end;
+    end if;
+
+    execute 'select p8_plan_document($1, $2)'
+       into v_out
+      using jsonb_build_object('name', p_name, 'version', v_ver) || v_spec,
+            workflow.plan_catalog();
+    return v_out;
+end;
+$$;
+
 -- The audit shape. A view would have been the natural spelling and cannot be
 -- one: a view referencing p8_plan_graph fails to CREATE where the parser
 -- extension is absent, which would make an optional dependency a hard one at
@@ -6004,7 +6062,14 @@ $$;
 -- operator view in §22d is not.
 grant execute on function workflow.plan_catalog() to authenticated;
 grant execute on function workflow.plan_graph(text, int) to authenticated;
+grant execute on function workflow.plan_document(text, int) to authenticated;
 grant execute on function workflow.plan_defects(text) to authenticated;
+
+comment on function workflow.plan_document(text, int) is
+    'A stored definition read as a pipeline: every step in order, carrying what '
+    'it does and the expanded entity it does it to -- the agent and its prompt, '
+    'the corpus and its columns, the tool and its description. A projection of '
+    'workflow.plan_graph().';
 
 comment on function workflow.plan_graph(text, int) is
     'A stored definition expanded along the entities it names -- agents, tool '

@@ -271,6 +271,76 @@ begin
     end if;
 end $$;
 
+-- ---------------------------------------------------------------------
+-- 8. THE DOCUMENT EXPANDS WHERE THE STEP USES IT.
+--
+-- plan_graph answers "does this resolve"; plan_document answers "what does
+-- this pipeline actually say". The assertion that matters is not that the
+-- document exists, it is that the ENTITY IS INLINE -- an agent's prompt at the
+-- step that asks it, a corpus's columns at the step that reads it. A document
+-- that named them and made you go looking would be the graph with extra steps.
+-- ---------------------------------------------------------------------
+do $$
+declare
+    v_doc  jsonb;
+    v_step jsonb;
+begin
+    if to_regprocedure('p8_plan_document(jsonb,jsonb)') is null then
+        raise notice 'workflow/11: SKIPPED the document -- installed parser has no p8_plan_document';
+        return;
+    end if;
+
+    v_doc := workflow.plan_document('t_pg_sound');
+
+    -- Steps come out in rank order, so the document reads as the pipeline runs.
+    if v_doc #>> '{steps,0,id}' <> 'retrieve__embed'
+       or v_doc #>> '{steps,1,id}' <> 'retrieve' then
+        raise exception 'the document is not in rank order: %',
+            (select jsonb_agg(x->>'id') from jsonb_array_elements(v_doc->'steps') x);
+    end if;
+
+    v_step := v_doc #> '{steps,1}';
+    if v_step #>> '{reads,table}' <> 'content.resource_chunks' then
+        raise exception 'the corpus was not expanded at the step that reads it: %',
+            v_step->'reads';
+    end if;
+    if jsonb_array_length(coalesce(v_step #> '{reads,columns}', '[]'::jsonb)) = 0 then
+        raise exception 'the corpus expanded without its columns -- "how data moves through '
+                        'the schema" is the question this is for';
+    end if;
+    if v_step #>> '{calls,description}' is null then
+        raise exception 'the step function expanded without what it does';
+    end if;
+
+    -- And the agent case: the prompt IS the intent, so it has to be here.
+    if to_regprocedure('agentic.plan_facet()') is not null
+       and exists (select 1 from agentic.agents) then
+        declare v_agent text; v_doc2 jsonb;
+        begin
+            select name into v_agent from agentic.agents order by name limit 1;
+            insert into workflow.definitions (name, spec) values
+            ('t_pg_agentic', jsonb_build_object('steps', jsonb_build_array(
+                jsonb_build_object(
+                    'key', 'ask', 'kind', 'http_call', 'queue', 'http',
+                    'input', jsonb_build_object(
+                        'url', '{{env.P8_AGENT_URL}}/v1/chat/completions',
+                        'body', jsonb_build_object('model', v_agent))))));
+            v_doc2 := workflow.plan_document('t_pg_agentic');
+            if v_doc2 #>> '{steps,0,calls,agent}' <> v_agent then
+                raise exception 'the agent step did not expand its agent: %',
+                    v_doc2 #> '{steps,0}';
+            end if;
+            if coalesce(v_doc2 #>> '{steps,0,calls,system_prompt}', '') = '' then
+                raise exception 'the agent expanded without its prompt, which is its intent';
+            end if;
+            if v_doc2 #>> '{steps,0,about}' not like 'asks agent %' then
+                raise exception 'the one-line summary does not say what the step does: %',
+                    v_doc2 #>> '{steps,0,about}';
+            end if;
+        end;
+    end if;
+end $$;
+
 do $$
 begin
     raise notice 'workflow/11: plan_catalog carries every section a graph looks into, from the registries';
@@ -279,6 +349,7 @@ begin
     raise notice 'workflow/11: ranking a corpus in a space it was never embedded into is reported before the run';
     raise notice 'workflow/11: a rate_key with no rate_limits row is an error -- the task would never be claimed';
     raise notice 'workflow/11: an agent nobody registered is a node AND a defect; an absent subsystem is neither';
+    raise notice 'workflow/11: the document reads in rank order, with the corpus and the agent expanded where they are used';
 end $$;
 
 rollback;

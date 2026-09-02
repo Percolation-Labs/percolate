@@ -971,12 +971,26 @@ select a.name,
        a.category,
        a.audience,
        a.model,
-       -- The prompt IS the intent, and a graph that omits it makes every agent
-       -- look alike. Truncated here rather than in the graph builder so the
-       -- limit is one a reader can see and change; the full text is one select
-       -- away for anybody who wants it.
-       left(a.system_prompt, 240) as intent,
+       -- THE WHOLE PROMPT, not a preview of it. An agent's intent IS its
+       -- prompt, and this view exists so a plan can be read for intent -- a
+       -- truncation makes every agent look like every other agent, which is
+       -- the failure mode the expansion is for.
+       a.system_prompt,
+       -- The SHAPE it must return, curated to what a reader needs: the
+       -- required keys and each property's type. The full JSON Schema is one
+       -- select away and is mostly boilerplate; what tells you whether N
+       -- results will combine is the key list.
+       case when a.structured_output_schema is null then null else
+           jsonb_build_object(
+               'required', coalesce(a.structured_output_schema->'required', '[]'::jsonb),
+               'properties', coalesce((
+                   select jsonb_object_agg(k, coalesce(v->>'type', 'any'))
+                     from jsonb_each(coalesce(
+                              a.structured_output_schema->'properties', '{}'::jsonb)) e(k, v)), 
+                   '{}'::jsonb))
+       end as output_shape,
        a.structured_output_schema is not null as has_output_schema,
+       nullif(a.context_policy, '{}'::jsonb) as context_policy,
        s.name as summarizer,
        a.tools
   from agentic.agents a
@@ -996,7 +1010,23 @@ select t.name,
        -- "nobody has asked yet", and only the first is evidence about the tools.
        coalesce((select jsonb_agg(e->>'name' order by e->>'name')
                    from jsonb_array_elements(t.cached_tools) e
-                  where e ? 'name'), '[]'::jsonb) as tools
+                  where e ? 'name'), '[]'::jsonb) as tools,
+       -- WHAT EACH TOOL SAYS IT DOES, which is the half of a binding that
+       -- carries intent. The description is the text the MODEL reads before
+       -- deciding to call it, so a plan that shows the tool name and not this
+       -- shows the part nobody needs. Parameters are named, not schema'd: the
+       -- argument names are what make a tool recognisable, and the types are
+       -- one fetch away for anybody who needs them.
+       coalesce((select jsonb_object_agg(e->>'name', jsonb_build_object(
+                            'description', e->>'description',
+                            'params', coalesce((
+                                select jsonb_agg(k order by k)
+                                  from jsonb_object_keys(coalesce(
+                                       e#>'{inputSchema,properties}',
+                                       e#>'{input_schema,properties}',
+                                       '{}'::jsonb)) k), '[]'::jsonb)))
+                   from jsonb_array_elements(t.cached_tools) e
+                  where e ? 'name'), '{}'::jsonb) as tool_detail
   from agentic.tool_servers t;
 
 -- One object per section, keyed by name, which is the shape p8_plan_graph
@@ -1011,16 +1041,18 @@ stable
 as $$
     select jsonb_build_object(
         'agents', coalesce((
-            select jsonb_object_agg(name, jsonb_build_object(
+            select jsonb_object_agg(name, jsonb_strip_nulls(jsonb_build_object(
                 'category', category, 'audience', audience, 'model', model,
-                'intent', intent, 'has_output_schema', has_output_schema,
-                'summarizer', summarizer, 'tools', tools))
+                'system_prompt', system_prompt, 'output_shape', output_shape,
+                'has_output_schema', has_output_schema,
+                'context_policy', context_policy,
+                'summarizer', summarizer, 'tools', tools)))
               from agentic.v_plan_agents), '{}'::jsonb),
         'servers', coalesce((
             select jsonb_object_agg(name, jsonb_build_object(
                 'kind', kind, 'url', url, 'emits_citations', emits_citations,
                 'serves_agents', serves_agents, 'synced_at', synced_at,
-                'tools', tools))
+                'tools', tools, 'tool_detail', tool_detail))
               from agentic.v_plan_servers), '{}'::jsonb));
 $$;
 

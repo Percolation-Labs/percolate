@@ -75,6 +75,26 @@ impl Graph {
     /// Add a node, or return the existing one. Ids are `kind:name`, so the same
     /// agent named by three steps is one node with three edges into it -- which
     /// is the whole reason this is a graph and not a tree.
+    ///
+    /// `extra` carries the node's own fields; `detail` is the catalog entry it
+    /// stands for, whole. The split is what makes the graph readable at two
+    /// depths: the fields are what a layout needs (id, kind, lane, label,
+    /// rank), and `detail` is what a READER needs -- the agent's actual
+    /// prompt, the corpus's actual columns, the tool's actual description.
+    /// Naming a thing and expanding it are different jobs and this does both
+    /// rather than choosing.
+    fn node_with(&mut self, kind: &str, name: &str, extra: Value, detail: Value) -> String {
+        let id = self.node(kind, name, extra);
+        if !detail.is_null() {
+            if let Some(n) = self.nodes.get_mut(&id) {
+                if n.get("detail").map(Value::is_null).unwrap_or(true) {
+                    n["detail"] = detail;
+                }
+            }
+        }
+        id
+    }
+
     fn node(&mut self, kind: &str, name: &str, extra: Value) -> String {
         let id = format!("{kind}:{name}");
         if !self.nodes.contains_key(&id) {
@@ -185,6 +205,120 @@ fn endpoint_of(url: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// What a step DOES, curated.
+//
+// A compiled step's `input` carries everything the engine needs and a fair
+// amount a reader does not: an agent step's whole OpenAI-shaped envelope, an
+// embed step's request template, a matrix's template object. This keeps the
+// half that describes the PIPELINE -- the query, the prompt, the url, the
+// fan-out width -- and drops the transport. The rule for what stays: if two
+// steps of the same kind would differ in it, it describes the pipeline.
+// ---------------------------------------------------------------------------
+
+fn step_detail(kind: &str, input: &Value) -> Value {
+    let mut d = Map::new();
+    match kind {
+        "sql" => {
+            if let Some(f) = input.get("function") {
+                d.insert("function".into(), f.clone());
+            }
+            if let Some(a) = input.get("args") {
+                d.insert("args".into(), a.clone());
+            }
+        }
+        "http_call" => {
+            if let Some(agent) = agent_of(input) {
+                d.insert("agent".into(), json!(agent));
+                // The prompt this step sends, which is the step's half of the
+                // intent -- the agent's own system prompt is the other half
+                // and lives on the agent node.
+                if let Some(m) = input.pointer("/body/messages").and_then(Value::as_array) {
+                    let user: Vec<&Value> = m.iter()
+                        .filter(|x| x.get("role").and_then(Value::as_str) == Some("user"))
+                        .filter_map(|x| x.get("content"))
+                        .collect();
+                    if let Some(c) = user.first() {
+                        d.insert("input".into(), (*c).clone());
+                    }
+                }
+                // The session rides INSIDE the body, beside the model and the
+                // messages, because that is where the runtime reads it --
+                // `session_group` and `output_schema` are the task's own
+                // business and sit at the top. Two homes, so two lookups.
+                if let Some(v) = input.pointer("/body/session") {
+                    d.insert("session".into(), v.clone());
+                }
+                for k in ["session_group", "output_schema"] {
+                    if let Some(v) = input.get(k) {
+                        d.insert(k.into(), v.clone());
+                    }
+                }
+            } else if let Some(text) = input.pointer("/embed/text") {
+                d.insert("embeds".into(), text.clone());
+                if let Some(m) = input.pointer("/embed/model") {
+                    d.insert("model".into(), m.clone());
+                }
+            } else {
+                for k in ["url", "method", "jsonpath", "credential_ref", "timeout_ms"] {
+                    if let Some(v) = input.get(k) {
+                        d.insert(k.into(), v.clone());
+                    }
+                }
+                // A body is the request, not the plan -- except the model
+                // name, which is the one thing in it that says what the call
+                // is FOR.
+                if let Some(m) = input.pointer("/body/model") {
+                    d.insert("model".into(), m.clone());
+                }
+            }
+        }
+        "matrix" => {
+            for k in ["max_fanout", "batch_size", "partition_by",
+                      "continue_on", "min_success"] {
+                if let Some(v) = input.get(k) {
+                    d.insert(k.into(), v.clone());
+                }
+            }
+            if let Some(f) = input.pointer("/rows/function") {
+                d.insert("rows_from".into(), f.clone());
+            } else if let Some(items) = input.get("items").and_then(Value::as_array) {
+                d.insert("rows_from".into(), json!(format!("{} literal item(s)", items.len())));
+            }
+        }
+        "signal" => {
+            if let Some(v) = input.get("signal") {
+                d.insert("signal".into(), v.clone());
+            }
+        }
+        "timer" => {
+            // `delay_seconds` is the key the compiler writes and the engine
+            // reads (schedule_timer, workflow-engine/schema.sql) -- reading
+            // anything else here means the document reports a wait no timer
+            // ever has. `seconds` stays as a fallback for a spec stored as raw
+            // JSON rather than compiled from YAML.
+            if let Some(v) = input.get("delay_seconds").or_else(|| input.get("seconds")) {
+                d.insert("seconds".into(), v.clone());
+            }
+        }
+        "sub_workflow" => {
+            if let Some(v) = input.get("workflow").or_else(|| input.get("name")) {
+                d.insert("workflow".into(), v.clone());
+            }
+        }
+        // `work` is code this collection did not write, so its input IS the
+        // description -- there is nothing to curate down to.
+        _ => {
+            if let Value::Object(m) = input {
+                for (k, v) in m {
+                    d.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+    if d.is_empty() { Value::Null } else { Value::Object(d) }
+}
+
+// ---------------------------------------------------------------------------
 // The builder.
 // ---------------------------------------------------------------------------
 
@@ -229,7 +363,7 @@ pub fn plan_graph(spec: &Value, catalog: &Value) -> Value {
         let empty = json!({});
         let input = s.get("input").unwrap_or(&empty);
 
-        let step_id = g.node(
+        let step_id = g.node_with(
             "step",
             &key,
             json!({
@@ -241,6 +375,7 @@ pub fn plan_graph(spec: &Value, catalog: &Value) -> Value {
                 "step_key": key,
                 "saga_group": s.get("saga_group").cloned().unwrap_or(Value::Null),
             }),
+            step_detail(&kind, input),
         );
         g.edge(&wf_id, &step_id, "contains");
 
@@ -372,7 +507,11 @@ fn classify_sql(g: &mut Graph, step_id: &str, key: &str, input: &Value, catalog:
         Some(f) => f,
         None => return,
     };
-    let fid = g.node("function", &func, json!({}));
+    // The registry entry whole, comment included -- what a `sql:` step DOES is
+    // then answerable from the plan rather than from the source.
+    let fid = g.node_with("function", &func, json!({}),
+        section(catalog, "functions").and_then(|m| m.get(&func)).cloned()
+            .unwrap_or(Value::Null));
     g.edge(step_id, &fid, "calls");
 
     match section(catalog, "functions") {
@@ -383,16 +522,7 @@ fn classify_sql(g: &mut Graph, step_id: &str, key: &str, input: &Value, catalog:
              allow-list is the point, so this is a plan that cannot run, not a plan that \
              runs unsafely",
         ),
-        Some(fns) => {
-            if let Some(f) = fns.get(&func) {
-                if let (Some(target), Some(n)) =
-                    (f.get("fn").and_then(Value::as_str), g.nodes.get_mut(&fid))
-                {
-                    n["target"] = json!(target);
-                }
-            }
-        }
-        None => {}
+        _ => {}
     }
 
     // A p8ql step is the one kind that says, in the document, which data it
@@ -427,9 +557,9 @@ fn query_reaches(g: &mut Graph, step_id: &str, key: &str, query: &str, catalog: 
     };
     let sources = section(catalog, "sources");
     let known = sources.and_then(|m| m.get(&source));
-    let sid = g.node("source", &source, json!({
+    let sid = g.node_with("source", &source, json!({
         "table": known.and_then(|k| str_of(k, "table")),
-    }));
+    }), known.cloned().unwrap_or(Value::Null));
     g.edge(step_id, &sid, "reads");
 
     if sources.is_some() && known.is_none() {
@@ -461,7 +591,9 @@ fn query_reaches(g: &mut Graph, step_id: &str, key: &str, query: &str, catalog: 
         Some(m) => m,
         None => return,
     };
-    let mid = g.node("model", &model, json!({}));
+    let mid = g.node_with("model", &model, json!({}),
+        section(catalog, "models").and_then(|m| m.get(&model)).cloned()
+            .unwrap_or(Value::Null));
     g.edge(&sid, &mid, "ranked_in");
     g.edge(step_id, &mid, "embeds_with");
 
@@ -534,7 +666,9 @@ fn classify_http(g: &mut Graph, step_id: &str, input: &Value, catalog: &Value) {
         return;
     }
     if let Some(model) = embed_model_of(input) {
-        let mid = g.node("model", &model, json!({}));
+        let mid = g.node_with("model", &model, json!({}),
+            section(catalog, "models").and_then(|m| m.get(&model)).cloned()
+                .unwrap_or(Value::Null));
         g.edge(step_id, &mid, "embeds_with");
         let models = section(catalog, "models");
         if let Some(ms) = models {
@@ -577,7 +711,9 @@ fn classify_http(g: &mut Graph, step_id: &str, input: &Value, catalog: &Value) {
 
 fn classify_matrix(g: &mut Graph, step_id: &str, key: &str, input: &Value, catalog: &Value) {
     if let Some(rows) = input.pointer("/rows/function").and_then(Value::as_str) {
-        let fid = g.node("function", rows, json!({}));
+        let fid = g.node_with("function", rows, json!({}),
+            section(catalog, "functions").and_then(|m| m.get(rows)).cloned()
+                .unwrap_or(Value::Null));
         g.edge(step_id, &fid, "expands_over");
         if let Some(fns) = section(catalog, "functions") {
             if !fns.contains_key(rows) {
@@ -594,10 +730,11 @@ fn classify_matrix(g: &mut Graph, step_id: &str, key: &str, input: &Value, catal
     let empty = json!({});
     let tinput = input.pointer("/template/input").unwrap_or(&empty);
     let tkind = input.pointer("/template/kind").and_then(Value::as_str).unwrap_or("");
-    let tid = g.node(
+    let tid = g.node_with(
         "step",
         &format!("{key}\u{2009}template"),
         json!({"step_kind": tkind, "template_of": key, "label": format!("{key} · each row")}),
+        step_detail(tkind, tinput),
     );
     g.edge(step_id, &tid, "expands_to");
     match tkind {
@@ -629,22 +766,13 @@ fn expand_agent(g: &mut Graph, name: &str, catalog: &Value, depth: usize) -> Str
     let agents = section(catalog, "agents");
     let row = agents.and_then(|m| m.get(name));
 
-    let aid = g.node(
+    let aid = g.node_with(
         "agent",
         name,
-        json!({
-            "category": row.and_then(|r| str_of(r, "category")),
-            "audience": row.and_then(|r| str_of(r, "audience")),
-            "model": row.and_then(|r| str_of(r, "model")),
-            // The prompt is what an agent's intent actually IS, and a graph
-            // that omits it makes every agent look alike. Truncated by the
-            // view, not here -- see plan-graph.md §4.
-            "intent": row.and_then(|r| str_of(r, "intent")),
-            "structured_output": row
-                .and_then(|r| r.get("has_output_schema"))
-                .cloned()
-                .unwrap_or(Value::Null),
-        }),
+        json!({"category": row.and_then(|r| str_of(r, "category"))}),
+        // The row whole: the prompt IS the intent, and the shape it must
+        // return is what says whether N of its answers will combine.
+        row.cloned().unwrap_or(Value::Null),
     );
 
     // Already expanded (the same agent called by two steps, or a delegation
@@ -687,17 +815,18 @@ fn expand_agent(g: &mut Graph, name: &str, catalog: &Value, depth: usize) -> Str
             None => continue,
         };
         let srow = servers.and_then(|m| m.get(&server));
-        let sid = g.node(
+        // The server whole, minus the per-tool detail -- that belongs on the
+        // tool nodes, and carrying it twice makes a plan unreadable exactly
+        // where a server exposes forty tools.
+        let mut sdetail = srow.cloned().unwrap_or(Value::Null);
+        if let Some(o) = sdetail.as_object_mut() {
+            o.remove("tool_detail");
+        }
+        let sid = g.node_with(
             "tool_server",
             &server,
-            json!({
-                "server_kind": srow.and_then(|r| str_of(r, "kind")),
-                "url": srow.and_then(|r| str_of(r, "url")),
-                "emits_citations": srow
-                    .and_then(|r| r.get("emits_citations")).cloned().unwrap_or(Value::Null),
-                "serves_agents": srow
-                    .and_then(|r| r.get("serves_agents")).cloned().unwrap_or(Value::Null),
-            }),
+            json!({"server_kind": srow.and_then(|r| str_of(r, "kind"))}),
+            sdetail,
         );
         g.edge(&aid, &sid, "binds");
 
@@ -749,9 +878,12 @@ fn expand_agent(g: &mut Graph, name: &str, catalog: &Value, depth: usize) -> Str
                 g.edge(&aid, &tid, "delegates_to");
                 continue;
             }
-            let tid = g.node("tool", &format!("{server}/{t}"), json!({
+            // What the tool SAYS IT DOES, which is the text the model reads
+            // before deciding to call it -- the half of a binding that carries
+            // intent, and the half a name alone cannot show.
+            let tid = g.node_with("tool", &format!("{server}/{t}"), json!({
                 "label": t, "server": server,
-            }));
+            }), srow.pointer(&format!("/tool_detail/{t}")).cloned().unwrap_or(Value::Null));
             g.edge(&sid, &tid, "exposes");
             g.edge(&aid, &tid, "may_call");
 
@@ -828,6 +960,281 @@ fn rank_steps(g: &mut Graph, steps: &[Value]) {
 
 // ---------------------------------------------------------------------------
 
+// ===========================================================================
+// The document: the same resolution, projected into something you can read.
+//
+// The graph answers "what does this reach, and does it resolve". It is the
+// right shape for a checker and the wrong shape for a person: a reader wants
+// the PIPELINE -- step, then what that step actually says and does, with the
+// agent's prompt, the corpus's columns and the tool's description sitting
+// where they are used rather than in a node list to be joined by eye.
+//
+// So this is a projection, not a second resolver. Everything below reads the
+// graph that was already built, which is what keeps the two views from ever
+// disagreeing -- a document that resolved things its own way would be a second
+// implementation of the only part that matters.
+//
+// WHAT IT LEAVES OUT is as deliberate as what it keeps. No ids, no lanes, no
+// ranks, no edge list: those are for a layout engine. Curation is the point --
+// an expansion that reproduces every column, constraint and schema of
+// everything a workflow touches is a document nobody reads twice, which is
+// the same failure as not expanding at all.
+// ===========================================================================
+
+/// A one-line statement of what the step does, built from the same detail the
+/// entry carries -- so the summary can never say something the body does not.
+fn about(kind: &str, detail: &Value, reaches: &Map<String, Value>) -> String {
+    let d = |k: &str| detail.get(k).cloned().unwrap_or(Value::Null);
+    let s = |k: &str| detail.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    match kind {
+        "query" => {
+            let q = detail.pointer("/args/0").and_then(Value::as_str).unwrap_or("");
+            format!("runs {}", trim(q, 90))
+        }
+        "function" => format!("calls {}()", s("function")),
+        "agent" => {
+            let name = s("agent");
+            match reaches.get("calls").and_then(|c| c.get("model")).and_then(Value::as_str) {
+                Some(m) => format!("asks agent {name} (on {m})"),
+                None => format!("asks agent {name}"),
+            }
+        }
+        "embed" => format!("embeds {} with {}", trim(&s("embeds"), 60), s("model")),
+        "rest" => format!("{} {}",
+            detail.get("method").and_then(Value::as_str).unwrap_or("calls"),
+            endpoint_of(&s("url"))),
+        "matrix" => format!("fans out over {} (max {})",
+            s("rows_from"),
+            d("max_fanout").as_i64().map(|n| n.to_string()).unwrap_or_else(|| "?".into())),
+        "signal" => format!("waits for a person to signal '{}'", s("signal")),
+        "timer" => format!("waits {} seconds", d("seconds")),
+        "sub_workflow" => format!("runs the workflow '{}'", s("workflow")),
+        _ => "runs code a worker supplies".to_string(),
+    }
+}
+
+fn trim(s: &str, n: usize) -> String {
+    let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if s.chars().count() <= n { s } else {
+        format!("{}...", s.chars().take(n).collect::<String>())
+    }
+}
+
+/// The step kind a reader recognises, rather than the one the engine dispatches
+/// on: `http_call` is three different things and the difference is the whole
+/// point of reading the plan.
+fn reader_kind(step_kind: &str, detail: &Value) -> &'static str {
+    match step_kind {
+        "sql" => match detail.get("function").and_then(Value::as_str) {
+            Some("p8ql") | Some("p8ql_vec") => "query",
+            _ => "function",
+        },
+        "http_call" => {
+            if detail.get("agent").is_some() { "agent" }
+            else if detail.get("embeds").is_some() { "embed" }
+            else { "rest" }
+        }
+        "matrix" => "matrix",
+        "signal" => "signal",
+        "timer" => "timer",
+        "sub_workflow" => "sub_workflow",
+        _ => "work",
+    }
+}
+
+/// The document form of one referenced entity: what it is, and the curated
+/// expansion of it, with the graph's bookkeeping dropped.
+fn inline(node: &Value) -> Value {
+    let mut m = Map::new();
+    let kind = node.get("kind").and_then(Value::as_str).unwrap_or("");
+    m.insert(kind.to_string(), node.get("name").cloned().unwrap_or(Value::Null));
+    if let Some(Value::Object(d)) = node.get("detail") {
+        let dimensioned = d.contains_key("space_detail");
+        for (k, v) in d {
+            // `tools` on an agent is the raw binding; the document shows the
+            // resolved tools instead, added by the caller.
+            if k == "tools" && kind == "agent" { continue; }
+            // The graph checks against the model NAMES and a reader wants the
+            // dimensions beside them. Both belong in the catalog; only one
+            // belongs in a document.
+            if k == "spaces" && dimensioned { continue; }
+            if k == "space_detail" {
+                m.insert("embedded_in".into(), v.clone());
+                continue;
+            }
+            m.insert(k.clone(), v.clone());
+        }
+    }
+    Value::Object(m)
+}
+
+pub fn plan_document(spec: &Value, catalog: &Value) -> Value {
+    let g = plan_graph(spec, catalog);
+    if g.get("ok").and_then(Value::as_bool) != Some(true) {
+        return g;
+    }
+    let empty: Vec<Value> = Vec::new();
+    let nodes: Vec<&Value> = g["nodes"].as_array().unwrap_or(&empty).iter().collect();
+    let edges: Vec<&Value> = g["edges"].as_array().unwrap_or(&empty).iter().collect();
+    let by_id = |id: &str| nodes.iter().find(|n| n["id"] == id).copied();
+    let out_of = |id: &str, kind: &str| -> Vec<&Value> {
+        edges.iter()
+            .filter(|e| e["from"] == id && e["kind"] == kind)
+            .filter_map(|e| e["to"].as_str().and_then(by_id))
+            .collect()
+    };
+
+    // Which defects belong to which step: a defect names a node, and a node is
+    // THIS step's business if THIS step reaches it. `claimed` accumulates
+    // across steps only so that the leftovers can be found at the end -- the
+    // per-step set has to be local, or step three inherits the defects of
+    // everything step one touched.
+    let mut claimed: Vec<String> = Vec::new();
+
+    let mut steps: Vec<Value> = Vec::new();
+    let mut step_nodes: Vec<&Value> = nodes.iter()
+        .filter(|n| n["kind"] == "step" && n.get("template_of").is_none())
+        .copied()
+        .collect();
+    step_nodes.sort_by_key(|n| (n.get("rank").and_then(Value::as_i64).unwrap_or(0),
+                                n["name"].as_str().unwrap_or("").to_string()));
+
+    for sn in step_nodes {
+        let id = sn["id"].as_str().unwrap_or("");
+        let mut mine: Vec<String> = Vec::new();
+        let detail = sn.get("detail").cloned().unwrap_or(json!({}));
+        let step_kind = sn.get("step_kind").and_then(Value::as_str).unwrap_or("");
+        let kind = reader_kind(step_kind, &detail);
+
+        let mut reaches: Map<String, Value> = Map::new();
+        for (edge_kind, key) in [("calls", "calls"), ("reads", "reads"),
+                                 ("embeds_with", "embeds_with"),
+                                 ("expands_over", "rows_from"),
+                                 ("invokes", "invokes"), ("waits_for", "waits_for")] {
+            for t in out_of(id, edge_kind) {
+                mine.push(t["id"].as_str().unwrap_or("").to_string());
+                let mut entry = inline(t);
+                // An agent is the one entity worth following one hop further:
+                // its tools and delegation targets are what it can DO, and a
+                // plan that names the agent and hides those has expanded
+                // nothing.
+                if t["kind"] == "agent" {
+                    let aid = t["id"].as_str().unwrap_or("");
+                    let tools: Vec<Value> = out_of(aid, "may_call").into_iter().map(|tool| {
+                        mine.push(tool["id"].as_str().unwrap_or("").to_string());
+                        inline(tool)
+                    }).collect();
+                    if !tools.is_empty() {
+                        entry["tools"] = json!(tools);
+                    }
+                    let servers: Vec<Value> = out_of(aid, "binds").into_iter().map(|srv| {
+                        mine.push(srv["id"].as_str().unwrap_or("").to_string());
+                        json!({"server": srv["name"], "url": srv.pointer("/detail/url"),
+                               "kind": srv.pointer("/detail/kind"),
+                               "synced_at": srv.pointer("/detail/synced_at")})
+                    }).collect();
+                    if !servers.is_empty() {
+                        entry["servers"] = json!(servers);
+                    }
+                    let deleg: Vec<Value> = out_of(aid, "delegates_to").into_iter()
+                        .map(|a| a["name"].clone()).collect();
+                    if !deleg.is_empty() {
+                        entry["delegates_to"] = json!(deleg);
+                    }
+                }
+                reaches.insert(key.to_string(), entry);
+            }
+        }
+
+        // A matrix's template is a step in every way but its key, so it is
+        // shown as one -- nested, because that is what it is.
+        if let Some(t) = out_of(id, "expands_to").into_iter().next() {
+            let tdetail = t.get("detail").cloned().unwrap_or(json!({}));
+            let tkind = reader_kind(t.get("step_kind").and_then(Value::as_str).unwrap_or(""),
+                                    &tdetail);
+            let tid = t["id"].as_str().unwrap_or("");
+            let mut treaches: Map<String, Value> = Map::new();
+            for (ek, key) in [("calls", "calls"), ("reads", "reads"),
+                              ("embeds_with", "embeds_with")] {
+                for tt in out_of(tid, ek) {
+                    mine.push(tt["id"].as_str().unwrap_or("").to_string());
+                    treaches.insert(key.to_string(), inline(tt));
+                }
+            }
+            let mut child = json!({"kind": tkind,
+                                   "about": about(tkind, &tdetail, &treaches)});
+            if let Value::Object(d) = &tdetail {
+                for (k, v) in d { child[k] = v.clone(); }
+            }
+            for (k, v) in treaches { child[k] = v; }
+            reaches.insert("each_row".into(), child);
+        }
+
+        // The control edges are not expanded into the document -- a queue is a
+        // name, not an entity worth a paragraph -- but a defect about one is
+        // still THIS step's problem, so its node counts as reached.
+        for k in ["claimed_from", "throttled_by"] {
+            for t in out_of(id, k) {
+                mine.push(t["id"].as_str().unwrap_or("").to_string());
+            }
+        }
+
+        let needs: Vec<Value> = edges.iter()
+            .filter(|e| e["to"] == id && e["kind"] == "needs")
+            .filter_map(|e| e["from"].as_str())
+            .map(|f| json!(f.trim_start_matches("step:")))
+            .collect();
+
+        let defects: Vec<Value> = g["defects"].as_array().unwrap_or(&empty).iter()
+            .filter(|d| {
+                let n = d["node"].as_str().unwrap_or("");
+                n == id || mine.iter().any(|c| c == n)
+            })
+            .map(|d| json!({"severity": d["severity"], "code": d["code"],
+                            "message": d["message"]}))
+            .collect();
+
+        let mut entry = json!({
+            "id": sn["name"],
+            "kind": kind,
+            "about": about(kind, &detail, &reaches),
+        });
+        if !needs.is_empty() { entry["needs"] = json!(needs); }
+        let q = sn.get("queue").and_then(Value::as_str).unwrap_or("none");
+        if q != "none" { entry["queue"] = json!(q); }
+        if let Value::Object(d) = &detail {
+            for (k, v) in d {
+                if k == "agent" { continue; }   // shown under `calls`
+                entry[k] = v.clone();
+            }
+        }
+        for (k, v) in reaches { entry[k] = v; }
+        if !defects.is_empty() { entry["defects"] = json!(defects); }
+        claimed.append(&mut mine);
+        steps.push(entry);
+    }
+
+    let unclaimed: Vec<Value> = g["defects"].as_array().unwrap_or(&empty).iter()
+        .filter(|d| {
+            let n = d["node"].as_str().unwrap_or("");
+            !claimed.iter().any(|c| c == n)
+                && !steps.iter().any(|s| format!("step:{}", s["id"].as_str().unwrap_or("")) == n)
+        })
+        .cloned()
+        .collect();
+
+    let mut out = json!({
+        "ok": true,
+        "workflow": g["workflow"],
+        "stats": g["stats"],
+        "steps": steps,
+    });
+    if !unclaimed.is_empty() {
+        out["defects"] = json!(unclaimed);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -836,7 +1243,10 @@ mod tests {
         json!({
             "agents": {
                 "triage_bot": {"category": "classifier", "audience": "user",
-                               "model": "claude-sonnet-5", "intent": "Classify an outage report.",
+                               "model": "claude-sonnet-5",
+                               "system_prompt": "Classify an outage report.",
+                               "output_shape": {"required": ["verdict"],
+                                                "properties": {"verdict": "string"}},
                                "has_output_schema": true,
                                "tools": [{"server": "p8-query", "tools": ["semantic_search"]}]},
                 "researcher": {"category": "general", "audience": "user",
@@ -845,7 +1255,10 @@ mod tests {
             "servers": {
                 "p8-query": {"kind": "mcp", "url": "http://mcp:8000", "emits_citations": true,
                              "serves_agents": false, "synced_at": "2026-09-01T00:00:00Z",
-                             "tools": ["semantic_search", "graph_walk"]},
+                             "tools": ["semantic_search", "graph_walk"],
+                             "tool_detail": {"semantic_search": {
+                                 "description": "Rank chunks against a question vector",
+                                 "params": ["limit", "query"]}}},
                 "p8-agents": {"kind": "mcp", "url": "http://runtime:8080", "serves_agents": true,
                               "synced_at": "2026-09-01T00:00:00Z", "tools": ["triage_bot"]}
             },
@@ -853,6 +1266,9 @@ mod tests {
                           "p8ql_vec": {"fn": "workflow.p8ql"},
                           "unextracted": {"fn": "content.unextracted"}},
             "sources": {"chunks": {"table": "content.resource_chunks",
+                                   "content_col": "content",
+                                   "columns": [{"name": "id", "type": "uuid"},
+                                               {"name": "content", "type": "text"}],
                                    "spaces": ["nomic-embed-text"]}},
             "models": {"nomic-embed-text": {"dim": 768, "is_default": true, "space_exists": true},
                        "text-embedding-3-small": {"dim": 1536, "space_exists": false}},
@@ -1035,6 +1451,84 @@ mod tests {
         assert_eq!(find(&g, "step:a").unwrap()["rank"], json!(0));
         assert_eq!(find(&g, "step:b").unwrap()["rank"], json!(1));
         assert_eq!(find(&g, "step:c").unwrap()["rank"], json!(2));
+    }
+
+    #[test]
+    fn the_document_puts_the_expansion_where_the_step_uses_it() {
+        let g = plan_document(
+            &spec_of(json!([
+                {"key": "retrieve", "kind": "sql", "queue": "none",
+                 "input": {"function": "p8ql_vec",
+                           "args": ["SEARCH \"outage\" FROM chunks USING nomic-embed-text"]}},
+                {"key": "classify", "kind": "http_call", "queue": "http",
+                 "depends_on": ["retrieve"],
+                 "input": {"url": "{{env.P8_AGENT_URL}}/v1/chat/completions",
+                           "body": {"model": "triage_bot",
+                                    "messages": [{"role": "user", "content": "Classify: x"}]}}}
+            ])),
+            &catalog(),
+        );
+        let steps = g["steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0]["id"], json!("retrieve"), "steps come out in rank order");
+
+        // The corpus is expanded WHERE IT IS READ, not in a node list.
+        assert_eq!(steps[0]["reads"]["source"], json!("chunks"));
+        assert_eq!(steps[0]["reads"]["table"], json!("content.resource_chunks"));
+        assert!(steps[0]["about"].as_str().unwrap().starts_with("runs SEARCH"));
+
+        // And the agent brings its prompt, its shape and its tools with it.
+        let calls = &steps[1]["calls"];
+        assert_eq!(calls["agent"], json!("triage_bot"));
+        assert_eq!(calls["system_prompt"], json!("Classify an outage report."));
+        assert_eq!(calls["tools"][0]["tool"], json!("p8-query/semantic_search"));
+        assert_eq!(calls["tools"][0]["description"],
+                   json!("Rank chunks against a question vector"));
+        assert_eq!(steps[1]["needs"], json!(["retrieve"]));
+    }
+
+    /// The three keys a document reads from a COMPILED step, each of which
+    /// lives somewhere a plausible guess would not have found it. A wrong key
+    /// here does not fail: it renders a blank, which reads like a step that
+    /// says nothing rather than a reader that looked in the wrong place.
+    #[test]
+    fn the_document_reads_the_keys_the_engine_writes_not_the_ones_it_might_have() {
+        let g = plan_document(
+            &spec_of(json!([
+                // `delay_seconds` is what compile_control emits and what
+                // schedule_timer reads -- not `seconds`, not `timer`.
+                {"key": "settle", "kind": "timer", "queue": "none",
+                 "input": {"delay_seconds": 90}},
+                // The session sits INSIDE the body, beside the model; only
+                // session_group is at the top.
+                {"key": "classify", "kind": "http_call", "queue": "http",
+                 "depends_on": ["settle"],
+                 "input": {"url": "{{env.P8_AGENT_URL}}/v1/chat/completions",
+                           "session_group": "triage",
+                           "body": {"model": "triage_bot",
+                                    "session": "{{run.$session}}",
+                                    "messages": [{"role": "user", "content": "Classify: x"}]}}},
+                // A queue with no queue_config row: the defect names the QUEUE
+                // node, and the step is the only place a reader will look for
+                // it.
+                {"key": "ship", "kind": "work", "queue": "nowhere",
+                 "depends_on": ["classify"], "input": {}}
+            ])),
+            &catalog(),
+        );
+        let steps = g["steps"].as_array().unwrap();
+
+        assert_eq!(steps[0]["seconds"], json!(90));
+        assert_eq!(steps[0]["about"], json!("waits 90 seconds"));
+
+        assert_eq!(steps[1]["session"], json!("{{run.$session}}"));
+        assert_eq!(steps[1]["session_group"], json!("triage"));
+
+        // A defect about a queue belongs to the step claimed from it, not to
+        // the unattributed pile at the end.
+        assert_eq!(steps[2]["defects"][0]["code"], json!("unconfigured_queue"));
+        assert!(g.get("defects").is_none(),
+                "every defect here has a step to belong to");
     }
 
     #[test]

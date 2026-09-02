@@ -1579,3 +1579,15 @@ fn p8_compile_workflow(yaml: &str) -> pgrx::JsonB {
 fn p8_plan_graph(spec: pgrx::JsonB, catalog: pgrx::JsonB) -> pgrx::JsonB {
     pgrx::JsonB(plan_graph::plan_graph(&spec.0, &catalog.0))
 }
+
+/// The same expansion, projected into something a person reads.
+///
+/// Steps in rank order, each carrying what it does and the resolved entity it
+/// does it to -- the agent's prompt, the corpus's columns, the tool's
+/// description -- rather than a node list and an edge list to be joined by
+/// eye. Built from the graph rather than beside it, so the two views cannot
+/// disagree about what a plan reaches.
+#[pg_extern(immutable, parallel_safe)]
+fn p8_plan_document(spec: pgrx::JsonB, catalog: pgrx::JsonB) -> pgrx::JsonB {
+    pgrx::JsonB(plan_graph::plan_document(&spec.0, &catalog.0))
+}

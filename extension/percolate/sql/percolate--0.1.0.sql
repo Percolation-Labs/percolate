@@ -5901,10 +5901,19 @@ declare
     v_facet jsonb;
 begin
     v_cat := jsonb_build_object(
+        -- WITH THE COMMENT, which is the same text a bound tool carries into
+        -- an LLM's context (§24) -- so what a `sql:` step DOES is answerable
+        -- from the plan instead of from the source. The registry's own
+        -- description first, since somebody wrote it for exactly this, and the
+        -- function's COMMENT behind it.
         'functions', coalesce((
-            select jsonb_object_agg(name, jsonb_build_object(
-                'fn', fn, 'arg_types', to_jsonb(arg_types)))
-              from workflow.step_functions), '{}'::jsonb),
+            select jsonb_object_agg(f.name, jsonb_strip_nulls(jsonb_build_object(
+                'fn', f.fn, 'arg_types', to_jsonb(f.arg_types),
+                'description', coalesce(f.description,
+                    obj_description(to_regprocedure(
+                        f.fn || '(' || array_to_string(f.arg_types, ',') || ')'), 'pg_proc')),
+                'timeout_ms', f.timeout_ms)))
+              from workflow.step_functions f), '{}'::jsonb),
         'queues', coalesce((
             select jsonb_agg(queue order by queue) from workflow.queue_config), '[]'::jsonb),
         'rate_keys', coalesce((
@@ -5974,6 +5983,55 @@ begin
 end;
 $$;
 
+-- The same expansion, read rather than traversed.
+--
+-- plan_graph answers "what does this reach, and does it resolve" -- the right
+-- shape for a checker and the wrong one for a person, who wants the pipeline:
+-- step, then what that step says and does, with the agent's prompt, the
+-- corpus's columns and the tool's description sitting where they are USED
+-- rather than in a node list to be joined by eye.
+--
+-- A projection of the graph, never a second resolver. Two views that resolve
+-- separately are two answers to the only question that matters.
+create or replace function workflow.plan_document(p_name text, p_version int default null)
+returns jsonb
+language plpgsql
+stable
+set search_path = pg_catalog, public
+as $$
+declare
+    v_spec jsonb;
+    v_ver  int;
+    v_out  jsonb;
+begin
+    if to_regprocedure('p8_plan_document(jsonb,jsonb)') is null then
+        raise exception
+            'workflow.plan_document needs the percolate extension (p8_plan_document). '
+            'The catalog half works without it: select workflow.plan_catalog().';
+    end if;
+
+    select d.spec, d.version into v_spec, v_ver
+      from workflow.definitions d
+     where d.name = p_name
+       and (p_version is null or d.version = p_version)
+       and d.deleted_at is null
+     order by d.version desc
+     limit 1;
+
+    if v_spec is null then
+        raise exception 'no workflow definition named % %', p_name,
+            case when p_version is null then '(any version)'
+                 else 'at version ' || p_version end;
+    end if;
+
+    execute 'select p8_plan_document($1, $2)'
+       into v_out
+      using jsonb_build_object('name', p_name, 'version', v_ver) || v_spec,
+            workflow.plan_catalog();
+    return v_out;
+end;
+$$;
+
 -- The audit shape. A view would have been the natural spelling and cannot be
 -- one: a view referencing p8_plan_graph fails to CREATE where the parser
 -- extension is absent, which would make an optional dependency a hard one at
@@ -6030,7 +6088,14 @@ $$;
 -- operator view in §22d is not.
 grant execute on function workflow.plan_catalog() to authenticated;
 grant execute on function workflow.plan_graph(text, int) to authenticated;
+grant execute on function workflow.plan_document(text, int) to authenticated;
 grant execute on function workflow.plan_defects(text) to authenticated;
+
+comment on function workflow.plan_document(text, int) is
+    'A stored definition read as a pipeline: every step in order, carrying what '
+    'it does and the expanded entity it does it to -- the agent and its prompt, '
+    'the corpus and its columns, the tool and its description. A projection of '
+    'workflow.plan_graph().';
 
 comment on function workflow.plan_graph(text, int) is
     'A stored definition expanded along the entities it names -- agents, tool '
@@ -10930,15 +10995,33 @@ select coalesce(s.name, l.name)                as name,
        coalesce(s.source_table, l.source_table) as source_table,
        s.name is not null                       as semantic,
        l.name is not null                       as lexical,
+       coalesce(s.content_col, l.content_col)   as content_col,
+       l.regconfig                              as regconfig,
        -- The spaces this corpus has rows in. A model's space is a table
        -- (aiq.emb_<model>, §10) and its rows are per chunk, so "embedded with
        -- M" is a question about data, not about registration -- which is the
        -- honest form of it, since registering a model creates an empty table.
        coalesce((
-           select jsonb_agg(m.name order by m.name)
+           select jsonb_agg(jsonb_build_object('model', m.name, 'dim', m.dim)
+                            order by m.name)
              from aiq.embedding_models m
             where aiq.space_populated(m.name, coalesce(s.source_table, l.source_table))
-       ), '[]'::jsonb)                          as spaces
+       ), '[]'::jsonb)                          as spaces,
+       -- THE SHAPE OF WHAT IT READS. Names and types, and nothing else: the
+       -- point of expanding a source is to see how data moves through the
+       -- schema, and constraints, defaults and indexes answer a different
+       -- question at ten times the length. Generated columns are excluded
+       -- because search_tsv is this schema's own bookkeeping, not the
+       -- corpus's shape.
+       coalesce((
+           select jsonb_agg(jsonb_build_object('name', c.column_name,
+                                               'type', c.data_type)
+                            order by c.ordinal_position)
+             from information_schema.columns c
+            where c.table_schema = split_part(coalesce(s.source_table, l.source_table), '.', 1)
+              and c.table_name   = split_part(coalesce(s.source_table, l.source_table), '.', 2)
+              and c.is_generated = 'NEVER'
+       ), '[]'::jsonb)                          as columns
   from aiq.semantic_sources s
   full join aiq.lexical_sources l on l.name = s.name;
 
@@ -10949,20 +11032,31 @@ stable
 as $$
     select jsonb_build_object(
         'sources', coalesce((
-            select jsonb_object_agg(name, jsonb_build_object(
+            select jsonb_object_agg(name, jsonb_strip_nulls(jsonb_build_object(
                 'table', source_table, 'semantic', semantic,
-                'lexical', lexical, 'spaces', spaces))
+                'lexical', lexical, 'content_col', content_col,
+                'regconfig', regconfig, 'columns', columns,
+                -- The model NAMES, for the space check the graph does, and the
+                -- dimensioned form beside it for a reader.
+                'spaces', (select coalesce(jsonb_agg(e->>'model'), '[]'::jsonb)
+                             from jsonb_array_elements(spaces) e),
+                'space_detail', spaces)))
               from aiq.v_plan_sources), '{}'::jsonb),
         'models', coalesce((
-            select jsonb_object_agg(m.name, jsonb_build_object(
+            select jsonb_object_agg(m.name, jsonb_strip_nulls(jsonb_build_object(
                 'dim', m.dim, 'provider', m.provider, 'is_default', m.is_default,
+                -- Where the vector comes from. A url with a {{env.X}} in it is
+                -- the registry doing its job, and it belongs in a plan for the
+                -- same reason the model name does.
+                'endpoint', m.endpoint,
                 -- Registered and never created is a real, silent state: the
                 -- embed call succeeds and there is nowhere to land the vector.
                 'space_exists', to_regclass(
-                    'aiq.' || quote_ident('emb_' || replace(m.name, '-', '_'))) is not null))
+                    'aiq.' || quote_ident('emb_' || replace(m.name, '-', '_'))) is not null)))
               from aiq.embedding_models m), '{}'::jsonb),
         'entities', coalesce((
-            select jsonb_object_agg(entity_type, jsonb_build_object('table', source_table))
+            select jsonb_object_agg(entity_type, jsonb_build_object(
+                'table', source_table, 'key', key_expr))
               from aiq.entity_registry), '{}'::jsonb));
 $$;
 
@@ -13265,12 +13359,26 @@ select a.name,
        a.category,
        a.audience,
        a.model,
-       -- The prompt IS the intent, and a graph that omits it makes every agent
-       -- look alike. Truncated here rather than in the graph builder so the
-       -- limit is one a reader can see and change; the full text is one select
-       -- away for anybody who wants it.
-       left(a.system_prompt, 240) as intent,
+       -- THE WHOLE PROMPT, not a preview of it. An agent's intent IS its
+       -- prompt, and this view exists so a plan can be read for intent -- a
+       -- truncation makes every agent look like every other agent, which is
+       -- the failure mode the expansion is for.
+       a.system_prompt,
+       -- The SHAPE it must return, curated to what a reader needs: the
+       -- required keys and each property's type. The full JSON Schema is one
+       -- select away and is mostly boilerplate; what tells you whether N
+       -- results will combine is the key list.
+       case when a.structured_output_schema is null then null else
+           jsonb_build_object(
+               'required', coalesce(a.structured_output_schema->'required', '[]'::jsonb),
+               'properties', coalesce((
+                   select jsonb_object_agg(k, coalesce(v->>'type', 'any'))
+                     from jsonb_each(coalesce(
+                              a.structured_output_schema->'properties', '{}'::jsonb)) e(k, v)), 
+                   '{}'::jsonb))
+       end as output_shape,
        a.structured_output_schema is not null as has_output_schema,
+       nullif(a.context_policy, '{}'::jsonb) as context_policy,
        s.name as summarizer,
        a.tools
   from agentic.agents a
@@ -13290,7 +13398,23 @@ select t.name,
        -- "nobody has asked yet", and only the first is evidence about the tools.
        coalesce((select jsonb_agg(e->>'name' order by e->>'name')
                    from jsonb_array_elements(t.cached_tools) e
-                  where e ? 'name'), '[]'::jsonb) as tools
+                  where e ? 'name'), '[]'::jsonb) as tools,
+       -- WHAT EACH TOOL SAYS IT DOES, which is the half of a binding that
+       -- carries intent. The description is the text the MODEL reads before
+       -- deciding to call it, so a plan that shows the tool name and not this
+       -- shows the part nobody needs. Parameters are named, not schema'd: the
+       -- argument names are what make a tool recognisable, and the types are
+       -- one fetch away for anybody who needs them.
+       coalesce((select jsonb_object_agg(e->>'name', jsonb_build_object(
+                            'description', e->>'description',
+                            'params', coalesce((
+                                select jsonb_agg(k order by k)
+                                  from jsonb_object_keys(coalesce(
+                                       e#>'{inputSchema,properties}',
+                                       e#>'{input_schema,properties}',
+                                       '{}'::jsonb)) k), '[]'::jsonb)))
+                   from jsonb_array_elements(t.cached_tools) e
+                  where e ? 'name'), '{}'::jsonb) as tool_detail
   from agentic.tool_servers t;
 
 -- One object per section, keyed by name, which is the shape p8_plan_graph
@@ -13305,16 +13429,18 @@ stable
 as $$
     select jsonb_build_object(
         'agents', coalesce((
-            select jsonb_object_agg(name, jsonb_build_object(
+            select jsonb_object_agg(name, jsonb_strip_nulls(jsonb_build_object(
                 'category', category, 'audience', audience, 'model', model,
-                'intent', intent, 'has_output_schema', has_output_schema,
-                'summarizer', summarizer, 'tools', tools))
+                'system_prompt', system_prompt, 'output_shape', output_shape,
+                'has_output_schema', has_output_schema,
+                'context_policy', context_policy,
+                'summarizer', summarizer, 'tools', tools)))
               from agentic.v_plan_agents), '{}'::jsonb),
         'servers', coalesce((
             select jsonb_object_agg(name, jsonb_build_object(
                 'kind', kind, 'url', url, 'emits_citations', emits_citations,
                 'serves_agents', serves_agents, 'synced_at', synced_at,
-                'tools', tools))
+                'tools', tools, 'tool_detail', tool_detail))
               from agentic.v_plan_servers), '{}'::jsonb));
 $$;
 

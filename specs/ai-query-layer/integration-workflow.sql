@@ -517,15 +517,33 @@ select coalesce(s.name, l.name)                as name,
        coalesce(s.source_table, l.source_table) as source_table,
        s.name is not null                       as semantic,
        l.name is not null                       as lexical,
+       coalesce(s.content_col, l.content_col)   as content_col,
+       l.regconfig                              as regconfig,
        -- The spaces this corpus has rows in. A model's space is a table
        -- (aiq.emb_<model>, §10) and its rows are per chunk, so "embedded with
        -- M" is a question about data, not about registration -- which is the
        -- honest form of it, since registering a model creates an empty table.
        coalesce((
-           select jsonb_agg(m.name order by m.name)
+           select jsonb_agg(jsonb_build_object('model', m.name, 'dim', m.dim)
+                            order by m.name)
              from aiq.embedding_models m
             where aiq.space_populated(m.name, coalesce(s.source_table, l.source_table))
-       ), '[]'::jsonb)                          as spaces
+       ), '[]'::jsonb)                          as spaces,
+       -- THE SHAPE OF WHAT IT READS. Names and types, and nothing else: the
+       -- point of expanding a source is to see how data moves through the
+       -- schema, and constraints, defaults and indexes answer a different
+       -- question at ten times the length. Generated columns are excluded
+       -- because search_tsv is this schema's own bookkeeping, not the
+       -- corpus's shape.
+       coalesce((
+           select jsonb_agg(jsonb_build_object('name', c.column_name,
+                                               'type', c.data_type)
+                            order by c.ordinal_position)
+             from information_schema.columns c
+            where c.table_schema = split_part(coalesce(s.source_table, l.source_table), '.', 1)
+              and c.table_name   = split_part(coalesce(s.source_table, l.source_table), '.', 2)
+              and c.is_generated = 'NEVER'
+       ), '[]'::jsonb)                          as columns
   from aiq.semantic_sources s
   full join aiq.lexical_sources l on l.name = s.name;
 
@@ -536,20 +554,31 @@ stable
 as $$
     select jsonb_build_object(
         'sources', coalesce((
-            select jsonb_object_agg(name, jsonb_build_object(
+            select jsonb_object_agg(name, jsonb_strip_nulls(jsonb_build_object(
                 'table', source_table, 'semantic', semantic,
-                'lexical', lexical, 'spaces', spaces))
+                'lexical', lexical, 'content_col', content_col,
+                'regconfig', regconfig, 'columns', columns,
+                -- The model NAMES, for the space check the graph does, and the
+                -- dimensioned form beside it for a reader.
+                'spaces', (select coalesce(jsonb_agg(e->>'model'), '[]'::jsonb)
+                             from jsonb_array_elements(spaces) e),
+                'space_detail', spaces)))
               from aiq.v_plan_sources), '{}'::jsonb),
         'models', coalesce((
-            select jsonb_object_agg(m.name, jsonb_build_object(
+            select jsonb_object_agg(m.name, jsonb_strip_nulls(jsonb_build_object(
                 'dim', m.dim, 'provider', m.provider, 'is_default', m.is_default,
+                -- Where the vector comes from. A url with a {{env.X}} in it is
+                -- the registry doing its job, and it belongs in a plan for the
+                -- same reason the model name does.
+                'endpoint', m.endpoint,
                 -- Registered and never created is a real, silent state: the
                 -- embed call succeeds and there is nowhere to land the vector.
                 'space_exists', to_regclass(
-                    'aiq.' || quote_ident('emb_' || replace(m.name, '-', '_'))) is not null))
+                    'aiq.' || quote_ident('emb_' || replace(m.name, '-', '_'))) is not null)))
               from aiq.embedding_models m), '{}'::jsonb),
         'entities', coalesce((
-            select jsonb_object_agg(entity_type, jsonb_build_object('table', source_table))
+            select jsonb_object_agg(entity_type, jsonb_build_object(
+                'table', source_table, 'key', key_expr))
               from aiq.entity_registry), '{}'::jsonb));
 $$;
 
