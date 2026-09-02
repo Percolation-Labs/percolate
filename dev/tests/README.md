@@ -198,6 +198,38 @@ The database halves of those contracts *are* covered, both here and by
 `../../surface.sql` — which is the right split: we guarantee the functions a
 service calls, and the service guarantees its own routes.
 
+## The fifth directory, which asks a different question
+
+`evals/` is not a sixth surface. The five above test a **mechanism** against its
+spec; `evals/` tests a **journey** — 109 of them, in `scenarios.yaml`, each
+citing which of 28 named failure modes it would notice, run by `./evals/run.py`
+against one committed fixture.
+
+```bash
+cd evals && ./run.py --fixture
+```
+
+The distinction is not coverage, and it earns its own directory because it finds
+a different class. A mechanism can be correct at every step of a journey that
+cannot be completed. `signal:` parks a run, refuses a stranger, cancels cleanly
+and stamps `completed_at`; every one of those is asserted somewhere above. What
+nothing had ever done was **read what the person said from the step that acts on
+it**, which is one function call past the end of all of them and on the other
+side of a wall: `signal_task` never merges its output into `runs.context`, so
+`{{steps.<signal>.result}}` resolves to nothing and the second half of every
+human-in-the-loop workflow is unreachable from the document.
+
+Three of the six findings open in that file were found the same way, by walking
+a journey rather than testing its parts — including a `timer: 3600` that waits
+zero seconds when it is the first step, and a published example that records no
+spans because it spells the key the writer does not read.
+
+A scenario there carries `status: pass` or an open verdict, and the runner
+reports loudly when a declared-open finding starts passing — a fix nobody
+recorded and a check that stopped checking look identical otherwise.
+`meta/skills/dogfooding` is the method that generates them; `../../scenarios/`
+is where the prose verdicts live.
+
 ## Relationship to `surface.sql`
 
 Complementary, and neither replaces the other:
@@ -206,6 +238,8 @@ Complementary, and neither replaces the other:
 |---|---|
 | `../../surface.sql` | Does every capability the specs promise **exist**? |
 | `run.sh` | Does it still **behave** the way the spec promised? |
+| `../currency.sh` | Is the database running **what the specs say**? |
+| `evals/run.py` | Can somebody who was not in the room **get the job done**? |
 
 Both exit nonzero, so both work as CI gates. Run `surface.sql` first: a missing
 function makes a behavioural test fail for an uninteresting reason.

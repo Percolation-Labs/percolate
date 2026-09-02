@@ -251,7 +251,10 @@ select ('57000000-0000-0000-0000-0000000000' || lpad(g::text, 2, '0'))::uuid,
        -- two -- which made a scenario asserting that a VARYING column is
        -- refused inside a batch pass for the wrong reason, because no column
        -- varied. A fixture whose columns are correlated cannot tell
-       -- `partition_by` from coincidence.
+       -- `partition_by` from coincidence. `site` is left CONSTANT per product,
+       -- deliberately: one column that varies inside a batch and one that does
+       -- not is what lets a scenario assert the refusal AND the leniency it is
+       -- the flip side of.
        (array['53000000-0000-0000-0000-000000000001',
               '53000000-0000-0000-0000-000000000002',
               '53000000-0000-0000-0000-000000000003'])[1 + ((g + 1) % 3)]::uuid,
