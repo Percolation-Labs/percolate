@@ -13,8 +13,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # NOTE: v0.8.1 (what ../../../p8k8/docker/Dockerfile.pg18 pins) fails to build
 # against PG19 beta headers (LWLock/slock_t/ConditionVariable missing from
 # hnsw.c's include chain) - trying latest tag instead.
+#
+# OPTFLAGS="" IS NOT A TUNING CHOICE, it is what makes the published image
+# runnable. pgvector's Makefile defaults to `-march=native`, so a build compiles
+# for the CPU it happens to be built ON. That is right for a laptop build and
+# catastrophic for a published image: CI builds arm64 on GitHub's Neoverse
+# runners, which have SVE, and Apple Silicon does not implement SVE -- so the
+# v0.1.0 image crashed the backend with `signal 4: Illegal instruction` on the
+# first `<=>` on every Mac. An INSERT of a vector worked; only the distance
+# function carried the instructions, so the failure arrived at query time.
+#
+# Nothing in CI would have caught it. The image builds, the extension installs,
+# `surface.sql` passes, and the crash needs a CPU different from the builder's
+# -- which is every user's. Found by pulling the published image onto the
+# machine this was developed on and running the sample corpus.
 RUN cd /tmp && git clone --branch v0.8.6 https://github.com/pgvector/pgvector.git \
-    && cd pgvector && make && make install && rm -rf /tmp/pgvector
+    && cd pgvector && make OPTFLAGS="" && make install && rm -rf /tmp/pgvector
 
 # pg_cron — core per meta/postgres-manifest.md, and the driver behind
 # workflow.tick() (workflow-engine/schema.sql §19).
