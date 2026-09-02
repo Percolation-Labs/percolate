@@ -284,7 +284,46 @@ create trigger trg_workflow_runs_touch before update on workflow.runs
 create trigger trg_tasks_touch before update on workflow.tasks
     for each row execute function public.touch_updated_at();
 
-create index idx_tasks_claimable on workflow.tasks (queue, priority, run_after) where status = 'ready';
+-- THE CLAIM INDEX MUST MATCH THE CLAIM'S ORDER BY, AND THIS ONE DID NOT.
+--
+-- It was (queue, priority, run_after), which looks right and is not: claim_task
+-- orders by `priority desc, created_at`, and `created_at` is not in the index
+-- at all. That costs nothing while a queue is shallow, because the planner
+-- reads a few rows either way -- and it is catastrophic once a queue is deep,
+-- because every row matches the predicate, so the index offers no selectivity
+-- and the planner correctly abandons it for a sequential scan plus a sort of
+-- the ENTIRE ready set, to return twenty rows.
+--
+-- MEASURED on PG19beta3, 1M ready tasks on one queue, 8 concurrent workers
+-- (dev/scale/):
+--
+--     (queue, priority, run_after)          7.6 claims/s   1050 ms mean
+--     (queue, priority desc, created_at)   14243 claims/s   0.56 ms mean
+--
+-- A single claim went from 40.4 ms to 0.031 ms and stopped spilling 19 MB of
+-- external merge sort to disk per claim, per worker. The shape of the failure
+-- is what makes it worth this comment: it is invisible on a fixture, it is
+-- invisible in every test this repo had, and it appears only under exactly the
+-- load the engine exists to absorb.
+--
+-- `priority desc` is written out rather than left to a reverse scan because
+-- the mixed direction (`desc, asc`) cannot be served by scanning one index
+-- backwards -- that would reverse both keys.
+create index idx_tasks_claimable on workflow.tasks (queue, priority desc, created_at)
+    where status = 'ready';
+
+-- The autoscaler's index. queue_depth() counts ready-and-due plus running, and
+-- with only the claim index the planner serves it from a bitmap OR when the
+-- live set is small and falls back to a parallel sequential scan when it is
+-- large -- which is precisely when the autoscaler is being asked to grow the
+-- pool. MEASURED at a 1M-row table with ~300k live: 30,733 buffers and 86 ms
+-- inside the function, against 867 buffers and an index-only scan with this.
+--
+-- Deliberately NOT indexing run_after's predicate: `run_after <= now()` is not
+-- immutable and cannot appear in a partial index's WHERE. It rides as an
+-- indexed column so the filter is answered without a heap fetch.
+create index idx_tasks_live on workflow.tasks (queue, status, run_after)
+    where status in ('ready', 'running');
 create index idx_tasks_run on workflow.tasks (run_id);
 create index idx_tasks_heartbeat on workflow.tasks (status, heartbeat_at) where status = 'running';
 create index idx_tasks_signal on workflow.tasks (wait_signal) where status = 'waiting_external';
