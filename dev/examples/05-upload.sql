@@ -18,10 +18,17 @@ select content.register_upload(
     p_external_id  => 'psc-2026-018'
 ) as resource_id \gset
 
+-- THE KEYS ARE start_offset/end_offset, and this line spelled them
+-- start_char/end_char for the life of the file. `record_chunks` reads the two
+-- it knows and ignores everything else, so the call returned 2, the page below
+-- read as a demonstration of spans, and every span it recorded was NULL. Found
+-- by dev/tests/evals/scenarios.yaml upload-13, which pins the silent-drop half
+-- as an open finding: a parser author gets a green count and an uncitable
+-- corpus.
 \echo '-- what the parser produced, with spans back into the source:'
 select content.record_chunks(:'resource_id'::uuid, $j$[
-  {"ordinal":0,"content":"Gothenburg PSC inspection found the auxiliary boiler within tolerance.","start_char":0,"end_char":69},
-  {"ordinal":1,"content":"No deficiencies were recorded against Aurora Kestrel on this call.","start_char":70,"end_char":135}
+  {"ordinal":0,"content":"Gothenburg PSC inspection found the auxiliary boiler within tolerance.","start_offset":0,"end_offset":69},
+  {"ordinal":1,"content":"No deficiencies were recorded against Aurora Kestrel on this call.","start_offset":70,"end_offset":135}
 ]$j$::jsonb) as chunks_recorded;
 
 \echo '-- queryable immediately, with no reindex step anywhere:'
