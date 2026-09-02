@@ -22,7 +22,10 @@
 #   gh secret set DOCKERHUB_USERNAME
 #   gh secret set DOCKERHUB_TOKEN
 #
-#   gh secret set GET_PERCOLATE_TOKEN   # PAT, issues:write on get-percolate
+#   gh secret set P8_RELEASE_TOKEN   # PAT, issues:write on get-percolate
+#                                   # and on p8-subsystems. ONE token for all
+#                                   # three repos -- @claude uses the same one
+#                                   # to reach across them (see claude.yml).
 #
 # The last one is a PAT and not the built-in GITHUB_TOKEN for a reason that is
 # easy to lose an afternoon to: an issue created with GITHUB_TOKEN does not
@@ -243,15 +246,15 @@ jobs:
         # A missing secret must not look like a successful release. The chart
         # lagging the package is the failure mode this whole workflow exists to
         # prevent, and it is invisible from here.
-        env: {TOKEN: "${{ secrets.GET_PERCOLATE_TOKEN }}"}
+        env: {TOKEN: "${{ secrets.P8_RELEASE_TOKEN }}"}
         run: |
           [ -n "$TOKEN" ] || {
-            echo "::error::GET_PERCOLATE_TOKEN is not set -- percolate-core ${{ needs.version.outputs.version }} is published but the chart still points at ${{ needs.version.outputs.previous }}. Bump charts/percolate/Chart.yaml on get-percolate by hand." >&2
+            echo "::error::P8_RELEASE_TOKEN is not set -- percolate-core ${{ needs.version.outputs.version }} is published but the chart still points at ${{ needs.version.outputs.previous }}. Bump charts/percolate/Chart.yaml on get-percolate by hand." >&2
             exit 1; }
 
       - name: Ask for the chart bump
         env:
-          GH_TOKEN: ${{ secrets.GET_PERCOLATE_TOKEN }}
+          GH_TOKEN: ${{ secrets.P8_RELEASE_TOKEN }}
           REPO: ${{ vars.CHART_REPO || 'percolating-sirsh/get-percolate' }}
           V: ${{ needs.version.outputs.version }}
           PREV: ${{ needs.version.outputs.previous }}
@@ -289,3 +292,27 @@ jobs:
           gh issue create --repo "$REPO" \
             --title "Release $V: bump the chart and the docs" \
             --body-file issue.md
+
+          # p8-subsystems quotes this version too -- dev/docker-compose.yml
+          # pins the image and PACKAGING.md documents it. It went stale once
+          # already (compose said 0.1.2 while 0.1.3 was current), which is a
+          # user running `docker compose up` on a version nobody meant to ship.
+          cat > specs-issue.md <<EOF
+          @claude percolate-core **$V** is published. This repository quotes
+          that version in two places and both still say \`$PREV\`:
+
+          - \`dev/docker-compose.yml\` -- the \`worker\` and \`content\`
+            services pin \`percolationlabs/percolate-core:$PREV\`. This is the
+            file INSTALL.md calls "the install", so a stale pin here is what a
+            new user actually runs.
+          - \`PACKAGING.md\` -- the summary table, the compose example and the
+            "Current version" line.
+
+          Please open a PR moving both to $V. Nothing else in this repo tracks
+          the core version; the extension has its own, and it does not move here.
+
+          Released by [\`release.yml\`]($RUN).
+          EOF
+          gh issue create --repo "${{ vars.SPECS_REPO || 'percolating-sirsh/p8-subsystems' }}" \
+            --title "percolate-core $V: update the compose pin and PACKAGING" \
+            --body-file specs-issue.md

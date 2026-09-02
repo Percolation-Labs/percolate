@@ -1,0 +1,76 @@
+# @claude in an issue or a review comment, and Claude Code picks it up.
+#
+# THIS FILE IS THE SAME IN ALL THREE REPOSITORIES -- p8-subsystems (the specs
+# and the extension), percolate-core (the Python services) and get-percolate
+# (the public face, docs and chart). That is deliberate: a release crosses all
+# three, so `@claude` has to work from whichever one you happen to be looking
+# at. Change one, change them all.
+#
+# THIS REPOSITORY IS PUBLIC, so without the author check any GitHub user could
+# spend the owner's Claude subscription by typing four characters in a comment.
+name: Claude Code
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [opened, assigned]
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  claude:
+    # Two conditions, and both matter. The mention is what makes it opt-in --
+    # without it every comment on every issue starts a run. The author check is
+    # what stops a stranger doing the same: `@claude` is a string anybody can
+    # type, and a run started by a drive-by comment spends the repository
+    # owner's OAuth token with the repository owner's write permissions.
+    #
+    # author_association is GitHub's own answer to "who is this to this repo":
+    # OWNER, MEMBER and COLLABORATOR are people who already have push access.
+    # CONTRIBUTOR (merged a PR once) and NONE are deliberately not on the list.
+    if: |
+      (github.event_name == 'issue_comment' &&
+       contains(github.event.comment.body, '@claude') &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+      (github.event_name == 'pull_request_review_comment' &&
+       contains(github.event.comment.body, '@claude') &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+      (github.event_name == 'pull_request_review' &&
+       contains(github.event.review.body, '@claude') &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association)) ||
+      (github.event_name == 'issues' &&
+       (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')) &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: write         # so Claude can run a release workflow, and read CI
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        env:
+          # The cross-repo reach. GITHUB_TOKEN is scoped to THIS repository, so
+          # with it alone Claude can fix the repo it was mentioned in and
+          # nothing else -- and every interesting request here crosses a
+          # boundary: cut a core release, then update the specs repo, then the
+          # chart. One PAT covering all three is what makes
+          # "@claude release core and bring everything into step" a single ask
+          # instead of three issues opened by hand.
+          #
+          # Falls back to GITHUB_TOKEN when the secret is not set, so a fork or
+          # an unconfigured repo degrades to in-repo work rather than failing.
+          GH_TOKEN: ${{ secrets.P8_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
