@@ -6457,14 +6457,34 @@ begin
         -- from the plan instead of from the source. The registry's own
         -- description first, since somebody wrote it for exactly this, and the
         -- function's COMMENT behind it.
+        -- SIGNATURE, NOT JUST NAME AND TYPES. Three things come off pg_proc
+        -- that the registry does not hold and a reader keeps having to guess:
+        --
+        --   `params`      the argument NAMES. A plan showing `args: [..., '8']`
+        --                 against `arg_types: [text, text]` tells you the
+        --                 second argument is a string and not that it is a
+        --                 LIMIT. pg_get_function_arguments knows.
+        --   `returns`     what comes back, so a step's output has a declared
+        --                 shape even before anything has run.
+        --   `mutates`     provolatile. A STABLE or IMMUTABLE function CANNOT
+        --                 write -- Postgres enforces that, so it is a fact
+        --                 rather than a promise -- which is what lets the graph
+        --                 tell a step that changes the database from a step
+        --                 that only asks it something, and therefore what lets
+        --                 it spot a read whose result nothing consumes.
         'functions', coalesce((
             select jsonb_object_agg(f.name, jsonb_strip_nulls(jsonb_build_object(
                 'fn', f.fn, 'arg_types', to_jsonb(f.arg_types),
                 'description', coalesce(f.description,
-                    obj_description(to_regprocedure(
-                        f.fn || '(' || array_to_string(f.arg_types, ',') || ')'), 'pg_proc')),
+                    obj_description(p.oid, 'pg_proc')),
+                'params', pg_get_function_arguments(p.oid),
+                'returns', pg_get_function_result(p.oid),
+                'mutates', p.provolatile = 'v',
                 'timeout_ms', f.timeout_ms)))
-              from workflow.step_functions f), '{}'::jsonb),
+              from workflow.step_functions f
+              left join pg_proc p on p.oid = to_regprocedure(
+                  f.fn || '(' || array_to_string(f.arg_types, ',') || ')')),
+            '{}'::jsonb),
         'queues', coalesce((
             select jsonb_agg(queue order by queue) from workflow.queue_config), '[]'::jsonb),
         'rate_keys', coalesce((
@@ -6661,6 +6681,293 @@ begin
 end;
 $$;
 
+-- ============================================================================
+-- PROBING: the cheap half of every step, actually executed.
+--
+-- plan_graph reads. This RUNS things -- the parts that cost nothing and prove
+-- something, which is a different question and the one a reader actually has
+-- before they start a pipeline they did not write.
+--
+--   `explain` on a statement       does it parse, and which relations does the
+--                                  PLANNER say it touches -- which retires the
+--                                  regex the graph uses to guess
+--   a temp view on a read          the exact output column names and types,
+--                                  without running the query
+--   to_regprocedure on a function  it exists at that signature, and pg_proc
+--                                  says whether it can write
+--   a row lookup for an agent      it exists, and its servers have been synced
+--
+-- Nothing here executes a step. EXPLAIN without ANALYZE plans and discards, and
+-- CREATE VIEW validates without running -- so probing a pipeline costs no SEC
+-- request, no model call and no row.
+--
+-- WHAT IT CANNOT PROBE IS REPORTED AS `skipped`, NEVER AS `ok`. The worker's
+-- environment, an external url, whether a credential resolves: all of those
+-- belong to a process this database deliberately cannot see, and a probe that
+-- returned ok for them would be the false pass this collection keeps removing.
+--
+-- Templates are substituted with `null` before probing, because `{{run.cik}}`
+-- is not SQL. That is enough for parsing, relations and column types, and it is
+-- honestly less than a real run: a query whose WHERE resolves to null plans the
+-- same and returns nothing.
+-- ============================================================================
+create or replace function workflow.plan_probe(p_name text, p_version int default null)
+returns table (step text, probe text, verdict text, detail text)
+language plpgsql
+volatile
+set search_path = pg_catalog, public
+as $$
+declare
+    v_spec  jsonb;
+    v_step  jsonb;
+    v_in    jsonb;
+    v_kind  text;
+    v_key   text;
+    v_stmt  text;
+    v_plan  jsonb;
+    v_rel   text[];
+    v_cols  jsonb;
+    v_fn    text;
+    v_oid   oid;
+    v_env   text[];
+begin
+    select d.spec into v_spec
+      from workflow.definitions d
+     where d.name = p_name
+       and (p_version is null or d.version = p_version)
+       and d.deleted_at is null
+     order by d.version desc
+     limit 1;
+
+    if v_spec is null then
+        raise exception 'no workflow definition named %', p_name;
+    end if;
+
+    for v_step in select * from jsonb_array_elements(v_spec->'steps') loop
+        v_key  := v_step->>'key';
+        v_kind := v_step->>'kind';
+        v_in   := coalesce(v_step->'input', '{}'::jsonb);
+
+        -- Every {{env.X}} the step names. The database cannot resolve one --
+        -- that is the worker's environment, deliberately -- so this is a list
+        -- to check by hand, reported as skipped rather than passed.
+        select array_agg(distinct m[1]) into v_env
+          from regexp_matches(v_in::text, '\{\{env\.([A-Za-z0-9_]+)\}\}', 'g') m;
+        if v_env is not null then
+            step := v_key; probe := 'env'; verdict := 'skipped';
+            detail := 'needs ' || array_to_string(v_env, ', ') ||
+                      ' from the worker''s environment, which this database cannot read';
+            return next;
+        end if;
+
+        if v_kind = 'sql' and (v_in ? 'statement') then
+            -- A template is not SQL. Null is enough to plan with.
+            v_stmt := regexp_replace(v_in->>'statement', '\{\{[^}]*\}\}', 'null', 'g');
+
+            begin
+                if coalesce((v_in->>'write')::boolean, false) then
+                    execute 'explain (format json) ' || v_stmt into v_plan;
+                else
+                    execute format(
+                        'explain (format json) select * from (%s) t', v_stmt) into v_plan;
+                end if;
+                step := v_key; probe := 'parses'; verdict := 'ok';
+                detail := 'the planner accepted it';
+                return next;
+
+                select array_agg(distinct x #>> '{}') into v_rel
+                  from jsonb_path_query(v_plan, '$.**."Relation Name"') x;
+                step := v_key; probe := 'relations';
+                verdict := case when v_rel is null then 'skipped' else 'ok' end;
+                detail := coalesce(
+                    'reads ' || array_to_string(v_rel, ', '),
+                    'the plan names no relation -- a values list, a function, or a '
+                    'constant expression');
+                return next;
+            exception when others then
+                step := v_key; probe := 'parses'; verdict := 'fail';
+                detail := sqlerrm;
+                return next;
+                v_stmt := null;    -- a statement that does not parse has no shape
+            end;
+
+            -- The shape, without running the query. A view is validated and
+            -- planned at creation and executes nothing.
+            --
+            -- Skipped entirely when the parse failed: reporting `returns:
+            -- skipped -- relation does not exist` after `parses: fail --
+            -- relation does not exist` says the same thing twice and makes the
+            -- one line that matters harder to find.
+            if v_stmt is not null and not coalesce((v_in->>'write')::boolean, false) then
+                begin
+                    execute format('create temp view _p8_probe as %s', v_stmt);
+                    select jsonb_object_agg(column_name, data_type) into v_cols
+                      from information_schema.columns
+                     where table_name = '_p8_probe';
+                    execute 'drop view _p8_probe';
+                    step := v_key; probe := 'returns'; verdict := 'ok';
+                    detail := coalesce(v_cols::text, '(no columns)');
+                    return next;
+                exception when others then
+                    begin execute 'drop view if exists _p8_probe'; exception when others then null; end;
+                    step := v_key; probe := 'returns'; verdict := 'skipped';
+                    detail := 'could not describe the result: ' || sqlerrm;
+                    return next;
+                end;
+            end if;
+
+        elsif v_kind = 'sql' then
+            v_fn := v_in->>'function';
+            select f.fn || '(' || array_to_string(f.arg_types, ',') || ')'
+              into v_stmt from workflow.step_functions f where f.name = v_fn;
+            if v_stmt is null then
+                step := v_key; probe := 'function'; verdict := 'fail';
+                detail := format('%L is not registered', v_fn);
+                return next;
+            else
+                v_oid := to_regprocedure(v_stmt);
+
+                -- THE STEP'S ARGUMENTS AGAINST THE FUNCTION'S. The registry
+                -- knows the signature and the step carries a list, and nothing
+                -- compared the two until dispatch -- where the failure reads
+                -- `function f(text) does not exist`, which sounds like a
+                -- missing function rather than a step passing one argument to
+                -- something that takes two.
+                if v_oid is not null then
+                    declare
+                        v_want int := coalesce(array_length(
+                            (select f.arg_types from workflow.step_functions f
+                              where f.name = v_fn), 1), 0);
+                        v_got  int := coalesce(jsonb_array_length(v_in->'args'), 0);
+                    begin
+                        if v_want <> v_got then
+                            step := v_key; probe := 'arity'; verdict := 'fail';
+                            detail := format(
+                                '%L is registered with %s argument(s) and this step passes %s',
+                                v_fn, v_want, v_got);
+                            return next;
+                        end if;
+                    end;
+                end if;
+
+                step := v_key; probe := 'function';
+                verdict := case when v_oid is null then 'fail' else 'ok' end;
+                detail := case when v_oid is null
+                    then format('registered as %s, which does not exist at that signature', v_stmt)
+                    else format('%s returns %s%s', pg_get_function_arguments(v_oid),
+                                pg_get_function_result(v_oid),
+                                case when (select provolatile from pg_proc where oid = v_oid) = 'v'
+                                     then ' (may write)' else ' (read-only)' end) end;
+                return next;
+            end if;
+
+        elsif v_kind = 'http_call' and (v_in->>'url') like '%P8_AGENT_URL%' then
+            if to_regclass('agentic.agents') is null then
+                step := v_key; probe := 'agent'; verdict := 'skipped';
+                detail := 'agentic is not installed on this deployment';
+                return next;
+            else
+                execute format(
+                    'select case when exists (select 1 from agentic.agents where name = %L)
+                          then ''ok'' else ''fail'' end', v_in#>>'{body,model}')
+                into verdict;
+                step := v_key; probe := 'agent';
+                detail := format('agent %L%s', v_in#>>'{body,model}',
+                                 case when verdict = 'ok' then ' exists'
+                                      else ' has no row in agentic.agents' end);
+                return next;
+            end if;
+
+        elsif v_kind = 'http_call' then
+            step := v_key; probe := 'endpoint'; verdict := 'skipped';
+            detail := format('%s -- an outbound call is the worker''s to make, so nothing '
+                             'here can tell you it answers', v_in->>'url');
+            return next;
+
+        elsif v_kind = 'sub_workflow' then
+            step := v_key; probe := 'workflow';
+            verdict := case when exists (
+                select 1 from workflow.definitions d
+                 where d.name = coalesce(v_in->>'workflow', v_in->>'name')
+                   and d.deleted_at is null) then 'ok' else 'fail' end;
+            detail := format('runs %L', coalesce(v_in->>'workflow', v_in->>'name'));
+            return next;
+        end if;
+    end loop;
+end;
+$$;
+
+-- ============================================================================
+-- WHAT THE LAST RUN ACTUALLY DID, beside the plan that described it.
+--
+-- The gap a plan cannot close on its own: a step's declared output is `jsonb`,
+-- and an author writing `{{steps.land.result.cik}}` has no way to know whether
+-- `cik` is a key of it. One execution answers that, and the join is already
+-- there -- workflow.tasks is keyed (run_id, step_key), which is why every step
+-- node carries step_key.
+--
+-- Shapes, not values. A result's keys and their types are what a next step is
+-- written against; the values are one select away and would make this
+-- unreadable for a fan-out that returned four thousand rows.
+-- ============================================================================
+create or replace function workflow.plan_status(p_name text, p_run_id uuid default null)
+returns table (
+    step     text,
+    status   text,
+    attempts int,
+    took     interval,
+    returned jsonb
+)
+language sql
+stable
+set search_path = pg_catalog, public
+as $$
+    with r as (
+        -- Runs point at a DEFINITION ID, not at a name: publishing v2 does not
+        -- retarget a run that started under v1. So the newest run of "this
+        -- workflow" is the newest run of any of its versions, which is what
+        -- somebody asking about a name means.
+        select coalesce(p_run_id, (
+            select r.id from workflow.runs r
+              join workflow.definitions d on d.id = r.workflow_def_id
+             where d.name = p_name
+             order by r.created_at desc limit 1)) as id
+    )
+    select t.step_key,
+           t.status,
+           t.attempts,
+           t.completed_at - t.claimed_at,
+           case jsonb_typeof(t.output->'result')
+                -- An array of rows: how many, and the shape of one of them,
+                -- which is what a template against it has to match.
+                when 'array' then jsonb_build_object(
+                    'rows', jsonb_array_length(t.output->'result'),
+                    'of', case when jsonb_array_length(t.output->'result') = 0 then null
+                          else (select jsonb_object_agg(k, jsonb_typeof(v))
+                                  from jsonb_each(t.output#>'{result,0}') e(k, v)) end)
+                when 'object' then (select jsonb_object_agg(k, jsonb_typeof(v))
+                                      from jsonb_each(t.output->'result') e(k, v))
+                when 'null' then null
+                else to_jsonb(jsonb_typeof(t.output->'result'))
+           end
+      from workflow.tasks t, r
+     where t.run_id = r.id
+     order by t.created_at, t.step_key;
+$$;
+
+comment on function workflow.plan_probe(text, int) is
+$c$Execute the cheap half of every step and report what it proves.
+EXPLAIN for a statement (does it parse, which relations does the planner name),
+a temp view for its result columns, a catalog lookup for a registered function
+or an agent. Runs no step: anything needing the worker's environment or an
+outbound call is reported skipped, never ok.$c$;
+
+comment on function workflow.plan_status(text, uuid) is
+$c$What the last run of this workflow actually did, per step.
+Status, attempts, duration, and the SHAPE of what each step returned -- keys and
+their types, or a row count -- which is the thing a plan cannot know and the
+next step has to be written against.$c$;
+
 -- Read surfaces over configuration only -- no run, no task, no per-tenant row
 -- passes through any of them, which is why these three are granted where every
 -- operator view in §22d is not.
@@ -6668,6 +6975,11 @@ grant execute on function workflow.plan_catalog() to authenticated;
 grant execute on function workflow.plan_graph(text, int) to authenticated;
 grant execute on function workflow.plan_document(text, int) to authenticated;
 grant execute on function workflow.plan_defects(text) to authenticated;
+grant execute on function workflow.plan_probe(text, int) to authenticated;
+-- plan_status reads workflow.tasks, which is RLS-enabled and per-tenant, and
+-- this function is SECURITY INVOKER (the default) precisely so that stays true:
+-- a caller sees the runs their policies admit, and nothing else.
+grant execute on function workflow.plan_status(text, uuid) to authenticated;
 
 comment on function workflow.plan_document(text, int) is
     'A stored definition read as a pipeline: every step in order, carrying what '

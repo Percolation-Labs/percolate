@@ -171,6 +171,11 @@ failure_modes:
     source: failure-modes.md §5
     tell: the refund fires during a successful booking
 
+  - id: second-mechanism
+    name: A second mechanism for a solved problem
+    source: failure-modes.md §5
+    tell: two code paths that must agree about a policy, agreeing only by coincidence
+
   - id: version-skew
     name: The compiler is older than the schema
     source: failure-modes.md §6
@@ -1999,8 +2004,12 @@ scenarios:
     check:
       - name: one child per row the query returned
         sql: "select count(*) from workflow.tasks where run_id=(select run_id from ctx) and step_key like 'fan[%'"
-        is: "4"
-        because: "the four marketed shared-tier products are what the fixture holds; a width baked into the document would not move when the data does, which is the whole reason `rows:` is a query"
+        is: "3"
+        because: "three shared-tier products are marketed and a fourth is withdrawn, so the width is a fact about the DATA -- a number baked into the document would not move when a product is withdrawn, which is the whole reason `rows:` is a query"
+      - name: and the withdrawn product is not among them
+        sql: "select count(*) from workflow.tasks where run_id=(select run_id from ctx) and step_key like 'fan[%' and input->'item'->>'ref'='dolmirase'"
+        is: "0"
+        because: "a fan-out over rows the query was written to exclude is a wrong answer with a green run and somebody else's rate limit spent on it"
       - name: and the children exist in the transaction that completed the parent
         sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='fan'"
         is: "done"
@@ -2034,11 +2043,11 @@ scenarios:
         because: "deferring {{item.*}} to dispatch put `item` into the contract of a shipped worker that knows three namespaces -- all six children of the headline example failed with `unknown template namespace 'item'`"
       - name: and the recorded input says precisely what will be sent
         sql: "select count(distinct input->>'url') from workflow.tasks where run_id=(select run_id from ctx) and step_key like 'fan[%'"
-        is: "4"
+        is: "3"
         because: "a recorded input reading `{{item.ref}}` forces a reader to join to input->'item' to learn what was requested; four identical urls would mean the substitution silently used one row for all of them"
       - name: while the row itself is kept verbatim beside it
         sql: "select count(*) from workflow.tasks where run_id=(select run_id from ctx) and step_key like 'fan[%' and input ? 'item'"
-        is: "4"
+        is: "3"
         because: "the fan-in reads rows through `item`; substituting and discarding would make the snapshot unrecoverable"
 
   - id: coll-03
@@ -2161,6 +2170,20 @@ scenarios:
       create temp table ctx as
         select workflow.start_workflow('ev_coll06','{}'::jsonb) as run_id;
     check:
+      - name: seriousness really does vary inside a product's batch
+        sql: |
+          select count(*) from (
+            select e->>'product' p, count(distinct e->>'seriousness') n
+            from jsonb_array_elements(calder.unprocessed_cases()) e group by 1) x
+          where x.n > 1
+        gte: "1"
+        because: >-
+          The fixture asserts its own precondition here, because an earlier
+          version keyed product, site and seriousness all off the same modulus
+          -- so partitioning by product also partitioned by seriousness, no
+          column varied, and this scenario passed while testing nothing. A
+          fixture whose columns are correlated cannot tell `partition_by` from
+          coincidence.
       - name: the step failed before any child existed
         sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='fan'"
         is: "failed"
@@ -2169,6 +2192,39 @@ scenarios:
         sql: "select error->>'error' from workflow.tasks where run_id=(select run_id from ctx) and step_key='fan'"
         matches: "seriousness"
         because: "the remedy is either partition_by or a different template, and both need to know which column was the problem"
+
+  - id: coll-06b
+    category: collection
+    title: A column constant across the batch may still be addressed
+    asks: "Then how do I put the product in the URL?"
+    mechanism: "YAML.md § Batching -- partition_by is a partition, not a sort, and that is why this is allowed"
+    catches: [wrong-grouping]
+    role: app_owner
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_coll06b
+      steps:
+        - id: fan
+          matrix:
+            rows: {function: unprocessed_cases}
+            max_fanout: 500
+            batch_size: 10
+            partition_by: [product]
+            template:
+              queue: http
+              rest: {url: 'http://p8-faultsrv:8099/p/{{item.product}}', method: GET}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_coll06b','{}'::jsonb) as run_id;
+    check:
+      - name: it expanded
+        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='fan'"
+        is: "done"
+        because: "refusing this too would make partition_by a sort with a misleading name -- the guarantee it buys is exactly that the partitioned column means something inside the child"
+      - name: and each child's url names its own partition
+        sql: "select count(distinct input->>'url') from workflow.tasks where run_id=(select run_id from ctx) and step_key like 'fan[%'"
+        is: "3"
+        because: "six children over three partitions must show three urls; one url would mean the first row's value was used for all of them, which is the failure coll-06 refuses"
 
   - id: coll-07
     category: collection
@@ -2196,8 +2252,9 @@ scenarios:
       $y$);
       create temp table ctx as
         select workflow.start_workflow('ev_coll07','{}'::jsonb) as run_id;
-      -- One 404, three successes -- the exact shape that killed two real
-      -- fan-outs on their first six-wide run.
+      -- One 404 and two successes -- 67% against a 50% floor. This is the
+      -- exact shape that killed two real fan-outs on their first six-wide run,
+      -- twice, under a pure AND-join.
       create temp table kids as
         select id, row_number() over (order by step_key) as n
         from workflow.tasks
@@ -2206,7 +2263,6 @@ scenarios:
              '{"error":"404 not found"}'::jsonb, true);
       select workflow.complete_task((select id from kids where n=2), '{"status":200,"result":{}}'::jsonb);
       select workflow.complete_task((select id from kids where n=3), '{"status":200,"result":{}}'::jsonb);
-      select workflow.complete_task((select id from kids where n=4), '{"status":200,"result":{}}'::jsonb);
     check:
       - name: the aggregate still ran
         sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='tally'"
@@ -2220,7 +2276,7 @@ scenarios:
   - id: coll-08
     category: collection
     title: Below the floor, the report does not run
-    asks: "Three of four calls failed. Is that a report?"
+    asks: "Two of three calls failed. Is that a report?"
     mechanism: "YAML.md § Surviving a failed child -- min_success is checked BEFORE the successor is released"
     catches: [partial-aggregate, silent-success]
     role: app_owner
@@ -2249,8 +2305,7 @@ scenarios:
         where run_id=(select run_id from ctx) and step_key like 'fan[%';
       select workflow.fail_task((select id from kids where n=1), '{"error":"404"}'::jsonb, true);
       select workflow.fail_task((select id from kids where n=2), '{"error":"404"}'::jsonb, true);
-      select workflow.fail_task((select id from kids where n=3), '{"error":"404"}'::jsonb, true);
-      select workflow.complete_task((select id from kids where n=4), '{"status":200,"result":{}}'::jsonb);
+      select workflow.complete_task((select id from kids where n=3), '{"status":200,"result":{}}'::jsonb);
     check:
       - name: the aggregate did not produce a number
         sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='tally'"
@@ -2264,7 +2319,7 @@ scenarios:
   - id: coll-09
     category: collection
     title: A 200 carrying nothing counts as transport, not as data
-    asks: "The registry returned {} for two of them."
+    asks: "The registry returned {} for all of them."
     mechanism: "YAML.md § min_success is a TRANSPORT floor"
     catches: [empty-success, partial-aggregate]
     role: app_owner
@@ -2299,7 +2354,7 @@ scenarios:
     check:
       - name: every empty 200 counted as a success
         sql: "select output#>>'{result,done}' from workflow.tasks where run_id=(select run_id from ctx) and step_key='tally'"
-        is: "4"
+        is: "3"
         because: "min_success is a transport floor by design, and saying so is the point -- whether the content is useful is the aggregate's job"
       - name: and the aggregate is the one that can tell
         sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='tally'"
@@ -2357,10 +2412,26 @@ scenarios:
           'aa000000-0000-0000-0000-0000000000a1',
           '{"status":"authorised"}'::jsonb) as rid;
     check:
-      - name: polling twice lands one record
-        sql: "select (select rid from a) = (select rid from b)"
+      - name: the first poll lands a record
+        sql: "select (select rid from a) is not null"
         is: "true"
-        because: "a feed poller runs on a schedule and re-sees most of what it saw last time -- 'nothing changed since last time' is the normal state of a polling pipeline, not an incident"
+        because: "the id is the handle the parse and the index both need"
+      - name: polling again lands nothing, and says so by returning null
+        sql: "select coalesce((select rid from b)::text, '(null)')"
+        is: "(null)"
+        because: >-
+          This is a DIFFERENT idempotency contract from `register_upload`, which
+          returns the SAME id on a repeat. Here null means "already ingested on
+          a previous poll" and is not an error -- a puller that treats a null
+          return as a failure re-processes its whole backlog every cycle, and
+          one written against the upload convention (`if rid is null: raise`)
+          does exactly that. Two conventions in one subsystem is the trap; the
+          scenario exists so nobody has to find it from a backlog that will not
+          drain.
+      - name: and there is exactly one resource
+        sql: "select count(*) from content.resources where external_id='eudra-2026-0041'"
+        is: "1"
+        because: "the point of the key is that a scheduled poll re-seeing what it saw last time is the normal state of a polling pipeline, not an incident"
       - name: with no bytes and no file row
         sql: "select coalesce((select file_id::text from content.resources where id=(select rid from a)),'(none)')"
         is: "(none)"
@@ -2380,7 +2451,11 @@ scenarios:
         - id: land
           sql:
             function: land_registry_records
-            args: ['[{"registry":"eudra","ref":"r1"},{"registry":"eudra","ref":"r2"}]']
+            # A LIST, not a quoted JSON string. `args: ['[{...}]']` passes a
+            # jsonb SCALAR and the function fails with `cannot extract elements
+            # from a scalar` -- see qs-19.
+            args:
+              - [{registry: eudra, ref: r1}, {registry: eudra, ref: r2}]
       $y$);
       create temp table ctx as
         select workflow.start_workflow('ev_coll12','{}'::jsonb) as run_id;
@@ -2419,3 +2494,918 @@ scenarios:
         sql: "select count(*) from content.channels where name='pv-registry'"
         is: "1"
         because: "the answer to 'add a feed without a deploy' today is a channel row plus a workflow, which is what coll-11 uses -- the gap is the scoring, health and paging vocabulary, not the ability to name a source"
+
+# =============================================================================
+# QUERY SURFACE -- the dialect, asked the way an agent on arrival asks it.
+#
+# The characteristic failure of this surface is a WRONG ANSWER, not an error
+# (`dev/tests/README.md`): nothing crashes, the caller simply gets something
+# other than what the spec promised. So most of these assert a REFUSAL -- a
+# modifier that means nothing where it is written, a mode that cannot be
+# guessed at, a name that resolves two ways -- because the alternative to a
+# refusal here is not an error, it is a plausible answer to a different
+# question.
+# =============================================================================
+
+  - id: qs-01
+    category: query-surface
+    title: An agent on arrival can ask what this database is
+    asks: "I have credentials and no documentation."
+    mechanism: "USAGE.md § SCHEMA -- the only mode answerable before you know anything"
+    catches: [never-executed]
+    role: authenticated
+    claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":["aa000000-0000-0000-0000-0000000000a1"]}'
+    check:
+      - name: bare SCHEMA returns the index of facets
+        sql: "select jsonb_typeof(aiq.schema()->'facets')"
+        isnt: null
+        because: "every other mode requires you to already hold a key, a source or a relation; without an index the discovery path has no first step"
+      - name: and the p8ql facet emits the grammar from the parser itself
+        sql: "select (aiq.schema('p8ql')::text) ~ 'LOOKUP'"
+        is: "true"
+        because: "a grammar listed by hand drifts from the parser; derived from it, a retired spelling disappears from the document without an edit"
+
+  - id: qs-02
+    category: query-surface
+    title: The schema facet names real keys, so the next call is not a guess
+    asks: "There is a `product` entity type. What is one called?"
+    mechanism: "USAGE.md § SCHEMA -- sample_keys, scoped to what the caller may see"
+    catches: [wrong-answer-not-error]
+    role: authenticated
+    claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":["aa000000-0000-0000-0000-0000000000a1"]}'
+    check:
+      - name: the graph facet carries example keys
+        sql: "select (aiq.schema('graph')::text) ~ 'sample_keys'"
+        is: "true"
+        because: "an agent given the type and the relation and no instance tried four spellings of a name and gave up -- a naming convention is the one thing that cannot be reasoned out, and three examples end the question"
+
+  - id: qs-03
+    category: query-surface
+    title: A retired spelling names its replacement
+    asks: "HYBRID used to work."
+    mechanism: "USAGE.md § The grammar, in full -- three retired spellings, each error naming its replacement"
+    catches: [version-skew]
+    role: app_owner
+    check:
+      - name: refused, pointing at SEARCH
+        sql: "select aiq.query('HYBRID \"hepatic\" FROM pv_chunks')::text"
+        raises: "SEARCH|unknown mode"
+        because: "'unknown mode' alone sends the reader to the grammar; naming the replacement ends it in one line"
+
+  - id: qs-04
+    category: query-surface
+    title: A modifier that means nothing where it is written is refused
+    asks: "LOOKUP ... DEPTH 3 -- does that widen the lookup?"
+    mechanism: "USAGE.md § The grammar -- FUZZY, DEPTH and TYPE are refused outside the modes they modify"
+    catches: [silent-template, wrong-answer-not-error]
+    role: app_owner
+    check:
+      - name: DEPTH on a LOOKUP is refused
+        sql: "select aiq.query('LOOKUP \"tolvaxen\" DEPTH 3')::text"
+        raises: "DEPTH"
+        because: "`LOOKUP \"acme\" DEPTH 3` used to parse and silently do a depth-1 lookup -- an answer to a question the caller did not ask"
+      - name: and LIMIT on a SCHEMA is refused
+        sql: "select aiq.query('SCHEMA \"graph\" LIMIT 3')::text"
+        raises: "LIMIT"
+        because: "a schema document is not a result set; accepting the modifier would make a truncated document look like a complete one"
+
+  - id: qs-05
+    category: query-surface
+    title: A misparse is visible, because the plan comes back with the rows
+    asks: "Did it understand what I asked?"
+    mechanism: "USAGE.md § One endpoint, every mode -- the response always carries the parsed plan"
+    catches: [wrong-answer-not-error]
+    role: app_owner
+    check:
+      - name: the plan says which mode ran
+        sql: "select aiq.query('LOOKUP \"tolvaxen\"')#>>'{plan,mode}'"
+        is: "LOOKUP"
+        because: "a misparse is otherwise indistinguishable from an empty result, and the two need completely different responses from the caller"
+      - name: and what it understood the argument to be
+        sql: "select aiq.query('GRAPH \"tolvaxen\" DEPTH 2')#>>'{plan,depth}'"
+        is: "2"
+        because: "a depth silently clamped or defaulted is a walk narrower than the one that was asked for, reported as the one that was asked for"
+
+  - id: qs-06
+    category: query-surface
+    title: Both quote characters quote
+    asks: "I am embedding this in SQL, so I need single quotes."
+    mechanism: "USAGE.md § LOOKUP -- \"…\" and '…' are interchangeable"
+    catches: [wrong-answer-not-error]
+    role: app_owner
+    check:
+      - name: single quotes resolve the same node
+        sql: "select aiq.query($q$LOOKUP 'SIG-114 hepatic injury'$q$)#>>'{rows,0,entity_type}'"
+        is: "signal"
+        because: "accepting only the double quote was a real bug whose bad half was silent: `LOOKUP 'R7'` SUCCEEDED with the key `'R7'`, quotes and all -- a lookup that matches nothing and reports no error"
+
+  - id: qs-07
+    category: query-surface
+    title: Several names in one call, each resolved independently
+    asks: "Resolve these five names."
+    mechanism: "USAGE.md § LOOKUP takes a list -- input_key echoed, unresolved named"
+    catches: [wrong-answer-not-error]
+    role: app_owner
+    check:
+      - name: the hits come back
+        sql: "select jsonb_array_length(aiq.query('LOOKUP \"tolvaxen\", \"ALTM\", \"no-such-thing\"')->'rows')"
+        is: "2"
+        because: "`rows` holding a row of nulls for a miss is indistinguishable from a hit to anything that does not inspect the fields -- a model read exactly that and answered as though it had found the node"
+      - name: each row says which name produced it
+        sql: "select aiq.query('LOOKUP \"tolvaxen\", \"ALTM\"')#>>'{rows,0,input_key}'"
+        isnt: null
+        because: "five names and five rows with no correspondence is a join the caller has to guess at"
+      - name: and the miss is handed over rather than left as a set difference
+        sql: "select aiq.query('LOOKUP \"tolvaxen\", \"no-such-thing\"')#>>'{unresolved,0}'"
+        is: "no-such-thing"
+        because: "'which of these did you not find' is the question a caller asks next, every time"
+
+  - id: qs-08
+    category: query-surface
+    title: One key's exact hit does not suppress another key's fuzzy match
+    asks: "Resolve a good name and a typo in the same call."
+    mechanism: "USAGE.md § LOOKUP -- each key runs the whole canonical -> alias -> fuzzy cascade on its own"
+    catches: [wrong-answer-not-error]
+    role: app_owner
+    check:
+      - name: both resolve
+        sql: "select jsonb_array_length(aiq.query('FUZZY LOOKUP \"tolvaxen\", \"beriflour\"')->'rows')"
+        gte: "2"
+        because: "resolving them as one set would make a list mean something different from the same keys asked one at a time, which is a difference no caller could predict"
+
+  - id: qs-09
+    category: query-surface
+    title: A rare token is found by TEXT and by neither of the others
+    asks: "Find the batch number LOT-4471B."
+    mechanism: "USAGE.md § TEXT -- the mode that exists because LOOKUP searches keys and embeddings are weakest on rare exact tokens"
+    catches: [wrong-answer-not-error]
+    role: app_owner
+    check:
+      - name: TEXT finds it
+        sql: "select jsonb_array_length(aiq.query('TEXT \"LOT-4471B\" FROM pv_chunks LIMIT 5')->'rows')"
+        is: "2"
+        because: "part numbers, tickers and error codes are exactly where embeddings are weakest, and they are what people actually paste into a search box"
+      - name: LOOKUP does not, because chunks are not nodes
+        sql: "select jsonb_array_length(aiq.query('LOOKUP \"LOT-4471B\"')->'rows')"
+        is: "0"
+        because: "matching is over node_keys only, never document text -- if LOOKUP fell through to the corpus, a key miss would silently become a text hit"
+
+  - id: qs-10
+    category: query-surface
+    title: SEMANTIC finds the passage that shares no words with the question
+    asks: "Anything about liver problems?"
+    mechanism: "USAGE.md § SEMANTIC -- the caller supplies the vector; FROM scopes the corpus"
+    catches: [wrong-answer-not-error]
+    role: app_owner
+    check:
+      - name: the nearest chunk is the one with no shared vocabulary
+        sql: |
+          select aiq.query('SEMANTIC "a liver problem" FROM pv_chunks USING calder-quad LIMIT 3',
+                           '[0,0,0.707,0.707]'::vector)#>>'{rows,0,chunk_id}'
+        is: "58000000-0000-0000-0000-000000000002"
+        because: "'Liver enzyme elevation' shares not one word with the question -- a corpus where the modes agree cannot show why there are three"
+      - name: and TEXT cannot find it
+        sql: "select jsonb_array_length(aiq.query('TEXT \"liver problem\" FROM pv_chunks LIMIT 5')->'rows')"
+        is: "0"
+        because: "the disagreement is the point; if the lexical half found it too, the semantic half would be unproven"
+
+  - id: qs-11
+    category: query-surface
+    title: FROM is a security property on SEMANTIC, not a convenience
+    asks: "Can I leave the corpus off?"
+    mechanism: "USAGE.md § SEMANTIC -- an embedding space is keyed by MODEL and holds every corpus at once"
+    catches: [tenancy-leak, wrong-answer-not-error]
+    role: app_owner
+    check:
+      - name: refused
+        sql: "select aiq.query('SEMANTIC \"a liver problem\" USING calder-quad LIMIT 3','[0,0,0.707,0.707]'::vector)::text"
+        raises: "FROM|source|corpus"
+        because: "the dispatch used to drop FROM and search everything, so a caller holding one tenant's claim received chunk ids and distances for another tenant's content. The space has no policy of its own; the corpus join is what puts one in the path"
+
+  - id: qs-12
+    category: query-surface
+    title: A vector of the wrong width names both sides
+    asks: "I embedded with a different model."
+    mechanism: "USAGE.md § SEMANTIC -- the width check names the model and both dimensions"
+    catches: [unstated-contract]
+    role: app_owner
+    check:
+      - name: refused with both numbers
+        sql: "select aiq.query('SEMANTIC \"x\" FROM pv_chunks USING calder-quad LIMIT 3','[1,0,0,0,0,0]'::vector)::text"
+        raises: "dimension"
+        because: "pgvector's bare 'expected N dimensions' does not say which model expected it, and the caller's next question is always which one they used"
+
+  - id: qs-13
+    category: query-surface
+    title: Two models of the same width are two different spaces
+    asks: "Both are four-dimensional. Does it matter which I name?"
+    mechanism: "USAGE.md § SEMANTIC -- the space is identified by the model, never by the dimension"
+    catches: [unstated-contract, wrong-answer-not-error]
+    role: app_owner
+    check:
+      - name: the same probe ranks differently in the two spaces
+        sql: |
+          select (aiq.query('SEMANTIC "x" FROM pv_chunks USING calder-quad LIMIT 1','[1,0,0,0]'::vector)#>>'{rows,0,chunk_id}')
+             is distinct from
+                 (aiq.query('SEMANTIC "x" FROM chunks     USING demo-quad-a  LIMIT 1','[1,0,0,0]'::vector)#>>'{rows,0,chunk_id}')
+        is: "true"
+        because: "nothing about a vector says which space it belongs to, and no dimension check can catch a caller naming the wrong model -- cosine distance between two spaces is a number, not an answer"
+
+  - id: qs-14
+    category: query-surface
+    title: SEARCH fuses two rankers, and says when one did not match
+    asks: "Search for the batch number and the meaning at once."
+    mechanism: "USAGE.md § SEARCH -- reciprocal rank fusion, null in a rank column means that signal did not match"
+    catches: [silent-template, wrong-answer-not-error]
+    role: app_owner
+    check:
+      - name: the chunk both rankers like comes first
+        sql: |
+          select aiq.query('SEARCH "LOT-4471B hepatic" FROM pv_chunks USING calder-quad LIMIT 3',
+                           '[0,0,0.9,0.436]'::vector)#>>'{rows,0,chunk_id}'
+        is: "58000000-0000-0000-0000-000000000001"
+        because: "RRF rather than score blending, because ts_rank and cosine distance share neither scale nor direction"
+      - name: and a lexical miss is reported as null, not as a zero
+        sql: |
+          select (aiq.query('SEARCH "LOT-4471B hepatic" FROM pv_chunks USING calder-quad LIMIT 3',
+                            '[0,0,0.9,0.436]'::vector)::text) ~ '"lexical_rank": null'
+        is: "true"
+        because: "the documented pipeline once fed a literal `{{run.question}}` to the lexical half: every lexical_rank came back null, the fusion degraded to semantic-only, and it returned rows. A null that reads as null is what makes that visible"
+
+  - id: qs-15
+    category: query-surface
+    title: Ordinary SQL is the floor, and is not executed by the parser
+    asks: "Can I just write SQL?"
+    mechanism: "USAGE.md § SQL -- recognised by how it starts; aiq.query returns a plan, sql_passthrough executes"
+    catches: [silent-success]
+    role: app_owner
+    check:
+      - name: recognised as SQL rather than as a dialect error
+        sql: "select aiq.query('select count(*) from calder.products')->>'mode'"
+        is: "SQL"
+        because: "sniffing a fixed set of read-only openers is what keeps `LOKUP \"x\"` an honest `unknown mode` error instead of a SQL syntax error about a language nobody was writing"
+      - name: and the statement is returned, not run
+        sql: "select aiq.query('select count(*) from calder.products') ? 'statement'"
+        is: "true"
+        because: "executing it here would run as the DEFINER; the passthrough is SECURITY INVOKER precisely so it runs as the caller"
+
+  - id: qs-16
+    category: query-surface
+    title: The passthrough is read-only, enforced by the transaction
+    asks: "Can I hide a write inside a function?"
+    mechanism: "USAGE.md § SQL -- read-only enforced by the database, not by inspecting the string"
+    catches: [tenancy-leak]
+    role: authenticated
+    claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":["aa000000-0000-0000-0000-0000000000a1"]}'
+    check:
+      - name: an obvious write is refused by the keyword check
+        sql: "select aiq.sql_passthrough('delete from calder.chunks')"
+        raises: "read-only"
+        because: "the leading-keyword check is a courtesy and the function's own comment says so -- it is not the boundary"
+      - name: a writer the caller cannot even execute is refused first
+        sql: "select aiq.sql_passthrough($q$select aiq.add_node_key('ALTM','planted','alias')$q$)"
+        raises: "permission denied"
+        because: "grants are the outer wall, and it holds for the functions an ordinary caller was never given -- but a wall that only stops what nobody could call anyway proves nothing about the next check"
+      - name: and a writer the caller CAN execute is refused by the transaction
+        sql: |
+          select aiq.sql_passthrough($q$select content.register_fetched(
+                 'pv-registry','planted','x',null,
+                 'aa000000-0000-0000-0000-0000000000a1'::uuid,'{}'::jsonb)$q$)
+        raises: "read-only transaction"
+        because: "THIS is the case the keyword filter cannot see: the statement starts with `select`, the caller holds EXECUTE, and the write is three frames down inside a SECURITY DEFINER function. Only the read-only transaction stops it, which is why `brief.md` §3 calls the string-inspecting design an RLS bypass and privilege escalation primitive"
+      - name: and nothing was planted
+        role: app_owner
+        sql: "select count(*) from content.resources where external_id='planted'"
+        is: "0"
+        because: "a refusal that still wrote is the worse half, and this is the one place in the collection where the caller supplies the statement"
+
+  - id: qs-17
+    category: query-surface
+    title: A walk is filtered mid-traversal, not just at the seed
+    asks: "What is my tenant's product connected to?"
+    mechanism: "USAGE.md § Tenancy -- RLS propagates through traversal"
+    catches: [tenancy-leak]
+    role: authenticated
+    claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":["aa000000-0000-0000-0000-0000000000a1"]}'
+    check:
+      - name: the tenant can see its own product
+        sql: "select aiq.query('LOOKUP \"westrelin\"')#>>'{rows,0,entity_type}'"
+        is: "product"
+        because: "a tenancy check that also hides a tenant's own rows is a broken feature, not a safe one"
+      - name: and the cross-tenant edge reaches nothing
+        sql: "select jsonb_array_length(aiq.query('GRAPH \"westrelin\" DEPTH 2')->'rows')"
+        is: "0"
+        because: "the edge's endpoints are never both visible to anybody, so it must be visible to nobody -- and must not disclose to either tenant that the other's node exists"
+      - name: and the other tenant's node does not even resolve
+        sql: "select jsonb_array_length(aiq.query('LOOKUP \"ostavir\"')->'rows')"
+        is: "0"
+        because: "an empty result usually means identity, not absence -- and here it has to mean identity, or the key registry becomes a directory of other tenants"
+
+  - id: qs-18
+    category: query-surface
+    title: A node excluded by the inclusion policy is not addressable at all
+    asks: "Harrow Labs was wound up. Can I still look it up?"
+    mechanism: "graph-identity.md -- the inclusion predicate decides what becomes a node"
+    catches: [wrong-answer-not-error, tenancy-leak]
+    role: app_owner
+    check:
+      - name: no node
+        sql: "select count(*) from aiq.nodes n join calder.sponsors s on s.id=n.entity_id where s.code='HRRW'"
+        is: "0"
+        because: "inclusion and tenancy are orthogonal, and a fixture that conflated them could not say which one did the filtering"
+      - name: and therefore no key
+        sql: "select jsonb_array_length(aiq.query('LOOKUP \"HRRW\"')->'rows')"
+        is: "0"
+        because: "a key surviving its node is a name that resolves to nothing downstream -- and it cannot be an edge endpoint however hard an extractor tries"
+
+  - id: qs-19
+    category: query-surface
+    title: A JSON argument written as a quoted string arrives as a scalar
+    asks: "Why does my batch step say 'cannot extract elements from a scalar'?"
+    mechanism: "workflow.resolve_args -- a literal is passed through with the type YAML gave it"
+    catches: [undocumented-contract, silent-template]
+    status: open-doc
+    role: app_owner
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_qs19
+      steps:
+        - id: land
+          sql:
+            function: land_registry_records
+            args: ['[{"registry":"eudra","ref":"r9"}]']
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_qs19','{}'::jsonb) as run_id;
+    check:
+      - name: the step failed at run time, not at authoring time
+        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='land'"
+        is: "failed"
+        because: "this half is right -- the failure is loud, and its message is Postgres's own"
+      - name: and the error explains what to write instead
+        sql: "select error->>'error' from workflow.tasks where run_id=(select run_id from ctx) and step_key='land'"
+        matches: "args|jsonb|list|quoted"
+        because: >-
+          THE FINDING, and it is a message rather than a mechanism.
+          `args: ['[{...}]']` is a JSON *string*; the step function takes jsonb
+          and gets a scalar, and the run fails with `cannot extract elements
+          from a scalar` -- true, and about a value the author cannot see. The
+          correct spelling is a real YAML list (`args:` then `- [{...}]`), which
+          coll-12 uses. YAML.md documents type preservation for whole-string
+          REFERENCES and says nothing about literals, so the natural thing to
+          type is the wrong one and the error names neither the argument nor the
+          remedy. `lint_spec` has the registered arg types and could refuse this
+          while the author is still looking at the document.
+
+  - id: qs-20
+    category: query-surface
+    title: A resolved value that looks like a template is data, not an instruction
+    asks: "My run input contains braces."
+    mechanism: "workflow.resolve_args -- one pass, appending to a buffer that is never re-scanned"
+    catches: [data-as-instruction]
+    role: app_owner
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_qs20
+      steps:
+        - id: echo
+          sql: {function: calder_echo, args: ['{{run.a}} then {{run.b}}']}
+      $y$);
+      create temp table ctx as select workflow.start_workflow('ev_qs20',
+        '{"a":"{{run.b}}","b":"SECRET"}'::jsonb) as run_id;
+    check:
+      - name: the first reference resolves to the literal braces it held
+        sql: "select output#>>'{result,echo}' from workflow.tasks where run_id=(select run_id from ctx) and step_key='echo'"
+        is: "{{run.b}} then SECRET"
+        because: "implemented as one replace() per reference, this resolved to `SECRET then SECRET` -- run input is caller-supplied, so that is caller data being re-read as an instruction, the oldest injection shape there is, arriving through a resolver written to close a different silence"
+
+# =============================================================================
+# RECOVERY -- what happens when the run does not go well.
+#
+# The engine's characteristic failure is a PARTIAL failure that reports success
+# (`dev/tests/README.md`), so most of these end by asking what the RUN says,
+# not what the task says. A saga that rolled back and reported `completed` is
+# the distinction the whole category exists for.
+#
+# Nothing here waits on a clock: a worker's death is driven by ageing
+# `heartbeat_at` rather than by sleeping, because a test that takes two minutes
+# is a test nobody runs. The wall-clock version -- `docker kill` on a worker
+# holding a task, then the live pg_cron reaper -- is worth running by hand once
+# per change to the recovery path and is deliberately not automated.
+# =============================================================================
+
+  - id: recov-01
+    category: recovery
+    title: A 5xx is retried; a 404 is not
+    asks: "The registry was down. Then it was missing a record."
+    mechanism: "workflow.fail_task -- terminal=true stops retrying, false re-queues with backoff"
+    catches: [absent-record]
+    role: app_owner
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_recov01
+      steps:
+        - id: poll
+          queue: http
+          rest: {url: 'http://p8-faultsrv:8099/empty', method: GET}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_recov01','{}'::jsonb) as run_id;
+      create temp table t as select * from workflow.claim_task('http','w1');
+      select workflow.fail_task((select id from t), '{"error":"503"}'::jsonb, false);
+    check:
+      - name: a transient failure goes back to the queue
+        sql: "select status from workflow.tasks where id=(select id from t)"
+        is: "ready"
+        because: "a 5xx is the case retry and backoff exist for; classifying it terminal wastes the attempt budget the first time somebody's proxy hiccups"
+      - name: with backoff, not immediately
+        sql: "select (run_after > now()) from workflow.tasks where id=(select id from t)"
+        is: "true"
+        because: "re-queuing with no backoff is a hot loop against a service that just told you it was struggling"
+      - name: and the attempt was counted
+        sql: "select attempts from workflow.tasks where id=(select id from t)"
+        gte: "1"
+        because: "an uncounted attempt makes max_attempts unreachable, which is how a crash-looping task is reaped and re-claimed without limit"
+
+  - id: recov-02
+    category: recovery
+    title: A terminal failure stops, and takes the run with it
+    asks: "The record does not exist and never will."
+    mechanism: "workflow.fail_task terminal=true -> run failed"
+    catches: [silent-success]
+    role: app_owner
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_recov02
+      steps:
+        - id: poll
+          queue: http
+          rest: {url: 'http://p8-faultsrv:8099/status/404', method: GET}
+        - id: report
+          needs: [poll]
+          sql: {function: calder_echo, args: ['reported']}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_recov02','{}'::jsonb) as run_id;
+      create temp table t as select * from workflow.claim_task('http','w1');
+      select workflow.fail_task((select id from t), '{"error":"404"}'::jsonb, true);
+    check:
+      - name: the task is failed for good
+        sql: "select status from workflow.tasks where id=(select id from t)"
+        is: "failed"
+        because: "a 404 stays a 404; retrying it is the pure-waste case the terminal classification exists for"
+      - name: the successor never runs
+        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='report'"
+        isnt: "done"
+        because: "a report written over a fetch that failed is confidently wrong, and the run is green either way unless the cascade stops it"
+      - name: and the run says failed
+        sql: "select status from workflow.runs where id=(select run_id from ctx)"
+        is: "failed"
+        because: "asking the TASK is not enough -- the whole class this category exists for is a run that reports success over a partial failure"
+
+  - id: recov-03
+    category: recovery
+    title: A crash loop spends its budget and stops
+    asks: "The worker dies every time it picks this up."
+    mechanism: "workflow.fail_task owns max_attempts, backoff and the terminal transition; the reaper only decides which tasks are dead"
+    catches: [inert-feature, silent-success, second-mechanism]
+    role: app_owner
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_recov03
+      steps:
+        - id: poll
+          queue: http
+          rest: {url: 'http://p8-faultsrv:8099/empty', method: GET}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_recov03','{}'::jsonb) as run_id;
+      create temp table t as select id, max_attempts from workflow.claim_task('http','w1');
+      -- Driven the way a crash loop actually runs: fail, let the backoff be
+      -- aged away, claim again, fail again. Twelve rounds is more than any
+      -- default budget, so the exit is the budget rather than the loop.
+      do $c$
+      declare i int; r record;
+      begin
+        for i in 1..12 loop
+          perform workflow.fail_task((select id from t), '{"error":"crash"}'::jsonb, false);
+          exit when (select status from workflow.tasks where id=(select id from t)) = 'failed';
+          update workflow.tasks set run_after = now() - interval '1 minute'
+           where id = (select id from t);
+          select * into r from workflow.claim_task('http','w1');
+          exit when r.id is null;
+        end loop;
+      end $c$;
+    check:
+      - name: it stops at the budget rather than retrying forever
+        sql: "select status from workflow.tasks where id=(select id from t)"
+        is: "failed"
+        because: "the reaper once requeued stale tasks itself instead of calling fail_task, so max_attempts was a budget for errors and not for crashes -- a task whose worker dies every time was re-claimed without limit, at claim speed, with no backoff"
+      - name: and the budget was the declared one
+        sql: "select (attempts >= max_attempts) from workflow.tasks where id=(select id from t)"
+        is: "true"
+        because: "two code paths that must agree about a policy, agreeing only by coincidence, is the shape -- the fix was to delete the second policy rather than repair it"
+
+  - id: recov-04
+    category: recovery
+    title: A dead worker's task comes back, and the attempt is counted
+    asks: "The pod was killed mid-call."
+    mechanism: "workflow.reap_stale_tasks -- decides which tasks are dead, and calls fail_task"
+    catches: [two-workers-one-task, second-mechanism]
+    role: app_owner
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_recov04
+      steps:
+        - id: poll
+          queue: http
+          rest: {url: 'http://p8-faultsrv:8099/slow/45000', method: GET}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_recov04','{}'::jsonb) as run_id;
+      create temp table t as select * from workflow.claim_task('http','w1');
+      -- Aged rather than waited out. A test that takes two minutes is a test
+      -- nobody runs, and the reaper's decision is about heartbeat_at, not about
+      -- how long this session sat still.
+      update workflow.tasks set heartbeat_at = now() - interval '1 hour'
+       where id = (select id from t);
+      create temp table reaped as select workflow.reap_stale_tasks() as n;
+    check:
+      - name: the reaper noticed
+        sql: "select n::text from reaped"
+        gte: "1"
+        because: "a task whose holder stopped heartbeating is indistinguishable from one whose holder is merely slow -- the reaper has to act on the observation it has"
+      - name: it is claimable again
+        sql: "select status from workflow.tasks where id=(select id from t)"
+        is: "ready"
+        because: "recovery that does not return the work to the queue is a task lost with its run still open"
+      - name: and the attempt was charged against the budget
+        sql: "select attempts from workflow.tasks where id=(select id from t)"
+        gte: "1"
+        because: "an uncharged crash is how a task consumes a worker slot forever while the dashboard reads green"
+
+  - id: recov-05
+    category: recovery
+    title: The worker that looks dead comes back, and cannot publish
+    asks: "The 'dead' pod finished and is about to report."
+    mechanism: "the lease fence -- complete_task refuses a revoked lease; failure-modes.md §5"
+    catches: [two-workers-one-task]
+    role: app_owner
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_recov05
+      steps:
+        - id: poll
+          queue: http
+          rest: {url: 'http://p8-faultsrv:8099/slow/45000', method: GET}
+        - id: report
+          needs: [poll]
+          sql: {function: calder_echo, args: ['reported']}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_recov05','{}'::jsonb) as run_id;
+      create temp table t as select * from workflow.claim_task('http','w1');
+      update workflow.tasks set heartbeat_at = now() - interval '1 hour'
+       where id = (select id from t);
+      select workflow.reap_stale_tasks();
+    check:
+      - name: the zombie's heartbeat says STOP
+        sql: "select workflow.heartbeat_task((select id from t),'w1')::text"
+        is: "false"
+        because: "false is the worker's instruction to abandon the work; a worker that keeps going after its lease was revoked is the second half of a two-workers-one-task"
+      - name: and nothing it might publish is on the task
+        sql: "select coalesce((select output::text from workflow.tasks where id=(select id from t)),'(none)')"
+        is: "(none)"
+        because: "the reaped task carries no output, so there is nothing for a successor to read early -- the fence has to hold before the zombie reports, not after"
+      - name: the successor did not consume a stale answer
+        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='report'"
+        isnt: "done"
+        because: "the real failure is not the duplicate work -- it is that a stale answer is published, the successor consumes it, and the live holder's real answer then overwrites the same key AFTER the read. One template resolves to two values over one run, both workers did the work, and nothing is logged"
+
+  - id: recov-06
+    category: recovery
+    title: A saga undoes what already worked, in reverse
+    asks: "We reserved the slot and booked the reviewer, then the deadline moved."
+    mechanism: "YAML.md § Saga -- compensate_with + saga_group; workflow.begin_compensation"
+    catches: [silent-success, compensation-in-forward-graph]
+    role: app_owner
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_recov06
+      steps:
+        - id: reserve_slot
+          p8ql: 'LOOKUP "sig-114"'
+          compensate_with: release_slot
+          saga_group: review
+        - id: book_reviewer
+          needs: [reserve_slot]
+          p8ql: 'LOOKUP "ALTM"'
+          compensate_with: unbook_reviewer
+          saga_group: review
+        - id: confirm_deadline
+          needs: [book_reviewer]
+          queue: http
+          rest: {url: 'http://p8-faultsrv:8099/status/409', method: GET}
+        - id: release_slot
+          sql: {function: calder_echo, args: ['slot released']}
+        - id: unbook_reviewer
+          sql: {function: calder_echo, args: ['reviewer unbooked']}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_recov06','{}'::jsonb) as run_id;
+      select workflow.fail_task(
+             (select id from workflow.tasks
+               where run_id=(select run_id from ctx) and step_key='confirm_deadline'),
+             '{"error":"409 deadline moved"}'::jsonb, true);
+      -- `begin_compensation` returns void, so the count comes from the tasks it
+      -- created rather than from a return value.
+      select workflow.begin_compensation((select run_id from ctx),'review');
+    check:
+      - name: the compensations did NOT run on the way forward
+        sql: |
+          select count(*) from workflow.tasks
+          where run_id=(select run_id from ctx)
+            and step_key in ('release_slot','unbook_reviewer')
+            and compensates_task_id is null
+        is: "0"
+        because: "a compensation declared like any other step, with no dependencies, becomes a ROOT and runs immediately -- refunding the customer during a successful booking"
+      - name: two compensations were created, one per completed saga step
+        sql: |
+          select count(*) from workflow.tasks
+          where run_id=(select run_id from ctx) and compensates_task_id is not null
+        is: "2"
+        because: "one per completed saga step; a compensation created for a step that never ran undoes something that never happened"
+      - name: and the run says compensated, not completed
+        sql: "select status from workflow.runs where id=(select run_id from ctx)"
+        isnt: "completed"
+        because: "a saga that rolled back and reported success is the exact distinction this status exists for, and it was once reported complete before any compensation had run"
+
+  - id: recov-07
+    category: recovery
+    title: A compensation that depends on a forward step is flagged
+    asks: "My undo needs the search result from step 2."
+    mechanism: "workflow.lint_spec -- a warning, because it genuinely works and does something other than what the author pictures"
+    catches: [compensation-in-forward-graph]
+    role: app_owner
+    check:
+      - name: the lint says so
+        sql: |
+          select (workflow.lint_spec($s${"steps":[
+            {"key":"charge","kind":"sql","queue":"none",
+             "input":{"function":"calder_echo","args":["charged"]},
+             "compensation_task_key":"refund","saga_group":"billing"},
+            {"key":"prep","kind":"sql","queue":"none",
+             "input":{"function":"calder_echo","args":["prep"]}},
+            {"key":"refund","kind":"sql","queue":"none",
+             "input":{"function":"calder_echo","args":["refunded"]},
+             "depends_on":["prep"]}
+          ]}$s$::jsonb)::text) ~ 'compensat'
+        is: "true"
+        because: "a compensation task is created only if the rollback happens, but its DEPENDENCIES are ordinary steps that run on every run -- including every run that succeeds. The cost lands on the runs that never fail, which is why it is a warning and not a refusal"
+
+  - id: recov-08
+    category: recovery
+    title: An idempotency key does not resurrect a cancelled run
+    asks: "We cancelled it. The scheduler fired again with the same key."
+    mechanism: "workflow.start_workflow -- external_id matches only states that mean the work happened"
+    catches: [idempotency-over-dead-run]
+    role: app_owner
+    # A `sub` claim, so the run has an owner and cancel_run's authorization
+    # check has somebody to recognise. An unowned run cannot be cancelled by
+    # bare ownership -- which is hitl-12's subject, and is why this is here.
+    claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":[]}'
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_recov08
+      steps:
+        - id: poll
+          queue: http
+          rest: {url: 'http://p8-faultsrv:8099/empty', method: GET}
+      $y$);
+      create temp table a as
+        select workflow.start_workflow('ev_recov08','{}'::jsonb,'nightly-2026-09-02') as run_id;
+      select workflow.cancel_run((select run_id from a));
+      -- Started here rather than inside a check, because a function that
+      -- INSERTs and a SELECT that reads the row back are two statements: within
+      -- one, the outer select uses a snapshot taken before the insert and the
+      -- join finds nothing.
+      create temp table retry as
+        select workflow.start_workflow('ev_recov08','{}'::jsonb,
+                                       'nightly-2026-09-02-retry') as run_id;
+    check:
+      - name: the dead run is not returned as 'already started'
+        sql: "select workflow.start_workflow('ev_recov08','{}'::jsonb,'nightly-2026-09-02')"
+        raises: "did not complete|cancelled"
+        because: "matching on the key alone returns a cancelled run as 'already started', and the caller records a fire for work that never happened"
+      - name: and the refusal says what to do instead
+        sql: "select workflow.start_workflow('ev_recov08','{}'::jsonb,'nightly-2026-09-02')"
+        raises: "new external_id"
+        because: >-
+          The interesting half. Silently starting a SECOND run under the same
+          key would be the other wrong answer -- external_id is unique, so the
+          honest options are 'return the dead run' (a lie) or 'refuse' (this),
+          and a refusal is only useful if the caller can act on it. A scheduler
+          that reads 'already started' and moves on skips a night; one that
+          reads this retries under a new key.
+      - name: and a different key does start a run
+        sql: "select status from workflow.runs where id=(select run_id from retry)"
+        is: "running"
+        because: "a refusal with no way forward would make the idempotency key a one-shot lock on the schedule"
+
+  - id: recov-09
+    category: recovery
+    title: Re-completing a finished task does not release its successor twice
+    asks: "The worker retried the completion after a network blip."
+    mechanism: "schema.sql §5 -- pending_deps decremented on the transition INTO terminal, never re-incremented"
+    catches: [silent-success, two-workers-one-task]
+    role: app_owner
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_recov09
+      steps:
+        - id: poll
+          queue: http
+          rest: {url: 'http://p8-faultsrv:8099/empty', method: GET}
+        - id: land
+          needs: [poll]
+          sql: {function: calder_echo, args: ['landed']}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_recov09','{}'::jsonb) as run_id;
+      create temp table t as select * from workflow.claim_task('http','w1');
+      select workflow.complete_task((select id from t),'{"status":200,"result":1}'::jsonb,'w1');
+    check:
+      - name: the second completion does not overwrite the answer
+        sql: |
+          select (select output->>'result' from workflow.tasks where id=(select id from t))
+          from (select workflow.complete_task((select id from t),
+                       '{"status":200,"result":2}'::jsonb,'w1')) z
+        is: "1"
+        because: "any second decrement of pending_deps releases a dependent early, and re-completing a task is the easiest way to reach it"
+      - name: and it does not vanish -- the refusal is recorded
+        sql: |
+          select detail->>'why' from workflow.task_events
+          where task_id=(select id from t) and detail->>'event'='lease_violation'
+        matches: "already done"
+        because: >-
+          It is a no-op rather than an exception, deliberately -- but a
+          completion that vanishes SILENTLY is indistinguishable from a worker
+          that never ran, so the refusal is a row. That is the whole of
+          failure-modes.md §5's instruction on this: record every refusal.
+      - name: and the successor ran exactly once
+        sql: "select count(*) from workflow.tasks where run_id=(select run_id from ctx) and step_key='land'"
+        is: "1"
+        because: "a successor that runs twice over one input is a double write nobody reconciles"
+
+  - id: recov-10
+    category: recovery
+    title: A stalled run is visible as stalled, not as running
+    asks: "Nothing has moved for an hour. Where do I look?"
+    mechanism: "workflow.v_stuck_tasks -- a staleness view paired with a progress view"
+    catches: [inert-feature, silent-success]
+    role: app_owner
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_recov10
+      steps:
+        - id: poll
+          queue: http
+          rest: {url: 'http://p8-faultsrv:8099/slow/45000', method: GET}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_recov10','{}'::jsonb) as run_id;
+      create temp table t as select * from workflow.claim_task('http','w1');
+      update workflow.tasks set heartbeat_at = now() - interval '2 hours',
+             claimed_at = now() - interval '2 hours'
+       where id = (select id from t);
+    check:
+      - name: the staleness view names it
+        sql: "select count(*) from workflow.v_stuck_tasks where id=(select id from t)"
+        gte: "1"
+        because: "a view whose entire job is to notice stuck tasks, and which the condition's own mechanics keep clear, is worse than no view -- because someone is watching it"
+
+  - id: recov-11
+    category: recovery
+    title: A queue nobody polls is a wait, not a failure -- and it is visible
+    asks: "I routed a step to a pool that does not exist and nothing happened."
+    mechanism: "claim_task is per queue -- a step routed to a queue nobody polls WAITS"
+    catches: [inert-feature, silent-success]
+    role: app_owner
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_recov11
+      steps:
+        - id: q
+          queue: a-queue-nobody-polls
+          rest: {url: 'http://p8-faultsrv:8099/empty', method: GET}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_recov11','{}'::jsonb) as run_id;
+    check:
+      - name: the task is ready and unclaimed
+        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='q'"
+        is: "ready"
+        because: "this is the failure mode with no symptom -- a step routed to a queue nobody polls does not fail, it waits, and the run stays green-ish forever"
+      - name: and the run is not reported complete
+        sql: "select status from workflow.runs where id=(select run_id from ctx)"
+        is: "running"
+        because: "a run whose only task is parked must not be `completed`; if it were, the pipeline would report success having done nothing"
+
+  - id: recov-12
+    category: recovery
+    title: A decision replayed with different output is caught
+    asks: "We re-ran the branch and it decided something else."
+    mechanism: "schema.sql -- decision tasks are contractually pure; the output hash is checked on re-execution"
+    catches: [silent-success, wrong-grouping]
+    role: app_owner
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_recov12
+      steps:
+        - id: branch
+          queue: http
+          rest: {url: 'http://p8-faultsrv:8099/empty', method: GET}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_recov12','{}'::jsonb) as run_id;
+      update workflow.tasks set kind='decision'
+       where run_id=(select run_id from ctx) and step_key='branch';
+      create temp table t as select id from workflow.tasks
+        where run_id=(select run_id from ctx) and step_key='branch';
+      select workflow.complete_decision_task((select id from t),
+             '{"result":"A"}'::jsonb, '[]'::jsonb);
+      update workflow.tasks set status='ready', completed_at=null
+       where id=(select id from t);
+    check:
+      - name: replaying with a different answer is refused
+        sql: |
+          select workflow.complete_decision_task((select id from t),
+                 '{"result":"B"}'::jsonb, '[]'::jsonb)
+        raises: "hash|pure|differs|decision"
+        because: "a decision task is pure with respect to a recorded snapshot; a purity violation that is not caught is a replay that branches differently from the run it is replaying, silently"
+
+  - id: recov-13
+    category: recovery
+    title: An empty queue hands a worker a row of nulls, not no rows
+    asks: "How does a worker know the queue is empty?"
+    mechanism: "workflow.claim_task -- `returns workflow.tasks`, not `returns setof`"
+    catches: [undocumented-contract, silent-success]
+    status: open-defect
+    role: app_owner
+    check:
+      - name: nothing is actually claimed
+        sql: "select count(*) from workflow.claim_task('a-queue-with-nothing-in-it','w1') t where t.id is not null"
+        is: "0"
+        because: "the mechanism is right -- an empty queue hands out no work. The finding below is entirely about how it SAYS so"
+      - name: and the caller is told so by getting no row
+        sql: "select count(*) from workflow.claim_task('a-queue-with-nothing-in-it','w1')"
+        is: "0"
+        because: >-
+          THE FINDING. `claim_task` is declared `returns workflow.tasks`, so an
+          empty queue produces exactly one row with every column NULL and
+          `found` true. A worker written the obvious way -- `row =
+          claim_task(q, id); if row: work(row)` -- treats an empty queue as a
+          task arriving, on the single most-called function in the worker
+          contract, and `spec.md` §4 documents the signature with no note that
+          emptiness is spelled this way. `setof workflow.tasks` returning zero
+          rows says it in the type. It is the same shape USAGE.md records for
+          `lookup_many`'s LEFT JOIN and resolves the same way: "rows is
+          non-empty, and a miss is indistinguishable from a hit to anything
+          that does not inspect the fields."
+
+  - id: recov-14
+    category: recovery
+    title: A cancelled run does not accept work that was already in flight
+    asks: "We cancelled while a worker was mid-call."
+    mechanism: "complete_task -- every completion path checks the run's state"
+    catches: [work-under-cancelled-run]
+    role: app_owner
+    claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":[]}'
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_recov14
+      steps:
+        - id: poll
+          queue: http
+          rest: {url: 'http://p8-faultsrv:8099/slow/45000', method: GET}
+        - id: land
+          needs: [poll]
+          sql: {function: calder_echo, args: ['landed']}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_recov14','{}'::jsonb) as run_id;
+      create temp table t as select * from workflow.claim_task('http','w1');
+      select workflow.cancel_run((select run_id from ctx));
+    check:
+      - name: the in-flight task is told to stop
+        sql: "select workflow.heartbeat_task((select id from t),'w1')::text"
+        is: "false"
+        because: "the heartbeat is the only channel the engine has to a worker mid-call, and cancel_requested is one of the three things it says STOP for"
+      - name: and the successor stays cancelled
+        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='land'"
+        is: "cancelled"
+        because: "a worker finishing in-flight work resurrects a cancelled graph one step at a time unless every completion path checks"
+      - name: and the run stays cancelled
+        sql: "select status from workflow.runs where id=(select run_id from ctx)"
+        is: "cancelled"
+        because: "the run's status is what every dashboard reads; a graph half-resurrected under a cancelled run is invisible there"

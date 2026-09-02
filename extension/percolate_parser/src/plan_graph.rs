@@ -394,6 +394,62 @@ fn step_detail(kind: &str, input: &Value) -> Value {
 }
 
 // ---------------------------------------------------------------------------
+// What a step DOES to the world, as a closed set.
+//
+// A reader wants to know three things before running a plan they did not write:
+// what costs money, what changes data, and what merely asks a question. None of
+// that was answerable from the document -- `sql` covered a query and a delete,
+// `http_call` covered a free GET and a paid completion.
+//
+// `mutates` for a registered function is not a guess: it comes off
+// pg_proc.provolatile, and a STABLE or IMMUTABLE function cannot write because
+// Postgres refuses to let it. That is what makes `unconsumed_read` below safe
+// to report -- without it, every step that lands rows through a function would
+// look like a read nobody consumes.
+// ---------------------------------------------------------------------------
+
+fn effects_of(kind: &str, detail: &Value, catalog: &Value) -> Vec<&'static str> {
+    match kind {
+        "sql" => {
+            if detail.get("statement").is_some() {
+                if detail.get("write").and_then(Value::as_bool).unwrap_or(false) {
+                    vec!["reads", "writes"]
+                } else {
+                    vec!["reads"]
+                }
+            } else {
+                let mutates = detail
+                    .get("function").and_then(Value::as_str)
+                    .and_then(|f| section(catalog, "functions").and_then(|m| m.get(f)))
+                    .and_then(|f| f.get("mutates")).and_then(Value::as_bool);
+                match mutates {
+                    Some(true) => vec!["reads", "writes"],
+                    Some(false) => vec!["reads"],
+                    // Registered against a function this deployment does not
+                    // have. `unknown` rather than an assumption in either
+                    // direction -- guessing "reads" here would let the orphan
+                    // check fire on a step that lands data.
+                    None => vec!["unknown"],
+                }
+            }
+        }
+        "http_call" => {
+            if detail.get("agent").is_some() || detail.get("embeds").is_some() {
+                vec!["network", "model"]
+            } else {
+                vec!["network"]
+            }
+        }
+        "matrix" => vec!["reads", "fans_out"],
+        "signal" | "timer" => vec!["waits"],
+        "sub_workflow" => vec!["invokes"],
+        // `work` is code this collection did not write. Anything it does is
+        // outside what a plan can see, and saying "reads" would be a claim.
+        _ => vec!["unknown"],
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The builder.
 // ---------------------------------------------------------------------------
 
@@ -450,6 +506,7 @@ pub fn plan_graph(spec: &Value, catalog: &Value) -> Value {
                 // a join rather than a second graph. See plan-graph.md §6.
                 "step_key": key,
                 "saga_group": s.get("saga_group").cloned().unwrap_or(Value::Null),
+                "effects": json!(effects_of(&kind, &step_detail(&kind, input), catalog)),
             }),
             step_detail(&kind, input),
         );
@@ -551,6 +608,75 @@ pub fn plan_graph(spec: &Value, catalog: &Value) -> Value {
     g.step = None;
     rank_steps(&mut g, &steps);
 
+    // A READ NOTHING CONSUMES.
+    //
+    // `resolve` in a real pipeline ran a LOOKUP, depended on the landing step,
+    // and nothing depended on IT -- so its result went into runs.context and no
+    // step ever read it. That is either the workflow's output for whoever polls
+    // the run, or a wiring mistake, and the two are indistinguishable from
+    // here: this says which step it is and lets the reader decide.
+    //
+    // Only for steps whose effects are reads alone. A step that writes, calls a
+    // model, waits on a person or runs somebody's code has a point beyond its
+    // return value, and reporting those would make the check noise -- the last
+    // step of most pipelines is exactly one of them.
+    //
+    // AND ONLY WHEN SOMETHING ELSE FINISHES THE WORKFLOW. A pipeline whose only
+    // leaf is a query is a pipeline whose answer IS that query, and warning on
+    // it would fire on the most ordinary thing anyone writes -- the version
+    // that did exactly that lasted one test run. The signal is a read left
+    // hanging BESIDE a leaf that does something: then the read is either the
+    // caller's second output or a step somebody meant to wire in, and it is
+    // worth a sentence.
+    let leaves: Vec<String> = steps.iter().filter_map(|s| str_of(s, "key"))
+        .filter(|k| !steps.iter().any(|o| o.get("depends_on").and_then(Value::as_array)
+            .map(|d| d.iter().any(|x| x.as_str() == Some(k.as_str()))).unwrap_or(false)))
+        .collect();
+    let effects_of_key = |k: &str| -> Vec<String> {
+        g.nodes.get(&format!("step:{k}")).and_then(|n| n.get("effects"))
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+            .unwrap_or_default()
+    };
+    let has_acting_leaf = leaves.iter().any(|k| effects_of_key(k) != vec!["reads".to_string()]);
+    if !has_acting_leaf {
+        return finish(g, &steps, wf_name, wf_version);
+    }
+
+    for s in &steps {
+        let key = match str_of(s, "key") { Some(k) => k, None => continue };
+        let id = format!("step:{key}");
+        let effects: Vec<&str> = g.nodes.get(&id)
+            .and_then(|n| n.get("effects"))
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        if effects != ["reads"] {
+            continue;
+        }
+        let consumed = steps.iter().any(|other| {
+            other.get("depends_on").and_then(Value::as_array)
+                .map(|d| d.iter().any(|x| x.as_str() == Some(key.as_str())))
+                .unwrap_or(false)
+        });
+        if !consumed {
+            g.step = Some(key.clone());
+            g.defect(
+                "warning", "unconsumed_read", &id,
+                &format!("nothing in this workflow depends on '{key}', and it only reads"),
+                "its result reaches runs.context and nowhere else, so this is the run's \
+                 output for whoever polls it -- or a step somebody meant to wire up",
+            );
+            g.step = None;
+        }
+    }
+
+    finish(g, &steps, wf_name, wf_version)
+}
+
+/// The one exit, because there are two ways out of the builder now and a
+/// second copy of this is how the two stop agreeing.
+fn finish(g: Graph, steps: &[Value], wf_name: String, wf_version: i64) -> Value {
     let (errors, warnings) = g.defects.iter().fold((0, 0), |(e, w), d| {
         match d.get("severity").and_then(Value::as_str) {
             Some("error") => (e + 1, w),
@@ -1768,6 +1894,75 @@ mod tests {
         assert_eq!(g["steps"][0]["kind"], json!("write"),
                    "a mutation must not read as a query");
         assert_eq!(g["steps"][0]["write"], json!(true));
+    }
+
+    #[test]
+    fn a_read_left_hanging_beside_a_step_that_acts_is_reported() {
+        let mut cat = catalog();
+        cat["relations"] = json!(["demo_sec.facts"]);
+        let g = plan_graph(
+            &spec_of(json!([
+                {"key": "land", "kind": "sql", "queue": "none",
+                 "input": {"function": "record", "args": []}},
+                // reads, and nothing depends on it
+                {"key": "resolve", "kind": "sql", "queue": "none", "depends_on": ["land"],
+                 "input": {"statement": "select 1 from demo_sec.facts"}},
+                // the leaf that finishes the workflow
+                {"key": "classify", "kind": "http_call", "queue": "http",
+                 "depends_on": ["land"],
+                 "input": {"url": "{{env.P8_AGENT_URL}}/v1/chat/completions",
+                           "body": {"model": "triage_bot"}}}
+            ])),
+            &cat,
+        );
+        let d: Vec<&Value> = g["defects"].as_array().unwrap().iter()
+            .filter(|d| d["code"] == "unconsumed_read").collect();
+        assert_eq!(d.len(), 1, "exactly the hanging read");
+        assert_eq!(d[0]["step"], json!("resolve"));
+    }
+
+    #[test]
+    fn a_workflow_whose_only_leaf_is_a_query_is_not_nagged() {
+        // The answer IS the query. The version of this check that fired here
+        // lasted one test run, and would have fired on the most ordinary
+        // workflow anyone writes.
+        let mut cat = catalog();
+        cat["relations"] = json!(["demo_sec.facts"]);
+        let g = plan_graph(
+            &spec_of(json!([{"key": "q", "kind": "sql", "queue": "none",
+                             "input": {"statement": "select 1 from demo_sec.facts"}}])),
+            &cat,
+        );
+        assert!(!codes(&g).contains(&"unconsumed_read".to_string()));
+    }
+
+    #[test]
+    fn a_step_says_what_it_does_to_the_world() {
+        let mut cat = catalog();
+        cat["functions"] = json!({
+            "land_rows": {"fn": "demo.land", "mutates": true},
+            "count_rows": {"fn": "demo.count", "mutates": false}});
+        let g = plan_graph(
+            &spec_of(json!([
+                {"key": "w", "kind": "sql", "queue": "none",
+                 "input": {"statement": "delete from t", "write": true}},
+                {"key": "land", "kind": "sql", "queue": "none", "depends_on": ["w"],
+                 "input": {"function": "land_rows", "args": []}},
+                {"key": "count", "kind": "sql", "queue": "none", "depends_on": ["w"],
+                 "input": {"function": "count_rows", "args": []}},
+                {"key": "ask", "kind": "http_call", "queue": "http", "depends_on": ["w"],
+                 "input": {"url": "{{env.P8_AGENT_URL}}/v1/chat/completions",
+                           "body": {"model": "triage_bot"}}}
+            ])),
+            &cat,
+        );
+        let fx = |k: &str| find(&g, &format!("step:{k}")).unwrap()["effects"].clone();
+        assert_eq!(fx("w"), json!(["reads", "writes"]));
+        // provolatile, not a promise: a STABLE function cannot write, and
+        // Postgres is what enforces that.
+        assert_eq!(fx("land"), json!(["reads", "writes"]));
+        assert_eq!(fx("count"), json!(["reads"]));
+        assert_eq!(fx("ask"), json!(["network", "model"]));
     }
 
     #[test]

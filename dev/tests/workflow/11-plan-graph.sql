@@ -341,6 +341,122 @@ begin
     end if;
 end $$;
 
+-- ---------------------------------------------------------------------
+-- 9. PROBING: the cheap half of every step, actually executed.
+--
+-- The plan READS. This RUNS the parts that cost nothing and prove something,
+-- which is the question a reader has before starting a pipeline they did not
+-- write. Three things it must get right, and one it must refuse to answer:
+--
+--   the RELATIONS come from the planner, not from the graph's regex -- so a
+--   statement whose table is a typo fails here with the database's own message;
+--   the SHAPE comes from a temp view, which validates and plans a statement
+--   without executing it, so a reader knows the column names before the first
+--   run rather than after it;
+--   the ARITY compares the step's argument list against the registered
+--   signature, because the dispatch failure for that reads `function f(text)
+--   does not exist`, which sounds like a missing function;
+--   and anything needing the WORKER'S ENVIRONMENT is `skipped`, never `ok`.
+-- ---------------------------------------------------------------------
+do $$
+declare
+    v_ok  int;
+    v_row record;
+begin
+    if to_regprocedure('workflow.plan_probe(text,integer)') is null then
+        raise notice 'workflow/11: SKIPPED the probe -- not installed';
+        return;
+    end if;
+
+    create table t_pg_probe (cik text, fy int, val numeric);
+
+    insert into workflow.definitions (name, spec) values
+    ('t_pg_probes', '{"steps":[
+        {"key":"good", "kind":"sql", "queue":"none",
+         "input":{"statement":"select fy, val from t_pg_probe where cik = ''{{run.cik}}''"}},
+        {"key":"typo", "kind":"sql", "queue":"none", "depends_on":["good"],
+         "input":{"statement":"select * from t_pg_probez"}},
+        {"key":"wrongargs", "kind":"sql", "queue":"none", "depends_on":["good"],
+         "input":{"function":"p8ql", "args":[]}}
+     ]}');
+
+    -- A statement with a {{template}} in it is not SQL. Substituted with null
+    -- it plans identically, which is enough for every check here.
+    select count(*) into v_ok from workflow.plan_probe('t_pg_probes')
+     where step = 'good' and verdict = 'ok';
+    if v_ok < 3 then
+        raise exception
+            'a sound statement should probe ok for parses, relations and returns; got %',
+            (select jsonb_agg(jsonb_build_object('p', probe, 'v', verdict))
+               from workflow.plan_probe('t_pg_probes') where step = 'good');
+    end if;
+
+    -- THE SHAPE, WITHOUT RUNNING IT. This is the gap a plan cannot close on
+    -- its own: an author writing {{steps.good.result...}} has no other way to
+    -- learn the column names before the first run.
+    select * into v_row from workflow.plan_probe('t_pg_probes')
+     where step = 'good' and probe = 'returns';
+    if v_row.detail not like '%"val"%' or v_row.detail not like '%"fy"%' then
+        raise exception 'the probe did not describe the result columns: %', v_row.detail;
+    end if;
+
+    -- The relations come from the PLANNER.
+    select * into v_row from workflow.plan_probe('t_pg_probes')
+     where step = 'good' and probe = 'relations';
+    if v_row.detail not like '%t_pg_probe%' then
+        raise exception 'the probe did not name the relation the planner reads: %', v_row.detail;
+    end if;
+
+    if not exists (select 1 from workflow.plan_probe('t_pg_probes')
+                    where step = 'typo' and probe = 'parses' and verdict = 'fail') then
+        raise exception 'a statement naming a table that does not exist probed clean';
+    end if;
+    -- and says it once, not twice
+    if exists (select 1 from workflow.plan_probe('t_pg_probes')
+                where step = 'typo' and probe = 'returns') then
+        raise exception 'the shape probe ran on a statement that does not parse';
+    end if;
+
+    if not exists (select 1 from workflow.plan_probe('t_pg_probes')
+                    where step = 'wrongargs' and probe = 'arity' and verdict = 'fail') then
+        raise exception
+            'a step passing no arguments to a one-argument function probed clean -- at '
+            'dispatch that reads as a missing function';
+    end if;
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 10. WHAT THE LAST RUN RETURNED, shape by shape.
+--
+-- The other half of the same gap. A step's declared output is `jsonb`; an
+-- author writing {{steps.x.result.cik}} has no way to know `cik` is a key of
+-- it. One execution answers that, and the join was already there.
+-- ---------------------------------------------------------------------
+do $$
+declare v_ret jsonb;
+begin
+    if to_regprocedure('workflow.plan_status(text,uuid)') is null then
+        raise notice 'workflow/11: SKIPPED plan_status -- not installed';
+        return;
+    end if;
+
+    insert into workflow.definitions (name, spec) values
+    ('t_pg_ran', '{"steps":[
+        {"key":"rows", "kind":"sql", "queue":"none",
+         "input":{"statement":"select 1 as n, ''x''::text as label"}}
+     ]}');
+    perform workflow.start_workflow('t_pg_ran', '{}'::jsonb);
+
+    select returned into v_ret from workflow.plan_status('t_pg_ran') where step = 'rows';
+    if v_ret->>'rows' is distinct from '1' then
+        raise exception 'plan_status did not report the row count: %', v_ret;
+    end if;
+    if v_ret#>>'{of,label}' <> 'string' or v_ret#>>'{of,n}' <> 'number' then
+        raise exception
+            'plan_status did not report the shape of what the step returned: %', v_ret;
+    end if;
+end $$;
+
 do $$
 begin
     raise notice 'workflow/11: plan_catalog carries every section a graph looks into, from the registries';
@@ -350,6 +466,9 @@ begin
     raise notice 'workflow/11: a rate_key with no rate_limits row is an error -- the task would never be claimed';
     raise notice 'workflow/11: an agent nobody registered is a node AND a defect; an absent subsystem is neither';
     raise notice 'workflow/11: the document reads in rank order, with the corpus and the agent expanded where they are used';
+    raise notice 'workflow/11: the probe parses a statement, names its relations from the planner, and describes its columns without running it';
+    raise notice 'workflow/11: a typo fails once, and an argument list that does not match the signature fails before dispatch';
+    raise notice 'workflow/11: plan_status reports the shape of what each step actually returned';
 end $$;
 
 rollback;
