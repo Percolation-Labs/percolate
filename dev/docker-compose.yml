@@ -60,6 +60,11 @@ services:
   # the services share percolate_core.core, so three images would be three
   # builds of the same base and three tags to keep in step.
   #
+  # These `command:`s are ARGS to the image ENTRYPOINT (compose appends; only
+  # Kubernetes replaces), and they are spelled for the pinned 0.1.3 image --
+  # `content serve`, not the `p8 serve content` every spec now uses. They flip
+  # with the image pin, together with the pool rows in k8s/. PACKAGING.md.
+  #
   # None of them holds a table grant. Every database interaction is a
   # SECURITY DEFINER function call, and each sets the caller's claims per
   # transaction, so RLS sees the user rather than the service.
