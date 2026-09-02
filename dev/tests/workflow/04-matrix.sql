@@ -572,7 +572,8 @@ begin
         '{"url":"https://x/CIK{{item.cik}}/{{item.concept}}.json",
           "n":"{{item.n}}", "obj":"{{item.nested}}", "lit":"untouched",
           "keep":"{{run.tier}}", "arr":["{{item.cik}}"]}'::jsonb,
-        '{"cik":"0000320193","concept":"Revenues","n":42,"nested":{"a":1}}'::jsonb, 'fan');
+        '{"cik":"0000320193","concept":"Revenues","n":42,"nested":{"a":1}}'::jsonb,
+        '[{"cik":"0000320193"}]'::jsonb, 'fan');
 
     -- Interpolated into a larger string.
     if v->>'url' <> 'https://x/CIK0000320193/Revenues.json' then
@@ -602,7 +603,8 @@ begin
     -- in it and a 404 nobody can explain.
     begin
         perform workflow.substitute_item('{"u":"{{item.typo}}"}'::jsonb,
-                                         '{"cik":"1"}'::jsonb, 'fan');
+                                         '{"cik":"1"}'::jsonb,
+                                         '[{"cik":"1"}]'::jsonb, 'fan');
         raise exception 'a template naming a missing column was accepted';
     exception when others then
         v_err := sqlerrm;

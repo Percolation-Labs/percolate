@@ -1763,6 +1763,11 @@ begin
         'step_key',    v_task.step_key,
         'kind',        v_task.kind,
         'item',        v_task.input->'item',
+        -- The batched peer (§20j). Costs the worker nothing to ignore -- the
+        -- rows are inside task_input either way -- and spares a handler that
+        -- does care from knowing which nested field they live in, which is
+        -- the same argument §20e makes for `item`.
+        'items',       v_task.input->'items',
         'matrix_parent_step', (select m.step_key from workflow.tasks m
                                where m.id = v_task.matrix_parent_id),
         'attempt',     v_task.attempts,
@@ -2848,9 +2853,17 @@ begin
         end if;
         v_val := p_item #> string_to_array(v_rest, '.');
     else
+        -- {{items}} is deliberately NOT resolvable here. It is bound at
+        -- expansion (§20j), inside the matrix template, so reaching this
+        -- branch means it was written on an ordinary step -- where there is no
+        -- batch and no honest answer.
         raise exception
             'unknown template namespace ''%'' in a sql step argument '
-            '-- expected steps, run or item', v_head;
+            '-- expected steps, run or item%', v_head,
+            case when v_head = 'items'
+                 then '. {{items}} is a matrix TEMPLATE namespace: it binds when the '
+                      'fan-out expands, so it means nothing on a step outside one.'
+                 else '' end;
     end if;
 
     if v_val is null then
@@ -3077,10 +3090,24 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- because it is the recorded snapshot §20 turns on, and because a `sql` child
 -- can then read it with its type intact.
 --
+-- §20j's `{{items}}` -- the whole batch, when the step declares one -- binds
+-- here too, and the argument above is why it was never a question the second
+-- time: a batched `rest` child POSTing its rows as a body would otherwise need
+-- the same worker to learn a namespace it does not have.
+--
 -- The payoff beyond correctness: a worker never learns that a task came from a
 -- fan-out. Expansion is the engine's business, and it now stays there.
 -- ------------------------------------------------------------
-create or replace function workflow.substitute_item(p_value jsonb, p_item jsonb, p_step text)
+--
+-- p_rows is the whole batch (§20j) and p_item the part of it a child may
+-- address as one row: the row itself when the step does not batch, and the
+-- columns constant across the batch when it does. Two parameters rather than
+-- one because {{item.col}} and {{items}} are different questions -- "the value
+-- this task is about" and "every row this task owns" -- and a function that
+-- guessed which was meant from the type it was handed would answer the wrong
+-- one silently on a batch of exactly one.
+create or replace function workflow.substitute_item(
+    p_value jsonb, p_item jsonb, p_rows jsonb, p_step text)
 returns jsonb as $$
 declare
     v_txt   text;
@@ -3099,17 +3126,41 @@ begin
         v_out := '{}'::jsonb;
         for v_key in select jsonb_object_keys(p_value) loop
             v_out := v_out || jsonb_build_object(
-                v_key, workflow.substitute_item(p_value->v_key, p_item, p_step));
+                v_key, workflow.substitute_item(p_value->v_key, p_item, p_rows, p_step));
         end loop;
         return v_out;
 
     when 'array' then
         return coalesce((
-            select jsonb_agg(workflow.substitute_item(e, p_item, p_step) order by ord)
+            select jsonb_agg(workflow.substitute_item(e, p_item, p_rows, p_step) order by ord)
             from jsonb_array_elements(p_value) with ordinality as x(e, ord)), '[]'::jsonb);
 
     when 'string' then
         v_txt := p_value #>> '{}';
+
+        -- {{items}} -- every row this child owns, as an array. Bound at
+        -- EXPANSION like {{item.*}} and for the same reason: a batched `rest`
+        -- child POSTing ten records as its body is the headline case for
+        -- batching over a network, and resolving this at dispatch instead
+        -- would put a fourth namespace into the contract of a shipped worker
+        -- image that knows three -- the exact mistake §20a-bis records.
+        --
+        -- An array of one when the step does not batch, so batch_size stays a
+        -- number an author can turn up or down without rewriting the step it
+        -- feeds.
+        if v_txt ~ '^\s*\{\{\s*items\s*\}\}\s*$' then
+            return p_rows;
+        end if;
+        -- Embedded in a larger string, it is refused rather than rendered.
+        -- {{item.cik}} interpolates because a column is a scalar; a batch is
+        -- an array, and splicing its JSON text into a URL produces a request
+        -- that is wrong in a way no status code reports.
+        if v_txt ~ '\{\{\s*items\s*\}\}' then
+            raise exception
+                'matrix step ''%'': {{items}} is embedded in ''%''. The batch is an '
+                'array -- it can be a whole value (a request body, a sql argument), '
+                'not part of a string.', p_step, v_txt;
+        end if;
 
         -- A WHOLE-STRING reference keeps its native type, so a numeric column
         -- arrives as a number and a nested object arrives as an object. Same
@@ -3163,6 +3214,8 @@ $$ language plpgsql immutable;
 --     "rows":  {"function": "<registered>", "args": [...]},   -- OR
 --     "items": [ {...}, {...} ],                              -- a literal set
 --     "max_fanout": 5000,
+--     "batch_size": 10,                    -- optional: rows per child
+--     "partition_by": ["tenant"],          -- optional: rows that stay together
 --     "template": {
 --        "queue":  "edgar-xbrl",
 --        "kind":   "http_call",
@@ -3174,6 +3227,24 @@ $$ language plpgsql immutable;
 -- Children are keyed `<matrix_key>[<i>]`, which is why validate_spec below
 -- refuses a declared step key containing '[' -- the two namespaces must not
 -- be able to collide.
+--
+-- BATCHING -- one child owns MANY rows (§20j). A matrix over 100 rows creating
+-- 100 tasks is right when a row is an HTTP call and wrong when a row is a
+-- database write: 100 claims, 100 heartbeats and 100 completions to do work
+-- that one statement could do in ten. `batch_size` caps the rows per child;
+-- `partition_by` names columns whose rows must stay in the same child. Either
+-- one on its own is enough to make the step batched; both together partition
+-- first, then chunk each partition at the cap.
+--
+-- A batched child carries `input.items` (its rows, in order) and `input.batch`
+-- ({index, size, key}) INSTEAD of `input.item` -- the shape says how many rows
+-- the task owns, so nothing downstream has to guess. `{{item.<col>}}` still
+-- resolves in a batched template, but only for a column that is CONSTANT
+-- across the batch, which is exactly what partition_by manufactures; naming
+-- one that varies fails the step before any child exists.
+--
+-- `max_fanout` still counts ROWS, not children. It exists to stop a cross join
+-- with a forgotten WHERE, and batching a runaway does not make it smaller.
 --
 -- Returns the number of children created. Zero is a legitimate answer, not an
 -- error: an empty row set means there was nothing to do, the matrix task
@@ -3197,6 +3268,15 @@ declare
     v_added     int;
     v_hash      text;
     v_prior     text;
+    v_bsize     int;
+    v_part      jsonb;
+    v_batched   boolean;
+    v_eff       int;
+    v_cap       int;
+    v_b         record;
+    v_common    jsonb;
+    v_input     jsonb;
+    v_ref       text[];
 begin
     select * into t from workflow.tasks where id = p_task_id;
     -- run_after is checked here and not in execute_sql_step's equivalent, and
@@ -3236,6 +3316,30 @@ begin
                 'rows, and the failure should be this task, not the database.', t.step_key;
         end if;
 
+        -- Batching (§20j). Shape checked here, before the row function runs,
+        -- so a typo costs no query.
+        v_bsize := nullif(v_spec->>'batch_size', '')::int;
+        v_part  := v_spec->'partition_by';
+        if v_bsize is not null and v_bsize < 1 then
+            raise exception
+                'matrix step ''%'' has batch_size %, which gives every child no rows. '
+                'Omit it for one row per child.', t.step_key, v_bsize;
+        end if;
+        if v_part is not null then
+            if jsonb_typeof(v_part) <> 'array' or jsonb_array_length(v_part) = 0
+               or exists (select 1 from jsonb_array_elements(v_part) e
+                          where jsonb_typeof(e) <> 'string') then
+                raise exception
+                    'matrix step ''%'' has partition_by %, where a non-empty array of '
+                    'column names was expected.', t.step_key, v_part;
+            end if;
+        end if;
+        v_batched := v_bsize is not null or v_part is not null;
+        -- No cap under a bare partition_by: "one child per tenant" is the whole
+        -- request, and a partition too big for one task is caught by the
+        -- payload check below with batch_size named as the remedy.
+        v_eff := coalesce(v_bsize, case when v_part is null then 1 else 2147483647 end);
+
         -- The row set. Exactly one source, checked rather than preferred, so
         -- a spec carrying both is a named error instead of a silent choice.
         if (v_spec ? 'rows') = (v_spec ? 'items') then
@@ -3258,11 +3362,33 @@ begin
                 '[{"col": ...}, ...]', t.step_key, coalesce(jsonb_typeof(v_rows), 'null');
         end if;
 
+        -- The ceiling is on the ROW SET, and stays there when the step batches.
+        -- Batching divides the number of TASKS; it does nothing about a cross
+        -- join that returned five million rows, and every one of those rows
+        -- still has to be carried in some task's input.
         if jsonb_array_length(v_rows) > v_max then
             raise exception
-                'matrix step ''%'' would expand to % tasks, over its declared max_fanout '
-                'of %. Narrow the query or raise the ceiling deliberately.',
+                'matrix step ''%'' produced % rows, over its declared max_fanout of %. '
+                'Narrow the query or raise the ceiling deliberately. max_fanout counts '
+                'rows, not children -- batching makes fewer tasks, not a smaller '
+                'runaway.',
                 t.step_key, jsonb_array_length(v_rows), v_max;
+        end if;
+
+        -- Named columns must exist, checked once over the whole set rather than
+        -- discovered per batch: a partition key that is null everywhere is a
+        -- typo, and it should fail before a single child exists.
+        if v_part is not null and jsonb_array_length(v_rows) > 0 then
+            for v_row in select * from jsonb_array_elements(v_part) loop
+                if not (v_rows->0) ? (v_row #>> '{}') then
+                    raise exception
+                        'matrix step ''%'': partition_by names ''%'', which is not a '
+                        'column of the row set. The row has: %',
+                        t.step_key, v_row #>> '{}',
+                        (select string_agg(k, ', ' order by k)
+                         from jsonb_object_keys(v_rows->0) k);
+                end if;
+            end loop;
         end if;
 
         -- The digest, over the ORDERED row set. This is what makes a matrix a
@@ -3293,11 +3419,114 @@ begin
             return (select count(*)::int from workflow.tasks where matrix_parent_id = p_task_id);
         end if;
 
-        -- 1. The children. Each carries its row verbatim as input->'item';
-        --    the template's own {{...}} references are left untouched and
-        --    resolve at dispatch, like every other step's.
-        for v_row in select * from jsonb_array_elements(v_rows)
+        -- 1. The children. One per BATCH -- and an unbatched matrix is the
+        --    degenerate batch of one, which is why there is one loop and not
+        --    two. A second loop for the batched case would be a second place
+        --    to fix the rewire, the collision check and the payload cap.
+        --
+        --    Each child carries its rows verbatim (`item` for a batch of one
+        --    by construction, `items` when the step declared batching); the
+        --    template's own {{...}} references are left untouched and resolve
+        --    at dispatch, like every other step's.
+        --
+        --    Partitions are emitted in order of FIRST APPEARANCE, and rows
+        --    keep their source order inside a batch, so the child keys are a
+        --    deterministic function of the row set -- the same property the
+        --    re-expansion hash depends on.
+        v_cap := coalesce(
+            nullif(current_setting('workflow.max_payload_bytes', true), '')::int, 65536);
+
+        for v_b in
+            with r as (
+                select e as item, ord
+                from jsonb_array_elements(v_rows) with ordinality x(e, ord)
+            ), k as (
+                select item, ord,
+                       case when v_part is null then 'null'::jsonb
+                            else (select coalesce(jsonb_object_agg(c, item->c), '{}'::jsonb)
+                                  from jsonb_array_elements_text(v_part) c) end as pk
+                from r
+            ), g as (
+                select item, ord, pk,
+                       min(ord) over (partition by pk) as first_ord,
+                       ((row_number() over (partition by pk order by ord) - 1) / v_eff)
+                           as chunk
+                from k
+            )
+            select jsonb_agg(item order by ord) as rows,
+                   case when v_part is null then null else pk end as key,
+                   first_ord, chunk
+            from g
+            group by pk, first_ord, chunk
+            order by first_ord, chunk
         loop
+            if v_batched then
+                -- The columns a batched child may template: present in every
+                -- row of the batch and holding one distinct value. Under
+                -- partition_by the partition columns are constant by
+                -- construction, which is what makes
+                -- `.../tenant/{{item.tenant}}` legal on a batch of fifty.
+                select coalesce(jsonb_object_agg(kk, vv), '{}'::jsonb) into v_common
+                from (
+                    select j.key as kk, (array_agg(j.value))[1] as vv
+                    from jsonb_array_elements(v_b.rows) e, lateral jsonb_each(e) j
+                    group by j.key
+                    having count(distinct j.value) = 1
+                       and count(*) = jsonb_array_length(v_b.rows)
+                ) c;
+
+                -- Checked here rather than left to substitute_item, because
+                -- the two failures need different remedies: "no such column"
+                -- is a typo, "varies within the batch" is a partition_by that
+                -- was not declared, and one message cannot say both.
+                for v_ref in select regexp_matches(
+                        v_tmpl::text, '\{\{\s*item\.([a-zA-Z0-9_.]+)\s*\}\}', 'g')
+                loop
+                    if v_common #> string_to_array(v_ref[1], '.') is null
+                       and (v_b.rows->0) #> string_to_array(v_ref[1], '.') is not null then
+                        raise exception
+                            'matrix step ''%'': the template names {{item.%}}, which VARIES '
+                            'across the rows of batch %. A batched child owns many rows, so '
+                            'only a column constant across the batch can be substituted into '
+                            'it -- add ''%'' to partition_by to make it one, or read the rows '
+                            'from input.items in the child instead.',
+                            t.step_key, v_ref[1], v_i, v_ref[1];
+                    end if;
+                end loop;
+
+                v_input := workflow.substitute_item(
+                               coalesce(v_tmpl->'input', '{}'::jsonb),
+                               v_common, v_b.rows, t.step_key)
+                           || jsonb_build_object(
+                                'items', v_b.rows,
+                                'batch', jsonb_build_object(
+                                    'index', v_i,
+                                    'size',  jsonb_array_length(v_b.rows),
+                                    'key',   v_b.key));
+            else
+                v_row := v_b.rows->0;
+                -- Substituted, then the row appended verbatim. The child's
+                -- input therefore says exactly what will be sent AND still
+                -- carries the snapshot §20 records.
+                v_input := workflow.substitute_item(
+                               coalesce(v_tmpl->'input', '{}'::jsonb),
+                               v_row, jsonb_build_array(v_row), t.step_key)
+                           || jsonb_build_object('item', v_row);
+            end if;
+
+            -- §7's cap would catch this on INSERT, and its message would send the
+            -- author to look for a big payload when what they have is too many
+            -- small ones. A batch is the one case where the remedy is a number
+            -- in the spec, so it is worth naming.
+            if pg_column_size(v_input) > v_cap then
+                raise exception
+                    'matrix step ''%'': batch % holds % rows and % bytes of task input, '
+                    'over the % byte cap. Lower batch_size (currently %), or raise '
+                    'workflow.max_payload_bytes deliberately.',
+                    t.step_key, v_i, jsonb_array_length(v_b.rows),
+                    pg_column_size(v_input), v_cap, v_eff;
+            end if;
+
             insert into workflow.tasks (
                 run_id, step_key, queue, kind, input, rate_key,
                 pending_deps, status, matrix_parent_id, parent_span_id,
@@ -3307,11 +3536,7 @@ begin
                 t.step_key || '[' || v_i || ']',
                 coalesce(v_tmpl->>'queue', t.queue),
                 coalesce(v_tmpl->>'kind', 'work'),
-                -- Substituted, then the row appended verbatim. The child's
-                -- input therefore says exactly what will be sent AND still
-                -- carries the snapshot §20 records.
-                workflow.substitute_item(coalesce(v_tmpl->'input', '{}'::jsonb), v_row, t.step_key)
-                    || jsonb_build_object('item', v_row),
+                v_input,
                 v_tmpl->>'rate_key',
                 0, 'ready', p_task_id, t.span_id,
                 v_tmpl->>'saga_group',
@@ -3380,10 +3605,16 @@ begin
         -- its siblings. The digest said how many children there were and
         -- nothing about how to find them; matrix_outputs() below needs the
         -- handle, and this is the only place a downstream step can get one.
+        --
+        -- `rows` is separate from `fanout` because batching made them different
+        -- numbers, and a fan-in that reports "100 processed" off a count of
+        -- children would be wrong by a factor of batch_size. They are equal on
+        -- an unbatched matrix, which is why one field was enough until now.
         perform workflow.complete_task(p_task_id, jsonb_build_object('result',
             jsonb_build_object(
                 'task_id',   p_task_id,
                 'fanout',    coalesce(array_length(v_children, 1), 0),
+                'rows',      jsonb_array_length(v_rows),
                 'rows_hash', v_hash,
                 'source',    coalesce(v_spec#>>'{rows,function}', 'items'))));
         update workflow.tasks set decision_output_hash = v_hash where id = p_task_id;
@@ -3470,8 +3701,15 @@ begin
             'than a task id from elsewhere.', p_task_id, v_run;
     end if;
 
+    -- `item` and `items` are both here and exactly one of them is ever
+    -- non-null: `item` on an ordinary child, `items` on a batched one (§20j).
+    -- Not collapsed into a single always-an-array field, which was the first
+    -- shape tried: it would have duplicated every row of an unbatched fan-out
+    -- inside a wrapper array, in the one function whose payload is already N
+    -- outputs wide, to spare an aggregate a coalesce it mostly does not need.
     return (select coalesce(jsonb_agg(jsonb_build_object(
                 'step_key', t.step_key, 'item', t.input->'item',
+                'items', t.input->'items',
                 'status', t.status, 'output', t.output)
             order by t.created_at, t.step_key), '[]'::jsonb)
             from workflow.tasks t where t.matrix_parent_id = p_task_id);
@@ -3535,10 +3773,19 @@ revoke execute on function workflow.assert_task_in_current_run(uuid) from public
 -- one cannot make: it is SECURITY DEFINER and granted to `authenticated`, so
 -- without that check a guessed task id reads another tenant's row set. Edit
 -- there; this body is dead wherever user-rbac is loaded.
+--
+-- It returns the ROW SET, not the children, which is why a batched fan-out
+-- (§20j) is flattened here rather than returned as an array of arrays: the
+-- snapshot this reads back is the thing the row function produced, and
+-- batching is a decision about who executes it, not about what it is. A
+-- caller wanting the batch boundaries wants matrix_outputs.
 create or replace function workflow.matrix_rows(p_task_id uuid)
 returns jsonb as $$
-    select coalesce(jsonb_agg(t.input->'item' order by t.created_at, t.step_key), '[]'::jsonb)
+    select coalesce(jsonb_agg(r order by t.created_at, t.step_key, r_ord), '[]'::jsonb)
     from workflow.tasks t
+    cross join lateral jsonb_array_elements(
+        case when t.input ? 'items' then t.input->'items'
+             else jsonb_build_array(t.input->'item') end) with ordinality x(r, r_ord)
     where t.matrix_parent_id = p_task_id;
 $$ language sql stable security definer set search_path = pg_catalog, public;
 
@@ -3631,6 +3878,26 @@ begin
                 'point: a cross join with a forgotten WHERE is the obvious way to hurt '
                 'yourself here, and it should fail the task rather than the database.',
                 v_step->>'key';
+        end if;
+
+        -- Batching (§20j), refused at registration for the same reason the
+        -- ceiling is: a spec can arrive as JSON without passing the compiler,
+        -- and `batch_size: 0` is a definition that can only ever fail at 3am.
+        if v_in ? 'batch_size'
+           and ((v_in->>'batch_size') is null or (v_in->>'batch_size')::int < 1) then
+            raise exception
+                'matrix step ''%'' has batch_size %, which gives every child no rows. '
+                'Omit it for one row per child.',
+                v_step->>'key', v_in->>'batch_size';
+        end if;
+        if v_in ? 'partition_by'
+           and (jsonb_typeof(v_in->'partition_by') <> 'array'
+                or jsonb_array_length(v_in->'partition_by') = 0
+                or exists (select 1 from jsonb_array_elements(v_in->'partition_by') e
+                           where jsonb_typeof(e) <> 'string')) then
+            raise exception
+                'matrix step ''%'' has partition_by %, where a non-empty array of column '
+                'names was expected.', v_step->>'key', v_in->'partition_by';
         end if;
 
         -- A child has no static successors to rewire, so a matrix inside a
@@ -3797,6 +4064,93 @@ begin
     end if;
     raise notice 'workflow-engine 20: matrix path self-check passed';
 end $$;
+
+-- ------------------------------------------------------------
+-- 20j. Batching -- a child owns a chunk of the row set, not a row of it.
+--
+-- The map half of map-reduce had exactly one granularity: one row, one task.
+-- That is right when a row is an HTTP call to somebody else's API, because the
+-- task IS the concurrency unit and the rate limit is per call. It is wrong the
+-- moment a row is cheap: a hundred rows that each take four milliseconds of
+-- work become a hundred claims, a hundred heartbeats, a hundred completions
+-- and a hundred cascade cycles -- the engine costing more than the job. Ten
+-- workers owning ten rows each is the shape people actually ask for, and until
+-- now the only way to express it was to make the row function return chunks,
+-- which moves a scheduling decision into a domain query and hides it from
+-- every reader of the YAML.
+--
+-- So it is declared on the step, in two spellings that answer two different
+-- questions:
+--
+--   batch_size: 10          how many rows may one worker own
+--   partition_by: [tenant]  which rows must NOT be split across workers
+--
+-- Either alone is enough. Together they partition first and then chunk each
+-- partition at the cap, which is the combination with an actual use: "group by
+-- tenant, but no single task swallows more than fifty".
+--
+-- FOUR THINGS THIS HAD TO GET RIGHT.
+--
+-- 1. The child's input shape SAYS how many rows it owns. A batched child
+--    carries `items` (an array) and `batch` ({index, size, key}); an unbatched
+--    one carries `item`, exactly as before. The tempting alternative -- always
+--    `items`, an array of one when unbatched -- is a smaller rule and a worse
+--    one: every existing handler, every fan-in function and every recorded
+--    task input in the collection reads `item`, and rewriting all of them to
+--    unwrap a one-element array buys uniformity at the cost of the thing that
+--    made the row visible in the first place. A shape that changes when the
+--    author asks for a different shape is the honest version.
+--
+-- 2. `{{item.<col>}}` still works on a batch -- for a column that is constant
+--    across it. This is not a leniency, it is the entire reason partition_by
+--    is a partition and not just a sort: `partition_by: [tenant]` guarantees
+--    `tenant` is one value in the child, so `.../t/{{item.tenant}}` means
+--    something. Naming a column that varies fails the step BEFORE any child
+--    exists, with the remedy in the message, rather than silently substituting
+--    the first row's value -- which would produce a task that processes fifty
+--    rows and addresses one of them, and would look correct in every test with
+--    a batch size of one.
+--
+-- 3. A batched child must be able to READ its batch, and that is a second
+--    template reference: `{{items}}`. Without it batching is unusable on
+--    exactly the step kind it is most worth having on -- a `sql` child whose
+--    args are `['{{item.chunk_id}}']` has no spelling for "all fifty of mine",
+--    and the whole point of the feature is to turn a hundred cheap writes into
+--    ten. It is bound at EXPANSION, beside `{{item.*}}` and for the same
+--    reason: a batched `rest` child POSTing its ten records as a body is the
+--    headline case for batching over a network, and binding at dispatch
+--    instead would put a fourth namespace into the contract of a shipped
+--    worker image that knows three. It is an array of one when the step does
+--    not batch, so `batch_size` stays a number an author can turn up or down
+--    without rewriting the step it feeds; and a `work` child that would rather
+--    read its rows off the task row finds them at `input.items`, which
+--    get_task_context hands over as a peer of `item`.
+--
+-- 4. `max_fanout` still counts ROWS. It would have been easy to let it count
+--    children, since children are what get inserted -- and then a forgotten
+--    WHERE with `batch_size: 1000` would slip a five-million-row cross join
+--    past a ceiling of 5000 and land it in five thousand task inputs. The
+--    ceiling guards the row set; batching decides who carries it.
+--
+-- WHAT BATCHING COSTS, stated because it is not free. `min_success` and
+-- `continue_on` (§21e) count CHILDREN, and a batched child is a batch: one
+-- failure now loses ten rows instead of one, and a 90% floor over ten batches
+-- tolerates a single failure rather than ten. That is a real coarsening of
+-- partial-failure tolerance and it is the trade the author is making when they
+-- set batch_size -- fewer, larger units of both work and blast radius.
+-- Retries are per task too, so a batch retried re-does every row in it, which
+-- makes an idempotent handler a precondition rather than a nicety.
+--
+-- The other cost is the payload cap. N rows in one task input is the one place
+-- in this engine where a spec value directly multiplies a stored payload, so
+-- expansion checks the built input against §7's cap itself instead of letting
+-- the INSERT trigger do it -- same failure, but the message names batch_size,
+-- which is the number the author has to change and the one the generic
+-- "reduce the payload" message cannot know about.
+-- ------------------------------------------------------------
+-- workflow.expand_matrix(uuid) is defined in section 20c.
+-- This section explains why it has the shape it does; the body is not repeated,
+-- because two copies of a function is how a fix lands in only one of them.
 
 -- ============================================================
 -- 21. What five real runs broke, and what was done about it.
@@ -4507,7 +4861,16 @@ begin
             ('timer',        E'name: c\nsteps:\n  - id: s\n    timer: 1'),
             ('sub_workflow', E'name: c\nsteps:\n  - id: s\n    workflow: other'),
 
-            ('continue_on',  E'name: c\nsteps:\n  - id: s\n    matrix:\n      items: []\n      max_fanout: 1\n      continue_on: failed\n      min_success: 0.5\n      template: {work: true}')
+            ('continue_on',  E'name: c\nsteps:\n  - id: s\n    matrix:\n      items: []\n      max_fanout: 1\n      continue_on: failed\n      min_success: 0.5\n      template: {work: true}'),
+
+            -- §20j. Probed for exactly the reason 22c exists: the SQL half of
+            -- batching can ship without the compiler half, and the error a
+            -- reader then gets is `unknown field batch_size` on a document
+            -- YAML.md documents in full. Compile-success IS evidence here,
+            -- unlike output_schema below, because WfMatrix carries
+            -- deny_unknown_fields -- a compiler that has not heard of
+            -- batch_size refuses the document rather than dropping the key.
+            ('batching',     E'name: c\nsteps:\n  - id: s\n    matrix:\n      items: []\n      max_fanout: 10\n      batch_size: 5\n      partition_by: [tenant]\n      template: {work: true}')
         ) as t(feature, yaml)
     loop
         execute 'select p8_compile_workflow($1)' into v_res using v_case.yaml;
@@ -5104,3 +5467,355 @@ naming an unregistered function, and an agent step naming an agent that does
 not exist. Errors are refused by define_yaml; warnings are raised and the
 definition stands, because a function or an agent may legitimately be
 registered after the workflow that names it.$c$;
+
+-- ============================================================================
+-- Operating at scale: retention, a plan gate, and the failures that are silent.
+--
+-- Everything in this section exists because dev/scale/ found it missing while
+-- measuring the engine, and every one of them was a shell script or an ad-hoc
+-- query first. A scaling property you can only check by remembering to write
+-- the query is a property nobody checks.
+-- ============================================================================
+
+-- ------------------------------------------------------------
+-- 1. Retention. The task table only ever grew.
+--
+-- Nothing in this engine deleted a task, so `workflow.tasks` grew without
+-- bound -- and scale.md found that the autoscaler's own probe changes plan on
+-- the ratio of live rows to total rows, so an unbounded table degrades the
+-- thing that decides how many workers you get.
+--
+-- BATCHED, and that is the whole reason this is a function rather than advice.
+-- Deleting a million task rows in one statement takes tens of minutes: every
+-- row costs an index update per index plus a foreign-key probe into
+-- task_dependencies, and it accumulates in one transaction's WAL. Measured on
+-- the harness: a single-statement delete of 1M rows was still running after 22
+-- minutes. Each batch here commits on its own.
+-- ------------------------------------------------------------
+
+-- KEYED ON completed_at, FALLING BACK TO updated_at, and both halves matter.
+--
+-- completed_at first, because workflow.runs carries a touch trigger: updated_at
+-- means "last modified" and is rewritten by any later write to the row, so
+-- retention keyed on it alone would be retention keyed on when somebody last
+-- looked at the run. completed_at is set once, when the run finished, which is
+-- the question retention is actually asking.
+--
+-- The coalesce is not defensive padding. A run CAN reach a terminal status with
+-- a null completed_at -- found by doing it -- and keyed on completed_at alone
+-- such a run and every task under it would be immortal, invisibly, forever.
+-- updated_at is a sound lower bound on the age of a row nobody is touching.
+--
+-- The old note, kept because the reasoning still applies:
+-- workflow.runs carries a touch trigger, so updated_at means "last modified"
+-- and is rewritten by any later write to the row. Retention keyed on it would
+-- be retention keyed on when somebody last looked at the run. completed_at is
+-- set once, when the run finished, which is the question retention is actually
+-- asking.
+--
+-- THE TERMINAL STATUSES ARE ASSERTED, NOT ASSUMED.
+--
+-- Written first as ('succeeded','failed','cancelled'), which workflow.runs
+-- refuses -- it uses 'completed'. That version would have purged NOTHING,
+-- silently, forever, and reported a clean zero every time it ran. agentic.runs
+-- does use 'succeeded', and both constraints are named runs_status_check, which
+-- is how the wrong vocabulary looked right.
+--
+-- So the names are checked against the constraint that owns them, at load time.
+do $$
+declare v_def text;
+begin
+    select pg_get_constraintdef(k.oid) into v_def
+    from pg_constraint k
+    join pg_class c on c.oid = k.conrelid
+    join pg_namespace n on n.oid = c.relnamespace
+    where k.conname = 'runs_status_check' and n.nspname = 'workflow';
+
+    if v_def is null or v_def not like '%completed%' then
+        raise exception
+            'workflow.purge_completed hard-codes the terminal run statuses and '
+            'workflow.runs no longer admits ''completed'' (constraint: %). '
+            'Purging would silently delete nothing.', coalesce(v_def, '(none)');
+    end if;
+end $$;
+
+drop function if exists workflow.purge_completed(interval, int, int);
+create or replace function workflow.purge_completed(
+    p_older_than  interval default interval '30 days',
+    p_batch       int      default 50,      -- RUNS per batch, not tasks
+    p_max_batches int      default 1000)
+returns table(batches int, runs_purged bigint, tasks_purged bigint, runs_skipped bigint) as $$
+declare
+    v_cut     timestamptz := now() - p_older_than;
+    v_has_agentic boolean := to_regclass('agentic.runs') is not null;
+    v_ids     uuid[];
+    v_n       bigint;
+    v_batches int := 0;
+    v_runs    bigint := 0;
+    v_tasks   bigint := 0;
+    v_skipped bigint := 0;
+begin
+    if p_batch < 1 then
+        raise exception 'p_batch must be positive';
+    end if;
+
+    loop
+        exit when v_batches >= p_max_batches;
+
+        -- ELIGIBILITY IS PER RUN, AND EVERY CLAUSE HERE IS A FOREIGN KEY THAT
+        -- WOULD OTHERWISE ABORT THE PURGE MID-BATCH. Found by running it: the
+        -- first version deleted tasks and then failed on
+        -- schedules_last_run_id_fkey, leaving the run half-purged.
+        select array_agg(r.id) into v_ids
+        from (
+            select r.id
+            from workflow.runs r
+            where r.status in ('completed','failed','cancelled')
+              and coalesce(r.completed_at, r.updated_at) < v_cut
+              -- A schedule points at its most recent run. Deleting it would
+              -- lose the schedule's own history.
+              and not exists (select 1 from workflow.schedules s where s.last_run_id = r.id)
+              -- A sub_workflow parent task points at its child run.
+              and not exists (select 1 from workflow.tasks t where t.child_run_id = r.id)
+              -- An agent run records the workflow task that triggered it.
+              and (not v_has_agentic or not exists (
+                    select 1 from agentic.runs ar
+                    join workflow.tasks t on t.id = ar.workflow_task_id
+                    where t.run_id = r.id))
+            order by coalesce(r.completed_at, r.updated_at)
+            limit p_batch
+        ) r;
+
+        exit when v_ids is null;
+
+        -- A WHOLE RUN AT A TIME. Tasks reference each other within a run --
+        -- compensates_task_id and matrix_parent_id are both NO ACTION -- so a
+        -- batch that split a run would block on its own siblings.
+        delete from workflow.tasks t where t.run_id = any(v_ids);
+        get diagnostics v_n = row_count;
+        v_tasks := v_tasks + v_n;
+
+        delete from workflow.runs r where r.id = any(v_ids);
+        get diagnostics v_n = row_count;
+        v_runs := v_runs + v_n;
+
+        v_batches := v_batches + 1;
+    end loop;
+
+    -- What was eligible by age and held back by a reference, so an operator
+    -- watching the table not shrink has an answer rather than a mystery.
+    select count(*) into v_skipped
+    from workflow.runs r
+    where r.status in ('completed','failed','cancelled')
+      and coalesce(r.completed_at, r.updated_at) < v_cut;
+
+    return query select v_batches, v_runs, v_tasks, v_skipped;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+revoke execute on function workflow.purge_completed(interval, int, int) from public;
+
+-- ------------------------------------------------------------
+-- 2. The plan gate.
+--
+-- THE DEFECT THIS EXISTS FOR: idx_tasks_claimable did not match claim_task's
+-- ORDER BY, so on a deep queue the planner abandoned it for a sequential scan
+-- plus a sort of the entire ready set -- to return twenty rows. 78 claims/s
+-- against 13,965 on the same data. No functional test could see it, because
+-- the engine was correct throughout; only the plan was wrong.
+--
+-- So the assertion is about the PLAN, and it belongs in the database rather
+-- than in a shell script, because the thing it protects is a property of the
+-- schema.
+--
+-- IT REFUSES TO PASS ON A SHALLOW QUEUE, and that is the design. The defect is
+-- invisible below a few thousand ready rows: the planner picks the index
+-- whatever its shape, so a gate that ran on a fixture would have reported
+-- health for the entire life of the bug. Inconclusive is an honest answer and
+-- a false pass is not.
+-- ------------------------------------------------------------
+create or replace function workflow.check_hot_paths(p_min_depth int default 2000)
+returns table(path text, verdict text, detail text) as $$
+declare
+    v_queue text;
+    v_depth bigint;
+    v_plan  jsonb;
+    v_nodes text[];
+begin
+    select t.queue, count(*) into v_queue, v_depth
+    from workflow.tasks t
+    where t.status = 'ready'
+    group by t.queue
+    order by count(*) desc
+    limit 1;
+
+    if v_queue is null or v_depth < p_min_depth then
+        return query select
+            'claim'::text, 'inconclusive'::text,
+            format('deepest queue has %s ready task(s), below the %s needed to '
+                   'judge -- the planner picks the index at any shape when the '
+                   'ready set is small, so a pass here would mean nothing',
+                   coalesce(v_depth, 0), p_min_depth);
+        return;
+    end if;
+
+    execute format(
+        'explain (format json) select * from workflow.tasks
+          where queue = %L and status = ''ready'' and run_after <= now()
+          order by priority desc, created_at
+          for update skip locked limit 20', v_queue)
+    into v_plan;
+
+    select array_agg(distinct x #>> '{}')
+      into v_nodes
+      from jsonb_path_query(v_plan, '$.**."Node Type"') x;
+
+    return query select
+        'claim'::text,
+        case
+            when 'Seq Scan' = any(v_nodes) then 'FAIL'
+            when 'Sort'     = any(v_nodes) then 'FAIL'
+            else 'ok'
+        end,
+        case
+            when 'Seq Scan' = any(v_nodes) or 'Sort' = any(v_nodes) then
+                format('claim_task is scanning and sorting %s ready tasks on queue %L '
+                       'to return 20. The claim index no longer matches its ORDER BY '
+                       '(priority desc, created_at). Plan: %s',
+                       v_depth, v_queue, array_to_string(v_nodes, ' -> '))
+            else
+                format('index-backed at depth %s on queue %L (%s)',
+                       v_depth, v_queue, array_to_string(v_nodes, ' -> '))
+        end;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+grant execute on function workflow.check_hot_paths(int) to authenticated;
+
+-- ------------------------------------------------------------
+-- 3. Work nobody can claim -- the failure with no error in it.
+--
+-- `rate_key` is a REFERENCE to a row in workflow.rate_limits, not a
+-- declaration of one. try_consume_rate_limit does `update ... where key = $1`,
+-- which matches nothing when the bucket does not exist and therefore returns
+-- false -- every time, forever. The task sits in `ready`, no worker ever claims
+-- it, no attempt is recorded, nothing retries, and the worker beside it reports
+-- an empty queue. Measured on this collection's own embed fan-out: six children
+-- in `ready`, no error, no dead task, no signal of any kind.
+--
+-- v_stuck_tasks cannot see it either: it reports tasks that are OLD, and a
+-- freshly created unclaimable task is not old yet. It becomes visible there an
+-- hour later, described as something else.
+-- ------------------------------------------------------------
+create or replace view workflow.v_unclaimable as
+    select t.id, t.run_id, t.queue, t.step_key, t.rate_key,
+           'rate_key names no bucket in workflow.rate_limits'::text as reason,
+           format('insert into workflow.rate_limits (key, capacity, tokens, refill_rate) '
+                  'values (%L, 20, 20, 1);', t.rate_key) as remedy,
+           now() - t.created_at as waiting
+    from workflow.tasks t
+    where t.status = 'ready'
+      and t.rate_key is not null
+      and not exists (select 1 from workflow.rate_limits rl where rl.key = t.rate_key)
+  union all
+    select t.id, t.run_id, t.queue, t.step_key, null::text,
+           'queue has no worker pool and no config'::text,
+           format('no workflow.queue_config row for queue %L, and nothing has '
+                  'claimed from it', t.queue),
+           now() - t.created_at
+    from workflow.tasks t
+    where t.status = 'ready'
+      and t.run_after <= now()
+      and t.created_at < now() - interval '10 minutes'
+      and not exists (
+          select 1 from workflow.tasks c
+          where c.queue = t.queue and c.claimed_at > now() - interval '10 minutes');
+
+-- ------------------------------------------------------------
+-- 4. The backlog, as an operator needs it rather than as a count.
+--
+-- v_queue_depth answers "how many rows are in each state", which is the shape
+-- a dashboard wants and not the shape a decision wants. The question behind
+-- scaling a pool is "how long has the oldest thing been waiting", because that
+-- is the number an SLO is written against -- depth alone cannot distinguish a
+-- queue of 10,000 draining in seconds from a queue of 50 that nothing is
+-- serving.
+-- ------------------------------------------------------------
+create or replace view workflow.v_backlog as
+    select t.queue,
+           count(*) filter (where t.status = 'ready' and t.run_after <= now())  as claimable,
+           count(*) filter (where t.status = 'ready' and t.run_after >  now())  as backing_off,
+           count(*) filter (where t.status = 'running')                          as running,
+           count(*) filter (where t.status = 'waiting_external')                 as waiting_on_a_person,
+           coalesce(max(now() - t.created_at) filter
+               (where t.status = 'ready' and t.run_after <= now()),
+               interval '0')                                                     as oldest_wait,
+           count(distinct t.claimed_by) filter
+               (where t.claimed_at > now() - interval '5 minutes')               as workers_seen,
+           max(t.claimed_at)                                                     as last_claim
+    from workflow.tasks t
+    where t.status in ('ready','running','waiting_external')
+    group by t.queue;
+
+-- ------------------------------------------------------------
+-- 5. Connection headroom -- the ceiling that arrives before throughput does.
+--
+-- Measured on a three-node cluster: thirty worker pods at four connections
+-- each, against max_connections = 100, produced "sorry, too many clients
+-- already" for everybody INCLUDING the operator -- the role was a superuser and
+-- superuser_reserved_connections is 3, and thirty pods reconnecting in a loop
+-- won the race for those three slots. The failure mode of connection
+-- exhaustion is not that work stops; it is that nobody can get in to see why.
+--
+-- Which makes headroom something to watch BEFORE it is gone, and there was
+-- nothing reporting it.
+-- ------------------------------------------------------------
+create or replace view workflow.v_capacity as
+    select (select setting::int from pg_settings where name = 'max_connections')      as max_connections,
+           (select setting::int from pg_settings where name = 'superuser_reserved_connections') as reserved,
+           (select count(*)::int from pg_stat_activity)                               as in_use,
+           (select setting::int from pg_settings where name = 'max_connections')
+             - (select count(*)::int from pg_stat_activity)                           as headroom,
+           (select count(distinct claimed_by)::int from workflow.tasks
+             where claimed_at > now() - interval '5 minutes')                         as workers_seen,
+           case when (select count(*)::float from pg_stat_activity)
+                     / nullif((select setting::float from pg_settings
+                                where name = 'max_connections'), 0) > 0.8
+                then 'connection budget over 80% used -- a pool scaling on queue '
+                     'depth can exhaust this long before it exhausts throughput'
+                else null end                                                          as warning;
+
+grant select on workflow.v_backlog, workflow.v_unclaimable, workflow.v_capacity
+    to authenticated;
+
+-- ------------------------------------------------------------
+-- 6. Synthetic load, so a scaling test is one call rather than a script.
+--
+-- Inserts directly rather than going through start_workflow, deliberately: a
+-- scale probe is measuring the CLAIM path, and routing a million tasks through
+-- the compiler would measure that instead. Owner-only for the same reason
+-- register_step_function is -- it decides what the deployment can be made to do.
+-- ------------------------------------------------------------
+create or replace function workflow.seed_load(
+    p_queue text, p_count int, p_definition text default '__scale_probe')
+returns uuid as $$
+declare v_def uuid; v_run uuid;
+begin
+    insert into workflow.definitions (name, spec)
+    select p_definition, jsonb_build_object('steps', jsonb_build_array(jsonb_build_object(
+               'key','w','kind','work','queue',p_queue)))
+    where not exists (select 1 from workflow.definitions where name = p_definition);
+
+    select id into v_def from workflow.definitions where name = p_definition;
+    insert into workflow.runs (workflow_def_id, status) values (v_def, 'running')
+    returning id into v_run;
+
+    insert into workflow.tasks (run_id, step_key, kind, queue, status, pending_deps, input)
+    select v_run, 'p' || g, 'work', p_queue, 'ready', 0, '{}'::jsonb
+    from generate_series(1, p_count) g;
+
+    return v_run;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+revoke execute on function workflow.seed_load(text, int, text) from public;

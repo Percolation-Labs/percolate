@@ -567,14 +567,16 @@ fn p8_workflow_grammar() -> pgrx::JsonB {
             {"key": "work", "compiles_to": "kind: work", "runs_on": "your own code",
              "purpose": "The only case that needs a worker you wrote."},
             {"key": "matrix", "compiles_to": "kind: matrix", "runs_on": "nobody -- expansion is a transaction",
-             "purpose": "Fan out over a row set: one child task per row, inserted by the statement that completes the parent. Requires max_fanout and exactly one of rows (a registered function) or items (a literal list). The template is an ordinary action, spelled the same way."}
+             "purpose": "Fan out over a row set: one child task per row, inserted by the statement that completes the parent. Requires max_fanout and exactly one of rows (a registered function) or items (a literal list). The template is an ordinary action, spelled the same way.",
+             "batching": "batch_size: N gives each child up to N rows instead of one; partition_by: [col] keeps rows sharing a key in the same child; together they partition first and cap within each partition. A batched child carries items (an array) and batch ({index,size,key}) instead of item, reads its rows as {{items}}, and may substitute {{item.<col>}} only for a column constant across the batch -- which is what partition_by guarantees."}
         ],
         "templates": {
             "run": "{{run.x}} -- what start_workflow was called with",
             "steps": "{{steps.<id>.result}} -- a completed step's output",
-            "item": "{{item.x}} -- one matrix row; bound only on fan-out children",
+            "item": "{{item.x}} -- one matrix row; bound only on fan-out children, and on a BATCHED child only for a column constant across the batch",
+            "items": "{{items}} -- every row a fan-out child owns, as an array (of one when the step does not batch). A whole value only: it cannot be interpolated into a string. Bound at EXPANSION, beside item, so no worker has to know a task was batched.",
             "env": "{{env.X}} -- resolved by the WORKER only. sql steps have no env: the database has no business reading the deployment's environment.",
-            "when": "All of these resolve at DISPATCH, never at definition time."
+            "when": "All of these resolve at DISPATCH, never at definition time -- except item and items, which bind when a matrix expands, so a fan-out child's recorded input says exactly what will be sent."
         },
         "desugaring": {
             "p8ql SEMANTIC/SEARCH": {
@@ -588,7 +590,8 @@ fn p8_workflow_grammar() -> pgrx::JsonB {
         },
         "limits": {
             "payload": "task input/output are capped (workflow.max_payload_bytes); anything larger must be a $ref to object storage",
-            "max_fanout": "mandatory on a matrix step -- a cross join with a forgotten WHERE would otherwise insert the cartesian product as task rows"
+            "max_fanout": "mandatory on a matrix step -- a cross join with a forgotten WHERE would otherwise insert the cartesian product as task rows. It counts ROWS, not children: batching makes fewer tasks, not a smaller runaway.",
+            "batch_size": "N rows share one task input, so it multiplies the payload directly -- expansion refuses a batch over the cap and names batch_size as the remedy. It also coarsens continue_on/min_success, which count children: one failed batch loses all its rows."
         }
     }))
 }
@@ -1014,7 +1017,34 @@ struct WfMatrix {
     continue_on: Option<String>,
     #[serde(default)]
     min_success: Option<f64>,
+    // Batching (schema.sql §20j): how many rows one child may own, and which
+    // rows must not be split across two. Either alone makes the step batched;
+    // together they partition first and then cap each partition.
+    #[serde(default)]
+    batch_size: Option<i64>,
+    #[serde(default)]
+    partition_by: Option<PartitionBy>,
     template: WfTemplate,
+}
+
+// `partition_by: tenant` and `partition_by: [tenant, region]` are the same
+// intention at two widths, and refusing the first would be a syntax rule with
+// no reason behind it. Normalised to an array on the way out, so the engine
+// sees one shape.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PartitionBy {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl PartitionBy {
+    fn columns(&self) -> Vec<String> {
+        match self {
+            PartitionBy::One(c) => vec![c.clone()],
+            PartitionBy::Many(cs) => cs.clone(),
+        }
+    }
 }
 
 // The same action fields a step has, minus the graph and saga ones: a child
@@ -1322,10 +1352,39 @@ fn compile_matrix(id: &str, m: &WfMatrix, s: &WfStep)
         }
     }
 
+    // Batching. Checked here so the message names the step; the engine checks
+    // it again at registration, because a spec can arrive as JSON without
+    // passing through this compiler at all.
+    if let Some(b) = m.batch_size {
+        if b < 1 {
+            return Err(format!(
+                "matrix step '{}' has batch_size {}, which gives every child no rows. \
+                 Omit it for one row per child.", id, b));
+        }
+    }
+    let partition_cols = m.partition_by.as_ref().map(|p| p.columns());
+    if let Some(cols) = &partition_cols {
+        if cols.is_empty() {
+            return Err(format!(
+                "matrix step '{}' has an empty partition_by. Name the columns whose rows \
+                 must stay in one child, or omit it.", id));
+        }
+        if let Some(c) = cols.iter().find(|c| c.trim().is_empty()) {
+            return Err(format!(
+                "matrix step '{}' has a blank column name in partition_by: {:?}", id, c));
+        }
+    }
+
     let mut input = serde_json::json!({
         "max_fanout": max_fanout,
         "template": {"queue": tqueue, "kind": tkind, "input": tinput},
     });
+    if let Some(b) = m.batch_size {
+        input["batch_size"] = serde_json::json!(b);
+    }
+    if let Some(cols) = &partition_cols {
+        input["partition_by"] = serde_json::json!(cols);
+    }
     if let Some(c) = &m.continue_on {
         input["continue_on"] = serde_json::json!(c);
     }

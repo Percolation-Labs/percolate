@@ -294,9 +294,18 @@ begin
     end if;
     perform workflow.assert_run_access(v_run, 'read');
 
-    return (select coalesce(jsonb_agg(t.input->'item' order by t.created_at, t.step_key),
+    -- Batched children (schema.sql §20j) hold `items`, not `item`, and this
+    -- returns the ROW SET -- so they are flattened back to it. Kept in step
+    -- with the body this overrides; a checked copy that answers a different
+    -- question is worse than no copy.
+    return (select coalesce(jsonb_agg(r order by t.created_at, t.step_key, r_ord),
                             '[]'::jsonb)
-            from workflow.tasks t where t.matrix_parent_id = p_task_id);
+            from workflow.tasks t
+            cross join lateral jsonb_array_elements(
+                case when t.input ? 'items' then t.input->'items'
+                     else jsonb_build_array(t.input->'item') end)
+                with ordinality x(r, r_ord)
+            where t.matrix_parent_id = p_task_id);
 end;
 $$ language plpgsql stable security definer set search_path = pg_catalog, public;
 
@@ -334,6 +343,7 @@ begin
 
     return (select coalesce(jsonb_agg(jsonb_build_object(
                 'step_key', t.step_key, 'item', t.input->'item',
+                'items', t.input->'items',
                 'status', t.status, 'output', t.output)
             order by t.created_at, t.step_key), '[]'::jsonb)
             from workflow.tasks t where t.matrix_parent_id = p_task_id);
