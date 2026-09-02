@@ -65,7 +65,7 @@ services:
   # transaction, so RLS sees the user rather than the service.
   # ---------------------------------------------------------------------
   worker:
-    image: percolationlabs/percolate-core:0.1.2
+    image: percolationlabs/percolate-core:0.1.3
     container_name: p8-worker
     depends_on:
       db:
@@ -80,7 +80,7 @@ services:
       LLM_API_KEY: ${LLM_API_KEY:-}
 
   content:
-    image: percolationlabs/percolate-core:0.1.2
+    image: percolationlabs/percolate-core:0.1.3
     container_name: p8-content
     depends_on:
       db:

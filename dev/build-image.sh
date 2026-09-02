@@ -9,7 +9,12 @@ cd "$(dirname "$0")"
 ROOT="$(cd .. && pwd)"
 TAG=${TAG:-percolationlabs/percolate-postgres:19}
 
-echo "==> regenerating percolate--0.1.0.sql from specs/"
+# The version comes from percolate.control, which is where Postgres looks for
+# it -- not from a copy in this script that a release would have to remember.
+VERSION=$(sed -n "s/^default_version = '\\(.*\\)'/\\1/p" "$ROOT/extension/percolate/percolate.control")
+[ -n "$VERSION" ] || { echo "no default_version in percolate.control" >&2; exit 1; }
+
+echo "==> regenerating percolate--$VERSION.sql from specs/"
 python3 "$ROOT/extension/percolate/build-sql.py"
 
 # One .so per architecture. A shared library is compiled against one ABI, so
@@ -42,7 +47,7 @@ done
 
 B="$ROOT/extension/percolate_parser/target-$(docker version -f '{{.Server.Arch}}')/release/percolate_parser-pg19"
 
-# the glob must catch percolate_parser--0.1.0.sql, whose name has no dot
+# the glob must catch percolate_parser--<version>.sql, whose name has no dot
 # immediately after the stem -- "percolate_parser.*" silently misses it
 #
 # Guarded, because the parser BUILD above is skipped when dist/ already holds
@@ -51,8 +56,15 @@ B="$ROOT/extension/percolate_parser/target-$(docker version -f '{{.Server.Arch}}
 # tree does not), and it made the script abort on a `cp` for files that were
 # already sitting in dist/ from the run that produced them.
 if [ -d "$B/usr/share/postgresql/19/extension" ]; then
+  # Clear before copying, for the same reason the percolate script is cleared
+  # below: dist/ is not rebuilt from scratch, so after a version bump it holds
+  # BOTH percolate_parser--<old>.sql and --<new>.sql, and the Dockerfile's glob
+  # would copy both into the image. Two installable versions of an extension is
+  # not an error Postgres reports -- it is an offer, and one half of it is a
+  # version nobody meant to ship.
+  rm -f dist/percolate_parser--*.sql
   cp "$B"/usr/share/postgresql/19/extension/percolate_parser* dist/
-elif [ ! -f dist/percolate_parser--0.1.0.sql ] || [ ! -f dist/percolate_parser.control ]; then
+elif [ ! -f "dist/percolate_parser--$VERSION.sql" ] || [ ! -f dist/percolate_parser.control ]; then
   echo "no parser build tree at $B and dist/ has no percolate_parser SQL --" >&2
   echo "run with REBUILD_PARSER=1 to compile it" >&2
   exit 1
@@ -60,7 +72,10 @@ else
   echo "==> reusing dist/percolate_parser SQL (no build tree to copy from)"
 fi
 cp "$ROOT/extension/percolate/percolate.control" dist/
-cp "$ROOT/extension/percolate/sql/percolate--0.1.0.sql" dist/
+# Stale scripts from a previous version would be picked up by the Dockerfile's
+# glob and shipped as extra installable versions nobody meant to publish.
+rm -f dist/percolate--*.sql
+cp "$ROOT/extension/percolate/sql/percolate--$VERSION.sql" dist/
 
 echo "==> building $TAG"
 docker build -f Dockerfile.pg19 -t "$TAG" .

@@ -1,0 +1,172 @@
+# Cut an EXTENSION release: the schema, the parsers, the image that bakes them.
+#
+# The counterpart to percolate-core's release.yml, and deliberately a separate
+# button. The two move on their own clocks -- a worker fix and a schema change
+# are not the same event and should not force each other's version -- which is
+# the whole reason the repositories are separate in the first place.
+#
+# The version lives HERE because the source does. `percolate.control`'s
+# `default_version` is what Postgres itself reads to answer "what version is
+# this extension", so it is the one home; build-sql.py reads it rather than
+# restating it, and the bump script moves it along with percolate_parser's
+# control file and Cargo.toml.
+#
+# The BUILD lives in get-percolate, and that split is not arbitrary: the .so is
+# compiled natively per platform on runners this repository cannot reach (macOS
+# and arm64), the release has to be PUBLIC for `install.sh` to curl it, and
+# this repository is private. So this workflow owns the number and dispatches
+# the build, then waits for it -- waiting rather than firing and forgetting,
+# because a green run here that means "a build started somewhere" is worse than
+# no signal at all.
+#
+# ---------------------------------------------------------------------------
+# Configured once:
+#   gh secret set P8_RELEASE_TOKEN    # PAT: actions+issues write on
+#                                     # get-percolate, issues write on
+#                                     # percolate-core. One token, three repos.
+# ---------------------------------------------------------------------------
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: which part of the extension version to bump
+        type: choice
+        options: [minor, patch, major]
+        default: minor
+      publish:
+        description: publish for real (off = bump and build, change nothing)
+        type: boolean
+        default: true
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # commit the bump, push the tag
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+
+      - name: Bump the extension version
+        id: bump
+        # Four files -- two control files, Cargo.toml, and the generated script
+        # whose NAME is the version. The script refuses to bump if the two
+        # extensions have drifted apart, rather than silently reuniting them.
+        run: python .github/scripts/bump_extension_version.py "${{ inputs.bump }}"
+
+      - name: Refuse to re-release
+        run: |
+          v="${{ steps.bump.outputs.version }}"
+          if git rev-parse -q --verify "refs/tags/v$v" >/dev/null; then
+            echo "::error::tag v$v already exists" >&2; exit 1
+          fi
+
+      - name: The generated SQL must match the specs it came from
+        # build-sql.py just wrote it, so this can only fail if the generator
+        # is not deterministic -- which is worth knowing before publishing a
+        # schema that a database will run.
+        run: python3 extension/percolate/build-sql.py --check
+
+      - name: Commit and tag
+        if: inputs.publish
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A extension/
+          git commit -m "extension ${{ steps.bump.outputs.version }}: release"
+          git tag -a "v${{ steps.bump.outputs.version }}" \
+                  -m "percolate extension ${{ steps.bump.outputs.version }}"
+          git push origin HEAD:"${{ github.ref_name }}" --follow-tags
+
+      # -------------------------------------------------------------------
+      # Hand off to get-percolate, which has the native runners and the public
+      # releases -- then WAIT. `gh workflow run` returns as soon as the
+      # dispatch is accepted, so without the watch below this job would go
+      # green while the parsers were still compiling and could still fail.
+      # -------------------------------------------------------------------
+      - name: Build and publish, on get-percolate
+        if: inputs.publish
+        env:
+          GH_TOKEN: ${{ secrets.P8_RELEASE_TOKEN }}
+          REPO: ${{ vars.CHART_REPO || 'percolating-sirsh/get-percolate' }}
+          V: ${{ steps.bump.outputs.version }}
+        run: |
+          [ -n "$GH_TOKEN" ] || {
+            echo "::error::P8_RELEASE_TOKEN is not set -- the version is bumped and tagged but nothing is published. Run parser.yml on $REPO by hand with version=$V." >&2
+            exit 1; }
+
+          # Recorded BEFORE dispatching, so the run we then look for cannot be
+          # an older one that happens to be in flight.
+          since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          gh workflow run parser.yml --repo "$REPO" \
+            -f ref="v$V" -f version="$V" -f push_image=true
+
+          # `gh workflow run` does not return the run id -- there isn't one yet.
+          # Poll for the first run created after the dispatch.
+          id=""
+          for _ in $(seq 1 30); do
+            sleep 5
+            id=$(gh run list --repo "$REPO" --workflow parser.yml \
+                   --created ">$since" --limit 1 --json databaseId \
+                   --jq '.[0].databaseId // empty')
+            [ -n "$id" ] && break
+          done
+          [ -n "$id" ] && echo "run=$id" || {
+            echo "::error::dispatched parser.yml on $REPO but no run appeared within 150s -- check $REPO/actions" >&2
+            exit 1; }
+
+          echo "watching https://github.com/$REPO/actions/runs/$id"
+          gh run watch "$id" --repo "$REPO" --exit-status
+
+      # -------------------------------------------------------------------
+      # The docs last, once the assets and the image they describe exist.
+      # Two issues, because two repositories quote this version in prose and
+      # neither can be updated from here without a commit nobody reviews.
+      # -------------------------------------------------------------------
+      - name: Ask for the doc updates
+        if: inputs.publish
+        env:
+          GH_TOKEN: ${{ secrets.P8_RELEASE_TOKEN }}
+          REPO: ${{ vars.CHART_REPO || 'percolating-sirsh/get-percolate' }}
+          V: ${{ steps.bump.outputs.version }}
+          PREV: ${{ steps.bump.outputs.previous }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          cat > issue.md <<EOF
+          @claude the Percolate extension **$V** is released -- assets on this
+          repo, and \`percolationlabs/percolate-postgres:19-$V\` on Docker Hub.
+          The docs still describe \`$PREV\`. Please open a PR that catches them up.
+
+          - \`docs/src/install.md\` and \`README.md\` -- any quoted asset name,
+            \`CREATE EXTENSION\` output or version in prose. \`install.sh\` now
+            reads the version out of \`percolate.control\`, so it needs no edit;
+            the prose around it is what goes stale.
+          - Anywhere pinning \`percolate-postgres\` -- \`:19\` still resolves to
+            this build, but \`:19-$V\` is the immutable tag worth showing anyone
+            who needs to pin. Pre-1.0 there is no in-place extension upgrade, so
+            pinning is the upgrade strategy and the docs should say so.
+          - The chart's \`appVersion\` tracks **percolate-core**, not this, so it
+            does not move here.
+
+          Released by [\`release.yml\`]($RUN).
+          EOF
+          gh issue create --repo "$REPO" \
+            --title "Extension $V: catch the docs up" --body-file issue.md
+
+      - name: Summary
+        run: |
+          {
+            echo "### percolate extension ${{ steps.bump.outputs.previous }} -> ${{ steps.bump.outputs.version }}"
+            [ "${{ inputs.publish }}" = "true" ] \
+              && echo "Assets and image published from get-percolate; docs issue opened." \
+              || echo "_dry run: nothing committed, nothing published_"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -78,7 +78,19 @@ def check_raise_format(path, text):
             "`%L` prints the value and then an L. Quote it yourself: ''%''.")
 
 
-VERSION = "0.1.0"
+# The version is NOT declared here. `percolate.control` is where Postgres
+# itself looks to answer "what version is this extension", so a second copy in
+# this file would be a second answer -- and the one that loses is whichever the
+# release tooling forgot. Read it, do not restate it.
+def _version() -> str:
+    control = ROOT / "extension/percolate/percolate.control"
+    m = re.search(r"^default_version\s*=\s*'([^']+)'", control.read_text(), re.M)
+    if not m:
+        raise SystemExit(f"{control}: no default_version to build against")
+    return m.group(1)
+
+
+VERSION = _version()
 
 # Not arbitrary: the two cores are MUTUALLY dependent (rbac.attempt_login needs
 # workflow.rate_limits; workflow.runs' RLS needs rbac.current_user_id), a real

@@ -58,8 +58,14 @@ RUN cd /tmp && git clone --branch v1.6.7 https://github.com/citusdata/pg_cron.gi
 # cluster, which is how this image spent its first release arm64-only.
 ARG TARGETARCH
 COPY dist/percolate_parser-${TARGETARCH}.so /usr/lib/postgresql/19/lib/percolate_parser.so
-COPY dist/percolate_parser.control dist/percolate_parser--0.1.0.sql \
-     dist/percolate.control dist/percolate--0.1.0.sql \
+# Globbed rather than named, so a version bump does not have to be remembered
+# here as well. The control files carry the version Postgres will install; the
+# script filenames only have to match them, and build-image.sh (or CI) is what
+# puts the matching pair in dist/. A stale extra script in dist/ would be
+# copied too -- which is why the bump script deletes the old one rather than
+# leaving it for a glob to find.
+COPY dist/percolate_parser.control dist/percolate_parser--*.sql \
+     dist/percolate.control dist/percolate--*.sql \
      /usr/share/postgresql/19/extension/
 
 # The bootstrap, so `docker run` gives a system rather than an empty database
