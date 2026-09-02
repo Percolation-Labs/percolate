@@ -90,20 +90,36 @@ or a check that stopped checking.
 
 ## What is open right now
 
-Six, and four of them are the same shape: a rule applied at the site that hurt
-and not at the other sites that perform the same transition.
+One, and it is not a defect: `coll-13` records that `content.connectors` is
+deliberately outside the product, because a missing thing and an excluded thing
+are the same absence and without somewhere to write the reason nobody
+re-examines either.
 
-| Scenario | Finding |
-|---|---|
-| `hitl-04` | **A `signal:` task's output never reaches `runs.context`.** `complete_task` merges it; `signal_task` and `promote_due_timers` set status, output and `completed_at` and merge nothing. So `{{steps.<signal>.result}}` resolves to nothing and the acting step fails with `template 'steps.officer.result' resolved to nothing`. The second half of every human-in-the-loop workflow — *act on what they said* — is unreachable from the document. `dev/examples/08-wait.sql` does not notice because it waits, resumes, and never reads the payload. |
-| `hitl-08` | **A `timer:` that is a ROOT step ignores its delay.** `delay_seconds` is applied by `autorun_sql_steps`, which is `after update of status` and fires only on the transition *into* ready — and a root timer is INSERTED ready. `run_after` stays `now()`, the next tick fires it, and a `timer: 3600` waits zero seconds with every task `done`. This is `failure-modes.md` §5's own *trigger that fires only on the transition you did not take*, reopened at the timer branch of that same trigger. `hitl-08b` shows the non-root case working, which is why nothing noticed. |
-| `upload-13` | **`record_chunks` silently drops a span key it does not recognise** — and `dev/examples/05-upload.sql`, whose output is quoted on the published *Ten things, worked through* page under the heading "what the parser produced, **with spans back into the source**", passes `start_char`/`end_char` where the writer reads `start_offset`/`end_offset`. Every span that example records is NULL and the call returns the chunk count. |
-| `recov-13` | **`claim_task` returns one row of NULLs on an empty queue**, because it is declared `returns workflow.tasks` rather than `setof`. A worker written the obvious way treats an empty queue as a task arriving, on the most-called function in the worker contract, and `spec.md` §4 documents the signature with no note that emptiness is spelled this way. |
-| `qs-19` | **A literal JSON argument written as a quoted string arrives as a jsonb scalar**, and the run fails with Postgres's `cannot extract elements from a scalar` — true, and about a value the author cannot see. `lint_spec` holds the registered argument types and could refuse it while the author is still looking at the document. |
-| `coll-13` | `content.connectors` is deliberately **not shipped** — recorded as a scenario rather than left as an absence, because a missing thing and an excluded thing are the same absence, and without somewhere to write the reason nobody re-examines either. |
+The five findings this suite was written to pin are closed, and each scenario
+now asserts the fixed behaviour rather than the defect:
 
-Each is pinned by a check that goes red today and will go green the moment it
-is fixed, at which point `run.py` says so by name.
+| Scenario | Was | Fix |
+|---|---|---|
+| `hitl-04` | A `signal:` task's output never reached `runs.context`, so `{{steps.<signal>.result}}` resolved to nothing and the second half of every human-in-the-loop workflow was unreachable from the document. | `workflow.merge_step_context()`, called by all three paths that mark a task done — **before** the transition, because a `sql` successor auto-runs inside the statement that marks it ready. The payload is nested under `result` like every other kind. |
+| `hitl-08` | A `timer:` that was a root step ignored its delay, because `delay_seconds` was applied by an `after update of status` trigger and a root timer is *inserted* ready. | `workflow.apply_timer_delay()` with an AFTER INSERT trigger beside the existing update path; the update stamp is unconditional so a non-root timer is still measured from readiness. |
+| `upload-13` | `record_chunks` silently dropped an unrecognised span key, and two published pages passed the spelling it does not read. | The key set is checked **before** the DELETE, and the refusal names `start_offset`. Docs corrected in get-percolate. |
+| `recov-13` | `claim_task` returned one row of NULLs on an empty queue, being `returns workflow.tasks`. | `returns setof workflow.tasks`. Callers using `select * from` are unaffected. |
+| `qs-19` | A quoted JSON literal reached a `jsonb` step function as a scalar and failed at dispatch with a message naming neither the argument nor the remedy. | `lint_spec` refuses it at authoring time — and `qs-19` asserts that a **template** in the same position is *not* refused, because the first version of that rule rejected the shipped `ask_uploads` workflow at install time. |
+
+All four defects were one shape: a rule applied at the site that hurt and not at
+the other paths performing the same transition. Each fix is therefore a function
+with N callers rather than a statement with one, so the enumeration is a grep.
+
+**And one correction that came from reading, not running.** The
+`iterated-query` category originally asserted the *width* of a walk at each
+depth — `is: "18"` — which is fixture arithmetic, not a specified guarantee: an
+extra edge in the fixture turns it red for no reason anyone cares about. Those
+scenarios now assert what the spec actually promises (one row per node at its
+shortest depth, `path_weight` as the product along the path, the refusals) and,
+in `iter-01` and `iter-02`, that the **property graph** and the recursive walk
+answer the same question the same way. PG19 rejects a path *quantifier* but
+accepts a fixed-length chain — so "GRAPH_TABLE cannot do depth n" was too
+strong, and `schema.sql` now says the narrower true thing.
 
 ## The fixture
 

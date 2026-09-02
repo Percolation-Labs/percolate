@@ -612,63 +612,134 @@ scenarios:
 
   - id: iter-01
     category: iterated-query
-    title: Depth 1 does not contain the answer, and says so by omission
-    asks: "Which corporate group is behind SIG-114?"
-    mechanism: "USAGE.md § GRAPH -- one row per node at its shortest depth"
-    catches: [wrong-answer-not-error]
+    title: The two traversal mechanisms agree at depth 1
+    asks: "Depth 1 goes through the property graph and depth 2 does not. Do they agree?"
+    mechanism: "aiq.graph_neighbors (GRAPH_TABLE over aiq.knowledge_graph) vs aiq.graph_walk (WITH RECURSIVE)"
+    catches: [second-mechanism, wrong-answer-not-error]
+    role: app_owner
     check:
-      - name: the first hop reaches the product only
-        sql: "select jsonb_array_length(aiq.query('GRAPH \"sig-114\" DEPTH 1')->'rows')"
-        is: "1"
-        because: "a walk that returned more at depth 1 than the graph holds would make every later width meaningless"
-      - name: and the parent is not in it
-        sql: "select exists (select 1 from jsonb_array_elements(aiq.query('GRAPH \"sig-114\" DEPTH 1')->'rows') r where r->>'key'='nvra')"
-        is: "false"
-        because: "the whole iteration story needs the first width to be genuinely wrong"
+      - name: the same seed reaches the same node set both ways
+        sql: |
+          select (select coalesce(string_agg(key, ',' order by key), '')
+                    from aiq.graph_neighbors((select node_id from aiq.lookup('tolvaxen'))))
+               = (select coalesce(string_agg(key, ',' order by key), '')
+                    from aiq.graph_walk((select node_id from aiq.lookup('tolvaxen')), 1))
+        is: "true"
+        because: >-
+          THIS IS THE CHECK THAT MAKES TWO MECHANISMS HONEST. `GRAPH DEPTH 1`
+          is answered by GRAPH_TABLE over the property graph; `DEPTH 2` and up
+          by WITH RECURSIVE. Two code paths that must agree about the same
+          question, agreeing only by coincidence, is failure-modes.md §5's
+          "second mechanism for a solved problem" -- and nothing had ever
+          compared them. Depth 1 is the overlap, so it is the place the
+          comparison is possible at all.
+      - name: and neither invents an edge the catalogue does not allow
+        sql: |
+          select count(*) from aiq.graph_neighbors(
+                   (select node_id from aiq.lookup('tolvaxen'))) n
+          where n.relation not in (
+            select relation from aiq.relation_types
+            union select inverse_label from aiq.relation_types)
+        is: "0"
+        because: "the relation a walk REPORTS has to be one the caller can write back as `TYPE`, or the result cannot be fed into the next query -- which was a real round-trip bug, not a hypothetical"
 
   - id: iter-02
     category: iterated-query
-    title: Depth 2 reaches the marketing authorisation holder
-    asks: "Who makes the drug this signal is about?"
-    mechanism: "USAGE.md § GRAPH -- DEPTH n, ordered by depth then path_weight"
-    catches: [wrong-answer-not-error]
+    title: A bounded walk is expressible over the property graph, and matches
+    asks: "PG19 has no path quantifier. Does that mean SQL/PGQ cannot do two hops?"
+    mechanism: "GRAPH_TABLE fixed-length chain vs aiq.graph_walk -- schema.sql's note on graph_walk"
+    catches: [second-mechanism, version-skew]
+    role: app_owner
     check:
-      - name: the immediate sponsor appears
-        sql: "select exists (select 1 from jsonb_array_elements(aiq.query('GRAPH \"sig-114\" DEPTH 2')->'rows') r where r->>'key'='altm')"
+      - name: a quantifier is genuinely rejected
+        sql: |
+          select count(*) from graph_table (aiq.knowledge_graph
+            match (a is node) -[e is related]->{1,3} (b is node)
+            columns (a.id as a_id)) g
+        raises: "quantifier is not supported"
+        because: "this is the fact the implementation is built on, and it is worth re-asserting rather than trusting: if PG19 ever gains quantified paths, the recursion stops being the only option and this check says so"
+      - name: but a FIXED-LENGTH chain is not
+        sql: |
+          select count(*) > 0 from graph_table (aiq.knowledge_graph
+            match (a is node) -[e1 is related]- (b is node) -[e2 is related]- (c is node)
+            columns (a.id as a_id, c.id as c_id)) g
         is: "true"
-        because: "two hops is the ordinary shape of the question and has to work before three is interesting"
-      - name: the parent still does not
-        sql: "select exists (select 1 from jsonb_array_elements(aiq.query('GRAPH \"sig-114\" DEPTH 2')->'rows') r where r->>'key'='nvra')"
-        is: "false"
-        because: "if depth 2 already returned depth-3 nodes the ceiling would not be a ceiling"
+        because: >-
+          The narrower true statement. "GRAPH_TABLE cannot do depth n" is what
+          the spec used to imply and it is wrong -- a bounded walk IS
+          expressible over the property graph, and the reason the recursion
+          stays is that graph_walk's contract is depth-unbounded, not that
+          SQL/PGQ cannot reach two hops.
+      - name: and it finds the same two-hop nodes the recursive walk does
+        sql: |
+          with pgq as (
+            select distinct kc.key
+            from graph_table (aiq.knowledge_graph
+              match (a is node) -[e1 is related]- (b is node) -[e2 is related]- (c is node)
+              columns (a.id as a_id, c.id as c_id)) g
+            join aiq.node_keys ka on ka.node_id = g.a_id and ka.kind = 'canonical'
+            join aiq.node_keys kc on kc.node_id = g.c_id and kc.kind = 'canonical'
+            where ka.key = 'sig-114 hepatic injury' and g.c_id <> g.a_id),
+          rec as (
+            select distinct w.key
+            from aiq.graph_walk((select node_id from aiq.lookup('sig-114')), 2) w)
+          select count(*) from (
+            select key from pgq except select key from rec) missing
+        is: "0"
+        because: "every node the property graph reaches in two hops must be in the recursive walk's answer; a node one mechanism finds and the other does not is the disagreement the pair exists to be checked for"
 
   - id: iter-03
     category: iterated-query
-    title: Depth 3 answers it, and the widening is the cost
-    asks: "Expand until you find the group -- what did that cost?"
-    mechanism: "USAGE.md § GRAPH -- DEPTH ceiling of 5 in the dialect"
-    catches: [rate-ceiling, wrong-answer-not-error]
+    title: A node reachable at several depths is returned at its shortest
+    asks: "How far is this from my seed?"
+    mechanism: "aiq.graph_walk -- DISTINCT ON (id) ORDER BY depth; USAGE.md § GRAPH"
+    catches: [wrong-answer-not-error, wrong-grouping]
+    role: app_owner
     check:
-      - name: the parent is finally reachable
-        sql: "select exists (select 1 from jsonb_array_elements(aiq.query('GRAPH \"sig-114\" DEPTH 3')->'rows') r where r->>'key'='nvra')"
-        is: "true"
-        because: "an agent that cannot reach a three-hop fact has to be told so, not left to widen forever"
-      - name: and it cost eighteen nodes to learn one
-        sql: "select jsonb_array_length(aiq.query('GRAPH \"sig-114\" DEPTH 3')->'rows')"
-        is: "18"
-        because: "iteration is only worth teaching if widening is expensive; a fixture where depth 3 returns three nodes makes the lesson invisible"
+      - name: one row per node, however many paths reach it
+        sql: |
+          select count(*) from (
+            select node_id from aiq.graph_walk(
+                     (select node_id from aiq.lookup('tolvaxen')), 3)
+            group by node_id having count(*) > 1) dupes
+        is: "0"
+        because: "a per-path result set says the same name three times, and an agent counting rows concludes it is three times as related. This is the guarantee -- not the row count, which is a fact about the fixture"
+      - name: and the depth reported is the shortest one
+        sql: |
+          select depth from aiq.graph_walk(
+                   (select node_id from aiq.lookup('sig-114')), 4) w
+          where w.key = 'nvra'
+        is: "3"
+        because: "NVRA is reachable from SIG-114 through two different subsidiaries; reporting the longer route would make `depth` a fact about traversal order rather than about the graph"
 
   - id: iter-04
     category: iterated-query
-    title: A node reachable two ways appears once, at its shortest depth
-    asks: "Novara is reachable through two subsidiaries. Do I get it twice?"
-    mechanism: "USAGE.md § GRAPH -- DISTINCT ON, shortest depth, ordered by path_weight"
-    catches: [wrong-answer-not-error, wrong-grouping]
+    title: A walk is ordered by how strongly the path is believed
+    asks: "Which of these neighbours should I look at first?"
+    mechanism: "aiq.graph_walk -- path_weight is the PRODUCT of edge weights; brief.md §3.6"
+    catches: [wrong-answer-not-error]
+    role: app_owner
     check:
-      - name: exactly one row for the parent
-        sql: "select count(*) from jsonb_array_elements(aiq.query('GRAPH \"tolvaxen\" DEPTH 3')->'rows') r where r->>'key'='nvra'"
-        is: "1"
-        because: "a per-path result set says the same name three times and an agent counting rows concludes it is three times as related"
+      - name: a longer path through strong edges outranks a short weak one
+        sql: |
+          select (select path_weight from aiq.graph_walk(
+                    (select node_id from aiq.lookup('sig-114')), 3) w where w.key='altm')
+               > (select path_weight from aiq.graph_walk(
+                    (select node_id from aiq.lookup('sig-114')), 3) w where w.key='sig-121 rash cluster')
+        is: "true"
+        because: >-
+          `edges.weight` is where the ingestion pipeline's coherence score
+          arrives at the read path. Until path_weight existed, graph_walk
+          ordered by node uuid and ignored weight entirely -- so the whole
+          scoring pipeline was discarded at the final step, which is the exact
+          failure brief.md §3.6 is about. The 0.40 forum claim must rank below
+          the 0.95 authorisation two hops away.
+      - name: and the product is what accumulates, not the sum or the minimum
+        sql: |
+          select round(path_weight::numeric, 4)::text from aiq.graph_walk(
+                   (select node_id from aiq.lookup('sig-114')), 3) w where w.key='nvra'
+        is: "0.8550"
+        because: "1.00 x 0.95 x 0.90. A sum would reward length; a minimum would make a long chain of near-certainties indistinguishable from a single one"
 
   - id: iter-05
     category: iterated-query
@@ -789,10 +860,30 @@ scenarios:
     mechanism: "USAGE.md § GRAPH -- inverse traversal is served from the dst_id index, not a second stored row"
     catches: [wrong-answer-not-error]
     check:
-      - name: four signals point at the hub
-        sql: "select count(*) from jsonb_array_elements(aiq.query('GRAPH \"tolvaxen\" TYPE implicated_in')->'rows') r"
-        is: "4"
-        because: "the reverse question is answered from the index with the catalogue's inverse label; a fixture that stored reverse edges would pass this while the mechanism was broken"
+      - name: every inbound edge is reached, and the count comes from the edges
+        sql: |
+          select (select count(*) from jsonb_array_elements(
+                    aiq.query('GRAPH "tolvaxen" TYPE implicated_in')->'rows') r)
+               = (select count(*) from aiq.edges e
+                    join aiq.nodes d on d.id = e.dst_id
+                   where d.entity_id = '52000000-0000-0000-0000-000000000001'
+                     and e.relation = 'implicates')
+        is: "true"
+        because: >-
+          Compared against the edge table rather than against a number, so
+          adding a signal to the fixture does not turn this red for a reason
+          that has nothing to do with the guarantee. The guarantee is that the
+          reverse question is answered from the dst_id index with the
+          catalogue's inverse label -- a fixture that stored reverse edges would
+          satisfy a hard-coded count while the mechanism was broken.
+      - name: and no reverse edge is stored to make that easy
+        sql: |
+          select count(*) from aiq.edges e
+          join aiq.nodes s on s.id = e.src_id
+          where s.entity_id = '52000000-0000-0000-0000-000000000001'
+            and e.relation = 'implicated_in'
+        is: "0"
+        because: "the inverse label is resolved from the relation catalogue at READ time; an inverse edge in the table would be a second copy of a fact, and the two would drift"
 
 # =============================================================================
 # HUMAN IN THE LOOP -- a run that stops until a person answers, and then acts
@@ -910,7 +1001,6 @@ scenarios:
     asks: "Record what they decided."
     mechanism: "YAML.md § Templates -- every step nests its payload under `result`, read with {{steps.<id>.result}}"
     catches: [silent-success, never-executed, unreachable-capability]
-    status: open-defect
     claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":[]}'
     setup: |
       select workflow.define_yaml($y$
@@ -927,24 +1017,31 @@ scenarios:
       select workflow.signal_task((select run_id from ctx),'officer',
              '{"signal":"sig-114","decision":"escalate","by":"safety.officer"}'::jsonb);
     check:
-      - name: the payload IS on the task
-        sql: "select output->>'decision' from workflow.tasks where run_id=(select run_id from ctx) and step_key='officer'"
+      - name: the payload is on the task, nested under `result` like every kind
+        sql: "select output#>>'{result,decision}' from workflow.tasks where run_id=(select run_id from ctx) and step_key='officer'"
         is: "escalate"
-        because: "the signal itself works; what follows is about where the output goes, not whether it exists"
+        because: >-
+          It used to be stored BARE -- `{\"decision\": …}` rather than
+          `{\"result\": {\"decision\": …}}` -- so YAML.md's one idiom to learn was
+          honoured by every step kind except the two whose entire purpose is to
+          be read afterwards. Merging the output into runs.context was only half
+          the fix; without the nesting `{{steps.officer.result}}` still resolves
+          to nothing.
       - name: and it reaches runs.context, where every template reads from
         sql: "select context ? 'officer' from workflow.runs where id=(select run_id from ctx)"
         is: "true"
         because: >-
-          THIS IS THE FINDING. `complete_task` merges a task's output into
-          runs.context; `signal_task` and `promote_due_timers` set status,
-          output and completed_at and merge nothing. So {{steps.<signal>.…}}
-          resolves to nothing, the acting step fails with `template
-          'steps.officer.result' resolved to nothing`, and the whole point of a
-          human-in-the-loop workflow -- act on what they said -- is unreachable
-          from the document. Exactly failure-modes.md §5's shape: a property of
-          a state transition fixed at the one site that hurt, with the other
-          paths that perform the same transition left behind. The same paragraph
-          already records `now()` reopening this way twice.
+          WAS THE FINDING, fixed by `workflow.merge_step_context()`.
+          `complete_task` merged a task's output into runs.context and
+          `signal_task`/`promote_due_timers` merged nothing, so
+          {{steps.<signal>.…}} resolved to nothing and the acting step failed
+          with `template 'steps.officer.result' resolved to nothing` -- the
+          whole point of a human-in-the-loop workflow, unreachable from the
+          document. Exactly failure-modes.md §5's shape: a property of a state
+          transition fixed at the one site that hurt, with the other paths that
+          perform it left behind, in the paragraph that already records `now()`
+          reopening this way twice. The merge is now one function with three
+          callers, so the enumeration is a grep rather than a memory.
       - name: so the acting step runs rather than failing
         sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='land'"
         is: "done"
@@ -1036,7 +1133,7 @@ scenarios:
       select workflow.signal_task((select run_id from ctx),'officer','{"d":2}'::jsonb);
     check:
       - name: the first answer is the one kept
-        sql: "select output->>'d' from workflow.tasks where run_id=(select run_id from ctx) and step_key='officer'"
+        sql: "select output#>>'{result,d}' from workflow.tasks where run_id=(select run_id from ctx) and step_key='officer'"
         is: "1"
         because: "the second UPDATE matches nothing because the status is no longer waiting_external -- if it matched, the recorded decision would be whichever click landed last"
       - name: and the successor ran exactly once
@@ -1050,7 +1147,6 @@ scenarios:
     asks: "Wait an hour before asking anyone."
     mechanism: "schema.sql §21i autorun_sql_steps -- a timer's delay_seconds is applied to run_after"
     catches: [inert-feature, trigger-on-untaken-transition, silent-success]
-    status: open-defect
     claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":[]}'
     setup: |
       select workflow.define_yaml($y$
@@ -1073,19 +1169,17 @@ scenarios:
         sql: "select round(extract(epoch from (run_after - now()))) from workflow.tasks where run_id=(select run_id from ctx) and kind='timer'"
         gt: "3000"
         because: >-
-          THIS IS THE FINDING. `delay_seconds` is applied by
-          `autorun_sql_steps`, which is `after update of status` and fires only
-          on the transition INTO ready. A timer that is a ROOT step is INSERTED
-          already ready, so the trigger never sees it, `run_after` stays at
-          now(), and the next `promote_due_timers()` fires it immediately. The
-          cooling-off period is zero and every task is `done`. It is
-          failure-modes.md §5's own entry -- "a trigger that fires only on the
-          transition you did not take" -- reopened at the timer branch of the
-          same trigger, and it fails the quiet way round: not a step that never
-          starts, but a wait that never waits. hitl-08b shows the non-root case
-          working, which is why nothing noticed;
-          `dev/examples/08-wait.sql` ages `run_after` by hand before promoting
-          and so demonstrates a mechanism it is standing in for.
+          WAS THE FINDING, fixed by `workflow.apply_timer_delay()` and an AFTER
+          INSERT trigger beside the existing update path. `delay_seconds` was
+          applied only by `autorun_sql_steps`, which is `after update of status`
+          -- and a root timer is INSERTED already ready by mark_roots_ready, so
+          the trigger never saw it, `run_after` stayed at now(), and
+          `timer: 3600` waited zero seconds with every task `done`.
+          failure-modes.md §5's own "trigger that fires only on the transition
+          you did not take", reopened at the timer branch of that same trigger
+          and failing the quiet way round: not a step that never starts, but a
+          wait that never waits. hitl-08b holds the non-root case, which kept
+          working throughout and is why nothing noticed.
       - name: so a tick does not fire it
         sql: "select workflow.promote_due_timers()"
         is: "0"
@@ -1592,51 +1686,58 @@ scenarios:
 
   - id: upload-13
     category: upload
-    title: A span key the parser spelled differently is dropped in silence
+    title: A span key the parser spelled differently is refused, not dropped
     asks: "My parser emits start_char. Did the spans land?"
-    mechanism: "content.record_chunks -- reads start_offset / end_offset from each chunk object"
+    mechanism: "content.record_chunks -- reads start_offset/end_offset and refuses any other key"
     catches: [silent-success, undocumented-contract]
-    status: open-defect
     role: app_owner
     setup: |
       create temp table up as select content.register_upload(
           'pv-reports','sha256:ev-upload-13','pv','psur/g.pdf',100,'application/pdf',
           'PSUR G',null,null,'{}'::jsonb,'ev-psur-g') as rid;
-      -- The spelling `dev/examples/05-upload.sql` uses, verbatim.
-      create temp table n as select content.record_chunks((select rid from up), $j$[
-        {"ordinal":0,"content":"Hepatic injury reports rose in the period.","start_char":0,"end_char":42}
-      ]$j$::jsonb) as recorded;
+      select content.record_chunks((select rid from up), $j$[
+        {"ordinal":0,"content":"same text","start_offset":7,"end_offset":42}
+      ]$j$::jsonb);
     check:
-      - name: the call reports success
-        sql: "select recorded::text from n"
-        is: "1"
-        because: "this is the half that works, and it is what makes the next check a silent failure rather than a loud one"
-      - name: and the span it was given is on the row
-        sql: "select coalesce(start_offset::text,'(null)') from content.resource_chunks where resource_id=(select rid from up)"
-        is: "0"
+      - name: the wrong spelling is refused, by name
+        sql: |
+          select content.record_chunks((select rid from up), $j$[
+            {"ordinal":0,"content":"Hepatic injury reports rose in the period.",
+             "start_char":0,"end_char":42}
+          ]$j$::jsonb)
+        raises: "start_char"
         because: >-
-          THIS IS THE FINDING, and it is live in a published example.
-          `record_chunks` reads `start_offset`/`end_offset` and ignores every
-          other key. `dev/examples/05-upload.sql` -- whose output is quoted on
-          the `Ten things, worked through` docs page under the heading "what the
-          parser produced, WITH SPANS BACK INTO THE SOURCE" -- passes
-          `start_char`/`end_char`. Every span it records is NULL, the call
-          returns the chunk count, and the example reads as a demonstration of
-          a feature it is not exercising. Two halves: the example is wrong, and
-          `record_chunks` accepts an unrecognised key rather than refusing it,
-          which is failure-modes.md §6's "a deserialiser silently drops keys it
-          does not know" one layer down from the YAML compiler that already
-          learned to refuse them. A parser author gets a green count and an
-          uncitable corpus.
-      - name: and the correct spelling does land
+          WAS THE FINDING, and it was live in a published example.
+          `record_chunks` reads `start_offset`/`end_offset` and used to ignore
+          every other key, so `dev/examples/05-upload.sql` -- whose output is
+          quoted on the `Ten things, worked through` docs page under the heading
+          "what the parser produced, WITH SPANS BACK INTO THE SOURCE" -- recorded
+          NULL for every span while returning the chunk count. The example read
+          as a demonstration of a feature it was not exercising, and a parser
+          author following it got a green count and an uncitable corpus.
+          failure-modes.md §6's "a deserialiser silently drops keys it does not
+          know", one layer below the YAML compiler that already refuses an
+          unknown step key for exactly this reason.
+      - name: and the refusal names the spelling that works
+        sql: |
+          select content.record_chunks((select rid from up), $j$[
+            {"ordinal":0,"content":"x","start_char":0}
+          ]$j$::jsonb)
+        raises: "start_offset"
+        because: "a refusal that does not carry the remedy sends the author to the schema; the whole cost of this defect was that nobody knew which key to write"
+      - name: the refused call did not destroy what was already there
+        sql: "select count(*) from content.resource_chunks where resource_id=(select rid from up)"
+        is: "1"
+        because: "record_chunks DELETEs before it inserts, so a refusal raised AFTER the delete would destroy a resource's chunks in the name of protecting them. The chunk recorded in setup is still there, which is the only way to tell the check runs before anything is touched"
+      # Recorded in setup rather than inside the check: a function that INSERTs
+      # and a SELECT that reads the row back are two statements, and within one
+      # the outer select uses a snapshot taken before the insert.
+      - name: and the correct spelling lands the span
         sql: |
           select (select start_offset::text from content.resource_chunks
-                   where resource_id = (select rid from up))
-          from (select content.record_chunks((select rid from up), $j$[
-                  {"ordinal":0,"content":"same text","start_offset":7,"end_offset":42}
-                ]$j$::jsonb)) z
+                    where resource_id = (select rid from up) and ordinal = 0)
         is: "7"
-        because: "the mechanism is right; only the contract is under-stated -- so the fix is a refusal and a corrected example, not a schema change"
+        because: "the mechanism was always right; only the contract was under-stated, so the fix is a refusal and a corrected example rather than a schema change"
 
 # =============================================================================
 # FILE TO GRAPH -- a document arrives and the world model grows.
@@ -2820,43 +2921,72 @@ scenarios:
 
   - id: qs-19
     category: query-surface
-    title: A JSON argument written as a quoted string arrives as a scalar
+    title: A JSON argument written as a quoted string is refused while you are authoring
     asks: "Why does my batch step say 'cannot extract elements from a scalar'?"
-    mechanism: "workflow.resolve_args -- a literal is passed through with the type YAML gave it"
+    mechanism: "workflow.lint_spec -- the step_functions allow-list already holds the declared argument types"
     catches: [undocumented-contract, silent-template]
-    status: open-doc
     role: app_owner
-    setup: |
-      select workflow.define_yaml($y$
-      name: ev_qs19
-      steps:
-        - id: land
-          sql:
-            function: land_registry_records
-            args: ['[{"registry":"eudra","ref":"r9"}]']
-      $y$);
-      create temp table ctx as
-        select workflow.start_workflow('ev_qs19','{}'::jsonb) as run_id;
     check:
-      - name: the step failed at run time, not at authoring time
-        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='land'"
-        is: "failed"
-        because: "this half is right -- the failure is loud, and its message is Postgres's own"
-      - name: and the error explains what to write instead
-        sql: "select error->>'error' from workflow.tasks where run_id=(select run_id from ctx) and step_key='land'"
-        matches: "args|jsonb|list|quoted"
+      - name: refused at define time, not on the third task of a run
+        sql: |
+          select workflow.define_yaml($y$
+          name: ev_qs19
+          steps:
+            - id: land
+              sql:
+                function: land_registry_records
+                args: ['[{"registry":"eudra","ref":"r9"}]']
+          $y$)
+        raises: "quoted JSON string"
         because: >-
-          THE FINDING, and it is a message rather than a mechanism.
-          `args: ['[{...}]']` is a JSON *string*; the step function takes jsonb
-          and gets a scalar, and the run fails with `cannot extract elements
-          from a scalar` -- true, and about a value the author cannot see. The
-          correct spelling is a real YAML list (`args:` then `- [{...}]`), which
-          coll-12 uses. YAML.md documents type preservation for whole-string
-          REFERENCES and says nothing about literals, so the natural thing to
-          type is the wrong one and the error names neither the argument nor the
-          remedy. `lint_spec` has the registered arg types and could refuse this
-          while the author is still looking at the document.
-
+          WAS THE FINDING, fixed in `lint_spec`. `args: ['[{…}]']` is a JSON
+          *string*; a step function declared `jsonb` received a scalar and the
+          run failed at dispatch with Postgres's own `cannot extract elements
+          from a scalar` -- true, and about a value the author cannot see,
+          naming neither the argument nor the remedy. YAML.md documents type
+          preservation for whole-string REFERENCES and says nothing about
+          literals, so the natural thing to type was the wrong one.
+      - name: and the refusal says what to write instead
+        sql: |
+          select workflow.define_yaml($y$
+          name: ev_qs19b
+          steps:
+            - id: land
+              sql:
+                function: land_registry_records
+                args: ['[{"registry":"eudra","ref":"r9"}]']
+          $y$)
+        raises: "real YAML list"
+        because: "the correct spelling is a list rather than a quoted string, and a lint that refuses without saying so just moves the guessing earlier"
+      - name: a TEMPLATE in the same position is not refused
+        sql: |
+          select workflow.lint_spec($s${"steps":[
+            {"key":"land","kind":"sql","queue":"none",
+             "input":{"function":"land_registry_records",
+                      "args":["{{steps.fetch.result}}"]}}
+          ]}$s$::jsonb)::text
+        unmatches: "quoted JSON string"
+        because: >-
+          The first version of this rule matched on the leading brace and
+          refused the shipped `ask_uploads` workflow at install time, because
+          `p8ql_vec`'s vector argument is `{{steps.retrieve__embed.result}}` --
+          which starts with `{` and resolves at dispatch to a real array. A lint
+          firing on a document the collection itself ships is the loudest
+          possible version of being wrong, and this check is what keeps the
+          narrowing honest.
+      - name: and the correct spelling still compiles
+        sql: |
+          select (workflow.define_yaml($y$
+          name: ev_qs19c
+          steps:
+            - id: land
+              sql:
+                function: land_registry_records
+                args:
+                  - [{registry: eudra, ref: r1}]
+          $y$)) is not null
+        is: "true"
+        because: "a rule that refuses the wrong spelling and the right one is not a rule, it is an outage"
   - id: qs-20
     category: query-surface
     title: A resolved value that looks like a template is data, not an instruction
@@ -3350,7 +3480,6 @@ scenarios:
     asks: "How does a worker know the queue is empty?"
     mechanism: "workflow.claim_task -- `returns workflow.tasks`, not `returns setof`"
     catches: [undocumented-contract, silent-success]
-    status: open-defect
     role: app_owner
     check:
       - name: nothing is actually claimed
@@ -3361,17 +3490,17 @@ scenarios:
         sql: "select count(*) from workflow.claim_task('a-queue-with-nothing-in-it','w1')"
         is: "0"
         because: >-
-          THE FINDING. `claim_task` is declared `returns workflow.tasks`, so an
-          empty queue produces exactly one row with every column NULL and
-          `found` true. A worker written the obvious way -- `row =
-          claim_task(q, id); if row: work(row)` -- treats an empty queue as a
-          task arriving, on the single most-called function in the worker
-          contract, and `spec.md` §4 documents the signature with no note that
-          emptiness is spelled this way. `setof workflow.tasks` returning zero
-          rows says it in the type. It is the same shape USAGE.md records for
-          `lookup_many`'s LEFT JOIN and resolves the same way: "rows is
-          non-empty, and a miss is indistinguishable from a hit to anything
-          that does not inspect the fields."
+          WAS THE FINDING, fixed by declaring it `returns setof
+          workflow.tasks`. `returns workflow.tasks` cannot express "nothing to
+          claim": `return null` is one row with every column NULL and `found`
+          true, so a worker written the obvious way -- claim, and work the row
+          if you got one -- treated an empty queue as a task arriving, on the
+          most-called function in the worker contract. The reference worker
+          defends against it (`task_id = row[0] if row else None`), which is
+          evidence the trap was known at the call site and never fixed at the
+          source. Same shape USAGE.md records for `lookup_many`'s LEFT JOIN:
+          "rows is non-empty, and a miss is indistinguishable from a hit to
+          anything that does not inspect the fields."
 
   - id: recov-14
     category: recovery

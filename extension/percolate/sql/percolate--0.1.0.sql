@@ -788,8 +788,31 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 
 -- Current form. It reached this shape in section 21b (Rate limiting stops being decoration.), which explains
 -- the failure that produced it. Defined here, where it is first needed.
+-- SETOF, NOT A BARE COMPOSITE, and the difference is the whole contract for an
+-- empty queue.
+--
+-- `returns workflow.tasks` cannot express "nothing to claim": `return null`
+-- from a composite-returning function is ONE ROW with every column NULL, and
+-- `found` is true. A worker written the obvious way -- claim, and work the row
+-- if you got one -- therefore treats an empty queue as a task arriving, on the
+-- most-called function in this API, and spec.md §4 documented the signature
+-- with no note that emptiness was spelled that way. The reference worker
+-- defends against it (`task_id = row[0] if row else None`), which is evidence
+-- the trap was known at the call site and never fixed at the source.
+--
+-- Same shape `ai-query-layer/USAGE.md` records for `lookup_many`'s LEFT JOIN,
+-- resolved the same way: "rows is non-empty, and a miss is indistinguishable
+-- from a hit to anything that does not inspect the fields." `setof` returning
+-- zero rows says it in the type, and matches `claim_tasks` below, which has
+-- been setof since it was written.
+--
+-- The return type changes, so this is a drop rather than a replace. Callers
+-- using `select * from claim_task(...)` are unaffected; one using
+-- `(claim_task(...)).id` now gets zero rows instead of one NULL, which is the
+-- correction.
+drop function if exists workflow.claim_task(text, text);
 create or replace function workflow.claim_task(p_queue text, p_worker_id text)
-returns workflow.tasks as $$
+returns setof workflow.tasks as $$
 declare
     t           workflow.tasks;
     v_lookahead int;
@@ -813,10 +836,12 @@ begin
                 claimed_at = now(), heartbeat_at = now(), attempts = attempts + 1
             where id = t.id
             returning * into t;
-            return t;
+            return next t;
+            return;
         end if;
     end loop;
-    return null;
+    -- Nothing claimable: no rows, rather than one row of nulls.
+    return;
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
@@ -849,9 +874,10 @@ $$ language sql;
 -- superseded copies that behave correctly right up until somebody fixes one of
 -- them -- so it is delegated rather than duplicated. It stays for callers
 -- written against the old name; new callers use claim_task.
+drop function if exists workflow.claim_task_rate_limited(text, text);
 create or replace function workflow.claim_task_rate_limited(p_queue text, p_worker_id text)
-returns workflow.tasks as $$
-    select workflow.claim_task(p_queue, p_worker_id);
+returns setof workflow.tasks as $$
+    select * from workflow.claim_task(p_queue, p_worker_id);
 $$ language sql;
 
 -- THE LEASE FENCE (§23). Returns null when the caller may act on the task, or
@@ -938,6 +964,53 @@ begin
     where id = p_task_id and status = 'running'
     returning not cancel_requested into v_ok;
     return coalesce(v_ok, false);
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- A task's output reaching runs.context is a property of the TRANSITION INTO
+-- `done`, not of complete_task -- and writing it inline in complete_task is how
+-- it became a property of complete_task alone. `signal_task` and
+-- `promote_due_timers` mark a task done too and merged nothing, so
+-- {{steps.<a signal step>.result}} resolved to nothing and the acting step
+-- failed with a template its author had written correctly. The whole second
+-- half of a human-in-the-loop workflow -- act on what the person said -- was
+-- unreachable from the document, and `dev/examples/08-wait.sql` did not notice
+-- because it waits, resumes, and never reads the payload.
+--
+-- failure-modes.md §5 already names this shape ("when a correction applies to a
+-- property of a state transition, enumerate every path that performs that
+-- transition") and records it reopening three times for `now()` -- at these
+-- same two call sites. So the merge is a function with three callers rather
+-- than a statement with one, and the enumeration is `grep merge_step_context`.
+-- CALL THIS BEFORE THE STATUS TRANSITION, NEVER AFTER. A `sql` successor
+-- auto-runs inside the statement that marks it ready (failure-modes.md §1, "an
+-- aggregate over a partial set"), so a merge performed after the UPDATE is a
+-- merge the successor never sees -- it reads runs.context one statement too
+-- early and gets nothing. complete_task has always merged first; the first
+-- version of the signal and timer fixes merged after, and the acting step
+-- still failed with `template 'steps.officer.result' resolved to nothing`
+-- while the context ended up perfectly correct. Order is the whole fix here.
+create or replace function workflow.merge_step_context(p_task_id uuid, p_output jsonb)
+returns void as $$
+declare t workflow.tasks;
+begin
+    select * into t from workflow.tasks where id = p_task_id;
+    if not found then
+        return;
+    end if;
+    -- Matrix children deliberately do NOT write into runs.context: one JSONB
+    -- column rewritten in full per completion is quadratic write amplification
+    -- at fan-out scale, and matrix_outputs() is the handle-and-reader version
+    -- of the same thing. Carried here rather than left at the one call site
+    -- that had it, so the three paths cannot disagree about that either.
+    if t.matrix_parent_id is null then
+        update workflow.runs r
+        set context = context || jsonb_build_object(t.step_key, p_output),
+            updated_at = now()
+        where r.id = t.run_id;
+    else
+        update workflow.runs set updated_at = now() where id = t.run_id;
+    end if;
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
@@ -1054,13 +1127,7 @@ begin
         return;
     end if;
 
-    if t.matrix_parent_id is null then
-        update workflow.runs r
-        set context = context || jsonb_build_object(t.step_key, v_out), updated_at = now()
-        where r.id = t.run_id;
-    else
-        update workflow.runs set updated_at = now() where id = t.run_id;
-    end if;
+    perform workflow.merge_step_context(p_task_id, v_out);
 
     update workflow.tasks set status = 'done', output = v_out,
         completed_at = clock_timestamp()
@@ -1235,10 +1302,31 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- before everything that ran after it -- because a NULL sorts first.
 create or replace function workflow.signal_task(p_run_id uuid, p_signal text, p_payload jsonb)
 returns void as $$
-    update workflow.tasks
-    set status = 'done', output = p_payload, completed_at = clock_timestamp()
-    where run_id = p_run_id and wait_signal = p_signal and status = 'waiting_external';
-$$ language sql;
+declare r record;
+begin
+    -- The rows are selected, merged, and only then transitioned -- see the note
+    -- on merge_step_context. Doing it in one UPDATE ... RETURNING loop reads
+    -- better and releases the successor before its input exists.
+    for r in
+        select id from workflow.tasks
+        where run_id = p_run_id and wait_signal = p_signal
+          and status = 'waiting_external'
+        for update
+    loop
+        -- NESTED UNDER `result`, like every other kind. YAML.md states the rule
+        -- generally -- "{{steps.<id>.result}} is the one idiom to learn" -- and
+        -- `signal` was the kind that stored the payload bare, so the documented
+        -- spelling resolved to nothing on the one step whose entire purpose is
+        -- to be read afterwards.
+        perform workflow.merge_step_context(
+            r.id, jsonb_build_object('result', p_payload));
+        update workflow.tasks
+        set status = 'done', output = jsonb_build_object('result', p_payload),
+            completed_at = clock_timestamp()
+        where id = r.id;
+    end loop;
+end;
+$$ language plpgsql;
 
 -- REPLACED by integration-rbac.sql (e), for the same reason and with the same
 -- consequence as signal_task above: that version checks the caller's authority
@@ -1511,14 +1599,28 @@ $$ language plpgsql;
 -- first under `order by completed_at desc`, so a timer inside a saga group was
 -- compensated before everything that ran after it.
 create or replace function workflow.promote_due_timers() returns int as $$
-    with due as (
-        update workflow.tasks set status = 'done', output = '{"fired": true}'::jsonb,
-            completed_at = clock_timestamp()
+declare r record; v_n int := 0;
+begin
+    for r in
+        select id from workflow.tasks
         where kind = 'timer' and status = 'ready' and run_after <= now()
-        returning id
-    )
-    select count(*)::int from due;
-$$ language sql;
+        for update skip locked
+    loop
+        -- `result` again: a timer was the second kind whose output did not
+        -- honour the one idiom, so {{steps.<a timer>.result.fired}} was
+        -- unreadable on a step that is otherwise trivially readable. Merged
+        -- before the transition, for the reason merge_step_context states.
+        perform workflow.merge_step_context(
+            r.id, '{"result": {"fired": true}}'::jsonb);
+        update workflow.tasks set status = 'done',
+            output = '{"result": {"fired": true}}'::jsonb,
+            completed_at = clock_timestamp()
+        where id = r.id;
+        v_n := v_n + 1;
+    end loop;
+    return v_n;
+end;
+$$ language plpgsql;
 -- select cron.schedule('promote-timers', '*/10 seconds', $$select workflow.promote_due_timers()$$);
 
 -- ------------------------------------------------------------
@@ -2044,10 +2146,15 @@ $$ language plpgsql;
 --
 -- A third mode -- `scoped`, where a statement runs under the run owner's
 -- identity so RLS applies -- is the one that would make this safe as a
--- production default, and it is deliberately not built: it needs an execution
--- identity that survives a scheduled run whose owner has left the company,
--- which is a decision rather than a function. roadmap.md carries it with the
--- trigger that would promote it.
+-- production default, and it cannot be built here. Tried: Postgres refuses
+-- `SET ROLE` anywhere inside a SECURITY DEFINER call stack, and
+-- execute_sql_step must be SECURITY DEFINER because it writes task rows --
+-- `cannot set parameter "role" within security-definer function`. Replaying
+-- the claims without the role switch changes nothing, because an owner
+-- bypasses RLS whatever the claims say. So scoping needs the statement
+-- executed OUTSIDE this call stack: the worker claiming it, or a loopback
+-- connection. roadmap.md §6 carries both routes, what each costs, and the
+-- trigger -- a second tenant sharing a deployment.
 --
 -- The registry does not go away and is not deprecated. It keeps the two jobs it
 -- was always better at than gatekeeping: a per-function timeout, and a
@@ -2348,6 +2455,58 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- Re-entry is safe: execute_sql_step() moves the row to 'running' before doing
 -- any work, so the recursive fire sees a non-ready row and stops. A chain of
 -- sql steps runs to completion through ordinary cascade.
+-- A timer's delay is a property of BECOMING READY, and for a root timer that
+-- happens at INSERT -- the one transition the autorun trigger below cannot see.
+--
+-- mark_roots_ready is a BEFORE INSERT trigger that rewrites `status` in the NEW
+-- row, so a timer with no `needs:` is inserted already `ready` and no UPDATE
+-- ever fires. `delay_seconds` was therefore stored on the task and applied to
+-- nothing: run_after stayed at now(), the next promote_due_timers() fired it,
+-- and `timer: 3600` as a document's first step waited zero seconds with every
+-- task ending `done` and the run `completed`. A cooling-off period that does
+-- not cool off, reported as success.
+--
+-- Same class as the ON UPDATE ONLY note below -- "a trigger that fires only on
+-- the transition you did not take" -- failing the quiet way round: not a step
+-- that never starts, but a wait that never waits. `dev/examples/08-wait.sql`
+-- ages run_after by hand before promoting, which reads as a testing
+-- convenience and was in fact a workaround for this, in the file whose job is
+-- to demonstrate that timers work.
+--
+-- A function with two callers rather than a second copy of the arithmetic:
+-- two paths that must agree about a policy and agree only by coincidence is
+-- how this collection keeps re-finding the same bug.
+create or replace function workflow.apply_timer_delay(p_task_id uuid)
+returns void as $$
+    update workflow.tasks
+    set run_after = clock_timestamp()
+                  + ((input->>'delay_seconds')::numeric * interval '1 second')
+    where id = p_task_id and kind = 'timer' and (input ? 'delay_seconds');
+$$ language sql;
+
+-- Unconditional, where the old inline form skipped a row whose run_after was
+-- already in the future. That guard is what would let the INSERT stamp below
+-- win over the later readiness stamp for a NON-root timer, measuring its delay
+-- from the run's start rather than from when it became ready -- the property
+-- the old comment claimed and the new insert path would otherwise remove.
+create or replace function workflow.apply_timer_delay_on_insert() returns trigger as $$
+begin
+    perform workflow.apply_timer_delay(new.id);
+    return null;
+end;
+$$ language plpgsql;
+
+-- Only a timer, and only one inserted already ready. Every other kind stays
+-- strictly on the update path for the reason the next comment gives: during
+-- start_workflow's two-pass construction the graph is not yet valid, so an
+-- insert-time autorun would EXECUTE the whole workflow in arbitrary order.
+-- Stamping a column is not executing, which is why this one is safe and those
+-- are not.
+create trigger trg_apply_timer_delay
+    after insert on workflow.tasks
+    for each row when (new.kind = 'timer' and new.status = 'ready')
+    execute function workflow.apply_timer_delay_on_insert();
+
 -- Current form. It reached this shape in section 21i (Timers and sub-workflows start themselves.), which explains
 -- the failure that produced it. Defined here, where it is first needed.
 create or replace function workflow.autorun_sql_steps() returns trigger as $$
@@ -2361,12 +2520,8 @@ begin
             perform workflow.start_child_workflow(
                 new.id, new.input->>'workflow',
                 coalesce(new.input->'input', '{}'::jsonb));
-        elsif new.kind = 'timer' and (new.input ? 'delay_seconds') then
-            -- Measured from readiness, not from the run's start.
-            update workflow.tasks
-            set run_after = clock_timestamp()
-                          + ((new.input->>'delay_seconds')::numeric * interval '1 second')
-            where id = new.id and run_after <= clock_timestamp();
+        elsif new.kind = 'timer' then
+            perform workflow.apply_timer_delay(new.id);
         end if;
     end if;
     return null;
@@ -5642,6 +5797,19 @@ alone -- cancelling it is a no-op, not an error.$c$;
 -- register the function" impossible, which is a real and reasonable order.
 -- ============================================================
 
+-- Does this text parse as a JSON array or object? A predicate rather than an
+-- inline cast, because the only way to ask Postgres is to try it and catch the
+-- failure, and an exception block inside the lint's own loop would be a third
+-- level of nesting around one boolean.
+create or replace function workflow.parses_as_json_container(p_text text)
+returns boolean as $$
+begin
+    return jsonb_typeof(p_text::jsonb) in ('array', 'object');
+exception when others then
+    return false;
+end;
+$$ language plpgsql immutable;
+
 create or replace function workflow.lint_spec(p_spec jsonb)
 returns table(step_key text, severity text, detail text) as $$
 declare
@@ -5686,6 +5854,63 @@ begin
                 severity := 'warning';
                 detail := 'p8ql could not be checked: ' || sqlerrm;
                 return next;
+            end;
+        end if;
+
+        -- (a2) a jsonb argument written as a QUOTED JSON STRING.
+        --
+        -- `args: ['[{"a":1}]']` is a JSON string, not an array. It reaches a
+        -- step function declared `jsonb` as a scalar and the run fails at
+        -- dispatch with Postgres's own `cannot extract elements from a scalar`
+        -- -- true, and about a value the author cannot see, naming neither the
+        -- argument nor the remedy. YAML.md documents type preservation for
+        -- whole-string REFERENCES and says nothing about literals, so the
+        -- natural thing to type is the wrong one.
+        --
+        -- The allow-list already holds the declared argument types, so this is
+        -- answerable while the author is still looking at the document rather
+        -- than on the third task of a run.
+        if v_step->>'kind' = 'sql' and v_step->'input' ? 'function' then
+            declare
+                v_types text[]; v_arg jsonb; v_i int := 0; v_txt text;
+            begin
+                select arg_types into v_types from workflow.step_functions
+                 where name = v_step->'input'->>'function';
+                for v_arg in
+                    select * from jsonb_array_elements(
+                        coalesce(v_step->'input'->'args', '[]'::jsonb))
+                loop
+                    v_i := v_i + 1;
+                    if v_types is not null and v_types[v_i] = 'jsonb'
+                       and jsonb_typeof(v_arg) = 'string' then
+                        v_txt := ltrim(v_arg #>> '{}');
+                        -- A TEMPLATE IS NOT A LITERAL, and forgetting that made
+                        -- the first version of this rule refuse the shipped
+                        -- `ask_uploads` workflow at install time: p8ql_vec's
+                        -- vector argument is
+                        -- '{{steps.retrieve__embed.result}}', which starts with
+                        -- '{' and resolves at dispatch to a real array. A lint
+                        -- firing on a document the collection itself ships is
+                        -- the loudest possible version of being wrong, so this
+                        -- is written to be sure rather than suspicious: skip
+                        -- anything holding a reference, and flag only text that
+                        -- actually parses as a JSON array or object.
+                        if v_txt not like '%{{%'
+                           and left(v_txt, 1) in ('[', '{')
+                           and workflow.parses_as_json_container(v_txt) then
+                            severity := 'error';
+                            detail := format(
+                                'argument %s of %s is declared jsonb and was '
+                                'written as a quoted JSON string, so it arrives '
+                                'as a scalar and the step fails at dispatch with '
+                                '"cannot extract elements from a scalar". Write '
+                                'it as a real YAML list or mapping under args:, '
+                                'not inside quotes.',
+                                v_i, v_step->'input'->>'function');
+                            return next;
+                        end if;
+                    end if;
+                end loop;
             end;
         end if;
 
@@ -8201,6 +8426,7 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 
 create or replace function workflow.signal_task(p_run_id uuid, p_signal text, p_payload jsonb)
 returns void as $$
+declare r record;
 begin
     -- Was equally open, and only *appeared* safe when tested because
     -- wait_signal was never populated (schema.sql's start_workflow bug, fixed
@@ -8215,9 +8441,31 @@ begin
     -- any deployment that loads both -- which is every deployment, since both
     -- files are in build-sql.py's ORDER. The fix was first applied to the
     -- superseded copy and had no effect; dev/currency.sh is what noticed.
-    update workflow.tasks
-    set status = 'done', output = p_payload, completed_at = clock_timestamp()
-    where run_id = p_run_id and wait_signal = p_signal and status = 'waiting_external';
+    -- The output is merged into runs.context for the same reason complete_task
+    -- merges it: {{steps.<id>.…}} reads from there, so a person's decision that
+    -- stops here is a decision no downstream step can act on. Kept in step with
+    -- schema.sql's copy through the shared workflow.merge_step_context(), which
+    -- is the point of that function existing -- the previous shape had the
+    -- merge written once, at one of the three sites that mark a task done.
+    -- Selected, merged, then transitioned -- and the ORDER is the fix, not an
+    -- arrangement. A `sql` successor auto-runs inside the statement that marks
+    -- it ready, so merging afterwards leaves runs.context perfectly correct and
+    -- the acting step already failed. schema.sql's merge_step_context carries
+    -- the full note; this is the copy that actually runs.
+    for r in
+        select id from workflow.tasks
+        where run_id = p_run_id and wait_signal = p_signal
+          and status = 'waiting_external'
+        for update
+    loop
+        -- Nested under `result`: the one idiom every other step kind honours.
+        perform workflow.merge_step_context(
+            r.id, jsonb_build_object('result', p_payload));
+        update workflow.tasks
+        set status = 'done', output = jsonb_build_object('result', p_payload),
+            completed_at = clock_timestamp()
+        where id = r.id;
+    end loop;
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
@@ -8494,8 +8742,13 @@ grant execute on function workflow.encoding_drift() to worker;
 --   FUZZY LOOKUP     -> pg_trgm over node_keys ONLY, never the data plane
 --   SEMANTIC         -> pgvector over the embedding table for one entity type
 --   GRAPH depth 1    -> GRAPH_TABLE over the property graph below
---   GRAPH depth n>1  -> WITH RECURSIVE over edges (PG19 has no quantified
---                       path patterns; confirmed empirically, brief.md §3)
+--   GRAPH depth n>1  -> WITH RECURSIVE over edges. PG19 has no quantified path
+--                       patterns -- confirmed empirically, brief.md §3 -- but
+--                       that is a narrower fact than "GRAPH_TABLE cannot do
+--                       depth n": a FIXED-LENGTH chain works and carries the
+--                       relations and weights (see graph_walk's note). The
+--                       recursion is kept because the walk is depth-unbounded
+--                       when called directly; the equivalence is asserted.
 --   SEARCH           -> RRF fusion of the lexical and semantic ranks
 --   <ordinary SQL>   -> read-only passthrough, SECURITY INVOKER (brief.md §3);
 --                       no keyword, recognised by how the statement starts
@@ -9186,10 +9439,38 @@ create or replace function aiq.graph_neighbors(
     limit p_limit;
 $$ language sql stable;
 
--- GRAPH depth n>1: WITH RECURSIVE. PG19's GRAPH_TABLE rejects quantified path
--- patterns outright ("element pattern quantifier is not supported") -- not a
--- beta gap to wait out, deliberately scoped out of the initial implementation
--- (brief.md §3). Depth- AND degree-capped, per graph-identity.md "Non-goals".
+-- GRAPH depth n>1: WITH RECURSIVE. Depth- AND degree-capped, per
+-- graph-identity.md "Non-goals".
+--
+-- THE REASON THIS IS NOT SQL/PGQ IS NARROWER THAN IT USED TO SAY, and the
+-- distinction is worth keeping straight because "we have property graphs, use
+-- them" is the right instinct. What PG19 rejects is a QUANTIFIER:
+--
+--     match (a is node) -[e is related]->{1,3} (b is node)
+--     ERROR:  element pattern quantifier is not supported
+--
+-- A FIXED-LENGTH chain is accepted, and carries everything this function
+-- accumulates -- both endpoints, each hop's relation and each hop's weight:
+--
+--     match (a is node) -[e1 is related]- (b is node) -[e2 is related]- (c is node)
+--     columns (a.id, c.id, e1.relation, e2.relation, e1.weight, e2.weight)
+--
+-- So a BOUNDED walk is expressible as a union of N fixed-length patterns, and
+-- the dialect's own ceiling is 5. What is not expressible that way is this
+-- function's actual contract: it takes p_depth with no upper bound, for the
+-- deliberate deep analytic walk the dialect refuses and sends here, and N
+-- patterns cannot be written for an N nobody knows until the call. Generating
+-- them as dynamic SQL would trade a readable recursion for an EXECUTE, and the
+-- cycle guard -- `not nx.id = any(w.seen)` -- would become a quadratic pile of
+-- pairwise inequalities per pattern.
+--
+-- The cost of keeping two mechanisms is that they must agree, which is
+-- failure-modes.md §5's "a second mechanism for a solved problem" waiting to
+-- happen: graph_neighbors answers depth 1 through GRAPH_TABLE and this answers
+-- it through recursion, and nothing compared them. So the equivalence is now
+-- ASSERTED rather than assumed -- `dev/tests/evals/scenarios.yaml` iter-01 and
+-- iter-13 run the same bounded walk both ways and require the node sets to
+-- match, which is the check that makes keeping both honest.
 drop function if exists aiq.graph_walk(uuid, int, text, int);
 create or replace function aiq.graph_walk(
     p_node_id uuid, p_depth int default 2, p_relation text default null,
@@ -12486,6 +12767,38 @@ begin
     select r.org_id into v_org from content.resources r where r.id = p_resource_id;
     if not found or not content.may_access_org(v_org) then
         raise exception 'no such resource, or it is not yours';
+    end if;
+
+    -- AN UNRECOGNISED KEY IS REFUSED, not ignored, and this cost two published
+    -- pages. The writer reads `start_offset`/`end_offset`; the cookbook and a
+    -- recipe both passed `start_char`/`end_char`, the insert quietly took NULL
+    -- for both columns, and the call returned the chunk count -- so a page
+    -- headed "with spans back into the source" demonstrated a feature it was
+    -- not exercising, and anyone who copied it got a corpus whose passages
+    -- cannot be quoted back to the page they came from.
+    --
+    -- This is failure-modes.md §6's dropped-key class ("a deserialiser silently
+    -- drops keys it does not know") one layer below the YAML compiler, which
+    -- already refuses an unknown key on a step and lists the valid ones for
+    -- exactly this reason. `ordinal` is accepted and ignored -- ordering comes
+    -- from array position, and the examples all carry it -- but it is named
+    -- here rather than left to look like a typo.
+    if exists (
+        select 1 from jsonb_array_elements(p_chunks) c,
+                      jsonb_object_keys(c) k
+         where k not in ('content','token_count','start_offset','end_offset',
+                         'metadata','ordinal'))
+    then
+        raise exception
+            'unknown key(s) in a chunk: %. A chunk may carry content, '
+            'token_count, start_offset, end_offset, metadata and ordinal. '
+            'Spans are start_offset/end_offset -- start_char/end_char is the '
+            'usual mistake and used to be accepted and dropped, which recorded '
+            'no span and reported success.',
+            (select string_agg(distinct k, ', ' order by k)
+               from jsonb_array_elements(p_chunks) c, jsonb_object_keys(c) k
+              where k not in ('content','token_count','start_offset','end_offset',
+                              'metadata','ordinal'));
     end if;
 
     delete from content.resource_chunks where resource_id = p_resource_id;
