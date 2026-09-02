@@ -956,6 +956,14 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- transition") and records it reopening three times for `now()` -- at these
 -- same two call sites. So the merge is a function with three callers rather
 -- than a statement with one, and the enumeration is `grep merge_step_context`.
+-- CALL THIS BEFORE THE STATUS TRANSITION, NEVER AFTER. A `sql` successor
+-- auto-runs inside the statement that marks it ready (failure-modes.md §1, "an
+-- aggregate over a partial set"), so a merge performed after the UPDATE is a
+-- merge the successor never sees -- it reads runs.context one statement too
+-- early and gets nothing. complete_task has always merged first; the first
+-- version of the signal and timer fixes merged after, and the acting step
+-- still failed with `template 'steps.officer.result' resolved to nothing`
+-- while the context ended up perfectly correct. Order is the whole fix here.
 create or replace function workflow.merge_step_context(p_task_id uuid, p_output jsonb)
 returns void as $$
 declare t workflow.tasks;
@@ -1270,24 +1278,26 @@ create or replace function workflow.signal_task(p_run_id uuid, p_signal text, p_
 returns void as $$
 declare r record;
 begin
+    -- The rows are selected, merged, and only then transitioned -- see the note
+    -- on merge_step_context. Doing it in one UPDATE ... RETURNING loop reads
+    -- better and releases the successor before its input exists.
     for r in
-        with signalled as (
-            update workflow.tasks
-            set status = 'done',
-                -- NESTED UNDER `result`, like every other kind. YAML.md states
-                -- the rule generally -- "{{steps.<id>.result}} is the one idiom
-                -- to learn" -- and `signal` was the kind that stored the
-                -- payload bare, so the documented spelling resolved to nothing
-                -- on the one step whose entire purpose is to be read.
-                output = jsonb_build_object('result', p_payload),
-                completed_at = clock_timestamp()
-            where run_id = p_run_id and wait_signal = p_signal
-              and status = 'waiting_external'
-            returning id, output)
-        select id, output from signalled
+        select id from workflow.tasks
+        where run_id = p_run_id and wait_signal = p_signal
+          and status = 'waiting_external'
+        for update
     loop
-        -- And into runs.context, or nothing downstream can read the decision.
-        perform workflow.merge_step_context(r.id, r.output);
+        -- NESTED UNDER `result`, like every other kind. YAML.md states the rule
+        -- generally -- "{{steps.<id>.result}} is the one idiom to learn" -- and
+        -- `signal` was the kind that stored the payload bare, so the documented
+        -- spelling resolved to nothing on the one step whose entire purpose is
+        -- to be read afterwards.
+        perform workflow.merge_step_context(
+            r.id, jsonb_build_object('result', p_payload));
+        update workflow.tasks
+        set status = 'done', output = jsonb_build_object('result', p_payload),
+            completed_at = clock_timestamp()
+        where id = r.id;
     end loop;
 end;
 $$ language plpgsql;
@@ -1566,18 +1576,20 @@ create or replace function workflow.promote_due_timers() returns int as $$
 declare r record; v_n int := 0;
 begin
     for r in
-        with due as (
-            -- `result` again: a timer was the second kind whose output did not
-            -- honour the one idiom, so {{steps.<a timer>.result.fired}} was
-            -- unreadable on a step that is otherwise trivially readable.
-            update workflow.tasks set status = 'done',
-                output = '{"result": {"fired": true}}'::jsonb,
-                completed_at = clock_timestamp()
-            where kind = 'timer' and status = 'ready' and run_after <= now()
-            returning id, output)
-        select id, output from due
+        select id from workflow.tasks
+        where kind = 'timer' and status = 'ready' and run_after <= now()
+        for update skip locked
     loop
-        perform workflow.merge_step_context(r.id, r.output);
+        -- `result` again: a timer was the second kind whose output did not
+        -- honour the one idiom, so {{steps.<a timer>.result.fired}} was
+        -- unreadable on a step that is otherwise trivially readable. Merged
+        -- before the transition, for the reason merge_step_context states.
+        perform workflow.merge_step_context(
+            r.id, '{"result": {"fired": true}}'::jsonb);
+        update workflow.tasks set status = 'done',
+            output = '{"result": {"fired": true}}'::jsonb,
+            completed_at = clock_timestamp()
+        where id = r.id;
         v_n := v_n + 1;
     end loop;
     return v_n;

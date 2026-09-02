@@ -910,7 +910,6 @@ scenarios:
     asks: "Record what they decided."
     mechanism: "YAML.md § Templates -- every step nests its payload under `result`, read with {{steps.<id>.result}}"
     catches: [silent-success, never-executed, unreachable-capability]
-    status: open-defect
     claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":[]}'
     setup: |
       select workflow.define_yaml($y$
@@ -927,24 +926,31 @@ scenarios:
       select workflow.signal_task((select run_id from ctx),'officer',
              '{"signal":"sig-114","decision":"escalate","by":"safety.officer"}'::jsonb);
     check:
-      - name: the payload IS on the task
-        sql: "select output->>'decision' from workflow.tasks where run_id=(select run_id from ctx) and step_key='officer'"
+      - name: the payload is on the task, nested under `result` like every kind
+        sql: "select output#>>'{result,decision}' from workflow.tasks where run_id=(select run_id from ctx) and step_key='officer'"
         is: "escalate"
-        because: "the signal itself works; what follows is about where the output goes, not whether it exists"
+        because: >-
+          It used to be stored BARE -- `{\"decision\": …}` rather than
+          `{\"result\": {\"decision\": …}}` -- so YAML.md's one idiom to learn was
+          honoured by every step kind except the two whose entire purpose is to
+          be read afterwards. Merging the output into runs.context was only half
+          the fix; without the nesting `{{steps.officer.result}}` still resolves
+          to nothing.
       - name: and it reaches runs.context, where every template reads from
         sql: "select context ? 'officer' from workflow.runs where id=(select run_id from ctx)"
         is: "true"
         because: >-
-          THIS IS THE FINDING. `complete_task` merges a task's output into
-          runs.context; `signal_task` and `promote_due_timers` set status,
-          output and completed_at and merge nothing. So {{steps.<signal>.…}}
-          resolves to nothing, the acting step fails with `template
-          'steps.officer.result' resolved to nothing`, and the whole point of a
-          human-in-the-loop workflow -- act on what they said -- is unreachable
-          from the document. Exactly failure-modes.md §5's shape: a property of
-          a state transition fixed at the one site that hurt, with the other
-          paths that perform the same transition left behind. The same paragraph
-          already records `now()` reopening this way twice.
+          WAS THE FINDING, fixed by `workflow.merge_step_context()`.
+          `complete_task` merged a task's output into runs.context and
+          `signal_task`/`promote_due_timers` merged nothing, so
+          {{steps.<signal>.…}} resolved to nothing and the acting step failed
+          with `template 'steps.officer.result' resolved to nothing` -- the
+          whole point of a human-in-the-loop workflow, unreachable from the
+          document. Exactly failure-modes.md §5's shape: a property of a state
+          transition fixed at the one site that hurt, with the other paths that
+          perform it left behind, in the paragraph that already records `now()`
+          reopening this way twice. The merge is now one function with three
+          callers, so the enumeration is a grep rather than a memory.
       - name: so the acting step runs rather than failing
         sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='land'"
         is: "done"
@@ -1036,7 +1042,7 @@ scenarios:
       select workflow.signal_task((select run_id from ctx),'officer','{"d":2}'::jsonb);
     check:
       - name: the first answer is the one kept
-        sql: "select output->>'d' from workflow.tasks where run_id=(select run_id from ctx) and step_key='officer'"
+        sql: "select output#>>'{result,d}' from workflow.tasks where run_id=(select run_id from ctx) and step_key='officer'"
         is: "1"
         because: "the second UPDATE matches nothing because the status is no longer waiting_external -- if it matched, the recorded decision would be whichever click landed last"
       - name: and the successor ran exactly once
@@ -1050,7 +1056,6 @@ scenarios:
     asks: "Wait an hour before asking anyone."
     mechanism: "schema.sql §21i autorun_sql_steps -- a timer's delay_seconds is applied to run_after"
     catches: [inert-feature, trigger-on-untaken-transition, silent-success]
-    status: open-defect
     claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":[]}'
     setup: |
       select workflow.define_yaml($y$
@@ -1073,19 +1078,17 @@ scenarios:
         sql: "select round(extract(epoch from (run_after - now()))) from workflow.tasks where run_id=(select run_id from ctx) and kind='timer'"
         gt: "3000"
         because: >-
-          THIS IS THE FINDING. `delay_seconds` is applied by
-          `autorun_sql_steps`, which is `after update of status` and fires only
-          on the transition INTO ready. A timer that is a ROOT step is INSERTED
-          already ready, so the trigger never sees it, `run_after` stays at
-          now(), and the next `promote_due_timers()` fires it immediately. The
-          cooling-off period is zero and every task is `done`. It is
-          failure-modes.md §5's own entry -- "a trigger that fires only on the
-          transition you did not take" -- reopened at the timer branch of the
-          same trigger, and it fails the quiet way round: not a step that never
-          starts, but a wait that never waits. hitl-08b shows the non-root case
-          working, which is why nothing noticed;
-          `dev/examples/08-wait.sql` ages `run_after` by hand before promoting
-          and so demonstrates a mechanism it is standing in for.
+          WAS THE FINDING, fixed by `workflow.apply_timer_delay()` and an AFTER
+          INSERT trigger beside the existing update path. `delay_seconds` was
+          applied only by `autorun_sql_steps`, which is `after update of status`
+          -- and a root timer is INSERTED already ready by mark_roots_ready, so
+          the trigger never saw it, `run_after` stayed at now(), and
+          `timer: 3600` waited zero seconds with every task `done`.
+          failure-modes.md §5's own "trigger that fires only on the transition
+          you did not take", reopened at the timer branch of that same trigger
+          and failing the quiet way round: not a step that never starts, but a
+          wait that never waits. hitl-08b holds the non-root case, which kept
+          working throughout and is why nothing noticed.
       - name: so a tick does not fire it
         sql: "select workflow.promote_due_timers()"
         is: "0"
@@ -1592,51 +1595,58 @@ scenarios:
 
   - id: upload-13
     category: upload
-    title: A span key the parser spelled differently is dropped in silence
+    title: A span key the parser spelled differently is refused, not dropped
     asks: "My parser emits start_char. Did the spans land?"
-    mechanism: "content.record_chunks -- reads start_offset / end_offset from each chunk object"
+    mechanism: "content.record_chunks -- reads start_offset/end_offset and refuses any other key"
     catches: [silent-success, undocumented-contract]
-    status: open-defect
     role: app_owner
     setup: |
       create temp table up as select content.register_upload(
           'pv-reports','sha256:ev-upload-13','pv','psur/g.pdf',100,'application/pdf',
           'PSUR G',null,null,'{}'::jsonb,'ev-psur-g') as rid;
-      -- The spelling `dev/examples/05-upload.sql` uses, verbatim.
-      create temp table n as select content.record_chunks((select rid from up), $j$[
-        {"ordinal":0,"content":"Hepatic injury reports rose in the period.","start_char":0,"end_char":42}
-      ]$j$::jsonb) as recorded;
+      select content.record_chunks((select rid from up), $j$[
+        {"ordinal":0,"content":"same text","start_offset":7,"end_offset":42}
+      ]$j$::jsonb);
     check:
-      - name: the call reports success
-        sql: "select recorded::text from n"
-        is: "1"
-        because: "this is the half that works, and it is what makes the next check a silent failure rather than a loud one"
-      - name: and the span it was given is on the row
-        sql: "select coalesce(start_offset::text,'(null)') from content.resource_chunks where resource_id=(select rid from up)"
-        is: "0"
+      - name: the wrong spelling is refused, by name
+        sql: |
+          select content.record_chunks((select rid from up), $j$[
+            {"ordinal":0,"content":"Hepatic injury reports rose in the period.",
+             "start_char":0,"end_char":42}
+          ]$j$::jsonb)
+        raises: "start_char"
         because: >-
-          THIS IS THE FINDING, and it is live in a published example.
-          `record_chunks` reads `start_offset`/`end_offset` and ignores every
-          other key. `dev/examples/05-upload.sql` -- whose output is quoted on
-          the `Ten things, worked through` docs page under the heading "what the
-          parser produced, WITH SPANS BACK INTO THE SOURCE" -- passes
-          `start_char`/`end_char`. Every span it records is NULL, the call
-          returns the chunk count, and the example reads as a demonstration of
-          a feature it is not exercising. Two halves: the example is wrong, and
-          `record_chunks` accepts an unrecognised key rather than refusing it,
-          which is failure-modes.md §6's "a deserialiser silently drops keys it
-          does not know" one layer down from the YAML compiler that already
-          learned to refuse them. A parser author gets a green count and an
-          uncitable corpus.
-      - name: and the correct spelling does land
+          WAS THE FINDING, and it was live in a published example.
+          `record_chunks` reads `start_offset`/`end_offset` and used to ignore
+          every other key, so `dev/examples/05-upload.sql` -- whose output is
+          quoted on the `Ten things, worked through` docs page under the heading
+          "what the parser produced, WITH SPANS BACK INTO THE SOURCE" -- recorded
+          NULL for every span while returning the chunk count. The example read
+          as a demonstration of a feature it was not exercising, and a parser
+          author following it got a green count and an uncitable corpus.
+          failure-modes.md §6's "a deserialiser silently drops keys it does not
+          know", one layer below the YAML compiler that already refuses an
+          unknown step key for exactly this reason.
+      - name: and the refusal names the spelling that works
+        sql: |
+          select content.record_chunks((select rid from up), $j$[
+            {"ordinal":0,"content":"x","start_char":0}
+          ]$j$::jsonb)
+        raises: "start_offset"
+        because: "a refusal that does not carry the remedy sends the author to the schema; the whole cost of this defect was that nobody knew which key to write"
+      - name: the refused call did not destroy what was already there
+        sql: "select count(*) from content.resource_chunks where resource_id=(select rid from up)"
+        is: "1"
+        because: "record_chunks DELETEs before it inserts, so a refusal raised AFTER the delete would destroy a resource's chunks in the name of protecting them. The chunk recorded in setup is still there, which is the only way to tell the check runs before anything is touched"
+      # Recorded in setup rather than inside the check: a function that INSERTs
+      # and a SELECT that reads the row back are two statements, and within one
+      # the outer select uses a snapshot taken before the insert.
+      - name: and the correct spelling lands the span
         sql: |
           select (select start_offset::text from content.resource_chunks
-                   where resource_id = (select rid from up))
-          from (select content.record_chunks((select rid from up), $j$[
-                  {"ordinal":0,"content":"same text","start_offset":7,"end_offset":42}
-                ]$j$::jsonb)) z
+                    where resource_id = (select rid from up) and ordinal = 0)
         is: "7"
-        because: "the mechanism is right; only the contract is under-stated -- so the fix is a refusal and a corrected example, not a schema change"
+        because: "the mechanism was always right; only the contract was under-stated, so the fix is a refusal and a corrected example rather than a schema change"
 
 # =============================================================================
 # FILE TO GRAPH -- a document arrives and the world model grows.
@@ -2820,43 +2830,72 @@ scenarios:
 
   - id: qs-19
     category: query-surface
-    title: A JSON argument written as a quoted string arrives as a scalar
+    title: A JSON argument written as a quoted string is refused while you are authoring
     asks: "Why does my batch step say 'cannot extract elements from a scalar'?"
-    mechanism: "workflow.resolve_args -- a literal is passed through with the type YAML gave it"
+    mechanism: "workflow.lint_spec -- the step_functions allow-list already holds the declared argument types"
     catches: [undocumented-contract, silent-template]
-    status: open-doc
     role: app_owner
-    setup: |
-      select workflow.define_yaml($y$
-      name: ev_qs19
-      steps:
-        - id: land
-          sql:
-            function: land_registry_records
-            args: ['[{"registry":"eudra","ref":"r9"}]']
-      $y$);
-      create temp table ctx as
-        select workflow.start_workflow('ev_qs19','{}'::jsonb) as run_id;
     check:
-      - name: the step failed at run time, not at authoring time
-        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='land'"
-        is: "failed"
-        because: "this half is right -- the failure is loud, and its message is Postgres's own"
-      - name: and the error explains what to write instead
-        sql: "select error->>'error' from workflow.tasks where run_id=(select run_id from ctx) and step_key='land'"
-        matches: "args|jsonb|list|quoted"
+      - name: refused at define time, not on the third task of a run
+        sql: |
+          select workflow.define_yaml($y$
+          name: ev_qs19
+          steps:
+            - id: land
+              sql:
+                function: land_registry_records
+                args: ['[{"registry":"eudra","ref":"r9"}]']
+          $y$)
+        raises: "quoted JSON string"
         because: >-
-          THE FINDING, and it is a message rather than a mechanism.
-          `args: ['[{...}]']` is a JSON *string*; the step function takes jsonb
-          and gets a scalar, and the run fails with `cannot extract elements
-          from a scalar` -- true, and about a value the author cannot see. The
-          correct spelling is a real YAML list (`args:` then `- [{...}]`), which
-          coll-12 uses. YAML.md documents type preservation for whole-string
-          REFERENCES and says nothing about literals, so the natural thing to
-          type is the wrong one and the error names neither the argument nor the
-          remedy. `lint_spec` has the registered arg types and could refuse this
-          while the author is still looking at the document.
-
+          WAS THE FINDING, fixed in `lint_spec`. `args: ['[{…}]']` is a JSON
+          *string*; a step function declared `jsonb` received a scalar and the
+          run failed at dispatch with Postgres's own `cannot extract elements
+          from a scalar` -- true, and about a value the author cannot see,
+          naming neither the argument nor the remedy. YAML.md documents type
+          preservation for whole-string REFERENCES and says nothing about
+          literals, so the natural thing to type was the wrong one.
+      - name: and the refusal says what to write instead
+        sql: |
+          select workflow.define_yaml($y$
+          name: ev_qs19b
+          steps:
+            - id: land
+              sql:
+                function: land_registry_records
+                args: ['[{"registry":"eudra","ref":"r9"}]']
+          $y$)
+        raises: "real YAML list"
+        because: "the correct spelling is a list rather than a quoted string, and a lint that refuses without saying so just moves the guessing earlier"
+      - name: a TEMPLATE in the same position is not refused
+        sql: |
+          select workflow.lint_spec($s${"steps":[
+            {"key":"land","kind":"sql","queue":"none",
+             "input":{"function":"land_registry_records",
+                      "args":["{{steps.fetch.result}}"]}}
+          ]}$s$::jsonb)::text
+        unmatches: "quoted JSON string"
+        because: >-
+          The first version of this rule matched on the leading brace and
+          refused the shipped `ask_uploads` workflow at install time, because
+          `p8ql_vec`'s vector argument is `{{steps.retrieve__embed.result}}` --
+          which starts with `{` and resolves at dispatch to a real array. A lint
+          firing on a document the collection itself ships is the loudest
+          possible version of being wrong, and this check is what keeps the
+          narrowing honest.
+      - name: and the correct spelling still compiles
+        sql: |
+          select (workflow.define_yaml($y$
+          name: ev_qs19c
+          steps:
+            - id: land
+              sql:
+                function: land_registry_records
+                args:
+                  - [{registry: eudra, ref: r1}]
+          $y$)) is not null
+        is: "true"
+        because: "a rule that refuses the wrong spelling and the right one is not a rule, it is an outage"
   - id: qs-20
     category: query-surface
     title: A resolved value that looks like a template is data, not an instruction
@@ -3350,7 +3389,6 @@ scenarios:
     asks: "How does a worker know the queue is empty?"
     mechanism: "workflow.claim_task -- `returns workflow.tasks`, not `returns setof`"
     catches: [undocumented-contract, silent-success]
-    status: open-defect
     role: app_owner
     check:
       - name: nothing is actually claimed
@@ -3361,17 +3399,17 @@ scenarios:
         sql: "select count(*) from workflow.claim_task('a-queue-with-nothing-in-it','w1')"
         is: "0"
         because: >-
-          THE FINDING. `claim_task` is declared `returns workflow.tasks`, so an
-          empty queue produces exactly one row with every column NULL and
-          `found` true. A worker written the obvious way -- `row =
-          claim_task(q, id); if row: work(row)` -- treats an empty queue as a
-          task arriving, on the single most-called function in the worker
-          contract, and `spec.md` §4 documents the signature with no note that
-          emptiness is spelled this way. `setof workflow.tasks` returning zero
-          rows says it in the type. It is the same shape USAGE.md records for
-          `lookup_many`'s LEFT JOIN and resolves the same way: "rows is
-          non-empty, and a miss is indistinguishable from a hit to anything
-          that does not inspect the fields."
+          WAS THE FINDING, fixed by declaring it `returns setof
+          workflow.tasks`. `returns workflow.tasks` cannot express "nothing to
+          claim": `return null` is one row with every column NULL and `found`
+          true, so a worker written the obvious way -- claim, and work the row
+          if you got one -- treated an empty queue as a task arriving, on the
+          most-called function in the worker contract. The reference worker
+          defends against it (`task_id = row[0] if row else None`), which is
+          evidence the trap was known at the call site and never fixed at the
+          source. Same shape USAGE.md records for `lookup_many`'s LEFT JOIN:
+          "rows is non-empty, and a miss is indistinguishable from a hit to
+          anything that does not inspect the fields."
 
   - id: recov-14
     category: recovery

@@ -274,16 +274,24 @@ begin
     -- schema.sql's copy through the shared workflow.merge_step_context(), which
     -- is the point of that function existing -- the previous shape had the
     -- merge written once, at one of the three sites that mark a task done.
+    -- Selected, merged, then transitioned -- and the ORDER is the fix, not an
+    -- arrangement. A `sql` successor auto-runs inside the statement that marks
+    -- it ready, so merging afterwards leaves runs.context perfectly correct and
+    -- the acting step already failed. schema.sql's merge_step_context carries
+    -- the full note; this is the copy that actually runs.
     for r in
-        with signalled as (
-            update workflow.tasks
-            set status = 'done', output = p_payload, completed_at = clock_timestamp()
-            where run_id = p_run_id and wait_signal = p_signal
-              and status = 'waiting_external'
-            returning id, output)
-        select id, output from signalled
+        select id from workflow.tasks
+        where run_id = p_run_id and wait_signal = p_signal
+          and status = 'waiting_external'
+        for update
     loop
-        perform workflow.merge_step_context(r.id, r.output);
+        -- Nested under `result`: the one idiom every other step kind honours.
+        perform workflow.merge_step_context(
+            r.id, jsonb_build_object('result', p_payload));
+        update workflow.tasks
+        set status = 'done', output = jsonb_build_object('result', p_payload),
+            completed_at = clock_timestamp()
+        where id = r.id;
     end loop;
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
