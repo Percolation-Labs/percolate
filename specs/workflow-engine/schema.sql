@@ -2018,10 +2018,15 @@ $$ language plpgsql;
 --
 -- A third mode -- `scoped`, where a statement runs under the run owner's
 -- identity so RLS applies -- is the one that would make this safe as a
--- production default, and it is deliberately not built: it needs an execution
--- identity that survives a scheduled run whose owner has left the company,
--- which is a decision rather than a function. roadmap.md carries it with the
--- trigger that would promote it.
+-- production default, and it cannot be built here. Tried: Postgres refuses
+-- `SET ROLE` anywhere inside a SECURITY DEFINER call stack, and
+-- execute_sql_step must be SECURITY DEFINER because it writes task rows --
+-- `cannot set parameter "role" within security-definer function`. Replaying
+-- the claims without the role switch changes nothing, because an owner
+-- bypasses RLS whatever the claims say. So scoping needs the statement
+-- executed OUTSIDE this call stack: the worker claiming it, or a loopback
+-- connection. roadmap.md §6 carries both routes, what each costs, and the
+-- trigger -- a second tenant sharing a deployment.
 --
 -- The registry does not go away and is not deprecated. It keeps the two jobs it
 -- was always better at than gatekeeping: a per-function timeout, and a
