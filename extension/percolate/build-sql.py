@@ -103,6 +103,7 @@ ORDER = [
     ("ai-query-layer/schema.sql",               "nodes, keys, edges, the seven query modes, embedding spaces"),
     ("ai-query-layer/integration-rbac.sql",     "org scoping, api views, the SECURITY INVOKER read path"),
     ("ai-query-layer/integration-workflow.sql", "p8ql as a workflow step"),
+    ("ai-query-layer/graph-algorithms.sql",     "the compiled graph algorithms, wrapped -- after integration-rbac, because it resolves names through aiq.lookup and must inherit whatever authorization that carries"),
     ("world-model-ingestion/schema.sql",        "the content plane: channels, files, resources, chunks"),
     ("world-model-ingestion/integration.sql",   "registers the corpus, projects documents into the graph"),
     ("agentic/schema.sql",                      "agents, sessions, runs, messages -- the conversation plane"),

@@ -210,6 +210,16 @@ struct Scratch {
     parent: Vec<u32>,
     stamp: Vec<u32>,
     epoch: u32,
+    /// The backward frontier of a bidirectional search. A second set of
+    /// arrays rather than a second call, because the two searches have to be
+    /// live at the same time -- that is the whole mechanism.
+    dist_b: Vec<f64>,
+    parent_b: Vec<u32>,
+    stamp_b: Vec<u32>,
+    epoch_b: u32,
+    /// Which terminal's territory a node fell into, for the Voronoi step of
+    /// the connecting-subgraph approximation.
+    region: Vec<u32>,
 }
 
 impl Scratch {
@@ -221,10 +231,15 @@ impl Scratch {
             parent: vec![u32::MAX; n],
             stamp: vec![0; n],
             epoch: 0,
+            dist_b: vec![0.0; n],
+            parent_b: vec![u32::MAX; n],
+            stamp_b: vec![0; n],
+            epoch_b: 0,
+            region: vec![u32::MAX; n],
         }
     }
     fn bytes(&self) -> usize {
-        self.p.len() * 8 * 3 + self.parent.len() * 4 + self.stamp.len() * 4
+        self.p.len() * 8 * 4 + self.parent.len() * 8 + self.stamp.len() * 8 + self.region.len() * 4
     }
     /// A fresh generation of the stamp, which is how a call "clears" the
     /// arrays without touching them. Wrapping is handled by re-zeroing, which
@@ -238,6 +253,16 @@ impl Scratch {
             self.epoch = 1;
         }
         self.epoch
+    }
+    fn bump_b(&mut self) -> u32 {
+        self.epoch_b = self.epoch_b.wrapping_add(1);
+        if self.epoch_b == 0 {
+            for x in self.stamp_b.iter_mut() {
+                *x = 0;
+            }
+            self.epoch_b = 1;
+        }
+        self.epoch_b
     }
 }
 
@@ -279,6 +304,11 @@ struct Snapshot {
     reach: Option<Reach>,
     labels: Option<Labels>,
     community: Option<Vec<u32>>,
+    /// Sizes, computed once when the partition is. Looking a size up by
+    /// scanning the label vector is O(n) per call, which turns "what community
+    /// is this node in" -- asked once per node when checking a partition
+    /// against a known one -- into an O(n^2) sweep.
+    community_sizes: Option<Map<u32, u32>>,
     community_ms: f64,
 }
 
@@ -493,7 +523,14 @@ fn build() -> Snapshot {
         ic[e.dst as usize] += 1;
     }
 
-    let built_at = Spi::get_one::<String>("select now()::text").unwrap_or(None).unwrap_or_default();
+    // clock_timestamp(), not now(): now() is the transaction's start time, so
+    // two snapshots built in one transaction -- which is exactly what happens
+    // when a session changes tenant mid-transaction -- reported the same
+    // built_at while holding different graphs. The tenancy test caught it, and
+    // the field it caught it with is the one an operator would have trusted.
+    let built_at = Spi::get_one::<String>("select clock_timestamp()::text")
+        .unwrap_or(None)
+        .unwrap_or_default();
     Snapshot {
         fingerprint: fingerprint(),
         ids,
@@ -509,6 +546,7 @@ fn build() -> Snapshot {
         reach: None,
         labels: None,
         community: None,
+        community_sizes: None,
         community_ms: 0.0,
     }
 }
@@ -569,16 +607,35 @@ impl PartialOrd for QItem {
 /// the questions that are.
 #[inline]
 fn nbrs(g: &Snapshot, v: u32, directed: bool, f: &Filter, buf: &mut Vec<(u32, f32, u32)>) -> u64 {
+    nbrs_dir(g, v, true, directed, f, buf)
+}
+
+/// Neighbours in one direction of travel. `forward` is the direction the
+/// caller is walking; on an undirected graph both directions are the same
+/// union, and the parameter costs nothing. It exists for the backward half of
+/// a bidirectional search on a directed graph, which must follow in-edges or
+/// it is searching a different graph from the forward half.
+#[inline]
+fn nbrs_dir(
+    g: &Snapshot,
+    v: u32,
+    forward: bool,
+    directed: bool,
+    f: &Filter,
+    buf: &mut Vec<(u32, f32, u32)>,
+) -> u64 {
     buf.clear();
     let mut scanned = 0u64;
-    for &eid in g.out(v) {
-        scanned += 1;
-        let e = &g.edges[eid as usize];
-        if f.keep(e) {
-            buf.push((e.dst, e.w, eid));
+    if forward || !directed {
+        for &eid in g.out(v) {
+            scanned += 1;
+            let e = &g.edges[eid as usize];
+            if f.keep(e) {
+                buf.push((e.dst, e.w, eid));
+            }
         }
     }
-    if !directed {
+    if !forward || !directed {
         for &eid in g.inc(v) {
             scanned += 1;
             let e = &g.edges[eid as usize];
@@ -601,67 +658,6 @@ fn nbrs(g: &Snapshot, v: u32, directed: bool, f: &Filter, buf: &mut Vec<(u32, f3
 fn cost_of(w: f32) -> f64 {
     let c = (w as f64).clamp(1.0e-6, 1.0);
     1.0 - c.ln()
-}
-
-/// Single-source Dijkstra over the snapshot, writing into scratch.
-///
-/// Returns the stamp epoch it wrote under; `sc.stamp[v] == epoch` means `v`
-/// was settled, `sc.dist[v]` is its distance and `sc.parent[v]` the edge it
-/// arrived by. Stops on budget, on `stop_at`, or when the heap empties.
-#[allow(clippy::too_many_arguments)]
-fn dijkstra(
-    g: &Snapshot,
-    sc: &mut Scratch,
-    sources: &[u32],
-    stop_at: Option<u32>,
-    banned_edges: &Set<u32>,
-    banned_nodes: &Set<u32>,
-    directed: bool,
-    f: &Filter,
-    b: &mut Budget,
-) -> u32 {
-    let epoch = sc.bump();
-    let mut heap: BinaryHeap<QItem> = BinaryHeap::new();
-    let mut buf: Vec<(u32, f32, u32)> = Vec::new();
-    for &s in sources {
-        if banned_nodes.contains(&s) {
-            continue;
-        }
-        sc.stamp[s as usize] = epoch;
-        sc.dist[s as usize] = 0.0;
-        sc.parent[s as usize] = u32::MAX;
-        heap.push(QItem(0.0, s));
-    }
-    let mut settled: Set<u32> = set();
-    while let Some(QItem(d, v)) = heap.pop() {
-        if settled.contains(&v) {
-            continue;
-        }
-        if sc.stamp[v as usize] == epoch && d > sc.dist[v as usize] {
-            continue;
-        }
-        settled.insert(v);
-        if Some(v) == stop_at {
-            return epoch;
-        }
-        let scanned = nbrs(g, v, directed, f, &mut buf);
-        if !b.spend(scanned) {
-            break;
-        }
-        for &(u, w, eid) in buf.iter() {
-            if banned_nodes.contains(&u) || banned_edges.contains(&eid) {
-                continue;
-            }
-            let nd = d + cost_of(w);
-            if sc.stamp[u as usize] != epoch || nd < sc.dist[u as usize] {
-                sc.stamp[u as usize] = epoch;
-                sc.dist[u as usize] = nd;
-                sc.parent[u as usize] = eid;
-                heap.push(QItem(nd, u));
-            }
-        }
-    }
-    epoch
 }
 
 /// Walk parent edges back from `v` to a source. Returns node ordinals from
@@ -689,6 +685,136 @@ fn unwind(g: &Snapshot, sc: &Scratch, epoch: u32, v: u32) -> Option<(Vec<u32>, V
     nodes.reverse();
     eids.reverse();
     Some((nodes, eids))
+}
+
+/// Bidirectional Dijkstra.
+///
+/// Added after measuring: the single-source version answered a random pair on
+/// a 400k-edge graph in 148 ms at the median and exhausted its budget on one
+/// call in five, because an unreachable or distant target makes a one-sided
+/// search settle the entire component before it can say so. Two frontiers
+/// meeting in the middle settle roughly the square root of that volume, and
+/// the stopping rule -- top(forward) + top(backward) >= best-so-far -- is what
+/// makes the answer still exact rather than merely fast.
+#[allow(clippy::too_many_arguments)]
+fn bidi(
+    g: &Snapshot,
+    sc: &mut Scratch,
+    src: u32,
+    dst: u32,
+    banned_edges: &Set<u32>,
+    banned_nodes: &Set<u32>,
+    directed: bool,
+    f: &Filter,
+    b: &mut Budget,
+) -> Option<(Vec<u32>, Vec<u32>, f64)> {
+    if src == dst {
+        return Some((vec![src], Vec::new(), 0.0));
+    }
+    if banned_nodes.contains(&src) || banned_nodes.contains(&dst) {
+        return None;
+    }
+    let ef = sc.bump();
+    let eb = sc.bump_b();
+    let mut hf: BinaryHeap<QItem> = BinaryHeap::new();
+    let mut hb: BinaryHeap<QItem> = BinaryHeap::new();
+    sc.stamp[src as usize] = ef;
+    sc.dist[src as usize] = 0.0;
+    sc.parent[src as usize] = u32::MAX;
+    sc.stamp_b[dst as usize] = eb;
+    sc.dist_b[dst as usize] = 0.0;
+    sc.parent_b[dst as usize] = u32::MAX;
+    hf.push(QItem(0.0, src));
+    hb.push(QItem(0.0, dst));
+    let mut done_f: Set<u32> = set();
+    let mut done_b: Set<u32> = set();
+    let mut best = f64::INFINITY;
+    let mut meet: Option<u32> = None;
+    let mut buf: Vec<(u32, f32, u32)> = Vec::new();
+
+    while !hf.is_empty() && !hb.is_empty() {
+        let tf = hf.peek().map(|q| q.0).unwrap_or(f64::INFINITY);
+        let tb = hb.peek().map(|q| q.0).unwrap_or(f64::INFINITY);
+        if tf + tb >= best {
+            break;
+        }
+        let forward = tf <= tb;
+        let (d, v) = {
+            let q = if forward { hf.pop() } else { hb.pop() }.unwrap();
+            (q.0, q.1)
+        };
+        let already = if forward { !done_f.insert(v) } else { !done_b.insert(v) };
+        if already {
+            continue;
+        }
+        let cur = if forward { sc.dist[v as usize] } else { sc.dist_b[v as usize] };
+        if d > cur {
+            continue;
+        }
+        let scanned = nbrs_dir(g, v, forward, directed, f, &mut buf);
+        if !b.spend(scanned) {
+            break;
+        }
+        for &(u, w, eid) in buf.iter() {
+            if banned_nodes.contains(&u) || banned_edges.contains(&eid) {
+                continue;
+            }
+            let nd = d + cost_of(w);
+            if forward {
+                if sc.stamp[u as usize] != ef || nd < sc.dist[u as usize] {
+                    sc.stamp[u as usize] = ef;
+                    sc.dist[u as usize] = nd;
+                    sc.parent[u as usize] = eid;
+                    hf.push(QItem(nd, u));
+                }
+                if sc.stamp_b[u as usize] == eb {
+                    let tot = nd + sc.dist_b[u as usize];
+                    if tot < best {
+                        best = tot;
+                        meet = Some(u);
+                    }
+                }
+            } else {
+                if sc.stamp_b[u as usize] != eb || nd < sc.dist_b[u as usize] {
+                    sc.stamp_b[u as usize] = eb;
+                    sc.dist_b[u as usize] = nd;
+                    sc.parent_b[u as usize] = eid;
+                    hb.push(QItem(nd, u));
+                }
+                if sc.stamp[u as usize] == ef {
+                    let tot = nd + sc.dist[u as usize];
+                    if tot < best {
+                        best = tot;
+                        meet = Some(u);
+                    }
+                }
+            }
+        }
+    }
+
+    let m = meet?;
+    let (mut nodes, mut eids) = unwind(g, sc, ef, m)?;
+    // The backward half is stored pointing at dst, so it is walked forward
+    // from the meeting point rather than reversed like the front half.
+    let mut cur = m;
+    let mut guard = 0;
+    while sc.stamp_b[cur as usize] == eb && sc.parent_b[cur as usize] != u32::MAX {
+        guard += 1;
+        if guard > 4096 {
+            return None;
+        }
+        let eid = sc.parent_b[cur as usize];
+        let e = &g.edges[eid as usize];
+        let next = if e.src == cur { e.dst } else { e.src };
+        eids.push(eid);
+        nodes.push(next);
+        cur = next;
+    }
+    if *nodes.last()? != dst {
+        return None;
+    }
+    let cost: f64 = eids.iter().map(|&e| cost_of(g.edges[e as usize].w)).sum();
+    Some((nodes, eids, cost))
 }
 
 fn path_json(g: &Snapshot, nodes: &[u32], eids: &[u32]) -> Value {
@@ -843,12 +969,8 @@ fn k_shortest(
     let empty_n: Set<u32> = set();
     let mut found: Vec<(Vec<u32>, Vec<u32>, f64)> = Vec::new();
 
-    let epoch = dijkstra(g, sc, &[src], Some(dst), &empty_e, &empty_n, directed, f, b);
-    match unwind(g, sc, epoch, dst) {
-        Some((nodes, eids)) if eids.len() <= max_hops => {
-            let c = sc.dist[dst as usize];
-            found.push((nodes, eids, c));
-        }
+    match bidi(g, sc, src, dst, &empty_e, &empty_n, directed, f, b) {
+        Some((nodes, eids, c)) if eids.len() <= max_hops => found.push((nodes, eids, c)),
         _ => return found,
     }
 
@@ -874,8 +996,8 @@ fn k_shortest(
             for &v in &root[..i] {
                 banned_n.insert(v);
             }
-            let ep = dijkstra(g, sc, &[spur], Some(dst), &banned_e, &banned_n, directed, f, b);
-            if let Some((mut nodes, mut eids)) = unwind(g, sc, ep, dst) {
+            let spur_path = bidi(g, sc, spur, dst, &banned_e, &banned_n, directed, f, b);
+            if let Some((mut nodes, mut eids, _)) = spur_path {
                 let mut full_n = root.clone();
                 full_n.extend(nodes.drain(1..));
                 let mut full_e = root_e.clone();
@@ -1069,15 +1191,17 @@ fn cliques(l: &Local, subset: &[u32], min_size: usize, b: &mut Budget) -> Vec<Ve
 // evidence, and a single path repeated is not.
 // ===========================================================================
 
+#[allow(clippy::too_many_arguments)]
 fn trust(
     g: &Snapshot,
     sc: &mut Scratch,
     seeds: &[u32],
     floor: f64,
+    top_k: usize,
     directed: bool,
     f: &Filter,
     b: &mut Budget,
-) -> Vec<(u32, f64, usize)> {
+) -> (Vec<(u32, f64, usize)>, usize) {
     let epoch = sc.bump();
     let mut heap: BinaryHeap<QItem> = BinaryHeap::new();
     let mut buf: Vec<(u32, f32, u32)> = Vec::new();
@@ -1090,10 +1214,28 @@ fn trust(
         touched.push(s);
         heap.push(QItem(0.0, s));
     }
+    // The walk settles in increasing cost, which is decreasing confidence, so
+    // the first k nodes it settles ARE the k most confident. Stopping there is
+    // exact for the ranking and turns an exploration of the component into a
+    // bounded one -- which is the difference between 277 ms with the budget
+    // exhausted on every call and a few milliseconds.
+    //
+    // A confidence floor does NOT do this, and that is the measurement that
+    // rewrote this function: on a small-world graph a floor of 0.2 and a floor
+    // of 0.05 both reached two thirds of a million nodes, because five hops of
+    // 0.65-weight edges still clears either. A floor bounds belief; only a rank
+    // bound bounds work.
+    //
+    // The margin over top_k is for the corroboration step, which can lift a
+    // node above nodes settled before it.
+    let settle_cap = (top_k * 4).max(256);
     let mut settled: Set<u32> = set();
     while let Some(QItem(d, v)) = heap.pop() {
         if !settled.insert(v) || d > sc.dist[v as usize] {
             continue;
+        }
+        if settled.len() > settle_cap {
+            break;
         }
         let scanned = nbrs(g, v, directed, f, &mut buf);
         if !b.spend(scanned) {
@@ -1115,19 +1257,27 @@ fn trust(
             }
         }
     }
-    // Corroboration, computed once over the settled set rather than during the
-    // walk: a node's support is a property of who reached it, which is not
-    // known until the walk stops.
-    let mut out: Vec<(u32, f64, usize)> = Vec::new();
-    for &v in touched.iter() {
-        if sc.stamp[v as usize] != epoch || !sc.dist[v as usize].is_finite() {
-            continue;
-        }
-        let conf = (-sc.dist[v as usize]).exp();
-        if conf < floor {
-            continue;
-        }
-        nbrs(g, v, directed, f, &mut buf);
+    // Corroboration is computed AFTER the ranking and only for the rows that
+    // will be returned. The first version computed it for every settled node,
+    // in a loop that charged nothing to the budget: on a million-node graph
+    // that second pass took longer than the walk it was annotating -- 668 ms
+    // against a 250 ms budget that reported itself exhausted, which is the
+    // worst of both, a bound that is announced and not kept. Support is a
+    // property of a row somebody reads, so it is computed for those rows.
+    let mut ranked: Vec<(u32, f64)> = touched
+        .iter()
+        .filter(|&&v| sc.stamp[v as usize] == epoch && sc.dist[v as usize].is_finite())
+        .map(|&v| (v, (-sc.dist[v as usize]).exp()))
+        .filter(|&(_, c)| c >= floor)
+        .collect();
+    let reached = ranked.len();
+    ranked.sort_by(|a, c| c.1.total_cmp(&a.1));
+    ranked.truncate(top_k);
+
+    let mut out: Vec<(u32, f64, usize)> = Vec::with_capacity(ranked.len());
+    for &(v, conf) in ranked.iter() {
+        let scanned = nbrs(g, v, directed, f, &mut buf);
+        b.spend(scanned);
         let mut support = 0usize;
         let mut none_of_them = 1.0f64;
         for &(u, w, _) in buf.iter() {
@@ -1144,7 +1294,7 @@ fn trust(
         out.push((v, combined, support));
     }
     out.sort_by(|a, c| c.1.total_cmp(&a.1));
-    out
+    (out, reached)
 }
 
 // ===========================================================================
@@ -1161,6 +1311,14 @@ fn trust(
 // relevant" but "what connects them", and no amount of ranking answers it.
 // ===========================================================================
 
+/// How far the connecting walk is allowed to spread before it gives up on the
+/// terminals it has not reached. A structural bound on top of the time budget,
+/// because the failure it prevents is not slowness: an unbounded walk on a
+/// four-million-edge graph settles the whole component and returns a partial
+/// answer anyway, having spent the entire budget proving that two of the five
+/// terminals are far apart.
+const CONNECT_SETTLE_CAP: usize = 50_000;
+
 fn connect(
     g: &Snapshot,
     sc: &mut Scratch,
@@ -1168,47 +1326,89 @@ fn connect(
     f: &Filter,
     b: &mut Budget,
 ) -> (Vec<u32>, Vec<u32>, usize) {
-    let empty_e: Set<u32> = set();
-    let empty_n: Set<u32> = set();
+    // Mehlhorn's variant, which replaced one Dijkstra per terminal after that
+    // shape took 502 ms of a 500 ms budget on every call at four million
+    // edges. Same 2-approximation, one walk: a multi-source Dijkstra labels
+    // every node with the terminal nearest it, and the shortest connection
+    // between two terminals is then found by scanning edges that cross a
+    // territory boundary -- an O(m) pass over what was settled, rather than
+    // |T| separate explorations of the same neighbourhood.
     let t = terms.len();
-    // One Dijkstra per terminal, copied out of scratch because the next one
-    // overwrites it. Bounded by |T|, which the entry point caps.
-    let mut trees: Vec<Map<u32, (f64, u32)>> = Vec::with_capacity(t);
-    for &s in terms {
-        let epoch = dijkstra(g, sc, &[s], None, &empty_e, &empty_n, false, f, b);
-        let mut m: Map<u32, (f64, u32)> = map();
-        for &u in terms {
-            if sc.stamp[u as usize] == epoch {
-                // Record the whole path back, not just the endpoint: expanding
-                // an MST edge needs every parent pointer along it.
-                let mut cur = u;
-                let mut guard = 0;
-                while sc.stamp[cur as usize] == epoch && guard < 4096 {
-                    guard += 1;
-                    m.insert(cur, (sc.dist[cur as usize], sc.parent[cur as usize]));
-                    if sc.parent[cur as usize] == u32::MAX {
-                        break;
-                    }
-                    let e = &g.edges[sc.parent[cur as usize] as usize];
-                    cur = if e.dst == cur { e.src } else { e.dst };
-                }
-            }
+    let epoch = sc.bump();
+    let mut heap: BinaryHeap<QItem> = BinaryHeap::new();
+    for (i, &v) in terms.iter().enumerate() {
+        sc.stamp[v as usize] = epoch;
+        sc.dist[v as usize] = 0.0;
+        sc.parent[v as usize] = u32::MAX;
+        sc.region[v as usize] = i as u32;
+        heap.push(QItem(0.0, v));
+    }
+    let mut settled: Set<u32> = set();
+    let mut order: Vec<u32> = Vec::new();
+    let mut buf: Vec<(u32, f32, u32)> = Vec::new();
+    while let Some(QItem(d, v)) = heap.pop() {
+        if d > sc.dist[v as usize] || !settled.insert(v) {
+            continue;
         }
-        trees.push(m);
-        if b.exhausted {
+        order.push(v);
+        if order.len() >= CONNECT_SETTLE_CAP {
             break;
+        }
+        let scanned = nbrs(g, v, false, f, &mut buf);
+        if !b.spend(scanned) {
+            break;
+        }
+        let rv = sc.region[v as usize];
+        for &(u, w, eid) in buf.iter() {
+            let nd = d + cost_of(w);
+            if sc.stamp[u as usize] != epoch || nd < sc.dist[u as usize] {
+                sc.stamp[u as usize] = epoch;
+                sc.dist[u as usize] = nd;
+                sc.parent[u as usize] = eid;
+                sc.region[u as usize] = rv;
+                heap.push(QItem(nd, u));
+            }
         }
     }
 
-    // Prim over the metric closure. Terminals the walk never reached are left
-    // out and counted, rather than silently making the answer look connected.
-    let reached = trees.len();
+    // The metric closure, read off the boundaries between territories.
+    let mut closure: Map<(u32, u32), (f64, u32)> = map();
+    for &v in order.iter() {
+        let rv = sc.region[v as usize];
+        if rv == u32::MAX {
+            continue;
+        }
+        let scanned = nbrs(g, v, false, f, &mut buf);
+        if !b.spend(scanned) {
+            break;
+        }
+        for &(u, w, eid) in buf.iter() {
+            if sc.stamp[u as usize] != epoch || !settled.contains(&u) {
+                continue;
+            }
+            let ru = sc.region[u as usize];
+            if ru == u32::MAX || ru == rv {
+                continue;
+            }
+            let cost = sc.dist[v as usize] + cost_of(w) + sc.dist[u as usize];
+            let key = (rv.min(ru), rv.max(ru));
+            match closure.get(&key) {
+                Some(&(c, _)) if c <= cost => {}
+                _ => {
+                    closure.insert(key, (cost, eid));
+                }
+            }
+        }
+    }
+
+    // Prim over the terminals. A terminal whose territory never met another's
+    // is simply not joined, and is counted rather than quietly dropped.
     let mut in_tree = vec![false; t];
-    let mut mst: Vec<(usize, usize)> = Vec::new();
     in_tree[0] = true;
+    let mut chosen: Vec<u32> = Vec::new();
     for _ in 1..t {
-        let mut best: Option<(f64, usize, usize)> = None;
-        for i in 0..t.min(reached) {
+        let mut best: Option<(f64, u32, usize)> = None;
+        for i in 0..t {
             if !in_tree[i] {
                 continue;
             }
@@ -1216,17 +1416,18 @@ fn connect(
                 if in_tree[j] {
                     continue;
                 }
-                if let Some(&(d, _)) = trees[i].get(&terms[j]) {
-                    if best.map(|(bd, _, _)| d < bd).unwrap_or(true) {
-                        best = Some((d, i, j));
+                let key = ((i as u32).min(j as u32), (i as u32).max(j as u32));
+                if let Some(&(c, eid)) = closure.get(&key) {
+                    if best.map(|(bc, _, _)| c < bc).unwrap_or(true) {
+                        best = Some((c, eid, j));
                     }
                 }
             }
         }
         match best {
-            Some((_, i, j)) => {
+            Some((_, eid, j)) => {
                 in_tree[j] = true;
-                mst.push((i, j));
+                chosen.push(eid);
             }
             None => break,
         }
@@ -1234,20 +1435,26 @@ fn connect(
 
     let mut nodes: Set<u32> = terms.iter().copied().collect();
     let mut eids: Set<u32> = set();
-    for &(i, j) in mst.iter() {
-        let mut cur = terms[j];
-        let mut guard = 0;
-        while let Some(&(_, pe)) = trees[i].get(&cur) {
-            guard += 1;
-            if pe == u32::MAX || guard > 4096 {
-                break;
+    for &eid in chosen.iter() {
+        eids.insert(eid);
+        let e = &g.edges[eid as usize];
+        // Both ends walk home to their own terminal through the parent tree.
+        for &end in [e.src, e.dst].iter() {
+            nodes.insert(end);
+            let mut cur = end;
+            let mut guard = 0;
+            while sc.stamp[cur as usize] == epoch && sc.parent[cur as usize] != u32::MAX {
+                guard += 1;
+                if guard > 4096 {
+                    break;
+                }
+                let pe = sc.parent[cur as usize];
+                eids.insert(pe);
+                let pedge = &g.edges[pe as usize];
+                let prev = if pedge.dst == cur { pedge.src } else { pedge.dst };
+                nodes.insert(prev);
+                cur = prev;
             }
-            eids.insert(pe);
-            let e = &g.edges[pe as usize];
-            let prev = if e.dst == cur { e.src } else { e.dst };
-            nodes.insert(prev);
-            nodes.insert(cur);
-            cur = prev;
         }
     }
 
@@ -1299,8 +1506,13 @@ fn connect(
 // Jaccard similarity as well -- worth having, not built here.)
 // ===========================================================================
 
-const HLL_P: usize = 4;
-const HLL_M: usize = 1 << HLL_P; // 16 registers, ~26% relative error
+// 64 registers: 16 was measured at a 16% median and 51% p95 relative error on
+// the scale fixture, which is too loose to gate a query on -- the p95 is the
+// number that decides, and half a magnitude is not a bound. 64 costs nothing
+// at rest (the registers are not kept) and four times the transient memory
+// during the build, which is the cheapest part of the index.
+const HLL_P: usize = 6;
+const HLL_M: usize = 1 << HLL_P;
 
 struct Reach {
     depth: usize,
@@ -1331,7 +1543,10 @@ fn hll_estimate(regs: &[u8]) -> f64 {
             zeros += 1;
         }
     }
-    let alpha = 0.673; // m = 16
+    // The standard bias constant for m >= 64; the small-m values (0.673 at 16,
+    // 0.697 at 32) differ enough to matter, so this is not a constant to carry
+    // over unchanged if HLL_P moves down.
+    let alpha = 0.7213 / (1.0 + 1.079 / m);
     let e = alpha * m * m / sum;
     // Linear counting below the raw estimator's usable range. Most
     // neighbourhoods in a real graph are small, so this branch is the common
@@ -1467,7 +1682,7 @@ impl Labels {
     }
 }
 
-fn build_labels(g: &Snapshot, b: &mut Budget) -> Labels {
+fn build_labels(g: &Snapshot, b: &mut Budget, max_entries: usize) -> Labels {
     let t0 = Instant::now();
     let n = g.n();
     let mut lab: Vec<Vec<(u32, u8)>> = vec![Vec::new(); n];
@@ -1487,6 +1702,14 @@ fn build_labels(g: &Snapshot, b: &mut Budget) -> Labels {
 
     for (rank, &root) in order.iter().enumerate() {
         if b.exhausted {
+            complete = false;
+            break;
+        }
+        // A second ceiling, on memory rather than time. The label set is the
+        // thing that decides whether this index is usable, and an index that
+        // needs gigabytes to answer a hop count has already failed -- better
+        // to stop and report the size than to find out by being killed.
+        if entries > max_entries {
             complete = false;
             break;
         }
@@ -1568,6 +1791,33 @@ fn build_labels(g: &Snapshot, b: &mut Budget) -> Labels {
 // this in" as a column rather than a walk. Modularity to three decimal places
 // is not what makes REPACK pay off.
 // ===========================================================================
+
+/// Newman modularity of a partition, in one pass over the edges.
+///
+/// The metric that decides whether a partition is worth having. "How big is
+/// the largest community" does not: on a graph with a hub, label propagation
+/// happily returns one community containing 91% of the nodes and several
+/// hundred singletons, which looks like a result and is not one. Q near zero
+/// says exactly that, and it says it without needing a fixture whose true
+/// communities are known.
+fn modularity(g: &Snapshot, lbl: &[u32]) -> f64 {
+    let m = g.m() as f64;
+    if m == 0.0 {
+        return 0.0;
+    }
+    let mut inside = 0.0f64;
+    let mut dsum: Map<u32, f64> = map();
+    for e in g.edges.iter() {
+        let (a, c) = (lbl[e.src as usize], lbl[e.dst as usize]);
+        if a == c {
+            inside += 1.0;
+        }
+        *dsum.entry(a).or_insert(0.0) += 1.0;
+        *dsum.entry(c).or_insert(0.0) += 1.0;
+    }
+    let m2 = 2.0 * m;
+    inside / m - dsum.values().map(|d| (d / m2) * (d / m2)).sum::<f64>()
+}
 
 fn label_prop(g: &Snapshot, iters: usize, b: &mut Budget) -> (Vec<u32>, usize, usize, f64) {
     let t0 = Instant::now();
@@ -1850,10 +2100,9 @@ fn p8_graph_trust(
     }
     let sc = scratch(g.n());
     let mut b = Budget::new(budget_ms, 0);
-    let out = trust(g, sc, &ords, floor, directed, &f, &mut b);
+    let (out, reached) = trust(g, sc, &ords, floor, k.max(0) as usize, directed, &f, &mut b);
     let rows: Vec<Value> = out
         .iter()
-        .take(k.max(0) as usize)
         .map(|&(v, c, s)| json!({
             "node_id": g.ids[v as usize].to_string(),
             "confidence": (c * 100000.0).round() / 100000.0,
@@ -1861,7 +2110,7 @@ fn p8_graph_trust(
         }))
         .collect();
     let mut meta = b.meta();
-    meta["reached"] = json!(out.len());
+    meta["reached"] = json!(reached);
     JsonB(json!({"ok": true, "unresolved": missing, "rows": rows, "meta": meta, "snapshot": snap_meta(g)}))
 }
 
@@ -1965,10 +2214,13 @@ fn p8_graph_frontier(
 
 /// Build pruned landmark labels.
 #[pg_extern]
-fn p8_graph_labels_build(budget_ms: default!(i32, 60000)) -> JsonB {
+fn p8_graph_labels_build(
+    budget_ms: default!(i32, 60000),
+    max_entries: default!(i64, 20000000),
+) -> JsonB {
     let g = snapshot(false);
     let mut b = Budget::new(budget_ms, 0);
-    let l = build_labels(g, &mut b);
+    let l = build_labels(g, &mut b, max_entries.max(0) as usize);
     let out = json!({
         "ok": true,
         "complete": l.complete,
@@ -2017,15 +2269,17 @@ fn p8_graph_communities(iters: default!(i32, 10), budget_ms: default!(i32, 60000
     let g = snapshot(false);
     let mut b = Budget::new(budget_ms, 0);
     let (lbl, count, rounds, ms) = label_prop(g, iters.clamp(1, 100) as usize, &mut b);
-    let mut sizes: Map<u32, usize> = map();
+    let q = modularity(g, &lbl);
+    let mut sizes: Map<u32, u32> = map();
     for &l in lbl.iter() {
         *sizes.entry(l).or_insert(0) += 1;
     }
-    let mut top: Vec<(u32, usize)> = sizes.into_iter().collect();
+    let mut top: Vec<(u32, u32)> = sizes.iter().map(|(&k, &v)| (k, v)).collect();
     top.sort_by_key(|&(_, s)| std::cmp::Reverse(s));
     let out = json!({
         "ok": true,
         "communities": count,
+        "modularity": (q * 10000.0).round() / 10000.0,
         "rounds": rounds,
         "build_ms": (ms * 1000.0).round() / 1000.0,
         "largest": top.iter().take(10).map(|&(_, s)| s).collect::<Vec<_>>(),
@@ -2033,6 +2287,7 @@ fn p8_graph_communities(iters: default!(i32, 10), budget_ms: default!(i32, 60000
         "snapshot": snap_meta(g)
     });
     g.community = Some(lbl);
+    g.community_sizes = Some(sizes);
     g.community_ms = ms;
     JsonB(out)
 }
@@ -2049,8 +2304,63 @@ fn p8_graph_community_of(node: Uuid) -> JsonB {
         None => JsonB(json!({"ok": false, "error": "no partition -- call p8_graph_communities() first"})),
         Some(c) => {
             let l = c[v as usize];
-            let size = c.iter().filter(|&&x| x == l).count();
+            let size = g.community_sizes.as_ref().and_then(|s| s.get(&l).copied()).unwrap_or(0);
             JsonB(json!({"ok": true, "community": l, "size": size}))
         }
     }
 }
+
+// ===========================================================================
+// §13. Deny by default
+//
+// These functions are created by a SUPERUSER-installed extension, so they
+// arrive with PUBLIC EXECUTE like every other C function -- and unlike the
+// parser, they are not pure computation over a string. The first call in a
+// backend builds an adjacency snapshot, which at four million edges is 225 MB
+// and three and a half seconds; RLS makes that not a disclosure problem, and
+// leaves it a resource one, reachable by `web_anon`.
+//
+// So the extension revokes itself. `app_owner` -- the role that owns the
+// schema half and therefore owns the wrappers -- gets it back WITH GRANT
+// OPTION, which is what lets `aiq.enable_graph_algorithms()` hand it onward
+// without a superuser being in the room. If that role does not exist, the
+// functions stay superuser-only, which is the right failure direction.
+//
+// The revoke is written against the catalog rather than a list of twelve
+// signatures on purpose: a list is a thing that goes stale one function at a
+// time, silently, in the direction of more access.
+extension_sql!(
+    r#"
+do $$
+declare r record;
+begin
+    for r in select p.oid::regprocedure as sig
+               from pg_proc p
+               join pg_namespace n on n.oid = p.pronamespace
+              where p.proname like 'p8\_graph\_%'
+                and n.nspname = current_schema()
+    loop
+        execute format('revoke execute on function %s from public', r.sig);
+        if exists (select 1 from pg_roles where rolname = 'app_owner') then
+            execute format('grant execute on function %s to app_owner with grant option', r.sig);
+        end if;
+    end loop;
+end $$;
+"#,
+    name = "graph_algorithms_deny_by_default",
+    requires = [
+        p8_graph_snapshot,
+        p8_graph_snapshot_drop,
+        p8_graph_ppr,
+        p8_graph_paths,
+        p8_graph_dense,
+        p8_graph_trust,
+        p8_graph_connect,
+        p8_graph_reach_build,
+        p8_graph_frontier,
+        p8_graph_labels_build,
+        p8_graph_distance,
+        p8_graph_communities,
+        p8_graph_community_of,
+    ],
+);

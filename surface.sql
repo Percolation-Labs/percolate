@@ -159,6 +159,19 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','function','aiq.lookup','text,boolean,integer','§7: LOOKUP / FUZZY'),
 ('ai-query-layer','function','aiq.graph_neighbors','uuid,text,integer','§7: GRAPH depth 1'),
 ('ai-query-layer','function','aiq.graph_walk','uuid,integer,text,integer','§7: GRAPH depth n>1'),
+-- The compiled algorithms, and ONLY the ones graph-algorithms.md marks SAFE.
+-- Two of the five index proposals and one of the query ones are parked on a
+-- measurement; they are deliberately absent here, because a row in this list
+-- is a promise and a parked proposal is not one.
+('ai-query-layer','function','aiq.related','text[],integer,text,integer,timestamptz,boolean','graph-algorithms.md §5.1: ranked relatedness, which a depth cap cannot express'),
+('ai-query-layer','function','aiq.graph_paths','text,text,integer,integer,integer,text,timestamptz','graph-algorithms.md §5.2: k cheapest routes -- the one read path that honours valid_to'),
+('ai-query-layer','function','aiq.graph_connect','text[],integer,text','graph-algorithms.md §5.5: the smallest subgraph joining a result set'),
+('ai-query-layer','function','aiq.graph_dense','text,integer,integer,integer,text','graph-algorithms.md §5.3: k-core and cliques, bounded before the exponential part runs'),
+('ai-query-layer','function','aiq.graph_trust','text[],double precision,integer,integer,text,timestamptz','graph-algorithms.md §5.4: how much of this rests on a model guess'),
+('ai-query-layer','function','aiq.graph_frontier','text,integer,boolean,integer','graph-algorithms.md §4.2: how big is the neighbourhood, before walking it'),
+('ai-query-layer','function','aiq.graph_snapshot','boolean','graph-algorithms.md §4.1: what adjacency THIS backend is holding'),
+('ai-query-layer','function','aiq.graph_reach_build','integer,integer','graph-algorithms.md §4.2: the sketch build, a scheduled task not a query'),
+('ai-query-layer','function','aiq.enable_graph_algorithms','name,boolean','graph-algorithms.md §11: shipped experimental means present, inert, and openable in one call'),
 ('ai-query-layer','function','aiq.semantic_in','text,vector,text,integer','§10: SEMANTIC, model-scoped -- source-qualified, per schema.sql'),
 ('ai-query-layer','function','aiq.lexical','text,text,integer','§11: TEXT'),
 ('ai-query-layer','function','aiq.search','text,text,vector,text,integer,integer','§11: SEARCH / RRF'),
