@@ -108,6 +108,10 @@ fn map<K, V>() -> Map<K, V> {
 // ===========================================================================
 
 struct Budget {
+    /// When the CALL started, which is not when the walk did. Everything a
+    /// caller waits for happens between these two instants, and the gap is
+    /// usually a snapshot build.
+    call_start: Instant,
     start: Instant,
     ms: u64,
     max_ops: u64,
@@ -117,15 +121,31 @@ struct Budget {
 }
 
 impl Budget {
+    /// Started at the top of the entry point, BEFORE the snapshot is fetched,
+    /// so that `elapsed_ms` is what the caller waited rather than what the
+    /// algorithm ran for. Measured before this existed: a first call on a
+    /// four-million-edge graph took 2,689 ms and reported 96 ms with
+    /// `exhausted: false` -- both true of the walk, and the number an operator
+    /// would have written an SLO against.
     fn new(ms: i32, max_ops: i64) -> Self {
+        let now = Instant::now();
         Budget {
-            start: Instant::now(),
+            call_start: now,
+            start: now,
             ms: ms.max(1) as u64,
             max_ops: if max_ops <= 0 { u64::MAX } else { max_ops as u64 },
             ops: 0,
             since_check: 0,
             exhausted: false,
         }
+    }
+
+    /// The walk's own clock starts here, after whatever setup the entry point
+    /// needed. The budget bounds the WALK: a snapshot build is a one-time cost
+    /// per backend and truncating it produces nothing usable, so it is
+    /// reported rather than cut short.
+    fn begin_walk(&mut self) {
+        self.start = Instant::now();
     }
 
     /// Charge `n` edge visits. Returns false once the budget is spent, and
@@ -157,12 +177,32 @@ impl Budget {
         self.start.elapsed().as_secs_f64() * 1000.0
     }
 
+    /// Total wall clock for the call, including anything that happened before
+    /// the walk began.
+    fn call_ms(&self) -> f64 {
+        self.call_start.elapsed().as_secs_f64() * 1000.0
+    }
+
+    /// Four numbers, and the two booleans mean different things on purpose.
+    ///
+    /// `exhausted` says the ANSWER is partial -- the walk stopped early and
+    /// there is more out there. `over_budget` says the CALL took longer than
+    /// it was given, which on a cold backend is the snapshot build and says
+    /// nothing about the answer's completeness. Collapsing them would make a
+    /// complete answer that arrived late indistinguishable from a truncated
+    /// one that arrived on time, and those are opposite problems.
     fn meta(&self) -> Value {
+        let build = last_build_ms();
+        let call = self.call_ms();
         json!({
             "budget_ms": self.ms,
-            "elapsed_ms": (self.elapsed_ms() * 1000.0).round() / 1000.0,
+            "elapsed_ms": (call * 1000.0).round() / 1000.0,
+            "walk_ms": (self.elapsed_ms() * 1000.0).round() / 1000.0,
+            "build_ms": (build * 1000.0).round() / 1000.0,
+            "snapshot_built": build > 0.0,
             "edge_visits": self.ops,
             "exhausted": self.exhausted,
+            "over_budget": call > self.ms as f64,
         })
     }
 }
@@ -321,6 +361,9 @@ struct Snapshot {
     /// Reuse across a different fingerprint is a cross-tenant read, so it is
     /// refused rather than warned about.
     fingerprint: String,
+    /// The admission slot this backend holds while this snapshot exists. The
+    /// lock and the memory have the same lifetime on purpose.
+    slot: i32,
     /// Reported on every answer, because a filtered snapshot silently returns
     /// a filtered answer and a caller has to be able to see which graph it
     /// asked. Same rule as the parsed plan riding along with every result.
@@ -419,15 +462,45 @@ impl Filter {
 // has no state to corrupt.
 static mut SNAP: *mut Snapshot = std::ptr::null_mut();
 
+/// What the snapshot build in the current call cost, or zero if it reused one.
+///
+/// Backend-local and reset at the top of every entry point, because the
+/// question it answers is "did THIS call pay for a build" -- which is what
+/// separates a 2.7 second first call from a 96 millisecond second one, and is
+/// invisible in any number that only measures the algorithm.
+static mut LAST_BUILD_MS: f64 = 0.0;
+
+fn reset_build_clock() {
+    unsafe { LAST_BUILD_MS = 0.0 }
+}
+
+fn last_build_ms() -> f64 {
+    unsafe { LAST_BUILD_MS }
+}
+
 fn cached() -> Option<&'static mut Snapshot> {
     unsafe { SNAP.as_mut() }
 }
 
-fn install(s: Snapshot) -> &'static mut Snapshot {
+fn install(mut s: Snapshot, slot: i32) -> &'static mut Snapshot {
     unsafe {
+        LAST_BUILD_MS += s.build_ms;
+        // The outgoing snapshot's slot is reused rather than released and
+        // retaken: a backend that already holds one is not a new admission,
+        // and releasing first would let another backend take it and leave this
+        // one refused for a rebuild it was already entitled to make.
         if !SNAP.is_null() {
+            let prev = (*SNAP).slot;
             drop(Box::from_raw(SNAP));
             SNAP = std::ptr::null_mut();
+            if prev >= 0 && prev != slot {
+                release_slot(slot);
+                s.slot = prev;
+            } else {
+                s.slot = slot;
+            }
+        } else {
+            s.slot = slot;
         }
         SNAP = Box::into_raw(Box::new(s));
         &mut *SNAP
@@ -439,8 +512,12 @@ fn drop_cached() -> bool {
         if SNAP.is_null() {
             return false;
         }
+        let slot = (*SNAP).slot;
         drop(Box::from_raw(SNAP));
         SNAP = std::ptr::null_mut();
+        if slot >= 0 {
+            release_slot(slot);
+        }
         true
     }
 }
@@ -550,6 +627,30 @@ fn build(bf: &BuildFilter) -> Snapshot {
                 let vt = row.get::<i64>(6).ok().flatten().unwrap_or(T_MAX);
                 edges.push(Edge { src: s, dst: d, rel: rid, w, vf, vt });
             }
+            // Checked per batch rather than per row, and against the ARRIVING
+            // size rather than a pre-count: a `count(*)` to decide whether to
+            // build costs a scan of the thing we are about to scan anyway, and
+            // an estimate from reltuples is wrong in exactly the direction
+            // that matters.
+            //
+            // The final structure is bigger than this (the two index arrays
+            // and the id map add roughly a third), so the check charges for
+            // them here rather than discovering them after the point of no
+            // return.
+            let projected = edges.len() * std::mem::size_of::<Edge>() * 4 / 3
+                + ids.len() * 40;
+            if projected > SNAPSHOT_MAX_BYTES {
+                error!(
+                    "the graph does not fit in one backend's snapshot ceiling of {} MiB \
+                     ({} edges so far). Build over a subset instead: \
+                     aiq.graph_snapshot(true, relations => array[...], weight_floor => 0.5). \
+                     The ceiling exists because this memory is outside work_mem, so \
+                     exceeding it is an OOM kill and a cluster restart rather than a \
+                     slow query -- see ai-query-layer/graph-algorithms.md 2.3.",
+                    SNAPSHOT_MAX_BYTES / (1024 * 1024),
+                    edges.len()
+                );
+            }
             check_for_interrupts!();
         }
     });
@@ -587,6 +688,7 @@ fn build(bf: &BuildFilter) -> Snapshot {
         .unwrap_or_default();
     Snapshot {
         fingerprint: fingerprint(),
+        slot: -1,
         build_filter: bf.clone(),
         ids,
         index,
@@ -606,6 +708,85 @@ fn build(bf: &BuildFilter) -> Snapshot {
     }
 }
 
+/// How much a single backend may spend on one snapshot before it refuses.
+///
+/// This is not a tuning knob, it is a crash guard, and it was added after
+/// watching the alternative. Eight concurrent callers against a 3.94M-edge
+/// graph on a 7.65 GiB machine did not produce a slow query: the OOM killer
+/// took a backend with `signal 9`, and Postgres responded the way it must to
+/// a backend that dies holding shared memory -- "terminating any other active
+/// server processes", then recovery. One graph query took the cluster down.
+///
+/// The reason nothing in Postgres prevented that is structural: the snapshot
+/// is Rust-allocated memory outside `work_mem`, so no existing setting sees
+/// it, and the planner has no idea it exists. So the bound has to be here.
+///
+/// 512 MiB is chosen to be generous for one backend and survivable for
+/// several: it holds roughly nine million edges, and eight backends at the
+/// ceiling still fit a 4 GiB budget. It is a per-backend number and the
+/// arithmetic that matters is `ceiling x concurrent graph callers`.
+const SNAPSHOT_MAX_BYTES: usize = 512 * 1024 * 1024;
+
+/// How many backends on this cluster may hold a snapshot at once.
+///
+/// A per-backend ceiling stops ONE pathological graph from taking the box. It
+/// does nothing about N ordinary callers, and N ordinary callers is what took
+/// the box: eight concurrent queries against a 3.94M-edge graph, each well
+/// inside the ceiling, ended in `signal 9` and "terminating any other active
+/// server processes". Sizing per backend and hoping is not admission control.
+///
+/// So this is admission control, built out of the primitive Postgres already
+/// has. A backend takes one of `SNAPSHOT_SLOTS` session-level advisory locks
+/// before it builds, and holds it for as long as it holds the snapshot; a
+/// backend that cannot get one is REFUSED with a sentence rather than allowed
+/// to find out what happens next. Session-level locks are released when the
+/// connection ends, which is also when the memory goes back, so the lock and
+/// the thing it guards have exactly the same lifetime.
+///
+/// Six is the default because the peak during a build is roughly twice the
+/// resident snapshot -- the edge array, the two index arrays and the id map
+/// are all live at once -- so six large snapshots is about 3 GiB of transient
+/// on a graph this size. It is the number to raise with memory, and the number
+/// that stops mattering when the snapshot moves into shared memory, which this
+/// measurement promoted from "the next thing to build" to a requirement above
+/// single-digit concurrency.
+const SNAPSHOT_SLOTS: i32 = 6;
+
+/// Namespace for the advisory locks, chosen to be recognisable in
+/// `pg_locks.objid` rather than to be random.
+const SNAPSHOT_LOCK_KEY: i32 = 0x7038_9A11u32 as i32;
+
+/// Take a slot, or refuse. Returns the slot held, for release on drop.
+fn acquire_slot() -> i32 {
+    for slot in 0..SNAPSHOT_SLOTS {
+        let got = Spi::get_one_with_args::<bool>(
+            "select pg_try_advisory_lock($1, $2)",
+            &[SNAPSHOT_LOCK_KEY.into(), slot.into()],
+        )
+        .unwrap_or(None)
+        .unwrap_or(false);
+        if got {
+            return slot;
+        }
+    }
+    error!(
+        "all {} graph snapshot slots on this cluster are held. Each one is a \
+         backend holding an adjacency snapshot, and the memory is outside \
+         work_mem -- so admitting this call is how a graph query becomes an OOM \
+         kill and a cluster restart rather than a slow query. Retry, or release \
+         one with select aiq.graph_snapshot_drop() in a session that is done \
+         with it. See ai-query-layer/graph-algorithms.md 2.3.",
+        SNAPSHOT_SLOTS
+    );
+}
+
+fn release_slot(slot: i32) {
+    let _ = Spi::get_one_with_args::<bool>(
+        "select pg_advisory_unlock($1, $2)",
+        &[SNAPSHOT_LOCK_KEY.into(), slot.into()],
+    );
+}
+
 /// The query path's way in. Rebuilds when the fingerprint moved, which covers
 /// both the tenancy case (a different role or claim set) and the ordinary
 /// staleness one -- and otherwise reuses whatever snapshot this backend holds,
@@ -621,7 +802,11 @@ fn snapshot(refresh: bool) -> &'static mut Snapshot {
         }
     }
     let bf = cached().map(|s| s.build_filter.clone()).unwrap_or_default();
-    install(build(&bf))
+    let slot = match cached() {
+        Some(c) if c.slot >= 0 => c.slot,
+        _ => acquire_slot(),
+    };
+    install(build(&bf), slot)
 }
 
 /// The builder's way in: a filter is an instruction to build, not a preference
@@ -635,7 +820,11 @@ fn snapshot_filtered(bf: BuildFilter, refresh: bool) -> &'static mut Snapshot {
             }
         }
     }
-    install(build(&bf))
+    let slot = match cached() {
+        Some(c) if c.slot >= 0 => c.slot,
+        _ => acquire_slot(),
+    };
+    install(build(&bf), slot)
 }
 
 // ===========================================================================
@@ -2017,6 +2206,7 @@ fn p8_graph_snapshot(
     weight_floor: default!(f64, 0.0),
     as_of_us: default!(Option<i64>, "NULL"),
 ) -> JsonB {
+    reset_build_clock();
     let bf = BuildFilter {
         relations: relations.filter(|r| !r.is_empty()),
         weight_floor: weight_floor as f32,
@@ -2028,6 +2218,10 @@ fn p8_graph_snapshot(
         snapshot_filtered(bf, refresh)
     };
     let mut m = snap_meta(g);
+    // Whether THIS call paid for a build, as distinct from `build_ms`, which
+    // is what the snapshot in hand cost whenever it was made. An operator
+    // pre-warming a pool needs the first; one sizing memory needs the second.
+    m["built_now"] = json!(last_build_ms() > 0.0);
     // Reported separately from the snapshot's own bytes because it is a
     // different kind of cost: the snapshot is the graph, the scratch is what
     // one query needs to walk it, and only the second scales with concurrency.
@@ -2057,6 +2251,8 @@ fn p8_graph_ppr(
     relation: default!(Option<&str>, "NULL"),
     as_of_us: default!(Option<i64>, "NULL"),
 ) -> JsonB {
+    reset_build_clock();
+    let mut b = Budget::new(budget_ms, 0);
     let g = snapshot(false);
     let (ords, missing) = resolve(g, seeds);
     let f = match filter_of(g, relation, as_of_us) {
@@ -2070,7 +2266,7 @@ fn p8_graph_ppr(
         }));
     }
     let sc = scratch(g.n());
-    let mut b = Budget::new(budget_ms, 0);
+    b.begin_walk();
     let (scores, pushes) = ppr(g, sc, &ords, alpha, epsilon, directed, &f, &mut b);
     let rows: Vec<Value> = scores
         .iter()
@@ -2099,6 +2295,8 @@ fn p8_graph_paths(
     relation: default!(Option<&str>, "NULL"),
     as_of_us: default!(Option<i64>, "NULL"),
 ) -> JsonB {
+    reset_build_clock();
+    let mut b = Budget::new(budget_ms, 0);
     let g = snapshot(false);
     let f = match filter_of(g, relation, as_of_us) {
         Ok(f) => f,
@@ -2120,7 +2318,7 @@ fn p8_graph_paths(
         }
     };
     let sc = scratch(g.n());
-    let mut b = Budget::new(budget_ms, 0);
+    b.begin_walk();
     let paths = k_shortest(g, sc, s, d, k.max(1) as usize, max_hops.max(1) as usize, directed, &f, &mut b);
     let out: Vec<Value> = paths
         .iter()
@@ -2143,6 +2341,8 @@ fn p8_graph_dense(
     budget_ms: default!(i32, 250),
     relation: default!(Option<&str>, "NULL"),
 ) -> JsonB {
+    reset_build_clock();
+    let mut b = Budget::new(budget_ms, 0);
     let g = snapshot(false);
     let f = match filter_of(g, relation, None) {
         Ok(f) => f,
@@ -2152,7 +2352,7 @@ fn p8_graph_dense(
         Some(s) => s,
         None => return JsonB(json!({"ok": true, "unresolved": [seed.to_string()], "snapshot": snap_meta(g)})),
     };
-    let mut b = Budget::new(budget_ms, 0);
+    b.begin_walk();
     let l = induce(g, s, max_nodes.max(2) as usize, &f, &mut b);
     let core = k_core(&l);
     let kmax = core.iter().copied().max().unwrap_or(0);
@@ -2184,6 +2384,8 @@ fn p8_graph_trust(
     relation: default!(Option<&str>, "NULL"),
     as_of_us: default!(Option<i64>, "NULL"),
 ) -> JsonB {
+    reset_build_clock();
+    let mut b = Budget::new(budget_ms, 0);
     let g = snapshot(false);
     let (ords, missing) = resolve(g, seeds);
     let f = match filter_of(g, relation, as_of_us) {
@@ -2194,7 +2396,7 @@ fn p8_graph_trust(
         return JsonB(json!({"ok": true, "unresolved": missing, "rows": [], "snapshot": snap_meta(g)}));
     }
     let sc = scratch(g.n());
-    let mut b = Budget::new(budget_ms, 0);
+    b.begin_walk();
     let (out, reached) = trust(g, sc, &ords, floor, k.max(0) as usize, directed, &f, &mut b);
     let rows: Vec<Value> = out
         .iter()
@@ -2216,6 +2418,8 @@ fn p8_graph_connect(
     budget_ms: default!(i32, 500),
     relation: default!(Option<&str>, "NULL"),
 ) -> JsonB {
+    reset_build_clock();
+    let mut b = Budget::new(budget_ms, 0);
     let g = snapshot(false);
     let (ords, missing) = resolve(g, terminals);
     let f = match filter_of(g, relation, None) {
@@ -2233,7 +2437,7 @@ fn p8_graph_connect(
     // set a person is reading.
     let terms: Vec<u32> = ords.iter().copied().take(20).collect();
     let sc = scratch(g.n());
-    let mut b = Budget::new(budget_ms, 0);
+    b.begin_walk();
     let (nodes, eids, connected) = connect(g, sc, &terms, &f, &mut b);
     JsonB(json!({
         "ok": true,
@@ -2258,8 +2462,10 @@ fn p8_graph_connect(
 /// Build the reach sketches.
 #[pg_extern]
 fn p8_graph_reach_build(depth: default!(i32, 3), budget_ms: default!(i32, 60000)) -> JsonB {
-    let g = snapshot(false);
+    reset_build_clock();
     let mut b = Budget::new(budget_ms, 0);
+    let g = snapshot(false);
+    b.begin_walk();
     let d = depth.clamp(1, 6) as usize;
     let r = build_reach(g, d, &mut b);
     match r {
@@ -2288,6 +2494,8 @@ fn p8_graph_frontier(
     exact: default!(bool, false),
     budget_ms: default!(i32, 250),
 ) -> JsonB {
+    reset_build_clock();
+    let mut b = Budget::new(budget_ms, 0);
     let g = snapshot(false);
     let v = match g.ord(seed) {
         Some(v) => v,
@@ -2298,7 +2506,7 @@ fn p8_graph_frontier(
     let mut out = json!({"ok": true, "depth": d, "estimate": est});
     if exact {
         let sc = scratch(g.n());
-        let mut b = Budget::new(budget_ms, 0);
+        b.begin_walk();
         let (n, complete) = exact_reach(g, sc, v, d, &mut b);
         out["exact"] = json!(n);
         out["exact_complete"] = json!(complete);
@@ -2313,8 +2521,10 @@ fn p8_graph_labels_build(
     budget_ms: default!(i32, 60000),
     max_entries: default!(i64, 20000000),
 ) -> JsonB {
-    let g = snapshot(false);
+    reset_build_clock();
     let mut b = Budget::new(budget_ms, 0);
+    let g = snapshot(false);
+    b.begin_walk();
     let l = build_labels(g, &mut b, max_entries.max(0) as usize);
     let out = json!({
         "ok": true,
@@ -2361,8 +2571,10 @@ fn p8_graph_distance(a: Uuid, b: Uuid) -> JsonB {
 /// Partition the graph by label propagation.
 #[pg_extern]
 fn p8_graph_communities(iters: default!(i32, 10), budget_ms: default!(i32, 60000)) -> JsonB {
-    let g = snapshot(false);
+    reset_build_clock();
     let mut b = Budget::new(budget_ms, 0);
+    let g = snapshot(false);
+    b.begin_walk();
     let (lbl, count, rounds, ms) = label_prop(g, iters.clamp(1, 100) as usize, &mut b);
     let q = modularity(g, &lbl);
     let mut sizes: Map<u32, u32> = map();
@@ -2485,8 +2697,10 @@ fn p8_graph_components(
     min_size: default!(i32, 2),
     budget_ms: default!(i32, 30000),
 ) -> TableIterator<'static, (name!(node_id, Uuid), name!(component, Uuid), name!(size, i32))> {
-    let g = snapshot(false);
+    reset_build_clock();
     let mut b = Budget::new(budget_ms, 0);
+    let g = snapshot(false);
+    b.begin_walk();
     let n = g.n();
     let mut parent: Vec<u32> = (0..n as u32).collect();
 

@@ -310,6 +310,67 @@ begin
     raise notice 'query/11: RELEVANCE parses, refuses DEPTH, and reports unresolved seeds';
 end $$;
 
+-- PATH is one mode with two arities, and the minimum is the assertion: one
+-- name is neither a route nor a connecting subgraph, and whoever wrote it
+-- wanted a different mode.
+do $$
+declare v jsonb;
+begin
+    v := aiq_parse('PATH "a"');
+    if (v->>'ok')::boolean then
+        raise exception 'PATH accepted a single name, which is neither of the things it does';
+    end if;
+    -- DEPTH's default is GRAPH's, and it is wrong here: a one-hop route is a
+    -- direct edge. The plan must show the substituted default rather than
+    -- leaving the caller to discover it from a short answer.
+    if (aiq_parse('PATH "a", "b"')->>'depth')::int <> 6 then
+        raise exception 'PATH did not carry its own DEPTH default into the plan';
+    end if;
+
+    v := aiq.query('PATH "acme", "ndlr" LIMIT 2');
+    if jsonb_array_length(v->'rows') < 1 then
+        raise exception 'PATH found no route between two directly linked nodes';
+    end if;
+    if jsonb_typeof(v->'exhausted') <> 'boolean' then
+        raise exception 'PATH did not report its budget outcome';
+    end if;
+
+    -- Three terminals is the same mode answering the generalised question.
+    v := aiq.query('PATH "acme", "ndlr", "brls"');
+    if v->'rows'->0->'edges' is null then
+        raise exception 'PATH with three names did not return a connecting subgraph: %', v;
+    end if;
+    raise notice 'query/11: PATH answers two names as routes and three as a connecting subgraph';
+end $$;
+
+-- The budget describes the CALL. Before this, it started after the snapshot
+-- was fetched, so a cold first call reported 96 ms of a 2,689 ms wait -- true
+-- of the walk, and the number an SLO would have been written against.
+do $$
+declare v jsonb; m jsonb;
+begin
+    perform p8_graph_snapshot_drop();
+    v := p8_graph_ppr(array[(select node_id from aiq.lookup('acme', false, 1))]);
+    m := v->'meta';
+    if jsonb_typeof(m->'build_ms') <> 'number'
+       or jsonb_typeof(m->'walk_ms') <> 'number'
+       or jsonb_typeof(m->'over_budget') <> 'boolean' then
+        raise exception 'the budget does not separate the call from the walk: %', m;
+    end if;
+    if not (m->>'snapshot_built')::boolean then
+        raise exception 'a call that had to build reported that it did not';
+    end if;
+    if (m->>'elapsed_ms')::numeric < (m->>'walk_ms')::numeric then
+        raise exception 'elapsed_ms is smaller than walk_ms, so it is not the call';
+    end if;
+    -- And the second call on the same snapshot pays nothing for it.
+    m := p8_graph_ppr(array[(select node_id from aiq.lookup('acme', false, 1))])->'meta';
+    if (m->>'snapshot_built')::boolean or (m->>'build_ms')::numeric <> 0 then
+        raise exception 'a call that reused a snapshot claimed it built one: %', m;
+    end if;
+    raise notice 'query/11: the budget reports the call, and says which part was the build';
+end $$;
+
 -- ---------------------------------------------------------------------
 -- 11. EVERY CROSSING OF THE EXTENSION BOUNDARY IS SATISFIED.
 --

@@ -1243,6 +1243,39 @@ begin
         -- (brief.md §3's correction).
         return jsonb_build_object('mode','SQL','statement', p->>'arg',
             'note','execute via the SECURITY INVOKER read-only passthrough, not here');
+    when 'PATH' then
+        -- Two arities, one question. Two names is the route between them;
+        -- three or more is the smallest structure joining all of them, which
+        -- is the two-terminal case generalised rather than a second mode --
+        -- a shortest path IS the Steiner tree of two terminals.
+        select coalesce(jsonb_agg(distinct a.key) filter (where l.node_id is null),
+                        '[]'::jsonb)
+          into v_unresolved
+        from jsonb_array_elements_text(p->'args') a(key)
+        left join lateral (select node_id from aiq.lookup(a.key, false, 1)) l on true;
+
+        begin
+            if jsonb_array_length(p->'args') = 2 then
+                v_out := aiq.graph_paths(p->'args'->>0, p->'args'->>1,
+                             (p->>'limit')::int, greatest((p->>'depth')::int, 2),
+                             250, p->>'relation');
+                v_exhausted := coalesce((v_out->'meta'->>'exhausted')::boolean, false);
+                v_out := v_out->'paths';
+            else
+                v_out := aiq.graph_connect(
+                             (select array_agg(value) from jsonb_array_elements_text(p->'args')),
+                             500, p->>'relation');
+                v_exhausted := coalesce((v_out->'meta'->>'exhausted')::boolean, false);
+                v_out := jsonb_build_array(v_out - 'meta' - 'unresolved');
+            end if;
+        exception when insufficient_privilege then
+            raise exception
+                'PATH needs the graph algorithms, which ship switched off. '
+                'Turn them on for this role with '
+                'select aiq.enable_graph_algorithms(''%'') -- see '
+                'ai-query-layer/graph-algorithms.md §11.', current_user;
+        end;
+
     when 'RELEVANCE' then
         -- The one mode that reaches across the extension boundary TWICE: the
         -- parser that understood the string is a C function, and so is the
@@ -1287,13 +1320,13 @@ begin
     -- empty is "every name you gave me resolved". Emitting it always, empty,
     -- for SEMANTIC and TEXT would make the second reading unavailable.
     return jsonb_build_object('mode', p->>'mode', 'plan', p, 'rows', v_out)
-        || case when p->>'mode' in ('LOOKUP', 'RELEVANCE')
+        || case when p->>'mode' in ('LOOKUP', 'RELEVANCE', 'PATH')
                 then jsonb_build_object('unresolved', v_unresolved)
                 else '{}'::jsonb end
         -- Only the budgeted mode reports a budget. Emitting `exhausted` on
         -- every mode would make it noise on the six that cannot be truncated,
         -- and a reader would stop looking at it on the one that can.
-        || case when p->>'mode' = 'RELEVANCE'
+        || case when p->>'mode' in ('RELEVANCE', 'PATH')
                 then jsonb_build_object('exhausted', v_exhausted)
                 else '{}'::jsonb end;
 end;
@@ -2794,6 +2827,12 @@ select aiq.register_schema_example('p8ql', 'graph-walk', 'p8ql',
     'GRAPH "acme" DEPTH 2 TYPE competes_with',
     'DEPTH applies only to GRAPH and TYPE only to GRAPH and RELEVANCE; written '
     'elsewhere they are refused, not ignored.', 20);
+select aiq.register_schema_example('p8ql', 'path', 'p8ql',
+    'PATH "acme", "nwnd" LIMIT 3',
+    'Two names is the three cheapest routes between them, ordered. Three or '
+    'more names is the smallest subgraph joining all of them -- the same '
+    'question generalised, because a shortest path is the Steiner tree of two '
+    'terminals. DEPTH bounds the longest route worth considering.', 27);
 select aiq.register_schema_example('p8ql', 'relevance', 'p8ql',
     'RELEVANCE "acme", "ndlr" LIMIT 10',
     'Ranked, not depth-capped: GRAPH answers "what is within n hops", this '

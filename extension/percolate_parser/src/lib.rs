@@ -287,6 +287,7 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, ParseError> {
     if !matches!(
         mode.as_str(),
         "LOOKUP" | "SEMANTIC" | "GRAPH" | "TEXT" | "SEARCH" | "SCHEMA" | "RELEVANCE"
+            | "PATH"
     ) {
         return Err(ParseError::UnknownMode(mode));
     }
@@ -327,15 +328,28 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, ParseError> {
             "expected a quoted argument, e.g. LOOKUP \"acme\"",
         ));
     }
-    // LOOKUP and RELEVANCE take a list, for the same reason: an agent almost
-    // never holds exactly one entity, and ranking relatedness to a SET of
-    // seeds is a different and usually better question than ranking to one.
-    if q.args.len() > 1 && !matches!(mode.as_str(), "LOOKUP" | "RELEVANCE") {
+    // LOOKUP, RELEVANCE and PATH take a list, each for its own reason: an
+    // agent almost never holds exactly one entity, relatedness to a SET is a
+    // different and usually better question than relatedness to one, and a
+    // connection between two things generalises to a connection among N.
+    if q.args.len() > 1 && !matches!(mode.as_str(), "LOOKUP" | "RELEVANCE" | "PATH") {
         return Err(ParseError::UnexpectedToken(format!(
-            "{} takes one argument, got {} -- only LOOKUP and RELEVANCE take a list",
+            "{} takes one argument, got {} -- only LOOKUP, RELEVANCE and PATH take a list",
             mode,
             q.args.len()
         )));
+    }
+    // PATH is the one mode with a MINIMUM. Two names is a route between them;
+    // three or more is the smallest structure joining all of them, which is
+    // the same question generalised rather than a second mode. One name is
+    // neither, and is almost certainly a reach for GRAPH or RELEVANCE.
+    if mode == "PATH" && q.args.len() < 2 {
+        return Err(ParseError::MissingArgument(
+            "PATH needs at least two names -- PATH \"a\", \"b\" is the route \
+             between them and PATH \"a\", \"b\", \"c\" is the smallest \
+             structure joining all three. For what is near ONE thing, use \
+             GRAPH or RELEVANCE",
+        ));
     }
 
     // Written-ness, not value: `limit` and `depth` carry defaults, so "was it
@@ -434,9 +448,12 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, ParseError> {
         // everything within n hops, so a depth here would be a number the
         // engine had to ignore. Refused with the reason, because the caller
         // who writes it is reaching for GRAPH.
+        // DEPTH bounds a traversal, which GRAPH and PATH both do -- on PATH
+        // it is the longest route worth considering. RELEVANCE has no depth
+        // to bound. TYPE filters a relation, which all three can do.
         let allowed = match m {
-            "DEPTH" => q.mode == "GRAPH",
-            _ => matches!(q.mode.as_str(), "GRAPH" | "RELEVANCE"),
+            "DEPTH" => matches!(q.mode.as_str(), "GRAPH" | "PATH"),
+            _ => matches!(q.mode.as_str(), "GRAPH" | "RELEVANCE" | "PATH"),
         };
         if !allowed {
             return Err(ParseError::MissingArgument(match m {
@@ -445,11 +462,22 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, ParseError> {
                      score reaches a node, not by how many hops away it is. \
                      Use GRAPH \"x\" DEPTH n for a bounded walk"
                 }
-                "DEPTH" => "DEPTH applies only to GRAPH -- it describes a traversal",
-                _ => "TYPE applies only to GRAPH and RELEVANCE -- it filters a \
+                "DEPTH" => "DEPTH applies to GRAPH and PATH -- it bounds a \
+                            traversal, and RELEVANCE is not one",
+                _ => "TYPE applies to GRAPH, RELEVANCE and PATH -- it filters a \
                       relation on an edge",
             }));
         }
+    }
+    // DEPTH's default of 1 is GRAPH's default, and it is wrong for PATH: a
+    // one-hop route is a direct edge, so an unwritten DEPTH there would mean
+    // "only tell me about things that are already adjacent" -- which is not
+    // what anybody asking for a path means. The mode-specific default is set
+    // here rather than in the dispatcher so the PLAN says what will happen; a
+    // default the caller cannot see in the plan is a default they will
+    // discover from a wrong answer.
+    if q.mode == "PATH" && wrote_graph_modifier != Some("DEPTH") {
+        q.depth = 6;
     }
     // A schema document is not a result set, so LIMIT has nothing to limit.
     if wrote_limit && q.mode == "SCHEMA" {
@@ -527,6 +555,10 @@ fn p8_query_grammar() -> pgrx::JsonB {
              "syntax": "GRAPH \"<key>\" [DEPTH n] [TYPE <relation>] [LIMIT n]",
              "purpose": "Walk relationships out from a named node, to a bounded depth. The right mode for one and two hops.",
              "example": "GRAPH \"acme\" DEPTH 2 TYPE competes_with"},
+            {"mode": "PATH",
+             "syntax": "PATH \"<a>\", \"<b>\" [, \"<c>\" ...] [DEPTH n] [TYPE <relation>] [LIMIT n]",
+             "purpose": "How are these connected? Two names give the LIMIT best routes between them, cheapest first. Three or more give the smallest subgraph joining all of them -- the same question generalised, not a second mode.",
+             "example": "PATH \"acme\", \"nwnd\" LIMIT 3"},
             {"mode": "RELEVANCE",
              "syntax": "RELEVANCE \"<key>\" [, \"<key>\" ...] [TYPE <relation>] [LIMIT n]",
              "purpose": "Rank what is most related to one or more nodes. Not a depth-capped walk: it returns an order, which is what a walk cannot give you. Takes a list, because relatedness to a SET is a different question.",
@@ -693,6 +725,22 @@ mod tests {
         let e = parse_query("GRAPH \"acme\", \"ndlr\"").unwrap_err();
         assert!(e.message().contains("only LOOKUP and RELEVANCE take a list"),
                 "got: {}", e.message());
+    }
+
+    /// PATH is the one mode with a minimum arity, and the two arities are two
+    /// readings of one question rather than two modes.
+    #[pg_test]
+    fn path_needs_two_names_and_generalises_past_them() {
+        let q = parse_query("PATH \"acme\", \"nwnd\" LIMIT 3 DEPTH 4").unwrap();
+        assert_eq!(q.mode, "PATH");
+        assert_eq!(q.args.len(), 2);
+        assert_eq!(q.limit, 3);
+        assert_eq!(q.depth, 4);
+
+        assert_eq!(parse_query("PATH \"a\", \"b\", \"c\"").unwrap().args.len(), 3);
+
+        let e = parse_query("PATH \"acme\"").unwrap_err();
+        assert!(e.message().contains("at least two names"), "got: {}", e.message());
     }
 
     #[pg_test]
