@@ -118,6 +118,23 @@ guarantee is quietly removed**, not by exercising a path that already works.
 Before adding one, break the thing it protects and confirm the test notices —
 an assertion that cannot fail is documentation wearing a test's clothes.
 
+**And prefer a test that walks the catalogue to one that walks a list.** The
+difference is not tidiness, it is whether the test still holds next month.
+`rbac/02` §3 asserts RLS is enabled on every table that *has a policy* — a
+correct assertion with a hole exactly the shape of the thing it guards, because
+a table with no policy never enters the loop. Two tables carrying extracted
+entity names were readable across tenants for precisely that reason, and
+`rbac/05` found them by enumerating every readable table instead and naming the
+shared-config exceptions with the tier each belongs to. Same shape in `rbac/04`:
+an earlier pass fixed eleven functions reachable by the wrong role by listing
+them once, by hand, and the list is what let the twelfth through.
+
+So when writing one of these, ask what the `where` clause excludes and whether
+the excluded set is the failure. A named exception list *inside* the test is
+fine and is often the point — it turns "nobody thought about this" into
+"somebody decided this", and the next person adding a table has to join that
+decision.
+
 ## The third question, which neither of these asks
 
 `run.sh` asks whether the database still BEHAVES as the specs promise.
@@ -154,6 +171,18 @@ executing, and an upload retried without an `external_id` that ingests twice.
 Writing the examples asked a fourth question the other three do not: not "is
 this right?", not "has this ever run?", but **"is this what a reader would be
 told it does?"**
+
+## What each surface's newer files guard
+
+The five directories are organised by subsystem; within them a few files are
+organised by *failure class* instead, because the class outlived the subsystem
+that produced it:
+
+| file | the class |
+|---|---|
+| `rbac/04-definer-surface.sql` | Every SECURITY DEFINER function, enumerated: none may carry Postgres's PUBLIC default, none may be reachable by `web_anon` outside the five that *are* anonymous authentication. Written because a schema-wide `revoke ... from public` binds only what exists when it runs, and six functions were created after it. |
+| `rbac/05-read-surface.sql` | Every readable table has a policy or is named shared config; every view is granted to a caller or named operator-only. Then the two reference tables are asserted by *reading them as a tenant*, because a policy that is present and wrong is invisible to a catalogue check. |
+| `query/12-usage-examples.sql` | `USAGE.md`'s own surface, in the forms that document shows. Not a doc-sync mechanism — nothing here can read a Markdown file — but the coupling stated: change a signature and a test with that document's name on it breaks before a reader does. |
 
 ## The one test that is not SQL
 
