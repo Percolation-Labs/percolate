@@ -1051,3 +1051,1006 @@ fn cliques(l: &Local, subset: &[u32], min_size: usize, b: &mut Budget) -> Vec<Ve
     out.sort_by_key(|c| std::cmp::Reverse(c.len()));
     out
 }
+
+// ===========================================================================
+// §7. Trust propagation -- how much of this answer is a model's guess
+//
+// Every extracted edge carries a weight and a provenance; every resolution
+// carries a tier. `graph-index.md` §5 throws away what does not resolve, but
+// what survives is still a mixture of registry matches and model guesses, and
+// nothing downstream can currently tell them apart *after a traversal*, which
+// is exactly where the mixing happens.
+//
+// Two numbers, and they answer different questions. `confidence` is the
+// best single path, computed as max-product -- a Dijkstra in -ln(w) space, no
+// hop constant, because a long chain of certain edges should not be penalised
+// for its length. `support` is noisy-OR over the distinct neighbours that
+// carry belief into the node: two independent paths saying the same thing is
+// evidence, and a single path repeated is not.
+// ===========================================================================
+
+fn trust(
+    g: &Snapshot,
+    sc: &mut Scratch,
+    seeds: &[u32],
+    floor: f64,
+    directed: bool,
+    f: &Filter,
+    b: &mut Budget,
+) -> Vec<(u32, f64, usize)> {
+    let epoch = sc.bump();
+    let mut heap: BinaryHeap<QItem> = BinaryHeap::new();
+    let mut buf: Vec<(u32, f32, u32)> = Vec::new();
+    let mut touched: Vec<u32> = Vec::new();
+    let max_cost = -floor.max(1.0e-9).ln();
+    for &s in seeds {
+        sc.stamp[s as usize] = epoch;
+        sc.dist[s as usize] = 0.0;
+        sc.parent[s as usize] = u32::MAX;
+        touched.push(s);
+        heap.push(QItem(0.0, s));
+    }
+    let mut settled: Set<u32> = set();
+    while let Some(QItem(d, v)) = heap.pop() {
+        if !settled.insert(v) || d > sc.dist[v as usize] {
+            continue;
+        }
+        let scanned = nbrs(g, v, directed, f, &mut buf);
+        if !b.spend(scanned) {
+            break;
+        }
+        for &(u, w, _) in buf.iter() {
+            let nd = d - (w as f64).clamp(1.0e-6, 1.0).ln();
+            if nd > max_cost {
+                continue;
+            }
+            if sc.stamp[u as usize] != epoch {
+                sc.stamp[u as usize] = epoch;
+                sc.dist[u as usize] = f64::INFINITY;
+                touched.push(u);
+            }
+            if nd < sc.dist[u as usize] {
+                sc.dist[u as usize] = nd;
+                heap.push(QItem(nd, u));
+            }
+        }
+    }
+    // Corroboration, computed once over the settled set rather than during the
+    // walk: a node's support is a property of who reached it, which is not
+    // known until the walk stops.
+    let mut out: Vec<(u32, f64, usize)> = Vec::new();
+    for &v in touched.iter() {
+        if sc.stamp[v as usize] != epoch || !sc.dist[v as usize].is_finite() {
+            continue;
+        }
+        let conf = (-sc.dist[v as usize]).exp();
+        if conf < floor {
+            continue;
+        }
+        nbrs(g, v, directed, f, &mut buf);
+        let mut support = 0usize;
+        let mut none_of_them = 1.0f64;
+        for &(u, w, _) in buf.iter() {
+            if sc.stamp[u as usize] != epoch || u == v {
+                continue;
+            }
+            let cu = (-sc.dist[u as usize]).exp() * (w as f64).clamp(0.0, 1.0);
+            if cu >= floor && sc.dist[u as usize] < sc.dist[v as usize] {
+                support += 1;
+                none_of_them *= 1.0 - cu.min(0.999);
+            }
+        }
+        let combined = if support == 0 { conf } else { conf.max(1.0 - none_of_them) };
+        out.push((v, combined, support));
+    }
+    out.sort_by(|a, c| c.1.total_cmp(&a.1));
+    out
+}
+
+// ===========================================================================
+// §8. Minimum connecting subgraph -- "how are these N things related?"
+//
+// The classic 2-approximation for the Steiner tree: shortest paths between
+// every pair of terminals, a minimum spanning tree over that metric closure,
+// then the union of the paths with non-terminal leaves pruned. NP-hard, so it
+// is budgeted by construction, and the approximation ratio is the price of
+// having an answer at all.
+//
+// This is the operation that turns a result list into a picture. A retrieval
+// returns eight entities; the honest follow-up question is not "which is most
+// relevant" but "what connects them", and no amount of ranking answers it.
+// ===========================================================================
+
+fn connect(
+    g: &Snapshot,
+    sc: &mut Scratch,
+    terms: &[u32],
+    f: &Filter,
+    b: &mut Budget,
+) -> (Vec<u32>, Vec<u32>, usize) {
+    let empty_e: Set<u32> = set();
+    let empty_n: Set<u32> = set();
+    let t = terms.len();
+    // One Dijkstra per terminal, copied out of scratch because the next one
+    // overwrites it. Bounded by |T|, which the entry point caps.
+    let mut trees: Vec<Map<u32, (f64, u32)>> = Vec::with_capacity(t);
+    for &s in terms {
+        let epoch = dijkstra(g, sc, &[s], None, &empty_e, &empty_n, false, f, b);
+        let mut m: Map<u32, (f64, u32)> = map();
+        for &u in terms {
+            if sc.stamp[u as usize] == epoch {
+                // Record the whole path back, not just the endpoint: expanding
+                // an MST edge needs every parent pointer along it.
+                let mut cur = u;
+                let mut guard = 0;
+                while sc.stamp[cur as usize] == epoch && guard < 4096 {
+                    guard += 1;
+                    m.insert(cur, (sc.dist[cur as usize], sc.parent[cur as usize]));
+                    if sc.parent[cur as usize] == u32::MAX {
+                        break;
+                    }
+                    let e = &g.edges[sc.parent[cur as usize] as usize];
+                    cur = if e.dst == cur { e.src } else { e.dst };
+                }
+            }
+        }
+        trees.push(m);
+        if b.exhausted {
+            break;
+        }
+    }
+
+    // Prim over the metric closure. Terminals the walk never reached are left
+    // out and counted, rather than silently making the answer look connected.
+    let reached = trees.len();
+    let mut in_tree = vec![false; t];
+    let mut mst: Vec<(usize, usize)> = Vec::new();
+    in_tree[0] = true;
+    for _ in 1..t {
+        let mut best: Option<(f64, usize, usize)> = None;
+        for i in 0..t.min(reached) {
+            if !in_tree[i] {
+                continue;
+            }
+            for j in 0..t {
+                if in_tree[j] {
+                    continue;
+                }
+                if let Some(&(d, _)) = trees[i].get(&terms[j]) {
+                    if best.map(|(bd, _, _)| d < bd).unwrap_or(true) {
+                        best = Some((d, i, j));
+                    }
+                }
+            }
+        }
+        match best {
+            Some((_, i, j)) => {
+                in_tree[j] = true;
+                mst.push((i, j));
+            }
+            None => break,
+        }
+    }
+
+    let mut nodes: Set<u32> = terms.iter().copied().collect();
+    let mut eids: Set<u32> = set();
+    for &(i, j) in mst.iter() {
+        let mut cur = terms[j];
+        let mut guard = 0;
+        while let Some(&(_, pe)) = trees[i].get(&cur) {
+            guard += 1;
+            if pe == u32::MAX || guard > 4096 {
+                break;
+            }
+            eids.insert(pe);
+            let e = &g.edges[pe as usize];
+            let prev = if e.dst == cur { e.src } else { e.dst };
+            nodes.insert(prev);
+            nodes.insert(cur);
+            cur = prev;
+        }
+    }
+
+    // Prune: a non-terminal leaf is a path that went somewhere and came back.
+    let termset: Set<u32> = terms.iter().copied().collect();
+    loop {
+        let mut deg: Map<u32, usize> = map();
+        for &e in eids.iter() {
+            let ed = &g.edges[e as usize];
+            *deg.entry(ed.src).or_insert(0) += 1;
+            *deg.entry(ed.dst).or_insert(0) += 1;
+        }
+        let leaves: Vec<u32> = deg
+            .iter()
+            .filter(|(v, &d)| d == 1 && !termset.contains(v))
+            .map(|(&v, _)| v)
+            .collect();
+        if leaves.is_empty() {
+            break;
+        }
+        let leafset: Set<u32> = leaves.iter().copied().collect();
+        eids.retain(|&e| {
+            let ed = &g.edges[e as usize];
+            !leafset.contains(&ed.src) && !leafset.contains(&ed.dst)
+        });
+        for v in leaves {
+            nodes.remove(&v);
+        }
+    }
+
+    let connected = in_tree.iter().filter(|&&x| x).count();
+    (nodes.into_iter().collect(), eids.into_iter().collect(), connected)
+}
+
+// ===========================================================================
+// §9. Reach sketches -- how big is the frontier, answered before the walk
+//
+// The reason a DEPTH-3 traversal falls over is not that three hops is hard; it
+// is that nobody knows the frontier is 400,000 nodes until they are holding
+// it. HyperANF gives that number in O(1) at query time for the price of a few
+// passes at build time, and it is the input a planner or a dialect needs to
+// refuse or downgrade a query *before* spending the budget -- the same
+// "convert a quiet failure into a refusal" discipline the modes are built on.
+//
+// Only the cardinality is kept, not the sketch. The registers are needed to
+// UNION neighbourhoods during the build; afterwards, four bytes per node per
+// depth answers the question, and 16 bytes per node per depth does not answer
+// it any better. (A variant that keeps the registers buys neighbourhood
+// Jaccard similarity as well -- worth having, not built here.)
+// ===========================================================================
+
+const HLL_P: usize = 4;
+const HLL_M: usize = 1 << HLL_P; // 16 registers, ~26% relative error
+
+struct Reach {
+    depth: usize,
+    est: Vec<f32>, // n * depth, row-major by depth
+    build_ms: f64,
+}
+
+impl Reach {
+    fn bytes(&self) -> usize {
+        self.est.len() * 4
+    }
+    fn at(&self, v: u32, d: usize) -> f32 {
+        if d == 0 || d > self.depth {
+            return f32::NAN;
+        }
+        self.est[(d - 1) * (self.est.len() / self.depth) + v as usize]
+    }
+}
+
+#[inline]
+fn hll_estimate(regs: &[u8]) -> f64 {
+    let m = regs.len() as f64;
+    let mut sum = 0.0f64;
+    let mut zeros = 0usize;
+    for &r in regs {
+        sum += 2.0f64.powi(-(r as i32));
+        if r == 0 {
+            zeros += 1;
+        }
+    }
+    let alpha = 0.673; // m = 16
+    let e = alpha * m * m / sum;
+    // Linear counting below the raw estimator's usable range. Most
+    // neighbourhoods in a real graph are small, so this branch is the common
+    // one and leaving it out would make the index wrong exactly where it is
+    // most used.
+    if e <= 2.5 * m && zeros > 0 {
+        m * (m / zeros as f64).ln()
+    } else {
+        e
+    }
+}
+
+fn build_reach(g: &Snapshot, depth: usize, b: &mut Budget) -> Option<Reach> {
+    let t0 = Instant::now();
+    let n = g.n();
+    if n == 0 {
+        return None;
+    }
+    let mut cur = vec![0u8; n * HLL_M];
+    let mut next = vec![0u8; n * HLL_M];
+    for v in 0..n {
+        let mut h = FxHasher::default();
+        std::hash::Hasher::write(&mut h, &(v as u64).to_le_bytes());
+        let x = std::hash::Hasher::finish(&h);
+        let idx = (x >> (64 - HLL_P)) as usize;
+        let rho = ((x << HLL_P) | (1 << (HLL_P - 1))).leading_zeros() as u8 + 1;
+        cur[v * HLL_M + idx] = rho;
+    }
+    let f = Filter { rel: None, as_of: None };
+    let mut est = vec![0f32; n * depth];
+    let mut buf: Vec<(u32, f32, u32)> = Vec::new();
+    for d in 0..depth {
+        next.copy_from_slice(&cur);
+        for v in 0..n {
+            let scanned = nbrs(g, v as u32, false, &f, &mut buf);
+            if !b.spend(scanned.max(1)) {
+                return None;
+            }
+            for &(u, _, _) in buf.iter() {
+                for j in 0..HLL_M {
+                    let a = next[v * HLL_M + j];
+                    let c = cur[u as usize * HLL_M + j];
+                    if c > a {
+                        next[v * HLL_M + j] = c;
+                    }
+                }
+            }
+        }
+        std::mem::swap(&mut cur, &mut next);
+        for v in 0..n {
+            est[d * n + v] = hll_estimate(&cur[v * HLL_M..(v + 1) * HLL_M]) as f32;
+        }
+    }
+    Some(Reach { depth, est, build_ms: t0.elapsed().as_secs_f64() * 1000.0 })
+}
+
+/// Exact reach, for checking the sketch. Budgeted, because on a hub it is the
+/// query the sketch exists to avoid.
+fn exact_reach(g: &Snapshot, sc: &mut Scratch, v: u32, depth: usize, b: &mut Budget) -> (usize, bool) {
+    let epoch = sc.bump();
+    let f = Filter { rel: None, as_of: None };
+    let mut frontier = vec![v];
+    sc.stamp[v as usize] = epoch;
+    let mut seen = 1usize;
+    let mut buf: Vec<(u32, f32, u32)> = Vec::new();
+    for _ in 0..depth {
+        let mut nextf: Vec<u32> = Vec::new();
+        for &x in frontier.iter() {
+            let scanned = nbrs(g, x, false, &f, &mut buf);
+            if !b.spend(scanned) {
+                return (seen, false);
+            }
+            for &(u, _, _) in buf.iter() {
+                if sc.stamp[u as usize] != epoch {
+                    sc.stamp[u as usize] = epoch;
+                    seen += 1;
+                    nextf.push(u);
+                }
+            }
+        }
+        frontier = nextf;
+        if frontier.is_empty() {
+            break;
+        }
+    }
+    (seen, true)
+}
+
+// ===========================================================================
+// §10. Pruned landmark labeling -- exact distance, if it will build
+//
+// The most attractive index on paper: distance between any two nodes by
+// intersecting two sorted lists, microseconds, no traversal. The whole
+// question is whether the build survives contact with a real graph, and
+// whether the labels fit. It is included here to be *measured*, not because
+// the outcome is assumed -- an index whose build cost is superlinear on the
+// graphs this system actually holds is not an index, it is a research note.
+// ===========================================================================
+
+struct Labels {
+    lab: Vec<Vec<(u32, u8)>>,
+    roots: usize,
+    entries: usize,
+    build_ms: f64,
+    complete: bool,
+}
+
+impl Labels {
+    fn bytes(&self) -> usize {
+        self.entries * 8 + self.lab.len() * 24
+    }
+    /// Distance by merge-intersection of two sorted label lists.
+    fn query(&self, u: u32, v: u32) -> Option<u32> {
+        let (a, b) = (&self.lab[u as usize], &self.lab[v as usize]);
+        let (mut i, mut j) = (0usize, 0usize);
+        let mut best = u32::MAX;
+        while i < a.len() && j < b.len() {
+            match a[i].0.cmp(&b[j].0) {
+                Ordering::Less => i += 1,
+                Ordering::Greater => j += 1,
+                Ordering::Equal => {
+                    best = best.min(a[i].1 as u32 + b[j].1 as u32);
+                    i += 1;
+                    j += 1;
+                }
+            }
+        }
+        if best == u32::MAX {
+            None
+        } else {
+            Some(best)
+        }
+    }
+}
+
+fn build_labels(g: &Snapshot, b: &mut Budget) -> Labels {
+    let t0 = Instant::now();
+    let n = g.n();
+    let mut lab: Vec<Vec<(u32, u8)>> = vec![Vec::new(); n];
+    let mut order: Vec<u32> = (0..n as u32).collect();
+    // Highest degree first: the standard ordering, and the one the pruning
+    // argument depends on -- a hub covers most pairs, so later roots prune
+    // almost immediately. A bad order does not make the index wrong, it makes
+    // it enormous.
+    order.sort_by_key(|&v| std::cmp::Reverse(g.out(v).len() + g.inc(v).len()));
+    let f = Filter { rel: None, as_of: None };
+    let mut dist = vec![u8::MAX; n];
+    let mut touched: Vec<u32> = Vec::new();
+    let mut buf: Vec<(u32, f32, u32)> = Vec::new();
+    let mut roots = 0usize;
+    let mut entries = 0usize;
+    let mut complete = true;
+
+    for (rank, &root) in order.iter().enumerate() {
+        if b.exhausted {
+            complete = false;
+            break;
+        }
+        roots += 1;
+        let mut frontier = vec![root];
+        dist[root as usize] = 0;
+        touched.push(root);
+        lab[root as usize].push((rank as u32, 0));
+        entries += 1;
+        let mut d = 0u8;
+        while !frontier.is_empty() && d < 254 {
+            d += 1;
+            let mut nextf: Vec<u32> = Vec::new();
+            for &x in frontier.iter() {
+                let scanned = nbrs(g, x, false, &f, &mut buf);
+                if !b.spend(scanned) {
+                    complete = false;
+                    break;
+                }
+                for &(u, _, _) in buf.iter() {
+                    if dist[u as usize] != u8::MAX {
+                        continue;
+                    }
+                    // The prune: if what is already labelled explains this
+                    // distance, the label adds nothing.
+                    let known = {
+                        let (a, bb) = (&lab[root as usize], &lab[u as usize]);
+                        let (mut i, mut j) = (0usize, 0usize);
+                        let mut best = u32::MAX;
+                        while i < a.len() && j < bb.len() {
+                            match a[i].0.cmp(&bb[j].0) {
+                                Ordering::Less => i += 1,
+                                Ordering::Greater => j += 1,
+                                Ordering::Equal => {
+                                    best = best.min(a[i].1 as u32 + bb[j].1 as u32);
+                                    i += 1;
+                                    j += 1;
+                                }
+                            }
+                        }
+                        best
+                    };
+                    dist[u as usize] = d;
+                    touched.push(u);
+                    if known <= d as u32 {
+                        continue;
+                    }
+                    lab[u as usize].push((rank as u32, d));
+                    entries += 1;
+                    nextf.push(u);
+                }
+            }
+            if b.exhausted {
+                complete = false;
+                break;
+            }
+            frontier = nextf;
+        }
+        for &v in touched.iter() {
+            dist[v as usize] = u8::MAX;
+        }
+        touched.clear();
+    }
+    Labels {
+        lab,
+        roots,
+        entries,
+        build_ms: t0.elapsed().as_secs_f64() * 1000.0,
+        complete,
+    }
+}
+
+// ===========================================================================
+// §11. Communities -- label propagation
+//
+// Not Leiden. Label propagation is O(m) per round with a small constant, and
+// the thing communities are wanted for here is locality: a partition good
+// enough to cluster the edge table by, and to answer "what neighbourhood is
+// this in" as a column rather than a walk. Modularity to three decimal places
+// is not what makes REPACK pay off.
+// ===========================================================================
+
+fn label_prop(g: &Snapshot, iters: usize, b: &mut Budget) -> (Vec<u32>, usize, usize, f64) {
+    let t0 = Instant::now();
+    let n = g.n();
+    let mut lbl: Vec<u32> = (0..n as u32).collect();
+    let f = Filter { rel: None, as_of: None };
+    let mut buf: Vec<(u32, f32, u32)> = Vec::new();
+    let mut tally: Map<u32, f64> = map();
+    let mut rounds = 0usize;
+    for _ in 0..iters {
+        rounds += 1;
+        let mut changed = 0usize;
+        // A fixed coprime stride instead of a shuffle: asynchronous updates
+        // need an order that is not the adjacency order (which makes labels
+        // sweep across the graph), but it must also be reproducible or a scale
+        // number cannot be compared with the next one.
+        let stride = 1_000_003u64;
+        for k in 0..n as u64 {
+            let v = ((k.wrapping_mul(stride)) % n.max(1) as u64) as u32;
+            let scanned = nbrs(g, v, false, &f, &mut buf);
+            if !b.spend(scanned.max(1)) {
+                return (lbl, 0, rounds, t0.elapsed().as_secs_f64() * 1000.0);
+            }
+            if buf.is_empty() {
+                continue;
+            }
+            tally.clear();
+            for &(u, w, _) in buf.iter() {
+                *tally.entry(lbl[u as usize]).or_insert(0.0) += (w as f64).max(1.0e-6);
+            }
+            // Ties broken by the smaller label, so the result does not depend
+            // on hash iteration order.
+            let best = tally
+                .iter()
+                .max_by(|a, c| a.1.total_cmp(c.1).then_with(|| c.0.cmp(a.0)))
+                .map(|(&l, _)| l)
+                .unwrap();
+            if best != lbl[v as usize] {
+                lbl[v as usize] = best;
+                changed += 1;
+            }
+        }
+        if changed * 1000 < n {
+            break;
+        }
+    }
+    let uniq: Set<u32> = lbl.iter().copied().collect();
+    (lbl, uniq.len(), rounds, t0.elapsed().as_secs_f64() * 1000.0)
+}
+
+// ===========================================================================
+// §12. Entry points
+//
+// Every one returns JSONB with the same shape: `ok`, a `meta` block carrying
+// the budget outcome and the snapshot it ran against, and the result. The
+// uniformity is the point -- a caller that has to remember which functions
+// report exhaustion and which do not will read the ones that do not as
+// complete answers.
+// ===========================================================================
+
+fn resolve(g: &Snapshot, arr: pgrx::Array<'_, Uuid>) -> (Vec<u32>, Vec<String>) {
+    let mut ords = Vec::new();
+    let mut missing = Vec::new();
+    for id in arr.iter().flatten() {
+        match g.ord(id) {
+            Some(o) => ords.push(o),
+            // Same distinction the dialect's `unresolved` keeps: a node this
+            // caller cannot see and a node that does not exist look identical
+            // from here, and both are different from "it has no edges".
+            None => missing.push(id.to_string()),
+        }
+    }
+    (ords, missing)
+}
+
+fn snap_meta(g: &Snapshot) -> Value {
+    json!({
+        "nodes": g.n(),
+        "edges": g.m(),
+        "relations": g.rel_names.len(),
+        "build_ms": (g.build_ms * 1000.0).round() / 1000.0,
+        "built_at": g.built_at,
+        "bytes": g.bytes(),
+    })
+}
+
+fn filter_of(g: &Snapshot, relation: Option<&str>, as_of_us: Option<i64>) -> Result<Filter, String> {
+    let rel = match relation {
+        None => None,
+        Some(r) => match g.rel_id(r) {
+            Some(id) => Some(id),
+            // A relation nobody has written is not an empty result, it is a
+            // typo. Refusing it is the same rule the dialect applies to a
+            // modifier that means nothing for a mode.
+            None => {
+                return Err(format!(
+                    "no edge in this snapshot has relation '{}' -- known: {}",
+                    r,
+                    g.rel_names.join(", ")
+                ))
+            }
+        },
+    };
+    Ok(Filter { rel, as_of: as_of_us })
+}
+
+fn err(msg: String) -> JsonB {
+    JsonB(json!({ "ok": false, "error": msg }))
+}
+
+/// Build or report the adjacency snapshot this backend is using.
+#[pg_extern]
+fn p8_graph_snapshot(refresh: default!(bool, false)) -> JsonB {
+    let g = snapshot(refresh);
+    let mut m = snap_meta(g);
+    // Reported separately from the snapshot's own bytes because it is a
+    // different kind of cost: the snapshot is the graph, the scratch is what
+    // one query needs to walk it, and only the second scales with concurrency.
+    m["scratch_bytes"] = json!(scratch(g.n()).bytes());
+    JsonB(json!({ "ok": true, "snapshot": m }))
+}
+
+/// Release the snapshot. Backend-local memory, so this is the only way to give
+/// it back short of ending the session -- which matters, because the snapshot
+/// is the largest allocation this extension makes.
+#[pg_extern]
+fn p8_graph_snapshot_drop() -> JsonB {
+    let had = drop_cached();
+    JsonB(json!({ "ok": true, "dropped": had }))
+}
+
+/// Personalised PageRank from one or more seeds.
+#[pg_extern]
+#[allow(clippy::too_many_arguments)]
+fn p8_graph_ppr(
+    seeds: pgrx::Array<'_, Uuid>,
+    alpha: default!(f64, 0.15),
+    epsilon: default!(f64, 0.000001),
+    k: default!(i32, 50),
+    budget_ms: default!(i32, 250),
+    directed: default!(bool, false),
+    relation: default!(Option<&str>, "NULL"),
+    as_of_us: default!(Option<i64>, "NULL"),
+) -> JsonB {
+    let g = snapshot(false);
+    let (ords, missing) = resolve(g, seeds);
+    let f = match filter_of(g, relation, as_of_us) {
+        Ok(f) => f,
+        Err(e) => return err(e),
+    };
+    if ords.is_empty() {
+        return JsonB(json!({
+            "ok": true, "unresolved": missing, "rows": [],
+            "meta": {"note": "no seed resolved to a node"}, "snapshot": snap_meta(g)
+        }));
+    }
+    let sc = scratch(g.n());
+    let mut b = Budget::new(budget_ms, 0);
+    let (scores, pushes) = ppr(g, sc, &ords, alpha, epsilon, directed, &f, &mut b);
+    let rows: Vec<Value> = scores
+        .iter()
+        .take(k.max(0) as usize)
+        .map(|&(v, s)| json!({"node_id": g.ids[v as usize].to_string(), "score": s}))
+        .collect();
+    let mut meta = b.meta();
+    meta["pushes"] = json!(pushes);
+    meta["reached"] = json!(scores.len());
+    JsonB(json!({
+        "ok": true, "unresolved": missing, "rows": rows,
+        "meta": meta, "snapshot": snap_meta(g)
+    }))
+}
+
+/// The k best paths between two nodes, cheapest first.
+#[pg_extern]
+#[allow(clippy::too_many_arguments)]
+fn p8_graph_paths(
+    src: Uuid,
+    dst: Uuid,
+    k: default!(i32, 3),
+    max_hops: default!(i32, 6),
+    budget_ms: default!(i32, 250),
+    directed: default!(bool, false),
+    relation: default!(Option<&str>, "NULL"),
+    as_of_us: default!(Option<i64>, "NULL"),
+) -> JsonB {
+    let g = snapshot(false);
+    let f = match filter_of(g, relation, as_of_us) {
+        Ok(f) => f,
+        Err(e) => return err(e),
+    };
+    let (s, d) = match (g.ord(src), g.ord(dst)) {
+        (Some(s), Some(d)) => (s, d),
+        _ => {
+            let mut missing: Vec<String> = Vec::new();
+            if g.ord(src).is_none() {
+                missing.push(src.to_string());
+            }
+            if g.ord(dst).is_none() {
+                missing.push(dst.to_string());
+            }
+            return JsonB(json!({
+                "ok": true, "paths": [], "unresolved": missing, "snapshot": snap_meta(g)
+            }));
+        }
+    };
+    let sc = scratch(g.n());
+    let mut b = Budget::new(budget_ms, 0);
+    let paths = k_shortest(g, sc, s, d, k.max(1) as usize, max_hops.max(1) as usize, directed, &f, &mut b);
+    let out: Vec<Value> = paths
+        .iter()
+        .map(|(n, e, c)| {
+            let mut j = path_json(g, n, e);
+            j["cost"] = json!((c * 10000.0).round() / 10000.0);
+            j
+        })
+        .collect();
+    JsonB(json!({ "ok": true, "paths": out, "meta": b.meta(), "snapshot": snap_meta(g) }))
+}
+
+/// The densest structure around a node: core numbers, then cliques inside the
+/// densest core.
+#[pg_extern]
+fn p8_graph_dense(
+    seed: Uuid,
+    max_nodes: default!(i32, 2000),
+    min_clique: default!(i32, 3),
+    budget_ms: default!(i32, 250),
+    relation: default!(Option<&str>, "NULL"),
+) -> JsonB {
+    let g = snapshot(false);
+    let f = match filter_of(g, relation, None) {
+        Ok(f) => f,
+        Err(e) => return err(e),
+    };
+    let s = match g.ord(seed) {
+        Some(s) => s,
+        None => return JsonB(json!({"ok": true, "unresolved": [seed.to_string()], "snapshot": snap_meta(g)})),
+    };
+    let mut b = Budget::new(budget_ms, 0);
+    let l = induce(g, s, max_nodes.max(2) as usize, &f, &mut b);
+    let core = k_core(&l);
+    let kmax = core.iter().copied().max().unwrap_or(0);
+    let top: Vec<u32> = (0..l.nodes.len() as u32).filter(|&i| core[i as usize] >= kmax).collect();
+    let cl = cliques(&l, &top, min_clique.max(2) as usize, &mut b);
+    JsonB(json!({
+        "ok": true,
+        "induced": l.nodes.len(),
+        "max_core": kmax,
+        "core_members": top.iter().take(200).map(|&i| g.ids[l.nodes[i as usize] as usize].to_string()).collect::<Vec<_>>(),
+        "cliques": cl.iter().take(10).map(|c| json!({
+            "size": c.len(),
+            "nodes": c.iter().map(|&i| g.ids[l.nodes[i as usize] as usize].to_string()).collect::<Vec<_>>()
+        })).collect::<Vec<_>>(),
+        "meta": b.meta(),
+        "snapshot": snap_meta(g)
+    }))
+}
+
+/// Confidence and corroboration propagated from a set of trusted seeds.
+#[pg_extern]
+#[allow(clippy::too_many_arguments)]
+fn p8_graph_trust(
+    seeds: pgrx::Array<'_, Uuid>,
+    floor: default!(f64, 0.01),
+    k: default!(i32, 50),
+    budget_ms: default!(i32, 250),
+    directed: default!(bool, false),
+    relation: default!(Option<&str>, "NULL"),
+    as_of_us: default!(Option<i64>, "NULL"),
+) -> JsonB {
+    let g = snapshot(false);
+    let (ords, missing) = resolve(g, seeds);
+    let f = match filter_of(g, relation, as_of_us) {
+        Ok(f) => f,
+        Err(e) => return err(e),
+    };
+    if ords.is_empty() {
+        return JsonB(json!({"ok": true, "unresolved": missing, "rows": [], "snapshot": snap_meta(g)}));
+    }
+    let sc = scratch(g.n());
+    let mut b = Budget::new(budget_ms, 0);
+    let out = trust(g, sc, &ords, floor, directed, &f, &mut b);
+    let rows: Vec<Value> = out
+        .iter()
+        .take(k.max(0) as usize)
+        .map(|&(v, c, s)| json!({
+            "node_id": g.ids[v as usize].to_string(),
+            "confidence": (c * 100000.0).round() / 100000.0,
+            "support": s
+        }))
+        .collect();
+    let mut meta = b.meta();
+    meta["reached"] = json!(out.len());
+    JsonB(json!({"ok": true, "unresolved": missing, "rows": rows, "meta": meta, "snapshot": snap_meta(g)}))
+}
+
+/// The smallest subgraph connecting a set of nodes.
+#[pg_extern]
+fn p8_graph_connect(
+    terminals: pgrx::Array<'_, Uuid>,
+    budget_ms: default!(i32, 500),
+    relation: default!(Option<&str>, "NULL"),
+) -> JsonB {
+    let g = snapshot(false);
+    let (ords, missing) = resolve(g, terminals);
+    let f = match filter_of(g, relation, None) {
+        Ok(f) => f,
+        Err(e) => return err(e),
+    };
+    if ords.len() < 2 {
+        return JsonB(json!({
+            "ok": false, "unresolved": missing,
+            "error": "connect needs at least two resolved terminals"
+        }));
+    }
+    // Capped, because the walk count is linear in the terminal count and each
+    // walk is a full Dijkstra. Twenty is already more entities than a result
+    // set a person is reading.
+    let terms: Vec<u32> = ords.iter().copied().take(20).collect();
+    let sc = scratch(g.n());
+    let mut b = Budget::new(budget_ms, 0);
+    let (nodes, eids, connected) = connect(g, sc, &terms, &f, &mut b);
+    JsonB(json!({
+        "ok": true,
+        "unresolved": missing,
+        "terminals": terms.len(),
+        "connected": connected,
+        "nodes": nodes.iter().map(|&v| g.ids[v as usize].to_string()).collect::<Vec<_>>(),
+        "edges": eids.iter().map(|&e| {
+            let ed = &g.edges[e as usize];
+            json!({
+                "src": g.ids[ed.src as usize].to_string(),
+                "dst": g.ids[ed.dst as usize].to_string(),
+                "relation": g.rel_names[ed.rel as usize],
+                "weight": ed.w
+            })
+        }).collect::<Vec<_>>(),
+        "meta": b.meta(),
+        "snapshot": snap_meta(g)
+    }))
+}
+
+/// Build the reach sketches.
+#[pg_extern]
+fn p8_graph_reach_build(depth: default!(i32, 3), budget_ms: default!(i32, 60000)) -> JsonB {
+    let g = snapshot(false);
+    let mut b = Budget::new(budget_ms, 0);
+    let d = depth.clamp(1, 6) as usize;
+    let r = build_reach(g, d, &mut b);
+    match r {
+        Some(r) => {
+            let out = json!({
+                "ok": true, "depth": d,
+                "build_ms": (r.build_ms * 1000.0).round() / 1000.0,
+                "bytes": r.bytes(), "registers": HLL_M,
+                "meta": b.meta(), "snapshot": snap_meta(g)
+            });
+            g.reach = Some(r);
+            JsonB(out)
+        }
+        None => JsonB(json!({
+            "ok": false, "error": "reach build exhausted its budget",
+            "meta": b.meta(), "snapshot": snap_meta(g)
+        })),
+    }
+}
+
+/// Estimated (or exact) size of the k-hop frontier around a node.
+#[pg_extern]
+fn p8_graph_frontier(
+    seed: Uuid,
+    depth: default!(i32, 2),
+    exact: default!(bool, false),
+    budget_ms: default!(i32, 250),
+) -> JsonB {
+    let g = snapshot(false);
+    let v = match g.ord(seed) {
+        Some(v) => v,
+        None => return JsonB(json!({"ok": true, "unresolved": [seed.to_string()]})),
+    };
+    let d = depth.clamp(1, 6) as usize;
+    let est = g.reach.as_ref().map(|r| r.at(v, d) as f64);
+    let mut out = json!({"ok": true, "depth": d, "estimate": est});
+    if exact {
+        let sc = scratch(g.n());
+        let mut b = Budget::new(budget_ms, 0);
+        let (n, complete) = exact_reach(g, sc, v, d, &mut b);
+        out["exact"] = json!(n);
+        out["exact_complete"] = json!(complete);
+        out["meta"] = b.meta();
+    }
+    JsonB(out)
+}
+
+/// Build pruned landmark labels.
+#[pg_extern]
+fn p8_graph_labels_build(budget_ms: default!(i32, 60000)) -> JsonB {
+    let g = snapshot(false);
+    let mut b = Budget::new(budget_ms, 0);
+    let l = build_labels(g, &mut b);
+    let out = json!({
+        "ok": true,
+        "complete": l.complete,
+        "roots_processed": l.roots,
+        "nodes": g.n(),
+        "label_entries": l.entries,
+        "labels_per_node": if g.n() > 0 { l.entries as f64 / g.n() as f64 } else { 0.0 },
+        "build_ms": (l.build_ms * 1000.0).round() / 1000.0,
+        "bytes": l.bytes(),
+        "meta": b.meta(),
+        "snapshot": snap_meta(g)
+    });
+    g.labels = Some(l);
+    JsonB(out)
+}
+
+/// Hop distance between two nodes from the label index.
+#[pg_extern]
+fn p8_graph_distance(a: Uuid, b: Uuid) -> JsonB {
+    let g = snapshot(false);
+    let (x, y) = match (g.ord(a), g.ord(b)) {
+        (Some(x), Some(y)) => (x, y),
+        _ => return JsonB(json!({"ok": true, "distance": Value::Null, "unresolved": true})),
+    };
+    match &g.labels {
+        None => JsonB(json!({"ok": false, "error": "no label index -- call p8_graph_labels_build() first"})),
+        Some(l) => {
+            let t0 = Instant::now();
+            let d = l.query(x, y);
+            JsonB(json!({
+                "ok": true,
+                "distance": d,
+                // An incomplete build answers with an upper bound, never a
+                // proof of distance -- and a caller that is not told cannot
+                // know the difference.
+                "exact": l.complete,
+                "us": t0.elapsed().as_secs_f64() * 1_000_000.0
+            }))
+        }
+    }
+}
+
+/// Partition the graph by label propagation.
+#[pg_extern]
+fn p8_graph_communities(iters: default!(i32, 10), budget_ms: default!(i32, 60000)) -> JsonB {
+    let g = snapshot(false);
+    let mut b = Budget::new(budget_ms, 0);
+    let (lbl, count, rounds, ms) = label_prop(g, iters.clamp(1, 100) as usize, &mut b);
+    let mut sizes: Map<u32, usize> = map();
+    for &l in lbl.iter() {
+        *sizes.entry(l).or_insert(0) += 1;
+    }
+    let mut top: Vec<(u32, usize)> = sizes.into_iter().collect();
+    top.sort_by_key(|&(_, s)| std::cmp::Reverse(s));
+    let out = json!({
+        "ok": true,
+        "communities": count,
+        "rounds": rounds,
+        "build_ms": (ms * 1000.0).round() / 1000.0,
+        "largest": top.iter().take(10).map(|&(_, s)| s).collect::<Vec<_>>(),
+        "meta": b.meta(),
+        "snapshot": snap_meta(g)
+    });
+    g.community = Some(lbl);
+    g.community_ms = ms;
+    JsonB(out)
+}
+
+/// The community a node landed in, and how big it is.
+#[pg_extern]
+fn p8_graph_community_of(node: Uuid) -> JsonB {
+    let g = snapshot(false);
+    let v = match g.ord(node) {
+        Some(v) => v,
+        None => return JsonB(json!({"ok": true, "unresolved": [node.to_string()]})),
+    };
+    match &g.community {
+        None => JsonB(json!({"ok": false, "error": "no partition -- call p8_graph_communities() first"})),
+        Some(c) => {
+            let l = c[v as usize];
+            let size = c.iter().filter(|&&x| x == l).count();
+            JsonB(json!({"ok": true, "community": l, "size": size}))
+        }
+    }
+}

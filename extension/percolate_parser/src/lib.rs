@@ -6,6 +6,11 @@ use pgrx::prelude::*;
 // without pgrx: see plan_graph.rs's header for why the split falls there.
 mod plan_graph;
 
+// Graph algorithms over aiq.nodes / aiq.edges -- the budgeted, anytime half
+// of the graph that SQL/PGQ has no operator for. Its own file for the same
+// reason plan_graph.rs is: it is a different kind of thing from a parser.
+mod graph;
+
 ::pgrx::pg_module_magic!(name, version);
 
 // The SCHEMA is deliberately not here. An extension cannot contain both C

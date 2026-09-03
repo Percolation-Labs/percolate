@@ -148,10 +148,17 @@ begin
     "skills": [
         "p8ql-schema-first",
         "house-style-attribution",
-        "workflow-define-then-start"
+        "workflow-define-then-start",
+        "p8ql-fuzzy-lookup",
+        "p8ql-read-the-plan"
     ],
     "context_policy": {
         "skills": {
+            "always": [
+                "p8ql-schema-first",
+                "house-style-attribution",
+                "workflow-define-then-start"
+            ],
             "match": true,
             "top_k": 2,
             "min_score": 0.28,
