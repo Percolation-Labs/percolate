@@ -52,7 +52,7 @@ end $$;
 -- is genuinely one INSERT and not an integration.
 --
 -- NOT is_default, and that is a fixture constraint rather than a
--- recommendation: dev/tests/query/08-retrieval.sql §6 asserts that SEMANTIC
+-- recommendation: dev/tests/query/08-retrieval.sql §2 asserts that SEMANTIC
 -- with no USING resolves to `demo-quad-a`, so moving the default here would
 -- break a test of a different surface to make this one convenient. A real
 -- deployment has no fixture and should set is_default on its real model:

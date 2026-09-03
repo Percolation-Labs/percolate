@@ -7500,9 +7500,10 @@ create table rbac.role_permissions (
 -- function answers for ANY p_user_id, so a caller holding a user's uuid can
 -- learn whether that user has a given permission. It returns a boolean about
 -- role grants and never a row, and the parameter is deliberately kept because
--- spec.md §11's per-resource-sharing work needs to ask the question about
--- somebody else. Narrowing it to self-or-admin belongs with that work, not
--- here, where it would be a second authorization rule invented in passing.
+-- spec.md §5's per-resource-sharing work -- deferred, not built -- needs to
+-- ask the question about somebody else. Narrowing it to self-or-admin belongs
+-- with that work, not here, where it would be a second authorization rule
+-- invented in passing.
 create or replace function rbac.has_permission(p_user_id uuid, p_resource text, p_action text)
 returns boolean as $$
     select exists (
