@@ -639,15 +639,16 @@ fn build(bf: &BuildFilter) -> Snapshot {
             // return.
             let projected = edges.len() * std::mem::size_of::<Edge>() * 4 / 3
                 + ids.len() * 40;
-            if projected > SNAPSHOT_MAX_BYTES {
+            if projected > snapshot_max_bytes() {
                 error!(
                     "the graph does not fit in one backend's snapshot ceiling of {} MiB \
                      ({} edges so far). Build over a subset instead: \
                      aiq.graph_snapshot(true, relations => array[...], weight_floor => 0.5). \
                      The ceiling exists because this memory is outside work_mem, so \
                      exceeding it is an OOM kill and a cluster restart rather than a \
-                     slow query -- see ai-query-layer/graph-algorithms.md 2.3.",
-                    SNAPSHOT_MAX_BYTES / (1024 * 1024),
+                     slow query; raise it with percolate.graph_snapshot_max_mb if the \
+                     machine has the memory -- see graph-algorithms.md 2.3.",
+                    snapshot_max_bytes() / (1024 * 1024),
                     edges.len()
                 );
             }
@@ -721,11 +722,61 @@ fn build(bf: &BuildFilter) -> Snapshot {
 /// is Rust-allocated memory outside `work_mem`, so no existing setting sees
 /// it, and the planner has no idea it exists. So the bound has to be here.
 ///
-/// 512 MiB is chosen to be generous for one backend and survivable for
+/// The default of 512 MiB is generous for one backend and survivable for
 /// several: it holds roughly nine million edges, and eight backends at the
 /// ceiling still fit a 4 GiB budget. It is a per-backend number and the
-/// arithmetic that matters is `ceiling x concurrent graph callers`.
-const SNAPSHOT_MAX_BYTES: usize = 512 * 1024 * 1024;
+/// arithmetic that matters is `ceiling x concurrent graph callers` --
+/// which is why it is `percolate.graph_snapshot_max_mb` rather than a
+/// constant.
+
+// ===========================================================================
+// The two limits, as settings rather than as constants
+//
+// Both of these stand between a busy pool and a cluster restart, and the right
+// value for each is a function of how much memory the machine has. Compiled in,
+// they were a safety mechanism nobody could adjust without rebuilding the
+// extension -- six slots is right for 7.65 GiB and wrong for both a laptop and
+// a real server, and the failure mode of "wrong" is not a slow query.
+//
+// `Suset`: a DBA sets them in postgresql.conf and a superuser may change them
+// for a session. Deliberately not settable by the roles that CALL these
+// functions -- a limit its subject can raise is not a limit.
+// ===========================================================================
+
+static GUC_SNAPSHOT_SLOTS: pgrx::guc::GucSetting<i32> = pgrx::guc::GucSetting::<i32>::new(6);
+static GUC_SNAPSHOT_MAX_MB: pgrx::guc::GucSetting<i32> = pgrx::guc::GucSetting::<i32>::new(512);
+
+pub fn register_gucs() {
+    use pgrx::guc::{GucContext, GucFlags, GucRegistry};
+    GucRegistry::define_int_guc(
+        c"percolate.graph_snapshot_slots",
+        c"How many backends may hold a graph adjacency snapshot at once.",
+        c"Each slot is a backend holding an adjacency snapshot, whose memory is           outside work_mem and therefore invisible to every other Postgres           limit. A backend that cannot take a slot is refused rather than           admitted. Size it as (available memory / roughly twice one           snapshot); ai-query-layer/graph-algorithms.md 2.3 has the arithmetic           and the measurement that produced it.",
+        &GUC_SNAPSHOT_SLOTS,
+        1,
+        1024,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"percolate.graph_snapshot_max_mb",
+        c"The largest adjacency snapshot one backend may build, in megabytes.",
+        c"Checked against the arriving size during the build, so a graph too           large for one backend is refused with a pointer to the snapshot           filter rather than discovered by the OOM killer. This bounds ONE           backend; percolate.graph_snapshot_slots is what bounds several.",
+        &GUC_SNAPSHOT_MAX_MB,
+        16,
+        1024 * 64,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+}
+
+fn snapshot_slots() -> i32 {
+    GUC_SNAPSHOT_SLOTS.get()
+}
+
+fn snapshot_max_bytes() -> usize {
+    (GUC_SNAPSHOT_MAX_MB.get().max(1) as usize) * 1024 * 1024
+}
 
 /// How many backends on this cluster may hold a snapshot at once.
 ///
@@ -749,8 +800,7 @@ const SNAPSHOT_MAX_BYTES: usize = 512 * 1024 * 1024;
 /// on a graph this size. It is the number to raise with memory, and the number
 /// that stops mattering when the snapshot moves into shared memory, which this
 /// measurement promoted from "the next thing to build" to a requirement above
-/// single-digit concurrency.
-const SNAPSHOT_SLOTS: i32 = 6;
+/// single-digit concurrency. Set with `percolate.graph_snapshot_slots`.
 
 /// Namespace for the advisory locks, chosen to be recognisable in
 /// `pg_locks.objid` rather than to be random.
@@ -758,7 +808,8 @@ const SNAPSHOT_LOCK_KEY: i32 = 0x7038_9A11u32 as i32;
 
 /// Take a slot, or refuse. Returns the slot held, for release on drop.
 fn acquire_slot() -> i32 {
-    for slot in 0..SNAPSHOT_SLOTS {
+    let slots = snapshot_slots();
+    for slot in 0..slots {
         let got = Spi::get_one_with_args::<bool>(
             "select pg_try_advisory_lock($1, $2)",
             &[SNAPSHOT_LOCK_KEY.into(), slot.into()],
@@ -770,13 +821,14 @@ fn acquire_slot() -> i32 {
         }
     }
     error!(
-        "all {} graph snapshot slots on this cluster are held. Each one is a \
+        "all {} graph snapshot slots on this cluster are held (see \
+         percolate.graph_snapshot_slots). Each one is a \
          backend holding an adjacency snapshot, and the memory is outside \
          work_mem -- so admitting this call is how a graph query becomes an OOM \
          kill and a cluster restart rather than a slow query. Retry, or release \
          one with select aiq.graph_snapshot_drop() in a session that is done \
          with it. See ai-query-layer/graph-algorithms.md 2.3.",
-        SNAPSHOT_SLOTS
+        slots
     );
 }
 

@@ -13,6 +13,16 @@ mod graph;
 
 ::pgrx::pg_module_magic!(name, version);
 
+/// Runs when the library is loaded into a backend, which for an extension that
+/// is not in `shared_preload_libraries` is the first time one of its functions
+/// is called. The only thing it does is register the two settings that bound
+/// the graph snapshot's memory -- see `graph.rs`, and `graph-algorithms.md`
+/// §2.3 for why a compiled-in constant was the wrong shape for them.
+#[pg_guard]
+pub extern "C-unwind" fn _PG_init() {
+    graph::register_gucs();
+}
+
 // The SCHEMA is deliberately not here. An extension cannot contain both C
 // functions and RLS-protected tables, and the reason is structural:
 //

@@ -406,7 +406,59 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
--- 12. SHIPPED EXPERIMENTAL MEANS PRESENT AND UNREACHABLE.
+-- 12. THE TWO MEMORY LIMITS ARE SETTINGS, AND NOT THE CALLER'S TO RAISE.
+--
+-- Both stand between a busy pool and a cluster restart, and the right value
+-- for each depends on the machine -- so compiled-in constants were the wrong
+-- shape. What must hold is that they exist, that the ceiling refuses with a
+-- message naming itself, and that the roles which CALL these functions cannot
+-- raise them: a limit its subject can lift is not a limit.
+-- ---------------------------------------------------------------------
+do $$
+declare v_slots int; v_mb int; v_msg text;
+begin
+    -- Loading the library is what defines them, and the library loads on first
+    -- use rather than at startup -- so this touches a graph function first.
+    perform p8_graph_snapshot(false);
+    v_slots := current_setting('percolate.graph_snapshot_slots')::int;
+    v_mb    := current_setting('percolate.graph_snapshot_max_mb')::int;
+    if v_slots < 1 or v_mb < 16 then
+        raise exception 'the snapshot limits are not registered as settings (% slots, % MB)',
+            v_slots, v_mb;
+    end if;
+
+    -- The ceiling refuses, and the refusal names the setting that lifts it.
+    begin
+        set local percolate.graph_snapshot_max_mb = 16;
+        perform p8_graph_snapshot(true);
+        -- The fixture is small enough to fit 16 MB, so reaching here is fine;
+        -- what must not happen is the ceiling being unreachable in principle.
+    exception when others then
+        get stacked diagnostics v_msg = message_text;
+        if v_msg not like '%graph_snapshot_max_mb%' then
+            raise exception 'the ceiling refused without naming the setting: %', v_msg;
+        end if;
+    end;
+    reset percolate.graph_snapshot_max_mb;
+    raise notice 'query/11: the snapshot limits are settings (% slots, % MB)', v_slots, v_mb;
+end $$;
+
+do $$
+declare v_msg text;
+begin
+    set local role authenticated;
+    begin
+        set percolate.graph_snapshot_slots = 4096;
+        raise exception 'an end-user role raised its own snapshot slot limit';
+    exception when insufficient_privilege then
+        null;  -- the expected outcome
+    end;
+    reset role;
+    raise notice 'query/11: an end-user role cannot raise the limits that bound it';
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 13. SHIPPED EXPERIMENTAL MEANS PRESENT AND UNREACHABLE.
 --
 -- graph-algorithms.md ships these off by default: installed, inert, callable
 -- by nobody but the owner until a deliberate grant. That is what makes an
@@ -456,7 +508,7 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
--- 13. THE CACHE CANNOT CROSS A TENANT. The assertion this file exists for.
+-- 14. THE CACHE CANNOT CROSS A TENANT. The assertion this file exists for.
 --
 -- One backend, two identities, in that order. If the fingerprint check were
 -- removed, the second snapshot would be the first one -- same node count, same
