@@ -14592,9 +14592,19 @@ create table agentic.agents (
     -- Once that is true, "list the agents" is useless without a filter, and
     -- an interactive UI that shows a user a thousand machine extractors is
     -- broken. `audience` is the column that fixes it and it is deliberately
-    -- NOT derived from tags: whether a human may pick an agent is an access
-    -- decision, and inferring it from a free-text tag would make it one a
-    -- typo can change.
+    -- NOT derived from tags: whether a human is OFFERED an agent is worth
+    -- deciding explicitly, and inferring it from a free-text tag would make it
+    -- a decision a typo can change.
+    --
+    -- IT IS NOT AN ACCESS CONTROL, and brief.md called it one -- "an access
+    -- decision", in bold, in the column table. The difference runs in the
+    -- dangerous direction: §7's policy on this table is `for select using
+    -- (true)`, and `agents_api` hands `authenticated` every agent's full
+    -- system_prompt whatever its audience. Confirmed by marking one `internal`
+    -- and reading its prompt back as an ordinary user. Marking an agent
+    -- `internal` makes it invisible to a picker; it hides nothing from anyone
+    -- who asks for it by name. What would make it an access decision is the
+    -- per-tenant column §7 says does not exist yet.
     -- ------------------------------------------------------------------
     audience                 text not null default 'internal'
                                  check (audience in ('user','internal','system')),
@@ -16072,6 +16082,15 @@ create view agentic.plugins_api as
 -- The view an interactive UI reads. `audience = 'user'` is the whole point of
 -- the column: a thousand extractors are invisible here without anyone having
 -- to remember to filter.
+--
+-- IT HAD NO GRANT, so the only role that could read "the view an interactive UI
+-- reads" was the one that owns it. `authenticated` and `api_viewer` both got
+-- "permission denied for view agents_pickable" -- and the verification behind
+-- brief.md's paragraph on this ("with one extractor and one assistant
+-- registered, the view returns the assistant only") was true, as the owner, in
+-- a privilege context no UI has. The grant is below with the other read
+-- surfaces; the columns here are deliberately the pickable ones and NOT
+-- system_prompt, which is what makes granting it the whole fix.
 create or replace view agentic.agents_pickable as
 select id, name, category, tags, model, structured_output_schema is not null as has_shape
 from agentic.agents
@@ -16136,6 +16155,7 @@ revoke create on schema agentic from api_viewer;
 grant select on agentic.sessions_api, agentic.runs_api, agentic.messages_api,
                 agentic.tool_servers_api, agentic.agents_api,
                 agentic.skills_api, agentic.plugins_api to authenticated;
+grant select on agentic.agents_pickable to authenticated, api_viewer;
 
 grant execute on function agentic.create_session(text) to authenticated;
 grant execute on function agentic.start_run(text, uuid, uuid, uuid, text, text, text, uuid)

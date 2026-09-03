@@ -225,4 +225,60 @@ begin
                  'allow-list is refused at the write path';
 end $$;
 
+-- ---------------------------------------------------------------------
+-- `audience` IS A FILTER AND NOT A BOUNDARY, asserted in both directions
+-- because the docs claimed the second one.
+--
+-- brief.md's classification table called `audience` "an access decision", in
+-- bold. It is not: schema.sql §7 puts `for select using (true)` on this table
+-- and says so, and `agents_api` returns every agent's system_prompt to any
+-- authenticated caller. Someone reading only the brief would mark a sensitive
+-- agent `internal` and believe it was restricted.
+--
+-- And the view that IS the filter had no grant at all, so the only role that
+-- could read "the view an interactive UI reads" was its owner. Both halves are
+-- asserted here so neither can drift back: the filter must work for a real
+-- caller, and it must not be mistaken for a boundary.
+-- ---------------------------------------------------------------------
+do $$
+declare v_prompt text; v_pickable int; v_secret text := 'internal-only escalation code 4417';
+begin
+    perform agentic.upsert_agent(jsonb_build_object(
+        'name', 't_ab_internal', 'system_prompt', v_secret, 'audience', 'internal'));
+    perform agentic.upsert_agent(jsonb_build_object(
+        'name', 't_ab_user', 'system_prompt', 'hello', 'audience', 'user'));
+
+    set local role authenticated;
+    perform set_config('request.jwt.claims',
+        '{"sub":"11111111-1111-1111-1111-111111111111"}', true);
+
+    -- The filter works, for a role that is not the owner.
+    select count(*) into v_pickable
+      from agentic.agents_pickable where name in ('t_ab_internal', 't_ab_user');
+    if v_pickable <> 1 then
+        raise exception
+            'agents_pickable returned % of the two agents to an ordinary caller, '
+            'expected only the audience=user one. A permission denied here means '
+            'the view an interactive UI reads is readable only by its owner.',
+            v_pickable;
+    end if;
+
+    -- And it is not a boundary, which is the half the docs got wrong. This
+    -- asserts the CURRENT contract: if a per-tenant column ever makes audience
+    -- load-bearing, this is the assertion that has to be rewritten, and it
+    -- should be, rather than the claim quietly changing meaning again.
+    select system_prompt into v_prompt
+      from agentic.agents_api where name = 't_ab_internal';
+    if v_prompt is distinct from v_secret then
+        raise exception
+            'an audience=internal prompt is no longer readable through '
+            'agents_api. That may be an improvement, but brief.md and '
+            'schema.sql §7 both document the opposite -- update them with it.';
+    end if;
+
+    reset role;
+    raise notice 'agentic: audience filters agents_pickable for a real caller, and '
+                 'does not hide a system_prompt from agents_api';
+end $$;
+
 rollback;
