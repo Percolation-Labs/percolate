@@ -1280,6 +1280,113 @@ begin
 end;
 $$;
 
+-- Attaching a skill to an agent, in the database, as ONE statement.
+--
+-- Without this the only way to add a fragment to an agent is read-modify-write
+-- through upsert_agent: read `skills`, append, send the whole array back. That
+-- is a lost update waiting to happen, and not a theoretical one -- two clients
+-- attaching two different fragments to one agent both read the same array and
+-- the second write silently discards the first. No error, no conflict, and an
+-- agent that is missing instructions somebody watched themselves add. It is
+-- the same class of failure as upsert_agent's `excluded` bug, one layer up:
+-- a partial write that reports success.
+--
+-- Three properties, and each is a decision:
+--
+--   IN PLACE.   The array is appended to under a row lock (`for update`
+--               below), so concurrent attaches to one agent serialize instead
+--               of clobbering. This is the whole reason the function exists;
+--               a version without the lock would be sugar over the bug.
+--
+--   ONE PATH.   It does not write `agents` itself. It computes the new array
+--               and hands it to upsert_agent, so the checks that refuse an
+--               unknown skill or an unbound requires_tools server (§5) run
+--               here too, in exactly one place. A second write path with its
+--               own copy of the validation is how the two drift apart.
+--
+--   IDEMPOTENT. Attaching what is already attached changes nothing and is not
+--               an error. Order is meaningful -- composed fragments are
+--               concatenated in listed order -- so a new one appends at the
+--               end rather than being sorted in.
+--
+-- `p_spec` is what makes this one call rather than two: pass it and the
+-- fragment is authored (or updated) and attached together, which is what the
+-- REST path needs since PostgREST is one function per request.
+create or replace function agentic.attach_skill(
+    p_agent text, p_skill text, p_spec jsonb default null)
+returns agentic.agents
+language plpgsql security definer
+set search_path = pg_catalog, public
+as $$
+declare
+    v_skills text[];
+begin
+    -- Not upsert_agent's job to notice: called with {name, skills} for an
+    -- agent that does not exist, it would happily CREATE one with an empty
+    -- prompt and no tools -- an agent that resolves by name and can do
+    -- nothing. Attaching to something absent is a typo, so it is refused here.
+    select a.skills into v_skills
+      from agentic.agents a where a.name = p_agent
+      for update;
+    if not found then
+        raise exception
+            'no agent named % -- attach_skill adds a fragment to an agent that '
+            'exists, it does not create one.', p_agent;
+    end if;
+
+    if p_spec is not null then
+        -- The name is an argument AND may appear in the spec. Refused rather
+        -- than resolved: whichever one we picked, the other is what somebody
+        -- believed they had written.
+        if p_spec ? 'name' and p_spec->>'name' is distinct from p_skill then
+            raise exception
+                'attach_skill: the skill is named % in the argument and % in the '
+                'spec. Name it once.', p_skill, p_spec->>'name';
+        end if;
+        perform agentic.upsert_skill(p_spec || jsonb_build_object('name', p_skill));
+    end if;
+
+    if not (p_skill = any(coalesce(v_skills, '{}'))) then
+        v_skills := coalesce(v_skills, '{}') || p_skill;
+    end if;
+
+    -- Only the two keys, so every other column keeps the "an omitted key means
+    -- leave it alone" behaviour upsert_agent already guarantees.
+    return agentic.upsert_agent(jsonb_build_object(
+        'name', p_agent,
+        'skills', to_jsonb(v_skills)));
+end;
+$$;
+
+-- The other half, and it exists so that removing a fragment is not the one
+-- operation left doing read-modify-write. Detaching what was never attached is
+-- a no-op rather than an error: the caller's intent -- that this agent does
+-- not carry this fragment -- is satisfied either way.
+create or replace function agentic.detach_skill(p_agent text, p_skill text)
+returns agentic.agents
+language plpgsql security definer
+set search_path = pg_catalog, public
+as $$
+declare
+    v_skills text[];
+begin
+    select a.skills into v_skills
+      from agentic.agents a where a.name = p_agent
+      for update;
+    if not found then
+        raise exception 'no agent named %', p_agent;
+    end if;
+
+    select coalesce(array_agg(s order by ord), '{}') into v_skills
+      from unnest(coalesce(v_skills, '{}')) with ordinality t(s, ord)
+     where s <> p_skill;
+
+    return agentic.upsert_agent(jsonb_build_object(
+        'name', p_agent,
+        'skills', to_jsonb(v_skills)));
+end;
+$$;
+
 -- Applying a plugin: one document, one transaction, and -- the half that did
 -- not exist before -- a PRUNE.
 --
@@ -1607,6 +1714,8 @@ grant execute on function agentic.apply_summary(jsonb) to authenticated;
 grant execute on function agentic.upsert_agent(jsonb) to authenticated;
 grant execute on function agentic.upsert_tool_server(jsonb) to authenticated;
 grant execute on function agentic.upsert_skill(jsonb) to authenticated;
+grant execute on function agentic.attach_skill(text, text, jsonb) to authenticated;
+grant execute on function agentic.detach_skill(text, text) to authenticated;
 grant execute on function agentic.apply_plugin(jsonb) to authenticated;
 grant execute on function agentic.channel_for(uuid) to authenticated, api_viewer;
 

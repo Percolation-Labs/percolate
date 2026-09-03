@@ -282,6 +282,8 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('agentic','table','agentic.plugins',null,'plugins.md §9: a bundle applied from one document is removable as one'),
 ('agentic','function','agentic.upsert_skill','jsonb','plugins.md §4: skills are declared, not edited in a running database'),
 ('agentic','function','agentic.apply_plugin','jsonb','plugins.md §9: apply upserts what the manifest declares and prunes what it does not'),
+('agentic','function','agentic.attach_skill','text,text,jsonb','plugins.md §5.5: adding a fragment to an agent is one statement, not read-modify-write'),
+('agentic','function','agentic.detach_skill','text,text','plugins.md §5.5: and so is removing one'),
 ('agentic','view','agentic.skills_api',null,'plugins.md §5: the runtime loads a pinned body over REST like every other client'),
 ('agentic','view','agentic.plugins_api',null,'plugins.md §9: what did this plugin install, answered from the document as applied'),
 ('agentic','column','agentic.agents.skills',null,'plugins.md §5: the pinned list, which is prompt content the runtime must be able to read'),
