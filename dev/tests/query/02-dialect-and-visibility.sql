@@ -250,4 +250,120 @@ begin
     raise notice 'query/02: embedding spaces are keyed by model name, not dimension';
 end $$;
 
+-- ---------------------------------------------------------------------
+-- A NUMBER THE ENGINE CANNOT HONOUR IS REFUSED, NOT ROUNDED.
+--
+-- GRAPH has refused `DEPTH 0` since a measured failure, with the right
+-- sentence: it "asked for no traversal and would have been served a depth-1
+-- one". Two siblings never got the same treatment, and both were found by
+-- writing the impossible value and reading what came back:
+--
+--   RELEVANCE "acme" LIMIT -1  ->  rows: [], exhausted: false, unresolved: []
+--
+-- which is this envelope's way of saying "that entity exists and nothing is
+-- related to it". It is the collapse `unresolved` exists to prevent, reached
+-- from the other side -- not a name that failed to resolve, but a bound that
+-- could not be honoured.
+--
+--   PATH "acme" "ndlr" DEPTH -3  ->  a two-hop walk, under `plan.depth: -3`
+--
+-- because the dispatch passed `greatest(depth, 2)` while the envelope echoed
+-- what the caller wrote. The plan is the one artefact this dialect tells a
+-- reader to trust, and it was reporting a bound the walk had not used.
+-- ---------------------------------------------------------------------
+do $$
+declare
+    v_q text;
+    v_bad text[] := array[
+        'RELEVANCE "acme" LIMIT -1',
+        'RELEVANCE "acme" LIMIT 0',
+        'LOOKUP "acme" LIMIT -7',
+        'PATH "acme" "ndlr" DEPTH -3',
+        'PATH "acme" "ndlr" DEPTH 0'];
+    v_ok  boolean;
+begin
+    foreach v_q in array v_bad loop
+        v_ok := false;
+        begin
+            perform aiq.query(v_q);
+            v_ok := true;
+        exception when others then
+            if sqlerrm !~ '(LIMIT must be at least 1|DEPTH must be at least 1)' then
+                raise exception '`%` was refused for the wrong reason: %', v_q, sqlerrm;
+            end if;
+        end;
+        if v_ok then
+            raise exception
+                '`%` was answered rather than refused. A bound the engine '
+                'cannot honour must not come back as an empty result or a '
+                'silently different walk -- that is indistinguishable from '
+                '"there is nothing to find".', v_q;
+        end if;
+    end loop;
+    raise notice 'query/02: a LIMIT or DEPTH the engine cannot honour is refused, not rounded';
+end $$;
+
+-- And the plan reports the depth actually walked. DEPTH 1 is still clamped --
+-- a route between two distinct nodes needs two hops to be worth searching --
+-- but the clamp is now visible in the plan instead of silent.
+do $$
+declare v_plan jsonb;
+begin
+    v_plan := aiq.query('PATH "acme" "ndlr" DEPTH 1')->'plan';
+    if (v_plan->>'depth')::int <> 2 then
+        raise exception
+            'PATH DEPTH 1 reports depth % in the plan, and the walk it runs is '
+            'bounded at 2 -- a plan that does not say what was walked is the '
+            'defect, not the clamp', v_plan->>'depth';
+    end if;
+
+    -- The default is the parser's, not the dispatcher's, and it must survive
+    -- this: an unwritten DEPTH on PATH is 6, never GRAPH's 1.
+    v_plan := aiq.query('PATH "acme" "ndlr"')->'plan';
+    if (v_plan->>'depth')::int <> 6 then
+        raise exception
+            'PATH with no DEPTH reports %, expected the parser''s own default '
+            'of 6 -- a one-hop default would mean "only things already '
+            'adjacent", which is not what asking for a path means',
+            v_plan->>'depth';
+    end if;
+    raise notice 'query/02: the plan reports the depth PATH actually walks';
+end $$;
+
+-- The rule SCHEMA teaches has to be the rule the parser enforces. The
+-- registered example said "DEPTH applies only to GRAPH", and the parser has
+-- said "DEPTH applies to GRAPH and PATH" since PATH grew a depth -- so an
+-- agent reading SCHEMA before writing a query was taught not to use a modifier
+-- that works.
+do $$
+declare v_txt text; v_refused boolean := false;
+begin
+    select note into v_txt from aiq.schema_examples
+     where facet = 'p8ql' and label = 'graph-walk';
+    if v_txt is null then
+        raise exception 'the graph-walk schema example is missing -- SCHEMA '
+                        'teaches the dialect and this is one of its rules';
+    end if;
+    if v_txt ~ 'DEPTH applies only to GRAPH' then
+        raise exception
+            'the graph-walk example still teaches "DEPTH applies only to '
+            'GRAPH", which the parser contradicts by accepting PATH ... DEPTH';
+    end if;
+
+    begin
+        perform aiq.query('LOOKUP "acme" DEPTH 2');
+    exception when others then
+        v_refused := true;
+        if sqlerrm ~ 'RELEVANCE is not one' then
+            raise exception
+                'DEPTH on LOOKUP was refused by naming RELEVANCE, a mode the '
+                'caller did not write: %', sqlerrm;
+        end if;
+    end;
+    if not v_refused then
+        raise exception 'DEPTH on LOOKUP was accepted';
+    end if;
+    raise notice 'query/02: DEPTH is refused off GRAPH/PATH, naming the mode written';
+end $$;
+
 rollback;

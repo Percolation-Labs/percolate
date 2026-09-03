@@ -452,15 +452,13 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, ParseError> {
     // other than what it said, which is the exact failure the two rules above
     // exist to prevent. Found while adding SCHEMA, not by SCHEMA.
     if let Some(m) = wrote_graph_modifier {
-        // TYPE filters a relation, which both graph modes can do. DEPTH
-        // describes a traversal, and RELEVANCE is deliberately not one -- it
-        // ranks the neighbourhood the score actually reaches rather than
-        // everything within n hops, so a depth here would be a number the
-        // engine had to ignore. Refused with the reason, because the caller
-        // who writes it is reaching for GRAPH.
         // DEPTH bounds a traversal, which GRAPH and PATH both do -- on PATH
         // it is the longest route worth considering. RELEVANCE has no depth
-        // to bound. TYPE filters a relation, which all three can do.
+        // to bound: it ranks the neighbourhood the score actually reaches
+        // rather than everything within n hops, so a depth there would be a
+        // number the engine had to ignore, and it is refused with the reason
+        // because the caller who writes it is reaching for GRAPH. TYPE filters
+        // a relation, which all three can do.
         let allowed = match m {
             "DEPTH" => matches!(q.mode.as_str(), "GRAPH" | "PATH"),
             _ => matches!(q.mode.as_str(), "GRAPH" | "RELEVANCE" | "PATH"),
@@ -472,8 +470,11 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, ParseError> {
                      score reaches a node, not by how many hops away it is. \
                      Use GRAPH \"x\" DEPTH n for a bounded walk"
                 }
+                // Not "and RELEVANCE is not one": that arm is above, so this
+                // one only fires for a mode that is NOT RELEVANCE -- and it
+                // was naming RELEVANCE at a caller who had written LOOKUP.
                 "DEPTH" => "DEPTH applies to GRAPH and PATH -- it bounds a \
-                            traversal, and RELEVANCE is not one",
+                            traversal, and this mode is not one",
                 _ => "TYPE applies to GRAPH, RELEVANCE and PATH -- it filters a \
                       relation on an edge",
             }));

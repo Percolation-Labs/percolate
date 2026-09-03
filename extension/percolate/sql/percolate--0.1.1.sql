@@ -9844,6 +9844,25 @@ begin
         raise exception 'query parse error: %', p->>'error';
     end if;
 
+    -- LIMIT, ONCE, FOR EVERY MODE -- the same rule GRAPH already applies to
+    -- DEPTH, and the reason it belongs here rather than in three branches is
+    -- that it was missing from all of them in different ways.
+    --
+    -- `RELEVANCE "acme" LIMIT -1` came back `rows: []`, `exhausted: false`,
+    -- `unresolved: []` -- which is this envelope's way of saying "that entity
+    -- exists and nothing is related to it". It is the exact collapse
+    -- `unresolved` exists to prevent, arrived at from the other side: not a
+    -- name that failed to resolve, but a bound that could not be honoured.
+    -- LOOKUP was luckier and no better -- the negative reached Postgres and
+    -- came back as `LIMIT must not be negative`, an engine error with no mode
+    -- in it. One check, one sentence, before any of them run.
+    if (p->>'limit') is not null and (p->>'limit')::int < 1 then
+        raise exception
+            'LIMIT must be at least 1 -- % asks for no rows, and an empty '
+            'answer is indistinguishable from "there is nothing to find"',
+            p->>'limit';
+    end if;
+
     case p->>'mode'
     when 'LOOKUP' then
         -- The dialect takes a list, so the dispatch does too. Resolving five
@@ -10058,10 +10077,32 @@ begin
         from jsonb_array_elements_text(p->'args') a(key)
         left join lateral (select node_id from aiq.lookup(a.key, false, 1)) l on true;
 
+        -- DEPTH: refuse what cannot be meant, and REPORT what was used.
+        --
+        -- The dispatch passed `greatest(depth, 2)` and the envelope went on
+        -- echoing whatever the caller wrote, so `PATH "a" "b" DEPTH -3`
+        -- returned a two-hop walk under a plan saying `depth: -3` -- the one
+        -- artefact this envelope tells a reader to trust, reporting a bound the
+        -- walk had not used. GRAPH refuses depth < 1 two hundred lines up for
+        -- exactly this reason and PATH never got the same treatment.
+        --
+        -- The clamp itself stays, because depth 1 is the dialect's default
+        -- rather than something a caller asked for and a route between two
+        -- distinct nodes needs two hops to be worth searching for. What changes
+        -- is that the plan is corrected to the depth actually walked, so the
+        -- clamp is visible instead of silent.
+        if (p->>'depth')::int < 1 then
+            raise exception
+                'DEPTH must be at least 1 -- DEPTH % asked for no traversal, and '
+                'PATH would have served a depth-2 walk under a plan still '
+                'saying %', p->>'depth', p->>'depth';
+        end if;
+        p := jsonb_set(p, '{depth}', to_jsonb(greatest((p->>'depth')::int, 2)));
+
         begin
             if jsonb_array_length(p->'args') = 2 then
                 v_out := aiq.graph_paths(p->'args'->>0, p->'args'->>1,
-                             (p->>'limit')::int, greatest((p->>'depth')::int, 2),
+                             (p->>'limit')::int, (p->>'depth')::int,
                              250, p->>'relation');
                 v_exhausted := coalesce((v_out->'meta'->>'exhausted')::boolean, false);
                 v_out := v_out->'paths';
@@ -11629,8 +11670,8 @@ select aiq.register_schema_example('p8ql', 'lookup-list', 'p8ql',
     'Resolving several names is one round trip, not N.', 10);
 select aiq.register_schema_example('p8ql', 'graph-walk', 'p8ql',
     'GRAPH "acme" DEPTH 2 TYPE competes_with',
-    'DEPTH applies only to GRAPH and TYPE only to GRAPH and RELEVANCE; written '
-    'elsewhere they are refused, not ignored.', 20);
+    'DEPTH applies to GRAPH and PATH, TYPE to GRAPH, PATH and RELEVANCE; '
+    'written elsewhere they are refused, not ignored.', 20);
 select aiq.register_schema_example('p8ql', 'path', 'p8ql',
     'PATH "acme", "nwnd" LIMIT 3',
     'Two names is the three cheapest routes between them, ordered. Three or '
