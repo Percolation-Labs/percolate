@@ -25,9 +25,24 @@ do $$
 begin
     if to_regprocedure('p8_graph_ppr(uuid[],float8,float8,int,int,bool,text,bigint)') is null then
         raise exception
-            'the graph algorithms are not in the installed percolate_parser. '
-            'They are compiled, so a SQL reload does not carry them: rebuild the '
-            'image (dev/build-image.sh) or copy the .so into the container.';
+            'the installed percolate_parser does not DECLARE the graph algorithms '
+            '(percolate_parser %, on this database)',
+            (select extversion from pg_extension where extname = 'percolate_parser')
+            using detail =
+                'This is a missing SQL declaration, not necessarily a missing '
+                '.so -- the two halves ship as separate files and drift apart '
+                'independently. The first version of this message said "they '
+                'are compiled, so a SQL reload does not carry them: copy the '
+                '.so", and it was wrong where it fired: the .so in the '
+                'container held all thirty p8_graph symbols and what was '
+                'missing was percolate_parser--<version>.sql.',
+            hint =
+                'Check the .so first (nm -D percolate_parser.so | grep p8_graph). '
+                'If the symbols are there, the extension SQL is behind: '
+                'percolate_parser must be reinstalled, and CREATE EXTENSION IF '
+                'NOT EXISTS will not do it -- Postgres does not re-run a script '
+                'for a version it already records. Otherwise rebuild: '
+                'dev/build-image.sh.';
     end if;
 end $$;
 
@@ -556,6 +571,88 @@ begin
     end if;
     raise notice 'query/11: switching tenant in one backend rebuilds the snapshot (% -> % nodes)',
         a->'snapshot'->>'nodes', b->'snapshot'->>'nodes';
+end $$;
+
+reset role;
+
+-- ---------------------------------------------------------------------
+-- 15. AND THE FILTER DOES NOT CROSS ONE EITHER.
+--
+-- §14 asserts the snapshot is rebuilt for a new identity. It was, and the
+-- rebuild used the PREVIOUS identity's build filter -- so one caller's
+-- `graph_snapshot(true, relations => ...)` narrowed every algorithm the next
+-- caller ran on that backend, and nothing in any answer said so.
+-- `aiq.related('acme')` returned ten rows on a fresh connection and one row on
+-- that one. Through PostgREST's pool "the previous identity on this backend" is
+-- the ordinary case, not a contrived one.
+--
+-- Both directions are asserted, because the fix is a distinction and not a
+-- removal: a filter is a caller's choice about their own graph, so it must
+-- survive their own writes (the case the inheritance exists for -- an operator
+-- who built over a subset because the whole graph does not fit §2.3's ceiling)
+-- and must not outlive their identity.
+-- ---------------------------------------------------------------------
+create temp table t_filt (tag text primary key, v jsonb);
+grant insert, select on t_filt to authenticated;
+
+set local role authenticated;
+
+set local request.jwt.claims = '{"orgs":["a0000000-0000-0000-0000-00000000000a"]}';
+insert into t_filt select 'subset', aiq.graph_snapshot(true, array['knows']);
+
+-- The graph moves under that caller. Written as the owner because
+-- `authenticated` has no UPDATE on aiq.edges -- what has to change is the
+-- COUNTERS the staleness check reads, not who changed them, and the identity
+-- is set back before the next snapshot call. They come from the stats
+-- collector, so they are forced and given a moment to land; without that this
+-- section asserts nothing, because no rebuild happens at all.
+reset role;
+do $$
+begin
+    update aiq.edges set weight = weight where true;
+    perform pg_stat_force_next_flush();
+    perform pg_sleep(0.5);
+end $$;
+
+set local role authenticated;
+insert into t_filt select 'after_own_write', aiq.graph_snapshot(false);
+
+set local request.jwt.claims = '{"orgs":["a0000000-0000-0000-0000-00000000000b"]}';
+insert into t_filt select 'other_identity', aiq.graph_snapshot(false);
+
+do $$
+declare a jsonb; b jsonb; c jsonb;
+begin
+    select v->'snapshot' into a from t_filt where tag = 'subset';
+    select v->'snapshot' into b from t_filt where tag = 'after_own_write';
+    select v->'snapshot' into c from t_filt where tag = 'other_identity';
+
+    if a->'filter'->'relations' is null then
+        raise exception 'the subset build did not record its filter: %', a;
+    end if;
+    if b->'filter'->'relations' is distinct from a->'filter'->'relations' then
+        raise exception
+            'a caller lost their own build filter across their own write '
+            '(% -> %) -- an operator who built over a subset because the graph '
+            'does not fit the ceiling has that undone by anyone inserting an edge',
+            a->'filter'->'relations', b->'filter'->'relations';
+    end if;
+    if jsonb_typeof(c->'filter') <> 'null' then
+        raise exception
+            'a new identity inherited the previous one''s build filter (%) -- '
+            'every algorithm it runs is silently answering over a subset it did '
+            'not ask for and cannot see', c->'filter';
+    end if;
+    if (c->>'edges')::bigint <= (a->>'edges')::bigint then
+        raise exception
+            'the new identity holds % edges and the subset held % -- it is on '
+            'the narrowed graph, whatever the filter field says',
+            c->>'edges', a->>'edges';
+    end if;
+    raise notice
+        'query/11: a build filter survives its own caller''s writes (% edges) '
+        'and does not cross to the next identity (% edges)',
+        b->>'edges', c->>'edges';
 end $$;
 
 reset role;

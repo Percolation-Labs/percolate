@@ -33,9 +33,14 @@ $$;
 --
 -- Backend-local, so this reports what THIS connection is holding. Through a
 -- pooler that is a different backend per call and the honest answer is "it
--- depends"; graph-algorithms.md §6 is explicit that a pooled deployment must
--- either pin or preload, and that this function is how you find out which
--- backend you are on.
+-- depends"; graph-algorithms.md §2.1 and §2.3 are explicit about what a pooled
+-- deployment has to do about that, and this function is how you find out which
+-- backend you are on. (It said §6, which is the measurements table.)
+--
+-- The ARGUMENT NAMES here are `p_`-prefixed, and that is worth stating because
+-- the ceiling error in graph.rs spent a while telling operators to call
+-- `relations => ...`, which does not exist -- a remedy that fails with
+-- "function does not exist" at the moment somebody is already in trouble.
 -- ------------------------------------------------------------
 create or replace function aiq.graph_snapshot(
     p_refresh      boolean default false,

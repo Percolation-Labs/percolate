@@ -17,9 +17,11 @@
 //!    *cached*, and a cache built under one tenant's policies and read under
 //!    another's is a silent cross-tenant read — the read-side twin of the write
 //!    `world-model-ingestion/graph-index.md` §11 records. Every entry point
-//!    therefore checks a fingerprint (role + JWT claims) before reuse and
-//!    rebuilds rather than serving someone else's graph.
-//! 2. **It is a stale read by construction.** The fingerprint carries the
+//!    therefore checks the caller's identity (role + JWT claims) before reuse
+//!    and rebuilds rather than serving someone else's graph. A rebuild for a
+//!    NEW identity also drops the previous one's build filter, so a subset one
+//!    caller chose cannot narrow the next caller's answers.
+//! 2. **It is a stale read by construction.** The snapshot carries the
 //!    table's tuple-modification counters, so an edge written since the build
 //!    normally forces a rebuild — but those counters come from the stats
 //!    collector and lag. `stale` in the result is a fact about the snapshot,
@@ -357,16 +359,29 @@ impl BuildFilter {
 }
 
 struct Snapshot {
-    /// Who built it: role, claims, and the tuple counters of the two tables.
-    /// Reuse across a different fingerprint is a cross-tenant read, so it is
-    /// refused rather than warned about.
-    fingerprint: String,
+    /// WHO built it: role and JWT claims. Reuse across a different identity is
+    /// a cross-tenant read, so it is refused rather than warned about.
+    ///
+    /// Split from the counters below, and the split is load-bearing rather
+    /// than tidy -- see `snapshot()` for what each half decides.
+    identity: String,
+    /// WHEN it was built, as the two tables' tuple-modification counters. A
+    /// staleness hint, not a guarantee: `pg_stat_all_tables` is fed by the
+    /// stats collector, which lags.
+    counters: String,
     /// The admission slot this backend holds while this snapshot exists. The
     /// lock and the memory have the same lifetime on purpose.
     slot: i32,
-    /// Reported on every answer, because a filtered snapshot silently returns
-    /// a filtered answer and a caller has to be able to see which graph it
-    /// asked. Same rule as the parsed plan riding along with every result.
+    /// The subset this snapshot was built over, if any.
+    ///
+    /// It is reported by `aiq.graph_snapshot()` and NOT by the algorithms --
+    /// `related` and its siblings return fixed row shapes with nowhere to put
+    /// it. That is a real gap and it is stated here rather than in a claim that
+    /// this field is "reported on every answer", which is what this comment
+    /// used to say and what nothing in the code did. What closes the dangerous
+    /// half of it is `snapshot()`: a filter now belongs to the identity that
+    /// built it, so the only caller who can be answered over a subset is the
+    /// one who asked for it.
     build_filter: BuildFilter,
     ids: Vec<Uuid>,
     index: Map<Uuid, u32>,
@@ -522,21 +537,36 @@ fn drop_cached() -> bool {
     }
 }
 
-/// Role, claims and the two tables' modification counters.
+/// Role and claims: the tenancy guard.
 ///
-/// The first two are the tenancy guard. The counters are the staleness hint,
-/// and they are a hint: `pg_stat_all_tables` is fed by the stats collector,
+/// These two decide WHO a snapshot belongs to, and a change in them is the one
+/// case where the cached build filter must NOT be carried forward -- a filter
+/// is one caller's choice about their own graph, and inheriting it hands the
+/// next caller a subset they did not ask for and cannot see.
+fn identity() -> String {
+    Spi::get_one::<String>(
+        "select current_user::text
+             || '|' || coalesce(current_setting('request.jwt.claims', true), '')",
+    )
+    .unwrap_or(None)
+    .unwrap_or_default()
+}
+
+/// The two tables' modification counters: the staleness hint.
+///
+/// A hint, and it says so: `pg_stat_all_tables` is fed by the stats collector,
 /// which lags, so a snapshot can be behind the graph for as long as that lag.
 /// Recorded rather than papered over -- the alternative, `count(*)` per call,
 /// costs more than most of the algorithms it would be guarding.
-fn fingerprint() -> String {
+///
+/// A change here means the same caller's graph moved, which is a reason to
+/// rebuild and NOT a reason to discard the filter they built it with.
+fn counters() -> String {
     Spi::get_one::<String>(
-        "select current_user::text
-             || '|' || coalesce(current_setting('request.jwt.claims', true), '')
-             || '|' || coalesce((select sum(n_tup_ins + n_tup_upd + n_tup_del)::text
-                                   from pg_stat_all_tables
-                                  where schemaname = 'aiq'
-                                    and relname in ('nodes', 'edges')), '')",
+        "select coalesce((select sum(n_tup_ins + n_tup_upd + n_tup_del)::text
+                            from pg_stat_all_tables
+                           where schemaname = 'aiq'
+                             and relname in ('nodes', 'edges')), '')",
     )
     .unwrap_or(None)
     .unwrap_or_default()
@@ -643,7 +673,7 @@ fn build(bf: &BuildFilter) -> Snapshot {
                 error!(
                     "the graph does not fit in one backend's snapshot ceiling of {} MiB \
                      ({} edges so far). Build over a subset instead: \
-                     aiq.graph_snapshot(true, relations => array[...], weight_floor => 0.5). \
+                     aiq.graph_snapshot(true, p_relations => array[...], p_weight_floor => 0.5). \
                      The ceiling exists because this memory is outside work_mem, so \
                      exceeding it is an OOM kill and a cluster restart rather than a \
                      slow query; raise it with percolate.graph_snapshot_max_mb if the \
@@ -688,7 +718,8 @@ fn build(bf: &BuildFilter) -> Snapshot {
         .unwrap_or(None)
         .unwrap_or_default();
     Snapshot {
-        fingerprint: fingerprint(),
+        identity: identity(),
+        counters: counters(),
         slot: -1,
         build_filter: bf.clone(),
         ids,
@@ -839,21 +870,44 @@ fn release_slot(slot: i32) {
     );
 }
 
-/// The query path's way in. Rebuilds when the fingerprint moved, which covers
-/// both the tenancy case (a different role or claim set) and the ordinary
-/// staleness one -- and otherwise reuses whatever snapshot this backend holds,
-/// *including its filter*. A query does not silently widen the graph it was
-/// given; it runs on the one that was built, and says which one that was.
+/// The query path's way in -- every algorithm below, none of which passes a
+/// filter, because none of them is asking for a subset.
+///
+/// Rebuilds when either half of the old fingerprint moved, and the two halves
+/// mean different things on the way back:
+///
+///   * **The counters moved.** Same caller, their graph changed. Rebuild, and
+///     KEEP the filter -- an operator who built over a subset because the whole
+///     graph does not fit the ceiling (§2.3) must not have that undone by
+///     somebody inserting an edge. This is the case the inheritance exists for.
+///
+///   * **The identity moved.** A different role or claim set, which through a
+///     pooler is the ordinary case rather than an unusual one. Rebuild over the
+///     WHOLE graph. Carrying the filter here was a real bug and not a
+///     theoretical one: one session's `graph_snapshot(true, relations => ...)`
+///     narrowed every subsequent algorithm call on that backend, for every
+///     later caller, and nothing in any answer said so. `aiq.related('acme')`
+///     returned ten rows on a fresh backend and one row on that one -- the
+///     same question, the same data, a different answer decided by what
+///     somebody else did earlier on the connection they happened to get.
+///
+/// The distinction is exactly the one `identity()` and `counters()` already
+/// draw: a filter is a caller's choice about their own graph, so it survives
+/// their own writes and does not outlive them.
 fn snapshot(refresh: bool) -> &'static mut Snapshot {
-    let fp = fingerprint();
+    let id = identity();
+    let ct = counters();
     if !refresh {
         if let Some(s) = cached() {
-            if s.fingerprint == fp {
+            if s.identity == id && s.counters == ct {
                 return s;
             }
         }
     }
-    let bf = cached().map(|s| s.build_filter.clone()).unwrap_or_default();
+    let bf = match cached() {
+        Some(s) if s.identity == id => s.build_filter.clone(),
+        _ => BuildFilter::default(),
+    };
     let slot = match cached() {
         Some(c) if c.slot >= 0 => c.slot,
         _ => acquire_slot(),
@@ -864,10 +918,11 @@ fn snapshot(refresh: bool) -> &'static mut Snapshot {
 /// The builder's way in: a filter is an instruction to build, not a preference
 /// to be matched against a cache, so a different filter always rebuilds.
 fn snapshot_filtered(bf: BuildFilter, refresh: bool) -> &'static mut Snapshot {
-    let fp = fingerprint();
+    let id = identity();
+    let ct = counters();
     if !refresh {
         if let Some(s) = cached() {
-            if s.fingerprint == fp && s.build_filter == bf {
+            if s.identity == id && s.counters == ct && s.build_filter == bf {
                 return s;
             }
         }
