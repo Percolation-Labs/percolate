@@ -47,7 +47,22 @@ agent = [
     "pyyaml>=6.0",
     "rich>=13.9",
 ]
-all = ["percolate-core[content,agent,ingest,tabular]"]
+# Every provider pydantic-ai can drive, because `model` is a COLUMN and a
+# column should not be constrained by what somebody remembered to install.
+#
+# `agent` alone carries openai, which is the one an OpenAI-shaped gateway also
+# satisfies -- point OPENAI_BASE_URL at it and openrouter, cerebras, xai, zai,
+# vLLM and Ollama all work with no extra SDK. The providers below are the ones
+# that speak their own protocol and therefore need their own client. Measured,
+# they add ~140MB to the image (1.15GB -> 1.29GB), most of it botocore and
+# google-genai's protobuf -- which is why they are separable at all. The
+# published image takes them anyway (see `all`), because an image that cannot
+# run the model named in a row fails at request time rather than install time,
+# and 140MB is a poor trade against that.
+providers = [
+    "pydantic-ai-slim[anthropic,google,groq,mistral,cohere,huggingface,bedrock]>=0.4",
+]
+all = ["percolate-core[content,agent,providers,ingest,tabular]"]
 
 [project.scripts]
 percolate = "percolate_core.cli:app"

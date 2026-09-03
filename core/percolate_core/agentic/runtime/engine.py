@@ -21,6 +21,45 @@ from ..tools import ResolvedToolset, build_pydantic_ai_tools
 from .injection import build_instructions
 
 
+# Which pip extra supplies which provider prefix. pydantic-ai raises a bare
+# ImportError naming its own package ("Please install the `anthropic`
+# package"), which is true and unhelpful here: the reader has a row in a
+# database with `model` in it, not a pydantic-ai install to reason about. This
+# maps the failure back to the thing they can act on.
+#
+# The prefixes NOT listed are the OpenAI-compatible ones -- openrouter,
+# cerebras, xai, zai and any gateway -- which need no SDK of their own and so
+# can never land here.
+_PROVIDER_EXTRA = {
+    "anthropic": "anthropic",
+    "google": "google",
+    "google-gla": "google",
+    "google-vertex": "google",
+    "groq": "groq",
+    "mistral": "mistral",
+    "cohere": "cohere",
+    "huggingface": "huggingface",
+    "bedrock": "bedrock",
+}
+
+
+def _missing_provider(model: Any, err: ImportError) -> ImportError:
+    """Re-raise a provider ImportError as something a reader can act on."""
+    name = model if isinstance(model, str) else getattr(model, "model_name", str(model))
+    prefix = name.split(":", 1)[0] if isinstance(name, str) else ""
+    extra = _PROVIDER_EXTRA.get(prefix)
+    if not extra:
+        return err
+    return ImportError(
+        f"the agent's model is '{name}', and the '{prefix}' provider is not "
+        f"installed in this process. Install it with "
+        f"`pip install 'percolate-core[providers]'` (the published image "
+        f"carries every provider), or point the row at an OpenAI-compatible "
+        f"endpoint -- set OPENAI_BASE_URL and use an `openai:` model, which "
+        f"needs no additional package. Original error: {err}"
+    )
+
+
 @dataclass(slots=True)
 class ExecutionResult:
     """What one LLM turn produced, before any of it is persisted."""
@@ -62,16 +101,20 @@ class AgentEngine:
         """
         from pydantic_ai import Agent
 
-        return Agent(
-            model or agent.model or self.settings.default_model,
-            instructions=build_instructions(agent, context),
-            deps_type=AgentDeps,
-            tools=build_pydantic_ai_tools(
-                toolset, on_result=on_tool_result, headers=headers, before_call=before_call
-            ),
-            output_type=self.output_type(agent),
-            name=agent.name,
-        )
+        chosen = model or agent.model or self.settings.default_model
+        try:
+            return Agent(
+                chosen,
+                instructions=build_instructions(agent, context),
+                deps_type=AgentDeps,
+                tools=build_pydantic_ai_tools(
+                    toolset, on_result=on_tool_result, headers=headers, before_call=before_call
+                ),
+                output_type=self.output_type(agent),
+                name=agent.name,
+            )
+        except ImportError as err:
+            raise _missing_provider(chosen, err) from err
 
     def output_type(self, agent: AgentSpec) -> Any:
         """Turn ``structured_output_schema`` (JSON Schema) into an output type.

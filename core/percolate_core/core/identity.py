@@ -174,6 +174,55 @@ async def as_service(role: str = SERVICE_ROLE):
         yield conn
 
 
+def mint_jwt(
+    sub: str,
+    secret: str,
+    *,
+    role: str = ROLE,
+    ttl_seconds: int = 3600,
+    extra: Mapping[str, Any] | None = None,
+) -> str:
+    """Sign a bearer token that every surface in the deployment accepts.
+
+    The counterpart of ``claims_from_jwt`` and deliberately beside it: a minter
+    that disagreed with the verifier about the algorithm or the claim names
+    would produce tokens this collection rejects, and the two drifting apart is
+    exactly the failure that having one file prevents.
+
+    Two claims are load-bearing and neither is optional. ``sub`` is the user id
+    every policy reads through ``rbac.current_user_id()``, so a token without
+    it authenticates nobody. ``role`` is the Postgres role PostgREST switches
+    to, so a token without it lands on the anonymous role and reads nothing --
+    which looks like an empty database rather than like a permissions problem.
+
+    There is no ``kid`` and no asymmetric option, because PostgREST beside us
+    is verifying HS256 with one shared secret; offering more here would mean
+    minting tokens that work against this runtime and fail against the REST
+    interface in the same stack.
+    """
+    import base64
+    import hmac
+    import hashlib
+    import time
+
+    def b64(raw: bytes) -> str:
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+    now = int(time.time())
+    claims: dict[str, Any] = {"sub": str(sub), "role": role, "iat": now}
+    if ttl_seconds:
+        claims["exp"] = now + int(ttl_seconds)
+    if extra:
+        claims.update(extra)
+
+    head = b64(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
+    body = b64(json.dumps(claims, separators=(",", ":"), sort_keys=True).encode())
+    sig = b64(
+        hmac.new(secret.encode(), f"{head}.{body}".encode(), hashlib.sha256).digest()
+    )
+    return f"{head}.{body}.{sig}"
+
+
 def claims_from_jwt(token: str, secret: str) -> dict[str, Any]:
     """Verify a bearer token and return its claims.
 

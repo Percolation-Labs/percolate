@@ -83,6 +83,15 @@ app.add_typer(
 )
 
 
+# Mounted directly rather than through _subcommands(): `auth` needs nothing
+# beyond the base install, so there is no extra for it to be missing and no
+# stub to explain. A worker-only deployment is exactly where somebody is
+# holding admin credentials with no other tooling around.
+from .core.cli import app as _auth_app
+
+app.add_typer(_auth_app, name="auth", help="Bootstrap the first identity, and sign tokens")
+
+
 @app.command()
 def worker(
     queue: str = typer.Option("default", "--queue", "-q"),
