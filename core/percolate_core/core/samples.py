@@ -117,6 +117,22 @@ async def apply_sources(conn: Any, doc: dict[str, Any]) -> list[str]:
         await conn.execute("select aiq.register_embedding_space($1)", m["name"])
         done.append(f"embedding model {m['name']} ({m['dim']}d)")
 
+    # THE PIPELINE THAT USES THE MODEL, which registering the model does not
+    # install. A fresh database already has an `ingest_file` definition -- the
+    # extension's own bootstrap calls install_ingest_workflow() with no
+    # argument, which is the PARSE-ONLY pipeline, so that a channel never
+    # points at a definition that does not exist. Registering an embedding
+    # model does not change it. Without this a sample's corpus parses, chunks,
+    # and is never embedded: SEMANTIC and SEARCH find nothing, and no step ever
+    # fails to say why.
+    for ing in doc.get("ingest_pipelines") or []:
+        msg = await conn.fetchval(
+            "select content.install_ingest_workflow($1,$2,$3,$4)",
+            ing.get("model"), ing.get("queue", "ingest"),
+            ing.get("name", "ingest_file"), bool(ing.get("graph_index")),
+        )
+        done.append(f"ingest pipeline {msg}")
+
     for e in doc.get("entities") or []:
         await conn.execute(
             "select aiq.register_entity_table($1,$2,$3,$4,$5,$6)",
@@ -282,6 +298,26 @@ async def apply_plugin(conn: Any, doc: dict[str, Any]) -> list[str]:
         f"{len(doc.get('skills') or [])} skills, "
         f"{len(doc.get('agents') or [])} agents)"
     ]
+
+
+def orgs_in_documents(where: Path, yaml: Any) -> list[str]:
+    """Every distinct org the documents index names, in order.
+
+    Read separately from the upload loop because the TOKEN has to be minted
+    before the first request, and it has to cover all of them: the Content
+    Server checks the caller's claims per upload, so a token good for the first
+    document fails on the third.
+    """
+    index_path = where / "index.yaml"
+    if not index_path.exists():
+        return []
+    entries = yaml.safe_load(index_path.read_text()) or []
+    seen: list[str] = []
+    for e in entries:
+        org = e.get("org")
+        if org and org not in seen:
+            seen.append(org)
+    return seen
 
 
 async def apply_workflows(conn: Any, paths: list[Path]) -> list[str]:

@@ -302,6 +302,29 @@ def sample_load(
         yaml = samples._yaml()
         conn = await _connect(target_dsn)
         try:
+            # EVERYTHING A SAMPLE CREATES IS OWNED BY app_owner, like the rest
+            # of the collection. Loading as the superuser you connected with
+            # produces objects it owns, and the consequence is not cosmetic:
+            # `register_embedding_space` creates the vector table, and one
+            # owned by the superuser cannot be written by the SECURITY DEFINER
+            # function that runs as app_owner -- every embed task then fails
+            # with `must be owner of table emb_...`, long after the load
+            # reported success. Every other table in the collection is
+            # app_owner's for the RLS reason; this keeps a sample from being
+            # the exception.
+            #
+            # `session_user` is unchanged by SET ROLE, which is what
+            # `agentic.may_author` reads, so apply_plugin still takes the
+            # migration path.
+            try:
+                await conn.execute("set role app_owner")
+            except Exception as err:
+                raise samples.SampleError(
+                    f"cannot `set role app_owner` ({err}). A sample is loaded as "
+                    "the schema owner; connect with a DSN that is a member of "
+                    "app_owner -- the database owner, not a service role."
+                ) from err
+
             for step in manifest["load"]:
                 kind, target = next(iter(step.items()))
                 where = root / target
@@ -311,7 +334,10 @@ def sample_load(
                     # part of what it is setting up -- and that would otherwise
                     # persist on this connection through every later step.
                     await conn.execute(where.read_text())
-                    await conn.execute("reset role")
+                    # Back to app_owner, NOT `reset role`: a schema file
+                    # legitimately sets its own, and resetting would hand the
+                    # remaining steps back to the superuser.
+                    await conn.execute("set role app_owner")
                     done = [f"sql {target}"]
                 elif kind == "sources":
                     done = await samples.apply_sources(conn, yaml.safe_load(where.read_text()))
@@ -335,7 +361,22 @@ def sample_load(
                                 "uploading needs a token: pass --token, or --as-email "
                                 "for a user that exists (percolate auth bootstrap makes one)"
                             )
-                        upload_token = mint_jwt(uid, signing, ttl_seconds=900)
+                        # The token carries every org the index names. A sample
+                        # that demonstrates tenancy has to WRITE into more than
+                        # one tenant, and the Content Server refuses an upload
+                        # for an organization the caller's claims do not cover
+                        # -- "not authorized to register content for that
+                        # organization", which is the check working. Loading is
+                        # an administrative act done with the signing secret in
+                        # hand, so this mints the claims it needs and lets them
+                        # expire in fifteen minutes.
+                        orgs = samples.orgs_in_documents(where, samples._yaml())
+                        upload_token = mint_jwt(
+                            uid, signing, ttl_seconds=900,
+                            extra={"orgs": orgs} if orgs else None,
+                        )
+                        if orgs:
+                            typer.echo(f"  upload token covers {len(orgs)} org(s)")
                     done = await _upload_documents(where, content_url, upload_token, yaml)
                 for line in done:
                     typer.echo(f"  {line}")
@@ -362,6 +403,13 @@ async def _upload_documents(where: Any, content_url: str, token: str, yaml: Any)
     content.resource_chunks would skip precisely the part worth showing.
     """
     import httpx
+
+    # Imported here as well as in the caller: this function reaches for
+    # SampleError only on the failure path, so a missing import survives every
+    # successful run and then turns the first real upload failure into
+    # `NameError: name 'samples' is not defined` -- losing the status code and
+    # body that said what actually went wrong.
+    from . import samples
 
     index_path = where / "index.yaml"
     entries = yaml.safe_load(index_path.read_text()) if index_path.exists() else None
