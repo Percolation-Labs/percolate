@@ -12746,10 +12746,19 @@ begin
         raise exception 'no such role: %', p_role;
     end if;
     for r in
-        -- The six query entry points and the compiled functions under them.
-        -- graph_reach_build and enable_graph_algorithms itself are deliberately
-        -- absent: one is a maintenance operation with a real cost and the other
-        -- is the gate, and a gate an end-user role can open is not one.
+        -- The query entry points and the compiled functions under them.
+        -- `enable_graph_algorithms` itself is deliberately absent: a gate an
+        -- end-user role can open is not a gate.
+        --
+        -- `graph_reach_build` IS included, which the first version of this
+        -- function got wrong by reasoning rather than by running. It is a
+        -- maintenance operation, so it looked like one to withhold -- but the
+        -- sketch it builds lives in the backend that built it, over the graph
+        -- THAT CALLER could see. Built by the owner and read by a tenant, the
+        -- tenant's snapshot is rebuilt under their own fingerprint and the
+        -- estimate comes back null. An index only its author can use is not an
+        -- index; the cost it carries is bounded by the same budget as
+        -- everything else here.
         select p.oid::regprocedure as sig
           from pg_proc p
           join pg_namespace n on n.oid = p.pronamespace
@@ -12757,6 +12766,7 @@ begin
                 and p.proname in ('related','graph_paths','graph_connect',
                                   'graph_dense','graph_trust','graph_frontier',
                                   'graph_snapshot','graph_components','graph_induced',
+                                  'graph_reach_build',
                                   -- every wrapper's first statement calls it,
                                   -- so a grant that omits it grants nothing
                                   'graph_algorithms_available'))
