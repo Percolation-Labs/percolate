@@ -294,6 +294,17 @@ insert into expected (subsystem, kind, name, detail, why) values
 -- a demo that lives only in a running container -- so the audit asserts the
 -- rows, not just the tables they sit in.
 ('agentic','agent','percolate',null,'reference/percolate.yaml: the sample agent ships as data'),
+-- The sample fleet. These five rows ARE the sample agent's old system prompt:
+-- it went from 2,464 characters to 159 when they came out of it, and if they
+-- are missing the agent ships with a prompt that no longer says what it used
+-- to. That is the failure this block exists to catch -- a refactor whose
+-- second half did not install is strictly worse than not having done it.
+('agentic','skill','p8ql-schema-first',null,'reference/percolate.yaml: composed -- start with SCHEMA'),
+('agentic','skill','house-style-attribution',null,'reference/percolate.yaml: composed -- say which tool told you'),
+('agentic','skill','workflow-define-then-start',null,'reference/percolate.yaml: composed -- define work, do not poll'),
+('agentic','skill','p8ql-fuzzy-lookup',null,'reference/percolate.yaml: matched -- FUZZY when a LOOKUP finds nothing'),
+('agentic','skill','p8ql-read-the-plan',null,'reference/percolate.yaml: matched -- an empty result is not an answer'),
+('agentic','skill_binding','percolate',null,'plugins.md §5.1: the agent composes the three that were always in its prompt'),
 ('agentic','tool_server','p8-query',null,'reference/query_mcp.py: the MCP binding'),
 ('agentic','tool_server','p8-workflow',null,'reference/percolate.yaml: the OpenAPI binding over PostgREST'),
 
@@ -367,6 +378,16 @@ select e.*,
     when 'yaml_feature' then coalesce(
         (workflow.compiler_capabilities() #>> array['accepts', e.name])::boolean, false)
     when 'agent'       then exists (select 1 from agentic.agents where name = e.name)
+    -- A skill row, and -- the part that matters -- one with a BODY. An empty
+    -- `content` is a fragment that installs, resolves, composes and says
+    -- nothing, which no catalog check would notice.
+    when 'skill'       then exists (select 1 from agentic.skills
+                                     where name = e.name and length(content) > 0)
+    -- The other half of the refactor: the rows exist AND the agent carries
+    -- them. Either alone is the half-installed state.
+    when 'skill_binding' then exists (select 1 from agentic.agents a
+                                       where a.name = e.name
+                                         and cardinality(a.skills) >= 3)
     when 'tool_server' then exists (select 1 from agentic.tool_servers where name = e.name)
     -- A registered entity type with no nodes is a registration nobody ran, so
     -- the check is on the projected rows, not on the registry row.

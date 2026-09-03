@@ -22,7 +22,19 @@ set role app_owner;
 
 do $$
 begin
-    if to_regprocedure('content.install_ingest_workflow(text,text,text)') is null then
+    -- BY NAME, NOT BY SIGNATURE, and that is a correction rather than a style
+    -- choice. This guard was written against
+    -- `install_ingest_workflow(text,text,text)`, which ingestion.sql then
+    -- DROPPED and replaced with a six-argument version -- so from that commit
+    -- onward the check was false on every install, the whole ingestion sample
+    -- silently did not run, and the warning blamed a stale image for a
+    -- signature change inside the current one. A guard asking "does this image
+    -- have the function at all" should not be able to be wrong about that
+    -- because an argument was added.
+    if not exists (select 1 from pg_catalog.pg_proc p
+                     join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+                    where n.nspname = 'content'
+                      and p.proname = 'install_ingest_workflow') then
         raise warning
             'skipping the ingestion sample: this database image predates '
             'content.install_ingest_workflow. Everything else installed '
