@@ -23,7 +23,15 @@ CONTAINER="${CONTAINER:-p8-experiment-pg19}"
 TARGET_DB="${TARGET_DB:-p8experiment}"
 REF_DB="${REF_DB:-p8currency_ref}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPT="$HERE/../extension/percolate/sql/percolate--0.1.0.sql"
+
+# Read the version rather than restate it, because a bump RENAMES the script --
+# percolate.control's default_version is the filename, so a literal here is a
+# file-not-found on the first release. build-image.sh and reload.sh already do
+# it this way; this line did not, and 0.1.1 broke it.
+VERSION=$(sed -n "s/^default_version = '\(.*\)'/\1/p" "$HERE/../extension/percolate/percolate.control")
+[ -n "$VERSION" ] || { echo "no default_version in percolate.control" >&2; exit 1; }
+SCRIPT="$HERE/../extension/percolate/sql/percolate--$VERSION.sql"
+[ -f "$SCRIPT" ] || { echo "missing $SCRIPT -- run extension/percolate/build-sql.py" >&2; exit 1; }
 
 q() { docker exec -i "$CONTAINER" psql -U p8 -d "$1" -tAqc "$2"; }
 
