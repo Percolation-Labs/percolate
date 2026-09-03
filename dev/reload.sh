@@ -47,8 +47,28 @@ VERSION=$(sed -n "s/^default_version = '\(.*\)'/\1/p" "$ROOT/extension/percolate
 echo "==> installing percolate--$VERSION.sql into $CONTAINER"
 docker cp "$ROOT/extension/percolate/sql/percolate--$VERSION.sql" \
           "$CONTAINER:/tmp/percolate--$VERSION.sql" >/dev/null
+# THE CONTROL FILE GOES WITH IT, and leaving it behind cost a whole afternoon.
+# `create extension percolate` installs whatever `default_version` in the
+# IMAGE's percolate.control names -- so copying only the script put
+# percolate--0.1.1.sql next to a control file still saying 0.1.0, and every
+# reload after the version bump silently recreated the database from the script
+# the image shipped with. Nothing failed: surface.sql passed, the suites passed,
+# and they were passing against code that was two hours old.
+#
+# It worked before the bump for the worst possible reason -- the version had
+# never changed, so the name reload.sh wrote was the name the control asked for.
+docker cp "$ROOT/extension/percolate/percolate.control" \
+          "$CONTAINER:/tmp/percolate.control" >/dev/null
 docker exec "$CONTAINER" sh -c \
-  "cp /tmp/percolate--$VERSION.sql \$(pg_config --sharedir)/extension/"
+  "cp /tmp/percolate--$VERSION.sql /tmp/percolate.control \$(pg_config --sharedir)/extension/"
+
+# And say which version came back, because "it installed" is not the claim --
+# the claim is that it installed THIS one.
+INSTALLED=$(docker exec -i "$CONTAINER" psql -U "$SUPERUSER" -d "$ADMIN_DB" -tAc \
+  "select default_version from pg_available_extensions where name = 'percolate'")
+[ "$INSTALLED" = "$VERSION" ] || {
+  echo "the container offers percolate $INSTALLED, not $VERSION -- the control file did not land" >&2
+  exit 1; }
 
 echo "==> recreating database $DB"
 docker exec -i "$CONTAINER" psql -U "$SUPERUSER" -d "$ADMIN_DB" -q \
