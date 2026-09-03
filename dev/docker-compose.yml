@@ -51,9 +51,17 @@ services:
       PGRST_DB_ANON_ROLE: web_anon
       # Test-only secret -- never reuse in a real deployment.
       PGRST_JWT_SECRET: experiment-only-jwt-secret-not-for-real-use-0123456789
-      PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:3000
+      PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:3099
+    # 3099, not 3000. The published compose file in get-percolate binds the
+    # canonical ports (5432, 3000, 8080, 8081, 9000/9001) because those are
+    # what every worked example in the docs types, and a newcomer should
+    # never have to think about a port. So THIS stack is the one that moves:
+    # `db` already did (5499), and the rest follow the same x99 convention,
+    # so a cold-start check of the shipped file can run beside dev with no
+    # flags on either side. Container-internal URLs below are unchanged --
+    # inside the compose network postgrest is still :3000.
     ports:
-      - "3000:3000"
+      - "3099:3000"
 
   # ---------------------------------------------------------------------
   # percolate-core, pulled from Docker Hub. One image, three entrypoints --
@@ -105,7 +113,7 @@ services:
       P8_BUCKET: p8-content
       P8_JWT_SECRET: experiment-only-jwt-secret-not-for-real-use-0123456789
     ports:
-      - "8081:8081"
+      - "8199:8081"
 
   # ---------------------------------------------------------------------
   # The one MCP tool this collection ships: `query`, over the p8ql dialect.
@@ -150,8 +158,8 @@ services:
       MINIO_ROOT_USER: p8admin
       MINIO_ROOT_PASSWORD: p8password
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "9099:9000"
+      - "9098:9001"
     volumes:
       - p8-minio:/data
 

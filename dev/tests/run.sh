@@ -38,6 +38,37 @@ run_sql() {
     fi
 }
 
+# WHAT IS UNDER TEST, before anything is asserted about it.
+#
+# This banner exists because a run of this suite once failed on two parser bugs
+# that were already fixed in the tree: the .so under it had been compiled
+# before the fix and silently reused. Every minute spent after that was spent
+# reading correct source looking for a defect. A failure now opens with the
+# commit the artifact was built from, so the first question -- "is this a bug
+# or an old binary" -- is answered before the first assertion runs.
+#
+# Tolerant of a database that predates the provenance table: an older build
+# reports nothing rather than making this script fail on a banner.
+banner() {
+    local sql="select string_agg(component || ' ' || version || ' @ ' ||
+                    coalesce(commit_sha,'?') || ' (' ||
+                    coalesce(built_at::date::text,'?') || ')', E'\n  ')
+                 from public.percolate_build"
+    local out
+    if [ -n "$DSN" ]; then
+        out=$(psql "$DSN" -tAc "$sql" 2>/dev/null || true)
+    else
+        out=$(docker exec -i "$CONTAINER" psql -U p8 -d "$DB" -tAc "$sql" 2>/dev/null || true)
+    fi
+    if [ -n "$out" ]; then
+        echo "under test:"
+        echo "  $out"
+    else
+        echo "under test: this build records no provenance (percolate_build is empty)"
+    fi
+}
+banner
+
 failed=0
 for surface in ${SURFACES[@]}; do
     [ -d "$HERE/$surface" ] || { echo "no such surface: $surface" >&2; exit 2; }

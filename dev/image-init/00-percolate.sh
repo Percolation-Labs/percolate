@@ -104,4 +104,12 @@ begin
 end $$;
 EOSQL
 
+# Provenance, applied after the extension that defines the recorder. Tolerated
+# if absent so a hand-assembled image still starts -- an unstamped build
+# reports no rows, which reads as "unknown", not as a broken install.
+if [ -f /usr/local/share/percolate/build.sql ]; then
+    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
+         -f /usr/local/share/percolate/build.sql >/dev/null
+fi
+
 echo "percolate: installed into ${POSTGRES_DB}."

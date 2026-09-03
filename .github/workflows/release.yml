@@ -104,20 +104,22 @@ jobs:
             echo "::error::P8_RELEASE_TOKEN is not set -- the version is bumped and tagged but nothing is published. Run parser.yml on $REPO by hand with version=$V." >&2
             exit 1; }
 
-          # Recorded BEFORE dispatching, so the run we then look for cannot be
-          # an older one that happens to be in flight.
-          since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           gh workflow run parser.yml --repo "$REPO" \
             -f ref="v$V" -f version="$V" -f push_image=true
 
-          # `gh workflow run` does not return the run id -- there isn't one yet.
-          # Poll for the first run created after the dispatch.
+          # `gh workflow run` does not return the run id -- there isn't one yet
+          # -- so the run is found by NAME. parser.yml sets
+          # `run-name: extension <version>`, which is unique to this release;
+          # matching it cannot pick up a different run the way "newest run
+          # created after I dispatched" could, and that mattered because the
+          # consequence was watching one release and reporting its result as
+          # another's.
           id=""
           for _ in $(seq 1 30); do
             sleep 5
             id=$(gh run list --repo "$REPO" --workflow parser.yml \
-                   --created ">$since" --limit 1 --json databaseId \
-                   --jq '.[0].databaseId // empty')
+                   --limit 20 --json databaseId,displayTitle \
+                   --jq "[.[] | select(.displayTitle == \"extension $V\")][0].databaseId // empty")
             [ -n "$id" ] && break
           done
           [ -n "$id" ] && echo "run=$id" || {
@@ -127,46 +129,11 @@ jobs:
           echo "watching https://github.com/$REPO/actions/runs/$id"
           gh run watch "$id" --repo "$REPO" --exit-status
 
-      # -------------------------------------------------------------------
-      # The docs last, once the assets and the image they describe exist.
-      # Two issues, because two repositories quote this version in prose and
-      # neither can be updated from here without a commit nobody reviews.
-      # -------------------------------------------------------------------
-      - name: Ask for the doc updates
-        if: inputs.publish
-        env:
-          GH_TOKEN: ${{ secrets.P8_RELEASE_TOKEN }}
-          REPO: ${{ vars.CHART_REPO || 'percolating-sirsh/get-percolate' }}
-          V: ${{ steps.bump.outputs.version }}
-          PREV: ${{ steps.bump.outputs.previous }}
-          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          cat > issue.md <<EOF
-          @claude the Percolate extension **$V** is released -- assets on this
-          repo, and \`percolationlabs/percolate-postgres:19-$V\` on Docker Hub.
-          The docs still describe \`$PREV\`. Please open a PR that catches them up.
-
-          - \`docs/src/install.md\` and \`README.md\` -- any quoted asset name,
-            \`CREATE EXTENSION\` output or version in prose. \`install.sh\` now
-            reads the version out of \`percolate.control\`, so it needs no edit;
-            the prose around it is what goes stale.
-          - Anywhere pinning \`percolate-postgres\` -- \`:19\` still resolves to
-            this build, but \`:19-$V\` is the immutable tag worth showing anyone
-            who needs to pin. Pre-1.0 there is no in-place extension upgrade, so
-            pinning is the upgrade strategy and the docs should say so.
-          - The chart's \`appVersion\` tracks **percolate-core**, not this, so it
-            does not move here.
-
-          Released by [\`release.yml\`]($RUN).
-          EOF
-          gh issue create --repo "$REPO" \
-            --title "Extension $V: catch the docs up" --body-file issue.md
-
       - name: Summary
         run: |
           {
             echo "### percolate extension ${{ steps.bump.outputs.previous }} -> ${{ steps.bump.outputs.version }}"
             [ "${{ inputs.publish }}" = "true" ] \
-              && echo "Assets and image published from get-percolate; docs issue opened." \
+              && echo "Assets and image published from get-percolate, and its \`versions.toml\` moved with them -- the docs quote no version literals, so there is nothing left to chase." \
               || echo "_dry run: nothing committed, nothing published_"
           } >> "$GITHUB_STEP_SUMMARY"
