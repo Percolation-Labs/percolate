@@ -41,8 +41,6 @@ from .testing import (
 )
 
 app = typer.Typer(add_completion=False, help="Agent runtime (specs/agentic).")
-agent_app = typer.Typer(help="Agents are rows; a JSON Schema document is how one is written.")
-app.add_typer(agent_app, name="agent")
 tools_app = typer.Typer(help="Tool servers are rows too — register once, resolve per run.")
 app.add_typer(tools_app, name="tools")
 console = Console()
@@ -155,7 +153,7 @@ def repo_for_cli() -> Any:
     return connected(settings, UUID(settings.user_id) if settings.user_id else None)
 
 
-@agent_app.command("list")
+@app.command("list")
 def agent_list() -> None:
     """List agent rows — read through `agents_api`, so RLS applies."""
 
@@ -167,7 +165,7 @@ def agent_list() -> None:
     asyncio.run(_run())
 
 
-@agent_app.command("show")
+@app.command("show")
 def agent_show(name: str) -> None:
     """Read one agent row back as the document you would commit (``brief.md`` §6).
 
@@ -186,7 +184,7 @@ def agent_show(name: str) -> None:
     asyncio.run(_run())
 
 
-@agent_app.command("push")
+@app.command("push")
 def agent_push(path: Path) -> None:
     """Apply an agent definition as a row.
 
