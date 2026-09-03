@@ -2572,6 +2572,26 @@ grant select on workflow.step_functions to authenticated;
 -- running to define a workflow.
 -- ============================================================
 
+-- WHO MAY DEFINE A WORKFLOW -- the gate the open sql_policy assumes exists.
+--
+-- "SQL a step wrote itself" states the trade plainly: a statement runs as the
+-- engine owner, so anyone who may define a workflow may read anything in the
+-- database. That sentence is only survivable if defining a workflow is itself
+-- a privileged act, and until this hook existed it was not one: define_yaml
+-- carried Postgres's PUBLIC default for EXECUTE, so every authenticated user
+-- could author a step and read across every tenant. Found by calling it as a
+-- user with no permissions at all, who got back every row of rbac.users.
+--
+-- The engine standalone has no identity model, so the honest default here is
+-- `true` and the grant is the boundary -- the same rule this file applies to
+-- every worker-facing function. `integration-rbac.sql` shadows this with the
+-- rbac-aware version when the identity plane is installed, which is the same
+-- stub-and-shadow shape assert_run_access already uses for run access.
+create or replace function workflow.may_define()
+returns boolean as $$
+    select true;
+$$ language sql stable;
+
 -- Current form. It reached this shape in section 22c (BUG 3 -- the two halves can ship out of step, silently.), which explains
 -- the failure that produced it. Defined here, where it is first needed.
 create or replace function workflow.define_yaml(p_yaml text)
@@ -2585,6 +2605,17 @@ declare
     v_stale  text[];
     v_spec   jsonb;
 begin
+    if not workflow.may_define() then
+        raise exception
+            'not authorized to define workflows'
+            using detail = 'A workflow step may carry its own SQL, which runs as the '
+                           'engine owner and is not subject to row-level security, so '
+                           'defining one is an authoring privilege rather than a read.',
+                  hint   = 'Grant the caller a role holding workflows:update, or set '
+                           'percolate.sql_policy = ''registered'' if steps should only '
+                           'name functions from the allow-list.';
+    end if;
+
     if to_regprocedure('p8_compile_workflow(text)') is null then
         raise exception
             'workflow.define_yaml needs the percolate extension (p8_compile_workflow). '
@@ -8383,6 +8414,33 @@ begin
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
+-- AUTHORING A WORKFLOW IS THE SAME RULE, APPLIED TO THE OTHER SIDE OF THE
+-- ENGINE, and it was the one place the rule above was not applied.
+--
+-- `schema.sql`'s `may_define()` returns true, because the engine standalone has
+-- no identity to check. This is the version that runs once the identity plane
+-- is installed, and it exists because define_yaml was a SECURITY DEFINER
+-- function reachable by an end user with no authorization check and Postgres's
+-- PUBLIC default still on it. `schema.sql`'s open sql_policy says plainly that
+-- a step's statement runs as the engine owner and therefore reads across
+-- tenants; that trade is only survivable while defining a workflow is a
+-- privileged act, and it was not. Reproduced end to end: a user holding no
+-- permissions, refused on `select from rbac.users`, defined a one-step
+-- workflow and got back every row of it.
+--
+-- Same shape as agentic.may_author, deliberately -- a permission, or the
+-- bootstrap case where there is no end-user identity at all and the caller can
+-- already write the table directly. The second branch is what lets an operator
+-- and `dev/init/` seed definitions, and it is unreachable over PostgREST:
+-- there `session_user` is `authenticator`, which has no INSERT anywhere.
+create or replace function workflow.may_define()
+returns boolean as $$
+    select rbac.has_permission(rbac.current_user_id(), 'workflows', 'update')
+        or (rbac.current_user_id() is null
+            and pg_catalog.has_table_privilege(
+                    session_user, 'workflow.definitions'::regclass, 'insert'));
+$$ language sql stable security definer set search_path = pg_catalog, public;
+
 -- The authorization check, and then the cascade -- which is the unchecked form
 -- below, called rather than repeated. The first version inlined the same four
 -- statements here, so the cascade existed twice and the tree walk reached the
@@ -8704,6 +8762,27 @@ revoke execute on function workflow.encoding_drift() from public;
 revoke execute on function workflow.execute_sql_step(uuid) from public;
 revoke execute on function workflow.drain_sql_steps(uuid, int) from public;
 revoke execute on function workflow.tick(timestamptz) from public;
+
+-- THE SECOND ENUMERATION, and the reason it is a test rather than a list.
+--
+-- The revokes above came from enumerating the engine by hand once. Six more
+-- functions were created AFTER `schema.sql`'s `revoke execute on all functions
+-- in schema workflow from public`, which only touches functions that exist when
+-- it runs -- so each of them kept the PUBLIC default while carrying an explicit
+-- `grant ... to authenticated` that read as if it were the whole ACL. Every one
+-- already grants the callers it means to; revoking PUBLIC changes who can call
+-- them and nothing else.
+--
+-- A hand-maintained list is what let define_yaml through the first time, so the
+-- rule is now asserted generically in dev/tests/rbac/04-definer-surface.sql: no
+-- SECURITY DEFINER function in this collection may carry the PUBLIC default.
+revoke execute on function workflow.define_yaml(text) from public;
+revoke execute on function workflow.matrix_rows(uuid) from public;
+revoke execute on function workflow.matrix_outputs(uuid) from public;
+revoke execute on function workflow.schedule_workflow(text, text, text, jsonb, text, text) from public;
+revoke execute on function workflow.set_schedule_enabled(text, boolean) from public;
+revoke execute on function workflow.unschedule_workflow(text) from public;
+revoke execute on function workflow.may_define() from public;
 -- workflow.register_artifact() is the eleventh and it is NOT revoked here:
 -- content loads after the engine, so naming it in this file fails the install
 -- with "function does not exist". The revoke belongs beside its definition in
@@ -16067,6 +16146,35 @@ grant execute on function agentic.attach_skill(text, text, jsonb) to authenticat
 grant execute on function agentic.detach_skill(text, text) to authenticated;
 grant execute on function agentic.apply_plugin(jsonb) to authenticated;
 grant execute on function agentic.channel_for(uuid) to authenticated, api_viewer;
+
+-- AND THE PUBLIC DEFAULT, TAKEN AWAY -- because the twelve grants above are
+-- what this plane MEANS, and until this block existed they were not what it
+-- SAID. Postgres grants EXECUTE on a new function to PUBLIC unless you remove
+-- it, so each ACL above read `=X/app_owner | authenticated=X/app_owner`: the
+-- explicit grant, plus everybody. `web_anon` holds USAGE on this schema
+-- (§9, the anonymous read path), so every authoring entry point here was
+-- reachable unauthenticated, with `may_author` as the only thing between an
+-- anonymous request and a write that runs as the engine owner.
+--
+-- That check does hold -- verified by calling upsert_agent over REST with no
+-- token, which returns "not authorized to author agents". Depth is the point:
+-- workflow-engine/integration-rbac.sql §6 already argues that granting is not
+-- the same as scoping, and this is the same argument applied to the plane that
+-- was written after it. Nothing here loses a caller it had; every one of these
+-- names its callers on the line above.
+revoke execute on function agentic.create_session(text) from public;
+revoke execute on function agentic.start_run(text, uuid, uuid, uuid, text, text, text, uuid) from public;
+revoke execute on function agentic.finish_run(uuid, text, jsonb) from public;
+revoke execute on function agentic.persist_turn(jsonb) from public;
+revoke execute on function agentic.upsert_summary(uuid, text) from public;
+revoke execute on function agentic.apply_summary(jsonb) from public;
+revoke execute on function agentic.upsert_agent(jsonb) from public;
+revoke execute on function agentic.upsert_tool_server(jsonb) from public;
+revoke execute on function agentic.upsert_skill(jsonb) from public;
+revoke execute on function agentic.attach_skill(text, text, jsonb) from public;
+revoke execute on function agentic.detach_skill(text, text) from public;
+revoke execute on function agentic.apply_plugin(jsonb) from public;
+revoke execute on function agentic.may_author(text, regclass) from public;
 
 -- No base-table INSERT/UPDATE/DELETE grant to any PostgREST-facing role: the
 -- write path is the functions above, and nothing else.

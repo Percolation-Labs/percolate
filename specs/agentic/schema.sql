@@ -1719,6 +1719,35 @@ grant execute on function agentic.detach_skill(text, text) to authenticated;
 grant execute on function agentic.apply_plugin(jsonb) to authenticated;
 grant execute on function agentic.channel_for(uuid) to authenticated, api_viewer;
 
+-- AND THE PUBLIC DEFAULT, TAKEN AWAY -- because the twelve grants above are
+-- what this plane MEANS, and until this block existed they were not what it
+-- SAID. Postgres grants EXECUTE on a new function to PUBLIC unless you remove
+-- it, so each ACL above read `=X/app_owner | authenticated=X/app_owner`: the
+-- explicit grant, plus everybody. `web_anon` holds USAGE on this schema
+-- (§9, the anonymous read path), so every authoring entry point here was
+-- reachable unauthenticated, with `may_author` as the only thing between an
+-- anonymous request and a write that runs as the engine owner.
+--
+-- That check does hold -- verified by calling upsert_agent over REST with no
+-- token, which returns "not authorized to author agents". Depth is the point:
+-- workflow-engine/integration-rbac.sql §6 already argues that granting is not
+-- the same as scoping, and this is the same argument applied to the plane that
+-- was written after it. Nothing here loses a caller it had; every one of these
+-- names its callers on the line above.
+revoke execute on function agentic.create_session(text) from public;
+revoke execute on function agentic.start_run(text, uuid, uuid, uuid, text, text, text, uuid) from public;
+revoke execute on function agentic.finish_run(uuid, text, jsonb) from public;
+revoke execute on function agentic.persist_turn(jsonb) from public;
+revoke execute on function agentic.upsert_summary(uuid, text) from public;
+revoke execute on function agentic.apply_summary(jsonb) from public;
+revoke execute on function agentic.upsert_agent(jsonb) from public;
+revoke execute on function agentic.upsert_tool_server(jsonb) from public;
+revoke execute on function agentic.upsert_skill(jsonb) from public;
+revoke execute on function agentic.attach_skill(text, text, jsonb) from public;
+revoke execute on function agentic.detach_skill(text, text) from public;
+revoke execute on function agentic.apply_plugin(jsonb) from public;
+revoke execute on function agentic.may_author(text, regclass) from public;
+
 -- No base-table INSERT/UPDATE/DELETE grant to any PostgREST-facing role: the
 -- write path is the functions above, and nothing else.
 

@@ -2546,6 +2546,26 @@ grant select on workflow.step_functions to authenticated;
 -- running to define a workflow.
 -- ============================================================
 
+-- WHO MAY DEFINE A WORKFLOW -- the gate the open sql_policy assumes exists.
+--
+-- "SQL a step wrote itself" states the trade plainly: a statement runs as the
+-- engine owner, so anyone who may define a workflow may read anything in the
+-- database. That sentence is only survivable if defining a workflow is itself
+-- a privileged act, and until this hook existed it was not one: define_yaml
+-- carried Postgres's PUBLIC default for EXECUTE, so every authenticated user
+-- could author a step and read across every tenant. Found by calling it as a
+-- user with no permissions at all, who got back every row of rbac.users.
+--
+-- The engine standalone has no identity model, so the honest default here is
+-- `true` and the grant is the boundary -- the same rule this file applies to
+-- every worker-facing function. `integration-rbac.sql` shadows this with the
+-- rbac-aware version when the identity plane is installed, which is the same
+-- stub-and-shadow shape assert_run_access already uses for run access.
+create or replace function workflow.may_define()
+returns boolean as $$
+    select true;
+$$ language sql stable;
+
 -- Current form. It reached this shape in section 22c (BUG 3 -- the two halves can ship out of step, silently.), which explains
 -- the failure that produced it. Defined here, where it is first needed.
 create or replace function workflow.define_yaml(p_yaml text)
@@ -2559,6 +2579,17 @@ declare
     v_stale  text[];
     v_spec   jsonb;
 begin
+    if not workflow.may_define() then
+        raise exception
+            'not authorized to define workflows'
+            using detail = 'A workflow step may carry its own SQL, which runs as the '
+                           'engine owner and is not subject to row-level security, so '
+                           'defining one is an authoring privilege rather than a read.',
+                  hint   = 'Grant the caller a role holding workflows:update, or set '
+                           'percolate.sql_policy = ''registered'' if steps should only '
+                           'name functions from the allow-list.';
+    end if;
+
     if to_regprocedure('p8_compile_workflow(text)') is null then
         raise exception
             'workflow.define_yaml needs the percolate extension (p8_compile_workflow). '

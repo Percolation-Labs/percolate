@@ -210,6 +210,33 @@ begin
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
+-- AUTHORING A WORKFLOW IS THE SAME RULE, APPLIED TO THE OTHER SIDE OF THE
+-- ENGINE, and it was the one place the rule above was not applied.
+--
+-- `schema.sql`'s `may_define()` returns true, because the engine standalone has
+-- no identity to check. This is the version that runs once the identity plane
+-- is installed, and it exists because define_yaml was a SECURITY DEFINER
+-- function reachable by an end user with no authorization check and Postgres's
+-- PUBLIC default still on it. `schema.sql`'s open sql_policy says plainly that
+-- a step's statement runs as the engine owner and therefore reads across
+-- tenants; that trade is only survivable while defining a workflow is a
+-- privileged act, and it was not. Reproduced end to end: a user holding no
+-- permissions, refused on `select from rbac.users`, defined a one-step
+-- workflow and got back every row of it.
+--
+-- Same shape as agentic.may_author, deliberately -- a permission, or the
+-- bootstrap case where there is no end-user identity at all and the caller can
+-- already write the table directly. The second branch is what lets an operator
+-- and `dev/init/` seed definitions, and it is unreachable over PostgREST:
+-- there `session_user` is `authenticator`, which has no INSERT anywhere.
+create or replace function workflow.may_define()
+returns boolean as $$
+    select rbac.has_permission(rbac.current_user_id(), 'workflows', 'update')
+        or (rbac.current_user_id() is null
+            and pg_catalog.has_table_privilege(
+                    session_user, 'workflow.definitions'::regclass, 'insert'));
+$$ language sql stable security definer set search_path = pg_catalog, public;
+
 -- The authorization check, and then the cascade -- which is the unchecked form
 -- below, called rather than repeated. The first version inlined the same four
 -- statements here, so the cascade existed twice and the tree walk reached the
@@ -531,6 +558,27 @@ revoke execute on function workflow.encoding_drift() from public;
 revoke execute on function workflow.execute_sql_step(uuid) from public;
 revoke execute on function workflow.drain_sql_steps(uuid, int) from public;
 revoke execute on function workflow.tick(timestamptz) from public;
+
+-- THE SECOND ENUMERATION, and the reason it is a test rather than a list.
+--
+-- The revokes above came from enumerating the engine by hand once. Six more
+-- functions were created AFTER `schema.sql`'s `revoke execute on all functions
+-- in schema workflow from public`, which only touches functions that exist when
+-- it runs -- so each of them kept the PUBLIC default while carrying an explicit
+-- `grant ... to authenticated` that read as if it were the whole ACL. Every one
+-- already grants the callers it means to; revoking PUBLIC changes who can call
+-- them and nothing else.
+--
+-- A hand-maintained list is what let define_yaml through the first time, so the
+-- rule is now asserted generically in dev/tests/rbac/04-definer-surface.sql: no
+-- SECURITY DEFINER function in this collection may carry the PUBLIC default.
+revoke execute on function workflow.define_yaml(text) from public;
+revoke execute on function workflow.matrix_rows(uuid) from public;
+revoke execute on function workflow.matrix_outputs(uuid) from public;
+revoke execute on function workflow.schedule_workflow(text, text, text, jsonb, text, text) from public;
+revoke execute on function workflow.set_schedule_enabled(text, boolean) from public;
+revoke execute on function workflow.unschedule_workflow(text) from public;
+revoke execute on function workflow.may_define() from public;
 -- workflow.register_artifact() is the eleventh and it is NOT revoked here:
 -- content loads after the engine, so naming it in this file fails the install
 -- with "function does not exist". The revoke belongs beside its definition in

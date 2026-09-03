@@ -85,7 +85,14 @@ select workflow.schedule_workflow(
 insert into rbac.roles (name) values ('admin') on conflict do nothing;
 insert into rbac.role_permissions (role, resource, action) values
     ('admin', 'agents',       'update'),
-    ('admin', 'tool_servers', 'update')
+    ('admin', 'tool_servers', 'update'),
+    -- `workflows: update` is what workflow.may_define() asks for, and it is
+    -- here for the same reason as the two above: the check names a resource,
+    -- and a resource nothing inserts is a check nobody can pass. Defining a
+    -- workflow is an authoring privilege rather than a read because a step may
+    -- carry its own SQL, which runs as the engine owner outside RLS --
+    -- workflow-engine/schema.sql, "SQL a step wrote itself".
+    ('admin', 'workflows',    'update')
 on conflict do nothing;
 
 reset role;
