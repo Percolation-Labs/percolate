@@ -171,6 +171,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','function','aiq.graph_trust','text[],double precision,integer,integer,text,timestamptz','graph-algorithms.md §5.4: how much of this rests on a model guess'),
 ('ai-query-layer','function','aiq.graph_frontier','text,integer,boolean,integer','graph-algorithms.md §4.2: how big is the neighbourhood, before walking it'),
 ('ai-query-layer','function','aiq.graph_snapshot','boolean,text[],double precision,timestamptz','graph-algorithms.md §4.1: what adjacency THIS backend is holding, and over which subset of the edge table'),
+('ai-query-layer','function','aiq.graph_snapshot_drop','','graph-algorithms.md §2.3: give the snapshot and its admission slot back -- the remedy the slot-exhaustion error names'),
 ('ai-query-layer','function','aiq.graph_components','integer,integer','graph-algorithms.md §5.6: connected components -- the hardening primitive'),
 ('ai-query-layer','function','aiq.graph_induced','uuid[],text,timestamptz','graph-algorithms.md §5.7: the internal edges of a node set, in one round trip'),
 ('ai-query-layer','function','aiq.graph_reach_build','integer,integer','graph-algorithms.md §4.2: the sketch build, a scheduled task not a query'),

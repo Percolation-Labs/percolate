@@ -12736,6 +12736,30 @@ begin
              else (extract(epoch from p_as_of) * 1000000)::bigint end);
 end $$;
 
+-- Give the snapshot back. Backend-local memory, so this is the only way to
+-- release it short of ending the session -- and it holds an admission slot as
+-- well as the memory, so a session that is done with the graph and holding one
+-- is a slot the next caller is refused for.
+--
+-- THIS WRAPPER DID NOT EXIST, and three places said it did. The error raised
+-- when every slot is held tells the operator to "release one with select
+-- aiq.graph_snapshot_drop() in a session that is done with it";
+-- graph-algorithms.md §2.3 and §9b both name it. Only the compiled
+-- p8_graph_snapshot_drop was ever defined, so the remedy printed at the moment
+-- an operator is already being refused failed with "function does not exist".
+-- Nothing caught it because dev/tests/query/11 calls the compiled function
+-- directly -- the one caller in the tree that had no reason to use the name
+-- every document uses.
+create or replace function aiq.graph_snapshot_drop()
+returns jsonb language plpgsql volatile as $$
+begin
+    if not aiq.graph_algorithms_available() then
+        raise exception 'the graph algorithms are not installed -- they ship in '
+            'percolate_parser, the same extension as aiq_parse()';
+    end if;
+    return p8_graph_snapshot_drop();
+end $$;
+
 -- ------------------------------------------------------------
 -- 2. RELATED — personalised PageRank from one or more named seeds.
 --
@@ -13071,7 +13095,8 @@ begin
          where (n.nspname = 'aiq'
                 and p.proname in ('related','graph_paths','graph_connect',
                                   'graph_dense','graph_trust','graph_frontier',
-                                  'graph_snapshot','graph_components','graph_induced',
+                                  'graph_snapshot','graph_snapshot_drop',
+                                  'graph_components','graph_induced',
                                   'graph_reach_build',
                                   -- every wrapper's first statement calls it,
                                   -- so a grant that omits it grants nothing
