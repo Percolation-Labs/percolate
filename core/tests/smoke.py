@@ -198,14 +198,105 @@ async def check_a_sub_run_does_not_inherit_its_parents_history() -> None:
     assert [m.content for m in parent_window] == ["parent turn"], parent_window
 
 
+def check_a_schema_document_becomes_a_row_with_its_prompt() -> None:
+    """agents.md: `description` is the system prompt, `properties` the output.
+
+    THE TWO DIALECTS LOOK ALIKE AND THE WRONG ONE FAILS SILENTLY. Everything
+    that authors an agent -- these docs, a pydantic class, the sample -- writes
+    a JSON Schema document. `agentic.upsert_agent` takes the ROW, where those
+    two keys are `system_prompt` and `structured_output_schema`, and ignores
+    what it does not recognise. Hand it the document directly and it returns
+    success and stores an agent with an empty prompt and no output contract: it
+    exists, resolves by name, and can do nothing.
+
+    That shipped in the harbour sample and nothing caught it, because every
+    stage reported success. This asserts the translation both ways round the
+    only place it is written down.
+    """
+    doc = {
+        "type": "object",
+        "name": "harbourmaster",
+        "description": "You answer questions about the fleet.",
+        "model": "openai:gpt-4o-mini",
+        "properties": {"verdict": {"type": "string"}},
+        "required": ["verdict"],
+    }
+    # Asserted through the sample loader's translation rather than through
+    # `authoring.from_json_schema` alone. The mapping was always correct; what
+    # was missing was anything CALLING it on the way to apply_plugin, so a test
+    # of the mapping would have passed while the sample shipped a mute agent.
+    from percolate_core.core.samples import _agent_to_row
+
+    row = _agent_to_row(doc)
+    # .get(), not [], so a translation that did nothing fails with the sentence
+    # rather than a KeyError the reader has to interpret.
+    assert row.get("system_prompt") == doc["description"], (
+        f"the document was not translated -- system_prompt is "
+        f"{row.get('system_prompt')!r}, so this agent would upsert mute"
+    )
+    assert row.get("structured_output_schema"), "properties were dropped -- mute agent"
+    assert row["structured_output_schema"]["required"] == ["verdict"]
+    assert "description" not in row and "properties" not in row, row.keys()
+
+    # Keys the schema document carries that AgentSpec does not model are kept:
+    # `skills` is a real column, and dropping it is the same silent loss in a
+    # different place.
+    with_skills = _agent_to_row({**doc, "skills": ["house-style"]})
+    assert with_skills["skills"] == ["house-style"], with_skills.get("skills")
+
+    # A document already in the row dialect is passed through untouched, so an
+    # author who spells the row keys is taken at their word.
+    already = {"name": "x", "system_prompt": "spelled the row way"}
+    assert _agent_to_row(already) == already
+
+
+def check_every_model_provider_we_ship_can_be_constructed() -> None:
+    """`model` is a column, so it must not be limited by what got installed.
+
+    The image shipped `pydantic-ai-slim[openai]` while every documented example
+    said `anthropic:claude-sonnet-5`. A correct row therefore reached the
+    runtime and came back as `ImportError: Please install the anthropic
+    package` inside an otherwise-200 stream -- a packaging decision surfacing
+    as a request-time failure.
+
+    Constructing an Agent is enough to prove the provider imports: it resolves
+    the model and then complains about credentials, which is a different
+    exception and the one we want. No network, no key.
+    """
+    from pydantic_ai import Agent
+
+    models = [
+        "openai:gpt-4o-mini",
+        "anthropic:claude-sonnet-4-5",
+        "google:gemini-2.0-flash",
+        "groq:llama-3.3-70b-versatile",
+        "mistral:mistral-small-latest",
+        "cohere:command-r",
+        "huggingface:meta-llama/Llama-3.3-70B-Instruct",
+        "bedrock:anthropic.claude-3-5-sonnet-20241022-v2:0",
+    ]
+    for model in models:
+        try:
+            Agent(model)
+        except ImportError as err:  # the failure this check exists for
+            raise AssertionError(
+                f"{model}: provider not installed -- {err}. "
+                f"`all` must include the `providers` extra."
+            ) from err
+        except Exception:
+            pass  # missing credentials or region: the provider loaded, which is the point
+
+
 async def main() -> None:
     check_the_document_round_trips()
     check_a_code_authored_agent_is_the_same_document()
+    check_a_schema_document_becomes_a_row_with_its_prompt()
+    check_every_model_provider_we_ship_can_be_constructed()
     await check_citations_come_from_tools_not_the_model()
     await check_quota_denial_is_terminal_not_a_crash()
     await check_window_is_bounded()
     await check_a_sub_run_does_not_inherit_its_parents_history()
-    print("smoke: 6 checks passed")
+    print("smoke: 8 checks passed")
 
 
 if __name__ == "__main__":
