@@ -73,6 +73,13 @@ jobs:
           # an unconfigured repo degrades to in-repo work rather than failing.
           GH_TOKEN: ${{ secrets.P8_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
         with:
+          # REQUIRED, and the one thing here that is not in this file. Mint it
+          # with `claude setup-token` and set it on all three repositories:
+          #     gh secret set CLAUDE_CODE_OAUTH_TOKEN -R <owner>/<repo>
+          # Unset, the action does not report anything useful on the issue --
+          # it comments "Claude encountered an error" and exits 1 in about
+          # thirty seconds, having read nothing. So a mention that goes quiet
+          # is this before it is anything else; `gh secret list` is the check.
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 
           # The action's Bash gate is deny-by-default and `gh` is not on the
