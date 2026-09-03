@@ -57,10 +57,11 @@ end $$;
 -- indistinguishable from "nothing was due".
 do $$
 declare
-    v_runs    int;
-    v_failed  text;
-    v_latest  timestamptz;
-    v_waited  int := 0;
+    v_runs     int;
+    v_failed   text;
+    v_failures bigint;
+    v_latest   timestamptz;
+    v_waited   int := 0;
 begin
     -- WAIT FOR THE FIRST TICK RATHER THAN REQUIRING THE CALLER TO.
     --
@@ -93,12 +94,37 @@ begin
             'than running it in-process.';
     end if;
 
-    select string_agg(distinct d.return_message, '; ') into v_failed
+    -- RECENT FAILURES, NOT EVERY FAILURE THERE HAS EVER BEEN.
+    --
+    -- This read `where status <> 'succeeded'` over the whole of
+    -- job_run_details, and the whole of it is forever: pg_cron marks every
+    -- in-flight row `failed` with "server restarted" when the postmaster comes
+    -- back, so one `docker compose restart` made this file permanently red on
+    -- that database. Observed with nine "job startup timeout" rows inside a
+    -- seven-minute window and 495 successful ticks after them, up to a minute
+    -- before this ran -- a clock the very next assertion proves is healthy.
+    -- This file's own header says what that costs: "someone learns to expect
+    -- this file to be red."
+    --
+    -- Two changes, and the second is not cosmetic. The window makes it a
+    -- question about now. And it counts ROWS rather than aggregating messages:
+    -- `string_agg(distinct return_message)` over rows whose message is null
+    -- returns null, so a genuinely failed run that recorded no message passed
+    -- this check silently -- and `<> 'succeeded'` also swept up `running` and
+    -- `connecting`, which are what a tick looks like while it is working.
+    select count(*),
+           coalesce(string_agg(distinct coalesce(d.return_message, '(no message)'), '; '),
+                    '(no messages recorded)')
+      into v_failures, v_failed
       from cron.job_run_details d
       join cron.job j on j.jobid = d.jobid
-     where j.jobname = 'workflow-tick' and d.status <> 'succeeded';
-    if v_failed is not null then
-        raise exception 'workflow-tick has failing runs: %', v_failed;
+     where j.jobname = 'workflow-tick'
+       and d.status = 'failed'
+       and d.start_time > now() - interval '15 minutes';
+    if v_failures > 0 then
+        raise exception
+            'workflow-tick failed % times in the last 15 minutes: %',
+            v_failures, v_failed;
     end if;
 
     if v_latest < now() - interval '3 minutes' then

@@ -2,8 +2,14 @@
 # Run every test in the three surfaces, in order, against a live database.
 #
 #   ./run.sh                          # against the compose stack
+#   DB=p8reload ./run.sh              # against what dev/reload.sh just built
 #   DSN="postgres://…" ./run.sh       # against anything else
 #   ./run.sh query                    # one surface
+#
+# DB exists because the two halves of the inner loop did not compose. reload.sh
+# builds `p8reload` by default and this file only ever asked `p8experiment`, so
+# testing the edit you just made meant either reloading over the stack's own
+# database or having psql on the host for DSN -- and the container has one.
 #
 # Exits nonzero on the first failure, so it works as a CI gate alongside
 # ../../surface.sql. The two are complementary and neither replaces the other:
@@ -12,6 +18,7 @@
 set -euo pipefail
 
 CONTAINER="${CONTAINER:-p8-experiment-pg19}"
+DB="${DB:-p8experiment}"
 DSN="${DSN:-}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -27,7 +34,7 @@ run_sql() {
     if [ -n "$DSN" ]; then
         psql "$DSN" -v ON_ERROR_STOP=1 -q -f "$1"
     else
-        docker exec -i "$CONTAINER" psql -U p8 -d p8experiment -v ON_ERROR_STOP=1 -q < "$1"
+        docker exec -i "$CONTAINER" psql -U p8 -d "$DB" -v ON_ERROR_STOP=1 -q < "$1"
     fi
 }
 
