@@ -273,11 +273,38 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('agentic','view','agentic.v_plan_agents','','plan-graph.md §6: an agent expanded -- the whole prompt, because the prompt IS the intent'),
 ('agentic','view','agentic.v_plan_servers','','plan-graph.md §6: a server and what each of its tools says it does'),
 ('agentic','view','agentic.agents_pickable',null,'schema.sql §9: a table sized for thousands needs the audience filter'),
+-- Skills and plugins. The columns are listed alongside the tables on purpose:
+-- every one of them is a place this schema has already been bitten once. A
+-- column absent from a read view is a column the runtime does not have
+-- (agents_api), and a flag the persistence adapter cannot see is instructions
+-- it will summarize away (serves_skills).
+('agentic','table','agentic.skills',null,'plugins.md §4: a procedure an agent follows is a row, not a copied paragraph'),
+('agentic','table','agentic.plugins',null,'plugins.md §9: a bundle applied from one document is removable as one'),
+('agentic','function','agentic.upsert_skill','jsonb','plugins.md §4: skills are declared, not edited in a running database'),
+('agentic','function','agentic.apply_plugin','jsonb','plugins.md §9: apply upserts what the manifest declares and prunes what it does not'),
+('agentic','function','agentic.attach_skill','text,text,jsonb','plugins.md §5.5: adding a fragment to an agent is one statement, not read-modify-write'),
+('agentic','function','agentic.detach_skill','text,text','plugins.md §5.5: and so is removing one'),
+('agentic','view','agentic.skills_api',null,'plugins.md §5: the runtime loads a pinned body over REST like every other client'),
+('agentic','view','agentic.plugins_api',null,'plugins.md §9: what did this plugin install, answered from the document as applied'),
+('agentic','column','agentic.agents.skills',null,'plugins.md §5: the pinned list, which is prompt content the runtime must be able to read'),
+('agentic','column','agentic.tool_servers.serves_skills',null,'plugins.md §7: the adapter has to recognise a skill load to stop windowing it away'),
+('agentic','column','agentic.skills.discovery_text',null,'plugins.md §6: only the listing is embedded, and it is generated so it cannot drift'),
 -- The sample itself. A registered agent bound to servers that were never
 -- registered is the failure this repository keeps finding one layer down --
 -- a demo that lives only in a running container -- so the audit asserts the
 -- rows, not just the tables they sit in.
 ('agentic','agent','percolate',null,'reference/percolate.yaml: the sample agent ships as data'),
+-- The sample fleet. These five rows ARE the sample agent's old system prompt:
+-- it went from 2,464 characters to 159 when they came out of it, and if they
+-- are missing the agent ships with a prompt that no longer says what it used
+-- to. That is the failure this block exists to catch -- a refactor whose
+-- second half did not install is strictly worse than not having done it.
+('agentic','skill','p8ql-schema-first',null,'reference/percolate.yaml: composed -- start with SCHEMA'),
+('agentic','skill','house-style-attribution',null,'reference/percolate.yaml: composed -- say which tool told you'),
+('agentic','skill','workflow-define-then-start',null,'reference/percolate.yaml: composed -- define work, do not poll'),
+('agentic','skill','p8ql-fuzzy-lookup',null,'reference/percolate.yaml: matched -- FUZZY when a LOOKUP finds nothing'),
+('agentic','skill','p8ql-read-the-plan',null,'reference/percolate.yaml: matched -- an empty result is not an answer'),
+('agentic','skill_binding','percolate',null,'plugins.md §5.1: the agent composes the three that were always in its prompt'),
 ('agentic','tool_server','p8-query',null,'reference/query_mcp.py: the MCP binding'),
 ('agentic','tool_server','p8-workflow',null,'reference/percolate.yaml: the OpenAPI binding over PostgREST'),
 
@@ -351,6 +378,16 @@ select e.*,
     when 'yaml_feature' then coalesce(
         (workflow.compiler_capabilities() #>> array['accepts', e.name])::boolean, false)
     when 'agent'       then exists (select 1 from agentic.agents where name = e.name)
+    -- A skill row, and -- the part that matters -- one with a BODY. An empty
+    -- `content` is a fragment that installs, resolves, composes and says
+    -- nothing, which no catalog check would notice.
+    when 'skill'       then exists (select 1 from agentic.skills
+                                     where name = e.name and length(content) > 0)
+    -- The other half of the refactor: the rows exist AND the agent carries
+    -- them. Either alone is the half-installed state.
+    when 'skill_binding' then exists (select 1 from agentic.agents a
+                                       where a.name = e.name
+                                         and cardinality(a.skills) >= 3)
     when 'tool_server' then exists (select 1 from agentic.tool_servers where name = e.name)
     -- A registered entity type with no nodes is a registration nobody ran, so
     -- the check is on the projected rows, not on the registry row.
@@ -481,6 +518,10 @@ insert into api_exclusions (api_view, column_name, kind, why) values
 ('agentic.runs_api',         'updated_at', 'internal', 'mutation timestamp, not contract'),
 ('agentic.sessions_api',     'updated_at', 'internal', 'mutation timestamp, not contract'),
 ('agentic.tool_servers_api', 'updated_at', 'internal', 'mutation timestamp, not contract'),
+-- The lexical index itself, not a fact about the skill. A caller ranks by
+-- calling aiq.lexical or aiq.search; handing them the tsvector would be
+-- publishing the index and inviting somebody to rank in application code.
+('agentic.skills_api', 'search_tsv', 'internal', 'the generated lexical index; TEXT mode is the read path, not the vector'),
 
 ('workflow.runs_api', 'parent_task_id',   'internal', 'engine linkage; the parent/child relation is served by run_meta'),
 ('workflow.runs_api', 'cancel_requested', 'internal', 'engine flag; cancellation is an action, not a field to poll'),
@@ -552,11 +593,23 @@ insert into write_paths values
  'identity and timestamps are the database''s to assign, never the author''s'),
 ('agentic.tool_servers', 'agentic.upsert_tool_server',
  '{id,created_at,updated_at,synced_at}',
- 'synced_at is stamped BY the sync, from the presence of cached_tools -- an author setting it would be claiming a fetch that never happened');
+ 'synced_at is stamped BY the sync, from the presence of cached_tools -- an author setting it would be claiming a fetch that never happened'),
+('agentic.skills', 'agentic.upsert_skill',
+ '{id,created_at,updated_at,version,discovery_text,search_tsv}',
+ 'version is BUMPED by the function when the text changes, which is the point of having one -- an author setting it could claim an edit did not happen; discovery_text and search_tsv are generated from the three columns beside them, which is what stops the indexed text and the read text from drifting'),
+('agentic.plugins', 'agentic.apply_plugin',
+ '{installed_at,updated_at,manifest}',
+ 'the manifest is the document itself, not a key inside it -- apply_plugin stores what it was handed, which is what makes a later re-apply diffable');
 
 create temporary view write_contract as
 select w.fn, c.column_name,
-       coalesce(p.prosrc ~ ('p_spec\s*->>?\s*''' || c.column_name || ''''), false) as settable,
+       -- The parameter is `p_spec` on the upsert_* functions and `p_manifest`
+       -- on apply_plugin, because a plugin document is not a row spec. The
+       -- contract being checked is "the function names this column as a key",
+       -- which the parameter's name has nothing to do with -- so the pattern
+       -- accepts either rather than the write path being renamed to suit the
+       -- audit.
+       coalesce(p.prosrc ~ ('p_(spec|manifest)\s*->>?\s*''' || c.column_name || ''''), false) as settable,
        c.column_name = any(w.unsettable) as declared_out,
        w.why
   from write_paths w

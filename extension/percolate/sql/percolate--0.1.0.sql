@@ -13739,6 +13739,14 @@ create table agentic.tool_servers (
     -- claim that namespace, and a server merely *named* `agent` produced it by
     -- accident through collision-prefixing.
     serves_agents   boolean not null default false,
+    -- The same flag, for the other gateway. A server with this set exposes one
+    -- tool per `agentic.skills` row (plugins.md §4): calling it returns that
+    -- skill's body, which is how a skill is loaded by the MODEL's choice
+    -- rather than by the agent's configuration. A flag rather than a name
+    -- prefix for the reason serves_agents is one, and for a sharper one here:
+    -- what comes back is instructions, not an observation, so the persistence
+    -- adapter has to be able to recognise it and stop windowing it away.
+    serves_skills   boolean not null default false,
     -- Non-secret headers sent on BOTH the registration fetch and every
     -- subsequent call. Not a general escape hatch and explicitly not where a
     -- secret goes -- that is `credential_ref`, one column up, and the check
@@ -13804,6 +13812,19 @@ create table agentic.agents (
     --  "summarize_after_messages": int} -- §9 leaves the numbers open, so
     -- they are per-agent data with a runtime default, not constants.
     context_policy           jsonb not null default '{}'::jsonb,
+    -- PINNED skills, by name, in order (plugins.md §4). These are materialised
+    -- into the system prompt at invocation -- the row holds the keys, never the
+    -- text, so one skill edited once changes every agent that pins it. Skills
+    -- the MODEL may choose to load instead are not here at all: those are an
+    -- ordinary tool binding against a serves_skills server, and keeping the
+    -- two in separate columns is deliberate, because they are separate
+    -- mechanisms (prompt text vs. a tool call) and a single list that meant
+    -- either would be a list nobody could read the behaviour off.
+    --
+    -- Validated in upsert_agent rather than by a foreign key: the check that
+    -- matters is not "does the skill exist" but "does this agent bind what the
+    -- skill says it needs", which no FK can express.
+    skills                   text[] not null default '{}',
 
     -- ------------------------------------------------------------------
     -- Classification. Not decoration: this table is expected to hold
@@ -13857,6 +13878,214 @@ alter table agentic.agents add constraint agents_extractor_needs_schema
 create trigger trg_agents_updated
     before update on agentic.agents
     for each row execute function public.touch_updated_at();
+
+-- ------------------------------------------------------------
+-- 2b. Skills -- capability as prose, loaded on demand (plugins.md)
+--
+-- A tool is something an agent CALLS; a skill is something an agent READS and
+-- then follows. Both are rows and neither is code, which is why they live one
+-- table apart rather than one system apart -- but they are not the same thing,
+-- and the difference is the one the runtime has to act on: a tool call leaves
+-- the process and comes back an observation, while a skill changes how the
+-- model behaves for the rest of the turn.
+--
+-- A row here is the frontmatter and the body of one SKILL.md, transcribed
+-- rather than reinvented (plugins.md §1): `description` is what a model reads
+-- to decide whether it needs this, `content` is what it reads once it has
+-- decided, and keeping them in two columns IS the mechanism -- offering a
+-- thousand skills costs a thousand description lines, and the bodies cost
+-- nothing until one is named.
+--
+-- Why this is not just more `system_prompt`: a prompt belongs to one agent.
+-- The same argument that made tool_servers a table rather than inline config
+-- in agents.tools (brief.md §5.2) applies unchanged to prose -- ten agents
+-- that must all follow the same p8ql discipline should reference it once, not
+-- carry ten copies that drift.
+-- ------------------------------------------------------------
+create table agentic.skills (
+    id              uuid primary key default gen_random_uuid(),
+    -- The key an agent lists and the model names. Constrained to the shape the
+    -- Agent Skills spec uses, because this name is also a TOOL name on the
+    -- skill gateway (plugins.md §4), and a tool name with a space in it is a
+    -- tool no model can call.
+    name            text not null unique
+                        check (name ~ '^[a-z0-9]+(-[a-z0-9]+)*$'),
+    -- What it does. The one field a model sees without paying for the body.
+    description     text not null,
+    -- When to reach for it. Separate from `description` because it answers a
+    -- different question, and because it is the sentence a semantic match
+    -- should be hitting -- a request rarely resembles a capability statement.
+    when_to_use     text,
+    -- The markdown body. Never in a listing, and never embedded (§5): it is
+    -- instructions, and instructions dilute the description they would be
+    -- indexed alongside.
+    content         text not null,
+    -- What gets embedded, and the only thing that does. Generated rather than
+    -- assembled by whoever writes the embedding job, so the text that was
+    -- indexed and the text a reader sees cannot drift apart.
+    discovery_text  text generated always as (
+                        name || ': ' || description ||
+                        case when when_to_use is null then ''
+                             else ' ' || when_to_use end) stored,
+    -- The lexical half of the same index, and it is spelled out here rather
+    -- than left to aiq.register_lexical_source() for a reason Postgres
+    -- enforces: A GENERATED COLUMN CANNOT REFERENCE ANOTHER GENERATED COLUMN.
+    -- That function's default expression builds a tsvector over the registered
+    -- content column, which here is `discovery_text` -- generated -- so the
+    -- registration fails with "cannot use generated column in column
+    -- generation expression". Found by running it.
+    --
+    -- The fix keeps both properties rather than trading one away: this column
+    -- is generated from the three BASE columns directly, which is legal and
+    -- indexes exactly the same text, and the registration's `add column if not
+    -- exists` then finds it already present and moves on to the index. Making
+    -- discovery_text an ordinary column maintained by upsert_skill would have
+    -- worked too, and would have reintroduced the drift the generation exists
+    -- to make impossible.
+    search_tsv      tsvector generated always as (
+                        to_tsvector('english',
+                            name || ': ' || description ||
+                            case when when_to_use is null then ''
+                                 else ' ' || when_to_use end)) stored,
+    -- The tool servers this skill's instructions assume. Checked when an AGENT
+    -- pins the skill, not when the skill is authored: shared config may
+    -- legitimately be written before anything binds it. The Agent Skills
+    -- spec's `allowed-tools` is a permission grant; there are no permission
+    -- prompts here, so the useful half of that field is the dependency it
+    -- implies, and this is that half.
+    requires_tools  text[] not null default '{}',
+    -- The same three classification columns agents carry, for the same reason
+    -- and sized for the same population: a table one insert away from holding
+    -- thousands is a table nobody can list without a filter.
+    audience        text not null default 'internal'
+                        check (audience in ('user','internal','system')),
+    category        text not null default 'procedure'
+                        check (category in ('procedure','reference','style','safety')),
+    tags            text[] not null default '{}',
+    -- Bumped by upsert_skill when the text changes, and recorded on the
+    -- message that loaded it (plugins.md §8). Without it, a run whose answer
+    -- rests on a skill since rewritten is unreconstructable -- the same
+    -- provenance problem citations solve for retrieval, one layer along.
+    version         int not null default 1,
+    created_at      timestamptz not null default now(),
+    updated_at      timestamptz not null default now(),
+    -- The listing is a budget, not a free-text field: this text enters every
+    -- prompt that offers the skill, whether or not the skill is ever used.
+    -- 1536 characters is the Agent Skills listing cap, transcribed rather than
+    -- invented -- and a cap enforced by the table is the only kind that holds,
+    -- since the alternative is a truncation nobody sees.
+    constraint skill_listing_is_bounded
+        check (length(description) + coalesce(length(when_to_use), 0) <= 1536)
+);
+
+create index if not exists idx_skills_audience on agentic.skills (audience)
+    where audience = 'user';
+create index if not exists idx_skills_category on agentic.skills (category);
+create index if not exists idx_skills_tags     on agentic.skills using gin (tags);
+
+create trigger trg_skills_updated
+    before update on agentic.skills
+    for each row execute function public.touch_updated_at();
+
+-- Discovery over a thousand skills is the same problem as discovery over a
+-- thousand chunks, so it is the same machinery and not a second one: `skills`
+-- registers as an ai-query-layer semantic source over the listing text, and
+-- its vectors land in that layer's per-model embedding tables keyed by the
+-- skill's own id. Nothing here embeds anything -- that is an external model
+-- call this collection already has one path for (aiq.embed_batch_call plus a
+-- scheduled workflow-engine task), and a second one would be a second answer
+-- to which model this deployment uses.
+--
+-- Conditional, because this schema must stay loadable without the query layer
+-- installed -- the same shape workflow.plan_catalog() uses to call
+-- agentic.plan_facet() only when this schema is present.
+-- Registered as BOTH kinds of source, which is not symmetry for its own sake.
+-- The semantic registration is the one §6 is about. The lexical one is what
+-- makes matching work in a deployment with no embedding provider configured --
+-- `aiq.lexical` needs nothing but Postgres, and a fleet whose listings are
+-- written as "use when <the words someone would type>" is unusually well
+-- suited to term matching. So an agent's matching policy degrades to TEXT
+-- rather than to nothing, and `aiq.search` (RRF over both) is available to a
+-- deployment that has both. Learned by having no working key on the day this
+-- was measured: the fallback was hypothetical until it was the only arm that
+-- could run.
+--
+-- register_lexical_source adds a generated `search_tsv` column and its GIN
+-- index to this table, which is why it is called here rather than left to a
+-- deployment: the column belongs to the table, and a table whose index depends
+-- on somebody remembering a setup call is a table that is slow in exactly one
+-- environment.
+do $$
+begin
+    if to_regclass('aiq.semantic_sources') is not null then
+        insert into aiq.semantic_sources (name, source_table, content_col)
+        values ('skills', 'agentic.skills', 'discovery_text')
+        on conflict (name) do update
+           set source_table = excluded.source_table,
+               content_col  = excluded.content_col;
+        perform aiq.register_lexical_source('skills', 'agentic.skills', 'discovery_text');
+    end if;
+end $$;
+
+-- ------------------------------------------------------------
+-- 2c. Plugins -- the unit a bundle of configuration arrives and leaves as
+--
+-- This table names something that already existed: reference/percolate.yaml
+-- registers two tool servers and one agent in one document, and applying it
+-- twice is already an upsert. What it could not do is tell you afterwards
+-- which rows came from it, or remove them -- so a use case installed by a
+-- document was uninstalled by hand, row by row, from memory.
+--
+-- Hence a name, a version, and a `plugin` column on each of the three config
+-- tables. That is the whole concept: a plugin is not a new kind of thing, it
+-- is provenance on the things that already exist, which is exactly what makes
+-- a bundle removable.
+-- ------------------------------------------------------------
+create table agentic.plugins (
+    name         text primary key
+                     check (name ~ '^[a-z0-9]+(-[a-z0-9]+)*$'),
+    version      text not null default '0.0.0',
+    description  text,
+    author       jsonb,
+    homepage     text,
+    -- The document as applied, verbatim. Not read back by the runtime -- the
+    -- tables are the truth -- but a re-apply has to be diffable against what
+    -- is installed, and the pruning half of apply_plugin is unsafe without it.
+    manifest     jsonb not null default '{}'::jsonb,
+    installed_at timestamptz not null default now(),
+    updated_at   timestamptz not null default now()
+);
+
+create trigger trg_plugins_updated
+    before update on agentic.plugins
+    for each row execute function public.touch_updated_at();
+
+-- Declared here rather than in each table's own definition because the
+-- referenced table is defined last, which is deliberate and visible rather
+-- than an accident of ordering: a plugin is provenance ON config, so it cannot
+-- come first.
+--
+-- ON DELETE RESTRICT, and that is the design rather than caution. Uninstalling
+-- is `apply_plugin` with an empty manifest -- which prunes each row through
+-- the path that knows what else references it and reports what it removed.
+-- Deleting the plugin row on its own would leave rows whose origin nobody can
+-- name, which is the state this column exists to end.
+alter table agentic.tool_servers
+    add column if not exists plugin text
+    references agentic.plugins(name) on delete restrict;
+alter table agentic.agents
+    add column if not exists plugin text
+    references agentic.plugins(name) on delete restrict;
+alter table agentic.skills
+    add column if not exists plugin text
+    references agentic.plugins(name) on delete restrict;
+
+create index if not exists idx_tool_servers_plugin on agentic.tool_servers (plugin)
+    where plugin is not null;
+create index if not exists idx_agents_plugin on agentic.agents (plugin)
+    where plugin is not null;
+create index if not exists idx_skills_plugin on agentic.skills (plugin)
+    where plugin is not null;
 
 -- ------------------------------------------------------------
 -- 3. Sessions -- one AG-UI thread; the unit a conversation is owned by
@@ -14060,10 +14289,21 @@ create policy messages_via_run on agentic.messages
 -- a column that does not exist yet (brief.md §9).
 alter table agentic.agents       enable row level security;
 alter table agentic.tool_servers enable row level security;
+-- Skills and plugins are the same kind of thing and get the same treatment,
+-- including the same open consequence: a skill is prose every authenticated
+-- caller can read. That is the right default for a shared procedure and the
+-- wrong one for a skill encoding a customer's internal process, and this is
+-- the seam that case attaches to -- same column that does not exist yet.
+alter table agentic.skills       enable row level security;
+alter table agentic.plugins      enable row level security;
 
 create policy agents_are_shared_config on agentic.agents
     for select using (true);
 create policy tool_servers_are_shared_config on agentic.tool_servers
+    for select using (true);
+create policy skills_are_shared_config on agentic.skills
+    for select using (true);
+create policy plugins_are_shared_config on agentic.plugins
     for select using (true);
 -- ------------------------------------------------------------
 -- 8. The write path -- SECURITY DEFINER, ownership checked explicitly
@@ -14319,7 +14559,10 @@ language plpgsql security definer
 set search_path = pg_catalog, public
 as $$
 declare
-    v_row agentic.agents;
+    v_row    agentic.agents;
+    v_tools  jsonb;
+    v_skills jsonb;
+    v_gap    text;
 begin
     if not agentic.may_author('agents', 'agentic.agents'::regclass) then
         raise exception 'not authorized to author agents';
@@ -14387,6 +14630,83 @@ begin
         end;
     end if;
 
+    -- THE PINNED SKILL LIST IS CHECKED HERE, and the check that earns its
+    -- keep is the second one, not the first.
+    --
+    -- The first is ordinary: a name that matches no row is a typo, and a typo
+    -- in this column is an agent that silently loses a third of its
+    -- instructions -- no error, no missing tool, just a worse answer.
+    --
+    -- The second is the one a foreign key could never express. A skill
+    -- declares the tool servers its instructions assume (skills.requires_tools),
+    -- and an agent that pins "always answer retrieval questions with the
+    -- `query` tool" while binding no server that offers `query` is an agent
+    -- given instructions it cannot follow. That is worse than an unbound
+    -- tool, because a tool it cannot see is a tool it does not try: prose it
+    -- cannot act on is prose it will act on anyway, badly. Refused at author
+    -- time, where the fix is one line, rather than surfaced as a confusing
+    -- run three days later.
+    --
+    -- BOTH CHECKS RUN AGAINST THE AGENT THIS UPSERT WILL PRODUCE, not against
+    -- the document it was handed, and that distinction is the whole of the
+    -- second one. Written the obvious way -- validate `skills` when `skills`
+    -- is present -- it passes the test it was written for and misses the edit
+    -- that actually breaks an agent: `{"name": "a1", "tools": []}` carries no
+    -- `skills` key at all, so the check never runs, and the agent keeps a
+    -- pinned skill whose server it no longer binds. Found by trying it, one
+    -- statement after the refusal above worked.
+    if (p_spec ? 'skills') or (p_spec ? 'tools') then
+        if p_spec ? 'skills' and jsonb_typeof(p_spec->'skills') not in ('array','null') then
+            raise exception
+                'agent %: `skills` is %, where a list of skill names was expected -- '
+                '["p8ql-authoring", "workflow-yaml"]',
+                p_spec->>'name', jsonb_typeof(p_spec->'skills');
+        end if;
+        if p_spec ? 'skills'
+           and exists (select 1 from jsonb_array_elements(p_spec->'skills') e
+                        where jsonb_typeof(e) <> 'string') then
+            raise exception
+                'agent %: `skills` holds a non-string entry: %. A pinned skill is '
+                'named, never inlined -- the text lives in agentic.skills so that '
+                'editing it once changes every agent that pins it.',
+                p_spec->>'name', p_spec->'skills';
+        end if;
+
+        select coalesce(nullif(p_spec->'skills', 'null'::jsonb),
+                        (select to_jsonb(a.skills) from agentic.agents a
+                          where a.name = p_spec->>'name'),
+                        '[]'::jsonb),
+               coalesce(p_spec->'tools',
+                        (select a.tools from agentic.agents a
+                          where a.name = p_spec->>'name'),
+                        '[]'::jsonb)
+          into v_skills, v_tools;
+
+        select string_agg(k, ', ' order by k) into v_gap
+          from jsonb_array_elements_text(v_skills) k
+         where not exists (select 1 from agentic.skills sk where sk.name = k);
+        if v_gap is not null then
+            raise exception
+                'agent %: pins skill(s) % which do not exist. A pinned skill is '
+                'read into the prompt at every invocation; a name that resolves to '
+                'nothing is instructions the agent silently never receives.',
+                p_spec->>'name', v_gap;
+        end if;
+
+        select string_agg(distinct sk.name || ' needs ' || r, ', ') into v_gap
+          from jsonb_array_elements_text(v_skills) k
+          join agentic.skills sk on sk.name = k
+          cross join lateral unnest(sk.requires_tools) r
+         where not exists (select 1 from jsonb_array_elements(v_tools) b
+                            where b->>'server' = r);
+        if v_gap is not null then
+            raise exception
+                'agent %: % -- a tool server this agent does not bind. Bind it, '
+                'unpin the skill, or do not remove the binding.',
+                p_spec->>'name', v_gap;
+        end if;
+    end if;
+
     -- Every column an author can set, including the classification block.
     -- Leaving audience/category out of this list -- which is how it was first
     -- written, because they were added to the table later -- does not fail: it
@@ -14394,15 +14714,17 @@ begin
     -- authored as user-facing is accepted, reported as created, and then never
     -- appears in `agents_pickable`. A write path that cannot express a column
     -- the table has is a write path that quietly disagrees with its own schema.
-    insert into agentic.agents (name, system_prompt, model, tools,
+    insert into agentic.agents (name, system_prompt, model, tools, skills,
                                 structured_output_schema, chained_action,
                                 summarizer_agent_id, context_policy,
                                 audience, category, tags,
-                                extracts_source, extracts_doctype)
+                                extracts_source, extracts_doctype, plugin)
     values (p_spec->>'name',
             coalesce(p_spec->>'system_prompt', ''),
             p_spec->>'model',
             coalesce(p_spec->'tools', '[]'::jsonb),
+            coalesce((select array_agg(value)
+                        from jsonb_array_elements_text(p_spec->'skills')), '{}'),
             p_spec->'structured_output_schema',
             p_spec->'chained_action',
             (p_spec->>'summarizer_agent_id')::uuid,
@@ -14412,7 +14734,8 @@ begin
             coalesce((select array_agg(value)
                         from jsonb_array_elements_text(p_spec->'tags')), '{}'),
             p_spec->>'extracts_source',
-            p_spec->>'extracts_doctype')
+            p_spec->>'extracts_doctype',
+            p_spec->>'plugin')
     -- AN OMITTED KEY MEANS "LEAVE IT ALONE", NOT "SET IT TO THE DEFAULT".
     --
     -- Written the obvious way -- `set x = excluded.x` for every column -- this
@@ -14438,6 +14761,9 @@ begin
            tools                    = case when p_spec ? 'tools'
                                       then excluded.tools
                                       else agentic.agents.tools end,
+           skills                   = case when p_spec ? 'skills'
+                                      then excluded.skills
+                                      else agentic.agents.skills end,
            structured_output_schema = case when p_spec ? 'structured_output_schema'
                                       then excluded.structured_output_schema
                                       else agentic.agents.structured_output_schema end,
@@ -14464,7 +14790,10 @@ begin
                                       else agentic.agents.extracts_source end,
            extracts_doctype         = case when p_spec ? 'extracts_doctype'
                                       then excluded.extracts_doctype
-                                      else agentic.agents.extracts_doctype end
+                                      else agentic.agents.extracts_doctype end,
+           plugin                   = case when p_spec ? 'plugin'
+                                      then excluded.plugin
+                                      else agentic.agents.plugin end
     returning * into v_row;
     return v_row;
 end;
@@ -14484,7 +14813,8 @@ begin
 
     insert into agentic.tool_servers (name, kind, url, credential_ref,
                                       emits_citations, serves_agents,
-                                      default_headers, cached_tools, synced_at)
+                                      serves_skills, default_headers,
+                                      cached_tools, synced_at, plugin)
     -- kind and url are NOT NULL, so unlike every other column here they
     -- cannot be left to the ON CONFLICT arm: the tuple has to be VALID before
     -- Postgres will even look for the conflict, and a partial registration
@@ -14502,9 +14832,11 @@ begin
             p_spec->>'credential_ref',
             coalesce((p_spec->>'emits_citations')::boolean, false),
             coalesce((p_spec->>'serves_agents')::boolean, false),
+            coalesce((p_spec->>'serves_skills')::boolean, false),
             coalesce(p_spec->'default_headers', '{}'::jsonb),
             coalesce(p_spec->'cached_tools', '[]'::jsonb),
-            case when p_spec ? 'cached_tools' then now() end)
+            case when p_spec ? 'cached_tools' then now() end,
+            p_spec->>'plugin')
     -- Same rule as upsert_agent, and it reached every column here for the
     -- same reason: `cached_tools` was fixed alone because that is the column
     -- whose loss was noticed, while a registration omitting `credential_ref`
@@ -14526,6 +14858,12 @@ begin
            serves_agents   = case when p_spec ? 'serves_agents'
                                   then excluded.serves_agents
                                   else agentic.tool_servers.serves_agents end,
+           serves_skills   = case when p_spec ? 'serves_skills'
+                                  then excluded.serves_skills
+                                  else agentic.tool_servers.serves_skills end,
+           plugin          = case when p_spec ? 'plugin'
+                                  then excluded.plugin
+                                  else agentic.tool_servers.plugin end,
            default_headers = case when p_spec ? 'default_headers'
                                   then excluded.default_headers
                                   else agentic.tool_servers.default_headers end,
@@ -14535,6 +14873,343 @@ begin
            synced_at       = coalesce(excluded.synced_at, agentic.tool_servers.synced_at)
     returning * into v_row;
     return v_row;
+end;
+$$;
+
+-- Skills are written the same way agents are: authored in code or YAML,
+-- applied as a migration, never edited in a running database (brief.md §6,
+-- §11.8's second bullet).
+--
+-- `description` and `content` are NOT NULL, so they cannot be left to the ON
+-- CONFLICT arm the way a nullable column can -- the tuple has to be valid
+-- before Postgres will look for the conflict at all. The existing row supplies
+-- them, which is what makes "an omitted key means leave it alone" true on both
+-- arms rather than only on the one that is easy to write. Learned in
+-- upsert_tool_server, applied here rather than rediscovered.
+create or replace function agentic.upsert_skill(p_spec jsonb)
+returns agentic.skills
+language plpgsql security definer
+set search_path = pg_catalog, public
+as $$
+declare
+    v_row agentic.skills;
+begin
+    if not agentic.may_author('skills', 'agentic.skills'::regclass) then
+        raise exception 'not authorized to author skills';
+    end if;
+
+    insert into agentic.skills (name, description, when_to_use, content,
+                                requires_tools, audience, category, tags, plugin)
+    values (p_spec->>'name',
+            coalesce(p_spec->>'description',
+                     (select k.description from agentic.skills k
+                       where k.name = p_spec->>'name')),
+            p_spec->>'when_to_use',
+            coalesce(p_spec->>'content',
+                     (select k.content from agentic.skills k
+                       where k.name = p_spec->>'name')),
+            coalesce((select array_agg(value)
+                        from jsonb_array_elements_text(p_spec->'requires_tools')), '{}'),
+            coalesce(p_spec->>'audience', 'internal'),
+            coalesce(p_spec->>'category', 'procedure'),
+            coalesce((select array_agg(value)
+                        from jsonb_array_elements_text(p_spec->'tags')), '{}'),
+            p_spec->>'plugin')
+    on conflict (name) do update
+       set description    = case when p_spec ? 'description'
+                                 then excluded.description
+                                 else agentic.skills.description end,
+           when_to_use    = case when p_spec ? 'when_to_use'
+                                 then excluded.when_to_use
+                                 else agentic.skills.when_to_use end,
+           content        = case when p_spec ? 'content'
+                                 then excluded.content
+                                 else agentic.skills.content end,
+           requires_tools = case when p_spec ? 'requires_tools'
+                                 then excluded.requires_tools
+                                 else agentic.skills.requires_tools end,
+           audience       = case when p_spec ? 'audience'
+                                 then excluded.audience
+                                 else agentic.skills.audience end,
+           category       = case when p_spec ? 'category'
+                                 then excluded.category
+                                 else agentic.skills.category end,
+           tags           = case when p_spec ? 'tags'
+                                 then excluded.tags
+                                 else agentic.skills.tags end,
+           plugin         = case when p_spec ? 'plugin'
+                                 then excluded.plugin
+                                 else agentic.skills.plugin end,
+           -- The version bump is why this is a function and not an INSERT.
+           -- A body that changed while the version did not is a run whose
+           -- recorded provenance points at text that no longer exists, and
+           -- nothing downstream can detect that it is looking at the wrong
+           -- thing. Only the three fields a model actually reads count as a
+           -- change; retagging a skill is not a new version of it.
+           version        = agentic.skills.version + case
+               when (p_spec ? 'content'     and excluded.content     is distinct from agentic.skills.content)
+                 or (p_spec ? 'description' and excluded.description is distinct from agentic.skills.description)
+                 or (p_spec ? 'when_to_use' and excluded.when_to_use is distinct from agentic.skills.when_to_use)
+               then 1 else 0 end
+    returning * into v_row;
+    return v_row;
+end;
+$$;
+
+-- Attaching a skill to an agent, in the database, as ONE statement.
+--
+-- Without this the only way to add a fragment to an agent is read-modify-write
+-- through upsert_agent: read `skills`, append, send the whole array back. That
+-- is a lost update waiting to happen, and not a theoretical one -- two clients
+-- attaching two different fragments to one agent both read the same array and
+-- the second write silently discards the first. No error, no conflict, and an
+-- agent that is missing instructions somebody watched themselves add. It is
+-- the same class of failure as upsert_agent's `excluded` bug, one layer up:
+-- a partial write that reports success.
+--
+-- Three properties, and each is a decision:
+--
+--   IN PLACE.   The array is appended to under a row lock (`for update`
+--               below), so concurrent attaches to one agent serialize instead
+--               of clobbering. This is the whole reason the function exists;
+--               a version without the lock would be sugar over the bug.
+--
+--   ONE PATH.   It does not write `agents` itself. It computes the new array
+--               and hands it to upsert_agent, so the checks that refuse an
+--               unknown skill or an unbound requires_tools server (§5) run
+--               here too, in exactly one place. A second write path with its
+--               own copy of the validation is how the two drift apart.
+--
+--   IDEMPOTENT. Attaching what is already attached changes nothing and is not
+--               an error. Order is meaningful -- composed fragments are
+--               concatenated in listed order -- so a new one appends at the
+--               end rather than being sorted in.
+--
+-- `p_spec` is what makes this one call rather than two: pass it and the
+-- fragment is authored (or updated) and attached together, which is what the
+-- REST path needs since PostgREST is one function per request.
+create or replace function agentic.attach_skill(
+    p_agent text, p_skill text, p_spec jsonb default null)
+returns agentic.agents
+language plpgsql security definer
+set search_path = pg_catalog, public
+as $$
+declare
+    v_skills text[];
+begin
+    -- Not upsert_agent's job to notice: called with {name, skills} for an
+    -- agent that does not exist, it would happily CREATE one with an empty
+    -- prompt and no tools -- an agent that resolves by name and can do
+    -- nothing. Attaching to something absent is a typo, so it is refused here.
+    select a.skills into v_skills
+      from agentic.agents a where a.name = p_agent
+      for update;
+    if not found then
+        raise exception
+            'no agent named % -- attach_skill adds a fragment to an agent that '
+            'exists, it does not create one.', p_agent;
+    end if;
+
+    if p_spec is not null then
+        -- The name is an argument AND may appear in the spec. Refused rather
+        -- than resolved: whichever one we picked, the other is what somebody
+        -- believed they had written.
+        if p_spec ? 'name' and p_spec->>'name' is distinct from p_skill then
+            raise exception
+                'attach_skill: the skill is named % in the argument and % in the '
+                'spec. Name it once.', p_skill, p_spec->>'name';
+        end if;
+        perform agentic.upsert_skill(p_spec || jsonb_build_object('name', p_skill));
+    end if;
+
+    if not (p_skill = any(coalesce(v_skills, '{}'))) then
+        v_skills := coalesce(v_skills, '{}') || p_skill;
+    end if;
+
+    -- Only the two keys, so every other column keeps the "an omitted key means
+    -- leave it alone" behaviour upsert_agent already guarantees.
+    return agentic.upsert_agent(jsonb_build_object(
+        'name', p_agent,
+        'skills', to_jsonb(v_skills)));
+end;
+$$;
+
+-- The other half, and it exists so that removing a fragment is not the one
+-- operation left doing read-modify-write. Detaching what was never attached is
+-- a no-op rather than an error: the caller's intent -- that this agent does
+-- not carry this fragment -- is satisfied either way.
+create or replace function agentic.detach_skill(p_agent text, p_skill text)
+returns agentic.agents
+language plpgsql security definer
+set search_path = pg_catalog, public
+as $$
+declare
+    v_skills text[];
+begin
+    select a.skills into v_skills
+      from agentic.agents a where a.name = p_agent
+      for update;
+    if not found then
+        raise exception 'no agent named %', p_agent;
+    end if;
+
+    select coalesce(array_agg(s order by ord), '{}') into v_skills
+      from unnest(coalesce(v_skills, '{}')) with ordinality t(s, ord)
+     where s <> p_skill;
+
+    return agentic.upsert_agent(jsonb_build_object(
+        'name', p_agent,
+        'skills', to_jsonb(v_skills)));
+end;
+$$;
+
+-- Applying a plugin: one document, one transaction, and -- the half that did
+-- not exist before -- a PRUNE.
+--
+-- An upsert-only apply is how a bundle rots: an agent dropped from the
+-- manifest stays installed, still resolvable by name, still runnable, and now
+-- nothing on disk describes it. So a row carrying this plugin's name and
+-- absent from this manifest is removed, and the removals are reported rather
+-- than done quietly.
+--
+-- WHICH MAKES AN ABSENT SECTION LOUD, deliberately: `{"name": "x"}` with no
+-- `agents` key declares no agents and therefore removes every agent x
+-- installed. That is what makes uninstall expressible at all -- there is no
+-- second function for it -- and it is a trap for anyone writing a partial
+-- document, so it is stated here and in plugins.md §9 rather than left to be
+-- discovered.
+--
+-- Order is not cosmetic. Servers before skills before agents, because an
+-- agent's pinned skills must already exist for upsert_agent to validate them,
+-- and a skill's requires_tools names servers the agent must already bind.
+create or replace function agentic.apply_plugin(p_manifest jsonb)
+returns jsonb
+language plpgsql security definer
+set search_path = pg_catalog, public
+as $$
+declare
+    v_name    text := p_manifest->>'name';
+    v_servers text[];
+    v_skills  text[];
+    v_agents  text[];
+    v_e       jsonb;
+    v_gone    text[] := '{}';
+    v_batch   text[];
+    v_gap     text;
+begin
+    if v_name is null then
+        raise exception
+            'a plugin manifest must carry a name -- {"name": "...", "version": "...", '
+            '"tool_servers": [...], "skills": [...], "agents": [...]}. The name is '
+            'what makes the rows removable later.';
+    end if;
+    if not agentic.may_author('plugins', 'agentic.plugins'::regclass) then
+        raise exception 'not authorized to install plugins';
+    end if;
+
+    v_servers := coalesce((select array_agg(e->>'name')
+                             from jsonb_array_elements(
+                                  coalesce(p_manifest->'tool_servers', '[]'::jsonb)) e), '{}');
+    v_skills  := coalesce((select array_agg(e->>'name')
+                             from jsonb_array_elements(
+                                  coalesce(p_manifest->'skills', '[]'::jsonb)) e), '{}');
+    v_agents  := coalesce((select array_agg(e->>'name')
+                             from jsonb_array_elements(
+                                  coalesce(p_manifest->'agents', '[]'::jsonb)) e), '{}');
+
+    insert into agentic.plugins (name, version, description, author, homepage, manifest)
+    values (v_name, coalesce(p_manifest->>'version', '0.0.0'),
+            p_manifest->>'description', p_manifest->'author',
+            p_manifest->>'homepage', p_manifest)
+    on conflict (name) do update
+       set version     = excluded.version,
+           description = excluded.description,
+           author      = excluded.author,
+           homepage    = excluded.homepage,
+           manifest    = excluded.manifest;
+
+    for v_e in select * from jsonb_array_elements(
+                            coalesce(p_manifest->'tool_servers', '[]'::jsonb)) loop
+        perform agentic.upsert_tool_server(v_e || jsonb_build_object('plugin', v_name));
+    end loop;
+    for v_e in select * from jsonb_array_elements(
+                            coalesce(p_manifest->'skills', '[]'::jsonb)) loop
+        perform agentic.upsert_skill(v_e || jsonb_build_object('plugin', v_name));
+    end loop;
+    for v_e in select * from jsonb_array_elements(
+                            coalesce(p_manifest->'agents', '[]'::jsonb)) loop
+        perform agentic.upsert_agent(v_e || jsonb_build_object('plugin', v_name));
+    end loop;
+
+    -- Agents first: nothing in this schema references an agent except a RUN,
+    -- and a run is history. Deleting an agent that has answered something is
+    -- refused by the foreign key, which is correct and says so badly, so it is
+    -- caught and re-raised as the thing the author actually has to decide.
+    begin
+        with d as (delete from agentic.agents
+                    where plugin = v_name and not (name = any(v_agents))
+                returning name)
+        select coalesce(array_agg('agent:' || name), '{}') into v_batch from d;
+        v_gone := v_gone || v_batch;
+    exception when foreign_key_violation then
+        raise exception
+            'plugin %: an agent this manifest no longer declares has runs against it, '
+            'so removing it would delete conversation history. Keep it in the manifest, '
+            'or delete its runs first -- this function will not decide that for you.',
+            v_name;
+    end;
+
+    -- A skill pinned by an agent from ANOTHER plugin is not this manifest's to
+    -- remove. There is no foreign key to stop it: agents.skills is a list of
+    -- names, which is what lets one skill serve many agents, and the price is
+    -- that referential integrity is a check here rather than a constraint
+    -- there. Uncaught, this is the quietest failure in the whole schema -- the
+    -- agent keeps working and quietly loses a third of its instructions.
+    select string_agg(distinct k.name || ' (pinned by ' || a.name || ')', ', ')
+      into v_gap
+      from agentic.skills k
+      join agentic.agents a on k.name = any(a.skills)
+     where k.plugin = v_name and not (k.name = any(v_skills));
+    if v_gap is not null then
+        raise exception
+            'plugin %: cannot remove % -- unpin it first, or keep it in the manifest.',
+            v_name, v_gap;
+    end if;
+
+    with d as (delete from agentic.skills
+                where plugin = v_name and not (name = any(v_skills))
+            returning name)
+    select coalesce(array_agg('skill:' || name), '{}') into v_batch from d;
+    v_gone := v_gone || v_batch;
+
+    -- Same shape for servers, and the same absence of a foreign key:
+    -- agents.tools holds server NAMES in JSONB.
+    select string_agg(distinct t.name || ' (bound by ' || a.name || ')', ', ')
+      into v_gap
+      from agentic.tool_servers t
+      join agentic.agents a
+        on exists (select 1 from jsonb_array_elements(a.tools) b
+                    where b->>'server' = t.name)
+     where t.plugin = v_name and not (t.name = any(v_servers));
+    if v_gap is not null then
+        raise exception
+            'plugin %: cannot remove % -- rebind it first, or keep it in the manifest.',
+            v_name, v_gap;
+    end if;
+
+    with d as (delete from agentic.tool_servers
+                where plugin = v_name and not (name = any(v_servers))
+            returning name)
+    select coalesce(array_agg('server:' || name), '{}') into v_batch from d;
+    v_gone := v_gone || v_batch;
+
+    return jsonb_build_object(
+        'plugin',       v_name,
+        'version',      coalesce(p_manifest->>'version', '0.0.0'),
+        'tool_servers', to_jsonb(v_servers),
+        'skills',       to_jsonb(v_skills),
+        'agents',       to_jsonb(v_agents),
+        'removed',      to_jsonb(v_gone));
 end;
 $$;
 
@@ -14608,8 +15283,35 @@ create view agentic.messages_api as
 -- identical failure, one layer along.
 create view agentic.tool_servers_api as
     select id, name, kind, url, credential_ref, emits_citations, serves_agents,
-           default_headers, cached_tools, synced_at, created_at
+           serves_skills, default_headers, cached_tools, synced_at, plugin,
+           created_at
       from agentic.tool_servers;
+
+-- Skills, through the same read path as everything else. `content` is IN this
+-- view: the runtime loads a pinned skill's body over REST like every other
+-- client (brief.md §10.2), so a view that showed the listing and hid the body
+-- would be a view that cannot serve the one call it exists for.
+--
+-- What a LISTING costs is therefore a projection the caller chooses
+-- (`?select=name,description,when_to_use`), not a second view -- because the
+-- two differ only in columns, and a second view is a second place to forget a
+-- column when one is added. discovery_text is here for the same reason the
+-- embedding job needs it and nobody else does: it is generated, so it cannot
+-- disagree with the columns beside it.
+create view agentic.skills_api as
+    select id, name, description, when_to_use, content, discovery_text,
+           requires_tools, audience, category, tags, version, plugin,
+           created_at, updated_at
+      from agentic.skills;
+
+-- The manifest is in the view on purpose: "what did this plugin install" is a
+-- question asked when something is wrong, and answering it from the document
+-- as applied rather than from the rows is how you find the row that was
+-- edited in place afterwards (brief.md §11.8).
+create view agentic.plugins_api as
+    select name, version, description, author, homepage, manifest,
+           installed_at, updated_at
+      from agentic.plugins;
 -- The view an interactive UI reads. `audience = 'user'` is the whole point of
 -- the column: a thousand extractors are invisible here without anyone having
 -- to remember to filter.
@@ -14643,15 +15345,23 @@ order by extracts_source, extracts_doctype;
 -- mechanically rather than carefully: they are how a caller answers "which
 -- extractor owns this document", and surface.sql's round-trip check found them
 -- the first time it ran.
+-- `skills` is in this view for the reason the classification columns are, and
+-- it is the same mistake one column along if it is not: the runtime reads
+-- agents through this view, so a pinned skill invisible here is a pinned skill
+-- the runtime never loads -- an agent configured with instructions it silently
+-- does not receive, which is precisely the failure the author-time check in
+-- upsert_agent exists to prevent, reintroduced at the read path.
 create view agentic.agents_api as
-    select id, name, system_prompt, model, tools, structured_output_schema,
+    select id, name, system_prompt, model, tools, skills,
+           structured_output_schema,
            chained_action, summarizer_agent_id, context_policy,
            audience, category, tags, extracts_source, extracts_doctype,
-           created_at
+           plugin, created_at
       from agentic.agents;
 
 grant select on agentic.sessions, agentic.runs, agentic.messages,
-                agentic.agents, agentic.tool_servers to api_viewer;
+                agentic.agents, agentic.tool_servers,
+                agentic.skills, agentic.plugins to api_viewer;
 grant execute on function rbac.current_user_id() to api_viewer;
 
 -- Temporary CREATE, exactly as user-rbac does it: needed only for the
@@ -14662,10 +15372,13 @@ alter view agentic.runs_api         owner to api_viewer;
 alter view agentic.messages_api     owner to api_viewer;
 alter view agentic.tool_servers_api owner to api_viewer;
 alter view agentic.agents_api       owner to api_viewer;
+alter view agentic.skills_api       owner to api_viewer;
+alter view agentic.plugins_api      owner to api_viewer;
 revoke create on schema agentic from api_viewer;
 
 grant select on agentic.sessions_api, agentic.runs_api, agentic.messages_api,
-                agentic.tool_servers_api, agentic.agents_api to authenticated;
+                agentic.tool_servers_api, agentic.agents_api,
+                agentic.skills_api, agentic.plugins_api to authenticated;
 
 grant execute on function agentic.create_session(text) to authenticated;
 grant execute on function agentic.start_run(text, uuid, uuid, uuid, text, text, text, uuid)
@@ -14676,6 +15389,10 @@ grant execute on function agentic.upsert_summary(uuid, text) to authenticated;
 grant execute on function agentic.apply_summary(jsonb) to authenticated;
 grant execute on function agentic.upsert_agent(jsonb) to authenticated;
 grant execute on function agentic.upsert_tool_server(jsonb) to authenticated;
+grant execute on function agentic.upsert_skill(jsonb) to authenticated;
+grant execute on function agentic.attach_skill(text, text, jsonb) to authenticated;
+grant execute on function agentic.detach_skill(text, text) to authenticated;
+grant execute on function agentic.apply_plugin(jsonb) to authenticated;
 grant execute on function agentic.channel_for(uuid) to authenticated, api_viewer;
 
 -- No base-table INSERT/UPDATE/DELETE grant to any PostgREST-facing role: the
@@ -14730,7 +15447,20 @@ select a.name,
        a.structured_output_schema is not null as has_output_schema,
        nullif(a.context_policy, '{}'::jsonb) as context_policy,
        s.name as summarizer,
-       a.tools
+       a.tools,
+       -- THE PINNED SKILL BODIES, whole, for the same reason system_prompt is
+       -- whole one column up: a pinned skill IS part of this agent's prompt --
+       -- the runtime concatenates it in at invocation -- so a plan that shows
+       -- the name and not the text shows the citation and hides the argument.
+       -- Named `skills` rather than expanded into the prompt column because a
+       -- reader has to be able to see which part is shared and which part is
+       -- this agent's own.
+       coalesce((select jsonb_object_agg(k.name, jsonb_build_object(
+                            'version', k.version,
+                            'description', k.description,
+                            'content', k.content))
+                   from agentic.skills k
+                  where k.name = any(a.skills)), '{}'::jsonb) as skills
   from agentic.agents a
   left join agentic.agents s on s.id = a.summarizer_agent_id;
 
@@ -14740,6 +15470,7 @@ select t.name,
        t.url,
        t.emits_citations,
        t.serves_agents,
+       t.serves_skills,
        t.synced_at,
        -- The tool NAMES discovery wrote, which is what an allow-list is checked
        -- against. A server that has never synced has `[]` here and a null
@@ -14784,22 +15515,35 @@ as $$
                 'system_prompt', system_prompt, 'output_shape', output_shape,
                 'has_output_schema', has_output_schema,
                 'context_policy', context_policy,
-                'summarizer', summarizer, 'tools', tools)))
+                'summarizer', summarizer, 'tools', tools,
+                'skills', nullif(skills, '{}'::jsonb))))
               from agentic.v_plan_agents), '{}'::jsonb),
         'servers', coalesce((
             select jsonb_object_agg(name, jsonb_build_object(
                 'kind', kind, 'url', url, 'emits_citations', emits_citations,
-                'serves_agents', serves_agents, 'synced_at', synced_at,
+                'serves_agents', serves_agents, 'serves_skills', serves_skills,
+                'synced_at', synced_at,
                 'tools', tools, 'tool_detail', tool_detail))
-              from agentic.v_plan_servers), '{}'::jsonb));
+              from agentic.v_plan_servers), '{}'::jsonb),
+        -- Every skill, whether or not an agent pins it, because the population
+        -- a plan reader needs to see includes the ones nobody pinned yet --
+        -- that is how you notice a skill written and never bound. Listings
+        -- only: the bodies of the pinned ones are already under their agent,
+        -- and the rest would make this document unreadable at a thousand rows.
+        'skills', coalesce((
+            select jsonb_object_agg(name, jsonb_strip_nulls(jsonb_build_object(
+                'description', description, 'when_to_use', when_to_use,
+                'category', category, 'audience', audience,
+                'version', version, 'requires_tools', to_jsonb(requires_tools))))
+              from agentic.skills), '{}'::jsonb));
 $$;
 
 grant select on agentic.v_plan_agents, agentic.v_plan_servers to authenticated;
 grant execute on function agentic.plan_facet() to authenticated;
 
 comment on function agentic.plan_facet() is
-    'The agentic half of workflow.plan_catalog(): every agent and tool server, '
-    'keyed by name, in the shape p8_plan_graph reads. Shared config only.';
+    'The agentic half of workflow.plan_catalog(): every agent, tool server and '
+    'skill, keyed by name, in the shape p8_plan_graph reads. Shared config only.';
 
 -- ------------------------------------------------------------
 -- 10. Invariant self-checks -- the same two this collection has already been
