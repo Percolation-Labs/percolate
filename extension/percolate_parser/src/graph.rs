@@ -782,7 +782,7 @@ pub fn register_gucs() {
     GucRegistry::define_int_guc(
         c"percolate.graph_snapshot_slots",
         c"How many backends may hold a graph adjacency snapshot at once.",
-        c"Each slot is a backend holding an adjacency snapshot, whose memory is           outside work_mem and therefore invisible to every other Postgres           limit. A backend that cannot take a slot is refused rather than           admitted. Size it as (available memory / roughly twice one           snapshot); ai-query-layer/graph-algorithms.md 2.3 has the arithmetic           and the measurement that produced it.",
+        c"Each slot is a backend holding an adjacency snapshot, whose memory is outside work_mem and therefore invisible to every other Postgres limit. A backend that cannot take a slot is refused rather than admitted. Size it as (available memory / roughly twice one snapshot); ai-query-layer/graph-algorithms.md 2.3 has the arithmetic and the measurement that produced it.",
         &GUC_SNAPSHOT_SLOTS,
         1,
         1024,
@@ -792,7 +792,7 @@ pub fn register_gucs() {
     GucRegistry::define_int_guc(
         c"percolate.graph_snapshot_max_mb",
         c"The largest adjacency snapshot one backend may build, in megabytes.",
-        c"Checked against the arriving size during the build, so a graph too           large for one backend is refused with a pointer to the snapshot           filter rather than discovered by the OOM killer. This bounds ONE           backend; percolate.graph_snapshot_slots is what bounds several.",
+        c"Checked against the arriving size during the build, so a graph too large for one backend is refused with a pointer to the snapshot filter rather than discovered by the OOM killer. This bounds ONE backend; percolate.graph_snapshot_slots is what bounds several.",
         &GUC_SNAPSHOT_MAX_MB,
         16,
         1024 * 64,
