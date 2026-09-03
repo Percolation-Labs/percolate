@@ -158,6 +158,10 @@ grant execute on function aiq.semantic_in(text, vector, text, int) to authentica
 grant execute on function aiq.lexical(text, text, int) to authenticated;
 grant execute on function aiq.search(text, text, vector, text, int, int) to authenticated;
 grant execute on function aiq.sql_passthrough(text) to authenticated;
+-- Diagnostic, and granted for the same reason the error messages name the fix:
+-- the caller who hits "function p8_graph_ppr does not exist" is the one who
+-- needs to see which halves are in step, and they are rarely the DBA.
+grant execute on function aiq.extension_boundary() to authenticated;
 
 -- Registry reads: an agent needs to know which models and sources exist to
 -- form a valid query at all. Read-only, no row-level sensitivity.

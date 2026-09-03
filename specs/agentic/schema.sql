@@ -931,7 +931,7 @@ begin
                 where k not in ('server', 'tools');
                 if v_bad is not null then
                     raise exception
-                        'agent %: tool binding for server %s carries %, which this schema '
+                        'agent %: tool binding for server % carries %, which this schema '
                         'does not read. The allow-list key is `tools` (a list); an entry '
                         'the runtime does not understand is not ignored, it leaves the '
                         'agent with EVERY tool that server exposes.',

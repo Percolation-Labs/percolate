@@ -286,7 +286,7 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, ParseError> {
 
     if !matches!(
         mode.as_str(),
-        "LOOKUP" | "SEMANTIC" | "GRAPH" | "TEXT" | "SEARCH" | "SCHEMA"
+        "LOOKUP" | "SEMANTIC" | "GRAPH" | "TEXT" | "SEARCH" | "SCHEMA" | "RELEVANCE"
     ) {
         return Err(ParseError::UnknownMode(mode));
     }
@@ -327,9 +327,12 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, ParseError> {
             "expected a quoted argument, e.g. LOOKUP \"acme\"",
         ));
     }
-    if q.args.len() > 1 && mode != "LOOKUP" {
+    // LOOKUP and RELEVANCE take a list, for the same reason: an agent almost
+    // never holds exactly one entity, and ranking relatedness to a SET of
+    // seeds is a different and usually better question than ranking to one.
+    if q.args.len() > 1 && !matches!(mode.as_str(), "LOOKUP" | "RELEVANCE") {
         return Err(ParseError::UnexpectedToken(format!(
-            "{} takes one argument, got {} -- only LOOKUP resolves a list",
+            "{} takes one argument, got {} -- only LOOKUP and RELEVANCE take a list",
             mode,
             q.args.len()
         )));
@@ -425,10 +428,26 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, ParseError> {
     // other than what it said, which is the exact failure the two rules above
     // exist to prevent. Found while adding SCHEMA, not by SCHEMA.
     if let Some(m) = wrote_graph_modifier {
-        if q.mode != "GRAPH" {
+        // TYPE filters a relation, which both graph modes can do. DEPTH
+        // describes a traversal, and RELEVANCE is deliberately not one -- it
+        // ranks the neighbourhood the score actually reaches rather than
+        // everything within n hops, so a depth here would be a number the
+        // engine had to ignore. Refused with the reason, because the caller
+        // who writes it is reaching for GRAPH.
+        let allowed = match m {
+            "DEPTH" => q.mode == "GRAPH",
+            _ => matches!(q.mode.as_str(), "GRAPH" | "RELEVANCE"),
+        };
+        if !allowed {
             return Err(ParseError::MissingArgument(match m {
+                "DEPTH" if q.mode == "RELEVANCE" => {
+                    "DEPTH does not apply to RELEVANCE -- it ranks by how much \
+                     score reaches a node, not by how many hops away it is. \
+                     Use GRAPH \"x\" DEPTH n for a bounded walk"
+                }
                 "DEPTH" => "DEPTH applies only to GRAPH -- it describes a traversal",
-                _ => "TYPE applies only to GRAPH -- it filters a relation on an edge",
+                _ => "TYPE applies only to GRAPH and RELEVANCE -- it filters a \
+                      relation on an edge",
             }));
         }
     }
@@ -506,8 +525,12 @@ fn p8_query_grammar() -> pgrx::JsonB {
              "example": "FUZZY LOOKUP \"acme\", \"globex\" LIMIT 5"},
             {"mode": "GRAPH",
              "syntax": "GRAPH \"<key>\" [DEPTH n] [TYPE <relation>] [LIMIT n]",
-             "purpose": "Walk relationships out from a named node. DEPTH and TYPE apply only here.",
+             "purpose": "Walk relationships out from a named node, to a bounded depth. The right mode for one and two hops.",
              "example": "GRAPH \"acme\" DEPTH 2 TYPE competes_with"},
+            {"mode": "RELEVANCE",
+             "syntax": "RELEVANCE \"<key>\" [, \"<key>\" ...] [TYPE <relation>] [LIMIT n]",
+             "purpose": "Rank what is most related to one or more nodes. Not a depth-capped walk: it returns an order, which is what a walk cannot give you. Takes a list, because relatedness to a SET is a different question.",
+             "example": "RELEVANCE \"acme\", \"ndlr\" LIMIT 10"},
             {"mode": "TEXT",
              "syntax": "TEXT \"<text>\" FROM <source> [LIMIT n]",
              "purpose": "Lexical search. Needs no embedding, which is why it answers the rare-exact-token case SEMANTIC misses.",
@@ -641,6 +664,35 @@ mod tests {
     #[pg_test]
     fn unterminated_single_quote_is_an_error_not_a_key() {
         assert!(parse_query("LOOKUP 'R7 Notice").is_err());
+    }
+
+    /// RELEVANCE takes a list, shares TYPE with GRAPH, and refuses DEPTH.
+    /// The refusal is the assertion worth having: a depth the engine had to
+    /// ignore is the exact shape of query that quietly means something else,
+    /// and it is the modifier a caller reaching for GRAPH will write first.
+    #[pg_test]
+    fn relevance_takes_a_list_and_refuses_depth() {
+        let q = parse_query("RELEVANCE \"acme\", \"ndlr\" LIMIT 10").unwrap();
+        assert_eq!(q.mode, "RELEVANCE");
+        assert_eq!(q.args, vec!["acme".to_string(), "ndlr".to_string()]);
+        assert_eq!(q.limit, 10);
+
+        let q = parse_query("RELEVANCE \"acme\" TYPE competes_with").unwrap();
+        assert_eq!(q.relation.as_deref(), Some("competes_with"));
+
+        let e = parse_query("RELEVANCE \"acme\" DEPTH 2").unwrap_err();
+        assert!(e.message().contains("DEPTH does not apply to RELEVANCE"),
+                "got: {}", e.message());
+    }
+
+    /// The modes that take one argument still take one. Adding a second
+    /// list-taking mode is exactly the change that quietly widens the rule for
+    /// everything else.
+    #[pg_test]
+    fn a_list_is_still_refused_where_it_means_nothing() {
+        let e = parse_query("GRAPH \"acme\", \"ndlr\"").unwrap_err();
+        assert!(e.message().contains("only LOOKUP and RELEVANCE take a list"),
+                "got: {}", e.message());
     }
 
     #[pg_test]

@@ -61,13 +61,19 @@ def check_raise_format(path, text):
     error message. Twice, in one session, by the same author, which is the
     argument for checking it here rather than remembering it.
 
-    Only inside RAISE: `%L` and `%I` are correct and necessary in format().
+    `%s` and `%d` are checked for the same reason, and were added after this
+    check watched one go past: a message telling the reader to run
+    `enable_graph_algorithms(''%s'')` printed `enable_graph_algorithms
+    ('authenticateds')`. The C-shaped spelling is the one a writer reaches for
+    without thinking, so it is the one most worth refusing.
+
+    Only inside RAISE: all four are correct and necessary in format().
     """
     bad = []
     for m in re.finditer(r'raise\s+(?:exception|warning|notice)\b(.*?);', text,
                          re.S | re.I):
         body = re.sub(r'format\s*\(.*?\)', '', m.group(1), flags=re.S)
-        hit = re.search(r'%[LI]\b', body)
+        hit = re.search(r'%[LIsd]\b', body)
         if hit:
             bad.append((text[:m.start()].count('\n') + 1, hit.group(0)))
     if bad:
@@ -75,7 +81,8 @@ def check_raise_format(path, text):
         raise SystemExit(
             f"{path}: a RAISE message uses a format()-only specifier -- {detail}.\n"
             "RAISE has one placeholder, `%`; anything after it is literal text, so "
-            "`%L` prints the value and then an L. Quote it yourself: ''%''.")
+            "`%L` prints the value and then an L, and `%s` prints it and then an s. "
+            "Drop the letter, and quote it yourself if you need quotes: ''%''.")
 
 
 # The version is NOT declared here. `percolate.control` is where Postgres

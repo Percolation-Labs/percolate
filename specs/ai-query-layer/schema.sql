@@ -1024,6 +1024,7 @@ declare
     v_seed   jsonb;
     v_out    jsonb;
     v_unresolved jsonb := '[]'::jsonb;
+    v_exhausted  boolean := false;
 begin
     if to_regprocedure('aiq_parse(text)') is null then
         raise exception
@@ -1242,6 +1243,41 @@ begin
         -- (brief.md §3's correction).
         return jsonb_build_object('mode','SQL','statement', p->>'arg',
             'note','execute via the SECURITY INVOKER read-only passthrough, not here');
+    when 'RELEVANCE' then
+        -- The one mode that reaches across the extension boundary TWICE: the
+        -- parser that understood the string is a C function, and so is the
+        -- walk that answers it. brief.md §3.6 maps every crossing and says
+        -- what each one does when the compiled half is absent or behind.
+        --
+        -- `unresolved` is computed the same way LOOKUP computes it, and for
+        -- the same reason: aiq.related drops a seed it cannot resolve, which
+        -- through this envelope makes "no such entity" indistinguishable from
+        -- "that entity has nothing near it".
+        select coalesce(jsonb_agg(distinct a.key) filter (where l.node_id is null),
+                        '[]'::jsonb)
+          into v_unresolved
+        from jsonb_array_elements_text(p->'args') a(key)
+        left join lateral (select node_id from aiq.lookup(a.key, false, 1)) l on true;
+
+        begin
+            select coalesce(jsonb_agg(to_jsonb(r) - 'budget_exhausted'), '[]'::jsonb),
+                   coalesce(bool_or(r.budget_exhausted), false)
+              into v_out, v_exhausted
+            from aiq.related(
+                    (select array_agg(value) from jsonb_array_elements_text(p->'args')),
+                    (p->>'limit')::int, p->>'relation') r;
+        exception when insufficient_privilege then
+            -- The graph algorithms ship switched off, so this is the expected
+            -- state of a fresh install rather than a broken one, and the
+            -- message says the sentence that fixes it rather than naming a
+            -- compiled function the caller has never heard of.
+            raise exception
+                'RELEVANCE needs the graph algorithms, which ship switched off. '
+                'Turn them on for this role with '
+                'select aiq.enable_graph_algorithms(''%'') -- see '
+                'ai-query-layer/graph-algorithms.md §11.', current_user;
+        end;
+
     else
         raise exception 'unhandled mode %', p->>'mode';
     end case;
@@ -1251,11 +1287,100 @@ begin
     -- empty is "every name you gave me resolved". Emitting it always, empty,
     -- for SEMANTIC and TEXT would make the second reading unavailable.
     return jsonb_build_object('mode', p->>'mode', 'plan', p, 'rows', v_out)
-        || case when p->>'mode' = 'LOOKUP'
+        || case when p->>'mode' in ('LOOKUP', 'RELEVANCE')
                 then jsonb_build_object('unresolved', v_unresolved)
+                else '{}'::jsonb end
+        -- Only the budgeted mode reports a budget. Emitting `exhausted` on
+        -- every mode would make it noise on the six that cannot be truncated,
+        -- and a reader would stop looking at it on the one that can.
+        || case when p->>'mode' = 'RELEVANCE'
+                then jsonb_build_object('exhausted', v_exhausted)
                 else '{}'::jsonb end;
 end;
 $$ language plpgsql stable;
+
+-- ------------------------------------------------------------
+-- 9b. The extension boundary, reported rather than remembered.
+--
+-- This collection is TWO extensions, and the split is structural rather than
+-- stylistic: `percolate_parser` carries C functions and must be installed by a
+-- superuser; `percolate` owns tables and RLS policies and must NOT be, because
+-- a superuser-owned table has inert policies. Neither half can be what the
+-- other is.
+--
+-- So there is a boundary, and SQL crosses it. `aiq.query` calls `aiq_parse`,
+-- the six graph wrappers call `p8_graph_*`, and the workflow compiler calls
+-- `p8_compile_workflow`. Every one of those is late-bound -- plpgsql resolves
+-- a function name at execution, not at creation -- which is exactly why the
+-- failure is quiet: a database can install cleanly, pass a surface audit, and
+-- then fail on the first call because the compiled half is older than the SQL
+-- half. That is not hypothetical: a SQL reload does not carry a .so, so it is
+-- the NORMAL state of any stack that pulled a new schema without a new image.
+--
+-- This function answers "are my two halves in step" from the catalog rather
+-- than from a hand-maintained list, because a hand-maintained list of
+-- crossings drifts in the direction of claiming a crossing that no longer
+-- exists and missing the one somebody just added. It reads the bodies.
+-- ------------------------------------------------------------
+create or replace function aiq.extension_boundary() returns jsonb
+language sql stable as $$
+with provided as (
+    -- What the compiled half actually offers, from pg_proc rather than from
+    -- the control file: an extension can be registered while its library is
+    -- an older build, and it is the library that answers calls.
+    select p.proname, p.oid::regprocedure::text as signature
+      from pg_proc p
+     where p.prolang = (select oid from pg_language where lanname = 'c')
+       and coalesce(p.probin, '') like '%percolate_parser%'
+), bodies as (
+    select n.nspname || '.' || p.proname as caller, p.prosrc
+      from pg_proc p
+      join pg_namespace n on n.oid = p.pronamespace
+     where p.prolang = (select oid from pg_language where lanname = 'plpgsql')
+       and n.nspname in ('aiq', 'content', 'workflow', 'agentic')
+), crossings as (
+    -- A call with arguments. `[^)]` after the paren is what separates a call
+    -- from a MENTION, and the mention is not hypothetical: several of these
+    -- functions raise an error whose text says "the same extension as
+    -- aiq_parse()", and the first version of this query reported four
+    -- crossings that were apologies rather than calls.
+    select distinct b.caller, m[1] as callee
+      from bodies b
+      cross join lateral regexp_matches(
+            b.prosrc, '\m(aiq_parse|p8_[a-z0-9_]+)\s*\([^)]', 'g') m
+    union
+    -- And a genuine zero-argument call, which the rule above would drop.
+    -- `p8_query_grammar()` is reached exactly this way, through dynamic SQL,
+    -- so requiring a select in front of it keeps the call and still refuses
+    -- the prose.
+    select distinct b.caller, m[1] as callee
+      from bodies b
+      cross join lateral regexp_matches(
+            b.prosrc, '\mselect\s+(aiq_parse|p8_[a-z0-9_]+)\s*\(\s*\)', 'g') m
+)
+select jsonb_build_object(
+    'provider', jsonb_build_object(
+        'extension', (select extname from pg_extension where extname = 'percolate_parser'),
+        'version',   (select extversion from pg_extension where extname = 'percolate_parser'),
+        'functions', (select count(*) from provided)),
+    'crossings', coalesce((
+        select jsonb_agg(jsonb_build_object(
+                   'caller', c.caller, 'callee', c.callee,
+                   'present', exists (select 1 from provided v where v.proname = c.callee))
+                   order by c.caller, c.callee)
+          from crossings c), '[]'::jsonb),
+    'missing', coalesce((
+        select jsonb_agg(distinct c.callee)
+          from crossings c
+         where not exists (select 1 from provided v where v.proname = c.callee)),
+        '[]'::jsonb),
+    'ok', not exists (
+        select 1 from crossings c
+         where not exists (select 1 from provided v where v.proname = c.callee)))
+$$;
+
+comment on function aiq.extension_boundary() is
+    'Every place the SQL half calls the compiled half, and whether the compiled half provides it.';
 
 -- ============================================================
 -- 10. Embedding spaces: multiple models, multiple dimensions.
@@ -2667,7 +2792,14 @@ select aiq.register_schema_example('p8ql', 'lookup-list', 'p8ql',
     'Resolving several names is one round trip, not N.', 10);
 select aiq.register_schema_example('p8ql', 'graph-walk', 'p8ql',
     'GRAPH "acme" DEPTH 2 TYPE competes_with',
-    'DEPTH and TYPE apply only to GRAPH; written elsewhere they are refused, not ignored.', 20);
+    'DEPTH applies only to GRAPH and TYPE only to GRAPH and RELEVANCE; written '
+    'elsewhere they are refused, not ignored.', 20);
+select aiq.register_schema_example('p8ql', 'relevance', 'p8ql',
+    'RELEVANCE "acme", "ndlr" LIMIT 10',
+    'Ranked, not depth-capped: GRAPH answers "what is within n hops", this '
+    'answers "what matters most", and DEPTH is refused here for that reason. '
+    'Takes a list, because relatedness to a SET of seeds is the question an '
+    'agent holding several entities actually has.', 25);
 select aiq.register_schema_example('p8ql', 'lexical', 'p8ql',
     'TEXT "R7 recall notice" FROM chunks LIMIT 10',
     'No embedding needed -- this is the rare-exact-token case SEMANTIC misses.', 30);
@@ -2692,6 +2824,12 @@ select aiq.register_schema_example('graph', 'typed-walk', 'p8ql',
     'DEPTH above 1 falls back to WITH RECURSIVE -- PG19 has no quantified path '
     'patterns. One row per node at its shortest depth, ordered by depth then by '
     'the product of the edge weights along the path.', 20);
+select aiq.register_schema_example('graph', 'ranked', 'p8ql',
+    'RELEVANCE "ACME" TYPE competes_with LIMIT 10',
+    'The mode that is not a walk. It runs in the compiled extension and ships '
+    'switched off -- aiq.enable_graph_algorithms(role) turns it on -- and it '
+    'reports `exhausted` because it is budgeted: "nothing else is related" and '
+    '"I ran out of time" are different answers.', 25);
 select aiq.register_schema_example('graph', 'seed-then-load', 'p8ql',
     'LOOKUP "acme", "borealis"',
     'The seed of a walk is resolved exactly -- canonical, then short, then '

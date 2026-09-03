@@ -277,7 +277,75 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
--- 10. SHIPPED EXPERIMENTAL MEANS PRESENT AND UNREACHABLE.
+-- 10. THE DIALECT REACHES THEM, AND THE ENVELOPE KEEPS ITS PROMISES.
+--
+-- RELEVANCE is the one graph algorithm with a mode. Three things are asserted
+-- rather than assumed: that DEPTH is refused (a modifier the engine would have
+-- to ignore is the exact failure the dialect exists to prevent), that a name
+-- resolving to nothing is reported instead of dropped, and that the budget
+-- outcome rides on the envelope.
+-- ---------------------------------------------------------------------
+do $$
+declare v jsonb;
+begin
+    v := aiq_parse('RELEVANCE "acme", "ndlr" LIMIT 3');
+    if v->>'mode' <> 'RELEVANCE' or jsonb_array_length(v->'args') <> 2 then
+        raise exception 'RELEVANCE did not parse as a two-argument mode: %', v;
+    end if;
+    v := aiq_parse('RELEVANCE "acme" DEPTH 2');
+    if (v->>'ok')::boolean then
+        raise exception 'RELEVANCE accepted DEPTH, which it would have to ignore';
+    end if;
+
+    v := aiq.query('RELEVANCE "acme", "no-such-entity-at-all" LIMIT 3');
+    if not (v->'unresolved' @> '["no-such-entity-at-all"]'::jsonb) then
+        raise exception 'RELEVANCE dropped an unresolvable seed instead of reporting it: %', v;
+    end if;
+    if jsonb_typeof(v->'exhausted') <> 'boolean' then
+        raise exception 'RELEVANCE did not report its budget outcome: %', v;
+    end if;
+    if jsonb_array_length(v->'rows') = 0 then
+        raise exception 'RELEVANCE returned nothing for a seed that resolves';
+    end if;
+    raise notice 'query/11: RELEVANCE parses, refuses DEPTH, and reports unresolved seeds';
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 11. EVERY CROSSING OF THE EXTENSION BOUNDARY IS SATISFIED.
+--
+-- The two halves ship on different rails -- one in an image, one in a script --
+-- so they diverge, and a SQL reload does not carry a .so. This asserts the
+-- state is legible rather than that it is good: `ok` false is a real answer,
+-- and what must never happen is a crossing nobody knew about.
+-- ---------------------------------------------------------------------
+do $$
+declare v jsonb;
+begin
+    v := aiq.extension_boundary();
+    if jsonb_array_length(v->'crossings') < 10 then
+        raise exception
+            'the boundary report found only % crossings, which means the '
+            'derivation stopped seeing them rather than that they stopped '
+            'existing', jsonb_array_length(v->'crossings');
+    end if;
+    if not (v->>'ok')::boolean then
+        raise exception
+            'the SQL half calls compiled functions this build does not provide: % '
+            '-- rebuild the image (dev/build-image.sh)', v->>'missing';
+    end if;
+    -- The false positive that the first version of the report had: several
+    -- functions raise an error whose text names aiq_parse, and a match on the
+    -- mention rather than the call put four apologies in this list.
+    if exists (select 1 from jsonb_array_elements(v->'crossings') c
+                where c->>'caller' = 'aiq.graph_dense' and c->>'callee' = 'aiq_parse') then
+        raise exception 'the boundary report is counting a mention as a call again';
+    end if;
+    raise notice 'query/11: all % boundary crossings are provided by this build',
+        jsonb_array_length(v->'crossings');
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 12. SHIPPED EXPERIMENTAL MEANS PRESENT AND UNREACHABLE.
 --
 -- graph-algorithms.md ships these off by default: installed, inert, callable
 -- by nobody but the owner until a deliberate grant. That is what makes an
@@ -327,7 +395,7 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
--- 11. THE CACHE CANNOT CROSS A TENANT. The assertion this file exists for.
+-- 13. THE CACHE CANNOT CROSS A TENANT. The assertion this file exists for.
 --
 -- One backend, two identities, in that order. If the fingerprint check were
 -- removed, the second snapshot would be the first one -- same node count, same
