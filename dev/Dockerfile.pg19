@@ -2,7 +2,21 @@
 # Adapted from ../../../p8k8/docker/Dockerfile.pg18 (precedent, per
 # meta/skills/spec-driven-development §5 — reuse the working pattern rather
 # than inventing a new one).
-FROM postgres:19beta3-bookworm
+
+# TWO STAGES, AND THE REASON IS THE PULL.
+#
+# The compiler used to ship. `apt-get install build-essential git
+# postgresql-server-dev-19` is a 995 MB layer, it was never removed, and what it
+# produces is four megabytes: pgvector 1.87 MB, pg_cron 578 kB, the parser .so
+# 1.74 MB. So the published image was 1.94 GB to deliver 4 MB of extensions, and
+# every user paid that on `docker compose up` — which INSTALL.md calls the whole
+# install.
+#
+# Measured with `docker history` before changing anything. The builder below is
+# the old single stage unchanged; the runtime stage is the stock base image plus
+# the artefacts, staged through DESTDIR so each project installs wherever it
+# means to and nothing here has to enumerate paths upstream may move.
+FROM postgres:19beta3-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential git postgresql-server-dev-19 ca-certificates \
@@ -28,7 +42,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # -- which is every user's. Found by pulling the published image onto the
 # machine this was developed on and running the sample corpus.
 RUN cd /tmp && git clone --branch v0.8.6 https://github.com/pgvector/pgvector.git \
-    && cd pgvector && make OPTFLAGS="" && make install && rm -rf /tmp/pgvector
+    && cd pgvector && make OPTFLAGS="" && make install DESTDIR=/out && rm -rf /tmp/pgvector
 
 # pg_cron — core per meta/postgres-manifest.md, and the driver behind
 # workflow.tick() (workflow-engine/schema.sql §19).
@@ -43,7 +57,7 @@ RUN cd /tmp && git clone --branch v0.8.6 https://github.com/pgvector/pgvector.gi
 COPY patches/pg_cron-pg19.patch /tmp/
 RUN cd /tmp && git clone --branch v1.6.7 https://github.com/citusdata/pg_cron.git \
     && cd pg_cron && git apply /tmp/pg_cron-pg19.patch \
-    && make && make install && rm -rf /tmp/pg_cron /tmp/pg_cron-pg19.patch
+    && make && make install DESTDIR=/out && rm -rf /tmp/pg_cron /tmp/pg_cron-pg19.patch
 
 # pg_partman — core per meta/postgres-manifest.md — untested pending the above.
 # RUN cd /tmp && git clone --branch v5.2.4 https://github.com/pgpartman/pg_partman.git \
@@ -51,6 +65,19 @@ RUN cd /tmp && git clone --branch v1.6.7 https://github.com/citusdata/pg_cron.gi
 
 # pgcrypto and pg_trgm are contrib modules — already built into the base image,
 # just need CREATE EXTENSION at init time (see init/*.sql).
+
+# ---------------------------------------------------------------------------
+# The image users actually pull: the stock base, plus four megabytes.
+#
+# DESTDIR staging is what makes this safe to write blind. `make install
+# DESTDIR=/out` puts every file under /out at the path it would otherwise have
+# taken, so copying /out over / reproduces exactly what the single-stage build
+# produced — including anything upstream adds later that a hand-written file
+# list would miss (pg_cron's bitcode directory is the current example).
+# ---------------------------------------------------------------------------
+FROM postgres:19beta3-bookworm
+
+COPY --from=builder /out/ /
 
 # ---------------------------------------------------------------------------
 # The two Percolate extensions, baked in.
