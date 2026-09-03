@@ -51,7 +51,7 @@ create schema if not exists rbac;
 -- ------------------------------------------------------------
 -- 1. Users
 -- ------------------------------------------------------------
-create table rbac.users (
+create table if not exists rbac.users (
     id            uuid primary key default gen_random_uuid(),
     email         text not null unique,
     password_hash text,                 -- null for API-key-only / SSO-only accounts
@@ -160,22 +160,78 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 --    module (users, workflow, resource search, agentic tools).
 --    This is the same table any future module's RLS policies join to.
 -- ------------------------------------------------------------
-create table rbac.roles (
+create table if not exists rbac.roles (
     name        text primary key,
     description text
 );
 
-create table rbac.user_roles (
+create table if not exists rbac.user_roles (
     user_id uuid not null references rbac.users(id) on delete cascade,
     role    text not null references rbac.roles(name),
     primary key (user_id, role)
 );
 
-create table rbac.role_permissions (
+-- THE VOCABULARY, AS A TABLE, BECAUSE FREE TEXT HERE FAILS SILENTLY.
+--
+-- `role_permissions.action` used to be unconstrained text, and every consumer
+-- compares it with `=`. That combination has no loud failure mode: a grant of
+-- ('workflow_runs','read') where the policy asks for 'select' INSERTS, the
+-- role reads as populated, and every policy consulting it returns false. The
+-- published install guide and `percolate auth bootstrap` both shipped exactly
+-- that list, so following either produced an administrator who saw zero rows
+-- in workflow.runs_api and had no way to tell that from an empty database.
+--
+-- A pair is either something this collection checks for, or it is a typo.
+-- There is no third case, so the set is closed and role_permissions references
+-- it: the wrong verb now fails at the INSERT that writes it, naming the row,
+-- instead of at a policy that returns false somewhere else later.
+--
+-- It stays INSERTABLE, because the extensibility story is real -- a new module
+-- adds its pairs here and then grants them, still without writing authz code.
+-- What it can no longer do is grant a pair nothing will ever ask for.
+create table if not exists rbac.permission_kinds (
+    resource text not null,
+    action   text not null,
+    checked_by text not null,   -- where the pair is consulted, so it can be verified
+    primary key (resource, action)
+);
+
+insert into rbac.permission_kinds (resource, action, checked_by) values
+    -- RLS policies. Every one of these spells the read action 'select'; that
+    -- is the fact the old hand-copied lists got wrong.
+    ('users',              'select', 'policy users_self_or_admin'),
+    ('user_roles',         'select', 'policy user_roles_self_or_admin'),
+    ('api_keys',           'select', 'policy api_keys_self_or_admin'),
+    ('auth_events',        'select', 'policy auth_events_self_or_admin'),
+    ('refresh_tokens',     'select', 'policy refresh_tokens_self_or_admin'),
+    ('workflow_runs',      'select', 'policy runs_owner_or_permitted'),
+    ('workflow_schedules', 'select', 'policy schedules_owner_or_permitted'),
+    -- Function guards.
+    ('users',              'admin',  'rbac.grant_role'),
+    ('workflows',          'update', 'workflow.may_define'),
+    ('workflow_pools',     'update', 'workflow.pool guards'),
+    ('agents',             'update', 'agentic.may_author'),
+    ('tool_servers',       'update', 'agentic.may_author'),
+    ('skills',             'update', 'agentic.may_author'),
+    ('plugins',            'update', 'agentic.may_author'),
+    -- Runs and schedules carry a verb per operation rather than a read/write
+    -- pair, because cancelling somebody else's run and reading it are
+    -- different authorities.
+    ('workflow_runs',      'cancel', 'workflow.assert_run_access'),
+    ('workflow_runs',      'signal', 'workflow.assert_run_access'),
+    ('workflow_schedules', 'create', 'workflow.assert_schedule_access'),
+    ('workflow_schedules', 'enable', 'workflow.assert_schedule_access'),
+    ('workflow_schedules', 'delete', 'workflow.assert_schedule_access')
+on conflict do nothing;
+
+create table if not exists rbac.role_permissions (
     role     text not null references rbac.roles(name),
-    resource text not null,     -- e.g. 'workflow_runs', 'tasks', 'users'
-    action   text not null,     -- e.g. 'select', 'insert', 'cancel', 'admin'
-    primary key (role, resource, action)
+    resource text not null,
+    action   text not null,
+    primary key (role, resource, action),
+    -- The point of the table above: a pair nothing checks cannot be granted.
+    foreign key (resource, action)
+        references rbac.permission_kinds (resource, action)
 );
 
 -- One function every module's RLS policy calls. Add a new module
@@ -278,7 +334,7 @@ $$ language sql stable;
 --    stay short-lived (minutes) and are minted per-request from a
 --    valid refresh token.
 -- ------------------------------------------------------------
-create table rbac.refresh_tokens (
+create table if not exists rbac.refresh_tokens (
     id           uuid primary key default gen_random_uuid(),
     user_id      uuid not null references rbac.users(id) on delete cascade,
     token_hash   text not null unique,     -- sha256 of the raw token; raw never stored
@@ -288,7 +344,7 @@ create table rbac.refresh_tokens (
     revoked_at   timestamptz,
     replaced_by  uuid references rbac.refresh_tokens(id)  -- rotation chain, for reuse detection
 );
-create index idx_refresh_tokens_user on rbac.refresh_tokens (user_id) where revoked_at is null;
+create index if not exists idx_refresh_tokens_user on rbac.refresh_tokens (user_id) where revoked_at is null;
 
 -- Rotate: issue a new refresh token, revoke the old one, link the chain.
 -- If a caller ever presents an already-revoked token whose replaced_by
@@ -381,7 +437,7 @@ $$ language sql security definer set search_path = pg_catalog, public;
 --    (agents are long-running), but revocation is immediate since
 --    it's a DB row, not a stateless token.
 -- ------------------------------------------------------------
-create table rbac.api_keys (
+create table if not exists rbac.api_keys (
     id          uuid primary key default gen_random_uuid(),
     user_id     uuid references rbac.users(id) on delete cascade,  -- null = service account
     label       text not null,
@@ -533,7 +589,7 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 --    task_events. Every auth-relevant event, queryable, no separate
 --    logging infra needed for this.
 -- ------------------------------------------------------------
-create table rbac.auth_events (
+create table if not exists rbac.auth_events (
     id         bigint generated always as identity primary key,
     user_id    uuid,
     event_type text not null,   -- login_success, login_failed, password_changed,
@@ -548,7 +604,7 @@ create table rbac.auth_events (
     span_id    text not null default encode(gen_random_bytes(8), 'hex'),
     at         timestamptz not null default now()
 );
-create index idx_auth_events_user on rbac.auth_events (user_id, at);
+create index if not exists idx_auth_events_user on rbac.auth_events (user_id, at);
 
 -- SECURITY: this is the vulnerability that motivated this whole section --
 -- confirmed empirically as a full, working privilege escalation, not a
@@ -571,6 +627,88 @@ begin
     on conflict do nothing;
     insert into rbac.auth_events (user_id, event_type, detail)
     values (p_target_user_id, 'role_granted', jsonb_build_object('role', p_role, 'by', rbac.current_user_id()));
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
+-- 6b. THE FIRST ADMINISTRATOR.
+-- ------------------------------------------------------------
+-- grant_role() cannot make the first one -- it is gated on
+-- has_permission(current_user_id(), 'users', 'admin'), and on an empty
+-- database nobody holds that, including the person bootstrapping. So the
+-- first user_roles row has to be a plain INSERT by a connection privileged
+-- enough to write the table. That is a real bootstrap step, not an oversight:
+-- the alternative is a function that grants 'users'/'admin' to whoever asks
+-- first.
+--
+-- What was wrong was leaving the step as a LIST OF ROWS for a human to copy.
+-- `role_permissions.action` is free text matched with `=`, so a wrong string
+-- is not an error anywhere -- it inserts, the role looks populated, and every
+-- policy that consults it returns false. Found the hard way: the published
+-- install guide granted ('workflow_runs','read') and ('workflow_runs','write')
+-- when every RLS policy in the collection asks for 'select', so following the
+-- documentation exactly produced an "admin" who then saw zero rows in
+-- workflow.runs_api and had no way to tell that from "my workflow never ran".
+--
+-- The vocabulary is derived here rather than transcribed. Every pair below is
+-- one a policy or a guard actually asks for, and the reason each is spelled
+-- the way it is sits next to it -- because the failure mode of this table is
+-- silence, the fix is to stop hand-copying it, not to write the list down
+-- somewhere else as well.
+--
+-- Refuses once ANY role has been granted to anyone. That is what keeps it a
+-- bootstrap rather than a back door: it is reachable only while the system has
+-- no administrator, which is exactly the window in which it is not an
+-- escalation. EXECUTE is not granted to web_anon or authenticated (§9's
+-- revoke-first rule leaves it unreachable over PostgREST); this is run from a
+-- privileged local session, like the CREATE EXTENSION it follows.
+create or replace function rbac.bootstrap_admin(p_email text, p_password text,
+                                                p_role text default 'admin')
+returns uuid as $$
+declare v_uid uuid;
+begin
+    -- Idempotent for the caller who already ran it, refusing for everyone else.
+    -- A provisioning script that reruns must not fail, but "rerun" means the
+    -- SAME identity: if this email already holds this role, hand back its id
+    -- and change nothing. Creating a SECOND administrator is the thing being
+    -- refused, not being called twice.
+    select u.id into v_uid
+      from rbac.users u join rbac.user_roles ur on ur.user_id = u.id
+     where u.email = p_email and ur.role = p_role;
+    if found then
+        return v_uid;
+    end if;
+
+    if exists (select 1 from rbac.user_roles) then
+        raise exception 'rbac is already bootstrapped -- use rbac.grant_role() as an existing admin'
+            using hint = 'bootstrap_admin() only runs while no role has been granted to anyone';
+    end if;
+
+    select id into v_uid from rbac.users where email = p_email;
+    if not found then
+        v_uid := rbac.create_user_with_password(p_email, p_password);
+    end if;
+
+    insert into rbac.roles (name, description)
+    values (p_role, 'the first administrator')
+    on conflict (name) do nothing;
+
+    -- THE grant list is rbac.permission_kinds, not a copy of it. Every pair
+    -- this collection checks is declared there and constrained by the foreign
+    -- key on role_permissions, so "everything" is expressible as a select
+    -- rather than as nineteen literals somebody has to keep in step. A module
+    -- added later is covered the moment it declares its pairs, which is what
+    -- the admin role is supposed to mean.
+    insert into rbac.role_permissions (role, resource, action)
+    select p_role, resource, action from rbac.permission_kinds
+    on conflict do nothing;
+
+    insert into rbac.user_roles (user_id, role) values (v_uid, p_role);
+
+    insert into rbac.auth_events (user_id, event_type, detail)
+    values (v_uid, 'role_granted', jsonb_build_object('role', p_role, 'by', 'bootstrap_admin'));
+
+    return v_uid;
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
@@ -761,14 +899,19 @@ alter table rbac.user_roles enable row level security;
 -- join-once. This is a documented general Postgres RLS performance pattern,
 -- not specific to this schema -- worth applying to every RLS policy written
 -- for any future module, not just these five.
+drop policy if exists users_self_or_admin on rbac.users;
 create policy users_self_or_admin on rbac.users for select
   using (id = (select rbac.current_user_id()) or (select rbac.has_permission(rbac.current_user_id(), 'users', 'select')));
+drop policy if exists refresh_tokens_self_or_admin on rbac.refresh_tokens;
 create policy refresh_tokens_self_or_admin on rbac.refresh_tokens for select
   using (user_id = (select rbac.current_user_id()) or (select rbac.has_permission(rbac.current_user_id(), 'refresh_tokens', 'select')));
+drop policy if exists api_keys_self_or_admin on rbac.api_keys;
 create policy api_keys_self_or_admin on rbac.api_keys for select
   using (user_id = (select rbac.current_user_id()) or (select rbac.has_permission(rbac.current_user_id(), 'api_keys', 'select')));
+drop policy if exists auth_events_self_or_admin on rbac.auth_events;
 create policy auth_events_self_or_admin on rbac.auth_events for select
   using (user_id = (select rbac.current_user_id()) or (select rbac.has_permission(rbac.current_user_id(), 'auth_events', 'select')));
+drop policy if exists user_roles_self_or_admin on rbac.user_roles;
 create policy user_roles_self_or_admin on rbac.user_roles for select
   using (user_id = (select rbac.current_user_id()) or (select rbac.has_permission(rbac.current_user_id(), 'user_roles', 'select')));
 
@@ -794,11 +937,11 @@ create policy user_roles_self_or_admin on rbac.user_roles for select
 -- RLS row-filtering still uses the querying role, because current_user_id()
 -- reads session state regardless of whose privileges are active for the
 -- column check.
-create view rbac.users_api as
+create or replace view rbac.users_api as
   select id, email, status, created_at, updated_at from rbac.users;
-create view rbac.refresh_tokens_api as
+create or replace view rbac.refresh_tokens_api as
   select id, user_id, device_label, issued_at, expires_at, revoked_at from rbac.refresh_tokens;
-create view rbac.api_keys_api as
+create or replace view rbac.api_keys_api as
   select id, user_id, label, scopes, created_at, last_used_at, revoked_at from rbac.api_keys;
 
 -- Hand the views to api_viewer -- the step that makes RLS actually enforce on
@@ -844,9 +987,12 @@ grant select on rbac.api_keys_api to authenticated;
 
 grant select on rbac.auth_events to authenticated;
 grant select on rbac.user_roles to authenticated;
--- roles, role_permissions: reference/catalog data, not per-row sensitive --
--- plain table grants, no RLS needed.
-grant select on rbac.roles, rbac.role_permissions to authenticated;
+-- roles, role_permissions, permission_kinds: reference/catalog data, not
+-- per-row sensitive -- plain table grants, no RLS needed. permission_kinds is
+-- the vocabulary itself, and a caller who cannot read it cannot tell a
+-- permission they lack from one that does not exist.
+grant select on rbac.roles, rbac.role_permissions, rbac.permission_kinds
+    to authenticated;
 
 -- web_anon gets no table access at all -- every unauthenticated interaction
 -- this module supports (signup, login, refresh, API-key auth) is a function

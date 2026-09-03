@@ -892,8 +892,10 @@ grant select on aiq.soft_nodes, aiq.lake_nodes, aiq.graph_vocabulary to authenti
 alter table aiq.soft_nodes enable row level security;
 alter table aiq.lake_nodes enable row level security;
 
+drop policy if exists soft_nodes_org_scoped on aiq.soft_nodes;
 create policy soft_nodes_org_scoped on aiq.soft_nodes
     for select using (org_id is null or org_id in (select aiq.current_org_ids()));
+drop policy if exists lake_nodes_org_scoped on aiq.lake_nodes;
 create policy lake_nodes_org_scoped on aiq.lake_nodes
     for select using (org_id is null or org_id in (select aiq.current_org_ids()));
 

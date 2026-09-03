@@ -123,7 +123,7 @@ end;
 $$ language plpgsql;
 
 drop trigger if exists trg_connectors_validate on content.connectors;
-create trigger trg_connectors_validate before insert or update on content.connectors
+create or replace trigger trg_connectors_validate before insert or update on content.connectors
     for each row execute function content.connectors_validate();
 
 -- What the runner claims. Ordinary SQL, exposed as an RPC so a worker with no

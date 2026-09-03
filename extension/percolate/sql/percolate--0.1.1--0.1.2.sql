@@ -1,5 +1,5 @@
 -- ============================================================
--- percolate 0.1.1 -- the whole schema, as one extension script.
+-- percolate 0.1.2 -- the whole schema, as one extension script.
 --
 -- GENERATED from specs/ by extension/percolate/build-sql.py. Do not edit.
 --
@@ -17,6 +17,60 @@
 -- Roles are NOT created here: they are cluster-level, and a non-superuser
 -- cannot CREATE ROLE. See specs/user-rbac/roles.sql, applied once by a DBA.
 -- ============================================================
+
+-- ------------------------------------------------------------
+-- WHAT THIS BUILD WAS MADE FROM.
+--
+-- Provenance, because its absence cost a day. Two parser fixes were committed
+-- -- an error naming a mode the caller had not written, and one caller's build
+-- filter narrowing the next caller's answers -- and the test suite went on
+-- failing against a .so compiled before them. The failures pointed at source
+-- that was already correct, and nothing in the running database could say
+-- which of "this is a bug" and "this binary is old" was true.
+--
+-- `compiler_capabilities()` does not answer it either, deliberately: it probes
+-- FEATURES, one canary each, which detects the parser and the schema drifting
+-- apart from EACH OTHER. Both halves can agree perfectly and both be six
+-- commits behind the tree that produced them. This table is the other axis.
+--
+-- Not a constant baked into this file: the commit is not knowable when the
+-- file is generated (it would have to name the commit that contains it), and a
+-- SHA here would make the generated artifact differ on every build and defeat
+-- build-sql.py --check. It is written at PACKAGE time instead, by whatever
+-- assembles the release, through the function below.
+-- ------------------------------------------------------------
+create table if not exists public.percolate_build (
+    component  text primary key,         -- 'schema' or 'parser'
+    version    text not null,
+    commit_sha text,
+    built_at   timestamptz
+);
+grant select on public.percolate_build to public;
+
+create or replace function public.percolate_record_build(
+    p_component text, p_version text, p_commit text, p_built_at timestamptz)
+returns void language sql volatile as $fn$
+    insert into public.percolate_build (component, version, commit_sha, built_at)
+    values (p_component, p_version, p_commit, p_built_at)
+    on conflict (component) do update
+       set version = excluded.version,
+           commit_sha = excluded.commit_sha,
+           built_at = excluded.built_at;
+$fn$;
+
+-- The one-line answer. Reports every component and says plainly whether they
+-- came from the same commit, because "the halves disagree" is the condition
+-- worth naming and the one a human would otherwise have to eyeball.
+create or replace function public.percolate_build()
+returns table (component text, version text, commit_sha text,
+               built_at timestamptz, consistent boolean)
+language sql stable as $fn$
+    select b.component, b.version, b.commit_sha, b.built_at,
+           (select count(distinct commit_sha) <= 1
+              from public.percolate_build where commit_sha is not null)
+      from public.percolate_build b
+     order by b.component;
+$fn$;
 
 
 -- ============================================================
@@ -95,7 +149,7 @@ $$ language plpgsql;
 -- ------------------------------------------------------------
 -- 1. Workflow defs
 -- ------------------------------------------------------------
-create table workflow.definitions (
+create table if not exists workflow.definitions (
     id          uuid primary key default gen_random_uuid(),
     name        text not null,
     version     int not null default 1,
@@ -229,14 +283,14 @@ begin
 end;
 $$ language plpgsql;
 
-create trigger trg_check_spec_before_insert
+create or replace trigger trg_check_spec_before_insert
     before insert or update of spec on workflow.definitions
     for each row execute function workflow.check_spec_before_insert();
 
 -- ------------------------------------------------------------
 -- 2. Workflow runs
 -- ------------------------------------------------------------
-create table workflow.runs (
+create table if not exists workflow.runs (
     id               uuid primary key default gen_random_uuid(),
     workflow_def_id  uuid not null references workflow.definitions(id),
     parent_task_id   uuid,
@@ -262,7 +316,7 @@ create table workflow.runs (
 -- ------------------------------------------------------------
 -- 3. Tasks
 -- ------------------------------------------------------------
-create table workflow.tasks (
+create table if not exists workflow.tasks (
     id               uuid primary key default gen_random_uuid(),
     run_id           uuid not null references workflow.runs(id) on delete cascade,
     step_key         text not null,
@@ -324,9 +378,9 @@ create table workflow.tasks (
     unique (run_id, step_key)
 );
 
-create trigger trg_workflow_runs_touch before update on workflow.runs
+create or replace trigger trg_workflow_runs_touch before update on workflow.runs
     for each row execute function public.touch_updated_at();
-create trigger trg_tasks_touch before update on workflow.tasks
+create or replace trigger trg_tasks_touch before update on workflow.tasks
     for each row execute function public.touch_updated_at();
 
 -- THE CLAIM INDEX MUST MATCH THE CLAIM'S ORDER BY, AND THIS ONE DID NOT.
@@ -354,7 +408,7 @@ create trigger trg_tasks_touch before update on workflow.tasks
 -- `priority desc` is written out rather than left to a reverse scan because
 -- the mixed direction (`desc, asc`) cannot be served by scanning one index
 -- backwards -- that would reverse both keys.
-create index idx_tasks_claimable on workflow.tasks (queue, priority desc, created_at)
+create index if not exists idx_tasks_claimable on workflow.tasks (queue, priority desc, created_at)
     where status = 'ready';
 
 -- The autoscaler's index. queue_depth() counts ready-and-due plus running, and
@@ -367,23 +421,23 @@ create index idx_tasks_claimable on workflow.tasks (queue, priority desc, create
 -- Deliberately NOT indexing run_after's predicate: `run_after <= now()` is not
 -- immutable and cannot appear in a partial index's WHERE. It rides as an
 -- indexed column so the filter is answered without a heap fetch.
-create index idx_tasks_live on workflow.tasks (queue, status, run_after)
+create index if not exists idx_tasks_live on workflow.tasks (queue, status, run_after)
     where status in ('ready', 'running');
-create index idx_tasks_run on workflow.tasks (run_id);
-create index idx_tasks_heartbeat on workflow.tasks (status, heartbeat_at) where status = 'running';
-create index idx_tasks_signal on workflow.tasks (wait_signal) where status = 'waiting_external';
+create index if not exists idx_tasks_run on workflow.tasks (run_id);
+create index if not exists idx_tasks_heartbeat on workflow.tasks (status, heartbeat_at) where status = 'running';
+create index if not exists idx_tasks_signal on workflow.tasks (wait_signal) where status = 'waiting_external';
 
-create table workflow.task_dependencies (
+create table if not exists workflow.task_dependencies (
     task_id             uuid not null references workflow.tasks(id) on delete cascade,
     depends_on_task_id  uuid not null references workflow.tasks(id) on delete cascade,
     primary key (task_id, depends_on_task_id)
 );
-create index idx_task_deps_reverse on workflow.task_dependencies (depends_on_task_id);
+create index if not exists idx_task_deps_reverse on workflow.task_dependencies (depends_on_task_id);
 
 -- ------------------------------------------------------------
 -- 4. Per-queue config
 -- ------------------------------------------------------------
-create table workflow.queue_config (
+create table if not exists workflow.queue_config (
     queue          text primary key,
     stale_timeout  interval not null default interval '2 minutes',
     rate_lookahead int not null default 20
@@ -392,7 +446,7 @@ create table workflow.queue_config (
 -- ------------------------------------------------------------
 -- 5. Rate limiting
 -- ------------------------------------------------------------
-create table workflow.rate_limits (
+create table if not exists workflow.rate_limits (
     key         text primary key,
     capacity    numeric not null,
     tokens      numeric not null,
@@ -417,7 +471,7 @@ $$ language plpgsql;
 -- ------------------------------------------------------------
 -- 6. Audit log
 -- ------------------------------------------------------------
-create table workflow.task_events (
+create table if not exists workflow.task_events (
     id             bigint generated always as identity primary key,
     task_id        uuid not null,
     run_id         uuid not null,
@@ -427,7 +481,7 @@ create table workflow.task_events (
     detail         jsonb,
     at             timestamptz not null default now()
 );
-create index idx_task_events_run on workflow.task_events (run_id, at);
+create index if not exists idx_task_events_run on workflow.task_events (run_id, at);
 
 create or replace function workflow.log_task_transition() returns trigger as $$
 begin
@@ -443,7 +497,7 @@ begin
 end;
 $$ language plpgsql;
 
-create trigger trg_log_task_transition
+create or replace trigger trg_log_task_transition
     after update of status on workflow.tasks
     for each row execute function workflow.log_task_transition();
 
@@ -538,7 +592,7 @@ begin
 end;
 $$ language plpgsql;
 
-create trigger trg_enforce_payload_ref_size
+create or replace trigger trg_enforce_payload_ref_size
     before insert or update on workflow.tasks
     for each row execute function workflow.enforce_payload_ref_size();
 
@@ -614,7 +668,7 @@ begin
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
-create trigger trg_cascade_task_status
+create or replace trigger trg_cascade_task_status
     after update of status on workflow.tasks
     for each row execute function workflow.cascade_task_status();
 
@@ -627,7 +681,7 @@ begin
 end;
 $$ language plpgsql;
 
-create trigger trg_mark_roots_ready
+create or replace trigger trg_mark_roots_ready
     before insert on workflow.tasks
     for each row execute function workflow.mark_roots_ready();
 
@@ -640,7 +694,7 @@ begin
 end;
 $$ language plpgsql;
 
-create trigger trg_notify_new_ready
+create or replace trigger trg_notify_new_ready
     after insert on workflow.tasks
     for each row execute function workflow.notify_new_ready();
 
@@ -1414,7 +1468,7 @@ begin
 end;
 $$ language plpgsql;
 
-create trigger trg_resolve_parent_on_child_completion
+create or replace trigger trg_resolve_parent_on_child_completion
     after update of status on workflow.runs
     for each row execute function workflow.resolve_parent_on_child_completion();
 
@@ -1713,10 +1767,10 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- ------------------------------------------------------------
 -- 15. Observability views
 -- ------------------------------------------------------------
-create view workflow.v_queue_depth as
+create or replace view workflow.v_queue_depth as
     select queue, status, count(*) as value from workflow.tasks group by queue, status;
 
-create view workflow.v_run_progress as
+create or replace view workflow.v_run_progress as
     select r.id as run_id, d.name as workflow_name, r.status as run_status,
            count(*) filter (where t.status = 'done') as done,
            count(*) as total, r.created_at, r.updated_at
@@ -1725,7 +1779,7 @@ create view workflow.v_run_progress as
     join workflow.tasks t on t.run_id = r.id
     group by r.id, d.name, r.status, r.created_at, r.updated_at;
 
-create view workflow.v_stuck_tasks as
+create or replace view workflow.v_stuck_tasks as
     select t.id, t.run_id, t.queue, t.step_key, t.status,
            extract(epoch from now() - t.created_at) as age_seconds
     from workflow.tasks t
@@ -1741,7 +1795,7 @@ create view workflow.v_stuck_tasks as
 -- lease violations from one queue mean workers are dying, or a stale_timeout is
 -- shorter than the work. Silently dropping them is what made the reaper's own
 -- defects invisible for as long as they were.
-create view workflow.v_lease_violations as
+create or replace view workflow.v_lease_violations as
     select e.detail->>'queue'  as queue,
            e.detail->>'op'     as op,
            e.detail->>'why'    as why,
@@ -1753,7 +1807,7 @@ create view workflow.v_lease_violations as
     where e.detail->>'event' = 'lease_violation'
     group by 1,2,3,4,5 order by 6 desc;
 
-create view workflow.v_compensation_status as
+create or replace view workflow.v_compensation_status as
     select f.run_id, f.saga_group,
            count(*) as total_compensatable,
            count(c.id) as compensations_created,
@@ -1764,7 +1818,7 @@ create view workflow.v_compensation_status as
     where f.saga_group is not null and f.compensation_task_key is not null
     group by f.run_id, f.saga_group;
 
-create view workflow.v_decision_history as
+create or replace view workflow.v_decision_history as
     select te.run_id, te.task_id, t.step_key, te.input_snapshot, t.output as decision_output, te.at
     from workflow.task_events te
     join workflow.tasks t on t.id = te.task_id
@@ -2047,7 +2101,7 @@ alter table workflow.tasks drop constraint if exists tasks_kind_check;
 alter table workflow.tasks add constraint tasks_kind_check
     check (kind in ('work','decision','timer','signal','sub_workflow','http_call','sql'));
 
-create table workflow.step_functions (
+create table if not exists workflow.step_functions (
     name          text primary key,        -- what a step spec names
     fn            text not null,            -- schema-qualified function
     arg_types     text[] not null default '{}',
@@ -2502,7 +2556,7 @@ $$ language plpgsql;
 -- insert-time autorun would EXECUTE the whole workflow in arbitrary order.
 -- Stamping a column is not executing, which is why this one is safe and those
 -- are not.
-create trigger trg_apply_timer_delay
+create or replace trigger trg_apply_timer_delay
     after insert on workflow.tasks
     for each row when (new.kind = 'timer' and new.status = 'ready')
     execute function workflow.apply_timer_delay_on_insert();
@@ -2528,7 +2582,7 @@ begin
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
-create trigger trg_autorun_sql_steps
+create or replace trigger trg_autorun_sql_steps
     after update of status on workflow.tasks
     for each row execute function workflow.autorun_sql_steps();
 
@@ -2732,7 +2786,7 @@ grant execute on function workflow.define_yaml(text) to authenticated;
 -- retry, backoff, the reaper, saga compensation, cancellation and tracing all
 -- apply unchanged. Nothing here is a second execution engine.
 -- ------------------------------------------------------------
-create table workflow.schedules (
+create table if not exists workflow.schedules (
     id             uuid primary key default gen_random_uuid(),
     name           text not null unique,
     -- The definition NAME, not its id: start_workflow() resolves the latest
@@ -2773,10 +2827,10 @@ create table workflow.schedules (
     created_at     timestamptz not null default now(),
     updated_at     timestamptz not null default now()
 );
-create index idx_schedules_due on workflow.schedules (last_tick_at) where enabled;
-create index idx_schedules_org on workflow.schedules (org_id);
+create index if not exists idx_schedules_due on workflow.schedules (last_tick_at) where enabled;
+create index if not exists idx_schedules_org on workflow.schedules (org_id);
 
-create trigger trg_schedules_touch before update on workflow.schedules
+create or replace trigger trg_schedules_touch before update on workflow.schedules
     for each row execute function public.touch_updated_at();
 
 -- One field of a 5-field cron expression, against one integer.
@@ -7334,7 +7388,7 @@ create schema if not exists rbac;
 -- ------------------------------------------------------------
 -- 1. Users
 -- ------------------------------------------------------------
-create table rbac.users (
+create table if not exists rbac.users (
     id            uuid primary key default gen_random_uuid(),
     email         text not null unique,
     password_hash text,                 -- null for API-key-only / SSO-only accounts
@@ -7443,22 +7497,78 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 --    module (users, workflow, resource search, agentic tools).
 --    This is the same table any future module's RLS policies join to.
 -- ------------------------------------------------------------
-create table rbac.roles (
+create table if not exists rbac.roles (
     name        text primary key,
     description text
 );
 
-create table rbac.user_roles (
+create table if not exists rbac.user_roles (
     user_id uuid not null references rbac.users(id) on delete cascade,
     role    text not null references rbac.roles(name),
     primary key (user_id, role)
 );
 
-create table rbac.role_permissions (
+-- THE VOCABULARY, AS A TABLE, BECAUSE FREE TEXT HERE FAILS SILENTLY.
+--
+-- `role_permissions.action` used to be unconstrained text, and every consumer
+-- compares it with `=`. That combination has no loud failure mode: a grant of
+-- ('workflow_runs','read') where the policy asks for 'select' INSERTS, the
+-- role reads as populated, and every policy consulting it returns false. The
+-- published install guide and `percolate auth bootstrap` both shipped exactly
+-- that list, so following either produced an administrator who saw zero rows
+-- in workflow.runs_api and had no way to tell that from an empty database.
+--
+-- A pair is either something this collection checks for, or it is a typo.
+-- There is no third case, so the set is closed and role_permissions references
+-- it: the wrong verb now fails at the INSERT that writes it, naming the row,
+-- instead of at a policy that returns false somewhere else later.
+--
+-- It stays INSERTABLE, because the extensibility story is real -- a new module
+-- adds its pairs here and then grants them, still without writing authz code.
+-- What it can no longer do is grant a pair nothing will ever ask for.
+create table if not exists rbac.permission_kinds (
+    resource text not null,
+    action   text not null,
+    checked_by text not null,   -- where the pair is consulted, so it can be verified
+    primary key (resource, action)
+);
+
+insert into rbac.permission_kinds (resource, action, checked_by) values
+    -- RLS policies. Every one of these spells the read action 'select'; that
+    -- is the fact the old hand-copied lists got wrong.
+    ('users',              'select', 'policy users_self_or_admin'),
+    ('user_roles',         'select', 'policy user_roles_self_or_admin'),
+    ('api_keys',           'select', 'policy api_keys_self_or_admin'),
+    ('auth_events',        'select', 'policy auth_events_self_or_admin'),
+    ('refresh_tokens',     'select', 'policy refresh_tokens_self_or_admin'),
+    ('workflow_runs',      'select', 'policy runs_owner_or_permitted'),
+    ('workflow_schedules', 'select', 'policy schedules_owner_or_permitted'),
+    -- Function guards.
+    ('users',              'admin',  'rbac.grant_role'),
+    ('workflows',          'update', 'workflow.may_define'),
+    ('workflow_pools',     'update', 'workflow.pool guards'),
+    ('agents',             'update', 'agentic.may_author'),
+    ('tool_servers',       'update', 'agentic.may_author'),
+    ('skills',             'update', 'agentic.may_author'),
+    ('plugins',            'update', 'agentic.may_author'),
+    -- Runs and schedules carry a verb per operation rather than a read/write
+    -- pair, because cancelling somebody else's run and reading it are
+    -- different authorities.
+    ('workflow_runs',      'cancel', 'workflow.assert_run_access'),
+    ('workflow_runs',      'signal', 'workflow.assert_run_access'),
+    ('workflow_schedules', 'create', 'workflow.assert_schedule_access'),
+    ('workflow_schedules', 'enable', 'workflow.assert_schedule_access'),
+    ('workflow_schedules', 'delete', 'workflow.assert_schedule_access')
+on conflict do nothing;
+
+create table if not exists rbac.role_permissions (
     role     text not null references rbac.roles(name),
-    resource text not null,     -- e.g. 'workflow_runs', 'tasks', 'users'
-    action   text not null,     -- e.g. 'select', 'insert', 'cancel', 'admin'
-    primary key (role, resource, action)
+    resource text not null,
+    action   text not null,
+    primary key (role, resource, action),
+    -- The point of the table above: a pair nothing checks cannot be granted.
+    foreign key (resource, action)
+        references rbac.permission_kinds (resource, action)
 );
 
 -- One function every module's RLS policy calls. Add a new module
@@ -7561,7 +7671,7 @@ $$ language sql stable;
 --    stay short-lived (minutes) and are minted per-request from a
 --    valid refresh token.
 -- ------------------------------------------------------------
-create table rbac.refresh_tokens (
+create table if not exists rbac.refresh_tokens (
     id           uuid primary key default gen_random_uuid(),
     user_id      uuid not null references rbac.users(id) on delete cascade,
     token_hash   text not null unique,     -- sha256 of the raw token; raw never stored
@@ -7571,7 +7681,7 @@ create table rbac.refresh_tokens (
     revoked_at   timestamptz,
     replaced_by  uuid references rbac.refresh_tokens(id)  -- rotation chain, for reuse detection
 );
-create index idx_refresh_tokens_user on rbac.refresh_tokens (user_id) where revoked_at is null;
+create index if not exists idx_refresh_tokens_user on rbac.refresh_tokens (user_id) where revoked_at is null;
 
 -- Rotate: issue a new refresh token, revoke the old one, link the chain.
 -- If a caller ever presents an already-revoked token whose replaced_by
@@ -7664,7 +7774,7 @@ $$ language sql security definer set search_path = pg_catalog, public;
 --    (agents are long-running), but revocation is immediate since
 --    it's a DB row, not a stateless token.
 -- ------------------------------------------------------------
-create table rbac.api_keys (
+create table if not exists rbac.api_keys (
     id          uuid primary key default gen_random_uuid(),
     user_id     uuid references rbac.users(id) on delete cascade,  -- null = service account
     label       text not null,
@@ -7816,7 +7926,7 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 --    task_events. Every auth-relevant event, queryable, no separate
 --    logging infra needed for this.
 -- ------------------------------------------------------------
-create table rbac.auth_events (
+create table if not exists rbac.auth_events (
     id         bigint generated always as identity primary key,
     user_id    uuid,
     event_type text not null,   -- login_success, login_failed, password_changed,
@@ -7831,7 +7941,7 @@ create table rbac.auth_events (
     span_id    text not null default encode(gen_random_bytes(8), 'hex'),
     at         timestamptz not null default now()
 );
-create index idx_auth_events_user on rbac.auth_events (user_id, at);
+create index if not exists idx_auth_events_user on rbac.auth_events (user_id, at);
 
 -- SECURITY: this is the vulnerability that motivated this whole section --
 -- confirmed empirically as a full, working privilege escalation, not a
@@ -7854,6 +7964,88 @@ begin
     on conflict do nothing;
     insert into rbac.auth_events (user_id, event_type, detail)
     values (p_target_user_id, 'role_granted', jsonb_build_object('role', p_role, 'by', rbac.current_user_id()));
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
+-- 6b. THE FIRST ADMINISTRATOR.
+-- ------------------------------------------------------------
+-- grant_role() cannot make the first one -- it is gated on
+-- has_permission(current_user_id(), 'users', 'admin'), and on an empty
+-- database nobody holds that, including the person bootstrapping. So the
+-- first user_roles row has to be a plain INSERT by a connection privileged
+-- enough to write the table. That is a real bootstrap step, not an oversight:
+-- the alternative is a function that grants 'users'/'admin' to whoever asks
+-- first.
+--
+-- What was wrong was leaving the step as a LIST OF ROWS for a human to copy.
+-- `role_permissions.action` is free text matched with `=`, so a wrong string
+-- is not an error anywhere -- it inserts, the role looks populated, and every
+-- policy that consults it returns false. Found the hard way: the published
+-- install guide granted ('workflow_runs','read') and ('workflow_runs','write')
+-- when every RLS policy in the collection asks for 'select', so following the
+-- documentation exactly produced an "admin" who then saw zero rows in
+-- workflow.runs_api and had no way to tell that from "my workflow never ran".
+--
+-- The vocabulary is derived here rather than transcribed. Every pair below is
+-- one a policy or a guard actually asks for, and the reason each is spelled
+-- the way it is sits next to it -- because the failure mode of this table is
+-- silence, the fix is to stop hand-copying it, not to write the list down
+-- somewhere else as well.
+--
+-- Refuses once ANY role has been granted to anyone. That is what keeps it a
+-- bootstrap rather than a back door: it is reachable only while the system has
+-- no administrator, which is exactly the window in which it is not an
+-- escalation. EXECUTE is not granted to web_anon or authenticated (§9's
+-- revoke-first rule leaves it unreachable over PostgREST); this is run from a
+-- privileged local session, like the CREATE EXTENSION it follows.
+create or replace function rbac.bootstrap_admin(p_email text, p_password text,
+                                                p_role text default 'admin')
+returns uuid as $$
+declare v_uid uuid;
+begin
+    -- Idempotent for the caller who already ran it, refusing for everyone else.
+    -- A provisioning script that reruns must not fail, but "rerun" means the
+    -- SAME identity: if this email already holds this role, hand back its id
+    -- and change nothing. Creating a SECOND administrator is the thing being
+    -- refused, not being called twice.
+    select u.id into v_uid
+      from rbac.users u join rbac.user_roles ur on ur.user_id = u.id
+     where u.email = p_email and ur.role = p_role;
+    if found then
+        return v_uid;
+    end if;
+
+    if exists (select 1 from rbac.user_roles) then
+        raise exception 'rbac is already bootstrapped -- use rbac.grant_role() as an existing admin'
+            using hint = 'bootstrap_admin() only runs while no role has been granted to anyone';
+    end if;
+
+    select id into v_uid from rbac.users where email = p_email;
+    if not found then
+        v_uid := rbac.create_user_with_password(p_email, p_password);
+    end if;
+
+    insert into rbac.roles (name, description)
+    values (p_role, 'the first administrator')
+    on conflict (name) do nothing;
+
+    -- THE grant list is rbac.permission_kinds, not a copy of it. Every pair
+    -- this collection checks is declared there and constrained by the foreign
+    -- key on role_permissions, so "everything" is expressible as a select
+    -- rather than as nineteen literals somebody has to keep in step. A module
+    -- added later is covered the moment it declares its pairs, which is what
+    -- the admin role is supposed to mean.
+    insert into rbac.role_permissions (role, resource, action)
+    select p_role, resource, action from rbac.permission_kinds
+    on conflict do nothing;
+
+    insert into rbac.user_roles (user_id, role) values (v_uid, p_role);
+
+    insert into rbac.auth_events (user_id, event_type, detail)
+    values (v_uid, 'role_granted', jsonb_build_object('role', p_role, 'by', 'bootstrap_admin'));
+
+    return v_uid;
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
@@ -8044,14 +8236,19 @@ alter table rbac.user_roles enable row level security;
 -- join-once. This is a documented general Postgres RLS performance pattern,
 -- not specific to this schema -- worth applying to every RLS policy written
 -- for any future module, not just these five.
+drop policy if exists users_self_or_admin on rbac.users;
 create policy users_self_or_admin on rbac.users for select
   using (id = (select rbac.current_user_id()) or (select rbac.has_permission(rbac.current_user_id(), 'users', 'select')));
+drop policy if exists refresh_tokens_self_or_admin on rbac.refresh_tokens;
 create policy refresh_tokens_self_or_admin on rbac.refresh_tokens for select
   using (user_id = (select rbac.current_user_id()) or (select rbac.has_permission(rbac.current_user_id(), 'refresh_tokens', 'select')));
+drop policy if exists api_keys_self_or_admin on rbac.api_keys;
 create policy api_keys_self_or_admin on rbac.api_keys for select
   using (user_id = (select rbac.current_user_id()) or (select rbac.has_permission(rbac.current_user_id(), 'api_keys', 'select')));
+drop policy if exists auth_events_self_or_admin on rbac.auth_events;
 create policy auth_events_self_or_admin on rbac.auth_events for select
   using (user_id = (select rbac.current_user_id()) or (select rbac.has_permission(rbac.current_user_id(), 'auth_events', 'select')));
+drop policy if exists user_roles_self_or_admin on rbac.user_roles;
 create policy user_roles_self_or_admin on rbac.user_roles for select
   using (user_id = (select rbac.current_user_id()) or (select rbac.has_permission(rbac.current_user_id(), 'user_roles', 'select')));
 
@@ -8077,11 +8274,11 @@ create policy user_roles_self_or_admin on rbac.user_roles for select
 -- RLS row-filtering still uses the querying role, because current_user_id()
 -- reads session state regardless of whose privileges are active for the
 -- column check.
-create view rbac.users_api as
+create or replace view rbac.users_api as
   select id, email, status, created_at, updated_at from rbac.users;
-create view rbac.refresh_tokens_api as
+create or replace view rbac.refresh_tokens_api as
   select id, user_id, device_label, issued_at, expires_at, revoked_at from rbac.refresh_tokens;
-create view rbac.api_keys_api as
+create or replace view rbac.api_keys_api as
   select id, user_id, label, scopes, created_at, last_used_at, revoked_at from rbac.api_keys;
 
 -- Hand the views to api_viewer -- the step that makes RLS actually enforce on
@@ -8127,9 +8324,12 @@ grant select on rbac.api_keys_api to authenticated;
 
 grant select on rbac.auth_events to authenticated;
 grant select on rbac.user_roles to authenticated;
--- roles, role_permissions: reference/catalog data, not per-row sensitive --
--- plain table grants, no RLS needed.
-grant select on rbac.roles, rbac.role_permissions to authenticated;
+-- roles, role_permissions, permission_kinds: reference/catalog data, not
+-- per-row sensitive -- plain table grants, no RLS needed. permission_kinds is
+-- the vocabulary itself, and a caller who cannot read it cannot tell a
+-- permission they lack from one that does not exist.
+grant select on rbac.roles, rbac.role_permissions, rbac.permission_kinds
+    to authenticated;
 
 -- web_anon gets no table access at all -- every unauthenticated interaction
 -- this module supports (signup, login, refresh, API-key auth) is a function
@@ -8240,23 +8440,25 @@ alter table workflow.tasks enable row level security;
 
 -- Same (select ...) InitPlan wrapping as user-rbac/schema.sql's policies --
 -- has_permission() runs a join, so bare calls re-evaluate it per row scanned.
+drop policy if exists runs_owner_or_permitted on workflow.runs;
 create policy runs_owner_or_permitted on workflow.runs for select
   using (owner_id = (select rbac.current_user_id())
          or (select rbac.has_permission(rbac.current_user_id(), 'workflow_runs', 'select')));
 
 -- Tasks inherit their run's visibility rather than restating the rule -- one
 -- place to change it, and a task has no owner of its own.
+drop policy if exists tasks_via_run on workflow.tasks;
 create policy tasks_via_run on workflow.tasks for select
   using (exists (select 1 from workflow.runs r where r.id = workflow.tasks.run_id));
 
 -- Reads go through views owned by api_viewer, NOT the table owner -- the
 -- ownership split user-rbac/roles.sql §2 exists for. A view owned by the
 -- table owner bypasses RLS and returns every row to every caller.
-create view workflow.runs_api as
+create or replace view workflow.runs_api as
   select id, workflow_def_id, owner_id, status, compensation_state,
          external_id, input, context, trace_id, created_at, updated_at, completed_at
   from workflow.runs;
-create view workflow.tasks_api as
+create or replace view workflow.tasks_api as
   select id, run_id, step_key, kind, queue, status, attempts, max_attempts,
          priority, run_after, output, error, span_id, parent_span_id,
          created_at, updated_at, completed_at
@@ -8374,7 +8576,7 @@ begin
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
-create trigger trg_set_run_owner
+create or replace trigger trg_set_run_owner
     before insert on workflow.runs
     for each row execute function workflow.set_run_owner();
 
@@ -8547,7 +8749,13 @@ begin
     if not found then
         raise exception 'task % not found', p_task_id;
     end if;
-    perform workflow.assert_run_access(v_run, 'read');
+    -- 'select', not 'read'. Both call sites here are READING run-scoped rows, and
+    -- the RLS policy on workflow.runs already spells that authority 'select' --
+    -- so a deployment that granted the run-read permission the policy asks for
+    -- was still refused by these two functions, which asked for a string nothing
+    -- else in the collection uses. role_permissions.action is matched with `=`,
+    -- so the two spellings were two permissions, not one with an alias.
+    perform workflow.assert_run_access(v_run, 'select');
 
     -- Batched children (schema.sql §20j) hold `items`, not `item`, and this
     -- returns the ROW SET -- so they are flattened back to it. Kept in step
@@ -8601,7 +8809,7 @@ begin
 
     v_cur := nullif(current_setting('workflow.current_run_id', true), '');
     if v_cur is null or v_cur::uuid <> v_run then
-        perform workflow.assert_run_access(v_run, 'read');
+        perform workflow.assert_run_access(v_run, 'select');
     end if;
 
     return (select coalesce(jsonb_agg(jsonb_build_object(
@@ -8645,13 +8853,14 @@ begin
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
-create trigger trg_set_schedule_owner
+create or replace trigger trg_set_schedule_owner
     before insert on workflow.schedules
     for each row execute function workflow.set_schedule_owner();
 
 alter table workflow.schedules enable row level security;
 
 -- (select ...) wrapping, as everywhere: has_permission() runs a join.
+drop policy if exists schedules_owner_or_permitted on workflow.schedules;
 create policy schedules_owner_or_permitted on workflow.schedules for select
   using (owner_id = (select rbac.current_user_id())
          or (select rbac.has_permission(rbac.current_user_id(), 'workflow_schedules', 'select')));
@@ -8713,7 +8922,7 @@ end;
 $$ language plpgsql stable security definer set search_path = pg_catalog, public;
 
 -- The read path: a view owned by api_viewer, never the table owner.
-create view workflow.schedules_api as
+create or replace view workflow.schedules_api as
   select id, name, workflow_name, cron_expr, timezone, input, enabled,
          overlap_policy, owner_id, org_id, last_tick_at, last_fired_at,
          last_run_id, fire_count, skip_count, last_error, last_error_at,
@@ -8843,7 +9052,7 @@ create schema if not exists aiq;
 -- 1. Node registry — graph identity for one included typed row.
 --    Does NOT store the payload; payload stays on the typed table.
 -- ------------------------------------------------------------
-create table aiq.nodes (
+create table if not exists aiq.nodes (
     id           uuid primary key default gen_random_uuid(),
     entity_type  text not null,          -- owning table, e.g. 'company'
     entity_id    uuid not null,          -- PK in that table
@@ -8853,9 +9062,9 @@ create table aiq.nodes (
     updated_at   timestamptz not null default now(),
     unique (entity_type, entity_id)
 );
-create index idx_nodes_org on aiq.nodes (org_id);
+create index if not exists idx_nodes_org on aiq.nodes (org_id);
 
-create trigger trg_nodes_touch before update on aiq.nodes
+create or replace trigger trg_nodes_touch before update on aiq.nodes
     for each row execute function public.touch_updated_at();
 
 -- ------------------------------------------------------------
@@ -8863,7 +9072,7 @@ create trigger trg_nodes_touch before update on aiq.nodes
 --    Not the edge foreign key (that is nodes.id, graph-identity.md D3).
 --    entity_type is copied here so the unique index needs no join.
 -- ------------------------------------------------------------
-create table aiq.node_keys (
+create table if not exists aiq.node_keys (
     node_id      uuid not null references aiq.nodes(id) on delete cascade,
     entity_type  text not null,
     key          text not null,          -- normalized (lowercased, trimmed)
@@ -8884,20 +9093,20 @@ create table aiq.node_keys (
 -- companies both took the canonical key 'acme', and LOOKUP "ACME" -- the
 -- dialect's most common call, documented as an exact match -- returned two
 -- different nodes with no way to tell which was meant.
-create unique index idx_node_keys_canonical
+create unique index if not exists idx_node_keys_canonical
     on aiq.node_keys (org_id, key, entity_type) nulls not distinct
     where kind = 'canonical';
-create index idx_node_keys_lookup on aiq.node_keys (key);
+create index if not exists idx_node_keys_lookup on aiq.node_keys (key);
 -- FUZZY lives here and ONLY here: a trigram index on this thin key table,
 -- never on the data plane (graph-identity.md "Scale").
-create index idx_node_keys_trgm on aiq.node_keys using gin (key gin_trgm_ops);
+create index if not exists idx_node_keys_trgm on aiq.node_keys using gin (key gin_trgm_ops);
 
 -- ------------------------------------------------------------
 -- 3. Relation catalogue — every allowed (src_type, relation, dst_type).
 --    Out-of-catalogue relations are rejected at write, so the graph cannot
 --    accumulate typos-as-relations (graph-identity.md "Catalogue").
 -- ------------------------------------------------------------
-create table aiq.relation_types (
+create table if not exists aiq.relation_types (
     src_type   text not null,
     relation   text not null,
     dst_type   text not null,
@@ -8924,7 +9133,7 @@ create table aiq.relation_types (
 -- 4. Edges — canonical store for SOFT (authored) links only.
 --    Hard FK/junction relationships are NEVER copied here (D4).
 -- ------------------------------------------------------------
-create table aiq.edges (
+create table if not exists aiq.edges (
     id          uuid primary key default gen_random_uuid(),
     src_id      uuid not null references aiq.nodes(id) on delete cascade,
     dst_id      uuid not null references aiq.nodes(id) on delete cascade,
@@ -8939,9 +9148,9 @@ create table aiq.edges (
 );
 -- Forward and REVERSE both indexed: "what points at this?" is first-class,
 -- and the inverse edge is never stored (graph-identity.md "Edge table").
-create index idx_edges_src on aiq.edges (src_id);
-create index idx_edges_dst on aiq.edges (dst_id);
-create index idx_edges_relation on aiq.edges (relation);
+create index if not exists idx_edges_src on aiq.edges (src_id);
+create index if not exists idx_edges_dst on aiq.edges (dst_id);
+create index if not exists idx_edges_relation on aiq.edges (relation);
 
 -- Enforce the catalogue, and enforce that both endpoints are real nodes
 -- (the FKs already do the latter; this makes the type-pair check real).
@@ -8999,7 +9208,7 @@ begin
 end;
 $$ language plpgsql;
 
-create trigger trg_check_edge_catalogue
+create or replace trigger trg_check_edge_catalogue
     before insert or update on aiq.edges
     for each row execute function aiq.check_edge_catalogue();
 
@@ -9020,6 +9229,11 @@ create trigger trg_check_edge_catalogue
 --     unless id is also listed in PROPERTIES. Since every useful query needs
 --     the node id to join back to the typed tables, id is declared twice
 --     here by necessity, not redundancy.
+-- Dropped first: PG19 accepts `drop property graph if exists` but has no
+-- `create ... if not exists`, so this is the only idempotent spelling.
+-- A property graph is a declaration over tables and holds no data of its
+-- own, so recreating it costs nothing.
+drop property graph if exists aiq.knowledge_graph;
 create property graph aiq.knowledge_graph
     vertex tables (
         aiq.nodes key (id) label node properties (id, entity_type, org_id, summary)
@@ -9046,7 +9260,7 @@ create property graph aiq.knowledge_graph
 --    MUST use the same predicate, or a rebuild resurrects evicted nodes
 --    (graph-identity.md "Inclusion policy").
 -- ------------------------------------------------------------
-create table aiq.entity_registry (
+create table if not exists aiq.entity_registry (
     entity_type   text primary key,
     source_table  text not null,          -- schema-qualified
     key_expr      text not null,          -- SQL expr -> canonical key
@@ -9672,7 +9886,7 @@ $$ language sql stable;
 -- vector modes. Registered per corpus rather than hardcoded, because the
 -- content belongs to the consumer (world-model-ingestion owns
 -- resource_chunks), not to this layer.
-create table aiq.semantic_sources (
+create table if not exists aiq.semantic_sources (
     name          text primary key,
     source_table  text not null,       -- schema-qualified, has (id, content)
     content_col   text not null default 'content',
@@ -10320,7 +10534,7 @@ comment on function aiq.extension_boundary() is
 --     deliberate act that updates this paragraph.
 -- ============================================================
 
-create table aiq.embedding_models (
+create table if not exists aiq.embedding_models (
     name        text primary key,          -- 'nomic-embed-text', 'text-embedding-3-small'
     dim         int  not null check (dim > 0),
     provider    text not null,             -- 'ollama' | 'openai' | ...
@@ -10344,7 +10558,7 @@ create table aiq.embedding_models (
 -- Exactly one default at a time. A partial unique index rather than a trigger:
 -- the database enforces it, so a bad deploy fails loudly instead of leaving
 -- two defaults and a coin-flip about which one SEMANTIC uses.
-create unique index idx_embedding_models_one_default
+create unique index if not exists idx_embedding_models_one_default
     on aiq.embedding_models ((true)) where is_default;
 
 -- ------------------------------------------------------------
@@ -10375,7 +10589,7 @@ create unique index idx_embedding_models_one_default
 -- REST body. Two template layers, resolved in the right order by the two halves
 -- that own them.
 -- ------------------------------------------------------------
-create table aiq.embedding_providers (
+create table if not exists aiq.embedding_providers (
     provider         text primary key,
     request_template jsonb not null,
     response_path    text  not null,   -- dotted path, the worker's `jsonpath`
@@ -10387,7 +10601,8 @@ insert into aiq.embedding_providers (provider, request_template, response_path, 
     ('ollama', '{"model": "{{model}}", "prompt": "{{text}}"}'::jsonb, 'embedding',
      'POST /api/embeddings -- one vector, at the top level under "embedding".'),
     ('openai', '{"model": "{{model}}", "input": "{{text}}"}'::jsonb, 'data.0.embedding',
-     'POST /v1/embeddings -- a list, because the API embeds a batch; a single '
+     'POST /v1/embeddings -- a list, because the API embeds a batch
+on conflict do nothing; a single '
      'text still comes back as data[0]. Needs credential_ref on the model row.')
 on conflict (provider) do nothing;
 
@@ -10723,7 +10938,7 @@ $$ language plpgsql stable;
 -- rather than a default.
 -- ============================================================
 
-create table aiq.lexical_sources (
+create table if not exists aiq.lexical_sources (
     name         text primary key,
     source_table text not null,
     content_col  text not null default 'content',
@@ -11854,6 +12069,7 @@ alter table aiq.edges     enable row level security;
 -- (select ...) wrapping for InitPlan caching, same as every other RLS policy
 -- in this collection -- current_org_ids() is STABLE but that alone does not
 -- get it hoisted (user-rbac/schema.sql §9's EXPLAIN finding).
+drop policy if exists nodes_org_scoped on aiq.nodes;
 create policy nodes_org_scoped on aiq.nodes for select
   using (org_id is null or org_id in (select aiq.current_org_ids()));
 -- node_keys INHERITS its node's visibility rather than re-deriving it from
@@ -11872,12 +12088,14 @@ create policy nodes_org_scoped on aiq.nodes for select
 -- One source of truth: visibility lives on nodes, keys inherit it. Drift is
 -- now impossible rather than merely detected. (Same shape as workflow.tasks
 -- inheriting visibility from workflow.runs.)
+drop policy if exists node_keys_via_node on aiq.node_keys;
 create policy node_keys_via_node on aiq.node_keys for select
   using (exists (select 1 from aiq.nodes n where n.id = aiq.node_keys.node_id));
 -- Edges likewise inherit: an edge is visible only when BOTH endpoints are.
 -- Its own org_id stays for authoring/provenance, not for read gating -- same
 -- reasoning as node_keys above, and it additionally prevents an edge from
 -- revealing that an invisible node exists.
+drop policy if exists edges_via_endpoints on aiq.edges;
 create policy edges_via_endpoints on aiq.edges for select
   using (exists (select 1 from aiq.nodes s where s.id = aiq.edges.src_id)
      and exists (select 1 from aiq.nodes d where d.id = aiq.edges.dst_id));
@@ -11886,10 +12104,10 @@ create policy edges_via_endpoints on aiq.edges for select
 -- 2. Read path: views owned by api_viewer, exactly as user-rbac does.
 --    A view owned by app_owner would bypass the policies above.
 -- ------------------------------------------------------------
-create view aiq.nodes_api as
+create or replace view aiq.nodes_api as
   select id, entity_type, entity_id, org_id, summary, created_at, updated_at
   from aiq.nodes;
-create view aiq.edges_api as
+create or replace view aiq.edges_api as
   select id, src_id, dst_id, relation, weight, valid_from, valid_to, org_id, created_at
   from aiq.edges;
 
@@ -13186,7 +13404,7 @@ create schema if not exists content;
 -- `kind` distinguishes who initiates, which is the only thing that actually
 -- differs between them -- a push arrives as an upload, a pull is polled.
 -- ------------------------------------------------------------
-create table content.channels (
+create table if not exists content.channels (
     id            uuid primary key default gen_random_uuid(),
     name          text not null,
     kind          text not null check (kind in
@@ -13204,10 +13422,10 @@ create table content.channels (
     updated_at    timestamptz not null default now(),
     unique (org_id, name)
 );
-create index idx_channels_pollable on content.channels (last_polled_at)
+create index if not exists idx_channels_pollable on content.channels (last_polled_at)
     where enabled and poll_interval is not null;
 
-create trigger trg_channels_touch before update on content.channels
+create or replace trigger trg_channels_touch before update on content.channels
     for each row execute function public.touch_updated_at();
 
 -- ------------------------------------------------------------
@@ -13222,7 +13440,7 @@ create trigger trg_channels_touch before update on content.channels
 -- Consequently this table is never exposed through PostgREST -- reads go
 -- through a resource, which is scoped. See integration.sql.
 -- ------------------------------------------------------------
-create table content.files (
+create table if not exists content.files (
     id           uuid primary key default gen_random_uuid(),
     checksum     text not null unique,      -- sha256 of the content; the dedup key
     bucket       text not null,
@@ -13240,7 +13458,7 @@ create table content.files (
 -- fetched page, a Telegram post. It points at a channel (where it came from)
 -- and optionally a file (if it has bytes -- a scraped JSON record may not).
 -- ------------------------------------------------------------
-create table content.resources (
+create table if not exists content.resources (
     id           uuid primary key default gen_random_uuid(),
     channel_id   uuid not null references content.channels(id),
     file_id      uuid references content.files(id),
@@ -13274,8 +13492,8 @@ create table content.resources (
     updated_at   timestamptz not null default now(),
     unique (channel_id, external_id)
 );
-create index idx_resources_channel on content.resources (channel_id, ingested_at desc);
-create index idx_resources_org on content.resources (org_id);
+create index if not exists idx_resources_channel on content.resources (channel_id, ingested_at desc);
+create index if not exists idx_resources_org on content.resources (org_id);
 -- Partial on the states worth hunting for. 'stored' joins 'ready' in the
 -- exclusion: both are terminal and neither is something an operator goes
 -- looking for, so admitting artifacts here would grow the index without
@@ -13290,10 +13508,10 @@ alter table content.resources drop constraint if exists resources_status_check;
 alter table content.resources add constraint resources_status_check
     check (status in ('pending','ready','stored','failed','superseded'));
 drop index if exists content.idx_resources_status;
-create index idx_resources_status on content.resources (status)
+create index if not exists idx_resources_status on content.resources (status)
     where status not in ('ready','stored');
 
-create trigger trg_resources_touch before update on content.resources
+create or replace trigger trg_resources_touch before update on content.resources
     for each row execute function public.touch_updated_at();
 
 -- ------------------------------------------------------------
@@ -13310,7 +13528,7 @@ create trigger trg_resources_touch before update on content.resources
 -- in that direction because the embedding table is generic and does not know
 -- this schema; integration.sql adds the reconciliation instead.
 -- ------------------------------------------------------------
-create table content.resource_chunks (
+create table if not exists content.resource_chunks (
     id           uuid primary key default gen_random_uuid(),
     resource_id  uuid not null references content.resources(id) on delete cascade,
     ordinal      int not null,
@@ -13325,7 +13543,7 @@ create table content.resource_chunks (
     created_at   timestamptz not null default now(),
     unique (resource_id, ordinal)
 );
-create index idx_chunks_resource on content.resource_chunks (resource_id, ordinal);
+create index if not exists idx_chunks_resource on content.resource_chunks (resource_id, ordinal);
 
 -- ------------------------------------------------------------
 -- 5. Registration — upload and fetch, as functions.
@@ -14139,12 +14357,15 @@ alter table content.channels        enable row level security;
 alter table content.resources       enable row level security;
 alter table content.resource_chunks enable row level security;
 
+drop policy if exists channels_org_scoped on content.channels;
 create policy channels_org_scoped on content.channels for select
   using (org_id is null or org_id in (select aiq.current_org_ids()));
 
+drop policy if exists resources_org_scoped on content.resources;
 create policy resources_org_scoped on content.resources for select
   using (org_id is null or org_id in (select aiq.current_org_ids()));
 
+drop policy if exists chunks_via_resource on content.resource_chunks;
 create policy chunks_via_resource on content.resource_chunks for select
   using (exists (select 1 from content.resources r
                  where r.id = content.resource_chunks.resource_id));
@@ -14430,9 +14651,11 @@ grant execute on function aiq.record_embeddings(text, jsonb) to worker;
 alter table content.datasets      enable row level security;
 alter table content.dataset_files enable row level security;
 
+drop policy if exists datasets_org_scoped on content.datasets;
 create policy datasets_org_scoped on content.datasets for select
   using (org_id is null or org_id in (select aiq.current_org_ids()));
 
+drop policy if exists dataset_files_via_dataset on content.dataset_files;
 create policy dataset_files_via_dataset on content.dataset_files for select
   using (exists (select 1 from content.datasets d
                  where d.id = content.dataset_files.dataset_id));
@@ -14542,7 +14765,7 @@ create schema if not exists agentic;
 -- One row per MCP server or OpenAPI service. The runtime's entire tool
 -- surface is this table plus agents.tools; there is no built-in tool, ever.
 -- ------------------------------------------------------------
-create table agentic.tool_servers (
+create table if not exists agentic.tool_servers (
     id              uuid primary key default gen_random_uuid(),
     name            text not null unique,
     kind            text not null check (kind in ('mcp', 'openapi')),
@@ -14603,18 +14826,19 @@ create table agentic.tool_servers (
 -- jsonb_object_keys, because a CHECK constraint may not contain a subquery at
 -- all -- Postgres refuses the natural spelling outright. `?|` tests keys only,
 -- so lowercasing the values along with them changes nothing.
+alter table agentic.tool_servers drop constraint if exists tool_servers_headers_not_secrets;
 alter table agentic.tool_servers add constraint tool_servers_headers_not_secrets
     check (not (lower(default_headers::text)::jsonb
                 ?| array['authorization', 'proxy-authorization', 'cookie']));
 
-create trigger trg_tool_servers_updated
+create or replace trigger trg_tool_servers_updated
     before update on agentic.tool_servers
     for each row execute function public.touch_updated_at();
 
 -- ------------------------------------------------------------
 -- 2. Agents -- config rows; adding one is an insert (brief §2, §6)
 -- ------------------------------------------------------------
-create table agentic.agents (
+create table if not exists agentic.agents (
     id                       uuid primary key default gen_random_uuid(),
     name                     text not null unique,
     system_prompt            text not null default '',
@@ -14706,10 +14930,11 @@ create index if not exists idx_agents_tags     on agentic.agents using gin (tags
 -- An extractor without a declared output shape is a model call with extra
 -- steps: the shape is what makes N extractions combinable and what makes a
 -- bad answer RETRYABLE rather than silently wrong (workflow schema §21).
+alter table agentic.agents drop constraint if exists agents_extractor_needs_schema;
 alter table agentic.agents add constraint agents_extractor_needs_schema
     check (category <> 'extractor' or structured_output_schema is not null);
 
-create trigger trg_agents_updated
+create or replace trigger trg_agents_updated
     before update on agentic.agents
     for each row execute function public.touch_updated_at();
 
@@ -14736,7 +14961,7 @@ create trigger trg_agents_updated
 -- that must all follow the same p8ql discipline should reference it once, not
 -- carry ten copies that drift.
 -- ------------------------------------------------------------
-create table agentic.skills (
+create table if not exists agentic.skills (
     id              uuid primary key default gen_random_uuid(),
     -- The key an agent lists and the model names. Constrained to the shape the
     -- Agent Skills spec uses, because this name is also a TOOL name on the
@@ -14817,7 +15042,7 @@ create index if not exists idx_skills_audience on agentic.skills (audience)
 create index if not exists idx_skills_category on agentic.skills (category);
 create index if not exists idx_skills_tags     on agentic.skills using gin (tags);
 
-create trigger trg_skills_updated
+create or replace trigger trg_skills_updated
     before update on agentic.skills
     for each row execute function public.touch_updated_at();
 
@@ -14875,7 +15100,7 @@ end $$;
 -- is provenance on the things that already exist, which is exactly what makes
 -- a bundle removable.
 -- ------------------------------------------------------------
-create table agentic.plugins (
+create table if not exists agentic.plugins (
     name         text primary key
                      check (name ~ '^[a-z0-9]+(-[a-z0-9]+)*$'),
     version      text not null default '0.0.0',
@@ -14890,7 +15115,7 @@ create table agentic.plugins (
     updated_at   timestamptz not null default now()
 );
 
-create trigger trg_plugins_updated
+create or replace trigger trg_plugins_updated
     before update on agentic.plugins
     for each row execute function public.touch_updated_at();
 
@@ -14924,7 +15149,7 @@ create index if not exists idx_skills_plugin on agentic.skills (plugin)
 -- ------------------------------------------------------------
 -- 3. Sessions -- one AG-UI thread; the unit a conversation is owned by
 -- ------------------------------------------------------------
-create table agentic.sessions (
+create table if not exists agentic.sessions (
     id             uuid primary key default gen_random_uuid(),
     user_id        uuid not null default rbac.current_user_id(),
     agui_thread_id text,
@@ -14933,9 +15158,9 @@ create table agentic.sessions (
     updated_at     timestamptz not null default now()
 );
 
-create index on agentic.sessions (user_id, created_at desc);
+create index if not exists sessions_user_id_created_at_idx on agentic.sessions (user_id, created_at desc);
 
-create trigger trg_sessions_updated
+create or replace trigger trg_sessions_updated
     before update on agentic.sessions
     for each row execute function public.touch_updated_at();
 
@@ -14950,7 +15175,7 @@ create trigger trg_sessions_updated
 -- has no session, so scoping RLS through a session join would put background
 -- runs outside tenant isolation entirely.
 -- ------------------------------------------------------------
-create table agentic.runs (
+create table if not exists agentic.runs (
     id                      uuid primary key default gen_random_uuid(),
     session_id              uuid references agentic.sessions(id) on delete cascade,
     agent_id                uuid not null references agentic.agents(id),
@@ -14982,13 +15207,13 @@ create table agentic.runs (
         check (parent_run_id is null or depth > 0)
 );
 
-create index on agentic.runs (session_id, created_at);
-create index on agentic.runs (parent_run_id);
-create index on agentic.runs (trace_id);
-create index on agentic.runs (owner_id, created_at desc);
-create index on agentic.runs (workflow_task_id) where workflow_task_id is not null;
+create index if not exists runs_session_id_created_at_idx on agentic.runs (session_id, created_at);
+create index if not exists runs_parent_run_id_idx on agentic.runs (parent_run_id);
+create index if not exists runs_trace_id_idx on agentic.runs (trace_id);
+create index if not exists runs_owner_id_created_at_idx on agentic.runs (owner_id, created_at desc);
+create index if not exists runs_workflow_task_id_idx on agentic.runs (workflow_task_id) where workflow_task_id is not null;
 
-create trigger trg_runs_updated
+create or replace trigger trg_runs_updated
     before update on agentic.runs
     for each row execute function public.touch_updated_at();
 
@@ -15001,7 +15226,7 @@ create trigger trg_runs_updated
 -- rather than buried in a blob. role='summary' is a third kind entirely: one
 -- row per session, superseded rather than appended to (§3).
 -- ------------------------------------------------------------
-create table agentic.messages (
+create table if not exists agentic.messages (
     id           uuid primary key default gen_random_uuid(),
     run_id       uuid references agentic.runs(id) on delete cascade,
     session_id   uuid references agentic.sessions(id) on delete cascade,
@@ -15029,11 +15254,12 @@ create table agentic.messages (
 
 -- One summary per session, enforced by the database rather than by the
 -- application remembering to update instead of insert (§3).
-create unique index one_summary_per_session
+create unique index if not exists one_summary_per_session
     on agentic.messages (session_id) where role = 'summary';
-create index on agentic.messages (session_id, seq);
-create index on agentic.messages (run_id, seq);
+create index if not exists messages_session_id_seq_idx on agentic.messages (session_id, seq);
+create index if not exists messages_run_id_seq_idx on agentic.messages (run_id, seq);
 
+alter table agentic.runs drop constraint if exists runs_delegated_by_message_fk;
 alter table agentic.runs
     add constraint runs_delegated_by_message_fk
     foreign key (delegated_by_message_id)
@@ -15078,7 +15304,7 @@ end;
 $$ language plpgsql
 set search_path = pg_catalog, public, agentic;
 
-create trigger trg_notify_message
+create or replace trigger trg_notify_message
     after insert on agentic.messages
     for each row when (new.session_id is not null)
     execute function agentic.notify_message();
@@ -15090,15 +15316,18 @@ alter table agentic.sessions enable row level security;
 alter table agentic.runs     enable row level security;
 alter table agentic.messages enable row level security;
 
+drop policy if exists sessions_owner on agentic.sessions;
 create policy sessions_owner on agentic.sessions
     for select using (user_id = rbac.current_user_id());
 
 -- Scoped on the run's own owner, never through the session join: a scheduled
 -- run has no session, and an escape hatch for that case is how a table ends up
 -- with rows nobody can see and everybody can read (brief §3).
+drop policy if exists runs_owner on agentic.runs;
 create policy runs_owner on agentic.runs
     for select using (owner_id = rbac.current_user_id());
 
+drop policy if exists messages_via_run on agentic.messages;
 create policy messages_via_run on agentic.messages
     for select using (
         exists (select 1 from agentic.runs r
@@ -15131,12 +15360,16 @@ alter table agentic.tool_servers enable row level security;
 alter table agentic.skills       enable row level security;
 alter table agentic.plugins      enable row level security;
 
+drop policy if exists agents_are_shared_config on agentic.agents;
 create policy agents_are_shared_config on agentic.agents
     for select using (true);
+drop policy if exists tool_servers_are_shared_config on agentic.tool_servers;
 create policy tool_servers_are_shared_config on agentic.tool_servers
     for select using (true);
+drop policy if exists skills_are_shared_config on agentic.skills;
 create policy skills_are_shared_config on agentic.skills
     for select using (true);
+drop policy if exists plugins_are_shared_config on agentic.plugins;
 create policy plugins_are_shared_config on agentic.plugins
     for select using (true);
 -- ------------------------------------------------------------
@@ -16091,15 +16324,15 @@ $$;
 -- ------------------------------------------------------------
 grant usage on schema agentic to web_anon, authenticated, api_viewer;
 
-create view agentic.sessions_api as
+create or replace view agentic.sessions_api as
     select id, user_id, agui_thread_id, title, created_at from agentic.sessions;
-create view agentic.runs_api as
+create or replace view agentic.runs_api as
     select id, session_id, agent_id, owner_id, parent_run_id,
            delegated_by_message_id, trigger_kind, workflow_task_id,
            trace_id, span_id, parent_span_id, depth, state, status,
            created_at, finished_at
       from agentic.runs;
-create view agentic.messages_api as
+create or replace view agentic.messages_api as
     select id, run_id, session_id, role, content, tool_calls, tool_call_id,
            is_error, error_kind, citations, seq, created_at
       from agentic.messages;
@@ -16115,7 +16348,7 @@ create view agentic.messages_api as
 -- the constraint on the table guarantees it holds no secret, and a caller that
 -- cannot see it cannot reach the document it was registered against -- the
 -- identical failure, one layer along.
-create view agentic.tool_servers_api as
+create or replace view agentic.tool_servers_api as
     select id, name, kind, url, credential_ref, emits_citations, serves_agents,
            serves_skills, default_headers, cached_tools, synced_at, plugin,
            created_at
@@ -16132,7 +16365,7 @@ create view agentic.tool_servers_api as
 -- column when one is added. discovery_text is here for the same reason the
 -- embedding job needs it and nobody else does: it is generated, so it cannot
 -- disagree with the columns beside it.
-create view agentic.skills_api as
+create or replace view agentic.skills_api as
     select id, name, description, when_to_use, content, discovery_text,
            requires_tools, audience, category, tags, version, plugin,
            created_at, updated_at
@@ -16142,7 +16375,7 @@ create view agentic.skills_api as
 -- question asked when something is wrong, and answering it from the document
 -- as applied rather than from the rows is how you find the row that was
 -- edited in place afterwards (brief.md §11.8).
-create view agentic.plugins_api as
+create or replace view agentic.plugins_api as
     select name, version, description, author, homepage, manifest,
            installed_at, updated_at
       from agentic.plugins;
@@ -16194,7 +16427,7 @@ order by extracts_source, extracts_doctype;
 -- the runtime never loads -- an agent configured with instructions it silently
 -- does not receive, which is precisely the failure the author-time check in
 -- upsert_agent exists to prevent, reintroduced at the read path.
-create view agentic.agents_api as
+create or replace view agentic.agents_api as
     select id, name, system_prompt, model, tools, skills,
            structured_output_schema,
            chained_action, summarizer_agent_id, context_policy,
@@ -17354,8 +17587,10 @@ grant select on aiq.soft_nodes, aiq.lake_nodes, aiq.graph_vocabulary to authenti
 alter table aiq.soft_nodes enable row level security;
 alter table aiq.lake_nodes enable row level security;
 
+drop policy if exists soft_nodes_org_scoped on aiq.soft_nodes;
 create policy soft_nodes_org_scoped on aiq.soft_nodes
     for select using (org_id is null or org_id in (select aiq.current_org_ids()));
+drop policy if exists lake_nodes_org_scoped on aiq.lake_nodes;
 create policy lake_nodes_org_scoped on aiq.lake_nodes
     for select using (org_id is null or org_id in (select aiq.current_org_ids()));
 

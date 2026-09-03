@@ -45,6 +45,7 @@ alter table aiq.edges     enable row level security;
 -- (select ...) wrapping for InitPlan caching, same as every other RLS policy
 -- in this collection -- current_org_ids() is STABLE but that alone does not
 -- get it hoisted (user-rbac/schema.sql §9's EXPLAIN finding).
+drop policy if exists nodes_org_scoped on aiq.nodes;
 create policy nodes_org_scoped on aiq.nodes for select
   using (org_id is null or org_id in (select aiq.current_org_ids()));
 -- node_keys INHERITS its node's visibility rather than re-deriving it from
@@ -63,12 +64,14 @@ create policy nodes_org_scoped on aiq.nodes for select
 -- One source of truth: visibility lives on nodes, keys inherit it. Drift is
 -- now impossible rather than merely detected. (Same shape as workflow.tasks
 -- inheriting visibility from workflow.runs.)
+drop policy if exists node_keys_via_node on aiq.node_keys;
 create policy node_keys_via_node on aiq.node_keys for select
   using (exists (select 1 from aiq.nodes n where n.id = aiq.node_keys.node_id));
 -- Edges likewise inherit: an edge is visible only when BOTH endpoints are.
 -- Its own org_id stays for authoring/provenance, not for read gating -- same
 -- reasoning as node_keys above, and it additionally prevents an edge from
 -- revealing that an invisible node exists.
+drop policy if exists edges_via_endpoints on aiq.edges;
 create policy edges_via_endpoints on aiq.edges for select
   using (exists (select 1 from aiq.nodes s where s.id = aiq.edges.src_id)
      and exists (select 1 from aiq.nodes d where d.id = aiq.edges.dst_id));
@@ -77,10 +80,10 @@ create policy edges_via_endpoints on aiq.edges for select
 -- 2. Read path: views owned by api_viewer, exactly as user-rbac does.
 --    A view owned by app_owner would bypass the policies above.
 -- ------------------------------------------------------------
-create view aiq.nodes_api as
+create or replace view aiq.nodes_api as
   select id, entity_type, entity_id, org_id, summary, created_at, updated_at
   from aiq.nodes;
-create view aiq.edges_api as
+create or replace view aiq.edges_api as
   select id, src_id, dst_id, relation, weight, valid_from, valid_to, org_id, created_at
   from aiq.edges;
 

@@ -37,6 +37,7 @@ delete from rbac.user_roles where user_id in (
     '22222222-2222-2222-2222-222222222222');
 delete from rbac.role_permissions
  where role in ('admin','member') and resource = 'widgets';
+delete from rbac.permission_kinds where resource = 'widgets';
 -- The users are NOT deleted either, and that is the second half of the same
 -- lesson. alice and bob have fixed uuids and are the only identities a dev
 -- stack has, so everything anyone tries by hand ends up owned by one of them
@@ -56,6 +57,16 @@ insert into rbac.roles (name) values ('admin'), ('member') on conflict do nothin
 insert into rbac.user_roles (user_id, role) values
   ('11111111-1111-1111-1111-111111111111', 'admin'),
   ('22222222-2222-2222-2222-222222222222', 'member')
+on conflict do nothing;
+-- `widgets` is a module, in miniature -- a table, a policy, and a permission
+-- pair its policy consults -- so it declares that pair before granting it,
+-- which is the order rbac.permission_kinds requires of any module. The grant
+-- below used to be the whole step, and the foreign key rejected it: a pair
+-- nothing has declared is indistinguishable from a typo, which is the entire
+-- point of the table. This is what "add a module by inserting rows, not by
+-- writing authz code" looks like now.
+insert into rbac.permission_kinds (resource, action, checked_by) values
+  ('widgets', 'select', 'policy widgets_owner_or_permitted (dev/tests/rbac/01)')
 on conflict do nothing;
 insert into rbac.role_permissions (role, resource, action) values
   ('admin', 'widgets', 'select') on conflict do nothing;

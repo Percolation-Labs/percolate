@@ -50,7 +50,7 @@ declare
         'aiq.schema_examples', 'aiq.schema_facets', 'aiq.schema_revisions',
         -- Role and permission vocabulary. user-rbac/schema.sql calls these
         -- "reference/catalog data, not per-row sensitive" at the grant.
-        'rbac.roles', 'rbac.role_permissions',
+        'rbac.roles', 'rbac.role_permissions', 'rbac.permission_kinds',
         -- The allow-list a `sql` step may call. Registering is owner-only;
         -- reading the list is how an author knows what they may name.
         'workflow.step_functions'

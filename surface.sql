@@ -72,10 +72,20 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('user-rbac','table','rbac.api_keys',null,'spec.md §4: agents authenticate without a password'),
 ('user-rbac','table','rbac.refresh_tokens',null,'spec.md §3: revocable credential'),
 ('user-rbac','table','rbac.auth_events',null,'spec.md §6: append-only audit'),
+-- The closed permission vocabulary. Declared because role_permissions now
+-- references it: without this table the grant path does not exist at all,
+-- and its absence used to be expressible only as permissions that matched
+-- nothing.
+('user-rbac','table','rbac.permission_kinds',null,'schema §6: every (resource, action) the collection checks'),
 ('user-rbac','function','rbac.login','text,text,text,text','spec.md §4.2: atomic login'),
 ('user-rbac','function','rbac.create_user_with_password','text,text','spec.md §4.1: signup'),
 ('user-rbac','function','rbac.current_user_id','','spec.md §2: every RLS policy calls this'),
 ('user-rbac','function','rbac.has_permission','uuid,text,text','spec.md §2: one authz function'),
+-- The first administrator. Audited because it is a promise the install
+-- guide makes to a stranger -- and because the failure it replaced was
+-- silent: a hand-copied grant list whose wrong verbs left every policy
+-- returning false while the role looked populated.
+('user-rbac','function','rbac.bootstrap_admin','text,text,text','install: the first administrator, granted what the policies actually check'),
 ('user-rbac','function','rbac.verify_api_key','text','spec.md §4.6: API-key path'),
 
 -- ---------- ai-query-layer: SCHEMA facets (schema.sql §13) --------------

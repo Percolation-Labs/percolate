@@ -52,6 +52,121 @@ def check_single_definition(path, text):
             "needed, and let the later section explain why it has that shape.")
     return set(sigs)
 
+def _live_spans(text):
+    """Offsets of text that is NOT a comment, a dollar-quoted body or a string.
+
+    Every check below reads DDL, and these files are two-thirds prose: the
+    phrase `create table` appears in comments explaining tables, and inside
+    plpgsql bodies that build DDL dynamically. A check that cannot tell those
+    apart reports failures nobody can act on, and gets switched off.
+    """
+    i, n, out, seg = 0, len(text), [], 0
+    while i < n:
+        if text.startswith('--', i):
+            j = text.find('\n', i); j = n if j < 0 else j
+            out.append((seg, i)); seg = j; i = j
+        elif text.startswith('/*', i):
+            j = text.find('*/', i); j = n if j < 0 else j + 2
+            out.append((seg, i)); seg = j; i = j
+        elif text[i] == '$':
+            m = re.match(r'\$[A-Za-z_]*\$', text[i:])
+            if m:
+                tag = m.group(0)
+                j = text.find(tag, i + len(tag))
+                j = n if j < 0 else j + len(tag)
+                out.append((seg, i)); seg = j; i = j
+            else:
+                i += 1
+        elif text[i] == "'":
+            j = i + 1
+            while j < n:
+                if text[j] == "'":
+                    if j + 1 < n and text[j + 1] == "'":
+                        j += 2; continue
+                    j += 1; break
+                j += 1
+            i = j
+        else:
+            i += 1
+    out.append((seg, n))
+    return out
+
+
+_IDEMPOTENCY_RULES = [
+    (re.compile(r'^[ \t]*create[ \t]+table[ \t]+(?!if[ \t]+not[ \t]+exists)', re.I | re.M),
+     "create table -> create table if not exists"),
+    (re.compile(r'^[ \t]*create[ \t]+(unique[ \t]+)?index[ \t]+if[ \t]+not[ \t]+exists[ \t]+on[ \t]', re.I | re.M),
+     "an anonymous index cannot take IF NOT EXISTS -- give it the name Postgres "
+     "would have generated (<table>_<cols>_idx), so an existing database adopts "
+     "the index it already has instead of growing a second one"),
+    (re.compile(r'^[ \t]*create[ \t]+(unique[ \t]+)?index[ \t]+(?!if[ \t]+not[ \t]+exists|concurrently)', re.I | re.M),
+     "create index -> create index if not exists <name>"),
+    (re.compile(r'^[ \t]*create[ \t]+view[ \t]', re.I | re.M),
+     "create view -> create or replace view"),
+    (re.compile(r'^[ \t]*create[ \t]+trigger[ \t]', re.I | re.M),
+     "create trigger -> create or replace trigger (PG14+)"),
+    (re.compile(r'^[ \t]*create[ \t]+schema[ \t]+(?!if[ \t]+not[ \t]+exists)', re.I | re.M),
+     "create schema -> create schema if not exists"),
+]
+
+
+def check_idempotent(path, text):
+    """Refuse a statement that would fail on a database that already has it.
+
+    THE UPGRADE SCRIPT IS THIS BODY, REPLAYED. `percolate--<old>--<new>.sql` is
+    generated as a copy of the whole schema, so `ALTER EXTENSION percolate
+    UPDATE` converges an older database to this one -- which works only while
+    every statement here can run twice. That property is worth more than it
+    looks: the update runs as `app_owner`, so ownership and every RLS policy
+    survive it, where the dump-and-restore it replaces is exactly where a
+    superuser-owned restore leaves every policy inert.
+
+    Enforced rather than remembered, because the failure is invisible until
+    somebody upgrades. Verified once by diffing an upgraded database against a
+    fresh install of the same version: 629 objects, identical.
+    """
+    spans = _live_spans(text)
+
+    def live(i):
+        return any(a <= i < b for a, b in spans)
+
+    bad = []
+    for pat, remedy in _IDEMPOTENCY_RULES:
+        for m in pat.finditer(text):
+            if live(m.start()):
+                bad.append((text[:m.start()].count("\n") + 1, remedy))
+
+    # A policy and a constraint have neither OR REPLACE nor IF NOT EXISTS, so
+    # each has to be preceded by a drop of its own name.
+    for pat, kind, drop in [
+        (re.compile(r'^[ \t]*create[ \t]+policy[ \t]+([\w]+)', re.I | re.M),
+         "policy", "drop policy if exists {} "),
+        (re.compile(r'add[ \t]+constraint[ \t]+([\w]+)', re.I),
+         "constraint", "drop constraint if exists {}"),
+        # PG19 accepts `drop property graph if exists` and has no
+        # `create ... if not exists`, so this is the only idempotent spelling.
+        (re.compile(r'^[ \t]*create[ \t]+property[ \t]+graph[ \t]+([\w.]+)', re.I | re.M),
+         "property graph", "drop property graph if exists {};"),
+    ]:
+        for m in pat.finditer(text):
+            if not live(m.start()):
+                continue
+            name = m.group(1)
+            if not re.search(drop.format(re.escape(name)), text, re.I):
+                bad.append((text[:m.start()].count("\n") + 1,
+                            kind + " " + name + " is created without being dropped "
+                            "first -- add `" + drop.format(name).strip() + "` before it"))
+
+    if bad:
+        detail = "\n".join("  " + str(path) + ":" + str(ln) + "  " + why
+                           for ln, why in sorted(bad))
+        raise SystemExit(
+            str(path) + ": " + str(len(bad)) + " statement(s) cannot be applied "
+            "twice, so the generated upgrade script would fail on any existing "
+            "database:\n" + detail +
+            "\nThe schema is replayed to upgrade it -- see write_upgrades().")
+
+
 def check_raise_format(path, text):
     """Refuse a RAISE whose message uses a specifier only format() understands.
 
@@ -184,6 +299,60 @@ HEADER = f"""-- ============================================================
 -- Roles are NOT created here: they are cluster-level, and a non-superuser
 -- cannot CREATE ROLE. See specs/user-rbac/roles.sql, applied once by a DBA.
 -- ============================================================
+
+-- ------------------------------------------------------------
+-- WHAT THIS BUILD WAS MADE FROM.
+--
+-- Provenance, because its absence cost a day. Two parser fixes were committed
+-- -- an error naming a mode the caller had not written, and one caller's build
+-- filter narrowing the next caller's answers -- and the test suite went on
+-- failing against a .so compiled before them. The failures pointed at source
+-- that was already correct, and nothing in the running database could say
+-- which of "this is a bug" and "this binary is old" was true.
+--
+-- `compiler_capabilities()` does not answer it either, deliberately: it probes
+-- FEATURES, one canary each, which detects the parser and the schema drifting
+-- apart from EACH OTHER. Both halves can agree perfectly and both be six
+-- commits behind the tree that produced them. This table is the other axis.
+--
+-- Not a constant baked into this file: the commit is not knowable when the
+-- file is generated (it would have to name the commit that contains it), and a
+-- SHA here would make the generated artifact differ on every build and defeat
+-- build-sql.py --check. It is written at PACKAGE time instead, by whatever
+-- assembles the release, through the function below.
+-- ------------------------------------------------------------
+create table if not exists public.percolate_build (
+    component  text primary key,         -- 'schema' or 'parser'
+    version    text not null,
+    commit_sha text,
+    built_at   timestamptz
+);
+grant select on public.percolate_build to public;
+
+create or replace function public.percolate_record_build(
+    p_component text, p_version text, p_commit text, p_built_at timestamptz)
+returns void language sql volatile as $fn$
+    insert into public.percolate_build (component, version, commit_sha, built_at)
+    values (p_component, p_version, p_commit, p_built_at)
+    on conflict (component) do update
+       set version = excluded.version,
+           commit_sha = excluded.commit_sha,
+           built_at = excluded.built_at;
+$fn$;
+
+-- The one-line answer. Reports every component and says plainly whether they
+-- came from the same commit, because "the halves disagree" is the condition
+-- worth naming and the one a human would otherwise have to eyeball.
+create or replace function public.percolate_build()
+returns table (component text, version text, commit_sha text,
+               built_at timestamptz, consistent boolean)
+language sql stable as $fn$
+    select b.component, b.version, b.commit_sha, b.built_at,
+           (select count(distinct commit_sha) <= 1
+              from public.percolate_build where commit_sha is not null)
+      from public.percolate_build b
+     order by b.component;
+$fn$;
 """
 
 
@@ -238,6 +407,69 @@ def check_every_spec_is_accounted_for() -> None:
             "these are listed but do not exist: " + ", ".join(missing))
 
 
+def released_versions() -> list[str]:
+    """Every version already published, from the tags -- not from a list here.
+
+    A list would be a second place to remember something, which is what this
+    file exists to avoid. `git tag` already knows, and if there is no git (a
+    tarball, a vendored copy) the answer is "none published", which produces no
+    upgrade scripts and is the correct answer for that situation rather than a
+    crash.
+    """
+    import subprocess
+    try:
+        out = subprocess.run(["git", "-C", str(ROOT), "tag", "--list", "v*"],
+                             capture_output=True, text=True, timeout=10)
+    except Exception:
+        return []
+    if out.returncode != 0:
+        return []
+    seen = []
+    for line in out.stdout.split():
+        v = line.lstrip("v")
+        if re.fullmatch(r"\d+\.\d+\.\d+", v) and v != VERSION:
+            seen.append(v)
+    return sorted(seen, key=lambda x: [int(n) for n in x.split(".")])
+
+
+def write_upgrades(body: str) -> None:
+    """One `percolate--<old>--<VERSION>.sql` per already-released version.
+
+    THE SAME BODY, and that is the whole design rather than a shortcut. Every
+    statement in it is idempotent -- `create table if not exists`, `create or
+    replace view/function/trigger`, a policy dropped before it is created, seed
+    rows with `on conflict do nothing` -- so applying it to a database that is
+    already at an older version converges it to this one. build-sql.py refuses
+    a statement that breaks that property, so the guarantee is enforced rather
+    than remembered.
+    
+    Written for EVERY prior version, not just the previous one, because only
+    the current release's scripts ship: a database at 0.1.0 has no 0.1.1 script
+    on disk to hop through, so it needs a direct path.
+
+    What this cannot express is destructive change -- a dropped column, a
+    renamed table, a backfill. Those go in `specs/migrations/<old>--<new>.sql`,
+    which is prepended when it exists.
+    """
+    prior = released_versions()
+    if not prior:
+        print("no released versions in git tags -- no upgrade scripts written")
+        return
+    mig_dir = ROOT / "specs" / "migrations"
+    written = []
+    for old in prior:
+        delta_path = mig_dir / f"{old}--{VERSION}.sql"
+        head = ""
+        if delta_path.exists():
+            head = (f"-- from specs/migrations/{delta_path.name}: the part of this\n"
+                    f"-- upgrade that a replay cannot express.\n"
+                    + delta_path.read_text().rstrip() + "\n\n")
+        dest = ROOT / f"extension/percolate/sql/percolate--{old}--{VERSION}.sql"
+        dest.write_text(head + body)
+        written.append(f"{old}->{VERSION}" + (" (+delta)" if head else ""))
+    print(f"wrote {len(written)} upgrade script(s): {', '.join(written)}")
+
+
 def main() -> int:
     check_every_spec_is_accounted_for()
     parts = [HEADER]
@@ -251,6 +483,7 @@ def main() -> int:
         # files no longer create them and cannot disagree about versions.
         raw = src.read_text()
         check_raise_format(rel, raw)
+        check_idempotent(rel, raw)
         sigs_by_file.append((rel, check_single_definition(rel, raw)))
         body = re.sub(r"^create extension if not exists [a-z_]+;.*$", "",
                       raw, flags=re.M)
@@ -275,12 +508,35 @@ def main() -> int:
                   f"run: python3 {pathlib.Path(__file__).relative_to(ROOT)}",
                   file=sys.stderr)
             return 1
-        print(f"{out.relative_to(ROOT)} is current")
+        # The upgrade scripts are shipped artifacts too, and they go stale the
+        # same way -- a specs/ edit regenerated into percolate--<v>.sql and not
+        # into percolate--<old>--<v>.sql leaves existing databases upgrading to
+        # something that is not this version. Checking only the file somebody
+        # remembered to look at is how the parser stayed stale for a day.
+        stale = []
+        for old_v in released_versions():
+            up = ROOT / f"extension/percolate/sql/percolate--{old_v}--{VERSION}.sql"
+            delta = ROOT / "specs" / "migrations" / f"{old_v}--{VERSION}.sql"
+            if not up.exists():
+                stale.append(f"{up.name} is missing")
+            elif not up.read_text().endswith(body):
+                stale.append(f"{up.name} does not end with the current schema")
+            elif delta.exists() and delta.read_text().rstrip() not in up.read_text():
+                stale.append(f"{up.name} is missing its migrations/{delta.name} delta")
+        if stale:
+            print("STALE upgrade script(s): " + "; ".join(stale) +
+                  f" -- run: python3 {pathlib.Path(__file__).relative_to(ROOT)}",
+                  file=sys.stderr)
+            return 1
+        n = len(released_versions())
+        print(f"{out.relative_to(ROOT)} is current"
+              + (f", and {n} upgrade script(s) with it" if n else ""))
         return 0
 
     out.write_text(body)
     print(f"wrote {out.relative_to(ROOT)} "
           f"({len(body.splitlines())} lines from {len(ORDER)} spec files)")
+    write_upgrades(body)
     return 0
 
 

@@ -69,7 +69,7 @@ $$ language plpgsql;
 -- ------------------------------------------------------------
 -- 1. Workflow defs
 -- ------------------------------------------------------------
-create table workflow.definitions (
+create table if not exists workflow.definitions (
     id          uuid primary key default gen_random_uuid(),
     name        text not null,
     version     int not null default 1,
@@ -203,14 +203,14 @@ begin
 end;
 $$ language plpgsql;
 
-create trigger trg_check_spec_before_insert
+create or replace trigger trg_check_spec_before_insert
     before insert or update of spec on workflow.definitions
     for each row execute function workflow.check_spec_before_insert();
 
 -- ------------------------------------------------------------
 -- 2. Workflow runs
 -- ------------------------------------------------------------
-create table workflow.runs (
+create table if not exists workflow.runs (
     id               uuid primary key default gen_random_uuid(),
     workflow_def_id  uuid not null references workflow.definitions(id),
     parent_task_id   uuid,
@@ -236,7 +236,7 @@ create table workflow.runs (
 -- ------------------------------------------------------------
 -- 3. Tasks
 -- ------------------------------------------------------------
-create table workflow.tasks (
+create table if not exists workflow.tasks (
     id               uuid primary key default gen_random_uuid(),
     run_id           uuid not null references workflow.runs(id) on delete cascade,
     step_key         text not null,
@@ -298,9 +298,9 @@ create table workflow.tasks (
     unique (run_id, step_key)
 );
 
-create trigger trg_workflow_runs_touch before update on workflow.runs
+create or replace trigger trg_workflow_runs_touch before update on workflow.runs
     for each row execute function public.touch_updated_at();
-create trigger trg_tasks_touch before update on workflow.tasks
+create or replace trigger trg_tasks_touch before update on workflow.tasks
     for each row execute function public.touch_updated_at();
 
 -- THE CLAIM INDEX MUST MATCH THE CLAIM'S ORDER BY, AND THIS ONE DID NOT.
@@ -328,7 +328,7 @@ create trigger trg_tasks_touch before update on workflow.tasks
 -- `priority desc` is written out rather than left to a reverse scan because
 -- the mixed direction (`desc, asc`) cannot be served by scanning one index
 -- backwards -- that would reverse both keys.
-create index idx_tasks_claimable on workflow.tasks (queue, priority desc, created_at)
+create index if not exists idx_tasks_claimable on workflow.tasks (queue, priority desc, created_at)
     where status = 'ready';
 
 -- The autoscaler's index. queue_depth() counts ready-and-due plus running, and
@@ -341,23 +341,23 @@ create index idx_tasks_claimable on workflow.tasks (queue, priority desc, create
 -- Deliberately NOT indexing run_after's predicate: `run_after <= now()` is not
 -- immutable and cannot appear in a partial index's WHERE. It rides as an
 -- indexed column so the filter is answered without a heap fetch.
-create index idx_tasks_live on workflow.tasks (queue, status, run_after)
+create index if not exists idx_tasks_live on workflow.tasks (queue, status, run_after)
     where status in ('ready', 'running');
-create index idx_tasks_run on workflow.tasks (run_id);
-create index idx_tasks_heartbeat on workflow.tasks (status, heartbeat_at) where status = 'running';
-create index idx_tasks_signal on workflow.tasks (wait_signal) where status = 'waiting_external';
+create index if not exists idx_tasks_run on workflow.tasks (run_id);
+create index if not exists idx_tasks_heartbeat on workflow.tasks (status, heartbeat_at) where status = 'running';
+create index if not exists idx_tasks_signal on workflow.tasks (wait_signal) where status = 'waiting_external';
 
-create table workflow.task_dependencies (
+create table if not exists workflow.task_dependencies (
     task_id             uuid not null references workflow.tasks(id) on delete cascade,
     depends_on_task_id  uuid not null references workflow.tasks(id) on delete cascade,
     primary key (task_id, depends_on_task_id)
 );
-create index idx_task_deps_reverse on workflow.task_dependencies (depends_on_task_id);
+create index if not exists idx_task_deps_reverse on workflow.task_dependencies (depends_on_task_id);
 
 -- ------------------------------------------------------------
 -- 4. Per-queue config
 -- ------------------------------------------------------------
-create table workflow.queue_config (
+create table if not exists workflow.queue_config (
     queue          text primary key,
     stale_timeout  interval not null default interval '2 minutes',
     rate_lookahead int not null default 20
@@ -366,7 +366,7 @@ create table workflow.queue_config (
 -- ------------------------------------------------------------
 -- 5. Rate limiting
 -- ------------------------------------------------------------
-create table workflow.rate_limits (
+create table if not exists workflow.rate_limits (
     key         text primary key,
     capacity    numeric not null,
     tokens      numeric not null,
@@ -391,7 +391,7 @@ $$ language plpgsql;
 -- ------------------------------------------------------------
 -- 6. Audit log
 -- ------------------------------------------------------------
-create table workflow.task_events (
+create table if not exists workflow.task_events (
     id             bigint generated always as identity primary key,
     task_id        uuid not null,
     run_id         uuid not null,
@@ -401,7 +401,7 @@ create table workflow.task_events (
     detail         jsonb,
     at             timestamptz not null default now()
 );
-create index idx_task_events_run on workflow.task_events (run_id, at);
+create index if not exists idx_task_events_run on workflow.task_events (run_id, at);
 
 create or replace function workflow.log_task_transition() returns trigger as $$
 begin
@@ -417,7 +417,7 @@ begin
 end;
 $$ language plpgsql;
 
-create trigger trg_log_task_transition
+create or replace trigger trg_log_task_transition
     after update of status on workflow.tasks
     for each row execute function workflow.log_task_transition();
 
@@ -512,7 +512,7 @@ begin
 end;
 $$ language plpgsql;
 
-create trigger trg_enforce_payload_ref_size
+create or replace trigger trg_enforce_payload_ref_size
     before insert or update on workflow.tasks
     for each row execute function workflow.enforce_payload_ref_size();
 
@@ -588,7 +588,7 @@ begin
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
-create trigger trg_cascade_task_status
+create or replace trigger trg_cascade_task_status
     after update of status on workflow.tasks
     for each row execute function workflow.cascade_task_status();
 
@@ -601,7 +601,7 @@ begin
 end;
 $$ language plpgsql;
 
-create trigger trg_mark_roots_ready
+create or replace trigger trg_mark_roots_ready
     before insert on workflow.tasks
     for each row execute function workflow.mark_roots_ready();
 
@@ -614,7 +614,7 @@ begin
 end;
 $$ language plpgsql;
 
-create trigger trg_notify_new_ready
+create or replace trigger trg_notify_new_ready
     after insert on workflow.tasks
     for each row execute function workflow.notify_new_ready();
 
@@ -1388,7 +1388,7 @@ begin
 end;
 $$ language plpgsql;
 
-create trigger trg_resolve_parent_on_child_completion
+create or replace trigger trg_resolve_parent_on_child_completion
     after update of status on workflow.runs
     for each row execute function workflow.resolve_parent_on_child_completion();
 
@@ -1687,10 +1687,10 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- ------------------------------------------------------------
 -- 15. Observability views
 -- ------------------------------------------------------------
-create view workflow.v_queue_depth as
+create or replace view workflow.v_queue_depth as
     select queue, status, count(*) as value from workflow.tasks group by queue, status;
 
-create view workflow.v_run_progress as
+create or replace view workflow.v_run_progress as
     select r.id as run_id, d.name as workflow_name, r.status as run_status,
            count(*) filter (where t.status = 'done') as done,
            count(*) as total, r.created_at, r.updated_at
@@ -1699,7 +1699,7 @@ create view workflow.v_run_progress as
     join workflow.tasks t on t.run_id = r.id
     group by r.id, d.name, r.status, r.created_at, r.updated_at;
 
-create view workflow.v_stuck_tasks as
+create or replace view workflow.v_stuck_tasks as
     select t.id, t.run_id, t.queue, t.step_key, t.status,
            extract(epoch from now() - t.created_at) as age_seconds
     from workflow.tasks t
@@ -1715,7 +1715,7 @@ create view workflow.v_stuck_tasks as
 -- lease violations from one queue mean workers are dying, or a stale_timeout is
 -- shorter than the work. Silently dropping them is what made the reaper's own
 -- defects invisible for as long as they were.
-create view workflow.v_lease_violations as
+create or replace view workflow.v_lease_violations as
     select e.detail->>'queue'  as queue,
            e.detail->>'op'     as op,
            e.detail->>'why'    as why,
@@ -1727,7 +1727,7 @@ create view workflow.v_lease_violations as
     where e.detail->>'event' = 'lease_violation'
     group by 1,2,3,4,5 order by 6 desc;
 
-create view workflow.v_compensation_status as
+create or replace view workflow.v_compensation_status as
     select f.run_id, f.saga_group,
            count(*) as total_compensatable,
            count(c.id) as compensations_created,
@@ -1738,7 +1738,7 @@ create view workflow.v_compensation_status as
     where f.saga_group is not null and f.compensation_task_key is not null
     group by f.run_id, f.saga_group;
 
-create view workflow.v_decision_history as
+create or replace view workflow.v_decision_history as
     select te.run_id, te.task_id, t.step_key, te.input_snapshot, t.output as decision_output, te.at
     from workflow.task_events te
     join workflow.tasks t on t.id = te.task_id
@@ -2021,7 +2021,7 @@ alter table workflow.tasks drop constraint if exists tasks_kind_check;
 alter table workflow.tasks add constraint tasks_kind_check
     check (kind in ('work','decision','timer','signal','sub_workflow','http_call','sql'));
 
-create table workflow.step_functions (
+create table if not exists workflow.step_functions (
     name          text primary key,        -- what a step spec names
     fn            text not null,            -- schema-qualified function
     arg_types     text[] not null default '{}',
@@ -2476,7 +2476,7 @@ $$ language plpgsql;
 -- insert-time autorun would EXECUTE the whole workflow in arbitrary order.
 -- Stamping a column is not executing, which is why this one is safe and those
 -- are not.
-create trigger trg_apply_timer_delay
+create or replace trigger trg_apply_timer_delay
     after insert on workflow.tasks
     for each row when (new.kind = 'timer' and new.status = 'ready')
     execute function workflow.apply_timer_delay_on_insert();
@@ -2502,7 +2502,7 @@ begin
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
-create trigger trg_autorun_sql_steps
+create or replace trigger trg_autorun_sql_steps
     after update of status on workflow.tasks
     for each row execute function workflow.autorun_sql_steps();
 
@@ -2706,7 +2706,7 @@ grant execute on function workflow.define_yaml(text) to authenticated;
 -- retry, backoff, the reaper, saga compensation, cancellation and tracing all
 -- apply unchanged. Nothing here is a second execution engine.
 -- ------------------------------------------------------------
-create table workflow.schedules (
+create table if not exists workflow.schedules (
     id             uuid primary key default gen_random_uuid(),
     name           text not null unique,
     -- The definition NAME, not its id: start_workflow() resolves the latest
@@ -2747,10 +2747,10 @@ create table workflow.schedules (
     created_at     timestamptz not null default now(),
     updated_at     timestamptz not null default now()
 );
-create index idx_schedules_due on workflow.schedules (last_tick_at) where enabled;
-create index idx_schedules_org on workflow.schedules (org_id);
+create index if not exists idx_schedules_due on workflow.schedules (last_tick_at) where enabled;
+create index if not exists idx_schedules_org on workflow.schedules (org_id);
 
-create trigger trg_schedules_touch before update on workflow.schedules
+create or replace trigger trg_schedules_touch before update on workflow.schedules
     for each row execute function public.touch_updated_at();
 
 -- One field of a 5-field cron expression, against one integer.

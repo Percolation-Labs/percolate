@@ -21,7 +21,7 @@ create schema if not exists tradecraft;
 -- against, which is why this table and the resolution ledger (§6) are the same
 -- project.
 -- ----------------------------------------------------------------------------
-create table tradecraft.likelihood (
+create table if not exists tradecraft.likelihood (
     term      text primary key,
     alt_term  text not null,
     lo        numeric not null check (lo between 0 and 1),
@@ -53,7 +53,7 @@ on conflict (term) do nothing;
 -- news class declares that it derives from registry and filing classes.
 -- Counting classes without modelling derivation just moves the error.
 -- ----------------------------------------------------------------------------
-create table tradecraft.evidence_classes (
+create table if not exists tradecraft.evidence_classes (
     class        text primary key,
     description  text not null,
     -- classes this one commonly restates rather than independently observes
@@ -87,7 +87,7 @@ on conflict (class) do nothing;
 -- exists for evaluating reliability", which is the honest grade for a source
 -- with no track record, and it stays F until outcomes are observed (§6).
 -- ----------------------------------------------------------------------------
-create table tradecraft.source_reliability (
+create table if not exists tradecraft.source_reliability (
     connector_id text primary key references content.connectors(id) on delete cascade,
     grade        char(1) not null default 'F' check (grade in ('A','B','C','D','E','F')),
     basis        text,                 -- what the grade rests on
@@ -112,7 +112,7 @@ comment on column tradecraft.source_reliability.grade is
 -- when neither endpoint is, and Standard 8 (accuracy) is unmeasurable without
 -- this history, so a track record is impossible without it.
 -- ----------------------------------------------------------------------------
-create table tradecraft.assessments (
+create table if not exists tradecraft.assessments (
     id             uuid primary key default gen_random_uuid(),
     -- the stable thing being assessed across time; changes to the STATEMENT
     -- make a new row, changes of MIND make a new row with the same subject_key
@@ -140,8 +140,8 @@ create table tradecraft.assessments (
     check (supersedes is null or change_reason is not null)
 );
 
-create index on tradecraft.assessments (subject_key, published_at desc);
-create index on tradecraft.assessments (resolves_by) where resolves_by is not null;
+create index if not exists assessments_subject_key_published_at_idx on tradecraft.assessments (subject_key, published_at desc);
+create index if not exists assessments_resolves_by_idx on tradecraft.assessments (resolves_by) where resolves_by is not null;
 
 -- ICD 203's explicit prohibition, enforced rather than documented: a product
 -- must not combine a confidence level and a degree of likelihood in one
@@ -165,7 +165,7 @@ begin
 end;
 $$ language plpgsql;
 
-create trigger trg_assessments_check before insert or update on tradecraft.assessments
+create or replace trigger trg_assessments_check before insert or update on tradecraft.assessments
     for each row execute function tradecraft.assessments_check();
 
 -- ----------------------------------------------------------------------------
@@ -236,7 +236,7 @@ $$;
 -- toward 0.5 is penalised rather than rewarded. An improper rule would make
 -- "roughly even chance" the rational answer to everything.
 -- ----------------------------------------------------------------------------
-create table tradecraft.resolutions (
+create table if not exists tradecraft.resolutions (
     assessment_id uuid primary key references tradecraft.assessments(id) on delete cascade,
     outcome       boolean not null,
     resolved_at   timestamptz not null default now(),

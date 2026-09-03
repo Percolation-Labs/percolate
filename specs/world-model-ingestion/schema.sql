@@ -29,7 +29,7 @@ create schema if not exists content;
 -- `kind` distinguishes who initiates, which is the only thing that actually
 -- differs between them -- a push arrives as an upload, a pull is polled.
 -- ------------------------------------------------------------
-create table content.channels (
+create table if not exists content.channels (
     id            uuid primary key default gen_random_uuid(),
     name          text not null,
     kind          text not null check (kind in
@@ -47,10 +47,10 @@ create table content.channels (
     updated_at    timestamptz not null default now(),
     unique (org_id, name)
 );
-create index idx_channels_pollable on content.channels (last_polled_at)
+create index if not exists idx_channels_pollable on content.channels (last_polled_at)
     where enabled and poll_interval is not null;
 
-create trigger trg_channels_touch before update on content.channels
+create or replace trigger trg_channels_touch before update on content.channels
     for each row execute function public.touch_updated_at();
 
 -- ------------------------------------------------------------
@@ -65,7 +65,7 @@ create trigger trg_channels_touch before update on content.channels
 -- Consequently this table is never exposed through PostgREST -- reads go
 -- through a resource, which is scoped. See integration.sql.
 -- ------------------------------------------------------------
-create table content.files (
+create table if not exists content.files (
     id           uuid primary key default gen_random_uuid(),
     checksum     text not null unique,      -- sha256 of the content; the dedup key
     bucket       text not null,
@@ -83,7 +83,7 @@ create table content.files (
 -- fetched page, a Telegram post. It points at a channel (where it came from)
 -- and optionally a file (if it has bytes -- a scraped JSON record may not).
 -- ------------------------------------------------------------
-create table content.resources (
+create table if not exists content.resources (
     id           uuid primary key default gen_random_uuid(),
     channel_id   uuid not null references content.channels(id),
     file_id      uuid references content.files(id),
@@ -117,8 +117,8 @@ create table content.resources (
     updated_at   timestamptz not null default now(),
     unique (channel_id, external_id)
 );
-create index idx_resources_channel on content.resources (channel_id, ingested_at desc);
-create index idx_resources_org on content.resources (org_id);
+create index if not exists idx_resources_channel on content.resources (channel_id, ingested_at desc);
+create index if not exists idx_resources_org on content.resources (org_id);
 -- Partial on the states worth hunting for. 'stored' joins 'ready' in the
 -- exclusion: both are terminal and neither is something an operator goes
 -- looking for, so admitting artifacts here would grow the index without
@@ -133,10 +133,10 @@ alter table content.resources drop constraint if exists resources_status_check;
 alter table content.resources add constraint resources_status_check
     check (status in ('pending','ready','stored','failed','superseded'));
 drop index if exists content.idx_resources_status;
-create index idx_resources_status on content.resources (status)
+create index if not exists idx_resources_status on content.resources (status)
     where status not in ('ready','stored');
 
-create trigger trg_resources_touch before update on content.resources
+create or replace trigger trg_resources_touch before update on content.resources
     for each row execute function public.touch_updated_at();
 
 -- ------------------------------------------------------------
@@ -153,7 +153,7 @@ create trigger trg_resources_touch before update on content.resources
 -- in that direction because the embedding table is generic and does not know
 -- this schema; integration.sql adds the reconciliation instead.
 -- ------------------------------------------------------------
-create table content.resource_chunks (
+create table if not exists content.resource_chunks (
     id           uuid primary key default gen_random_uuid(),
     resource_id  uuid not null references content.resources(id) on delete cascade,
     ordinal      int not null,
@@ -168,7 +168,7 @@ create table content.resource_chunks (
     created_at   timestamptz not null default now(),
     unique (resource_id, ordinal)
 );
-create index idx_chunks_resource on content.resource_chunks (resource_id, ordinal);
+create index if not exists idx_chunks_resource on content.resource_chunks (resource_id, ordinal);
 
 -- ------------------------------------------------------------
 -- 5. Registration — upload and fetch, as functions.

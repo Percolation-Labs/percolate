@@ -35,23 +35,25 @@ alter table workflow.tasks enable row level security;
 
 -- Same (select ...) InitPlan wrapping as user-rbac/schema.sql's policies --
 -- has_permission() runs a join, so bare calls re-evaluate it per row scanned.
+drop policy if exists runs_owner_or_permitted on workflow.runs;
 create policy runs_owner_or_permitted on workflow.runs for select
   using (owner_id = (select rbac.current_user_id())
          or (select rbac.has_permission(rbac.current_user_id(), 'workflow_runs', 'select')));
 
 -- Tasks inherit their run's visibility rather than restating the rule -- one
 -- place to change it, and a task has no owner of its own.
+drop policy if exists tasks_via_run on workflow.tasks;
 create policy tasks_via_run on workflow.tasks for select
   using (exists (select 1 from workflow.runs r where r.id = workflow.tasks.run_id));
 
 -- Reads go through views owned by api_viewer, NOT the table owner -- the
 -- ownership split user-rbac/roles.sql §2 exists for. A view owned by the
 -- table owner bypasses RLS and returns every row to every caller.
-create view workflow.runs_api as
+create or replace view workflow.runs_api as
   select id, workflow_def_id, owner_id, status, compensation_state,
          external_id, input, context, trace_id, created_at, updated_at, completed_at
   from workflow.runs;
-create view workflow.tasks_api as
+create or replace view workflow.tasks_api as
   select id, run_id, step_key, kind, queue, status, attempts, max_attempts,
          priority, run_after, output, error, span_id, parent_span_id,
          created_at, updated_at, completed_at
@@ -169,7 +171,7 @@ begin
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
-create trigger trg_set_run_owner
+create or replace trigger trg_set_run_owner
     before insert on workflow.runs
     for each row execute function workflow.set_run_owner();
 
@@ -342,7 +344,13 @@ begin
     if not found then
         raise exception 'task % not found', p_task_id;
     end if;
-    perform workflow.assert_run_access(v_run, 'read');
+    -- 'select', not 'read'. Both call sites here are READING run-scoped rows, and
+    -- the RLS policy on workflow.runs already spells that authority 'select' --
+    -- so a deployment that granted the run-read permission the policy asks for
+    -- was still refused by these two functions, which asked for a string nothing
+    -- else in the collection uses. role_permissions.action is matched with `=`,
+    -- so the two spellings were two permissions, not one with an alias.
+    perform workflow.assert_run_access(v_run, 'select');
 
     -- Batched children (schema.sql §20j) hold `items`, not `item`, and this
     -- returns the ROW SET -- so they are flattened back to it. Kept in step
@@ -396,7 +404,7 @@ begin
 
     v_cur := nullif(current_setting('workflow.current_run_id', true), '');
     if v_cur is null or v_cur::uuid <> v_run then
-        perform workflow.assert_run_access(v_run, 'read');
+        perform workflow.assert_run_access(v_run, 'select');
     end if;
 
     return (select coalesce(jsonb_agg(jsonb_build_object(
@@ -440,13 +448,14 @@ begin
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
-create trigger trg_set_schedule_owner
+create or replace trigger trg_set_schedule_owner
     before insert on workflow.schedules
     for each row execute function workflow.set_schedule_owner();
 
 alter table workflow.schedules enable row level security;
 
 -- (select ...) wrapping, as everywhere: has_permission() runs a join.
+drop policy if exists schedules_owner_or_permitted on workflow.schedules;
 create policy schedules_owner_or_permitted on workflow.schedules for select
   using (owner_id = (select rbac.current_user_id())
          or (select rbac.has_permission(rbac.current_user_id(), 'workflow_schedules', 'select')));
@@ -508,7 +517,7 @@ end;
 $$ language plpgsql stable security definer set search_path = pg_catalog, public;
 
 -- The read path: a view owned by api_viewer, never the table owner.
-create view workflow.schedules_api as
+create or replace view workflow.schedules_api as
   select id, name, workflow_name, cron_expr, timezone, input, enabled,
          overlap_policy, owner_id, org_id, last_tick_at, last_fired_at,
          last_run_id, fire_count, skip_count, last_error, last_error_at,

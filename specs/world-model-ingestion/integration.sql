@@ -70,12 +70,15 @@ alter table content.channels        enable row level security;
 alter table content.resources       enable row level security;
 alter table content.resource_chunks enable row level security;
 
+drop policy if exists channels_org_scoped on content.channels;
 create policy channels_org_scoped on content.channels for select
   using (org_id is null or org_id in (select aiq.current_org_ids()));
 
+drop policy if exists resources_org_scoped on content.resources;
 create policy resources_org_scoped on content.resources for select
   using (org_id is null or org_id in (select aiq.current_org_ids()));
 
+drop policy if exists chunks_via_resource on content.resource_chunks;
 create policy chunks_via_resource on content.resource_chunks for select
   using (exists (select 1 from content.resources r
                  where r.id = content.resource_chunks.resource_id));
@@ -361,9 +364,11 @@ grant execute on function aiq.record_embeddings(text, jsonb) to worker;
 alter table content.datasets      enable row level security;
 alter table content.dataset_files enable row level security;
 
+drop policy if exists datasets_org_scoped on content.datasets;
 create policy datasets_org_scoped on content.datasets for select
   using (org_id is null or org_id in (select aiq.current_org_ids()));
 
+drop policy if exists dataset_files_via_dataset on content.dataset_files;
 create policy dataset_files_via_dataset on content.dataset_files for select
   using (exists (select 1 from content.datasets d
                  where d.id = content.dataset_files.dataset_id));

@@ -74,7 +74,7 @@ $$;
 -- else is either reinforcement from the engine's own history or a human anchor
 -- projected in from §3.
 -- ------------------------------------------------------------
-create table workflow.deposits (
+create table if not exists workflow.deposits (
     deposit_id   bigint generated always as identity primary key,
 
     -- WHERE. A locus in this tier is an ENGINE OBJECT -- brief.md §10 leaves
@@ -110,10 +110,10 @@ create table workflow.deposits (
 
 -- Invariant 3 lives here: a gradient read is always AT A LOCUS, and this is
 -- what makes that cheap.
-create index idx_deposits_locus
+create index if not exists idx_deposits_locus
     on workflow.deposits (locus_kind, locus, deposited_at desc);
-create index idx_deposits_time on workflow.deposits using brin (deposited_at);
-create index idx_deposits_org  on workflow.deposits (org_id) where org_id is not null;
+create index if not exists idx_deposits_time on workflow.deposits using brin (deposited_at);
+create index if not exists idx_deposits_org  on workflow.deposits (org_id) where org_id is not null;
 
 -- APPEND-ONLY (invariant 4), enforced by the grant AND by a trigger. The grant
 -- is the rule; the trigger is for the SECURITY DEFINER function written later
@@ -136,7 +136,7 @@ begin
 end;
 $$ language plpgsql;
 
-create trigger trg_deposits_append_only
+create or replace trigger trg_deposits_append_only
     before update or delete on workflow.deposits
     for each row execute function workflow.refuse_field_mutation();
 
@@ -159,7 +159,7 @@ create trigger trg_deposits_append_only
 -- settled it. Stored as one row it lands in a gradient nobody reads. So one
 -- act inserts as many deposits as it affects, sharing an act_id -- see §7.
 -- ------------------------------------------------------------
-create table workflow.anchors (
+create table if not exists workflow.anchors (
     anchor_id    uuid primary key default gen_random_uuid(),
     act          text not null
                      check (act in ('veto','interest','endorsement','resolution')),
@@ -180,8 +180,8 @@ create table workflow.anchors (
     deposited_at timestamptz not null default now()
 );
 
-create index idx_anchors_locus on workflow.anchors (locus_kind, locus, deposited_at desc);
-create index idx_anchors_user  on workflow.anchors (user_id, deposited_at desc);
+create index if not exists idx_anchors_locus on workflow.anchors (locus_kind, locus, deposited_at desc);
+create index if not exists idx_anchors_user  on workflow.anchors (user_id, deposited_at desc);
 
 revoke all on workflow.anchors from public;
 grant select, insert on workflow.anchors to authenticated;
@@ -190,7 +190,7 @@ grant select, insert on workflow.anchors to authenticated;
 -- anchors mean anything.
 grant select on workflow.anchors to worker;
 
-create trigger trg_anchors_append_only
+create or replace trigger trg_anchors_append_only
     before update or delete on workflow.anchors
     for each row execute function workflow.refuse_field_mutation();
 
@@ -533,13 +533,17 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 alter table workflow.deposits enable row level security;
 alter table workflow.anchors  enable row level security;
 
+drop policy if exists deposits_org_scoped on workflow.deposits;
 create policy deposits_org_scoped on workflow.deposits for select
     using (org_id is null or org_id in (select aiq.current_org_ids()));
+drop policy if exists deposits_insert_own_org on workflow.deposits;
 create policy deposits_insert_own_org on workflow.deposits for insert
     with check (content.may_access_org(org_id));
 
+drop policy if exists anchors_org_scoped on workflow.anchors;
 create policy anchors_org_scoped on workflow.anchors for select
     using (org_id is null or org_id in (select aiq.current_org_ids()));
+drop policy if exists anchors_insert_own_org on workflow.anchors;
 create policy anchors_insert_own_org on workflow.anchors for insert
     with check (content.may_access_org(org_id));
 

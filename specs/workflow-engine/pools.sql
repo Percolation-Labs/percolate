@@ -33,7 +33,7 @@
 -- Flat, not per-tenant: with one namespace there is one trust boundary, and a
 -- per-consumer allow-list would be pretending otherwise.
 -- ----------------------------------------------------------------------------
-create table workflow.pool_image_policy (
+create table if not exists workflow.pool_image_policy (
     id      bigint generated always as identity primary key,
     pattern text not null unique,   -- glob, e.g. 'ghcr.io/acme/*'
     note    text,
@@ -71,7 +71,7 @@ $$;
 --   no `dsn`                 -- injected by the manager from a Secret it
 --                               controls; see the reserved-key trigger below
 -- ----------------------------------------------------------------------------
-create table workflow.pools (
+create table if not exists workflow.pools (
     name          text primary key
                       -- RFC 1123 label, minus room for the 'p8-pool-' prefix
                       check (name ~ '^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$'),
@@ -121,7 +121,7 @@ create table workflow.pools (
     check (max_replicas >= min_replicas)
 );
 
-create index on workflow.pools (enabled) where enabled;
+create index if not exists pools_enabled_idx on workflow.pools (enabled) where enabled;
 
 -- ----------------------------------------------------------------------------
 -- 3. Queue binding
@@ -135,12 +135,12 @@ create index on workflow.pools (enabled) where enabled;
 -- queues. See pools.md §3.2 for why that is not yet usable -- the worker takes
 -- a single --queue today.
 -- ----------------------------------------------------------------------------
-create table workflow.pool_queues (
+create table if not exists workflow.pool_queues (
     queue text primary key,
     pool  text not null references workflow.pools(name) on delete cascade
 );
 
-create index on workflow.pool_queues (pool);
+create index if not exists pool_queues_pool_idx on workflow.pool_queues (pool);
 
 -- Default 1:1 -- declaring a pool named `embed` binds queue `embed` unless the
 -- consumer says otherwise. Convenience, not policy: delete the row and bind
@@ -155,7 +155,7 @@ begin
 end;
 $$;
 
-create trigger pools_bind_default_queue
+create or replace trigger pools_bind_default_queue
     after insert on workflow.pools
     for each row execute function workflow.pools_bind_default_queue();
 
@@ -169,7 +169,7 @@ create trigger pools_bind_default_queue
 -- Different problems, different responses; a single status column cannot tell
 -- them apart. That is the whole argument for carrying the pair.
 -- ----------------------------------------------------------------------------
-create table workflow.pool_status (
+create table if not exists workflow.pool_status (
     pool                text primary key references workflow.pools(name) on delete cascade,
     observed_generation bigint,
     ready_replicas      int,
@@ -280,15 +280,15 @@ begin
 end;
 $$;
 
-create trigger pools_set_owner       before insert on workflow.pools
+create or replace trigger pools_set_owner       before insert on workflow.pools
     for each row execute function workflow.set_pool_owner();
-create trigger pools_check_env       before insert or update on workflow.pools
+create or replace trigger pools_check_env       before insert or update on workflow.pools
     for each row execute function workflow.pools_check_env();
-create trigger pools_check_policy    before insert or update on workflow.pools
+create or replace trigger pools_check_policy    before insert or update on workflow.pools
     for each row execute function workflow.pools_check_policy();
-create trigger pools_bump_generation before insert or update on workflow.pools
+create or replace trigger pools_bump_generation before insert or update on workflow.pools
     for each row execute function workflow.pools_bump_generation();
-create trigger pools_notify_delete   after delete on workflow.pools
+create or replace trigger pools_notify_delete   after delete on workflow.pools
     for each row execute function workflow.pools_notify_delete();
 
 -- ----------------------------------------------------------------------------
@@ -454,10 +454,12 @@ alter table workflow.pools       enable row level security;
 alter table workflow.pool_queues enable row level security;
 alter table workflow.pool_status enable row level security;
 
+drop policy if exists pools_read on workflow.pools;
 create policy pools_read on workflow.pools
     for select to authenticated
     using (true);
 
+drop policy if exists pools_write on workflow.pools;
 create policy pools_write on workflow.pools
     for all to authenticated
     using      (owner_id = (select rbac.current_user_id())
@@ -465,9 +467,11 @@ create policy pools_write on workflow.pools
     with check (owner_id = (select rbac.current_user_id())
                 or (select rbac.has_permission(rbac.current_user_id(), 'workflow_pools', 'update')));
 
+drop policy if exists pool_queues_read on workflow.pool_queues;
 create policy pool_queues_read on workflow.pool_queues
     for select to authenticated using (true);
 
+drop policy if exists pool_queues_write on workflow.pool_queues;
 create policy pool_queues_write on workflow.pool_queues
     for all to authenticated
     using (pool in (select name from workflow.pools
@@ -475,10 +479,13 @@ create policy pool_queues_write on workflow.pool_queues
     with check (pool in (select name from workflow.pools
                          where owner_id = (select rbac.current_user_id())));
 
+drop policy if exists pool_status_read on workflow.pool_status;
 create policy pool_status_read on workflow.pool_status
     for select to authenticated using (true);
 
 -- pool_manager reads desired state for every pool -- it is the cluster's
 -- reconciler, not a consumer.
-create policy pools_manager_read       on workflow.pools       for select to pool_manager using (true);
+drop policy if exists pools_manager_read on workflow.pools;
+create policy pools_manager_read on workflow.pools       for select to pool_manager using (true);
+drop policy if exists pool_queues_manager_read on workflow.pool_queues;
 create policy pool_queues_manager_read on workflow.pool_queues for select to pool_manager using (true);

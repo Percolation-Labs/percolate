@@ -38,7 +38,7 @@ create schema if not exists aiq;
 -- 1. Node registry — graph identity for one included typed row.
 --    Does NOT store the payload; payload stays on the typed table.
 -- ------------------------------------------------------------
-create table aiq.nodes (
+create table if not exists aiq.nodes (
     id           uuid primary key default gen_random_uuid(),
     entity_type  text not null,          -- owning table, e.g. 'company'
     entity_id    uuid not null,          -- PK in that table
@@ -48,9 +48,9 @@ create table aiq.nodes (
     updated_at   timestamptz not null default now(),
     unique (entity_type, entity_id)
 );
-create index idx_nodes_org on aiq.nodes (org_id);
+create index if not exists idx_nodes_org on aiq.nodes (org_id);
 
-create trigger trg_nodes_touch before update on aiq.nodes
+create or replace trigger trg_nodes_touch before update on aiq.nodes
     for each row execute function public.touch_updated_at();
 
 -- ------------------------------------------------------------
@@ -58,7 +58,7 @@ create trigger trg_nodes_touch before update on aiq.nodes
 --    Not the edge foreign key (that is nodes.id, graph-identity.md D3).
 --    entity_type is copied here so the unique index needs no join.
 -- ------------------------------------------------------------
-create table aiq.node_keys (
+create table if not exists aiq.node_keys (
     node_id      uuid not null references aiq.nodes(id) on delete cascade,
     entity_type  text not null,
     key          text not null,          -- normalized (lowercased, trimmed)
@@ -79,20 +79,20 @@ create table aiq.node_keys (
 -- companies both took the canonical key 'acme', and LOOKUP "ACME" -- the
 -- dialect's most common call, documented as an exact match -- returned two
 -- different nodes with no way to tell which was meant.
-create unique index idx_node_keys_canonical
+create unique index if not exists idx_node_keys_canonical
     on aiq.node_keys (org_id, key, entity_type) nulls not distinct
     where kind = 'canonical';
-create index idx_node_keys_lookup on aiq.node_keys (key);
+create index if not exists idx_node_keys_lookup on aiq.node_keys (key);
 -- FUZZY lives here and ONLY here: a trigram index on this thin key table,
 -- never on the data plane (graph-identity.md "Scale").
-create index idx_node_keys_trgm on aiq.node_keys using gin (key gin_trgm_ops);
+create index if not exists idx_node_keys_trgm on aiq.node_keys using gin (key gin_trgm_ops);
 
 -- ------------------------------------------------------------
 -- 3. Relation catalogue — every allowed (src_type, relation, dst_type).
 --    Out-of-catalogue relations are rejected at write, so the graph cannot
 --    accumulate typos-as-relations (graph-identity.md "Catalogue").
 -- ------------------------------------------------------------
-create table aiq.relation_types (
+create table if not exists aiq.relation_types (
     src_type   text not null,
     relation   text not null,
     dst_type   text not null,
@@ -119,7 +119,7 @@ create table aiq.relation_types (
 -- 4. Edges — canonical store for SOFT (authored) links only.
 --    Hard FK/junction relationships are NEVER copied here (D4).
 -- ------------------------------------------------------------
-create table aiq.edges (
+create table if not exists aiq.edges (
     id          uuid primary key default gen_random_uuid(),
     src_id      uuid not null references aiq.nodes(id) on delete cascade,
     dst_id      uuid not null references aiq.nodes(id) on delete cascade,
@@ -134,9 +134,9 @@ create table aiq.edges (
 );
 -- Forward and REVERSE both indexed: "what points at this?" is first-class,
 -- and the inverse edge is never stored (graph-identity.md "Edge table").
-create index idx_edges_src on aiq.edges (src_id);
-create index idx_edges_dst on aiq.edges (dst_id);
-create index idx_edges_relation on aiq.edges (relation);
+create index if not exists idx_edges_src on aiq.edges (src_id);
+create index if not exists idx_edges_dst on aiq.edges (dst_id);
+create index if not exists idx_edges_relation on aiq.edges (relation);
 
 -- Enforce the catalogue, and enforce that both endpoints are real nodes
 -- (the FKs already do the latter; this makes the type-pair check real).
@@ -194,7 +194,7 @@ begin
 end;
 $$ language plpgsql;
 
-create trigger trg_check_edge_catalogue
+create or replace trigger trg_check_edge_catalogue
     before insert or update on aiq.edges
     for each row execute function aiq.check_edge_catalogue();
 
@@ -215,6 +215,11 @@ create trigger trg_check_edge_catalogue
 --     unless id is also listed in PROPERTIES. Since every useful query needs
 --     the node id to join back to the typed tables, id is declared twice
 --     here by necessity, not redundancy.
+-- Dropped first: PG19 accepts `drop property graph if exists` but has no
+-- `create ... if not exists`, so this is the only idempotent spelling.
+-- A property graph is a declaration over tables and holds no data of its
+-- own, so recreating it costs nothing.
+drop property graph if exists aiq.knowledge_graph;
 create property graph aiq.knowledge_graph
     vertex tables (
         aiq.nodes key (id) label node properties (id, entity_type, org_id, summary)
@@ -241,7 +246,7 @@ create property graph aiq.knowledge_graph
 --    MUST use the same predicate, or a rebuild resurrects evicted nodes
 --    (graph-identity.md "Inclusion policy").
 -- ------------------------------------------------------------
-create table aiq.entity_registry (
+create table if not exists aiq.entity_registry (
     entity_type   text primary key,
     source_table  text not null,          -- schema-qualified
     key_expr      text not null,          -- SQL expr -> canonical key
@@ -867,7 +872,7 @@ $$ language sql stable;
 -- vector modes. Registered per corpus rather than hardcoded, because the
 -- content belongs to the consumer (world-model-ingestion owns
 -- resource_chunks), not to this layer.
-create table aiq.semantic_sources (
+create table if not exists aiq.semantic_sources (
     name          text primary key,
     source_table  text not null,       -- schema-qualified, has (id, content)
     content_col   text not null default 'content',
@@ -1515,7 +1520,7 @@ comment on function aiq.extension_boundary() is
 --     deliberate act that updates this paragraph.
 -- ============================================================
 
-create table aiq.embedding_models (
+create table if not exists aiq.embedding_models (
     name        text primary key,          -- 'nomic-embed-text', 'text-embedding-3-small'
     dim         int  not null check (dim > 0),
     provider    text not null,             -- 'ollama' | 'openai' | ...
@@ -1539,7 +1544,7 @@ create table aiq.embedding_models (
 -- Exactly one default at a time. A partial unique index rather than a trigger:
 -- the database enforces it, so a bad deploy fails loudly instead of leaving
 -- two defaults and a coin-flip about which one SEMANTIC uses.
-create unique index idx_embedding_models_one_default
+create unique index if not exists idx_embedding_models_one_default
     on aiq.embedding_models ((true)) where is_default;
 
 -- ------------------------------------------------------------
@@ -1570,7 +1575,7 @@ create unique index idx_embedding_models_one_default
 -- REST body. Two template layers, resolved in the right order by the two halves
 -- that own them.
 -- ------------------------------------------------------------
-create table aiq.embedding_providers (
+create table if not exists aiq.embedding_providers (
     provider         text primary key,
     request_template jsonb not null,
     response_path    text  not null,   -- dotted path, the worker's `jsonpath`
@@ -1582,7 +1587,8 @@ insert into aiq.embedding_providers (provider, request_template, response_path, 
     ('ollama', '{"model": "{{model}}", "prompt": "{{text}}"}'::jsonb, 'embedding',
      'POST /api/embeddings -- one vector, at the top level under "embedding".'),
     ('openai', '{"model": "{{model}}", "input": "{{text}}"}'::jsonb, 'data.0.embedding',
-     'POST /v1/embeddings -- a list, because the API embeds a batch; a single '
+     'POST /v1/embeddings -- a list, because the API embeds a batch
+on conflict do nothing; a single '
      'text still comes back as data[0]. Needs credential_ref on the model row.')
 on conflict (provider) do nothing;
 
@@ -1918,7 +1924,7 @@ $$ language plpgsql stable;
 -- rather than a default.
 -- ============================================================
 
-create table aiq.lexical_sources (
+create table if not exists aiq.lexical_sources (
     name         text primary key,
     source_table text not null,
     content_col  text not null default 'content',

@@ -42,7 +42,7 @@ create schema if not exists agentic;
 -- One row per MCP server or OpenAPI service. The runtime's entire tool
 -- surface is this table plus agents.tools; there is no built-in tool, ever.
 -- ------------------------------------------------------------
-create table agentic.tool_servers (
+create table if not exists agentic.tool_servers (
     id              uuid primary key default gen_random_uuid(),
     name            text not null unique,
     kind            text not null check (kind in ('mcp', 'openapi')),
@@ -103,18 +103,19 @@ create table agentic.tool_servers (
 -- jsonb_object_keys, because a CHECK constraint may not contain a subquery at
 -- all -- Postgres refuses the natural spelling outright. `?|` tests keys only,
 -- so lowercasing the values along with them changes nothing.
+alter table agentic.tool_servers drop constraint if exists tool_servers_headers_not_secrets;
 alter table agentic.tool_servers add constraint tool_servers_headers_not_secrets
     check (not (lower(default_headers::text)::jsonb
                 ?| array['authorization', 'proxy-authorization', 'cookie']));
 
-create trigger trg_tool_servers_updated
+create or replace trigger trg_tool_servers_updated
     before update on agentic.tool_servers
     for each row execute function public.touch_updated_at();
 
 -- ------------------------------------------------------------
 -- 2. Agents -- config rows; adding one is an insert (brief §2, §6)
 -- ------------------------------------------------------------
-create table agentic.agents (
+create table if not exists agentic.agents (
     id                       uuid primary key default gen_random_uuid(),
     name                     text not null unique,
     system_prompt            text not null default '',
@@ -206,10 +207,11 @@ create index if not exists idx_agents_tags     on agentic.agents using gin (tags
 -- An extractor without a declared output shape is a model call with extra
 -- steps: the shape is what makes N extractions combinable and what makes a
 -- bad answer RETRYABLE rather than silently wrong (workflow schema §21).
+alter table agentic.agents drop constraint if exists agents_extractor_needs_schema;
 alter table agentic.agents add constraint agents_extractor_needs_schema
     check (category <> 'extractor' or structured_output_schema is not null);
 
-create trigger trg_agents_updated
+create or replace trigger trg_agents_updated
     before update on agentic.agents
     for each row execute function public.touch_updated_at();
 
@@ -236,7 +238,7 @@ create trigger trg_agents_updated
 -- that must all follow the same p8ql discipline should reference it once, not
 -- carry ten copies that drift.
 -- ------------------------------------------------------------
-create table agentic.skills (
+create table if not exists agentic.skills (
     id              uuid primary key default gen_random_uuid(),
     -- The key an agent lists and the model names. Constrained to the shape the
     -- Agent Skills spec uses, because this name is also a TOOL name on the
@@ -317,7 +319,7 @@ create index if not exists idx_skills_audience on agentic.skills (audience)
 create index if not exists idx_skills_category on agentic.skills (category);
 create index if not exists idx_skills_tags     on agentic.skills using gin (tags);
 
-create trigger trg_skills_updated
+create or replace trigger trg_skills_updated
     before update on agentic.skills
     for each row execute function public.touch_updated_at();
 
@@ -375,7 +377,7 @@ end $$;
 -- is provenance on the things that already exist, which is exactly what makes
 -- a bundle removable.
 -- ------------------------------------------------------------
-create table agentic.plugins (
+create table if not exists agentic.plugins (
     name         text primary key
                      check (name ~ '^[a-z0-9]+(-[a-z0-9]+)*$'),
     version      text not null default '0.0.0',
@@ -390,7 +392,7 @@ create table agentic.plugins (
     updated_at   timestamptz not null default now()
 );
 
-create trigger trg_plugins_updated
+create or replace trigger trg_plugins_updated
     before update on agentic.plugins
     for each row execute function public.touch_updated_at();
 
@@ -424,7 +426,7 @@ create index if not exists idx_skills_plugin on agentic.skills (plugin)
 -- ------------------------------------------------------------
 -- 3. Sessions -- one AG-UI thread; the unit a conversation is owned by
 -- ------------------------------------------------------------
-create table agentic.sessions (
+create table if not exists agentic.sessions (
     id             uuid primary key default gen_random_uuid(),
     user_id        uuid not null default rbac.current_user_id(),
     agui_thread_id text,
@@ -433,9 +435,9 @@ create table agentic.sessions (
     updated_at     timestamptz not null default now()
 );
 
-create index on agentic.sessions (user_id, created_at desc);
+create index if not exists sessions_user_id_created_at_idx on agentic.sessions (user_id, created_at desc);
 
-create trigger trg_sessions_updated
+create or replace trigger trg_sessions_updated
     before update on agentic.sessions
     for each row execute function public.touch_updated_at();
 
@@ -450,7 +452,7 @@ create trigger trg_sessions_updated
 -- has no session, so scoping RLS through a session join would put background
 -- runs outside tenant isolation entirely.
 -- ------------------------------------------------------------
-create table agentic.runs (
+create table if not exists agentic.runs (
     id                      uuid primary key default gen_random_uuid(),
     session_id              uuid references agentic.sessions(id) on delete cascade,
     agent_id                uuid not null references agentic.agents(id),
@@ -482,13 +484,13 @@ create table agentic.runs (
         check (parent_run_id is null or depth > 0)
 );
 
-create index on agentic.runs (session_id, created_at);
-create index on agentic.runs (parent_run_id);
-create index on agentic.runs (trace_id);
-create index on agentic.runs (owner_id, created_at desc);
-create index on agentic.runs (workflow_task_id) where workflow_task_id is not null;
+create index if not exists runs_session_id_created_at_idx on agentic.runs (session_id, created_at);
+create index if not exists runs_parent_run_id_idx on agentic.runs (parent_run_id);
+create index if not exists runs_trace_id_idx on agentic.runs (trace_id);
+create index if not exists runs_owner_id_created_at_idx on agentic.runs (owner_id, created_at desc);
+create index if not exists runs_workflow_task_id_idx on agentic.runs (workflow_task_id) where workflow_task_id is not null;
 
-create trigger trg_runs_updated
+create or replace trigger trg_runs_updated
     before update on agentic.runs
     for each row execute function public.touch_updated_at();
 
@@ -501,7 +503,7 @@ create trigger trg_runs_updated
 -- rather than buried in a blob. role='summary' is a third kind entirely: one
 -- row per session, superseded rather than appended to (§3).
 -- ------------------------------------------------------------
-create table agentic.messages (
+create table if not exists agentic.messages (
     id           uuid primary key default gen_random_uuid(),
     run_id       uuid references agentic.runs(id) on delete cascade,
     session_id   uuid references agentic.sessions(id) on delete cascade,
@@ -529,11 +531,12 @@ create table agentic.messages (
 
 -- One summary per session, enforced by the database rather than by the
 -- application remembering to update instead of insert (§3).
-create unique index one_summary_per_session
+create unique index if not exists one_summary_per_session
     on agentic.messages (session_id) where role = 'summary';
-create index on agentic.messages (session_id, seq);
-create index on agentic.messages (run_id, seq);
+create index if not exists messages_session_id_seq_idx on agentic.messages (session_id, seq);
+create index if not exists messages_run_id_seq_idx on agentic.messages (run_id, seq);
 
+alter table agentic.runs drop constraint if exists runs_delegated_by_message_fk;
 alter table agentic.runs
     add constraint runs_delegated_by_message_fk
     foreign key (delegated_by_message_id)
@@ -578,7 +581,7 @@ end;
 $$ language plpgsql
 set search_path = pg_catalog, public, agentic;
 
-create trigger trg_notify_message
+create or replace trigger trg_notify_message
     after insert on agentic.messages
     for each row when (new.session_id is not null)
     execute function agentic.notify_message();
@@ -590,15 +593,18 @@ alter table agentic.sessions enable row level security;
 alter table agentic.runs     enable row level security;
 alter table agentic.messages enable row level security;
 
+drop policy if exists sessions_owner on agentic.sessions;
 create policy sessions_owner on agentic.sessions
     for select using (user_id = rbac.current_user_id());
 
 -- Scoped on the run's own owner, never through the session join: a scheduled
 -- run has no session, and an escape hatch for that case is how a table ends up
 -- with rows nobody can see and everybody can read (brief §3).
+drop policy if exists runs_owner on agentic.runs;
 create policy runs_owner on agentic.runs
     for select using (owner_id = rbac.current_user_id());
 
+drop policy if exists messages_via_run on agentic.messages;
 create policy messages_via_run on agentic.messages
     for select using (
         exists (select 1 from agentic.runs r
@@ -631,12 +637,16 @@ alter table agentic.tool_servers enable row level security;
 alter table agentic.skills       enable row level security;
 alter table agentic.plugins      enable row level security;
 
+drop policy if exists agents_are_shared_config on agentic.agents;
 create policy agents_are_shared_config on agentic.agents
     for select using (true);
+drop policy if exists tool_servers_are_shared_config on agentic.tool_servers;
 create policy tool_servers_are_shared_config on agentic.tool_servers
     for select using (true);
+drop policy if exists skills_are_shared_config on agentic.skills;
 create policy skills_are_shared_config on agentic.skills
     for select using (true);
+drop policy if exists plugins_are_shared_config on agentic.plugins;
 create policy plugins_are_shared_config on agentic.plugins
     for select using (true);
 -- ------------------------------------------------------------
@@ -1591,15 +1601,15 @@ $$;
 -- ------------------------------------------------------------
 grant usage on schema agentic to web_anon, authenticated, api_viewer;
 
-create view agentic.sessions_api as
+create or replace view agentic.sessions_api as
     select id, user_id, agui_thread_id, title, created_at from agentic.sessions;
-create view agentic.runs_api as
+create or replace view agentic.runs_api as
     select id, session_id, agent_id, owner_id, parent_run_id,
            delegated_by_message_id, trigger_kind, workflow_task_id,
            trace_id, span_id, parent_span_id, depth, state, status,
            created_at, finished_at
       from agentic.runs;
-create view agentic.messages_api as
+create or replace view agentic.messages_api as
     select id, run_id, session_id, role, content, tool_calls, tool_call_id,
            is_error, error_kind, citations, seq, created_at
       from agentic.messages;
@@ -1615,7 +1625,7 @@ create view agentic.messages_api as
 -- the constraint on the table guarantees it holds no secret, and a caller that
 -- cannot see it cannot reach the document it was registered against -- the
 -- identical failure, one layer along.
-create view agentic.tool_servers_api as
+create or replace view agentic.tool_servers_api as
     select id, name, kind, url, credential_ref, emits_citations, serves_agents,
            serves_skills, default_headers, cached_tools, synced_at, plugin,
            created_at
@@ -1632,7 +1642,7 @@ create view agentic.tool_servers_api as
 -- column when one is added. discovery_text is here for the same reason the
 -- embedding job needs it and nobody else does: it is generated, so it cannot
 -- disagree with the columns beside it.
-create view agentic.skills_api as
+create or replace view agentic.skills_api as
     select id, name, description, when_to_use, content, discovery_text,
            requires_tools, audience, category, tags, version, plugin,
            created_at, updated_at
@@ -1642,7 +1652,7 @@ create view agentic.skills_api as
 -- question asked when something is wrong, and answering it from the document
 -- as applied rather than from the rows is how you find the row that was
 -- edited in place afterwards (brief.md §11.8).
-create view agentic.plugins_api as
+create or replace view agentic.plugins_api as
     select name, version, description, author, homepage, manifest,
            installed_at, updated_at
       from agentic.plugins;
@@ -1694,7 +1704,7 @@ order by extracts_source, extracts_doctype;
 -- the runtime never loads -- an agent configured with instructions it silently
 -- does not receive, which is precisely the failure the author-time check in
 -- upsert_agent exists to prevent, reintroduced at the read path.
-create view agentic.agents_api as
+create or replace view agentic.agents_api as
     select id, name, system_prompt, model, tools, skills,
            structured_output_schema,
            chained_action, summarizer_agent_id, context_policy,
