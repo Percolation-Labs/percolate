@@ -1,5 +1,5 @@
-"""`percolate auth` -- the two commands that stand between a fresh database and
-a working request.
+"""`percolate auth` and `percolate sample` -- what stands between a fresh
+database and a working request.
 
 A new install has no users, no roles and no permissions, and that is correct:
 the alternative is a default administrator with a password that is in a public
@@ -15,9 +15,13 @@ whenever you want to make a request by hand.
     percolate auth bootstrap --email me@example.com --password ... --print-token
     percolate auth token --email me@example.com
 
-Both need base install only -- asyncpg and typer -- so they work in a
+`auth` needs base install only -- asyncpg and typer -- so it works in a
 worker-only deployment, which is where somebody is most likely to be holding
-admin credentials and no other tooling.
+admin credentials and no other tooling. `sample` additionally reads YAML.
+
+`percolate sample load` is the other half: an empty database and a working
+token still answer every documented query with zero rows. See `samples.py` for
+why a sample is a directory of authored documents rather than a SQL dump.
 """
 
 from __future__ import annotations
@@ -203,3 +207,173 @@ def token(
             raise typer.Exit(1)
 
     typer.echo(mint_jwt(resolved, signing, role=role, ttl_seconds=ttl))
+
+
+# ---------------------------------------------------------------------------
+# `percolate sample` -- load a directory of documents into an empty install.
+# ---------------------------------------------------------------------------
+
+sample_app = typer.Typer(help="Load a sample dataset.", no_args_is_help=True)
+
+
+@sample_app.command("load")
+def sample_load(
+    path: str = typer.Argument(..., help="The sample directory (holds manifest.yaml)."),
+    dsn: str | None = typer.Option(None, help="Owner-level DSN. Default: P8_ADMIN_DSN, then P8_DSN."),
+    content_url: str = typer.Option("http://localhost:8081", help="Content Server, for the documents step."),
+    token: str | None = typer.Option(None, help="Bearer token for uploads. Default: minted from --as-email."),
+    as_email: str | None = typer.Option(None, help="Mint an upload token for this user."),
+    secret: str | None = typer.Option(None, help="Signing secret. Default: P8_JWT_SECRET."),
+    skip_documents: bool = typer.Option(False, "--skip-documents", help="Everything but the corpus."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Check the manifest and the environment, write nothing."),
+) -> None:
+    """Apply a sample, in the order its manifest declares.
+
+    Idempotent throughout, so a second run is how you pick up an edit rather
+    than something to avoid.
+
+    The documents step needs a **real embedding key**, and the manifest says
+    which environment variable holds it. That is deliberate: the corpus is
+    uploaded and embedded by the running pipeline rather than shipped as
+    literal vectors, so what you search is what a model produced. `--dry-run`
+    reports a missing key without writing anything; `--skip-documents` loads
+    everything else and leaves retrieval for when you have one.
+    """
+    from pathlib import Path
+
+    from . import samples
+    from .identity import mint_jwt
+
+    root = Path(path)
+    try:
+        manifest = samples.read_manifest(root)
+    except samples.SampleError as err:
+        typer.secho(str(err), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+
+    missing = samples.missing_credentials(manifest, dict(os.environ))
+    wants_documents = any("documents" in s for s in manifest["load"]) and not skip_documents
+
+    typer.echo(f"{manifest['name']} {manifest.get('version', '')}".rstrip())
+    if dry_run:
+        # Reported, not raised. --dry-run exists to answer "what would this
+        # need", so exiting on the missing key would withhold the answer.
+        for step in manifest["load"]:
+            kind, target = next(iter(step.items()))
+            skipped = " (skipped)" if kind == "documents" and skip_documents else ""
+            typer.echo(f"  would apply {kind:<10} {target}{skipped}")
+        typer.echo(
+            "  credentials: " + ("all present" if not missing
+                                 else f"MISSING {', '.join(missing)}"
+                                      + (" -- needed by the documents step" if wants_documents
+                                         else " -- not needed, documents are skipped"))
+        )
+        return
+
+    if missing and wants_documents:
+        typer.secho(
+            f"{manifest['name']} needs {', '.join(missing)} in this process's environment.\n"
+            "  The corpus is embedded by the real pipeline rather than shipped as\n"
+            "  literal vectors, so loading it costs one embedding call per chunk.\n"
+            "  Set the key, or pass --skip-documents to load everything else.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    target_dsn = _admin_dsn(dsn)
+    upload_token = token
+    if wants_documents and not upload_token and as_email:
+        upload_token = None  # minted below, once we know the user id
+
+    async def _run() -> None:
+        nonlocal upload_token
+        yaml = samples._yaml()
+        conn = await _connect(target_dsn)
+        try:
+            for step in manifest["load"]:
+                kind, target = next(iter(step.items()))
+                where = root / target
+                if kind == "sql":
+                    # `reset role` after, because a sample's schema file
+                    # legitimately does `set role app_owner` -- ownership is
+                    # part of what it is setting up -- and that would otherwise
+                    # persist on this connection through every later step.
+                    await conn.execute(where.read_text())
+                    await conn.execute("reset role")
+                    done = [f"sql {target}"]
+                elif kind == "sources":
+                    done = await samples.apply_sources(conn, yaml.safe_load(where.read_text()))
+                elif kind == "graph":
+                    done = await samples.apply_graph(conn, yaml.safe_load(where.read_text()))
+                elif kind == "plugin":
+                    done = await samples.apply_plugin(conn, yaml.safe_load(where.read_text()))
+                elif kind == "workflows":
+                    done = await samples.apply_workflows(conn, list(where.glob("*.yaml")))
+                elif kind == "documents":
+                    if skip_documents:
+                        typer.echo("  documents  skipped")
+                        continue
+                    if not upload_token:
+                        signing = _jwt_secret(secret)
+                        uid = await conn.fetchval(
+                            "select id::text from rbac.users where email = $1", as_email
+                        ) if as_email else None
+                        if uid is None:
+                            raise samples.SampleError(
+                                "uploading needs a token: pass --token, or --as-email "
+                                "for a user that exists (percolate auth bootstrap makes one)"
+                            )
+                        upload_token = mint_jwt(uid, signing, ttl_seconds=900)
+                    done = await _upload_documents(where, content_url, upload_token, yaml)
+                for line in done:
+                    typer.echo(f"  {line}")
+        finally:
+            await conn.close()
+
+    try:
+        asyncio.run(_run())
+    except samples.SampleError as err:
+        typer.secho(str(err), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+
+    typer.echo("")
+    typer.echo("loaded. The corpus embeds asynchronously -- watch it with:")
+    typer.echo("  select step_key, status, attempts from workflow.tasks where queue = 'ingest';")
+
+
+async def _upload_documents(where: Any, content_url: str, token: str, yaml: Any) -> list[str]:
+    """POST each document to the Content Server, as any uploader would.
+
+    Through the real endpoint rather than an INSERT, because that is the whole
+    claim being demonstrated: a file arrives and becomes chunks, vectors and
+    graph nodes with nothing else run by hand. An INSERT into
+    content.resource_chunks would skip precisely the part worth showing.
+    """
+    import httpx
+
+    index_path = where / "index.yaml"
+    entries = yaml.safe_load(index_path.read_text()) if index_path.exists() else None
+    if entries is None:
+        entries = [{"file": p.name, "title": p.stem} for p in sorted(where.glob("*.md"))]
+
+    done = []
+    async with httpx.AsyncClient(timeout=60) as client:
+        for e in entries:
+            body = (where / e["file"]).read_bytes()
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": e.get("content_type", "text/markdown"),
+                "x-p8-title": e.get("title", e["file"]),
+            }
+            if e.get("channel"):
+                headers["x-p8-channel"] = e["channel"]
+            if e.get("org"):
+                headers["x-p8-org"] = e["org"]
+            r = await client.post(f"{content_url.rstrip('/')}/files", content=body, headers=headers)
+            if r.status_code >= 300:
+                raise samples.SampleError(
+                    f"uploading {e['file']} failed: HTTP {r.status_code} {r.text[:200]}"
+                )
+            done.append(f"uploaded {e['file']} -> {r.json().get('resource_id')}")
+    return done

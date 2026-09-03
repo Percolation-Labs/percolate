@@ -88,8 +88,10 @@ app.add_typer(
 # stub to explain. A worker-only deployment is exactly where somebody is
 # holding admin credentials with no other tooling around.
 from .core.cli import app as _auth_app
+from .core.cli import sample_app as _sample_app
 
 app.add_typer(_auth_app, name="auth", help="Bootstrap the first identity, and sign tokens")
+app.add_typer(_sample_app, name="sample", help="Load a sample dataset")
 
 
 @app.command()
