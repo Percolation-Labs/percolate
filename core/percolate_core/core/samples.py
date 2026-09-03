@@ -221,14 +221,60 @@ async def apply_graph(conn: Any, doc: dict[str, Any]) -> list[str]:
     return done
 
 
+def _agent_to_row(entry: dict[str, Any]) -> dict[str, Any]:
+    """An agent written as a JSON Schema document, in the row shape.
+
+    THE TWO DIALECTS LOOK ALIKE AND ONE IS SILENTLY DROPPED. Every page of the
+    documentation authors an agent as a schema document -- the system prompt is
+    `description`, the output contract is `properties` -- because that is the
+    form a pydantic class already produces. `agentic.upsert_agent` takes the
+    ROW, where those two are `system_prompt` and `structured_output_schema`,
+    and ignores keys it does not know. So applying the documented form directly
+    returns success and stores an agent with an empty prompt and no output
+    contract: it exists, it resolves by name, and it can do nothing. That is
+    the exact failure agents.md describes for a partial upsert, reached by a
+    different road.
+
+    `authoring.from_json_schema` is the canonical translation and this calls
+    it rather than repeating the mapping -- two implementations of one
+    convention is how they drift.
+    """
+    if "system_prompt" in entry or "structured_output_schema" in entry:
+        return entry  # already the row shape; take the author at their word
+    if not ({"description", "properties"} & entry.keys()):
+        return entry  # neither dialect's distinguishing keys -- nothing to do
+
+    try:
+        from ..agentic import authoring
+    except ModuleNotFoundError as err:
+        raise SampleError(
+            "this sample writes agents as JSON Schema documents, which needs "
+            "the agent extra to translate: pip install 'percolate-core[agent]' "
+            "(the published image already has it)"
+        ) from err
+
+    spec = authoring.from_json_schema(entry)
+    row = spec.model_dump(mode="json", exclude={"id", "created_at", "updated_at"})
+    # Keys the schema document carries that AgentSpec does not model, kept
+    # rather than dropped -- `skills` and `category` are real columns.
+    for extra in ("skills", "category", "audience", "tags", "plugin"):
+        if entry.get(extra) is not None:
+            row[extra] = entry[extra]
+    return {k: v for k, v in row.items() if v is not None}
+
+
 async def apply_plugin(conn: Any, doc: dict[str, Any]) -> list[str]:
     """Tool servers, skills and agents, as one named and removable bundle.
 
     `agentic.apply_plugin` already does this and does it in the right order --
     servers before skills before agents, because a skill can require a server
     and an agent can pin a skill. Reimplementing the ordering here would be a
-    second place for it to be wrong.
+    second place for it to be wrong. The agents are translated on the way in;
+    see `_agent_to_row`.
     """
+    doc = dict(doc)
+    if doc.get("agents"):
+        doc["agents"] = [_agent_to_row(a) for a in doc["agents"]]
     await conn.execute("select agentic.apply_plugin($1::jsonb)", json.dumps(doc))
     return [
         f"plugin {doc.get('name')} "

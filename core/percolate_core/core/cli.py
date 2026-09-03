@@ -101,6 +101,7 @@ def bootstrap(
     role: str = typer.Option("admin", help="Role name to create and grant."),
     dsn: str | None = typer.Option(None, help="Owner-level DSN. Default: P8_ADMIN_DSN, then P8_DSN."),
     print_token: bool = typer.Option(False, "--print-token", help="Also sign a token for them."),
+    orgs: str | None = typer.Option(None, help="Comma-separated org ids for the printed token's `orgs` claim."),
     ttl: int = typer.Option(3600, help="Token lifetime in seconds, with --print-token."),
     secret: str | None = typer.Option(None, help="Signing secret. Default: P8_JWT_SECRET."),
 ) -> None:
@@ -157,8 +158,9 @@ def bootstrap(
             await conn.close()
 
         if signing:
+            extra = {"orgs": [o.strip() for o in orgs.split(",") if o.strip()]} if orgs else None
             typer.echo("")
-            typer.echo(mint_jwt(str(uid), signing, ttl_seconds=ttl))
+            typer.echo(mint_jwt(str(uid), signing, ttl_seconds=ttl, extra=extra))
 
     asyncio.run(_run())
 
@@ -168,6 +170,7 @@ def token(
     email: str | None = typer.Option(None, help="Look the subject up by email."),
     sub: str | None = typer.Option(None, help="Or give the user id directly."),
     role: str = typer.Option("authenticated", help="Postgres role claim, which PostgREST switches to."),
+    orgs: str | None = typer.Option(None, help="Comma-separated org ids for the `orgs` claim."),
     ttl: int = typer.Option(3600, help="Lifetime in seconds."),
     dsn: str | None = typer.Option(None, help="Only needed with --email."),
     secret: str | None = typer.Option(None, help="Signing secret. Default: P8_JWT_SECRET."),
@@ -177,6 +180,13 @@ def token(
     `--sub` needs no database at all, which matters: signing is an operation on
     a secret, not on the data, and a deployment that mints tokens from its own
     auth provider should be able to do it with nothing of ours running.
+
+    `--orgs` IS THE ONE PEOPLE MISS. Tenanted rows carry an org_id and the
+    policies filter on the `orgs` claim, so a token without it sees only the
+    shared tier -- rows with a null org. That is not an error and does not look
+    like one: queries return zero rows and `LOOKUP` reports the name
+    unresolved, which reads as "the data did not load" rather than "you are not
+    in that tenant". If a sample or an import put data in an org, name it here.
     """
     from .identity import mint_jwt
 
@@ -206,7 +216,8 @@ def token(
             )
             raise typer.Exit(1)
 
-    typer.echo(mint_jwt(resolved, signing, role=role, ttl_seconds=ttl))
+    extra = {"orgs": [o.strip() for o in orgs.split(",") if o.strip()]} if orgs else None
+    typer.echo(mint_jwt(resolved, signing, role=role, ttl_seconds=ttl, extra=extra))
 
 
 # ---------------------------------------------------------------------------
