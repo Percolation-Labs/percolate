@@ -17327,6 +17327,38 @@ grant execute on function aiq.graph_schema()                  to worker, authent
 grant execute on function aiq.is_graph_schema(jsonb)          to worker, authenticated;
 grant select on aiq.soft_nodes, aiq.lake_nodes, aiq.graph_vocabulary to authenticated, api_viewer;
 
+-- AND THE POLICIES THAT MAKE THAT GRANT SAFE, which it was written without.
+--
+-- The sentence above -- "the read helpers are SECURITY INVOKER, so a user
+-- calling them is filtered by their own policies" -- is true of the three
+-- functions and was never true of the table grant appended under it. Neither
+-- reference table had a policy, so there was nothing to be filtered by:
+--
+--   org B, through aiq.nodes         -> 1 row   (its own)
+--   org B, from aiq.soft_nodes       -> 2 rows  (both, with key, label, attrs)
+--
+-- Measured. The projection beside it is what proves the intent: both tables are
+-- registered with `p_org_expr => 'n.org_id'` precisely so the node they become
+-- is scoped, and reading the staging table went round it. These carry extracted
+-- entity NAMES before resolution, which is the most identifying thing in the
+-- pipeline.
+--
+-- Same predicate as aiq.nodes' own policy, and the same reason for the null
+-- branch: `org_id is null` is shared reference data, which §4.4 says is the
+-- normal state. `graph_vocabulary` stays policy-free deliberately -- it is the
+-- relation catalogue, the same shared-config tier as aiq.relation_types.
+--
+-- Nothing on the write path changes: the worker reaches these through
+-- SECURITY DEFINER functions owned by app_owner, and an owner is not subject
+-- to its own policies (rbac/02 §3 asserts that is still true).
+alter table aiq.soft_nodes enable row level security;
+alter table aiq.lake_nodes enable row level security;
+
+create policy soft_nodes_org_scoped on aiq.soft_nodes
+    for select using (org_id is null or org_id in (select aiq.current_org_ids()));
+create policy lake_nodes_org_scoped on aiq.lake_nodes
+    for select using (org_id is null or org_id in (select aiq.current_org_ids()));
+
 -- ------------------------------------------------------------
 -- 11. The default vocabulary, installed rather than left to a first caller.
 --
