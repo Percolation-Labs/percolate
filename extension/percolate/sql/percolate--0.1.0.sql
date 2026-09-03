@@ -8823,6 +8823,20 @@ create table aiq.relation_types (
     dst_type   text not null,
     inverse_label text,                  -- read-time inverse; NOT a stored edge
     description   text,
+    -- A symmetric relation has no direction to lose, so it is stored once, in
+    -- a canonical endpoint order (see the trigger below). Without this, both
+    -- (a,b) and (b,a) satisfy the unique index and every consumer dedupes by
+    -- hand -- and any degree-based algorithm over the graph double-counts the
+    -- pair, which is not a cosmetic problem: personalised PageRank gives such
+    -- a neighbour twice its share of the mass and k-core reads the degree as
+    -- two. Declared per triple because that is this table's key, but it is a
+    -- property of the TERM: the trigger reads it with bool_or over the term,
+    -- and a term marked symmetric in one triple and not another is a
+    -- modelling error rather than a supported state.
+    -- Named `is_symmetric`, not `symmetric`: SYMMETRIC is a reserved word in
+    -- SQL (it belongs to BETWEEN), so the obvious spelling is a column that
+    -- has to be double-quoted at every single use site forever.
+    is_symmetric boolean not null default false,
     primary key (src_type, relation, dst_type)
 );
 
@@ -8855,12 +8869,24 @@ create or replace function aiq.check_edge_catalogue() returns trigger as $$
 declare
     v_src_type text;
     v_dst_type text;
+    v_symmetric boolean;
+    v_swap uuid;
 begin
     select entity_type into v_src_type from aiq.nodes where id = new.src_id;
     select entity_type into v_dst_type from aiq.nodes where id = new.dst_id;
+    select bool_or(is_symmetric) into v_symmetric
+      from aiq.relation_types where relation = new.relation;
     if not exists (
         select 1 from aiq.relation_types
-        where src_type = v_src_type and relation = new.relation and dst_type = v_dst_type
+        where relation = new.relation
+          and ((src_type = v_src_type and dst_type = v_dst_type)
+               -- A symmetric relation is catalogued in one orientation and
+               -- accepted in either, because normalisation below may store it
+               -- in the other one. Requiring both rows would make the flag a
+               -- trap: you would declare a relation symmetric and then be
+               -- refused for writing it the way you declared it.
+               or (coalesce(v_symmetric, false)
+                   and src_type = v_dst_type and dst_type = v_src_type))
     ) then
         -- `%s` here, not `%`: RAISE takes % as the placeholder, so the
         -- original spelling appended a literal 's' to every value and the
@@ -8871,6 +8897,23 @@ begin
             'relation (%, %, %) is not in the catalogue -- add it to aiq.relation_types first',
             coalesce(v_src_type, '<no node>'), new.relation,
             coalesce(v_dst_type, '<no node>');
+    end if;
+
+    -- Normalise, rather than reject. A writer that has to know the ordering
+    -- rule before it can insert is a rule every writer gets wrong once; a
+    -- writer that inserts either way and lands on one row is a rule nobody has
+    -- to know. The consequence to be aware of is that the second orientation
+    -- now collides with the first on the unique index -- which is the point,
+    -- and is why a bulk evidence load should say `on conflict do nothing`.
+    --
+    -- Compared as uuid, which is byte order in Postgres and needs no
+    -- collation: the same constraint written over text keys is a genuine trap,
+    -- because a client language's sort order and the database's collation
+    -- disagree on strings that differ only by a separator.
+    if coalesce(v_symmetric, false) and new.src_id > new.dst_id then
+        v_swap := new.src_id;
+        new.src_id := new.dst_id;
+        new.dst_id := v_swap;
     end if;
     return new;
 end;
@@ -12370,14 +12413,21 @@ $$;
 -- either pin or preload, and that this function is how you find out which
 -- backend you are on.
 -- ------------------------------------------------------------
-create or replace function aiq.graph_snapshot(p_refresh boolean default false)
-returns jsonb language plpgsql stable as $$
+create or replace function aiq.graph_snapshot(
+    p_refresh      boolean default false,
+    p_relations    text[] default null,
+    p_weight_floor double precision default 0,
+    p_as_of        timestamptz default null
+) returns jsonb language plpgsql volatile as $$
 begin
     if not aiq.graph_algorithms_available() then
         raise exception 'the graph algorithms are not installed -- they ship in '
             'percolate_parser, the same extension as aiq_parse()';
     end if;
-    return p8_graph_snapshot(p_refresh);
+    return p8_graph_snapshot(
+        p_refresh, p_relations, p_weight_floor,
+        case when p_as_of is null then null
+             else (extract(epoch from p_as_of) * 1000000)::bigint end);
 end $$;
 
 -- ------------------------------------------------------------
@@ -12628,6 +12678,48 @@ begin
 end $$;
 
 -- ------------------------------------------------------------
+-- 7b. Two bulk primitives, addressed by id rather than by name.
+--
+-- Every wrapper above takes keys, because every wrapper above answers a
+-- question a person or an agent asked in words. These two are different: they
+-- are called with ids that came out of a previous call, in a loop, by code --
+-- so a key resolution per row would be a lookup nobody asked for and a join
+-- nobody reads. They also deliberately do not hydrate the result into keys and
+-- summaries: at a million rows that join costs more than the algorithm.
+--
+-- Both read the snapshot AS BUILT. That is the whole reason
+-- aiq.graph_snapshot() takes a filter: components over an unfiltered evidence
+-- graph are one blob, because the near-zero edges a threshold exists to ignore
+-- connect everything to everything. Filter the snapshot, then take components.
+-- ------------------------------------------------------------
+create or replace function aiq.graph_components(
+    p_min_size int default 2, p_budget_ms int default 30000
+) returns table(node_id uuid, component uuid, size int)
+language plpgsql stable as $$
+begin
+    if not aiq.graph_algorithms_available() then
+        raise exception 'the graph algorithms are not installed -- they ship in '
+            'percolate_parser, the same extension as aiq_parse()';
+    end if;
+    return query select * from p8_graph_components(p_min_size, p_budget_ms);
+end $$;
+
+create or replace function aiq.graph_induced(
+    p_node_ids uuid[], p_relation text default null, p_as_of timestamptz default null
+) returns table(src_id uuid, dst_id uuid, relation text, weight double precision)
+language plpgsql stable as $$
+begin
+    if not aiq.graph_algorithms_available() then
+        raise exception 'the graph algorithms are not installed -- they ship in '
+            'percolate_parser, the same extension as aiq_parse()';
+    end if;
+    return query select * from p8_graph_induced(
+        p_node_ids, p_relation,
+        case when p_as_of is null then null
+             else (extract(epoch from p_as_of) * 1000000)::bigint end);
+end $$;
+
+-- ------------------------------------------------------------
 -- 8. Deny by default, and one call to change that.
 --
 -- integration-rbac.sql already revoked EXECUTE on everything in `aiq` from
@@ -12664,7 +12756,7 @@ begin
          where (n.nspname = 'aiq'
                 and p.proname in ('related','graph_paths','graph_connect',
                                   'graph_dense','graph_trust','graph_frontier',
-                                  'graph_snapshot',
+                                  'graph_snapshot','graph_components','graph_induced',
                                   -- every wrapper's first statement calls it,
                                   -- so a grant that omits it grants nothing
                                   'graph_algorithms_available'))
@@ -12710,6 +12802,10 @@ comment on function aiq.graph_trust(text[], float8, int, int, text, timestamptz)
     'Confidence and corroboration propagated from seeds, over edge weights.';
 comment on function aiq.graph_frontier(text, int, boolean, int) is
     'Estimated size of the k-hop neighbourhood, for deciding whether to walk it.';
+comment on function aiq.graph_components(int, int) is
+    'Connected components of the snapshot as built, named by their smallest node id.';
+comment on function aiq.graph_induced(uuid[], text, timestamptz) is
+    'The edges internal to a set of nodes -- one call answers many components at once.';
 
 
 -- ============================================================

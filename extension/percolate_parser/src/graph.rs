@@ -284,11 +284,47 @@ fn scratch(n: usize) -> &'static mut Scratch {
     }
 }
 
+/// What the snapshot was built over.
+///
+/// A snapshot of the whole edge table is not always the graph anyone wants to
+/// walk. An evidence graph records a weak opinion on every pair it considered
+/// -- "we looked and found nothing" is a different fact from "we never looked"
+/// -- so most of its edges are below any operating threshold and none of them
+/// belong in a traversal. Filtering at the query is not the same thing: it
+/// narrows the answer, but the rows are still fetched, still resident, and
+/// still scanned at every visit to a node that has them.
+#[derive(Clone, PartialEq, Default)]
+struct BuildFilter {
+    relations: Option<Vec<String>>,
+    weight_floor: f32,
+    as_of: Option<i64>,
+}
+
+impl BuildFilter {
+    fn is_empty(&self) -> bool {
+        self.relations.is_none() && self.weight_floor <= 0.0 && self.as_of.is_none()
+    }
+    fn json(&self) -> Value {
+        if self.is_empty() {
+            return Value::Null;
+        }
+        json!({
+            "relations": self.relations,
+            "weight_floor": self.weight_floor,
+            "as_of_us": self.as_of,
+        })
+    }
+}
+
 struct Snapshot {
     /// Who built it: role, claims, and the tuple counters of the two tables.
     /// Reuse across a different fingerprint is a cross-tenant read, so it is
     /// refused rather than warned about.
     fingerprint: String,
+    /// Reported on every answer, because a filtered snapshot silently returns
+    /// a filtered answer and a caller has to be able to see which graph it
+    /// asked. Same rule as the parsed plan riding along with every result.
+    build_filter: BuildFilter,
     ids: Vec<Uuid>,
     index: Map<Uuid, u32>,
     edges: Vec<Edge>,
@@ -432,7 +468,7 @@ fn fingerprint() -> String {
 /// Build the CSR. Two cursors, two passes, no intermediate materialization of
 /// the whole edge set as SPI tuples -- a 10M-row `select` through
 /// `SpiClient::select` would hold every row in the SPI context at once.
-fn build() -> Snapshot {
+fn build(bf: &BuildFilter) -> Snapshot {
     let t0 = Instant::now();
     let mut ids: Vec<Uuid> = Vec::new();
     let mut index: Map<Uuid, u32> = map();
@@ -458,12 +494,30 @@ fn build() -> Snapshot {
             check_for_interrupts!();
         }
 
+        // The filter is pushed into the query rather than applied after the
+        // fetch: the point of it is that the rows never arrive, so neither the
+        // fetch nor the resident bytes are paid for a graph nobody walks.
+        // Bound parameters rather than an interpolated predicate -- the
+        // relation list arrives from a caller, and a snapshot builder is the
+        // last place to be assembling SQL out of one.
+        let args: Vec<pgrx::datum::DatumWithOid> = vec![
+            bf.relations.clone().into(),
+            bf.weight_floor.into(),
+            bf.as_of.into(),
+        ];
         let mut cur = client.open_cursor(
             "select src_id, dst_id, relation, weight,
                     coalesce((extract(epoch from valid_from) * 1000000)::bigint, (-9223372036854775808)::bigint),
                     coalesce((extract(epoch from valid_to)   * 1000000)::bigint,   9223372036854775807::bigint)
-               from aiq.edges",
-            &[],
+               from aiq.edges
+              where ($1::text[] is null or relation = any($1::text[]))
+                and weight >= $2::real
+                and ($3::bigint is null
+                     or (coalesce((extract(epoch from valid_from) * 1000000)::bigint,
+                                  (-9223372036854775808)::bigint) <= $3::bigint
+                     and coalesce((extract(epoch from valid_to) * 1000000)::bigint,
+                                  9223372036854775807::bigint) > $3::bigint))",
+            &args,
         );
         loop {
             let tbl = cur.fetch(65_536).expect("aiq.edges cursor");
@@ -533,6 +587,7 @@ fn build() -> Snapshot {
         .unwrap_or_default();
     Snapshot {
         fingerprint: fingerprint(),
+        build_filter: bf.clone(),
         ids,
         index,
         edges,
@@ -551,8 +606,11 @@ fn build() -> Snapshot {
     }
 }
 
-/// The one way in. Rebuilds when the fingerprint moved, which covers both the
-/// tenancy case (a different role or claim set) and the ordinary staleness one.
+/// The query path's way in. Rebuilds when the fingerprint moved, which covers
+/// both the tenancy case (a different role or claim set) and the ordinary
+/// staleness one -- and otherwise reuses whatever snapshot this backend holds,
+/// *including its filter*. A query does not silently widen the graph it was
+/// given; it runs on the one that was built, and says which one that was.
 fn snapshot(refresh: bool) -> &'static mut Snapshot {
     let fp = fingerprint();
     if !refresh {
@@ -562,7 +620,22 @@ fn snapshot(refresh: bool) -> &'static mut Snapshot {
             }
         }
     }
-    install(build())
+    let bf = cached().map(|s| s.build_filter.clone()).unwrap_or_default();
+    install(build(&bf))
+}
+
+/// The builder's way in: a filter is an instruction to build, not a preference
+/// to be matched against a cache, so a different filter always rebuilds.
+fn snapshot_filtered(bf: BuildFilter, refresh: bool) -> &'static mut Snapshot {
+    let fp = fingerprint();
+    if !refresh {
+        if let Some(s) = cached() {
+            if s.fingerprint == fp && s.build_filter == bf {
+                return s;
+            }
+        }
+    }
+    install(build(&bf))
 }
 
 // ===========================================================================
@@ -1901,6 +1974,7 @@ fn snap_meta(g: &Snapshot) -> Value {
         "build_ms": (g.build_ms * 1000.0).round() / 1000.0,
         "built_at": g.built_at,
         "bytes": g.bytes(),
+        "filter": g.build_filter.json(),
     })
 }
 
@@ -1929,9 +2003,30 @@ fn err(msg: String) -> JsonB {
 }
 
 /// Build or report the adjacency snapshot this backend is using.
+///
+/// The three filter arguments are what make this more than an inspection
+/// function. Supplying any of them is an instruction to build over that subset
+/// -- and the subset is then the graph every other function in this module
+/// walks, until the next build. That stickiness is deliberate: a query that
+/// silently widened the graph it was handed would be answering a different
+/// question from the one the caller set up.
 #[pg_extern]
-fn p8_graph_snapshot(refresh: default!(bool, false)) -> JsonB {
-    let g = snapshot(refresh);
+fn p8_graph_snapshot(
+    refresh: default!(bool, false),
+    relations: default!(Option<Vec<String>>, "NULL"),
+    weight_floor: default!(f64, 0.0),
+    as_of_us: default!(Option<i64>, "NULL"),
+) -> JsonB {
+    let bf = BuildFilter {
+        relations: relations.filter(|r| !r.is_empty()),
+        weight_floor: weight_floor as f32,
+        as_of: as_of_us,
+    };
+    let g = if bf.is_empty() && !refresh {
+        snapshot(false)
+    } else {
+        snapshot_filtered(bf, refresh)
+    };
     let mut m = snap_meta(g);
     // Reported separately from the snapshot's own bytes because it is a
     // different kind of cost: the snapshot is the graph, the scratch is what
@@ -2364,3 +2459,138 @@ end $$;
         p8_graph_community_of,
     ],
 );
+
+// ===========================================================================
+// §14. Two primitives the shipped six do not cover
+//
+// Both were asked for by a consumer building entity fusion on top of this
+// surface, and both are here because they are the generic shape of that ask
+// rather than the specific one: connected components and an induced subgraph
+// are what every clustering, blocking or repair pass is built out of, and
+// neither is expressible as a bounded query.
+// ===========================================================================
+
+/// Connected components by union-find with path halving.
+///
+/// Linear, and the cheapest useful thing on this list. It is also the one that
+/// most needs §2's snapshot filter in front of it: components over an
+/// unfiltered evidence graph are one giant blob, because the near-zero edges
+/// that a threshold exists to ignore connect everything to everything.
+///
+/// The component is named by the smallest node id in it, which makes the
+/// naming stable across runs and independent of iteration order -- a component
+/// id that moves between two runs over the same graph is not an id.
+#[pg_extern]
+fn p8_graph_components(
+    min_size: default!(i32, 2),
+    budget_ms: default!(i32, 30000),
+) -> TableIterator<'static, (name!(node_id, Uuid), name!(component, Uuid), name!(size, i32))> {
+    let g = snapshot(false);
+    let mut b = Budget::new(budget_ms, 0);
+    let n = g.n();
+    let mut parent: Vec<u32> = (0..n as u32).collect();
+
+    fn find(parent: &mut [u32], mut x: u32) -> u32 {
+        while parent[x as usize] != x {
+            // Path halving: one pointer update per step, no second pass, and
+            // it gives the same near-constant amortised cost as full
+            // compression without the recursion.
+            parent[x as usize] = parent[parent[x as usize] as usize];
+            x = parent[x as usize];
+        }
+        x
+    }
+
+    for (i, e) in g.edges.iter().enumerate() {
+        if i % 8192 == 0 && !b.spend(8192) {
+            break;
+        }
+        let (a, c) = (find(&mut parent, e.src), find(&mut parent, e.dst));
+        if a != c {
+            // Union by id rather than by rank, so the representative is the
+            // smaller ordinal and therefore the smallest uuid -- the stability
+            // property above falls out of the merge rather than a final pass.
+            if a < c {
+                parent[c as usize] = a;
+            } else {
+                parent[a as usize] = c;
+            }
+        }
+    }
+
+    let mut root: Vec<u32> = vec![0; n];
+    let mut size: Map<u32, i32> = map();
+    for v in 0..n as u32 {
+        let r = find(&mut parent, v);
+        root[v as usize] = r;
+        *size.entry(r).or_insert(0) += 1;
+    }
+
+    let floor = min_size.max(1);
+    let rows: Vec<(Uuid, Uuid, i32)> = (0..n as u32)
+        .filter_map(|v| {
+            let r = root[v as usize];
+            let sz = *size.get(&r).unwrap_or(&0);
+            if sz < floor {
+                return None;
+            }
+            Some((g.ids[v as usize], g.ids[r as usize], sz))
+        })
+        .collect();
+    TableIterator::new(rows)
+}
+
+/// The edges internal to a supplied set of nodes.
+///
+/// One call answers many clusters at once when the clusters are components,
+/// because an edge internal to the union of disjoint components is internal to
+/// exactly one of them -- so a repair pass over thousands of small clusters is
+/// one round trip, not thousands.
+#[pg_extern]
+fn p8_graph_induced(
+    node_ids: pgrx::Array<'_, Uuid>,
+    relation: default!(Option<&str>, "NULL"),
+    as_of_us: default!(Option<i64>, "NULL"),
+) -> TableIterator<'static, (
+    name!(src_id, Uuid),
+    name!(dst_id, Uuid),
+    name!(relation, String),
+    name!(weight, f64),
+)> {
+    let g = snapshot(false);
+    let f = match filter_of(g, relation, as_of_us) {
+        Ok(f) => f,
+        // A relation nobody wrote is a typo, and this shape cannot report one
+        // the way the JSONB entry points do -- so it returns nothing rather
+        // than everything, which is the safe direction for a set difference.
+        Err(_) => return TableIterator::new(Vec::new()),
+    };
+    let mut inside: Set<u32> = set();
+    for id in node_ids.iter().flatten() {
+        if let Some(o) = g.ord(id) {
+            inside.insert(o);
+        }
+    }
+    let mut seen: Set<u32> = set();
+    let mut rows: Vec<(Uuid, Uuid, String, f64)> = Vec::new();
+    for &v in inside.iter() {
+        for &eid in g.out(v).iter().chain(g.inc(v).iter()) {
+            let e = &g.edges[eid as usize];
+            if !f.keep(e) || !inside.contains(&e.src) || !inside.contains(&e.dst) {
+                continue;
+            }
+            // Both endpoints are in the set, so every internal edge is reached
+            // twice -- once from each end.
+            if !seen.insert(eid) {
+                continue;
+            }
+            rows.push((
+                g.ids[e.src as usize],
+                g.ids[e.dst as usize],
+                g.rel_names[e.rel as usize].clone(),
+                e.w as f64,
+            ));
+        }
+    }
+    TableIterator::new(rows)
+}

@@ -180,7 +180,104 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
--- 7. SHIPPED EXPERIMENTAL MEANS PRESENT AND UNREACHABLE.
+-- 7. A SYMMETRIC RELATION IS STORED ONCE, IN ONE ORDER.
+--
+-- The unique index is on the ORDERED triple, so without normalisation both
+-- (a,b,r) and (b,a,r) are legal rows describing one fact -- and the traversal
+-- unions out-edges with in-edges, so it would see that neighbour twice: twice
+-- the share of PageRank mass, a degree of two in k-core. The failure is a
+-- wrong number, not an error, which is why it is asserted rather than trusted.
+-- ---------------------------------------------------------------------
+do $$
+declare v_a uuid; v_b uuid; v_n int; v_norm boolean;
+begin
+    select node_id into v_a from aiq.node_keys where key = 'acme' and kind = 'canonical';
+    select node_id into v_b from aiq.node_keys where key = 'ndlr' and kind = 'canonical';
+
+    insert into aiq.relation_types (src_type, relation, dst_type, is_symmetric)
+    values ('company', 'same_as', 'company', true);
+
+    -- written high-to-low on purpose
+    insert into aiq.edges (src_id, dst_id, relation)
+    values (greatest(v_a, v_b), least(v_a, v_b), 'same_as');
+
+    select src_id < dst_id into v_norm from aiq.edges where relation = 'same_as';
+    if not v_norm then
+        raise exception 'a symmetric edge was stored in the order it was written, not normalised';
+    end if;
+
+    -- and the other orientation is the SAME row, not a second one
+    insert into aiq.edges (src_id, dst_id, relation)
+    values (least(v_a, v_b), greatest(v_a, v_b), 'same_as')
+    on conflict do nothing;
+
+    select count(*) into v_n from aiq.edges where relation = 'same_as';
+    if v_n <> 1 then
+        raise exception 'both orientations of a symmetric relation were stored: % rows', v_n;
+    end if;
+    raise notice 'query/11: a symmetric relation normalises to one row in one order';
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 8. THE SNAPSHOT CAN BE BUILT OVER A SUBSET, AND SAYS THAT IT WAS.
+--
+-- A filtered snapshot answers a different question from an unfiltered one, so
+-- the filter rides on every result alongside the counts. The alternative -- a
+-- caller unable to tell which graph it just walked -- is the same class of
+-- silent wrongness the dialect emits `plan` to prevent.
+-- ---------------------------------------------------------------------
+do $$
+declare v_all jsonb; v_one jsonb;
+begin
+    v_all := aiq.graph_snapshot(true);
+    v_one := aiq.graph_snapshot(true, array['competes_with']);
+    if (v_one->'snapshot'->>'edges')::int >= (v_all->'snapshot'->>'edges')::int then
+        raise exception 'filtering to one relation did not reduce the snapshot: % vs %',
+            v_one->'snapshot'->>'edges', v_all->'snapshot'->>'edges';
+    end if;
+    if v_one->'snapshot'->'filter'->'relations' is null then
+        raise exception 'a filtered snapshot did not report its filter';
+    end if;
+    if jsonb_typeof(v_all->'snapshot'->'filter') <> 'null' then
+        raise exception 'an unfiltered snapshot claimed a filter: %', v_all->'snapshot'->'filter';
+    end if;
+    raise notice 'query/11: the snapshot builds over a subset and reports which (% -> % edges)',
+        v_all->'snapshot'->>'edges', v_one->'snapshot'->>'edges';
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 9. COMPONENTS AND INDUCED EDGES, THE TWO BULK PRIMITIVES.
+--
+-- The fixture's three competitors are a triangle under `competes_with`, which
+-- makes it the one shape that exercises both: they must land in one component,
+-- and their induced subgraph must be the three edges and nothing else.
+-- ---------------------------------------------------------------------
+do $$
+declare v_ids uuid[]; v_comp int; v_edges int; v_members int;
+begin
+    perform aiq.graph_snapshot(true, array['competes_with']);
+    select array_agg(node_id) into v_ids
+      from aiq.node_keys where key in ('acme', 'ndlr', 'brls') and kind = 'canonical';
+
+    select count(distinct component), count(*) into v_comp, v_members
+      from aiq.graph_components(2) where node_id = any(v_ids);
+    if v_members <> 3 or v_comp <> 1 then
+        raise exception 'the competes_with triangle came back as % nodes in % components',
+            v_members, v_comp;
+    end if;
+
+    select count(*) into v_edges from aiq.graph_induced(v_ids);
+    if v_edges <> 3 then
+        raise exception 'the induced subgraph of a triangle has % edges, not 3', v_edges;
+    end if;
+    raise notice 'query/11: components and induced agree on the triangle (1 component, 3 edges)';
+
+    -- back to the whole graph, so later assertions are not reading a subset
+    perform aiq.graph_snapshot(true);
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 10. SHIPPED EXPERIMENTAL MEANS PRESENT AND UNREACHABLE.
 --
 -- graph-algorithms.md ships these off by default: installed, inert, callable
 -- by nobody but the owner until a deliberate grant. That is what makes an
@@ -197,6 +294,7 @@ begin
      where ((n.nspname = 'aiq' and p.proname in
              ('related','graph_paths','graph_connect','graph_dense','graph_trust',
               'graph_frontier','graph_snapshot','graph_reach_build',
+              'graph_components','graph_induced',
               'graph_algorithms_available','enable_graph_algorithms'))
          or p.proname like 'p8\_graph\_%')
        and (has_function_privilege('authenticated', p.oid, 'execute')
@@ -229,7 +327,7 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
--- 8. THE CACHE CANNOT CROSS A TENANT. The assertion this file exists for.
+-- 11. THE CACHE CANNOT CROSS A TENANT. The assertion this file exists for.
 --
 -- One backend, two identities, in that order. If the fingerprint check were
 -- removed, the second snapshot would be the first one -- same node count, same

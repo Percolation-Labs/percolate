@@ -37,14 +37,21 @@ $$;
 -- either pin or preload, and that this function is how you find out which
 -- backend you are on.
 -- ------------------------------------------------------------
-create or replace function aiq.graph_snapshot(p_refresh boolean default false)
-returns jsonb language plpgsql stable as $$
+create or replace function aiq.graph_snapshot(
+    p_refresh      boolean default false,
+    p_relations    text[] default null,
+    p_weight_floor double precision default 0,
+    p_as_of        timestamptz default null
+) returns jsonb language plpgsql volatile as $$
 begin
     if not aiq.graph_algorithms_available() then
         raise exception 'the graph algorithms are not installed -- they ship in '
             'percolate_parser, the same extension as aiq_parse()';
     end if;
-    return p8_graph_snapshot(p_refresh);
+    return p8_graph_snapshot(
+        p_refresh, p_relations, p_weight_floor,
+        case when p_as_of is null then null
+             else (extract(epoch from p_as_of) * 1000000)::bigint end);
 end $$;
 
 -- ------------------------------------------------------------
@@ -295,6 +302,48 @@ begin
 end $$;
 
 -- ------------------------------------------------------------
+-- 7b. Two bulk primitives, addressed by id rather than by name.
+--
+-- Every wrapper above takes keys, because every wrapper above answers a
+-- question a person or an agent asked in words. These two are different: they
+-- are called with ids that came out of a previous call, in a loop, by code --
+-- so a key resolution per row would be a lookup nobody asked for and a join
+-- nobody reads. They also deliberately do not hydrate the result into keys and
+-- summaries: at a million rows that join costs more than the algorithm.
+--
+-- Both read the snapshot AS BUILT. That is the whole reason
+-- aiq.graph_snapshot() takes a filter: components over an unfiltered evidence
+-- graph are one blob, because the near-zero edges a threshold exists to ignore
+-- connect everything to everything. Filter the snapshot, then take components.
+-- ------------------------------------------------------------
+create or replace function aiq.graph_components(
+    p_min_size int default 2, p_budget_ms int default 30000
+) returns table(node_id uuid, component uuid, size int)
+language plpgsql stable as $$
+begin
+    if not aiq.graph_algorithms_available() then
+        raise exception 'the graph algorithms are not installed -- they ship in '
+            'percolate_parser, the same extension as aiq_parse()';
+    end if;
+    return query select * from p8_graph_components(p_min_size, p_budget_ms);
+end $$;
+
+create or replace function aiq.graph_induced(
+    p_node_ids uuid[], p_relation text default null, p_as_of timestamptz default null
+) returns table(src_id uuid, dst_id uuid, relation text, weight double precision)
+language plpgsql stable as $$
+begin
+    if not aiq.graph_algorithms_available() then
+        raise exception 'the graph algorithms are not installed -- they ship in '
+            'percolate_parser, the same extension as aiq_parse()';
+    end if;
+    return query select * from p8_graph_induced(
+        p_node_ids, p_relation,
+        case when p_as_of is null then null
+             else (extract(epoch from p_as_of) * 1000000)::bigint end);
+end $$;
+
+-- ------------------------------------------------------------
 -- 8. Deny by default, and one call to change that.
 --
 -- integration-rbac.sql already revoked EXECUTE on everything in `aiq` from
@@ -331,7 +380,7 @@ begin
          where (n.nspname = 'aiq'
                 and p.proname in ('related','graph_paths','graph_connect',
                                   'graph_dense','graph_trust','graph_frontier',
-                                  'graph_snapshot',
+                                  'graph_snapshot','graph_components','graph_induced',
                                   -- every wrapper's first statement calls it,
                                   -- so a grant that omits it grants nothing
                                   'graph_algorithms_available'))
@@ -377,3 +426,7 @@ comment on function aiq.graph_trust(text[], float8, int, int, text, timestamptz)
     'Confidence and corroboration propagated from seeds, over edge weights.';
 comment on function aiq.graph_frontier(text, int, boolean, int) is
     'Estimated size of the k-hop neighbourhood, for deciding whether to walk it.';
+comment on function aiq.graph_components(int, int) is
+    'Connected components of the snapshot as built, named by their smallest node id.';
+comment on function aiq.graph_induced(uuid[], text, timestamptz) is
+    'The edges internal to a set of nodes -- one call answers many components at once.';
