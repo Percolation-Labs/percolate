@@ -1,6 +1,6 @@
 [project]
 name = "percolate-core"
-version = "0.1.6"
+version = "0.1.7"
 description = "Percolate core: the worker, Content Server and Agent Runtime for a Postgres-native stack"
 requires-python = ">=3.11"
 readme = "README.md"
@@ -38,6 +38,12 @@ ingest = [
 # Tabular is separate because a deployment that never uploads a CSV should not
 # carry pyarrow (~120MB) and duckdb (~45MB) to find that out.
 tabular = ["pyarrow>=17", "duckdb>=1.0"]
+# `percolate sample load` reads authored YAML, and that is the whole of what it
+# needs beyond the base install. It used to be reachable only through [agent],
+# so the first thing anyone following the install guide was told to do -- load
+# the sample -- asked them to install pydantic-ai, fastapi, uvicorn and mcp to
+# parse four small documents.
+sample = ["pyyaml>=6.0"]
 agent = [
     "pydantic>=2.9",
     "pydantic-ai-slim[openai]>=0.4",

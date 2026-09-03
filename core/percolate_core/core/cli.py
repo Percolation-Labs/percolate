@@ -3,9 +3,9 @@ database and a working request.
 
 A new install has no users, no roles and no permissions, and that is correct:
 the alternative is a default administrator with a password that is in a public
-compose file. But it means every documented `curl` fails until somebody does
-three inserts and signs a token, and the second of those is not something a
-reader should have to write from a JWT spec.
+compose file. But it means every documented `curl` fails until somebody makes
+the first administrator and signs a token, and neither is something a reader
+should have to write from a JWT spec.
 
 So these two exist, and they are deliberately NOT part of any service. Nothing
 here runs on a schedule or answers a port; `bootstrap` is a thing you do once,
@@ -35,24 +35,18 @@ import typer
 app = typer.Typer(help="Bootstrap the first identity, and sign tokens.", no_args_is_help=True)
 
 
-# The resources `rbac.has_permission` is actually consulted for, which is a
-# shorter list than the schema might suggest: `agentic.may_author` checks
-# agents/update, `rbac.grant_role` checks users/admin, and the two workflow
-# asserters check workflow_runs and workflow_schedules with the action they
-# were called for. Anything else in the collection is guarded by RLS on the
-# row rather than by a permission pair.
+# The permission list used to live here, as a Python constant, and it was
+# WRONG -- ("workflow_runs", "read") and ("workflow_runs", "write") where every
+# RLS policy in the collection asks for "select". `role_permissions.action` is
+# free text compared with `=`, so none of that was an error anywhere: the rows
+# inserted, the role looked populated, and `workflow.runs_api` then returned
+# zero rows to the administrator this command had just created -- which is
+# indistinguishable from a workflow that never ran.
 #
-# This is the ADMIN role's grant, not a description of the model: finer roles
-# are ordinary inserts into rbac.role_permissions, and the point of bootstrap
-# is to stop being the only user, not to be the only shape of user.
-ADMIN_PERMISSIONS = [
-    ("users", "admin"),
-    ("agents", "update"),
-    ("workflow_runs", "read"),
-    ("workflow_runs", "write"),
-    ("workflow_schedules", "read"),
-    ("workflow_schedules", "write"),
-]
+# It is not a corrected list now, it is no list. `rbac.bootstrap_admin()` in
+# the extension holds the vocabulary next to the policies that define it, and
+# this command calls that. A copy over here could only ever be right until the
+# schema moved, and nothing would report the day it stopped being.
 
 
 def _admin_dsn(dsn: str | None) -> str:
@@ -110,11 +104,17 @@ def bootstrap(
     Idempotent: run it twice and the second run reports the same user id rather
     than failing, so it is safe in a provisioning script that reruns.
 
-    The grant is a plain INSERT and not `rbac.grant_role`, which is not an
+    The work is done by `rbac.bootstrap_admin()` in the extension rather than
+    by statements here, so the permission vocabulary lives next to the policies
+    that consult it and cannot drift away from them -- which it had.
+
+    That function is not `rbac.grant_role`, and the difference is not an
     oversight to tidy up later. `grant_role` is gated on `users/admin`, and on
     an empty database nobody holds it -- including the person bootstrapping. A
     function that granted the first admin to whoever asked first would be a
-    hole; a bootstrap step that needs owner credentials is the honest shape.
+    hole, so `bootstrap_admin` refuses once any role has been granted to
+    anyone, and a bootstrap step that needs owner credentials is the honest
+    shape.
     """
     from .identity import mint_jwt
 
@@ -125,35 +125,19 @@ def bootstrap(
         conn = await _connect(target)
         try:
             async with conn.transaction():
-                uid = await conn.fetchval(
+                existing = await conn.fetchval(
                     "select id from rbac.users where email = $1", email
                 )
-                if uid is None:
-                    uid = await conn.fetchval(
-                        "select rbac.create_user_with_password($1, $2)", email, password
-                    )
-                    typer.echo(f"user     {email} -> {uid}")
-                else:
-                    typer.echo(f"user     {email} -> {uid} (existed)")
-
-                await conn.execute(
-                    "insert into rbac.roles (name, description) values ($1, $2)"
-                    " on conflict (name) do nothing",
-                    role,
-                    "created by percolate auth bootstrap",
+                uid = await conn.fetchval(
+                    "select rbac.bootstrap_admin($1, $2, $3)", email, password, role
                 )
-                await conn.executemany(
-                    "insert into rbac.role_permissions (role, resource, action)"
-                    " values ($1, $2, $3) on conflict do nothing",
-                    [(role, r, a) for r, a in ADMIN_PERMISSIONS],
+                typer.echo(
+                    f"user     {email} -> {uid}" + (" (existed)" if existing else "")
                 )
-                await conn.execute(
-                    "insert into rbac.user_roles (user_id, role) values ($1, $2)"
-                    " on conflict do nothing",
-                    uid,
-                    role,
+                granted = await conn.fetchval(
+                    "select count(*) from rbac.role_permissions where role = $1", role
                 )
-                typer.echo(f"role     {role} with {len(ADMIN_PERMISSIONS)} permissions, granted")
+                typer.echo(f"role     {role} with {granted} permissions, granted")
         finally:
             await conn.close()
 
@@ -162,7 +146,23 @@ def bootstrap(
             typer.echo("")
             typer.echo(mint_jwt(str(uid), signing, ttl_seconds=ttl, extra=extra))
 
-    asyncio.run(_run())
+    # A second administrator is REFUSED by rbac.bootstrap_admin, and that is a
+    # designed answer rather than a crash -- so it exits like one. Unhandled,
+    # asyncpg's RaiseError reaches typer's traceback renderer and the person
+    # reading it sees thirty lines of asyncio frames with the one sentence that
+    # matters ("rbac is already bootstrapped") somewhere in the middle.
+    try:
+        asyncio.run(_run())
+    except Exception as exc:  # asyncpg.exceptions.RaiseError, without the import
+        if type(exc).__name__ != "RaiseError":
+            raise
+        # .message, not str(exc): asyncpg's __str__ already appends "HINT: ..."
+        # to the message, so formatting the hint as well printed it twice.
+        typer.secho(f"error: {getattr(exc, 'message', exc)}", fg="red", err=True)
+        hint = getattr(exc, "hint", None)
+        if hint:
+            typer.secho(f"hint:  {hint}", err=True)
+        raise typer.Exit(1) from None
 
 
 @app.command()

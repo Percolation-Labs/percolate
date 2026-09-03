@@ -252,67 +252,75 @@ jobs:
             echo "::error::P8_RELEASE_TOKEN is not set -- percolate-core ${{ needs.version.outputs.version }} is published but the chart still points at ${{ needs.version.outputs.previous }}. Bump charts/percolate/Chart.yaml on get-percolate by hand." >&2
             exit 1; }
 
-      - name: Ask for the chart bump
+      # -------------------------------------------------------------------
+      # The chart and the docs, moved rather than requested.
+      #
+      # This was an issue asking @claude to open a PR, because the bump "is not
+      # mechanical -- Chart.yaml carries two versions that move for different
+      # reasons, and the docs quote version numbers in prose". Both halves of
+      # that are now false. get-percolate holds every published number in
+      # `versions.toml`, its pages carry @@placeholders@@ instead of literals,
+      # and `ci/versions.py --set published.core=` moves the one number and
+      # rewrites everything that repeats it -- including the chart's own
+      # version, which must move because Helm refuses to republish one that
+      # already exists.
+      #
+      # A commit rather than a PR now that the diff is one line in one file,
+      # derived rather than judged. `docs.yml` refuses to build a site whose
+      # numbers disagree with `versions.toml`, and `coldstart.sh` installs the
+      # result, so the review a human was providing is done by two checks that
+      # do not get tired.
+      # -------------------------------------------------------------------
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.CHART_REPO || 'percolating-sirsh/get-percolate' }}
+          token: ${{ secrets.P8_RELEASE_TOKEN }}
+          path: get-percolate
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}   # tomllib is stdlib from 3.11
+
+      - name: Point the chart and the docs at ${{ needs.version.outputs.version }}
+        working-directory: get-percolate
+        run: |
+          python3 ci/versions.py --set published.core=${{ needs.version.outputs.version }}
+          python3 ci/versions.py --check
+          git diff --quiet && { echo "already at ${{ needs.version.outputs.version }}"; exit 0; }
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "percolate-core ${{ needs.version.outputs.version }}: chart and docs"
+          # Rebase before pushing -- the extension release writes the same file
+          # for a different key. See parser.yml's docs-version job.
+          for _ in 1 2 3; do
+            git pull --rebase --quiet && git push && exit 0
+          done
+          echo "::error::could not push the version bump after three rebases" >&2
+          exit 1
+
+      # p8-subsystems still gets an issue, and deliberately: what is stale over
+      # there is `dev/docker-compose.yml`, the harness its own test suite runs
+      # against, and PACKAGING.md's prose. Which version the DEV stack pins is a
+      # choice somebody makes, not a number derived from a release -- it pins
+      # what the tests were last run against on purpose.
+      - name: Ask p8-subsystems to catch up
         env:
           GH_TOKEN: ${{ secrets.P8_RELEASE_TOKEN }}
-          REPO: ${{ vars.CHART_REPO || 'percolating-sirsh/get-percolate' }}
           V: ${{ needs.version.outputs.version }}
           PREV: ${{ needs.version.outputs.previous }}
           RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          # Written to a file rather than passed inline: a heredoc nested in a
-          # $( ) substitution parses differently across bash versions, and an
-          # apostrophe in the prose was enough to break it.
-          cat > issue.md <<EOF
-          @claude percolate-core **$V** is published -- PyPI and Docker Hub are
-          done. The chart and the docs still say \`$PREV\`. Please open a PR
-          that brings them into step.
-
-          - \`charts/percolate/Chart.yaml\` -- set \`appVersion: "$V"\`.
-            \`values.yaml\` leaves \`core.image.tag\` empty and falls back to
-            \`.Chart.AppVersion\`, so this one line is what actually moves the
-            deployed image.
-          - \`charts/percolate/Chart.yaml\` -- bump \`version\` too (the
-            chart's own; a patch is right if only appVersion moved). It has to
-            move: \`docs.yml\` runs \`helm repo index --merge\`, and
-            republishing an existing chart version collides rather than
-            publishing.
-          - \`docs/\` and \`README.md\` -- any prose, compose file or install
-            snippet quoting \`$PREV\`. A published page telling someone to pull
-            a tag that does not exist is the first artifact a new user meets, so
-            it is the one that must not be stale.
-
-          Not part of this bump, but worth confirming: \`percolate-postgres\` is
-          tagged \`19\` after the Postgres major rather than this version, so it
-          does not move here. If the extension SQL changed this cycle it needs a
-          separate \`images.yml\` run to repush \`:19\`.
-
-          Released by [\`release.yml\`]($RUN).
-          EOF
-          gh issue create --repo "$REPO" \
-            --title "Release $V: bump the chart and the docs" \
-            --body-file issue.md
-
-          # p8-subsystems quotes this version too -- dev/docker-compose.yml
-          # pins the image and PACKAGING.md documents it. It went stale once
-          # already (compose said 0.1.2 while 0.1.3 was current), which is a
-          # user running `docker compose up` on a version nobody meant to ship.
           cat > specs-issue.md <<EOF
-          @claude percolate-core **$V** is published. This repository quotes
-          that version in two places and both still say \`$PREV\`:
+          @claude percolate-core **$V** is published. get-percolate moved itself
+          (chart, compose and docs, by \`ci/versions.py\`). This repository
+          quotes the version in two places that are a judgement call rather than
+          a derivation, so they are asked for rather than pushed:
 
-          - \`dev/docker-compose.yml\` -- the \`worker\` and \`content\`
-            services pin \`percolationlabs/percolate-core:$PREV\`. This is the
-            file INSTALL.md calls "the install", so a stale pin here is what a
-            new user actually runs.
-          - \`PACKAGING.md\` -- the summary table, the compose example and the
-            "Current version" line.
-
-          Please open a PR moving both to $V. Nothing else in this repo tracks
-          the core version; the extension has its own, and it does not move here.
+          - \`dev/docker-compose.yml\` -- the harness \`dev/tests/run.sh\` runs
+            against. It pins \`$PREV\`. Moving it means the suite is exercising
+            $V, which is usually right and is still a decision.
+          - \`PACKAGING.md\` -- the summary table and the "Current version" line.
 
           Released by [\`release.yml\`]($RUN).
           EOF
           gh issue create --repo "${{ vars.SPECS_REPO || 'percolating-sirsh/p8-subsystems' }}" \
-            --title "percolate-core $V: update the compose pin and PACKAGING" \
+            --title "percolate-core $V: the dev pin and PACKAGING" \
             --body-file specs-issue.md

@@ -44,7 +44,7 @@ def _yaml() -> Any:
         import yaml
     except ModuleNotFoundError as err:  # pragma: no cover - depends on install
         raise SampleError(
-            "reading a sample needs PyYAML: pip install 'percolate-core[agent]' "
+            "reading a sample needs PyYAML: pip install 'percolate-core[sample]' "
             "(the published image already has it)"
         ) from err
     return yaml
@@ -77,7 +77,52 @@ def read_manifest(root: Path) -> dict[str, Any]:
             )
         if not (root / target).exists():
             raise SampleError(f"{path}: step {i} names {target}, which does not exist")
+        if kind == "plugin":
+            _assert_can_translate_agents(root / target)
     return doc
+
+
+def _needs_agent_translation(entry: dict[str, Any]) -> bool:
+    """Whether `_agent_row` would have to reach for the agent extra.
+
+    Deliberately the same three tests `_agent_row` makes, in the same order,
+    because a pre-flight that disagrees with the thing it is checking for is
+    worse than no pre-flight: it either blocks a load that would have worked or
+    passes one that will not.
+    """
+    if "system_prompt" in entry or "structured_output_schema" in entry:
+        return False
+    return bool({"description", "properties"} & entry.keys())
+
+
+def _assert_can_translate_agents(plugin_path: Path) -> None:
+    """Fail BEFORE the first write if the translation cannot happen.
+
+    This check used to live where the translation does -- inside `_agent_row`,
+    a third of the way through the load -- so `sample load` on an install
+    without the agent extra wrote the schema, the entities, the graph and its
+    edges, and only then discovered it could not read the agents. That is
+    precisely the "partially loaded" state this function's docstring says is
+    the one nothing handles well, produced by the loader itself.
+    """
+    try:
+        doc = _yaml().safe_load(plugin_path.read_text()) or {}
+    except Exception as err:
+        raise SampleError(f"{plugin_path}: cannot be parsed as YAML ({err})") from err
+    if not any(
+        _needs_agent_translation(a)
+        for a in (doc.get("agents") or [])
+        if isinstance(a, dict)
+    ):
+        return
+    try:
+        from ..agentic import authoring  # noqa: F401
+    except ModuleNotFoundError as err:
+        raise SampleError(
+            f"{plugin_path} writes agents as JSON Schema documents, which needs "
+            "the agent extra to translate: pip install 'percolate-core[agent]' "
+            "(the published image already has it). Nothing has been written."
+        ) from err
 
 
 def missing_credentials(doc: dict[str, Any], env: dict[str, str]) -> list[str]:
