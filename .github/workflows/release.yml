@@ -20,6 +20,31 @@
 # no signal at all.
 #
 # ---------------------------------------------------------------------------
+# THE ORDER, WHICH IS THE WHOLE DESIGN
+#
+# A release touches four systems and none of them share a transaction, so the
+# property to aim for is not atomicity -- it is that every stop is a state the
+# next run can finish from, and that nothing claims a version exists until it
+# does.
+#
+#   preflight   can refuse; changes nothing
+#   bump        a commit on main, UNTAGGED -- which check-version.sh already
+#               calls "unreleased" and passes
+#   build       the compilers, the assets, the image; the irreversible part
+#   TAG         last, and only now
+#
+# The tag therefore means PUBLISHED, not ATTEMPTED. It used to be third: a build
+# that failed left `v<version>` on origin for something nobody could download,
+# and the "refuse to re-release" check then blocked the retry, so recovering
+# meant deleting a tag by hand. Now a failed run leaves a bumped, untagged tree,
+# and running it again publishes THAT version rather than burning a new number.
+#
+# `publish: false` is a real dry run rather than a skip: it dispatches the same
+# build with an empty version, so the compilers and the image build actually run
+# and nothing is released, pushed or tagged. A dry run that skipped the dispatch
+# was exercising the one part that never fails.
+#
+# ---------------------------------------------------------------------------
 # Configured once:
 #   gh secret set P8_RELEASE_TOKEN    # PAT: actions+issues write on
 #                                     # get-percolate, issues write on
@@ -36,9 +61,19 @@ on:
         options: [minor, patch, major]
         default: minor
       publish:
-        description: publish for real (off = bump and build, change nothing)
+        description: >-
+          publish for real. Off is a real dry run: the compilers and the image
+          build actually run on get-percolate, and nothing is released, pushed
+          or tagged.
         type: boolean
         default: true
+      force_bump:
+        description: >-
+          move the number even though the tree already carries an unreleased
+          one. Off (the default) retries the unfinished version instead, which
+          is what converges after a failed release.
+        type: boolean
+        default: false
 
 concurrency:
   group: release
@@ -56,62 +91,118 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
 
+      # ---------------------------------------------------------------
+      # PREFLIGHT -- everything that can refuse, before anything mutates.
+      #
+      # The order here used to be bump, commit, TAG, push, then build. A build
+      # that failed left `v<version>` on origin for something nobody could
+      # download, and the "refuse to re-release" check then blocked the retry,
+      # so recovering meant deleting a tag by hand. The tag now means PUBLISHED
+      # rather than ATTEMPTED, which is what dev/check-version.sh already
+      # assumed, and it is the last thing to move rather than the first.
+      # ---------------------------------------------------------------
+      - name: Preflight
+        id: pre
+        env:
+          GH_TOKEN: ${{ secrets.P8_RELEASE_TOKEN }}
+          REPO: ${{ vars.CHART_REPO || 'percolating-sirsh/get-percolate' }}
+        run: |
+          # Checked HERE, not after the commit. Discovering a missing token
+          # three steps in is how the tree ends up bumped for a release that
+          # never happened.
+          [ -n "$GH_TOKEN" ] || {
+            echo "::error::P8_RELEASE_TOKEN is not set -- nothing has been changed. Set it and run again." >&2
+            exit 1; }
+          gh api "repos/$REPO" --jq .full_name >/dev/null || {
+            echo "::error::P8_RELEASE_TOKEN cannot reach $REPO -- nothing has been changed." >&2
+            exit 1; }
+
+          CUR=$(sed -n "s/^default_version = '\(.*\)'/\1/p" extension/percolate/percolate.control)
+          # An unreleased version in the tree is a release that did not finish,
+          # not a reason to burn another number. Retrying it is what converges;
+          # bumping again would leave a hole in the sequence for every failure.
+          if git rev-parse -q --verify "refs/tags/v$CUR" >/dev/null; then
+            echo "mode=bump" >> "$GITHUB_OUTPUT"
+            echo "v$CUR is published; this run will bump ${{ inputs.bump }}"
+          else
+            echo "mode=retry" >> "$GITHUB_OUTPUT"
+            echo "version=$CUR" >> "$GITHUB_OUTPUT"
+            echo "::notice::$CUR is in the tree and untagged -- publishing THAT rather than bumping. Set force_bump to move the number instead."
+          fi
+
       - name: Bump the extension version
         id: bump
+        if: steps.pre.outputs.mode == 'bump' || inputs.force_bump
         # Four files -- two control files, Cargo.toml, and the generated script
         # whose NAME is the version. The script refuses to bump if the two
         # extensions have drifted apart, rather than silently reuniting them.
         run: python .github/scripts/bump_extension_version.py "${{ inputs.bump }}"
 
-      - name: Refuse to re-release
+      - name: The version this run publishes
+        id: v
         run: |
-          v="${{ steps.bump.outputs.version }}"
-          if git rev-parse -q --verify "refs/tags/v$v" >/dev/null; then
-            echo "::error::tag v$v already exists" >&2; exit 1
-          fi
+          V="${{ steps.bump.outputs.version || steps.pre.outputs.version }}"
+          [ -n "$V" ] || { echo "::error::no version resolved" >&2; exit 1; }
+          git rev-parse -q --verify "refs/tags/v$V" >/dev/null \
+            && { echo "::error::v$V is already published" >&2; exit 1; }
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "publishing $V"
 
-      - name: The generated SQL must match the specs it came from
-        # build-sql.py just wrote it, so this can only fail if the generator
-        # is not deterministic -- which is worth knowing before publishing a
-        # schema that a database will run.
+      - name: The generated artifacts must match the specs they came from
+        # Covers the upgrade scripts too: a specs edit regenerated into
+        # percolate--<v>.sql but not into percolate--<old>--<v>.sql would ship
+        # existing databases an upgrade to the wrong schema.
         run: python3 extension/percolate/build-sql.py --check
 
-      - name: Commit and tag
-        if: inputs.publish
+      # The bump lands on main WITHOUT a tag. That is a state the collection
+      # already understands -- dev/check-version.sh calls it "unreleased" and
+      # passes -- so a failure after this point leaves the tree in a shape that
+      # is honest and that the next run picks up and finishes.
+      - name: Commit the bump
+        if: inputs.publish && steps.bump.outcome == 'success'
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A extension/
-          git commit -m "extension ${{ steps.bump.outputs.version }}: release"
-          git tag -a "v${{ steps.bump.outputs.version }}" \
-                  -m "percolate extension ${{ steps.bump.outputs.version }}"
-          git push origin HEAD:"${{ github.ref_name }}" --follow-tags
+          git diff --cached --quiet || git commit -m "extension ${{ steps.v.outputs.version }}: bump"
+          git push origin HEAD:"${{ github.ref_name }}"
 
-      # -------------------------------------------------------------------
-      # Hand off to get-percolate, which has the native runners and the public
-      # releases -- then WAIT. `gh workflow run` returns as soon as the
-      # dispatch is accepted, so without the watch below this job would go
-      # green while the parsers were still compiling and could still fail.
-      # -------------------------------------------------------------------
-      - name: Build and publish, on get-percolate
-        if: inputs.publish
+      - name: The commit being built
+        id: sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      # ---------------------------------------------------------------
+      # THE ONLY IRREVERSIBLE PART, AND IT RUNS BEFORE THE TAG.
+      #
+      # Dispatched against the SHA rather than a tag, because there is no tag
+      # yet -- that is the point. On `publish: false` the same dispatch goes out
+      # with an EMPTY version, which parser.yml treats as build-only: the real
+      # compilers, the real image build, no release and no pushed tag. A dry run
+      # that skipped the dispatch was testing the one part that never fails.
+      # ---------------------------------------------------------------
+      - name: Build on get-percolate (and publish, unless this is a dry run)
+        id: build
         env:
           GH_TOKEN: ${{ secrets.P8_RELEASE_TOKEN }}
           REPO: ${{ vars.CHART_REPO || 'percolating-sirsh/get-percolate' }}
-          V: ${{ steps.bump.outputs.version }}
+          V: ${{ steps.v.outputs.version }}
+          SHA: ${{ steps.sha.outputs.sha }}
         run: |
-          [ -n "$GH_TOKEN" ] || {
-            echo "::error::P8_RELEASE_TOKEN is not set -- the version is bumped and tagged but nothing is published. Run parser.yml on $REPO by hand with version=$V." >&2
-            exit 1; }
-
+          if [ "${{ inputs.publish }}" = "true" ]; then
+            DISPATCH_V=$V; PUSH=true; WANT="extension $V"
+          else
+            # parser.yml names its run after `version || ref`, so a build-only
+            # run is found by the SHA it was given.
+            DISPATCH_V=""; PUSH=false; WANT="extension $SHA"
+          fi
           gh workflow run parser.yml --repo "$REPO" \
-            -f ref="v$V" -f version="$V" -f push_image=true
+            -f ref="$SHA" -f version="$DISPATCH_V" -f push_image="$PUSH"
 
           # `gh workflow run` does not return the run id -- there isn't one yet
           # -- so the run is found by NAME. parser.yml sets
-          # `run-name: extension <version>`, which is unique to this release;
-          # matching it cannot pick up a different run the way "newest run
-          # created after I dispatched" could, and that mattered because the
+          # `run-name: extension <version or ref>`, which is unique to this
+          # dispatch; matching it cannot pick up a different run the way "newest
+          # run created after I dispatched" could, and that mattered because the
           # consequence was watching one release and reporting its result as
           # another's.
           id=""
@@ -119,21 +210,48 @@ jobs:
             sleep 5
             id=$(gh run list --repo "$REPO" --workflow parser.yml \
                    --limit 20 --json databaseId,displayTitle \
-                   --jq "[.[] | select(.displayTitle == \"extension $V\")][0].databaseId // empty")
+                   --jq "[.[] | select(.displayTitle == \"$WANT\")][0].databaseId // empty")
             [ -n "$id" ] && break
           done
-          [ -n "$id" ] && echo "run=$id" || {
-            echo "::error::dispatched parser.yml on $REPO but no run appeared within 150s -- check $REPO/actions" >&2
+          [ -n "$id" ] || {
+            echo "::error::dispatched parser.yml on $REPO but no run appeared within 150s -- nothing is tagged, so running this again resumes where it stopped. Check $REPO/actions" >&2
             exit 1; }
 
           echo "watching https://github.com/$REPO/actions/runs/$id"
           gh run watch "$id" --repo "$REPO" --exit-status
 
+      # ---------------------------------------------------------------
+      # THE COMMIT POINT. Everything above can fail and leave a tree that the
+      # next run finishes; past here the version is published and the tag says
+      # so. Nothing else in the collection treats a version as spent until this
+      # exists -- dev/check-version.sh, build-sql.py's upgrade scripts and
+      # suite.yml's upgrade job all read the tags.
+      # ---------------------------------------------------------------
+      - name: Tag it, now that it exists
+        if: inputs.publish
+        run: |
+          V=${{ steps.v.outputs.version }}
+          git tag -a "v$V" -m "percolate extension $V" ${{ steps.sha.outputs.sha }}
+          git push origin "v$V"
+          echo "::notice::v$V tagged -- the assets and image it names are already published"
+
       - name: Summary
         run: |
+          V=${{ steps.v.outputs.version }}
           {
-            echo "### percolate extension ${{ steps.bump.outputs.previous }} -> ${{ steps.bump.outputs.version }}"
-            [ "${{ inputs.publish }}" = "true" ] \
-              && echo "Assets and image published from get-percolate, and its \`versions.toml\` moved with them -- the docs quote no version literals, so there is nothing left to chase." \
-              || echo "_dry run: nothing committed, nothing published_"
+            if [ "${{ inputs.publish }}" = "true" ]; then
+              echo "### percolate extension $V published"
+              echo ""
+              echo "Assets and image built from \`${{ steps.sha.outputs.sha }}\`, then tagged \`v$V\` --"
+              echo "in that order, so a failure anywhere above leaves an untagged bump the next run finishes"
+              echo "rather than a tag for something nobody can download."
+              echo ""
+              echo "get-percolate's \`versions.toml\` moved with it, and its pages carry no version literals,"
+              echo "so there is nothing left to chase."
+            else
+              echo "### dry run: $V built, nothing published"
+              echo ""
+              echo "The real compilers and the real image build ran on get-percolate against"
+              echo "\`${{ steps.sha.outputs.sha }}\`. No release, no image push, no tag, no commit."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
