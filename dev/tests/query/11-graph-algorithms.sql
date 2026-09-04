@@ -657,4 +657,69 @@ end $$;
 
 reset role;
 
+set local role app_owner;
+
+-- ---------------------------------------------------------------------
+-- AN ANSWER MARKED `exact` MUST NOT BE WRONG.
+--
+-- The label index stores distances as a BYTE, so a root's BFS stops at 254
+-- hops. Both of the other ceilings on that build -- the time budget and the
+-- entry count -- say so by clearing `complete`, which is what
+-- p8_graph_distance reports as `exact`. The depth cap said nothing, so a pair
+-- further apart than the cap answered "no distance, and that is proven":
+--
+--     a 300-node path, n1 -> n300 (299 hops)
+--       -> {"distance": null, "exact": true}
+--
+-- The two nodes are plainly joined, along the only path there is. `exact` is
+-- the field that separates a proof from an upper bound, so the one thing it
+-- must never describe is a wrong answer -- and a caller who trusts it has no
+-- other way to find out.
+--
+-- Asserted as the invariant rather than as the number: EITHER the distance is
+-- right, OR the index says it is not exact. That holds for a complete index, a
+-- budget-truncated one and an over-deep one alike, so it does not have to be
+-- rewritten the next time a ceiling is added.
+-- ---------------------------------------------------------------------
+do $$
+declare v_ids uuid[]; v jsonb; n int := 300;
+begin
+    insert into aiq.relation_types (relation, src_type, dst_type)
+      values ('chain_rel','chain','chain') on conflict do nothing;
+    insert into aiq.nodes (entity_type, entity_id, summary)
+    select 'chain', gen_random_uuid(), 'n'||lpad(i::text,4,'0') from generate_series(1,n) i;
+    select array_agg(id order by summary) into v_ids
+      from aiq.nodes where entity_type='chain';
+    insert into aiq.edges (src_id, dst_id, relation, weight)
+    select v_ids[i], v_ids[i+1], 'chain_rel', 1.0 from generate_series(1, n-1) i;
+
+    perform p8_graph_snapshot(true);
+    perform p8_graph_labels_build(60000, 20000000);
+
+    -- Inside the cap the index knows the answer, and it is 199 hops.
+    v := p8_graph_distance(v_ids[1], v_ids[200]);
+    if (v->>'exact')::boolean and (v->>'distance')::int is distinct from 199 then
+        raise exception 'distance n1->n200 is %, marked exact, and the path is 199 hops',
+            coalesce(v->>'distance','null');
+    end if;
+
+    -- Past it the index cannot answer, and must not pretend it did.
+    v := p8_graph_distance(v_ids[1], v_ids[300]);
+    if (v->>'exact')::boolean and v->>'distance' is null then
+        raise exception
+            'p8_graph_distance reported no distance between two nodes joined by a '
+            '299-hop path AND marked the answer exact. The label index stops at 254 '
+            'hops; stopping at a ceiling has to clear `complete`, the way the budget '
+            'and entry ceilings already do.';
+    end if;
+    if (v->>'exact')::boolean and (v->>'distance')::int is distinct from 299 then
+        raise exception 'distance n1->n300 is %, marked exact, and the path is 299 hops',
+            coalesce(v->>'distance','null');
+    end if;
+
+    raise notice 'query/11: a distance marked exact is never wrong -- the depth ceiling '
+                 'clears `complete` like the other two';
+end $$;
+
+
 rollback;

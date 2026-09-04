@@ -2219,6 +2219,35 @@ fn build_labels(g: &Snapshot, b: &mut Budget, max_entries: usize) -> Labels {
             }
             frontier = nextf;
         }
+        // STOPPING AT THE DEPTH CAP IS AN INCOMPLETE INDEX, NOT A FINISHED ONE.
+        //
+        // Distances are u8, so a root's BFS stops at 254 hops. The two ceilings
+        // above -- the budget and the entry count -- both say so by setting
+        // `complete = false`; this one said nothing, and `complete` is exactly
+        // what p8_graph_distance reports as `exact`.
+        //
+        // So a pair further apart than the cap answered `{"distance": null,
+        // "exact": true}` -- no common landmark, rendered as no path, and
+        // marked as a proven answer. MEASURED on a 300-node path:
+        //
+        //     n1 -> n200 (199 hops)  -> distance 199, exact true   (right)
+        //     n1 -> n300 (299 hops)  -> distance null, exact true   (wrong,
+        //                                and the two nodes are plainly joined)
+        //
+        // `exact` exists to separate a proof from an upper bound, so the one
+        // state it must never describe is a wrong answer. A graph with a
+        // diameter past 254 is unusual -- a lineage or document chain is where
+        // it happens -- and being unusual is what makes reporting it matter,
+        // because nobody is going to notice it any other way.
+        //
+        // The cap itself stays: distances are a byte because the label set is
+        // what decides whether this index is usable at all (see the entry
+        // ceiling above), and widening them to answer a rare case would cost
+        // memory on every common one. Refusing to claim exactness is the honest
+        // form of the same limit.
+        if !frontier.is_empty() {
+            complete = false;
+        }
         for &v in touched.iter() {
             dist[v as usize] = u8::MAX;
         }
