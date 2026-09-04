@@ -53,12 +53,27 @@ docker exec -i "$CONTAINER" psql -U p8 -d "$REF_DB" -v ON_ERROR_STOP=1 -q \
 # prosecdef and proconfig are in here deliberately: `SECURITY DEFINER` silently
 # reverting to INVOKER is a privilege change that a body-only diff would miss,
 # and it is exactly what rbac.has_permission's recursion turned on.
+#
+# EVERY SCHEMA THE EXTENSION CREATES, and `agentic` was missing from this list
+# for its whole life -- sixteen shipped functions, the entire conversation
+# plane, invisible to the one check whose job is noticing that a body has
+# fallen behind its spec. It is the newest of the five and the list was written
+# before it existed, which is the ordinary way a hand-maintained enumeration
+# goes wrong. Checked against the source of truth with:
+#
+#     grep -o '^create schema if not exists [a-z_]*' \
+#          extension/percolate/sql/percolate--*.sql | sort -u
+#
+# `tradecraft` and `extract` are NOT shipped (build-sql.py's NOT_SHIPPED) and
+# stay in deliberately: a dev database that loaded one by hand should be told
+# so, and the reference database never has them, so they can only ever surface
+# as ORPHAN -- which is the report those files want.
 SNAP="select n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')'
              ||E'\t'||md5(p.prosrc)
              ||E'\t'||p.prosecdef
              ||E'\t'||coalesce(array_to_string(p.proconfig,','),'-')
       from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-      where n.nspname in ('workflow','rbac','aiq','content','tradecraft','extract')
+      where n.nspname in ('workflow','rbac','aiq','content','agentic','tradecraft','extract')
       order by 1;"
 
 ref=$(q "$REF_DB" "$SNAP")
