@@ -110,7 +110,7 @@ jobs:
         id: pre
         env:
           GH_TOKEN: ${{ secrets.P8_RELEASE_TOKEN }}
-          REPO: ${{ vars.CHART_REPO || 'percolating-sirsh/get-percolate' }}
+          REPO: ${{ vars.CHART_REPO || 'Percolation-Labs/get-percolate' }}
         run: |
           # Checked HERE, not after the commit. Discovering a missing token
           # three steps in is how the tree ends up bumped for a release that
@@ -189,7 +189,7 @@ jobs:
         id: build
         env:
           GH_TOKEN: ${{ secrets.P8_RELEASE_TOKEN }}
-          REPO: ${{ vars.CHART_REPO || 'percolating-sirsh/get-percolate' }}
+          REPO: ${{ vars.CHART_REPO || 'Percolation-Labs/get-percolate' }}
           V: ${{ steps.v.outputs.version }}
           SHA: ${{ steps.sha.outputs.sha }}
         run: |
