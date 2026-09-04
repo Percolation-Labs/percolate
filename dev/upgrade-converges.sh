@@ -151,6 +151,32 @@ union all
 select 'acl '||table_schema||'.'||table_name||' '||grantee||' '||privilege_type
   from information_schema.role_table_grants
  where table_schema in ('rbac','workflow','aiq','content','agentic')
+union all
+-- TRIGGERS, added after this script reported 2133 objects unchanged across a
+-- commit that ADDED ONE. Everything above describes tables and the functions
+-- beside them; nothing described what is WIRED to them, and a trigger is where
+-- this collection has found two of its worst bugs -- an autorun that fired on
+-- the transition nobody took, and a timer whose delay was stamped by a trigger
+-- that could not see the insert. A convergence check blind to them is blind to
+-- the class most worth checking.
+--
+-- tgtype is a bitmask and is rendered rather than compared raw, so a diff says
+-- BEFORE/UPD instead of 19.
+select 'trg '||n.nspname||'.'||c.relname||'.'||t.tgname
+       ||' '||(case when t.tgtype & 1 = 1 then 'ROW' else 'STMT' end)
+       ||' '||(case when t.tgtype & 2 > 0 then 'BEFORE'
+                    when t.tgtype & 64 > 0 then 'INSTEAD' else 'AFTER' end)
+       ||' '||concat_ws('/', case when t.tgtype & 4 > 0 then 'INS' end,
+                             case when t.tgtype & 8 > 0 then 'DEL' end,
+                             case when t.tgtype & 16 > 0 then 'UPD' end)
+       ||' -> '||p.proname
+       ||' enabled='||t.tgenabled::text
+  from pg_trigger t
+  join pg_class c on c.oid = t.tgrelid
+  join pg_namespace n on n.oid = c.relnamespace
+  join pg_proc p on p.oid = t.tgfoid
+ where not t.tgisinternal
+   and n.nspname in ('rbac','workflow','aiq','content','agentic')
 order by 1;"
 
 fresh=$(mktemp); upg=$(mktemp)

@@ -76,6 +76,36 @@ create table if not exists rbac.users (
 -- nothing on the install that just created it with this default.
 alter table rbac.users alter column status set default 'pending_verification';
 
+-- `updated_at` MAINTAINED, NOT HAND-SET. It was hand-set, in exactly one
+-- place -- `set_password` writes `updated_at = now()` alongside the hash -- and
+-- nowhere else, so the column on the most security-relevant table in the
+-- collection did not mean "when this row last changed". It meant "when this
+-- password last changed", which is a different fact under a name that promises
+-- the first one.
+--
+-- Measured before this trigger existed:
+--
+--     update rbac.users set status = 'disabled' -> updated_at moved: false
+--     update rbac.users set email  = ...        -> updated_at moved: false
+--
+-- Disabling an account is the documented way to stop one (§8, and
+-- verify_api_key/refresh_session now enforce it), so the single most
+-- interesting change a row can undergo was the one that left no timestamp.
+--
+-- This is the ground rule workflow-engine/schema.sql states for exactly this
+-- column on `workflow.tasks` -- "maintained by public.touch_updated_at(), not
+-- hand-set at each call site" -- and rbac was the schema still doing it the
+-- other way. Every other table in the collection that carries `updated_at`
+-- already has this trigger; the two that do not are this one and
+-- `workflow.rate_limits`, whose `updated_at` is the token bucket's refill
+-- clock rather than a system field and would be actively broken by a touch.
+--
+-- set_password's own assignment is left alone: it now writes the same value
+-- the trigger would, so it is redundant rather than wrong, and removing it
+-- would make the diff about something other than this.
+create or replace trigger trg_rbac_users_touch before update on rbac.users
+    for each row execute function public.touch_updated_at();
+
 -- Password verification pushed to pgcrypto -- no password ever leaves
 -- Postgres in plaintext, and hashing cost (bcrypt work factor) is
 -- tunable independent of the app layer.

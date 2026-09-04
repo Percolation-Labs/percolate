@@ -386,4 +386,47 @@ begin
                  'error from inside whichever policy or trigger asked';
 end $$;
 
+-- ---------------------------------------------------------------------
+-- 7. `rbac.users.updated_at` MEANS WHAT ITS NAME SAYS.
+--
+-- It was hand-set in exactly one place -- set_password writes it beside the
+-- hash -- and nowhere else, so on the most security-relevant table in the
+-- collection the column did not mean "when this row last changed". It meant
+-- "when this password last changed", under a name promising the first.
+-- Disabling an account, which §8 documents as the way to stop one, left no
+-- timestamp at all.
+--
+-- ASSERTED BY BACKDATING, because `now()` is TRANSACTION time: two updates in
+-- one transaction produce the same value whether or not anything maintains the
+-- column, so a test that compares before and after inside one transaction
+-- cannot tell a working trigger from a missing one. It reads as a pass either
+-- way, which is how this went unnoticed. Backdating and watching the value
+-- come back is the only form of the question that has an answer here.
+-- ---------------------------------------------------------------------
+do $$
+declare v_u uuid; t timestamptz;
+begin
+    v_u := rbac.create_user_with_password('touch-probe@example.com', 'a long passphrase');
+    update rbac.users set updated_at = timestamptz '2000-01-01' where id = v_u;
+
+    update rbac.users set status = 'disabled' where id = v_u;
+    select updated_at into t from rbac.users where id = v_u;
+    if t = timestamptz '2000-01-01' then
+        raise exception
+            'disabling an account left updated_at at %, so the column tracks password '
+            'changes rather than row changes -- and disabling is the single most '
+            'interesting change a user row undergoes', t;
+    end if;
+
+    update rbac.users set updated_at = timestamptz '2000-01-01' where id = v_u;
+    update rbac.users set email = 'touch-probe-renamed@example.com' where id = v_u;
+    select updated_at into t from rbac.users where id = v_u;
+    if t = timestamptz '2000-01-01' then
+        raise exception 'changing an email left updated_at at %', t;
+    end if;
+
+    raise notice 'rbac/03: updated_at is maintained by the trigger, so it moves for '
+                 'every change to the row and not only for a password';
+end $$;
+
 rollback;
