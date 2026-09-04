@@ -3,7 +3,7 @@
 # There were 41 of them -- 20 pure ones in `plan_graph.rs` and 21 `#[pg_test]`s
 # in `lib.rs` -- and NOTHING IN EITHER REPOSITORY EXECUTED THEM. (43 now: two
 # more `#[pg_test]`s tie the mode list to the error message that offers it and
-# to the grammar that publishes it, after the two had drifted apart.) `suite.yml`
+# to the grammar that publishes it, after the two had drifted apart.) `check.yml`
 # says so in as many words ("a change to the Rust is NOT tested here") and is
 # honest about why: it runs the published `.so` and a pgrx build is minutes.
 # get-percolate's `parser.yml` compiles the crate but only ever runs `cargo
@@ -18,10 +18,10 @@
 # to the product and exactly the kind of rot an unrun test collects -- which is
 # the argument for this file rather than against those tests.
 #
-# WHY IT IS A SEPARATE WORKFLOW. `suite.yml`'s whole affordability argument is
+# WHY IT IS A SEPARATE WORKFLOW. `check.yml`'s whole affordability argument is
 # that it does almost nothing: 26 seconds, no compiler. This job compiles a
 # pgrx crate and initdbs a PostgreSQL, which is minutes. Putting it in
-# `suite.yml` would make every Markdown-adjacent push pay for a Rust build.
+# `check.yml` would make every Markdown-adjacent push pay for a Rust build.
 # Scoped to the paths that can change the answer instead, so it runs when the
 # parser moves and never otherwise.
 #

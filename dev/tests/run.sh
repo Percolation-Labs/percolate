@@ -13,7 +13,7 @@
 # to one database by `cron.database_name`, so it cannot pass against the
 # scratch database `dev/reload.sh` builds.
 #
-# That made the two commands this file's header, `suite.yml`'s "if billing runs
+# That made the two commands this file's header, `check.yml`'s "if billing runs
 # out" fallback and `githooks/pre-push` all name into a run that ALWAYS ends
 # red, and the hook had grown a grep to filter the known failure back out --
 # which is a hook with a known red in it wearing a disguise. A skip that says
@@ -160,7 +160,7 @@ if [ "$skipped" -ne 0 ]; then
     # guarantee nobody checked, and the run that hides one is the run that
     # reports green for something it never looked at.
     echo "$skipped file(s) skipped for a missing extension:$skipped_names"
-    echo "  (REQUIRE_ALL=1 makes this a failure -- .github/workflows/suite.yml sets it)"
+    echo "  (REQUIRE_ALL=1 makes this a failure -- dev/check.sh sets it where the database has pg_cron)"
 fi
 if [ "$failed" -ne 0 ]; then
     echo "FAILED -- a guarantee the specs make is no longer held."

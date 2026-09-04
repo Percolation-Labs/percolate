@@ -18,7 +18,7 @@
 # It is deliberately NOT an `ALTER EXTENSION UPDATE`, and the reason is no
 # longer the one this comment used to give. It said "pre-1.0 there is no
 # in-place upgrade path (PACKAGING.md)"; PACKAGING.md §"in-place upgrade" now
-# opens by retracting exactly that, and `.github/workflows/suite.yml` upgrades
+# opens by retracting exactly that, and `.github/workflows/check.yml` upgrades
 # a real database with real data from the last release on every run.
 #
 # What survives is the argument for the INNER LOOP specifically: an update

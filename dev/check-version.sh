@@ -11,7 +11,7 @@
 # tag, or the number has to move before anything else is published under it.
 #
 # WHAT "ANYTHING ELSE" MEANS, narrowed after this ran red for the wrong reason.
-# It used to refuse ANY commit past the tag, and `.github/workflows/specs.yml`
+# It used to refuse ANY commit past the tag, and `.github/workflows/check.yml`
 # runs it on every push and every PR -- so the moment a release tagged v<x> and
 # one more commit landed, this job went red and STAYED red for the whole
 # inter-release period, which is nearly all of the time. Only `release.yml`

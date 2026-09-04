@@ -6,7 +6,7 @@ services:
     # install script to run.
     #
     # `:19` is MUTABLE and that is the choice here, where `.github/workflows/
-    # suite.yml` pins to `:19-<published>` for the opposite reason. The
+    # check.yml` pins to `:19-<published>` for the opposite reason. The
     # difference is what each is for: CI is a measurement and must not have the
     # thing under it move mid-run, while this stack is a workbench whose job is
     # to be current -- and `dev/reload.sh` overwrites the extension SQL from

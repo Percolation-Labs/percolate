@@ -336,7 +336,7 @@ def _psql(psql: str, sql: str) -> list[list[str]]:
 def catalog_vocabs(psql: str) -> tuple[list[Vocab], list[tuple[str, str]]]:
     """Read what a live database PUBLISHES as its contract.
 
-    Kept optional rather than required because `specs.yml` is pure Python over
+    Kept optional rather than required because the tree half of `check.yml` is pure Python over
     the tree and is the gate that runs on every push; needing a database would
     move this check into the expensive job, where it would run rarely. But the
     tree and a deployed database are not the same document -- three of four

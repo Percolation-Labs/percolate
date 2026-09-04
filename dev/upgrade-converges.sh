@@ -51,7 +51,7 @@ VERSION=$(sed -n "s/^default_version = '\(.*\)'/\1/p" extension/percolate/percol
 
 # The release a user upgrading today would be coming from: the newest tag below
 # this tree's version. Read from the tags rather than written down, same source
-# build-sql.py's upgrade scripts and suite.yml's upgrade job both use.
+# build-sql.py's upgrade scripts and check.yml's upgrade gates both use.
 FROM="${FROM:-$(git tag --list 'v*' | sed 's/^v//' \
     | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | grep -v "^$VERSION$" \
     | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)}"

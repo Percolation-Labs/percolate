@@ -1,0 +1,141 @@
+# EVERY GATE, AS ONE WORKFLOW THAT RUNS ONE SCRIPT.
+#
+# This replaced `specs.yml` and `suite.yml`, which between them held thirteen
+# named steps restating what `dev/check.sh` already does. The restatement was
+# the defect: the local set and the CI set were two lists, they drifted, and the
+# drift cost a round trip in 68167c1 when a developer ran `references.sh` and
+# reasonably assumed it covered `check-references.py`. A guard was written to
+# compare the two lists; the guard was then deleted along with the second list,
+# because keeping two copies in step is what you do when you have not noticed
+# you could have one.
+#
+# So: the jobs below run `dev/ci-database.sh` and `dev/check.sh`, which are the
+# same two commands a developer runs. There is nothing here to fall behind.
+#
+# TWO JOBS, NOT ONE, and the split is by COST rather than by subject. The tree
+# job needs no Docker and finishes in seconds, so it fails fast on the cheap
+# mistakes; the database job pulls an image. They run in parallel, which is what
+# the two workflows were really buying.
+#
+# WHAT THIS COSTS, MEASURED. The suite is seven seconds; installing the
+# extension and seeding is two; the container is healthy in one. Most of the
+# remainder is `workflow/03` waiting for a real pg_cron tick. The rest is
+# pulling the image -- which is why `dev/Dockerfile.pg19` became a two-stage
+# build, taking it from 1.94 GB to 654 MB. Do not add work here without
+# measuring it; this is affordable because it does almost nothing.
+#
+# IF BILLING RUNS OUT, nothing about how any of this gets run has to change:
+#
+#     dev/ci-database.sh && CONTAINER=p8-ci DB=p8ci dev/check.sh
+#
+# and `dev/githooks/pre-push` runs `dev/check.sh` on every push if you point git
+# at it.
+name: check
+
+on:
+  pull_request:
+    paths-ignore: ['**.md']
+  push:
+    branches: [main]
+    paths-ignore: ['**.md']
+  workflow_dispatch:
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Everything answerable from the tree alone. No Docker, no database, seconds.
+  tree:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Tags, and the history between them: "is HEAD past the tag for this
+          # version" is a question a shallow clone cannot answer, and a check
+          # that silently cannot run is the failure this repository keeps
+          # finding in other shapes.
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # build-sql.py compiles specs/contract/types/*.yaml. A BUILD-time
+      # dependency only -- the generated SQL carries the shapes as jsonb, so
+      # installing the extension needs no Python at all.
+      - run: pip install --quiet pyyaml
+      - run: dev/check.sh --tree
+
+  database:
+    runs-on: ubuntu-latest
+    env:
+      CONTAINER: p8-ci
+      DB: p8ci
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The upgrade gate resolves the release it upgrades FROM by reading
+          # tags, and ci-database.sh picks its image the same way.
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install --quiet pyyaml
+
+      # THE HONEST PART. The image carries a COMPILED parser and this job does
+      # not build one -- a pgrx build is minutes and the argument above is that
+      # this job is seconds. So a change to the Rust is NOT tested here, and
+      # saying so is the difference between a gap and a lie. `parser-tests.yml`
+      # runs the crate's own tests on the same paths, which closes half of it;
+      # the other half needs dev/build-image.sh.
+      - name: Refuse to imply the parser was tested
+        if: github.event_name == 'pull_request'
+        run: |
+          if git diff --name-only "origin/${{ github.base_ref }}...HEAD" \
+             | grep -q '^extension/percolate_parser/'; then
+            echo "::error::This branch changes extension/percolate_parser, and this job runs" \
+                 "the PUBLISHED .so -- it has not tested your parser change against this" \
+                 "tree's schema. parser-tests.yml runs the crate's own tests; for the pair," \
+                 "build and publish the image, or run dev/build-image.sh locally."
+            exit 1
+          fi
+
+      - run: dev/ci-database.sh
+      - run: dev/check.sh
+
+      # A red run whose cause is "the published parser predates a committed fix"
+      # is telling the truth and is unreadable without this. The job runs the .so
+      # from the last released image on purpose, so whenever the Rust has moved
+      # since that release some failures belong to the gap rather than to this
+      # commit. Reported, never suppressed: the moment a parser-ahead run is
+      # allowed to go green, the one signal that the published artifacts are
+      # behind their source is gone -- and that gap once cost a day while two
+      # committed parser fixes sat unshipped and the suite failed pointing at
+      # correct code.
+      - name: If it failed, say whether the published parser is behind
+        if: failure()
+        run: |
+          PREV=$(git tag --list 'v*' | sed 's/^v//' \
+                 | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+                 | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+          [ -n "$PREV" ] || exit 0
+          CHANGED=$(git diff --name-only "v$PREV..HEAD" -- extension/percolate_parser/src \
+                                                          extension/percolate_parser/Cargo.toml \
+                    | wc -l | tr -d ' ')
+          [ "$CHANGED" = "0" ] && exit 0
+          {
+            echo "### The parser under test is older than this tree"
+            echo ""
+            echo "This job runs the compiled parser from \`:19-$PREV\`, and $CHANGED file(s)"
+            echo "under \`extension/percolate_parser/\` have changed since \`v$PREV\`:"
+            echo ""
+            git diff --name-only "v$PREV..HEAD" -- extension/percolate_parser/ | sed 's/^/- /'
+            echo ""
+            echo "Failures in the dialect or graph-algorithm tests are expected in that state"
+            echo "and clear when the next release ships the rebuilt \`.so\`. Failures anywhere"
+            echo "else are this commit's."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice::the published parser ($PREV) predates $CHANGED changed parser file(s) -- see the run summary"
+
+      - name: What the database said, if it failed
+        if: failure()
+        run: docker logs "$CONTAINER" | tail -60

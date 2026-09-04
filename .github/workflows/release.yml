@@ -230,14 +230,14 @@ jobs:
       # next run finishes; past here the version is published and the tag says
       # so. Nothing else in the collection treats a version as spent until this
       # exists -- dev/check-version.sh, build-sql.py's upgrade scripts and
-      # suite.yml's upgrade job all read the tags.
+      # check.yml's upgrade gates all read the tags.
       # ---------------------------------------------------------------
       # PUSHED WITH THE PAT, BECAUSE GITHUB_TOKEN MAY NOT TOUCH A WORKFLOW FILE.
       #
       # 0.1.3 published everything and then failed here:
       #
       #   ! [remote rejected] v0.1.3 -> v0.1.3 (refusing to allow a GitHub App
-      #     to create or update workflow `.github/workflows/suite.yml` without
+      #     to create or update workflow `.github/workflows/check.yml` without
       #     `workflows` permission)
       #
       # The commit being tagged touched `.github/workflows/`, and a GitHub App
