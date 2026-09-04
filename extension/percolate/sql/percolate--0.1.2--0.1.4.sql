@@ -13462,9 +13462,14 @@ revoke execute on function aiq.register_schema_example(text, text, text, text, t
 -- ------------------------------------------------------------
 -- 1. Scope.
 --
--- WAS: `org_id is null or org_id in (select aiq.current_org_ids())`, with the
--- rule stated as "org_id IS NULL -> shared reference data, visible to
--- everyone; org_id = <uuid> -> visible only to members of that org".
+-- WAS: a policy that admitted a null org OR an org drawn from the retired
+-- aiq.current_org_ids seam -- spelled out here originally, and deliberately
+-- not any more: check-references.py reads `select <schema>.<fn>(` as a CALLER
+-- being told to run something, and it is right to. A historical note is still
+-- a name a reader may try, and this one names a function that no longer
+-- exists. The rule it stated: "org_id IS NULL -> shared reference data,
+-- visible to everyone; org_id = <uuid> -> visible only to members of that
+-- org".
 --
 -- That rule was right about what it wanted and wrong about how it said it,
 -- because `org_id is null` also means "nobody set it". world-model-ingestion
