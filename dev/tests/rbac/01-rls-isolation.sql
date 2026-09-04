@@ -65,9 +65,15 @@ on conflict do nothing;
 -- nothing has declared is indistinguishable from a typo, which is the entire
 -- point of the table. This is what "add a module by inserting rows, not by
 -- writing authz code" looks like now.
+-- `checked_by` NAMES THE POLICY THIS FILE ACTUALLY CREATES. It said
+-- `widgets_owner_or_permitted`, which is what the sketch in spec.md §2 calls
+-- the shape and not what line 81 below names the policy -- so the miniature
+-- module demonstrating how to declare a pair demonstrated the one mistake the
+-- column exists to make visible. Found by rbac/10, which walks every
+-- declaration of that form and asks whether the policy is there.
 insert into rbac.permission_kinds (resource, action, checked_by) values
-  ('widgets', 'select', 'policy widgets_owner_or_permitted (dev/tests/rbac/01)')
-on conflict do nothing;
+  ('widgets', 'select', 'policy select_own_or_permitted (dev/tests/rbac/01)')
+on conflict (resource, action) do update set checked_by = excluded.checked_by;
 insert into rbac.role_permissions (role, resource, action) values
   ('admin', 'widgets', 'select') on conflict do nothing;
 

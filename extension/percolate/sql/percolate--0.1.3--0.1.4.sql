@@ -7845,6 +7845,32 @@ create table if not exists rbac.roles (
     description text
 );
 
+-- WHAT "ADMIN" MEANS WHEN THE VOCABULARY GROWS UNDER IT.
+--
+-- `bootstrap_admin()` grants its role every pair in `permission_kinds` with a
+-- SELECT rather than a list of literals, and its comment says why: "a module
+-- added later is covered the moment it declares its pairs, which is what the
+-- admin role is supposed to mean". That sentence was false, and measured so --
+-- the select runs ONCE, at bootstrap, and every pair declared afterwards is a
+-- pair the administrator does not hold:
+--
+--     select rbac.bootstrap_admin('root@example.com', ...);
+--     insert into rbac.permission_kinds values ('widgets','select','policy ...');
+--     select rbac.has_permission(<root>, 'widgets', 'select');   -> false
+--
+-- That is not hypothetical either: `('orgs','admin')` was declared by the
+-- scope work in 0.1.4, so every database bootstrapped before it has an
+-- administrator who cannot administer an org and no way to tell that from
+-- "this deployment has no orgs". It is the same silent failure the
+-- `permission_kinds` table two hundred lines below exists to end -- a check
+-- that returns false somewhere else later, rather than an error where the
+-- mistake is -- reached from the one direction that table does not cover.
+--
+-- So the fact is a column and the maintenance is a trigger, rather than a
+-- select somebody has to remember to re-run: a role marked `grants_all` holds
+-- every declared pair, now and after the next module declares one.
+alter table rbac.roles add column if not exists grants_all boolean not null default false;
+
 create table if not exists rbac.user_roles (
     user_id uuid not null references rbac.users(id) on delete cascade,
     role    text not null references rbac.roles(name),
@@ -7912,7 +7938,21 @@ insert into rbac.permission_kinds (resource, action, checked_by) values
     ('workflow_schedules', 'create', 'workflow.assert_schedule_access'),
     ('workflow_schedules', 'enable', 'workflow.assert_schedule_access'),
     ('workflow_schedules', 'delete', 'workflow.assert_schedule_access')
-on conflict do nothing;
+-- `do update`, not `do nothing`, and the difference is only visible on an
+-- UPGRADED database. `checked_by` says where the pair is consulted so that it
+-- can be verified, and 0.1.4 renamed the policies that consult two of these to
+-- the generated `<table>_scoped`. `do nothing` leaves the row that is already
+-- there exactly as it was, so a fresh install named the new policies and every
+-- upgraded database went on naming `runs_owner_or_permitted` and
+-- `schedules_owner_or_permitted`, which by then existed nowhere.
+--
+-- Nothing could see it: `dev/upgrade-converges.sh` compares the two databases
+-- OBJECT by object, and this is a row. `rbac.visibilities` above already
+-- writes its vocabulary this way for the same reason -- a vocabulary that
+-- carries what it MEANS has to be able to correct that meaning on the way
+-- through, or the meaning is whatever it was on the day the row was first
+-- inserted.
+on conflict (resource, action) do update set checked_by = excluded.checked_by;
 
 create table if not exists rbac.role_permissions (
     role     text not null references rbac.roles(name),
@@ -7949,6 +7989,49 @@ alter table rbac.role_permissions
     add constraint role_permissions_resource_action_fkey
     foreign key (resource, action)
         references rbac.permission_kinds (resource, action);
+
+-- THE OTHER HALF OF `grants_all`: the pairs, kept current.
+--
+-- Two trigger points, because there are two ways a pair arrives and only one
+-- of them is a running database. A module declaring its pairs at runtime --
+-- the extensibility story `permission_kinds` states -- is an INSERT, and the
+-- trigger below catches it. A module declaring them in the schema arrives on
+-- an UPGRADE, where the replayed `insert ... on conflict do nothing` inserts
+-- nothing for a pair that is already there, so the trigger sees no rows; the
+-- statement after it is the convergent catch-up that covers that path, and it
+-- is also what backfills the administrator this column was added for.
+create or replace function rbac.grant_new_permission_kinds() returns trigger as $$
+begin
+    insert into rbac.role_permissions (role, resource, action)
+    select r.name, k.resource, k.action
+      from rbac.roles r cross join new_kinds k
+     where r.grants_all
+    on conflict do nothing;
+    return null;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+create or replace trigger trg_permission_kinds_grant_all
+    after insert on rbac.permission_kinds
+    referencing new table as new_kinds
+    for each statement execute function rbac.grant_new_permission_kinds();
+
+-- The administrator that already exists, marked and caught up. `('users','admin')`
+-- is the pair that MEANS deployment administrator -- it is what `grant_role()`
+-- itself is gated on -- so a role holding it is the role `bootstrap_admin()`
+-- created, whatever it was named. Convergent: on a fresh install nothing holds
+-- it yet and both statements are no-ops, and the bootstrap sets the column
+-- itself a moment later.
+update rbac.roles r set grants_all = true
+ where not r.grants_all
+   and exists (select 1 from rbac.role_permissions rp
+                where rp.role = r.name and rp.resource = 'users' and rp.action = 'admin');
+
+insert into rbac.role_permissions (role, resource, action)
+select r.name, k.resource, k.action
+  from rbac.roles r cross join rbac.permission_kinds k
+ where r.grants_all
+on conflict do nothing;
 
 -- One function every module's RLS policy calls. Add a new module
 -- (resource search, agentic tools) by inserting rows here, not by
@@ -8613,7 +8696,7 @@ insert into rbac.permission_kinds (resource, action, checked_by) values
     ('orgs',        'select', 'policy orgs_member_visible'),
     ('orgs',        'admin',  'rbac.add_org_member / rbac.remove_org_member'),
     ('org_members', 'select', 'policy org_members_own_orgs')
-on conflict do nothing;
+on conflict (resource, action) do update set checked_by = excluded.checked_by;
 
 -- ADDING SCOPE TO A TABLE IS TWO CALLS, AND NEITHER IS A POLICY SOMEBODY WROTE.
 --
@@ -8733,11 +8816,36 @@ begin
     end if;
 
     if v_row.revoked_at is not null then
-        -- reuse of a rotated-away token: possible theft. Revoke the
-        -- whole chain forward from here as a precaution.
-        update rbac.refresh_tokens set revoked_at = now()
-        where user_id = v_row.user_id and revoked_at is null;
-        raise exception 'refresh token reuse detected; all sessions revoked';
+        -- REUSE OF A ROTATED-AWAY TOKEN: possible theft, so every live session
+        -- for that user ends here. Two things about these six lines, both
+        -- learned by executing them rather than by reading them, and both the
+        -- reason this branch had never once done what its message claimed.
+        --
+        -- `t.user_id`, not `user_id`. This function RETURNS TABLE(user_id ...),
+        -- so `user_id` inside its body is the output parameter, and an UPDATE
+        -- whose WHERE mentions it is `column reference "user_id" is ambiguous`
+        -- -- raised at execution, from the one branch nothing had ever entered.
+        -- Every caller reads any error here as "session invalid" (spec.md
+        -- §4.3), so the wrong error and the right one are indistinguishable
+        -- from outside: theft detection reported success and revoked nothing.
+        -- The alias is what makes the statement mean the column.
+        --
+        -- AND NO RAISE, for attempt_login's reason (§5) applied to the one
+        -- other place in this file that writes before it refuses: a RAISE
+        -- aborts the transaction the revocation is in, so `raise 'all sessions
+        -- revoked'` was a sentence that undid itself. The status branch below
+        -- already reasoned this out and chose to refuse WITHOUT writing; this
+        -- branch has to write, so it is the refusal that has to go. No row is
+        -- the failure, exactly as login() returns no row for a bad password,
+        -- and for the identical reason.
+        update rbac.refresh_tokens t set revoked_at = now()
+        where t.user_id = v_row.user_id and t.revoked_at is null;
+        insert into rbac.auth_events (user_id, event_type, detail)
+        values (v_row.user_id, 'refresh_reuse_detected',
+                jsonb_build_object('token_id', v_row.id,
+                                   'device_label', v_row.device_label,
+                                   'replaced_by', v_row.replaced_by));
+        return;
     end if;
 
     if v_row.expires_at < now() then
@@ -9237,16 +9345,20 @@ begin
     -- the assertion that pins it is untouched.
     update rbac.users set status = 'active' where id = v_uid and status <> 'active';
 
-    insert into rbac.roles (name, description)
-    values (p_role, 'the first administrator')
-    on conflict (name) do nothing;
+    -- `grants_all`, which is what makes the SELECT below stay true rather than
+    -- being true once. See the column's own comment in section 2.
+    insert into rbac.roles (name, description, grants_all)
+    values (p_role, 'the first administrator', true)
+    on conflict (name) do update set grants_all = true;
 
     -- THE grant list is rbac.permission_kinds, not a copy of it. Every pair
     -- this collection checks is declared there and constrained by the foreign
     -- key on role_permissions, so "everything" is expressible as a select
     -- rather than as nineteen literals somebody has to keep in step. A module
     -- added later is covered the moment it declares its pairs, which is what
-    -- the admin role is supposed to mean.
+    -- the admin role is supposed to mean -- and is true because of
+    -- `roles.grants_all` and the trigger on `permission_kinds` (section 2),
+    -- not because of this statement, which runs exactly once.
     insert into rbac.role_permissions (role, resource, action)
     select p_role, resource, action from rbac.permission_kinds
     on conflict do nothing;
