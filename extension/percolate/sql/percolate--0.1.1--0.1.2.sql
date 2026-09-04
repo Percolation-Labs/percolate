@@ -9009,7 +9009,7 @@ grant execute on function workflow.encoding_drift() to worker;
 
 -- ============================================================
 -- ai-query-layer/schema.sql
---   nodes, keys, edges, the seven query modes, embedding spaces
+--   nodes, keys, edges, the nine query modes, embedding spaces
 -- ============================================================
 
 -- ============================================================

@@ -222,7 +222,7 @@ ORDER = [
     ("workflow-engine/schema.sql",              "the engine: definitions, runs, tasks, saga, sql steps, YAML"),
     ("user-rbac/schema.sql",                    "identity: users, roles, API keys, sessions, the role model"),
     ("workflow-engine/integration-rbac.sql",    "ownership and authorization on run-scoped entry points"),
-    ("ai-query-layer/schema.sql",               "nodes, keys, edges, the seven query modes, embedding spaces"),
+    ("ai-query-layer/schema.sql",               "nodes, keys, edges, the nine query modes, embedding spaces"),
     ("ai-query-layer/integration-rbac.sql",     "org scoping, api views, the SECURITY INVOKER read path"),
     ("ai-query-layer/integration-workflow.sql", "p8ql as a workflow step"),
     ("ai-query-layer/graph-algorithms.sql",     "the compiled graph algorithms, wrapped -- after integration-rbac, because it resolves names through aiq.lookup and must inherit whatever authorization that carries"),
