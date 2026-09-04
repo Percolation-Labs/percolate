@@ -421,6 +421,70 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
+-- 11b. AND THE REPORT ANSWERS "CALLABLE BY ME", NOT ONLY "PRESENT".
+--
+-- The gap this closes: the graph algorithms ship granted to nobody, which is
+-- deliberate -- so on a stock install every crossing is present, the boundary
+-- said ok, `surface.sql` said SURFACE COMPLETE, and the first call as
+-- `authenticated` was `permission denied for function graph_components`. A
+-- consumer writing a preflight does the obvious thing, looks the function up in
+-- pg_proc, and gets nine false OKs on a stack where nothing will run.
+--
+-- `present` and `callable by me` are different facts and the second is the one
+-- a consumer needs, so `ok` now folds it in. Asserted from BOTH sides, because
+-- a report that says false for everyone is as useless as one that says true.
+-- ---------------------------------------------------------------------
+do $$
+declare v jsonb; v_c jsonb;
+begin
+    v := aiq.extension_boundary();
+    for v_c in select jsonb_array_elements(v->'crossings') loop
+        if not (v_c ? 'callable') then
+            raise exception
+                'a crossing reports presence and not reachability: %', v_c;
+        end if;
+    end loop;
+    if (v->>'role') is null then
+        raise exception 'the report does not say whose reachability it measured';
+    end if;
+
+    -- As the owner, who can call everything: ok is true and nothing is listed
+    -- unreachable.
+    if not (v->>'ok')::boolean or jsonb_array_length(v->'unreachable') <> 0 then
+        raise exception
+            'the owner cannot reach its own crossings, which means the privilege '
+            'lookup is wrong rather than that the stack is: %', v->'unreachable';
+    end if;
+end $$;
+
+do $$
+declare v jsonb; v_c jsonb;
+begin
+    -- ...and as a role the gate is shut against. `authenticated` holds the
+    -- grants integration-rbac.sql gives it, which do not include the graph
+    -- algorithms until somebody asks for them.
+    -- Establish the precondition AS THE OWNER: a gate an end-user role can
+    -- open is not a gate, so `authenticated` cannot call this either way. On a
+    -- stock install this is a no-op, and it is here so the assertion below does
+    -- not depend on which order the blocks in this file have run in.
+    perform aiq.enable_graph_algorithms('authenticated', false);
+    set local role authenticated;
+    v := aiq.extension_boundary();
+    if (v->>'ok')::boolean then
+        raise exception
+            'the boundary reports ok to a role that cannot execute a single graph '
+            'entry point -- which is the false OK this instrument exists to end';
+    end if;
+    select c into v_c from jsonb_array_elements(v->'crossings') c
+     where not (c->>'callable')::boolean limit 1;
+    if v_c->>'remedy' is null then
+        raise exception 'an unreachable crossing does not carry its own remedy: %', v_c;
+    end if;
+    reset role;
+    raise notice 'query/11: the boundary answers callable-by-me, and names the fix';
+end $$;
+
+-- ---------------------------------------------------------------------
 -- 12. THE TWO MEMORY LIMITS ARE SETTINGS, AND NOT THE CALLER'S TO RAISE.
 --
 -- Both stand between a busy pool and a cluster restart, and the right value

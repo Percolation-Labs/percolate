@@ -398,6 +398,21 @@ begin
     if not exists (select 1 from pg_roles where rolname = p_role) then
         raise exception 'no such role: %', p_role;
     end if;
+    -- SAID OUT LOUD, because it is the one argument to this function that
+    -- changes who is on the other side of the gate rather than which of our own
+    -- roles is. web_anon is the UNAUTHENTICATED REST caller, so this grants the
+    -- compiled traversals -- graph_snapshot among them, a resident per-backend
+    -- CSR holding one of a fixed number of admission slots -- to anyone who can
+    -- reach the endpoint. It remains an operator's decision to make and this
+    -- does not refuse it; what it stops being is a decision made in silence.
+    if p_role = 'web_anon' and p_enabled then
+        raise notice
+            'granting the graph algorithms to web_anon: these are reachable '
+            'without authentication, and graph_snapshot holds a per-backend '
+            'adjacency snapshot in one of a fixed number of admission slots. '
+            'See graph-algorithms.md 2.3 for what an unauthenticated caller '
+            'can therefore cost you.';
+    end if;
     for r in
         -- The query entry points and the compiled functions under them.
         -- `enable_graph_algorithms` itself is deliberately absent: a gate an
@@ -436,7 +451,11 @@ begin
     return jsonb_build_object(
         'role', p_role,
         'enabled', p_enabled,
-        'functions', cardinality(v_did),
+        -- `grants`, not `functions`. This is the number of objects the loop
+        -- touched -- eleven wrappers plus every compiled p8_graph_* under them
+        -- -- and named `functions` beside 'role' and 'enabled' it read as the
+        -- count of graph algorithms, which is a different and smaller number.
+        'grants', cardinality(v_did),
         -- Said out loud, because the reason this gate exists is that the cost
         -- is not in the call, it is in the first call.
         'note', case when p_enabled

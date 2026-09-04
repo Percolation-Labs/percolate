@@ -1622,6 +1622,24 @@ with provided as (
       join pg_namespace n on n.oid = p.pronamespace
      where p.prolang = (select oid from pg_language where lanname = 'plpgsql')
        and n.nspname in ('aiq', 'content', 'workflow', 'agentic')
+), callers as (
+    -- The SQL half's own entry points, with whether the CALLING ROLE may
+    -- execute them. `present` and `callable by me` are different facts and the
+    -- second is the one a consumer needs: the graph algorithms ship switched
+    -- off per-role on purpose, so a stock install has all nine wrappers present
+    -- in pg_proc, every crossing satisfied, and `permission denied for function
+    -- graph_components` on the first call. A consumer writing a preflight check
+    -- does the obvious thing -- look the function up in the catalog -- and gets
+    -- nine false OKs on a stack where nothing will run. This function exists
+    -- for exactly that class of quiet failure and used to stop one step short
+    -- of it. (surface.sql has the same blind spot for the same reason, and says
+    -- so in its own header.)
+    select n.nspname || '.' || p.proname as caller,
+           bool_and(has_function_privilege(current_user, p.oid, 'execute')) as callable
+      from pg_proc p
+      join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname in ('aiq', 'content', 'workflow', 'agentic')
+     group by 1
 ), crossings as (
     -- A call with arguments. `[^)]` after the paren is what separates a call
     -- from a MENTION, and the mention is not hypothetical: several of these
@@ -1647,24 +1665,54 @@ select jsonb_build_object(
         'extension', (select extname from pg_extension where extname = 'percolate_parser'),
         'version',   (select extversion from pg_extension where extname = 'percolate_parser'),
         'functions', (select count(*) from provided)),
+    'role', current_user,
     'crossings', coalesce((
-        select jsonb_agg(jsonb_build_object(
+        select jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
                    'caller', c.caller, 'callee', c.callee,
-                   'present', exists (select 1 from provided v where v.proname = c.callee))
+                   'present', exists (select 1 from provided v where v.proname = c.callee),
+                   'callable', coalesce(a.callable, false),
+                   -- The diagnostic carries its own fix, the way the
+                   -- slot-exhaustion error does. A reader who has to go and
+                   -- find the remedy usually finds a different one.
+                   'remedy', case
+                             when coalesce(a.callable, false) then null
+                             -- The gate that is actually shut, when it is one:
+                             -- the graph algorithms are the only surface here
+                             -- that ships granted to nobody. Anything else
+                             -- unreachable is an ordinary missing grant, and
+                             -- saying `enable_graph_algorithms` about it would
+                             -- send the reader to a function that will not
+                             -- mention their table.
+                             when c.callee like 'p8\_graph\_%'
+                             then format('select aiq.enable_graph_algorithms(%L)', current_user)
+                             else format('grant execute on function %s to %I',
+                                         c.caller, current_user)
+                             end))
                    order by c.caller, c.callee)
-          from crossings c), '[]'::jsonb),
+          from crossings c left join callers a on a.caller = c.caller), '[]'::jsonb),
     'missing', coalesce((
         select jsonb_agg(distinct c.callee)
           from crossings c
          where not exists (select 1 from provided v where v.proname = c.callee)),
         '[]'::jsonb),
+    'unreachable', coalesce((
+        select jsonb_agg(distinct c.caller order by c.caller)
+          from crossings c left join callers a on a.caller = c.caller
+         where not coalesce(a.callable, false)), '[]'::jsonb),
+    -- `ok` FOLDS IN REACHABILITY, so the one field a preflight actually reads
+    -- is false on a stack where nothing will run. A report whose summary says
+    -- true while its own rows say the caller cannot execute a single crossing
+    -- is worse than no report: it is the false OK, with corroboration.
     'ok', not exists (
         select 1 from crossings c
-         where not exists (select 1 from provided v where v.proname = c.callee)))
+          left join callers a on a.caller = c.caller
+         where not exists (select 1 from provided v where v.proname = c.callee)
+            or not coalesce(a.callable, false)))
 $$;
 
 comment on function aiq.extension_boundary() is
-    'Every place the SQL half calls the compiled half, and whether the compiled half provides it.';
+    'Every place the SQL half calls the compiled half: whether the compiled '
+    'half provides it, and whether the calling role may execute it.';
 
 -- ============================================================
 -- 10. Embedding spaces: multiple models, multiple dimensions.

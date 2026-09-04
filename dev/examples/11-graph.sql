@@ -8,7 +8,7 @@
 -- The fixture is nine edges on purpose: every answer below is small enough to
 -- check by eye against 00-harbour.sql. What the same calls cost on a graph of
 -- four million edges is measured in dev/scale/graph/, not guessed at here.
-select aiq.enable_graph_algorithms('authenticated') -> 'functions' as granted;
+select aiq.enable_graph_algorithms('authenticated') -> 'grants' as granted;
 
 set local role authenticated;
 set local request.jwt.claims = '{"orgs":["d0000000-0000-0000-0000-00000000000a"]}';

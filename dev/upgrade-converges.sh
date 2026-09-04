@@ -66,6 +66,17 @@ for f in "$NEW_SQL" "$UPG_SQL"; do
     [ -f "$f" ] || { echo "missing $f -- run extension/percolate/build-sql.py" >&2; exit 1; }
 done
 
+# ...and PRESENT is not the same as CURRENT. This used to check only that the
+# files existed, so editing a spec and running this compared two databases built
+# from the previous generation of the scripts -- and reported DIVERGED for a
+# difference already fixed, or CONVERGES for one not yet generated. Both are
+# worse than a failure, because both look like an answer. `--check` is the
+# door build-sql.py already had; it costs nothing and the run below costs
+# minutes, so it goes first.
+python3 extension/percolate/build-sql.py --check >/dev/null || {
+    echo "the generated extension scripts are behind specs/ -- run: python3 extension/percolate/build-sql.py" >&2
+    exit 1; }
+
 # The OLD schema comes from the TAG, never from this tree's copy of that
 # filename. Getting that wrong is how the first run of this check reported a
 # clean upgrade: the tree's `percolate--<old>.sql` had already been rewritten by
