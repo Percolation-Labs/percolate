@@ -392,13 +392,41 @@ async def main() -> int:
             ("How long will the Kestrel line be paused, and when does it start?",
              "eleven", "ops-briefing.wav"),
         ]
+        # BOTH HALVES, because the label was already claiming both. This said
+        # "answered from <source>" while checking only that the expected string
+        # appeared somewhere in the reply. A model that already knows what an R7
+        # is, or that was handed the wrong passages and guessed well, passed a
+        # check whose whole purpose is proving the answer came out of THIS
+        # corpus -- and the answer half only ever tests the model, while the
+        # retrieval half is the one that tests the pipeline this file is about.
+        #
+        # The retrieved rows do NOT carry a title, which is why the assertion
+        # was missing rather than merely weak: `titles = [r.get("title") ...]`
+        # sat one line above the check, unused, and would have been a list of
+        # Nones if anything had read it -- aiq.search returns
+        # (chunk_id, content, rrf_score, lexical_rank, semantic_rank) and no
+        # document identity at all. So provenance is resolved here, through the
+        # chunk ids, which is the join the retrieval result deliberately leaves
+        # to the caller.
         for question, expect, source in questions:
             answer, retrieved = await ask(admin, question)
-            titles = [r.get("title") for r in retrieved] if retrieved else []
+            chunk_ids = [r.get("chunk_id") for r in retrieved if r.get("chunk_id")]
+            titles = [r["title"] for r in await admin.fetch("""
+                select distinct r.title
+                  from content.resource_chunks c
+                  join content.resources r on r.id = c.resource_id
+                 where c.id = any($1::uuid[])""", chunk_ids)] if chunk_ids else []
             print(f"    Q: {question}\n    A: {str(answer)[:220]}", flush=True)
-            check(expect.lower() in str(answer).lower()
-                  or (expect == "eleven" and "11" in str(answer)),
-                  f"answered from {source}", f"expected {expect!r}")
+            answered = (expect.lower() in str(answer).lower()
+                        or (expect == "eleven" and "11" in str(answer)))
+            # Among the retrieved documents, not ranked first: pinning the rank
+            # would make this a test of the fusion weights rather than of
+            # ingestion, and LIMIT 4 already says how wide the window is.
+            from_source = source in titles
+            check(answered and from_source, f"answered from {source}",
+                  f"expected {expect!r}"
+                  + ("" if answered else " -- not in the answer")
+                  + ("" if from_source else f" -- {source} was not retrieved; got {titles}"))
 
         print("\n=== drift ===", flush=True)
         # Scoped to this test's own resources: check_drift() reports the whole
