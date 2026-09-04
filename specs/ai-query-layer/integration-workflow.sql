@@ -42,6 +42,56 @@ declare v_out jsonb;
 begin
     v_out := aiq.query(p_query);
     if v_out->>'mode' = 'SQL' then
+        -- AND THE POLICY THAT TURNS THE TRADE OFF HAS TO REACH THIS DOOR TOO.
+        --
+        -- workflow-engine/schema.sql states the trade plainly: inside a step,
+        -- SQL runs as the engine owner and "anyone who may define a workflow
+        -- may therefore read anything in the database", deliberate for the
+        -- beta, with `percolate.sql_policy = 'registered'` as the lever that
+        -- refuses statements on a deployment that will not take it.
+        --
+        -- That lever did not cover this path. `sql: "select ..."` is refused at
+        -- define time by check_spec_before_insert; `p8ql: "select ..."` is not
+        -- a `statement` in the spec -- it compiles to the registered function
+        -- `p8ql` with the query as an argument -- so it never reached the
+        -- check, and executed as app_owner on a deployment whose operator had
+        -- explicitly locked statements out. Measured, same database, same
+        -- policy: the sql: form refused at authoring, the p8ql: form returning
+        -- `current_user = app_owner`. A control that reports success while the
+        -- thing it guards stays open is the failure this collection keeps
+        -- finding, and this is it in the one place a reader was told to trust.
+        --
+        -- CHECKED AT EXECUTION, NOT ONLY AT AUTHORING, and the distinction is
+        -- load-bearing: a definition written while the policy was `open`
+        -- outlives the change, so refusing only at define time would leave
+        -- every workflow authored before the lock still able to run.
+        --
+        -- ONLY INSIDE A STEP. `workflow.current_run_id` is set by
+        -- execute_sql_step and by nothing else, so it is the signal for "the
+        -- invoker is the engine owner". Called directly by an authenticated
+        -- user this function is SECURITY INVOKER running as THEM under RLS --
+        -- which is safe, is what the grant below is for, and is not what the
+        -- policy is about.
+        -- TWO NESTED `if`s, NOT ONE `and`, and that is not style.
+        -- `workflow.sql_policy()` is not granted to `authenticated`, and
+        -- plpgsql evaluates a whole condition as a single SELECT -- so both
+        -- the flat `and` form AND the one-if version raised `permission denied
+        -- for function sql_policy` on the DIRECT call, which is the one path
+        -- this check exists to leave alone. Observed twice, at line 36 and
+        -- then at line 43, before splitting the statements. The alternative
+        -- was to widen a grant so a guard could run, which is the wrong
+        -- direction: the guard should not need privileges the caller lacks.
+        if nullif(current_setting('workflow.current_run_id', true), '') is not null then
+          if workflow.sql_policy() = 'registered' then
+            raise exception
+                'this step carries plain SQL, and percolate.sql_policy is '
+                '''registered'' on this deployment -- inside a step it would run '
+                'as the engine owner, which is the read this policy exists to '
+                'refuse. Register the query as a step function and name it with '
+                'sql: {function: ...}, or run the SQL directly, where it is '
+                'scoped to you.';
+          end if;
+        end if;
         return jsonb_build_object(
             'mode', 'SQL',
             'statement', v_out->>'statement',

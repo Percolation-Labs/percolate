@@ -250,6 +250,76 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
+-- 5b. AND THE POLICY REACHES THE OTHER DOOR, which it did not.
+--
+-- §5 above proved `registered` refuses a `sql:` statement, and §6 below proves
+-- `p8ql: "select ..."` executes. Both were true and neither asked the question
+-- between them: does the lockdown cover the p8ql spelling? It did not. A
+-- `p8ql:` step is not a `statement` in the spec -- it compiles to the
+-- registered function `p8ql` with the query as an argument -- so it never
+-- reached check_spec_before_insert, and ran as app_owner on a deployment whose
+-- operator had explicitly locked statements out.
+--
+-- That is worse than the trade it defeats. workflow-engine/schema.sql states
+-- the open-policy trade plainly -- inside a step, SQL runs as the engine owner
+-- and anyone who may define a workflow may read anything -- and offers this
+-- GUC as the lever for a deployment that will not take it. A lever that
+-- reports success and does not move is the failure this collection keeps
+-- finding.
+--
+-- THE DEFINITION IS MADE BEFORE THE LOCK, deliberately: a workflow authored
+-- while the policy was `open` outlives the change, so a check that only ran at
+-- authoring would leave every pre-existing definition able to run. This asserts
+-- the refusal happens at EXECUTION.
+-- ---------------------------------------------------------------------
+do $$
+declare v_run uuid; v_err text;
+begin
+    perform workflow.define_yaml($y$
+name: t_os_p8ql_locked
+steps:
+  - id: dump
+    p8ql: "select current_user::text as u"
+$y$);
+
+    perform set_config('percolate.sql_policy', 'registered', true);
+    v_run := workflow.start_workflow('t_os_p8ql_locked', '{}'::jsonb);
+
+    if (select status from workflow.tasks where run_id = v_run and step_key = 'dump')
+       is distinct from 'failed' then
+        raise exception
+            'a p8ql step carrying plain SQL ran under sql_policy = registered -- '
+            'it executes as app_owner, so the lockdown does not cover the door '
+            'an author is most likely to use';
+    end if;
+    select detail#>>'{error,error}' into v_err from workflow.task_events
+     where run_id = v_run and to_status = 'failed' order by at desc limit 1;
+    if coalesce(v_err, '') not like '%registered%' then
+        raise exception 'the p8ql refusal did not name the policy: %', coalesce(v_err, '(none)');
+    end if;
+
+    -- AND THE DIRECT CALL IS UNTOUCHED, which is the half a blunt fix breaks.
+    -- Called by a user rather than from a step, workflow.p8ql is SECURITY
+    -- INVOKER running as THEM under RLS -- safe, granted on purpose, and not
+    -- what this policy is about. The guard keys on workflow.current_run_id,
+    -- which only execute_sql_step sets.
+    --
+    -- This assertion earned itself twice: the first two versions of the guard
+    -- raised `permission denied for function sql_policy` here, because
+    -- workflow.sql_policy() is not granted to `authenticated` and plpgsql
+    -- evaluates a whole `if` condition as one SELECT. Two nested `if`s, not an
+    -- `and`.
+    if (workflow.p8ql('select 1 as n')->'rows'->0->>'n') is distinct from '1' then
+        raise exception
+            'a direct call to workflow.p8ql was refused under sql_policy = '
+            'registered -- the guard is meant to key on being inside a step, '
+            'not on the policy alone';
+    end if;
+
+    perform set_config('percolate.sql_policy', 'open', true);
+end $$;
+
+-- ---------------------------------------------------------------------
 -- 6. `p8ql: "select ..."` EXECUTES, having previously reported success and
 --    returned a note.
 --
@@ -287,6 +357,7 @@ begin
     raise notice 'workflow/13: a declared write runs, and read-only does not leak into the engine''s own next statement';
     raise notice 'workflow/13: a {{template}} in a statement is a quoted value, so run input cannot become SQL';
     raise notice 'workflow/13: sql_policy = registered refuses statements and leaves the allow-list working';
+    raise notice 'workflow/13: ...and reaches the p8ql door too, without breaking the direct call';
     raise notice 'workflow/13: p8ql SQL mode executes instead of reporting success and returning a note';
 end $$;
 

@@ -2539,6 +2539,19 @@ declare
     t      workflow.tasks;
     v_spec jsonb;
     v_out  jsonb;
+    -- SAVED AND RESTORED RATHER THAN JUST SET, because the marker below now
+    -- means "the invoker of this call is the engine owner" and something reads
+    -- it to decide whether to refuse. set_config(..., true) is
+    -- transaction-local, which stops it leaking into a pooled connection's next
+    -- transaction and does NOT stop it outliving this step inside the current
+    -- one -- so after any step ran, an ordinary direct call later in the same
+    -- transaction looked like it was inside a step. Caught by the assertion in
+    -- dev/tests/workflow/13 §5b that a direct workflow.p8ql() call is still
+    -- allowed under sql_policy = 'registered'; it went red on the first run.
+    -- Restoring the previous value rather than blanking it keeps nesting
+    -- honest: a sql step whose completion autoruns its successor is this
+    -- function inside itself.
+    v_prev text := coalesce(nullif(current_setting('workflow.current_run_id', true), ''), '');
 begin
     select * into t from workflow.tasks where id = p_task_id;
     if not found or t.status <> 'ready' or t.kind <> 'sql' then
@@ -2579,8 +2592,10 @@ begin
                 v_spec->>'function', v_spec->'args', t.run_id, t.input->'item');
         end if;
         perform workflow.complete_task(p_task_id, jsonb_build_object('result', v_out));
+        perform set_config('workflow.current_run_id', v_prev, true);
         return true;
     exception when others then
+        perform set_config('workflow.current_run_id', v_prev, true);
         perform workflow.fail_task(p_task_id,
             jsonb_build_object('error', sqlerrm, 'sqlstate', sqlstate),
             -- A missing registration, a bad signature, a refused policy or a
