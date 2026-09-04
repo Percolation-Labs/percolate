@@ -55,6 +55,20 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # is worth reading only once they are green.
 SURFACES=("${@:-rbac query workflow content agentic}")
 
+# DSN is the ONE path that needs a psql on the host; the other two borrow the
+# container's. Checked once, here, because the alternative is what it did
+# before: `psql: command not found` printed once per file, thirteen identical
+# lines that look like thirteen broken tests and say nothing about the fix. The
+# message names DB= rather than telling anyone to install anything, because on
+# a machine without psql that is the answer and it is two lines up in this
+# file's own header.
+if [ -n "$DSN" ] && ! command -v psql >/dev/null 2>&1; then
+    echo "DSN is set but there is no psql on this host." >&2
+    echo "  Use the container's instead:  DB=<database> $0 ${*:-}" >&2
+    echo "  ...or install one:            brew install libpq && brew link --force libpq" >&2
+    exit 1
+fi
+
 run_sql() {
     if [ -n "$DSN" ]; then
         psql "$DSN" -v ON_ERROR_STOP=1 -q -f "$1"
