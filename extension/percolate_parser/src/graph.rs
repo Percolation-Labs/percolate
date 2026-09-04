@@ -3032,3 +3032,165 @@ fn p8_graph_induced(
     }
     TableIterator::new(rows)
 }
+
+// Run INSIDE Postgres, as `#[pg_test]`, not as a plain `#[test]`.
+//
+// The first version of these was `#[cfg(test)] mod tests` with `#[test]`, on
+// the reasoning that `build_labels` is pure -- it takes a graph and returns an
+// index, and touches no SQL. The crate would not link:
+//
+//     undefined reference to `PG_exception_stack'
+//     undefined reference to `CopyErrorData'
+//
+// Pure at the level of what it MEANS is not pure at the level of what it
+// LINKS. The walk reaches pgrx's FFI guard, and those symbols live in the
+// postgres binary, which a plain test harness is not running inside. The
+// existing pure tests in `plan_graph.rs` link because they stop at the
+// tokeniser and never cross that boundary.
+//
+// The module must be called `tests`: pgrx's harness looks the generated
+// functions up as `tests.<name>()` whatever the module is called, so a
+// `graph_tests` module compiles, installs into a `graph_tests` schema, and then
+// fails three times with "function tests.<name>() does not exist".
+//
+// Attribution here was worth the two builds it cost. The reasonable-sounding
+// deduction -- that `plan_graph.rs` already has a `#[cfg(test)] mod tests`, so
+// the lib-test target predates this and the failure must be environmental --
+// was wrong, and a baseline build without this module said so: 44 passed, exit
+// 0. `#[pg_test]` runs the same assertions in a real backend, which is where
+// the symbols are.
+#[cfg(any(test, feature = "pg_test"))]
+#[pg_schema]
+mod tests {
+    use super::*;
+    use pgrx::prelude::*;
+
+    /// An n-node path as the CSR the algorithms actually read: node i has the
+    /// single out-edge i and the single in-edge i-1, so an undirected walk from
+    /// either end crosses n-1 hops and nothing shorter exists.
+    ///
+    /// Built by hand rather than through `snapshot()` because `snapshot()`
+    /// reads two SQL tables and takes an admission slot. The point of this
+    /// fixture is that the label builder is pure -- given a graph it either
+    /// finishes or says it did not -- and a pure function deserves a test that
+    /// runs in milliseconds without a database.
+    fn path(n: usize) -> Snapshot {
+        let ids: Vec<Uuid> = (0..n)
+            .map(|i| {
+                let mut b = [0u8; 16];
+                b[12..].copy_from_slice(&(i as u32).to_be_bytes());
+                Uuid::from_bytes(b)
+            })
+            .collect();
+        let mut index: Map<Uuid, u32> = Map::default();
+        for (i, id) in ids.iter().enumerate() {
+            index.insert(*id, i as u32);
+        }
+        let edges: Vec<Edge> = (0..n.saturating_sub(1))
+            .map(|i| Edge {
+                src: i as u32,
+                dst: i as u32 + 1,
+                rel: 0,
+                w: 1.0,
+                vf: T_MIN,
+                vt: T_MAX,
+            })
+            .collect();
+        let (mut out_off, mut out_eid) = (Vec::with_capacity(n + 1), Vec::new());
+        for i in 0..n {
+            out_off.push(out_eid.len() as u32);
+            if i + 1 < n {
+                out_eid.push(i as u32);
+            }
+        }
+        out_off.push(out_eid.len() as u32);
+        let (mut in_off, mut in_eid) = (Vec::with_capacity(n + 1), Vec::new());
+        for i in 0..n {
+            in_off.push(in_eid.len() as u32);
+            if i > 0 {
+                in_eid.push(i as u32 - 1);
+            }
+        }
+        in_off.push(in_eid.len() as u32);
+        Snapshot {
+            identity: String::new(),
+            counters: String::new(),
+            slot: -1,
+            build_filter: BuildFilter { relations: None, weight_floor: 0.0, as_of: None },
+            ids,
+            index,
+            edges,
+            out_off,
+            out_eid,
+            in_off,
+            in_eid,
+            rel_names: vec!["chain_rel".to_string()],
+            build_ms: 0.0,
+            built_at: String::new(),
+            reach: None,
+            labels: None,
+            community: None,
+            community_sizes: None,
+            community_ms: 0.0,
+        }
+    }
+
+    /// Room to finish: neither the time budget nor the entry ceiling should be
+    /// what stops these builds, or the test would pass for the wrong reason.
+    fn roomy() -> Budget {
+        Budget::new(60_000, 20_000_000)
+    }
+
+    /// The graph module had no test of any kind before this one -- snapshot,
+    /// labels, distance, BFS and HLL alike -- which is how a label index could
+    /// stop at its depth cap and still report itself complete. The SQL suite
+    /// covers the same invariant end to end, but it runs against the parser
+    /// compiled into the last RELEASED image, so it cannot see a fix until one
+    /// ships. This runs on the source in the tree.
+    #[pg_test]
+    fn a_build_that_stops_at_the_depth_cap_is_not_complete() {
+        let g = path(300);
+        let labels = build_labels(&g, &mut roomy(), usize::MAX);
+        assert!(
+            !labels.complete,
+            "a 300-node path is 299 hops end to end and distances are a u8, so the \
+             BFS stops at 254 -- the index cannot answer every pair and must not \
+             claim it can. `complete` is what p8_graph_distance reports as `exact`, \
+             and an answer marked exact that is wrong is the one state it may never \
+             describe."
+        );
+    }
+
+    /// The other half, and the one that makes the assertion above mean
+    /// something: a build with room to finish says so, and answers correctly.
+    /// Without this, `complete = false` everywhere would pass the first test.
+    #[pg_test]
+    fn a_build_within_the_cap_is_complete_and_right() {
+        let g = path(50);
+        let labels = build_labels(&g, &mut roomy(), usize::MAX);
+        assert!(labels.complete, "a 49-hop path is well inside the 254-hop cap");
+        assert_eq!(
+            labels.query(0, 49),
+            Some(49),
+            "the only route from one end of a 50-node path to the other is 49 hops"
+        );
+        assert_eq!(labels.query(10, 20), Some(10));
+        assert_eq!(labels.query(7, 7), Some(0));
+    }
+
+    /// The cap is on a ROOT's BFS depth, not on the graph -- so an over-deep
+    /// graph still answers the pairs it did reach. Pinning this keeps the fix
+    /// from being "mark everything inexact", which would also pass the first
+    /// test and would make the index useless.
+    #[pg_test]
+    fn an_over_deep_graph_still_answers_the_pairs_it_reached() {
+        let g = path(300);
+        let labels = build_labels(&g, &mut roomy(), usize::MAX);
+        assert_eq!(
+            labels.query(100, 120),
+            Some(20),
+            "two nodes 20 hops apart are well within any root's reach; the depth \
+             ceiling costs exactness, not every answer"
+        );
+    }
+}
