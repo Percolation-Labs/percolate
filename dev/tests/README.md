@@ -264,6 +264,22 @@ recorded and a check that stopped checking look identical otherwise.
 `meta/skills/dogfooding` is the method that generates them; `../../scenarios/`
 is where the prose verdicts live.
 
+## `journeys/`, which is a fixture and not a suite
+
+`journeys/` holds no tests. It is the material half of
+`../../scenarios/evals/` — file bodies, chunks with literal vectors, graph
+payloads and unparsed workflow YAML — for journeys an agent performs **as the
+user**, by hand, against a database of its own. `run.sh` never sees it: the
+surface list above is explicit, so nothing there is globbed.
+
+It is separate from `evals/` next door for one reason, and it is the reason that
+directory earns its own place. `evals/run.py` rolls every scenario back, which
+is right for 109 of them and structurally cannot find anything that only goes
+wrong on the *fourth* thing a user does — the class two of the five postmortems
+are about and `../../meta/postmortems/README.md` still lists as the largest open
+shape. A journey does not roll back. Re-running one means rebuilding the
+database, which is why there is no teardown script in there.
+
 ## Relationship to `surface.sql`
 
 Complementary, and neither replaces the other:
