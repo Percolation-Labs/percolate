@@ -899,20 +899,60 @@ begin
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
+-- THE BATCH CLAIM CONSUMES THE RATE KEY TOO, and it did not.
+--
+-- §21b's fix moved the token bucket INTO claim_task so that throttling stopped
+-- being something a worker had to opt into -- the defect being that every
+-- piece existed (the bucket, try_consume_rate_limit, claim_task_rate_limited)
+-- and the shipped worker called none of them. This function was left as a bare
+-- UPDATE, so the same defect survived one function along: a worker that
+-- batches -- which spec.md §7 names as the throughput path, and grants to
+-- `worker` below -- got every throttled task handed to it, `rate_key` and all.
+-- §11's first test recipe combines the token bucket, lookahead-skip claiming
+-- AND batching in one pipeline, so they were always meant to compose.
+--
+-- The shape is claim_task's, generalised from "the first one that passes" to
+-- "the first p_batch_size that pass". The lookahead is ADDED to the batch size
+-- rather than shared with it: the point of looking ahead is that a throttled
+-- source must not head-of-line-block an unrelated one, and a lookahead that a
+-- full batch consumes is no lookahead at all.
+--
+-- Still one statement's worth of locking: `for update skip locked` over the
+-- candidate window, and the rows that are looked at and not claimed stay
+-- locked for the transaction exactly as claim_task's do -- concurrent claimers
+-- skip them rather than block, which is what SKIP LOCKED is for.
 create or replace function workflow.claim_tasks(p_queue text, p_worker_id text, p_batch_size int default 10)
 returns setof workflow.tasks as $$
-    update workflow.tasks
-    set status = 'running', claimed_by = p_worker_id,
-        claimed_at = now(), heartbeat_at = now(), attempts = attempts + 1
-    where id in (
-        select id from workflow.tasks
+declare
+    t           workflow.tasks;
+    v_lookahead int;
+    v_taken     int := 0;
+begin
+    select coalesce(rate_lookahead, 20) into v_lookahead
+    from workflow.queue_config where queue = p_queue;
+    v_lookahead := coalesce(v_lookahead, 20);
+
+    for t in
+        select * from workflow.tasks
         where queue = p_queue and status = 'ready' and run_after <= now()
         order by priority desc, created_at
         for update skip locked
-        limit p_batch_size
-    )
-    returning *;
-$$ language sql;
+        limit p_batch_size + v_lookahead
+    loop
+        exit when v_taken >= p_batch_size;
+        if t.rate_key is null or workflow.try_consume_rate_limit(t.rate_key) then
+            update workflow.tasks
+            set status = 'running', claimed_by = p_worker_id,
+                claimed_at = now(), heartbeat_at = now(), attempts = attempts + 1
+            where id = t.id
+            returning * into t;
+            v_taken := v_taken + 1;
+            return next t;
+        end if;
+    end loop;
+    return;
+end;
+$$ language plpgsql;
 
 -- SUPERSEDED, kept as an alias rather than a second body.
 --
@@ -6587,12 +6627,31 @@ with served as (
       and t.rate_key is not null
       and not exists (select 1 from workflow.rate_limits rl where rl.key = t.rate_key)
   union all
+    -- SAYS ONLY WHAT IT CHECKED. This used to report "queue has no worker pool
+    -- and no config", with a remedy asserting "no workflow.queue_config row for
+    -- queue X" -- and the predicate consults queue_config nowhere. A queue that
+    -- HAD a config row and had simply lost its workers got a diagnostic that
+    -- was half false, pointing the reader at a table with nothing wrong in it.
+    -- A view whose whole job is making an invisible failure legible cannot
+    -- afford to name a cause it did not test; that is the same "reports success
+    -- it did not verify" shape this file keeps correcting, inverted.
+    --
+    -- So the config half is now looked up rather than assumed, and the sentence
+    -- changes with the answer.
     select t.id, t.run_id, t.queue, t.step_key, null::text,
-           'queue has no worker pool and no config'::text,
-           format('no workflow.queue_config row for queue %L, and nothing has '
-                  'claimed from it', t.queue),
+           case when qc.queue is null
+                then 'queue has no worker pool and no config'
+                else 'queue is configured but nothing has claimed from it' end::text,
+           case when qc.queue is null
+                then format('no workflow.queue_config row for queue %L, and nothing has '
+                            'claimed from it in 10 minutes -- start a worker on that '
+                            'queue, or check the name the step spec wrote', t.queue)
+                else format('workflow.queue_config has a row for queue %L, so the name is '
+                            'right and no worker has claimed from it in 10 minutes -- '
+                            'the pool is down or scaled to zero', t.queue) end,
            now() - t.created_at
     from workflow.tasks t
+    left join workflow.queue_config qc on qc.queue = t.queue
     where t.status = 'ready'
       and t.run_after <= now()
       and t.created_at < now() - interval '10 minutes'
@@ -7733,6 +7792,24 @@ begin
         raise exception 'refresh token expired';
     end if;
 
+    -- The same status hole verify_api_key had, on the other long-lived
+    -- credential. Rotation issues a NEW 30-day token every time, so a session
+    -- that predates a disable never expires on its own -- disabling an account
+    -- stopped its password logins and left it signed in forever on every
+    -- device it was already signed in on.
+    --
+    -- Refused rather than revoked, and the distinction is the one §5 records
+    -- for attempt_login: a RAISE aborts the transaction, so revoking the chain
+    -- here and then raising would roll the revocation back and leave the very
+    -- state this branch exists to end. The refusal is enough -- the token
+    -- cannot be exchanged while the account is not active, and re-activating
+    -- restores the sessions that were legitimately open, which is the correct
+    -- reading of a suspension. Ending them for good is what revoke_all_sessions
+    -- is for, and it is a separate, deliberate act.
+    if (select status from rbac.users where id = v_row.user_id) <> 'active' then
+        raise exception 'account is not active';
+    end if;
+
     return query
     with new_token as (
         insert into rbac.refresh_tokens (user_id, token_hash, device_label, expires_at)
@@ -7798,11 +7875,58 @@ create index if not exists idx_password_reset_tokens_user
 --
 -- Returns void rather than the row id for the same reason -- a caller that can
 -- tell "issued" from "not issued" has the oracle back.
+--
+-- THE CALLER SUPPLIES THE SECRET, WHICH IS WHY THIS IS NOT A PUBLIC ENDPOINT.
+--
+-- `p_raw_token` is the reset credential itself, chosen by whoever calls this.
+-- That is correct for a TRUSTED caller -- a delivery path that mints a token,
+-- stores its hash here and emails the raw one, which is the shape §4.1
+-- describes -- and it is a complete account takeover for an anonymous one.
+-- EXECUTE used to be granted to `web_anon` (§9), with the reasoning that it is
+-- "self-authenticating by token possession, exactly as refresh_session is".
+-- It is not, and the difference is the whole vulnerability: refresh_session
+-- VERIFIES a token the server issued, while this one ISSUES the token the
+-- caller named. So:
+--
+--     set role web_anon;
+--     select rbac.request_password_reset('victim@example.com', 'token-i-picked');
+--     select rbac.reset_password('token-i-picked', 'my new password');
+--
+-- took over any account whose address you knew, over HTTP, with no email
+-- involved at any point. Same shape as the two spoofable-argument bugs already
+-- recorded in this file (`issue_refresh_token`'s caller-supplied user_id,
+-- `revoke_session`'s p_user_id), one step worse: what the caller controls here
+-- is not the identity but the secret.
+--
+-- The grant is gone (§9). `reset_password` stays on web_anon, because that one
+-- genuinely IS token possession. What this leaves is a system with no anonymous
+-- way to START a reset -- deliberately, and stated rather than papered over,
+-- exactly as §1a states the email-verification gap: the missing piece is a
+-- delivery path, and inventing one inside a security fix is how a subsystem
+-- grows a feature nobody specified. `dev/tests/rbac/06-password-reset.sql`
+-- pins both halves, so building delivery is a deliberate act that updates a
+-- test rather than a surprise.
+--
+-- THROTTLED, and before the lookup rather than after it. Minting reset tokens
+-- is a write an untrusted front end can drive at whatever rate it is willing
+-- to relay, each one spending the outstanding token for that address -- so an
+-- unthrottled reset request is a denial of service against the account holder,
+-- who never gets to use the link they were sent. The bucket is consumed before
+-- `rbac.users` is consulted, so a throttled unknown address and a throttled
+-- real one are still indistinguishable and the oracle stays shut.
 create or replace function rbac.request_password_reset(
     p_email text, p_raw_token text, p_ttl interval default interval '1 hour')
 returns void as $$
 declare v_user_id uuid;
 begin
+    insert into workflow.rate_limits (key, capacity, tokens, refill_rate)
+    values ('reset:' || lower(p_email), 3, 3, 0.0056)   -- 3 burst, ~1 per 3 min
+    on conflict (key) do nothing;
+
+    if not workflow.try_consume_rate_limit('reset:' || lower(p_email)) then
+        raise exception 'too many password reset requests for that address, try again shortly';
+    end if;
+
     select id into v_user_id from rbac.users where email = p_email;
     if v_user_id is null then
         return;                          -- deliberately indistinguishable
@@ -7879,12 +8003,28 @@ create table if not exists rbac.api_keys (
 -- security definer: self-authenticating via key possession, so safe as a
 -- public entry point, but needs to UPDATE last_used_at without granting
 -- broad UPDATE on api_keys to web_anon.
+--
+-- THE OWNER'S STATUS IS PART OF THE CHECK, and it was not. `status` was
+-- enforced in exactly one place in this file -- verify_password -- so
+-- `update rbac.users set status = 'disabled'`, the only lever the column
+-- offers and the one an operator reaches for when an account is compromised
+-- or an employee leaves, stopped password logins and left every API key that
+-- person held working indefinitely. A credential path that ignores the
+-- account's own status is not a second factor, it is a bypass.
+--
+-- `user_id is null` is a SERVICE ACCOUNT (the column's own comment says so)
+-- and has no user whose status could be consulted; its revocation is
+-- revoked_at, which is already checked. Revoking a key stays the way to kill
+-- one key; disabling the user is now the way to kill all of theirs at once.
 create or replace function rbac.verify_api_key(p_raw_key text)
 returns table(key_id uuid, user_id uuid, scopes text[]) as $$
     update rbac.api_keys
     set last_used_at = now()
     where key_hash = encode(digest(p_raw_key, 'sha256'), 'hex')
       and revoked_at is null
+      and (api_keys.user_id is null
+           or exists (select 1 from rbac.users u
+                       where u.id = api_keys.user_id and u.status = 'active'))
     returning id, user_id, scopes;
 $$ language sql security definer set search_path = pg_catalog, public;
 
@@ -8117,6 +8257,21 @@ begin
         v_uid := rbac.create_user_with_password(p_email, p_password);
     end if;
 
+    -- ACTIVATED, because this function's whole job is producing an account
+    -- that works. create_user_with_password inserts `pending_verification`
+    -- and verify_password requires `active` (§1a), so without this line
+    -- bootstrap_admin accepted a password, stored it, returned an id, and
+    -- handed back the one account in the system that could never log in --
+    -- while §1a's stated workaround for exactly that is the UPDATE below.
+    --
+    -- This is NOT the email-verification gap being quietly closed. It is
+    -- closed for THIS caller only, and the reason is that there is no inbox to
+    -- prove control of: bootstrap_admin is unreachable over PostgREST and runs
+    -- from a privileged local session, so the operator typing the address IS
+    -- the verification. Every other account still goes through §1a's gap, and
+    -- the assertion that pins it is untouched.
+    update rbac.users set status = 'active' where id = v_uid and status <> 'active';
+
     insert into rbac.roles (name, description)
     values (p_role, 'the first administrator')
     on conflict (name) do nothing;
@@ -8247,10 +8402,15 @@ revoke execute on all functions in schema rbac from public;
 grant execute on function rbac.create_user_with_password(text, text) to web_anon;
 grant execute on function rbac.login(text, text, text, text) to web_anon;
 grant execute on function rbac.refresh_session(text, text) to web_anon, authenticated;
--- web_anon on purpose: somebody who has forgotten their password cannot be
--- authenticated, which is the whole situation. Both are self-authenticating by
--- token possession, exactly as refresh_session is.
-grant execute on function rbac.request_password_reset(text, text, interval) to web_anon;
+-- reset_password on web_anon on purpose: somebody who has forgotten their
+-- password cannot be authenticated, which is the whole situation, and this one
+-- IS self-authenticating by token possession, exactly as refresh_session is.
+--
+-- request_password_reset is NOT, and used to be granted here on the reasoning
+-- that it was -- see its own header. It takes the raw token as an argument, so
+-- granting it to web_anon let an anonymous caller mint a reset credential of
+-- its own choosing for any address and redeem it on the next line. It stays
+-- owner-only: the caller that mints and delivers is a trusted one.
 grant execute on function rbac.reset_password(text, text) to web_anon;
 grant execute on function rbac.verify_api_key(text) to web_anon, authenticated;
 grant execute on function rbac.change_password(text, text) to authenticated;
@@ -8267,9 +8427,10 @@ grant execute on function rbac.revoke_all_sessions() to authenticated;
 -- widened search_path anywhere.
 grant execute on function rbac.has_permission(uuid, text, text) to web_anon, authenticated;
 grant execute on function rbac.current_user_id() to web_anon, authenticated;
--- set_password, verify_password, issue_refresh_token, attempt_login: stay
--- internal-only (owner-only EXECUTE), reachable only from within the
--- security-definer functions above that call them, never directly via RPC.
+-- set_password, verify_password, issue_refresh_token, attempt_login,
+-- request_password_reset: stay internal-only (owner-only EXECUTE), reachable
+-- only from within the security-definer functions above that call them, or
+-- from a trusted local session, never directly via RPC.
 
 -- (b) RLS on every table this module owns -- deny-by-default the moment RLS
 -- is enabled with no matching policy, which is exactly what anon/no-session
@@ -16577,14 +16738,14 @@ grant execute on function agentic.detach_skill(text, text) to authenticated;
 grant execute on function agentic.apply_plugin(jsonb) to authenticated;
 grant execute on function agentic.channel_for(uuid) to authenticated, api_viewer;
 
--- AND THE PUBLIC DEFAULT, TAKEN AWAY -- because the twelve grants above are
--- what this plane MEANS, and until this block existed they were not what it
--- SAID. Postgres grants EXECUTE on a new function to PUBLIC unless you remove
--- it, so each ACL above read `=X/app_owner | authenticated=X/app_owner`: the
--- explicit grant, plus everybody. `web_anon` holds USAGE on this schema
--- (§9, the anonymous read path), so every authoring entry point here was
--- reachable unauthenticated, with `may_author` as the only thing between an
--- anonymous request and a write that runs as the engine owner.
+-- AND THE PUBLIC DEFAULT, TAKEN AWAY -- because the grants above are what this
+-- plane MEANS, and until this block existed they were not what it SAID.
+-- Postgres grants EXECUTE on a new function to PUBLIC unless you remove it, so
+-- each ACL above read `=X/app_owner | authenticated=X/app_owner`: the explicit
+-- grant, plus everybody. `web_anon` holds USAGE on this schema (§9, the
+-- anonymous read path), so every authoring entry point here was reachable
+-- unauthenticated, with `may_author` as the only thing between an anonymous
+-- request and a write that runs as the engine owner.
 --
 -- That check does hold -- verified by calling upsert_agent over REST with no
 -- token, which returns "not authorized to author agents". Depth is the point:
@@ -16592,19 +16753,37 @@ grant execute on function agentic.channel_for(uuid) to authenticated, api_viewer
 -- the same as scoping, and this is the same argument applied to the plane that
 -- was written after it. Nothing here loses a caller it had; every one of these
 -- names its callers on the line above.
-revoke execute on function agentic.create_session(text) from public;
-revoke execute on function agentic.start_run(text, uuid, uuid, uuid, text, text, text, uuid) from public;
-revoke execute on function agentic.finish_run(uuid, text, jsonb) from public;
-revoke execute on function agentic.persist_turn(jsonb) from public;
-revoke execute on function agentic.upsert_summary(uuid, text) from public;
-revoke execute on function agentic.apply_summary(jsonb) from public;
-revoke execute on function agentic.upsert_agent(jsonb) from public;
-revoke execute on function agentic.upsert_tool_server(jsonb) from public;
-revoke execute on function agentic.upsert_skill(jsonb) from public;
-revoke execute on function agentic.attach_skill(text, text, jsonb) from public;
-revoke execute on function agentic.detach_skill(text, text) from public;
-revoke execute on function agentic.apply_plugin(jsonb) from public;
-revoke execute on function agentic.may_author(text, regclass) from public;
+--
+-- ONE STATEMENT, NOT AN ENUMERATION, and the enumeration is what went wrong.
+--
+-- This block used to list thirteen functions by signature. `rbac`, `workflow`
+-- and `aiq` all use the blanket form, and user-rbac §9(a) states the rule it
+-- exists for in as many words: "a new function added later is unreachable via
+-- REST until someone deliberately grants it. Deny-by-default, not
+-- allow-by-omission." The list here was allow-by-omission wearing the other
+-- one's clothes, and it had already missed three:
+--
+--   * `channel_for`, which is granted four lines above this block -- the list
+--     and the grants were written together and still disagreed, and the
+--     sentence introducing them said "twelve" where there are thirteen.
+--   * `plan_facet`, defined in §9b BELOW this block. That is exactly the
+--     "added later" case the rule is worded for, landing in the file that
+--     explains the rule.
+--   * `notify_message`, the trigger function.
+--
+-- None of the three was a live leak: all are SECURITY INVOKER, and `web_anon`
+-- holds no table grant in this schema, so the reads behind them fail on
+-- privileges rather than answering. That is the accident the depth argument
+-- above is about -- the same accident of grant ordering §1 of user-rbac
+-- records for set_password, which "silently succeeded purely because
+-- table-level UPDATE happened not to be granted yet".
+--
+-- Placed AFTER every grant in this file for the reason the blanket form
+-- requires: REVOKE ... FROM PUBLIC removes only PUBLIC's grant, so the
+-- role-specific grants above survive it untouched. §9b's grants come after
+-- this line and are re-stated there, which the self-check below now verifies
+-- rather than trusts.
+revoke execute on all functions in schema agentic from public;
 
 -- No base-table INSERT/UPDATE/DELETE grant to any PostgREST-facing role: the
 -- write path is the functions above, and nothing else.
@@ -16752,6 +16931,17 @@ $$;
 grant select on agentic.v_plan_agents, agentic.v_plan_servers to authenticated;
 grant execute on function agentic.plan_facet() to authenticated;
 
+-- RE-STATED, because plan_facet is defined after §9's blanket revoke and would
+-- otherwise carry the PUBLIC default it was born with -- which is precisely
+-- what happened, in the file that argues for the blanket form. `aiq` already
+-- does it this way (integration-rbac.sql and graph-algorithms.sql each end
+-- with one), and the rule that falls out is worth stating plainly: a file that
+-- defines a function after a revoke owes another revoke. The self-check below
+-- is what makes forgetting it a load-time failure rather than a quiet one.
+revoke execute on all functions in schema agentic from public;
+grant execute on function agentic.plan_facet() to authenticated;
+grant execute on function agentic.channel_for(uuid) to authenticated, api_viewer;
+
 comment on function agentic.plan_facet() is
     'The agentic half of workflow.plan_catalog(): every agent, tool server and '
     'skill, keyed by name, in the shape p8_plan_graph reads. Shared config only.';
@@ -16790,6 +16980,39 @@ begin
         raise exception 'WRITE GRANT INVARIANT VIOLATED: % is writable directly; '
                         'the write path is the SECURITY DEFINER functions only', v_bad;
     end if;
+
+    -- (c) No function in this schema still carries the PUBLIC EXECUTE default.
+    --
+    -- user-rbac §9(a) states this as a structural rule for the whole
+    -- collection, and this schema was the one that did not hold it: the
+    -- revoke was an enumeration, and it had missed channel_for, plan_facet and
+    -- notify_message. An enumeration cannot be trusted to stay complete -- that
+    -- is the entire argument for the blanket form -- so the thing to check is
+    -- not "is the list right" but "is any function still public".
+    --
+    -- aclexplode over proacl, and `proacl is null` matters as much as the
+    -- explode: a function nobody has touched has a NULL ACL, which MEANS the
+    -- default, which means PUBLIC holds EXECUTE. A check that only inspected
+    -- non-null ACLs would pass every function this is written to catch.
+    select string_agg(p.proname, ', ')
+      into v_bad
+      from pg_proc p
+      join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'agentic'
+       and (p.proacl is null
+            or exists (select 1 from aclexplode(p.proacl) a
+                        where a.grantee = 0 and a.privilege_type = 'EXECUTE'));
+    if v_bad is not null then
+        raise exception
+            'PUBLIC EXECUTE INVARIANT VIOLATED: agentic.% still carries EXECUTE for '
+            'PUBLIC. web_anon holds USAGE on this schema, so that is an anonymous '
+            'caller reaching it over PostgREST. Add `revoke execute on all functions '
+            'in schema agentic from public;` after the definition, then re-grant the '
+            'callers it is meant to have.', v_bad;
+    end if;
+
+    raise notice 'agentic self-check passed: api views are api_viewer-owned, no direct '
+                 'write grant, and no function is left public';
 end $$;
 
 

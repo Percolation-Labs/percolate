@@ -396,6 +396,24 @@ begin
         raise exception 'refresh token expired';
     end if;
 
+    -- The same status hole verify_api_key had, on the other long-lived
+    -- credential. Rotation issues a NEW 30-day token every time, so a session
+    -- that predates a disable never expires on its own -- disabling an account
+    -- stopped its password logins and left it signed in forever on every
+    -- device it was already signed in on.
+    --
+    -- Refused rather than revoked, and the distinction is the one §5 records
+    -- for attempt_login: a RAISE aborts the transaction, so revoking the chain
+    -- here and then raising would roll the revocation back and leave the very
+    -- state this branch exists to end. The refusal is enough -- the token
+    -- cannot be exchanged while the account is not active, and re-activating
+    -- restores the sessions that were legitimately open, which is the correct
+    -- reading of a suspension. Ending them for good is what revoke_all_sessions
+    -- is for, and it is a separate, deliberate act.
+    if (select status from rbac.users where id = v_row.user_id) <> 'active' then
+        raise exception 'account is not active';
+    end if;
+
     return query
     with new_token as (
         insert into rbac.refresh_tokens (user_id, token_hash, device_label, expires_at)
@@ -461,11 +479,58 @@ create index if not exists idx_password_reset_tokens_user
 --
 -- Returns void rather than the row id for the same reason -- a caller that can
 -- tell "issued" from "not issued" has the oracle back.
+--
+-- THE CALLER SUPPLIES THE SECRET, WHICH IS WHY THIS IS NOT A PUBLIC ENDPOINT.
+--
+-- `p_raw_token` is the reset credential itself, chosen by whoever calls this.
+-- That is correct for a TRUSTED caller -- a delivery path that mints a token,
+-- stores its hash here and emails the raw one, which is the shape §4.1
+-- describes -- and it is a complete account takeover for an anonymous one.
+-- EXECUTE used to be granted to `web_anon` (§9), with the reasoning that it is
+-- "self-authenticating by token possession, exactly as refresh_session is".
+-- It is not, and the difference is the whole vulnerability: refresh_session
+-- VERIFIES a token the server issued, while this one ISSUES the token the
+-- caller named. So:
+--
+--     set role web_anon;
+--     select rbac.request_password_reset('victim@example.com', 'token-i-picked');
+--     select rbac.reset_password('token-i-picked', 'my new password');
+--
+-- took over any account whose address you knew, over HTTP, with no email
+-- involved at any point. Same shape as the two spoofable-argument bugs already
+-- recorded in this file (`issue_refresh_token`'s caller-supplied user_id,
+-- `revoke_session`'s p_user_id), one step worse: what the caller controls here
+-- is not the identity but the secret.
+--
+-- The grant is gone (§9). `reset_password` stays on web_anon, because that one
+-- genuinely IS token possession. What this leaves is a system with no anonymous
+-- way to START a reset -- deliberately, and stated rather than papered over,
+-- exactly as §1a states the email-verification gap: the missing piece is a
+-- delivery path, and inventing one inside a security fix is how a subsystem
+-- grows a feature nobody specified. `dev/tests/rbac/06-password-reset.sql`
+-- pins both halves, so building delivery is a deliberate act that updates a
+-- test rather than a surprise.
+--
+-- THROTTLED, and before the lookup rather than after it. Minting reset tokens
+-- is a write an untrusted front end can drive at whatever rate it is willing
+-- to relay, each one spending the outstanding token for that address -- so an
+-- unthrottled reset request is a denial of service against the account holder,
+-- who never gets to use the link they were sent. The bucket is consumed before
+-- `rbac.users` is consulted, so a throttled unknown address and a throttled
+-- real one are still indistinguishable and the oracle stays shut.
 create or replace function rbac.request_password_reset(
     p_email text, p_raw_token text, p_ttl interval default interval '1 hour')
 returns void as $$
 declare v_user_id uuid;
 begin
+    insert into workflow.rate_limits (key, capacity, tokens, refill_rate)
+    values ('reset:' || lower(p_email), 3, 3, 0.0056)   -- 3 burst, ~1 per 3 min
+    on conflict (key) do nothing;
+
+    if not workflow.try_consume_rate_limit('reset:' || lower(p_email)) then
+        raise exception 'too many password reset requests for that address, try again shortly';
+    end if;
+
     select id into v_user_id from rbac.users where email = p_email;
     if v_user_id is null then
         return;                          -- deliberately indistinguishable
@@ -542,12 +607,28 @@ create table if not exists rbac.api_keys (
 -- security definer: self-authenticating via key possession, so safe as a
 -- public entry point, but needs to UPDATE last_used_at without granting
 -- broad UPDATE on api_keys to web_anon.
+--
+-- THE OWNER'S STATUS IS PART OF THE CHECK, and it was not. `status` was
+-- enforced in exactly one place in this file -- verify_password -- so
+-- `update rbac.users set status = 'disabled'`, the only lever the column
+-- offers and the one an operator reaches for when an account is compromised
+-- or an employee leaves, stopped password logins and left every API key that
+-- person held working indefinitely. A credential path that ignores the
+-- account's own status is not a second factor, it is a bypass.
+--
+-- `user_id is null` is a SERVICE ACCOUNT (the column's own comment says so)
+-- and has no user whose status could be consulted; its revocation is
+-- revoked_at, which is already checked. Revoking a key stays the way to kill
+-- one key; disabling the user is now the way to kill all of theirs at once.
 create or replace function rbac.verify_api_key(p_raw_key text)
 returns table(key_id uuid, user_id uuid, scopes text[]) as $$
     update rbac.api_keys
     set last_used_at = now()
     where key_hash = encode(digest(p_raw_key, 'sha256'), 'hex')
       and revoked_at is null
+      and (api_keys.user_id is null
+           or exists (select 1 from rbac.users u
+                       where u.id = api_keys.user_id and u.status = 'active'))
     returning id, user_id, scopes;
 $$ language sql security definer set search_path = pg_catalog, public;
 
@@ -780,6 +861,21 @@ begin
         v_uid := rbac.create_user_with_password(p_email, p_password);
     end if;
 
+    -- ACTIVATED, because this function's whole job is producing an account
+    -- that works. create_user_with_password inserts `pending_verification`
+    -- and verify_password requires `active` (§1a), so without this line
+    -- bootstrap_admin accepted a password, stored it, returned an id, and
+    -- handed back the one account in the system that could never log in --
+    -- while §1a's stated workaround for exactly that is the UPDATE below.
+    --
+    -- This is NOT the email-verification gap being quietly closed. It is
+    -- closed for THIS caller only, and the reason is that there is no inbox to
+    -- prove control of: bootstrap_admin is unreachable over PostgREST and runs
+    -- from a privileged local session, so the operator typing the address IS
+    -- the verification. Every other account still goes through §1a's gap, and
+    -- the assertion that pins it is untouched.
+    update rbac.users set status = 'active' where id = v_uid and status <> 'active';
+
     insert into rbac.roles (name, description)
     values (p_role, 'the first administrator')
     on conflict (name) do nothing;
@@ -910,10 +1006,15 @@ revoke execute on all functions in schema rbac from public;
 grant execute on function rbac.create_user_with_password(text, text) to web_anon;
 grant execute on function rbac.login(text, text, text, text) to web_anon;
 grant execute on function rbac.refresh_session(text, text) to web_anon, authenticated;
--- web_anon on purpose: somebody who has forgotten their password cannot be
--- authenticated, which is the whole situation. Both are self-authenticating by
--- token possession, exactly as refresh_session is.
-grant execute on function rbac.request_password_reset(text, text, interval) to web_anon;
+-- reset_password on web_anon on purpose: somebody who has forgotten their
+-- password cannot be authenticated, which is the whole situation, and this one
+-- IS self-authenticating by token possession, exactly as refresh_session is.
+--
+-- request_password_reset is NOT, and used to be granted here on the reasoning
+-- that it was -- see its own header. It takes the raw token as an argument, so
+-- granting it to web_anon let an anonymous caller mint a reset credential of
+-- its own choosing for any address and redeem it on the next line. It stays
+-- owner-only: the caller that mints and delivers is a trusted one.
 grant execute on function rbac.reset_password(text, text) to web_anon;
 grant execute on function rbac.verify_api_key(text) to web_anon, authenticated;
 grant execute on function rbac.change_password(text, text) to authenticated;
@@ -930,9 +1031,10 @@ grant execute on function rbac.revoke_all_sessions() to authenticated;
 -- widened search_path anywhere.
 grant execute on function rbac.has_permission(uuid, text, text) to web_anon, authenticated;
 grant execute on function rbac.current_user_id() to web_anon, authenticated;
--- set_password, verify_password, issue_refresh_token, attempt_login: stay
--- internal-only (owner-only EXECUTE), reachable only from within the
--- security-definer functions above that call them, never directly via RPC.
+-- set_password, verify_password, issue_refresh_token, attempt_login,
+-- request_password_reset: stay internal-only (owner-only EXECUTE), reachable
+-- only from within the security-definer functions above that call them, or
+-- from a trusted local session, never directly via RPC.
 
 -- (b) RLS on every table this module owns -- deny-by-default the moment RLS
 -- is enabled with no matching policy, which is exactly what anon/no-session

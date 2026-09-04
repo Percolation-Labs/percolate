@@ -1749,14 +1749,14 @@ grant execute on function agentic.detach_skill(text, text) to authenticated;
 grant execute on function agentic.apply_plugin(jsonb) to authenticated;
 grant execute on function agentic.channel_for(uuid) to authenticated, api_viewer;
 
--- AND THE PUBLIC DEFAULT, TAKEN AWAY -- because the twelve grants above are
--- what this plane MEANS, and until this block existed they were not what it
--- SAID. Postgres grants EXECUTE on a new function to PUBLIC unless you remove
--- it, so each ACL above read `=X/app_owner | authenticated=X/app_owner`: the
--- explicit grant, plus everybody. `web_anon` holds USAGE on this schema
--- (§9, the anonymous read path), so every authoring entry point here was
--- reachable unauthenticated, with `may_author` as the only thing between an
--- anonymous request and a write that runs as the engine owner.
+-- AND THE PUBLIC DEFAULT, TAKEN AWAY -- because the grants above are what this
+-- plane MEANS, and until this block existed they were not what it SAID.
+-- Postgres grants EXECUTE on a new function to PUBLIC unless you remove it, so
+-- each ACL above read `=X/app_owner | authenticated=X/app_owner`: the explicit
+-- grant, plus everybody. `web_anon` holds USAGE on this schema (§9, the
+-- anonymous read path), so every authoring entry point here was reachable
+-- unauthenticated, with `may_author` as the only thing between an anonymous
+-- request and a write that runs as the engine owner.
 --
 -- That check does hold -- verified by calling upsert_agent over REST with no
 -- token, which returns "not authorized to author agents". Depth is the point:
@@ -1764,19 +1764,37 @@ grant execute on function agentic.channel_for(uuid) to authenticated, api_viewer
 -- the same as scoping, and this is the same argument applied to the plane that
 -- was written after it. Nothing here loses a caller it had; every one of these
 -- names its callers on the line above.
-revoke execute on function agentic.create_session(text) from public;
-revoke execute on function agentic.start_run(text, uuid, uuid, uuid, text, text, text, uuid) from public;
-revoke execute on function agentic.finish_run(uuid, text, jsonb) from public;
-revoke execute on function agentic.persist_turn(jsonb) from public;
-revoke execute on function agentic.upsert_summary(uuid, text) from public;
-revoke execute on function agentic.apply_summary(jsonb) from public;
-revoke execute on function agentic.upsert_agent(jsonb) from public;
-revoke execute on function agentic.upsert_tool_server(jsonb) from public;
-revoke execute on function agentic.upsert_skill(jsonb) from public;
-revoke execute on function agentic.attach_skill(text, text, jsonb) from public;
-revoke execute on function agentic.detach_skill(text, text) from public;
-revoke execute on function agentic.apply_plugin(jsonb) from public;
-revoke execute on function agentic.may_author(text, regclass) from public;
+--
+-- ONE STATEMENT, NOT AN ENUMERATION, and the enumeration is what went wrong.
+--
+-- This block used to list thirteen functions by signature. `rbac`, `workflow`
+-- and `aiq` all use the blanket form, and user-rbac §9(a) states the rule it
+-- exists for in as many words: "a new function added later is unreachable via
+-- REST until someone deliberately grants it. Deny-by-default, not
+-- allow-by-omission." The list here was allow-by-omission wearing the other
+-- one's clothes, and it had already missed three:
+--
+--   * `channel_for`, which is granted four lines above this block -- the list
+--     and the grants were written together and still disagreed, and the
+--     sentence introducing them said "twelve" where there are thirteen.
+--   * `plan_facet`, defined in §9b BELOW this block. That is exactly the
+--     "added later" case the rule is worded for, landing in the file that
+--     explains the rule.
+--   * `notify_message`, the trigger function.
+--
+-- None of the three was a live leak: all are SECURITY INVOKER, and `web_anon`
+-- holds no table grant in this schema, so the reads behind them fail on
+-- privileges rather than answering. That is the accident the depth argument
+-- above is about -- the same accident of grant ordering §1 of user-rbac
+-- records for set_password, which "silently succeeded purely because
+-- table-level UPDATE happened not to be granted yet".
+--
+-- Placed AFTER every grant in this file for the reason the blanket form
+-- requires: REVOKE ... FROM PUBLIC removes only PUBLIC's grant, so the
+-- role-specific grants above survive it untouched. §9b's grants come after
+-- this line and are re-stated there, which the self-check below now verifies
+-- rather than trusts.
+revoke execute on all functions in schema agentic from public;
 
 -- No base-table INSERT/UPDATE/DELETE grant to any PostgREST-facing role: the
 -- write path is the functions above, and nothing else.
@@ -1924,6 +1942,17 @@ $$;
 grant select on agentic.v_plan_agents, agentic.v_plan_servers to authenticated;
 grant execute on function agentic.plan_facet() to authenticated;
 
+-- RE-STATED, because plan_facet is defined after §9's blanket revoke and would
+-- otherwise carry the PUBLIC default it was born with -- which is precisely
+-- what happened, in the file that argues for the blanket form. `aiq` already
+-- does it this way (integration-rbac.sql and graph-algorithms.sql each end
+-- with one), and the rule that falls out is worth stating plainly: a file that
+-- defines a function after a revoke owes another revoke. The self-check below
+-- is what makes forgetting it a load-time failure rather than a quiet one.
+revoke execute on all functions in schema agentic from public;
+grant execute on function agentic.plan_facet() to authenticated;
+grant execute on function agentic.channel_for(uuid) to authenticated, api_viewer;
+
 comment on function agentic.plan_facet() is
     'The agentic half of workflow.plan_catalog(): every agent, tool server and '
     'skill, keyed by name, in the shape p8_plan_graph reads. Shared config only.';
@@ -1962,4 +1991,37 @@ begin
         raise exception 'WRITE GRANT INVARIANT VIOLATED: % is writable directly; '
                         'the write path is the SECURITY DEFINER functions only', v_bad;
     end if;
+
+    -- (c) No function in this schema still carries the PUBLIC EXECUTE default.
+    --
+    -- user-rbac §9(a) states this as a structural rule for the whole
+    -- collection, and this schema was the one that did not hold it: the
+    -- revoke was an enumeration, and it had missed channel_for, plan_facet and
+    -- notify_message. An enumeration cannot be trusted to stay complete -- that
+    -- is the entire argument for the blanket form -- so the thing to check is
+    -- not "is the list right" but "is any function still public".
+    --
+    -- aclexplode over proacl, and `proacl is null` matters as much as the
+    -- explode: a function nobody has touched has a NULL ACL, which MEANS the
+    -- default, which means PUBLIC holds EXECUTE. A check that only inspected
+    -- non-null ACLs would pass every function this is written to catch.
+    select string_agg(p.proname, ', ')
+      into v_bad
+      from pg_proc p
+      join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'agentic'
+       and (p.proacl is null
+            or exists (select 1 from aclexplode(p.proacl) a
+                        where a.grantee = 0 and a.privilege_type = 'EXECUTE'));
+    if v_bad is not null then
+        raise exception
+            'PUBLIC EXECUTE INVARIANT VIOLATED: agentic.% still carries EXECUTE for '
+            'PUBLIC. web_anon holds USAGE on this schema, so that is an anonymous '
+            'caller reaching it over PostgREST. Add `revoke execute on all functions '
+            'in schema agentic from public;` after the definition, then re-grant the '
+            'callers it is meant to have.', v_bad;
+    end if;
+
+    raise notice 'agentic self-check passed: api views are api_viewer-owned, no direct '
+                 'write grant, and no function is left public';
 end $$;

@@ -424,6 +424,96 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
+-- 6b. AND BY claim_tasks, WHICH IS THE ONE THAT DID NOT.
+--
+-- §21b moved the bucket INTO claim_task so throttling stopped being something
+-- a worker opts into. It left the BATCH claim as a bare UPDATE, so the same
+-- defect survived one function along -- and claim_tasks is not a corner: it is
+-- what spec.md §7 names as the throughput path, it is granted to `worker`, and
+-- §11's first test recipe puts the token bucket and batching in one pipeline.
+-- A worker that batched got every throttled task handed to it at once, which
+-- is precisely the fan-out-at-a-regulator's-API failure §6 above is written
+-- about, reached by the faster route.
+--
+-- The old notice on this file claimed "a throttle works with any worker". It
+-- was true of the singular claim only, and the batch test in 06-recovery uses
+-- a queue with no rate_key, so nothing contradicted it.
+-- ---------------------------------------------------------------------
+insert into workflow.rate_limits (key, capacity, tokens, refill_rate)
+values ('t_fb_limit', 2, 2, 0);
+
+insert into workflow.definitions (name, spec) values
+('t_fb_rate', '{"steps":[
+  {"key":"a","kind":"work","queue":"t_brate","rate_key":"t_fb_limit"},
+  {"key":"b","kind":"work","queue":"t_brate","rate_key":"t_fb_limit"},
+  {"key":"c","kind":"work","queue":"t_brate","rate_key":"t_fb_limit"},
+  {"key":"d","kind":"work","queue":"t_brate","rate_key":"t_fb_limit"}]}');
+
+do $$
+declare v_run uuid; v_n int; v_left int;
+begin
+    v_run := workflow.start_workflow('t_fb_rate', '{}'::jsonb);
+
+    -- One call, asking for more than the bucket holds. The whole point of the
+    -- batch API is that it is ONE round trip, so the throttle has to hold
+    -- within a single call or it does not hold at all.
+    select count(*) into v_n from workflow.claim_tasks('t_brate', 'batch-tester', 10);
+    if v_n <> 2 then
+        raise exception
+            'claim_tasks handed out % of 4 tasks against a bucket of 2. The batch claim '
+            'is the throughput path and ignored rate_key entirely -- a throttle that is '
+            'bypassed by the API written for volume is bypassed exactly when it matters.',
+            v_n;
+    end if;
+
+    if (select tokens from workflow.rate_limits where key = 't_fb_limit') >= 2 then
+        raise exception 'the batch claim did not consume the bucket';
+    end if;
+
+    -- The rest are LEFT READY, not consumed and not failed: a throttled task
+    -- is one whose turn has not come, and the next claim after a refill takes
+    -- it. Same contract claim_task has.
+    select count(*) into v_left from workflow.tasks
+     where run_id = v_run and status = 'ready';
+    if v_left <> 2 then
+        raise exception 'expected 2 tasks left ready after a throttled batch, found %', v_left;
+    end if;
+
+    -- And an empty bucket yields an empty batch rather than a partial one that
+    -- looks like an empty queue.
+    if (select count(*) from workflow.claim_tasks('t_brate', 'batch-tester-2', 10)) <> 0 then
+        raise exception 'a spent bucket still handed out a batch';
+    end if;
+end $$;
+
+-- The lookahead survives batching, which is the other half of §11's recipe: a
+-- throttled source must not head-of-line-block an unrelated one, and a
+-- lookahead the batch itself consumes is no lookahead at all -- which is why
+-- claim_tasks adds it to the batch size rather than sharing it.
+insert into workflow.rate_limits (key, capacity, tokens, refill_rate)
+values ('t_fb_spent', 1, 0, 0);
+
+insert into workflow.definitions (name, spec) values
+('t_fb_mixed', '{"steps":[
+  {"key":"blocked","kind":"work","queue":"t_bmix","rate_key":"t_fb_spent"},
+  {"key":"free","kind":"work","queue":"t_bmix"}]}');
+
+do $$
+declare v_rows text[];
+begin
+    perform workflow.start_workflow('t_fb_mixed', '{}'::jsonb);
+    select array_agg(step_key order by step_key) into v_rows
+      from workflow.claim_tasks('t_bmix', 'batch-tester', 10);
+    if v_rows is distinct from array['free'] then
+        raise exception
+            'a batch behind a throttled task returned % -- one spent bucket must not '
+            'stall an unrelated task sharing the queue', coalesce(v_rows::text, 'nothing');
+    end if;
+    raise notice 'workflow/05: claim_task AND claim_tasks consume the rate key, so a '
+                 'throttle works with any worker, batched or not';
+end $$;
+
+-- ---------------------------------------------------------------------
 -- 7. Timers and sub-workflows (21g/21i), neither of which had ever executed.
 --
 -- start_child_workflow inserted a run row and NEVER EXPANDED THE CHILD'S TASK
@@ -723,7 +813,6 @@ do $$ begin
     raise notice 'workflow/05: a tolerated child failure satisfies its dependent; below min_success the aggregate is cancelled, not run';
     raise notice 'workflow/05: saga compensations stay out of the forward graph, trigger themselves, run as their declared kind, in reverse';
     raise notice 'workflow/05: a cancelled run is not an idempotent hit, and no work lands under one';
-    raise notice 'workflow/05: claim_task consumes the rate key, so a throttle works with any worker';
     raise notice 'workflow/05: sub-workflows expand and resolve their parent; a timer counts from readiness';
     raise notice 'workflow/05: a run can see itself via {{run.$*}}, in both resolvers, without shadowing caller input';
     raise notice 'workflow/05: registration checks the role that will EXECUTE, and says what to grant';

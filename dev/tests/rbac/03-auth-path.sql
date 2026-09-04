@@ -258,4 +258,82 @@ begin
     raise notice 'rbac/03: an API key ends by revocation only, while a session ends by clock -- deliberate, and now asserted';
 end $$;
 
+-- ---------------------------------------------------------------------
+-- 5. DISABLING AN ACCOUNT DISABLES EVERY WAY INTO IT.
+--
+-- `rbac.users.status` was enforced in exactly one function -- verify_password.
+-- So `update rbac.users set status = 'disabled'`, which is the only lever the
+-- column offers and the first thing anyone reaches for when an account is
+-- compromised or a person leaves, stopped password logins and left the other
+-- two credential paths wide open: every API key that person held kept
+-- verifying, and every refresh token they had kept minting fresh 30-day
+-- sessions -- rotation issues a NEW token each time, so a session opened
+-- before the disable never expires on its own.
+--
+-- Three doors, one lock, asserted here rather than in three places, because
+-- the failure was never in any single function -- it was that "status" meant
+-- something in one of them and nothing in the others. A fourth credential path
+-- added later belongs in this block.
+-- ---------------------------------------------------------------------
+do $$
+declare
+    v_uid uuid;
+    v_n   int;
+    v_refused boolean := false;
+begin
+    v_uid := rbac.create_user_with_password('leaver@example.com', 'a long passphrase');
+    update rbac.users set status = 'active' where id = v_uid;
+
+    insert into rbac.api_keys (user_id, label, key_hash)
+    values (v_uid, 'their laptop', encode(digest('sk-leaver-key', 'sha256'), 'hex'));
+    perform rbac.issue_refresh_token(v_uid, 'their laptop', 'leaver-session');
+
+    -- All three work while the account is active, so the assertions below are
+    -- about the disable and not about a fixture that never worked.
+    if rbac.verify_password('leaver@example.com', 'a long passphrase') is null then
+        raise exception 'the fixture cannot log in even while active';
+    end if;
+    select count(*) into v_n from rbac.verify_api_key('sk-leaver-key');
+    if v_n <> 1 then
+        raise exception 'the fixture key does not verify even while active';
+    end if;
+
+    update rbac.users set status = 'disabled' where id = v_uid;
+
+    if rbac.verify_password('leaver@example.com', 'a long passphrase') is not null then
+        raise exception 'a disabled account can still log in with its password';
+    end if;
+
+    select count(*) into v_n from rbac.verify_api_key('sk-leaver-key');
+    if v_n <> 0 then
+        raise exception
+            'a disabled account''s API key still verifies -- revoking every key one by '
+            'one is not what an operator thinks they are doing when they disable a user';
+    end if;
+
+    begin
+        perform rbac.refresh_session('leaver-session', 'leaver-session-2');
+    exception when others then
+        v_refused := sqlerrm like '%not active%';
+    end;
+    if not v_refused then
+        raise exception
+            'a disabled account''s refresh token still rotates -- every rotation issues '
+            'a new 30-day token, so the session outlives the disable indefinitely';
+    end if;
+
+    -- Re-activating restores what was legitimately open, which is the correct
+    -- reading of a suspension: refresh_session REFUSES rather than revoking,
+    -- deliberately (a RAISE would roll a revocation back anyway -- see §5 of
+    -- user-rbac/schema.sql). Ending sessions for good is revoke_all_sessions,
+    -- and it is a separate act.
+    update rbac.users set status = 'active' where id = v_uid;
+    if (select count(*) from rbac.verify_api_key('sk-leaver-key')) <> 1 then
+        raise exception 'reactivating the account did not restore its key';
+    end if;
+
+    raise notice 'rbac/03: disabling an account closes the password, API-key and '
+                 'refresh-token doors together, and reactivating reopens them';
+end $$;
+
 rollback;

@@ -819,20 +819,60 @@ begin
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
+-- THE BATCH CLAIM CONSUMES THE RATE KEY TOO, and it did not.
+--
+-- §21b's fix moved the token bucket INTO claim_task so that throttling stopped
+-- being something a worker had to opt into -- the defect being that every
+-- piece existed (the bucket, try_consume_rate_limit, claim_task_rate_limited)
+-- and the shipped worker called none of them. This function was left as a bare
+-- UPDATE, so the same defect survived one function along: a worker that
+-- batches -- which spec.md §7 names as the throughput path, and grants to
+-- `worker` below -- got every throttled task handed to it, `rate_key` and all.
+-- §11's first test recipe combines the token bucket, lookahead-skip claiming
+-- AND batching in one pipeline, so they were always meant to compose.
+--
+-- The shape is claim_task's, generalised from "the first one that passes" to
+-- "the first p_batch_size that pass". The lookahead is ADDED to the batch size
+-- rather than shared with it: the point of looking ahead is that a throttled
+-- source must not head-of-line-block an unrelated one, and a lookahead that a
+-- full batch consumes is no lookahead at all.
+--
+-- Still one statement's worth of locking: `for update skip locked` over the
+-- candidate window, and the rows that are looked at and not claimed stay
+-- locked for the transaction exactly as claim_task's do -- concurrent claimers
+-- skip them rather than block, which is what SKIP LOCKED is for.
 create or replace function workflow.claim_tasks(p_queue text, p_worker_id text, p_batch_size int default 10)
 returns setof workflow.tasks as $$
-    update workflow.tasks
-    set status = 'running', claimed_by = p_worker_id,
-        claimed_at = now(), heartbeat_at = now(), attempts = attempts + 1
-    where id in (
-        select id from workflow.tasks
+declare
+    t           workflow.tasks;
+    v_lookahead int;
+    v_taken     int := 0;
+begin
+    select coalesce(rate_lookahead, 20) into v_lookahead
+    from workflow.queue_config where queue = p_queue;
+    v_lookahead := coalesce(v_lookahead, 20);
+
+    for t in
+        select * from workflow.tasks
         where queue = p_queue and status = 'ready' and run_after <= now()
         order by priority desc, created_at
         for update skip locked
-        limit p_batch_size
-    )
-    returning *;
-$$ language sql;
+        limit p_batch_size + v_lookahead
+    loop
+        exit when v_taken >= p_batch_size;
+        if t.rate_key is null or workflow.try_consume_rate_limit(t.rate_key) then
+            update workflow.tasks
+            set status = 'running', claimed_by = p_worker_id,
+                claimed_at = now(), heartbeat_at = now(), attempts = attempts + 1
+            where id = t.id
+            returning * into t;
+            v_taken := v_taken + 1;
+            return next t;
+        end if;
+    end loop;
+    return;
+end;
+$$ language plpgsql;
 
 -- SUPERSEDED, kept as an alias rather than a second body.
 --
@@ -6507,12 +6547,31 @@ with served as (
       and t.rate_key is not null
       and not exists (select 1 from workflow.rate_limits rl where rl.key = t.rate_key)
   union all
+    -- SAYS ONLY WHAT IT CHECKED. This used to report "queue has no worker pool
+    -- and no config", with a remedy asserting "no workflow.queue_config row for
+    -- queue X" -- and the predicate consults queue_config nowhere. A queue that
+    -- HAD a config row and had simply lost its workers got a diagnostic that
+    -- was half false, pointing the reader at a table with nothing wrong in it.
+    -- A view whose whole job is making an invisible failure legible cannot
+    -- afford to name a cause it did not test; that is the same "reports success
+    -- it did not verify" shape this file keeps correcting, inverted.
+    --
+    -- So the config half is now looked up rather than assumed, and the sentence
+    -- changes with the answer.
     select t.id, t.run_id, t.queue, t.step_key, null::text,
-           'queue has no worker pool and no config'::text,
-           format('no workflow.queue_config row for queue %L, and nothing has '
-                  'claimed from it', t.queue),
+           case when qc.queue is null
+                then 'queue has no worker pool and no config'
+                else 'queue is configured but nothing has claimed from it' end::text,
+           case when qc.queue is null
+                then format('no workflow.queue_config row for queue %L, and nothing has '
+                            'claimed from it in 10 minutes -- start a worker on that '
+                            'queue, or check the name the step spec wrote', t.queue)
+                else format('workflow.queue_config has a row for queue %L, so the name is '
+                            'right and no worker has claimed from it in 10 minutes -- '
+                            'the pool is down or scaled to zero', t.queue) end,
            now() - t.created_at
     from workflow.tasks t
+    left join workflow.queue_config qc on qc.queue = t.queue
     where t.status = 'ready'
       and t.run_after <= now()
       and t.created_at < now() - interval '10 minutes'
