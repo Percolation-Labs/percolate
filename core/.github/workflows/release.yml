@@ -16,7 +16,7 @@
 #
 #   PyPI trusted publisher (no API token to leak or rotate) -- on
 #   pypi.org/manage/project/percolate-core/settings/publishing add a pending
-#   publisher for owner `percolating-sirsh`, repo `percolate-core`, workflow
+#   publisher for owner `Percolation-Labs`, repo `percolate-core`, workflow
 #   `release.yml`, environment `pypi`.
 #
 #   gh secret set DOCKERHUB_USERNAME
@@ -323,7 +323,7 @@ jobs:
       # -------------------------------------------------------------------
       - uses: actions/checkout@v4
         with:
-          repository: ${{ vars.CHART_REPO || 'percolating-sirsh/get-percolate' }}
+          repository: ${{ vars.CHART_REPO || 'Percolation-Labs/get-percolate' }}
           token: ${{ secrets.P8_RELEASE_TOKEN }}
           path: get-percolate
       - uses: actions/setup-python@v5
@@ -377,7 +377,7 @@ jobs:
 
           Released by [\`release.yml\`]($RUN).
           EOF
-          gh issue create --repo "${{ vars.SPECS_REPO || 'percolating-sirsh/p8-subsystems' }}" \
+          gh issue create --repo "${{ vars.SPECS_REPO || 'Percolation-Labs/p8-subsystems' }}" \
             --title "percolate-core $V: the dev pin and PACKAGING" \
             --body-file specs-issue.md
 

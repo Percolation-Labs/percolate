@@ -81,6 +81,6 @@ build-backend = "hatchling.build"
 packages = ["percolate_core"]
 
 [project.urls]
-Homepage = "https://github.com/percolating-sirsh/percolate-core"
-Repository = "https://github.com/percolating-sirsh/percolate-core"
-Specs = "https://github.com/percolating-sirsh/p8-subsystems"
+Homepage = "https://github.com/Percolation-Labs/percolate-core"
+Repository = "https://github.com/Percolation-Labs/percolate-core"
+Specs = "https://github.com/Percolation-Labs/p8-subsystems"

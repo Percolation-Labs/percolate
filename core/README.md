@@ -2,7 +2,7 @@
 
 The processes that sit in front of the database. The database itself, and the
 specs all of this is built against, live in
-[p8-subsystems](https://github.com/percolating-sirsh/p8-subsystems); nothing
+[p8-subsystems](https://github.com/Percolation-Labs/p8-subsystems); nothing
 here is required to use it.
 
 ```bash
@@ -117,7 +117,7 @@ a database, a stack or a key:
 
 The contract, the per-format argument and the six defects that running it
 found are `specs/world-model-ingestion/ingestion.md` in
-[p8-subsystems](https://github.com/percolating-sirsh/p8-subsystems).
+[p8-subsystems](https://github.com/Percolation-Labs/p8-subsystems).
 
 ---
 
@@ -228,7 +228,7 @@ The agent gateway is its own entrypoint because delegation is an MCP call into
 it: an agent that delegates references it as an ordinary `tool_servers` row.
 
 For the packaging decision record see
-[PACKAGING.md](https://github.com/percolating-sirsh/p8-subsystems/blob/main/PACKAGING.md);
+[PACKAGING.md](https://github.com/Percolation-Labs/p8-subsystems/blob/main/PACKAGING.md);
 for what packaging *requires of the design*, `specs/agentic/brief.md` §10.
 
 ---
