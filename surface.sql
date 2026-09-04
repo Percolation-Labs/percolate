@@ -305,7 +305,8 @@ insert into expected (subsystem, kind, name, detail, why) values
 -- only door. Every one of these is a promise made in YAML.md and roadmap.md §6.
 ('workflow-engine','function','workflow.run_sql','text,boolean,integer,jsonb','a step carries its own statement, read-only unless it declares otherwise'),
 ('workflow-engine','function','workflow.sql_policy','','open or registered -- the lockdown is a setting, not a rebuild'),
-('workflow-engine','function','workflow.resolve_statement','text,uuid,jsonb','a {{template}} in a statement is a quoted literal, so run input cannot become SQL'),
+('workflow-engine','function','workflow.resolve_statement','text,uuid,jsonb','the escaping form: a {{template}} becomes a quoted literal. Kept for the row-source statement'),
+('workflow-engine','function','workflow.resolve_statement_params','text,uuid,jsonb','the binding form: a {{template}} becomes $1->>ref with the values bound, so row data never reaches the parser'),
 -- The plan graph: a definition expanded along what it names (plan-graph.md).
 ('workflow-engine','function','workflow.plan_catalog','','what this deployment HAS, as one document the graph builder reads'),
 ('workflow-engine','function','workflow.plan_graph','text,integer','a definition expanded along the entities it reaches'),
