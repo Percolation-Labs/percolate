@@ -367,6 +367,55 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','entity_type','event',null,'dev/init/04-graph-sample.sql: the hard FK that is not an edge'),
 ('ai-query-layer','graph_example','graph',null,'§13a: the facet an agent reads before writing its first edge shipped with no examples'),
 
+-- ---------- the REST-reachable views ----------------------------------
+-- Thirteen of the fifteen *_api views were missing from this file until the
+-- closing check at the foot of it went looking. They are the most external
+-- thing the system has -- PostgREST turns each one into a URL -- and the
+-- inventory that is supposed to describe the surface did not mention them.
+-- That is the one-way-ratchet failure: everything listed here was checked to
+-- exist, and nothing asked what existed and was not listed.
+('agentic','view','agentic.agents_api',null,'schema.sql §9: the authoring view, system_prompt included -- an agent is its prompt'),
+('agentic','view','agentic.sessions_api',null,'schema.sql: a caller lists their own conversations'),
+('agentic','view','agentic.runs_api',null,'schema.sql: run state and trace ids, scoped to the owner'),
+('agentic','view','agentic.messages_api',null,'agents.md: the transcript read path -- owner-only, proven in dev/tests/agentic/03'),
+('agentic','view','agentic.tool_servers_api',null,'schema.sql: discovery reads default_headers from here, which is why the round trip covers it'),
+('ai-query-layer','view','aiq.nodes_api',null,'plan-graph.md: entities a caller may read, org-filtered'),
+('ai-query-layer','view','aiq.edges_api',null,'plan-graph.md: the relations between them, same filter'),
+('user-rbac','view','rbac.users_api',null,'spec.md §5: a directory that carries no password_hash'),
+('user-rbac','view','rbac.api_keys_api',null,'spec.md §5: a caller manages their own keys and sees no key_hash -- dev/tests/rbac/07'),
+('user-rbac','view','rbac.refresh_tokens_api',null,'spec.md §5: sessions a caller may revoke, without the token_hash that would let anyone replay them'),
+('workflow-engine','view','workflow.runs_api',null,'spec.md §4: run status over REST'),
+('workflow-engine','view','workflow.tasks_api',null,'spec.md §4: per-task state, the read half of the worker protocol'),
+('workflow-engine','view','workflow.schedules_api',null,'spec.md: what is scheduled, readable without the scheduler'),
+
+-- ---------- functions a caller role may execute -------------------------
+-- Same origin as the views above: these came back from asking the catalog
+-- which functions `authenticated` or `web_anon` may actually EXECUTE. Each is
+-- reachable from outside, so each is a promise whether or not anyone wrote it
+-- down.
+('agentic','function','agentic.upsert_summary','uuid,text','context compaction: a session''s rolling summary is written through one path'),
+('agentic','function','agentic.apply_summary','jsonb','the runtime hands back a summary it generated; this is where it lands'),
+('agentic','function','agentic.channel_for','uuid','a session''s notify channel, so a client can subscribe to its own run'),
+('ai-query-layer','function','aiq.current_org_ids','','the org filter every graph policy calls -- the aiq twin of rbac.current_user_id'),
+('ai-query-layer','function','aiq.graph_schema','','plan-graph.md: what the graph contains, answered from the registry'),
+('ai-query-layer','function','aiq.is_graph_schema','jsonb','the shape check upsert_graph applies, exposed so a caller can validate before sending'),
+('ai-query-layer','function','aiq.facet_examples','text','worked examples per facet, which is what makes the schema legible to a model'),
+('ai-query-layer','function','aiq.resolve_ref','text,text,boolean,real,uuid','name to node, fuzzily -- the entry point for turning prose into a graph reference'),
+('ai-query-layer','function','aiq.embed_call','jsonb,text','the embedding marker a step leaves for the worker to fulfil'),
+('world-model-ingestion','function','content.may_access_org','uuid','the org read check, called by policy'),
+('world-model-ingestion','function','content.assert_org_write','uuid,text','the org WRITE check -- the half that raises rather than filtering'),
+('world-model-ingestion','function','content.windows_to_index','uuid','ingest.md: the windows an indexing pass must cover for a resource'),
+('user-rbac','function','rbac.change_password','text,text','spec.md §4: a caller rotates their own password, old one required'),
+('user-rbac','function','rbac.grant_role','uuid,text','spec.md §4: role assignment, gated on users/admin -- the escalation guard dev/tests/rbac/07 pins'),
+('user-rbac','function','rbac.refresh_session','text,text','spec.md §4.3: refresh token rotation'),
+('user-rbac','function','rbac.revoke_session','uuid','spec.md §4.3: sign out one device'),
+('user-rbac','function','rbac.revoke_all_sessions','','spec.md §4.3: sign out everywhere, the control that matters after a leak'),
+('workflow-engine','function','workflow.cancel_run','uuid','spec.md §4: a caller stops their own run'),
+('workflow-engine','function','workflow.signal_task','uuid,text,jsonb','§16: the human-in-the-loop path -- a task waits for a signal from outside'),
+('workflow-engine','function','workflow.drain_sql_steps','uuid,integer','the in-database executor, so a pure-SQL workflow needs no worker at all'),
+('workflow-engine','function','workflow.p8ql','text','USAGE.md: the query entry point'),
+('workflow-engine','function','workflow.p8ql','text,jsonb','the same entry point with a caller-supplied embedding'),
+
 -- ---------- registrations the docs depend on ---------------------------
 ('cross','registration','lexical:chunks',null,'USAGE.md tells readers TEXT searches "chunks"'),
 ('cross','registration','semantic:chunks',null,'USAGE.md tells readers SEMANTIC searches "chunks"'),
@@ -699,4 +748,76 @@ begin
         (select count(*) from api_exclusions),
         (select count(*) from api_exclusions where kind = 'secret'),
         (select sum(coalesce(array_length(unsettable, 1), 0)) from write_paths);
+end $$;
+
+
+-- ============================================================
+-- THE CLOSING DIRECTION
+--
+-- Everything above runs one way: each capability this file DECLARES is checked
+-- against the catalog. Nothing ran the other way, and a one-way ratchet on an
+-- inventory is barely a ratchet at all -- it keeps the list from naming things
+-- that do not exist, and says nothing about things that exist and are not
+-- named. Adding a view is how a surface gets built; adding a line here is a
+-- separate act somebody has to remember. Those two facts together are the
+-- definition of drift.
+--
+-- It had drifted. Thirteen of the fifteen *_api views -- every URL PostgREST
+-- publishes for agentic, aiq, and rbac, including the two over the tables
+-- holding API keys and refresh tokens -- were absent, along with twenty-one
+-- functions a logged-in caller may execute. The audit read as complete
+-- throughout, because a list only ever answers the question you ask it.
+--
+-- So this asks the catalog what is REACHABLE and requires each answer to be
+-- declared. Reachability is the right test rather than "every view" or "every
+-- function": app_owner and worker are infrastructure identities whose
+-- authorization IS the grant, and holding them to an external contract would
+-- mean writing down the entire schema. What `authenticated` and `web_anon` can
+-- touch is, exactly, what a stranger can touch.
+--
+-- Declaring one costs a line and a reason. That reason is the actual product
+-- here -- a surface nobody can write a sentence justifying is a surface that
+-- probably should not be granted.
+-- ============================================================
+
+create temporary view reachable as
+with caller as (select unnest(array['authenticated','web_anon']) as r)
+select 'view' as kind, n.nspname || '.' || c.relname as name
+  from pg_class c join pg_namespace n on n.oid = c.relnamespace
+ where c.relkind = 'v'
+   and c.relname like '%\_api'
+   and exists (select 1 from caller where has_table_privilege(caller.r, c.oid, 'select'))
+union
+select 'function', n.nspname || '.' || p.proname
+  from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+ where n.nspname in ('agentic','workflow','content','aiq','rbac','trace')
+   and exists (select 1 from caller where has_function_privilege(caller.r, p.oid, 'execute'));
+
+\echo
+\echo '=== REACHABLE BUT UNDECLARED (a stranger can call it and this file does not say why) ==='
+select r.kind, r.name
+  from reachable r
+ where not exists (select 1 from expected e where lower(e.name) = r.name and e.kind = r.kind)
+ order by r.kind, r.name;
+
+do $$
+declare v_undeclared int; v_reachable int;
+begin
+    select count(*) into v_undeclared
+      from reachable r
+     where not exists (select 1 from expected e where lower(e.name) = r.name and e.kind = r.kind);
+    select count(*) into v_reachable from reachable;
+
+    if v_undeclared > 0 then
+        raise exception
+            'SURFACE UNDECLARED: % of % reachable objects are callable by `authenticated` '
+            'or `web_anon` and appear nowhere in this file. Either declare each one with '
+            'the reason it is exposed, or revoke the grant -- an external surface nobody '
+            'wrote a sentence for is the shape every drift defect starts as.',
+            v_undeclared, v_reachable;
+    end if;
+
+    raise notice
+        'SURFACE CLOSED: all % objects a caller role can reach are declared here',
+        v_reachable;
 end $$;
