@@ -231,6 +231,13 @@ jobs:
         if: inputs.publish
         run: |
           V=${{ steps.v.outputs.version }}
+          # Set HERE and not only in the bump step, which is skipped whenever
+          # this run is finishing a version the tree already carries -- exactly
+          # the path a retry takes. `git tag -a` needs an identity, so the first
+          # real retry died on `fatal: empty ident name` with everything else
+          # already published.
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "v$V" -m "percolate extension $V" ${{ steps.sha.outputs.sha }}
           git push origin "v$V"
           echo "::notice::v$V tagged -- the assets and image it names are already published"
