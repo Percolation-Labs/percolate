@@ -2561,15 +2561,29 @@ as $$
     select lower(coalesce(nullif(current_setting('percolate.sql_policy', true), ''), 'open'));
 $$;
 
+-- Dropped rather than left beside the new signature: `create or replace` with
+-- an added parameter makes a SECOND function, and the old three-argument one
+-- would still be callable and would still interpolate.
+drop function if exists workflow.run_sql(text, boolean, int);
+
 create or replace function workflow.run_sql(
     p_statement  text,
     p_write      boolean default false,
-    p_timeout_ms int default 30000)
+    p_timeout_ms int default 30000,
+    -- VALUES ARRIVE AS A PARAMETER, NOT AS TEXT. One jsonb, bound as $1, with
+    -- the statement referring to it by `$1->>'<ref>'`. See
+    -- workflow.resolve_statement_params for why one parameter rather than N:
+    -- plpgsql fixes the number of USING expressions at compile time, so a
+    -- variable-length parameter list is not expressible, and a single jsonb is.
+    p_params     jsonb default null)
 returns jsonb as $$
 declare
     v_out   jsonb;
     v_count bigint;
     v_pol   text := workflow.sql_policy();
+    -- Only bind when there is something to bind: EXECUTE refuses USING against
+    -- a statement with no placeholders ("too many parameters specified").
+    v_bind  boolean := p_params is not null and p_params <> '{}'::jsonb;
 begin
     if v_pol = 'registered' then
         raise exception
@@ -2594,7 +2608,9 @@ begin
         -- a question from a mutation is a plan nobody can review, and every
         -- reader of a definition deserves to see which steps change the
         -- database.
-        execute p_statement;
+        if v_bind then execute p_statement using p_params;
+        else           execute p_statement;
+        end if;
         get diagnostics v_count = row_count;
         return jsonb_build_object('rows_affected', v_count);
     end if;
@@ -2629,8 +2645,13 @@ begin
     -- a syntax error's worth of confusion for something that was neither.
     begin
         perform set_config('transaction_read_only', 'on', true);
-        execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
-        into v_out;
+        if v_bind then
+            execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
+            into v_out using p_params;
+        else
+            execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
+            into v_out;
+        end if;
         raise exception using errcode = 'P0001',
                               message = '__percolate_readonly_done__';
     exception when others then
@@ -2701,12 +2722,88 @@ begin
 end;
 $$ language plpgsql stable;
 
+-- ------------------------------------------------------------
+-- THE SAME JOB, DONE WITH A BOUND PARAMETER INSTEAD OF A LITERAL.
+--
+-- resolve_statement above escapes: it puts the value into the statement text as
+-- a quoted literal. That is the accepted fallback and it uses Postgres's own
+-- quoting, and it is still the weaker of the two answers, because the value
+-- reaches the parser. This one does not put the value in the text at all.
+--
+-- WHY IT MATTERS HERE RATHER THAN IN GENERAL. Tools that template SQL --
+-- Jinja over a warehouse, a DAG's operator arguments -- are safe because their
+-- trust model says the TEMPLATE AUTHOR is trusted, which is the same as saying
+-- they already have code execution. That model does not hold for a `matrix:`
+-- fanning out over rows: the values come from a data table, in a database whose
+-- whole premise is that tenants share it. Row data is untrusted input, and the
+-- only answer that does not depend on getting escaping right every time is that
+-- it never becomes syntax.
+--
+-- ONE PARAMETER, NOT N, and that is forced rather than chosen: plpgsql fixes
+-- the number of `EXECUTE ... USING` expressions at compile time, so a statement
+-- with a variable number of references cannot bind one parameter each. A single
+-- jsonb keyed by reference name is bindable, and `$1->>'item.site_ref'` is the
+-- extraction.
+--
+-- THE CAST IS TAKEN FROM THE VALUE, because `->>` is text and a quoted literal
+-- was not. `where n = '7'` works against an integer column -- an unknown-typed
+-- literal is coerced by context -- while `where n = ($1->>'n')` is
+-- `integer = text` and fails. So a JSON number binds as ::numeric and a JSON
+-- boolean as ::boolean, which is the coercion the literal form got for free.
+-- Measured, both directions, before this was written.
+--
+-- QUOTES THE AUTHOR WROTE ARE CONSUMED, exactly as resolve_statement does and
+-- for the reason its comment gives: `= '{{item.ref}}'` is what everybody types.
+-- Here it matters more than politeness -- leaving them would produce
+-- `'($1->>''item.ref'')'`, a literal string containing the extraction.
+create or replace function workflow.resolve_statement_params(
+    p_statement text, p_run_id uuid, p_item jsonb default null)
+returns jsonb as $$
+declare
+    v_out    text := p_statement;
+    v_ref    text;
+    v_val    jsonb;
+    v_params jsonb := '{}'::jsonb;
+    v_pat    text;
+    v_slot   text;
+begin
+    -- A statement that already uses $1 would collide with the binding. Refused
+    -- rather than mangled: the author is writing SQL, and a placeholder that
+    -- silently means something else is the failure this whole function is about.
+    if p_statement ~ '\$[0-9]' and p_statement ~ '\{\{' then
+        raise exception
+            'this statement uses both a {{template}} and a $n placeholder. '
+            'Templated values are bound as $1, so the two cannot be mixed -- '
+            'use {{...}} for values from the run or the row.';
+    end if;
+
+    for v_ref in
+        select distinct m[1]
+          from regexp_matches(p_statement, '\{\{\s*([a-zA-Z0-9_.$-]+)\s*\}\}', 'g') m
+    loop
+        v_val    := workflow.resolve_template_ref(v_ref, p_run_id, p_item);
+        v_params := v_params || jsonb_build_object(v_ref, v_val);
+        v_slot   := case jsonb_typeof(v_val)
+                        when 'number'  then '(($1->>' || quote_literal(v_ref) || ')::numeric)'
+                        when 'boolean' then '(($1->>' || quote_literal(v_ref) || ')::boolean)'
+                        else                '($1->>' || quote_literal(v_ref) || ')'
+                    end;
+        v_pat := '\{\{\s*' || regexp_replace(v_ref, '([.$\\])', '\\\1', 'g') || '\s*\}\}';
+        v_out := regexp_replace(v_out, '''' || v_pat || '''',
+                                replace(v_slot, '\', '\\'), 'g');
+        v_out := regexp_replace(v_out, v_pat,
+                                replace(v_slot, '\', '\\'), 'g');
+    end loop;
+    return jsonb_build_object('sql', v_out, 'params', v_params);
+end;
+$$ language plpgsql stable;
+
 -- Owner-only, like register_step_function and for the mirror-image reason: a
 -- caller reaching this directly would be executing SQL as app_owner with no run
 -- to account it to, which is exactly what the step path keeps inside a workflow.
-revoke execute on function workflow.run_sql(text, boolean, int) from public;
+revoke execute on function workflow.run_sql(text, boolean, int, jsonb) from public;
 
-comment on function workflow.run_sql(text, boolean, int) is
+comment on function workflow.run_sql(text, boolean, int, jsonb) is
 $c$Execute a workflow step's own SQL statement.
 Read-only unless p_write is true, enforced by transaction_read_only rather than
 by inspecting the statement, and refused entirely when percolate.sql_policy is
@@ -2736,6 +2833,7 @@ declare
     t      workflow.tasks;
     v_spec jsonb;
     v_out  jsonb;
+    v_res  jsonb;
     -- SAVED AND RESTORED RATHER THAN JUST SET, because the marker below now
     -- means "the invoker of this call is the engine owner" and something reads
     -- it to decide whether to refuse. set_config(..., true) is
@@ -2779,11 +2877,17 @@ begin
         -- checked first because it is the one an author writes by hand and a
         -- spec carrying both is refused at registration (validate_spec).
         if v_spec ? 'statement' then
+            -- Resolved into a STATEMENT PLUS PARAMETERS, not into text. The
+            -- item is the child's own row, and on a matrix child that row is
+            -- data somebody else wrote -- see resolve_statement_params for why
+            -- that is the case escaping is the wrong answer to.
+            v_res := workflow.resolve_statement_params(
+                         v_spec->>'statement', t.run_id, t.input->'item');
             v_out := workflow.run_sql(
-                workflow.resolve_statement(v_spec->>'statement', t.run_id,
-                                           t.input->'item'),
+                v_res->>'sql',
                 coalesce((v_spec->>'write')::boolean, false),
-                coalesce((v_spec->>'timeout_ms')::int, 30000));
+                coalesce((v_spec->>'timeout_ms')::int, 30000),
+                v_res->'params');
         else
             v_out := workflow.call_step_function(
                 v_spec->>'function', v_spec->'args', t.run_id, t.input->'item');
@@ -4553,6 +4657,28 @@ begin
                                coalesce(v_tmpl->'input', '{}'::jsonb),
                                v_row, jsonb_build_array(v_row), t.step_key)
                            || jsonb_build_object('item', v_row);
+            end if;
+
+            -- A `sql` STATEMENT IS PUT BACK UNSUBSTITUTED, and this is the
+            -- whole of the matrix half of the injection fix.
+            --
+            -- substitute_item interpolates {{item.*}} as text, which is right
+            -- for every other field it fills -- a rest body, a URL, an agent
+            -- argument -- and wrong for exactly one, because that one is handed
+            -- to the SQL parser. Interpolated here, a site reference of
+            -- `x'' || current_user || ''` expanded into a statement that ran and
+            -- returned `xapp_owner`: arbitrary SQL out of ordinary row data,
+            -- executing as the engine owner. Found by walking
+            -- scenarios/evals/J2, recorded in runs/2026-09-04-J2.md.
+            --
+            -- So the template survives to execution, where execute_sql_step
+            -- resolves it through resolve_statement_params and the row becomes
+            -- a BOUND PARAMETER. The child still carries `item` in its input --
+            -- appended below and unchanged -- which is what that resolution
+            -- reads, so nothing else has to know this happened.
+            if (v_tmpl->'input') ? 'statement' then
+                v_input := v_input || jsonb_build_object(
+                               'statement', v_tmpl->'input'->'statement');
             end if;
 
             -- §7's cap would catch this on INSERT, and its message would send the

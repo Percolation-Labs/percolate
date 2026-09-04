@@ -303,7 +303,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('workflow-engine','function','workflow.unschedule_workflow','text','§19: the destructive one'),
 -- A step may write its own SQL, and the allow-list is a policy rather than the
 -- only door. Every one of these is a promise made in YAML.md and roadmap.md §6.
-('workflow-engine','function','workflow.run_sql','text,boolean,integer','a step carries its own statement, read-only unless it declares otherwise'),
+('workflow-engine','function','workflow.run_sql','text,boolean,integer,jsonb','a step carries its own statement, read-only unless it declares otherwise'),
 ('workflow-engine','function','workflow.sql_policy','','open or registered -- the lockdown is a setting, not a rebuild'),
 ('workflow-engine','function','workflow.resolve_statement','text,uuid,jsonb','a {{template}} in a statement is a quoted literal, so run input cannot become SQL'),
 -- The plan graph: a definition expanded along what it names (plan-graph.md).

@@ -250,6 +250,91 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
+-- 4b. A MATRIX ROW CANNOT BECOME SQL.
+--
+-- §4 above proves a {{template}} in a top-level statement is a bound value.
+-- That was true of {{run.*}} and false of {{item.*}}: a matrix child's
+-- template was interpolated as TEXT at expansion, so a row whose column held
+--
+--     x' || current_user || '
+--
+-- expanded into `select 'x' || current_user || ''::text` and EXECUTED,
+-- returning `xapp_owner`. Arbitrary SQL out of ordinary row data, running as
+-- the engine owner. Found by walking scenarios/evals/J2; the run log is
+-- runs/2026-09-04-J2.md.
+--
+-- THE PAYLOAD IS THE ASSERTION. A test that fanned out over well-behaved rows
+-- passes on the broken engine and on the fixed one -- the whole defect is
+-- invisible until a value contains a quote, which is why one row in forty-two
+-- carried one and why this fixture carries the executable form rather than
+-- just an apostrophe. `o'brien-yard` proves the syntax error is gone;
+-- `x' || current_user || '` proves the execution is.
+--
+-- Values now travel as a bound parameter (resolve_statement_params ->
+-- run_sql's $1), so the check is not "did it escape correctly" but "did the
+-- text ever contain it": the stored statement must still be a template.
+-- ---------------------------------------------------------------------
+-- The row source. Two rows and both are the point: one apostrophe, and one
+-- payload that CONCATENATES if it is ever treated as syntax.
+create or replace function workflow.t_os_injection_rows() returns jsonb
+language sql stable as $f$
+    select jsonb_build_array(
+        jsonb_build_object('k','quote','v','o''brien-yard'),
+        jsonb_build_object('k','exec', 'v','x'' || current_user || ''')
+    );
+$f$;
+
+do $$
+declare v_run uuid; v_got text; v_status text; v_stmt text;
+begin
+    perform workflow.register_step_function(
+        't_os_rows', 'workflow.t_os_injection_rows', '{}', 30000, 'J2 injection probe');
+
+    perform workflow.define_yaml($y$
+name: t_os_matrix_inject
+steps:
+  - id: fan
+    matrix:
+      max_fanout: 10
+      rows: {function: t_os_rows}
+      template:
+        sql: "select '{{item.v}}'::text as v"
+$y$);
+    v_run := workflow.start_workflow('t_os_matrix_inject', '{}'::jsonb);
+
+    -- 1. THE EXECUTABLE PAYLOAD CAME BACK AS DATA. On the broken engine this
+    -- returned `xapp_owner` -- the concatenation having run.
+    select t.output->'result'->0->>'v' into v_got
+      from workflow.tasks t
+     where t.run_id = v_run and t.input->'item'->>'k' = 'exec';
+    if v_got is distinct from 'x'' || current_user || ''' then
+        raise exception
+            'a matrix row became SQL: the child returned %, not the payload '
+            'itself. Row values must be bound, not interpolated.',
+            coalesce(v_got, '(null)');
+    end if;
+
+    -- 2. AN APOSTROPHE IS DATA, not a syntax error one row in forty-two.
+    select t.status into v_status from workflow.tasks t
+     where t.run_id = v_run and t.input->'item'->>'k' = 'quote';
+    if v_status is distinct from 'succeeded' then
+        raise exception
+            'a row containing an apostrophe ended % -- the value reached the '
+            'parser as text', coalesce(v_status, '(no child)');
+    end if;
+
+    -- 3. AND THE TEXT NEVER HELD IT. The stored statement is still a template,
+    -- which is the difference between "escaped correctly" and "never syntax".
+    select t.input->>'statement' into v_stmt from workflow.tasks t
+     where t.run_id = v_run and t.input->'item'->>'k' = 'exec';
+    if coalesce(v_stmt, '') not like '%{{item.v}}%' then
+        raise exception
+            'the matrix child stored a substituted statement (%) -- the row was '
+            'interpolated into SQL text rather than bound', coalesce(v_stmt,'(null)');
+    end if;
+end $$;
+
+-- ---------------------------------------------------------------------
 -- 5b. AND THE POLICY REACHES THE OTHER DOOR, which it did not.
 --
 -- §5 above proved `registered` refuses a `sql:` statement, and §6 below proves
