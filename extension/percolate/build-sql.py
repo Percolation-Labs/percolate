@@ -451,6 +451,17 @@ def write_upgrades(body: str) -> None:
     renamed table, a backfill. Those go in `specs/migrations/<old>--<new>.sql`,
     which is prepended when it exists.
     """
+    # Leftovers first, so the remedy --check prints actually converges. --check
+    # refuses an upgrade path to a version this tree no longer ships, and the
+    # message it prints says "run build-sql.py" -- which would have been a lie
+    # if this only ever added files. A generator whose output is checked has to
+    # be able to reach the state the checker demands.
+    sql_dir = ROOT / "extension/percolate/sql"
+    for p in sorted(sql_dir.glob("percolate--*--*.sql")):
+        if not p.name.endswith(f"--{VERSION}.sql"):
+            p.unlink()
+            print(f"removed {p.name}: an upgrade path to a version this tree no longer ships")
+
     prior = released_versions()
     if not prior:
         print("no released versions in git tags -- no upgrade scripts written")
@@ -523,6 +534,29 @@ def main() -> int:
                 stale.append(f"{up.name} does not end with the current schema")
             elif delta.exists() and delta.read_text().rstrip() not in up.read_text():
                 stale.append(f"{up.name} is missing its migrations/{delta.name} delta")
+        # AND THE OPPOSITE FAILURE: a script that should no longer be there.
+        #
+        # Everything above asks whether the files that must exist do. Nothing
+        # asked whether a file that must NOT exist still does, and that is a
+        # real state rather than a hypothetical -- the version bump renames the
+        # base script and used to leave `percolate--<old>--<previous>.sql`
+        # behind. Postgres reads the sharedir to decide what an extension can
+        # become, so a leftover is an offer: `ALTER EXTENSION percolate UPDATE
+        # TO '<previous>'` still resolves, to a version whose base script the
+        # same bump deleted. Two installable versions, one of which nobody
+        # meant to ship, which is the exact sentence the bump script uses to
+        # justify deleting the base script it does remember.
+        #
+        # Checked here as well as fixed there, because "the writer remembers"
+        # is the property this file exists to stop relying on.
+        sql_dir = ROOT / "extension/percolate/sql"
+        orphans = sorted(
+            p.name for p in sql_dir.glob("percolate--*--*.sql")
+            if not p.name.endswith(f"--{VERSION}.sql"))
+        if orphans:
+            stale.append(
+                "leftover upgrade path(s) to a version this tree no longer ships: "
+                + ", ".join(orphans) + " -- delete them")
         if stale:
             print("STALE upgrade script(s): " + "; ".join(stale) +
                   f" -- run: python3 {pathlib.Path(__file__).relative_to(ROOT)}",

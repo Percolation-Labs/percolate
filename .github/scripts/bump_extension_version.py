@@ -94,15 +94,31 @@ def main() -> None:
     sub_once(CONTROL, r"^default_version = '.*'", f"default_version = '{new}'")
     sub_once(PARSER_CONTROL, r"^default_version = '.*'", f"default_version = '{new}'")
     sub_once(CARGO, r'^version = ".*"', f'version = "{new}"')
-    # Two occurrences (mountPath and subPath), so not sub_once.
+    # THE MOUNT LINES ONLY, and the anchor is the whole correctness of this.
+    #
+    # Two occurrences are meant to move -- `mountPath:` and `subPath:` -- so
+    # this is not sub_once. It used to be an unanchored substitution over the
+    # whole file, which found a THIRD: a comment recording what the published
+    # 0.1.0 image shipped ("percolate--0.1.0.sql at 4,457 lines against 10,429
+    # in this repository"). Two releases rewrote that sentence into a claim
+    # about 0.1.2 that is false about every number in it.
+    #
+    # A version in a comment is HISTORY and must not move. dev/references.sh
+    # already knows this -- its own header records that the first version of
+    # its check flagged that comment and "was wrong to" -- so the two now agree
+    # about which references are live: the ones used as paths. Matching
+    # `^\s*(mountPath|subPath):` is the same predicate references.sh greps for,
+    # which is what keeps the writer and the checker from drifting apart.
     txt = K8S_MANIFEST.read_text()
-    swapped, n = re.subn(r"percolate--[0-9]+\.[0-9]+\.[0-9]+\.sql",
-                         f"percolate--{new}.sql", txt)
+    swapped, n = re.subn(
+        r"^(\s*(?:mountPath|subPath):.*?)percolate--[0-9]+\.[0-9]+\.[0-9]+\.sql",
+        lambda m: f"{m.group(1)}percolate--{new}.sql", txt, flags=re.M)
     if n == 0:
-        fail(f"{K8S_MANIFEST.relative_to(ROOT)}: no percolate--<version>.sql to move -- "
-             "the manifest changed shape and this bump would leave it stale")
+        fail(f"{K8S_MANIFEST.relative_to(ROOT)}: no mountPath/subPath naming "
+             "percolate--<version>.sql -- the manifest changed shape and this bump "
+             "would leave it stale")
     K8S_MANIFEST.write_text(swapped)
-    print(f"  {K8S_MANIFEST.relative_to(ROOT)}: {n} reference(s) -> {new}")
+    print(f"  {K8S_MANIFEST.relative_to(ROOT)}: {n} mount reference(s) -> {new}")
 
     # Regenerate under the new name, then drop the old artifact. In that order:
     # if the build fails the tree still holds a valid, installable extension.
@@ -116,6 +132,29 @@ def main() -> None:
         fail(f"build-sql.py did not write {new_sql.name} -- it read a different version")
     if old_sql.exists():
         old_sql.unlink()
+
+    # AND THE UPGRADE SCRIPTS THAT NOW LEAD NOWHERE, which is the same argument
+    # as the line above and was missed because it is a different filename shape.
+    #
+    # Postgres reads the sharedir to answer "what can this extension become".
+    # `percolate--0.1.1--0.1.2.sql` declares an update PATH to 0.1.2, and the
+    # bump has just deleted `percolate--0.1.2.sql`, the base script for the
+    # version that path arrives at. Left behind, the release ships an installed
+    # extension one `ALTER EXTENSION percolate UPDATE TO '0.1.2'` away from a
+    # version nobody meant to offer -- which is precisely this file's own
+    # argument for deleting the old base script, one filename shape along.
+    #
+    # build-sql.py has just written a direct path from every version that is
+    # STILL PUBLISHED (it reads the tags), so nothing that a real database can
+    # be sitting at loses its route. Anything targeting a version other than
+    # the one being published is by construction a leftover.
+    stale = sorted(
+        p for p in SQL_DIR.glob("percolate--*--*.sql")
+        if not p.name.endswith(f"--{new}.sql")
+    )
+    for p in stale:
+        p.unlink()
+        print(f"  removed {p.name}: an upgrade path to a version this tree no longer ships")
 
     print(f"{current} -> {new}")
     if out := os.environ.get("GITHUB_OUTPUT"):
