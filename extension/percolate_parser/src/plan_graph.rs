@@ -719,8 +719,63 @@ fn finish(g: Graph, steps: &[Value], wf_name: String, wf_version: i64) -> Value 
 /// the engine got more expressive. Naming a table that does not exist is a
 /// better check than naming a function that does not exist, because it is the
 /// mistake people actually make.
+/// Strip what is not SQL: string literals, line comments and block comments.
+///
+/// The tokeniser below is deliberately crude -- it is a heuristic and says so --
+/// but crude about GRAMMAR is different from crude about what is even code.
+/// Without this, the word `from` inside prose produced a relation that does not
+/// exist and a defect warning about it:
+///
+///     select 1 where note = 'shipped from warehouse'
+///       -> unknown_relation: step 's' reads 'warehouse'
+///     -- was: select * from legacy_ledger
+///       -> unknown_relation: step 's' reads 'legacy_ledger'
+///
+/// A plan graph exists to report defects BEFORE a run, so a warning that fires
+/// on any statement containing "from" in a sentence is the kind of noise that
+/// teaches a reader to skip the warnings -- which costs more than the check is
+/// worth. The defect's own `consequence` already hedged with "unless the name
+/// is one this heuristic misread"; not misreading it is better than admitting
+/// to it.
+///
+/// Dollar-quoting is deliberately NOT handled: a `sql` step carries one
+/// statement, and a $$...$$ body inside one is a function definition, which
+/// `run_sql` refuses as DDL before this ever matters.
+fn strip_noncode(sql: &str) -> String {
+    let c: Vec<char> = sql.chars().collect();
+    let mut out = String::with_capacity(sql.len());
+    let mut i = 0usize;
+    while i < c.len() {
+        if c[i] == '\'' {
+            // '' inside a literal is an escaped quote, not the end of one.
+            i += 1;
+            while i < c.len() {
+                if c[i] == '\'' {
+                    if i + 1 < c.len() && c[i + 1] == '\'' { i += 2; continue; }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            out.push(' ');
+        } else if c[i] == '-' && i + 1 < c.len() && c[i + 1] == '-' {
+            while i < c.len() && c[i] != '\n' { i += 1; }
+            out.push(' ');
+        } else if c[i] == '/' && i + 1 < c.len() && c[i + 1] == '*' {
+            i += 2;
+            while i + 1 < c.len() && !(c[i] == '*' && c[i + 1] == '/') { i += 1; }
+            i = (i + 2).min(c.len());
+            out.push(' ');
+        } else {
+            out.push(c[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
 fn statement_relations(sql: &str) -> Vec<String> {
-    let lower = sql.to_lowercase();
+    let lower = strip_noncode(sql).to_lowercase();
     let bytes: Vec<char> = lower.chars().collect();
     let mut ctes: Vec<String> = Vec::new();
     let mut found: Vec<String> = Vec::new();
