@@ -23,6 +23,23 @@
 \set bkey  'bbbbbbbb-0000-4000-8000-00000000ac02'
 \set atok  'bbbbbbbb-0000-4000-8000-00000000ac03'
 
+-- The identities are BORROWED. alice and bob are created by rbac/01 and left
+-- behind on purpose (its header explains why deleting them breaks other
+-- subsystems' foreign keys), so this file depends on that one having run --
+-- as workflow/02 and workflow/06 already do. Said out loud here because the
+-- failure otherwise is a foreign-key violation on refresh_tokens, which names
+-- the symptom and not the cause.
+do $$
+begin
+    if not exists (select 1 from rbac.users
+                    where id = '11111111-1111-1111-1111-111111111111')
+    then
+        raise exception
+            'the shared fixture identities are missing -- run dev/tests/rbac/'
+            '01-rls-isolation.sql first, or the whole suite via dev/tests/run.sh';
+    end if;
+end $$;
+
 -- 0. Teardown scoped to this file's own rows. alice and bob are borrowed, as
 --    rbac/01 explains at length; their roles are deployment vocabulary and are
 --    not touched here either.
