@@ -221,6 +221,25 @@ insert into journey.chunks (doc_slug, ordinal, start_offset, end_offset, content
 -- down beside the vector instead of being decided after the result is seen.
 -- A step whose expectation is formed after the answer is a step that cannot
 -- fail, which is the class meta/postmortems/README.md calls the largest here.
+--
+-- NOT ON THE AXES, AND THAT IS THE WHOLE POINT OF THESE PARTICULAR DIGITS.
+-- The first version of this table used exact unit vectors -- [1,0,0,0] and so
+-- on -- and `dev/init/05-corpus-sample.sql` uses exact unit vectors too. They
+-- collided perfectly: on the first performance of J1 all four probes were won
+-- at distance 0.0000 by dev-sample chunks belonging to nobody in the journey,
+-- and Act 4 was void. See runs/2026-09-04-J1.md §3.7.
+--
+-- The part worth not repeating is HOW IT WAS VERIFIED, not what the numbers
+-- were. The header claimed all four probes rank their expect_top_doc first and
+-- that was checked against `journey.chunks` ALONE -- which is the one place the
+-- interference cannot appear, because the corpus `aiq` actually ranks over is
+-- `content.resource_chunks`, and this README calls the dev samples sitting in
+-- it "a feature: another tenant's data in the same tables". The interference
+-- was designed in and then verified where it was invisible.
+--
+-- So these are the centroid direction of each theme's own chunks -- where a
+-- real query embedding would sit -- and the assertion below checks them against
+-- the LIVE corpus rather than against this file's own rows.
 create table journey.probes (
     name           text primary key,
     asks           text not null,
@@ -231,17 +250,62 @@ create table journey.probes (
 
 insert into journey.probes (name, asks, embedding, expect_top_doc, because) values
 ('scour',   'How bad is the scour at the north abutment?',
- '[1,0,0,0]', 'scour-survey',
+ '[0.97,0.10,0.11,0.10]', 'scour-survey',
  'dim 1 is the hydrology axis and the survey chunks are the only near-unit vectors on it'),
 ('bearings','What is wrong with the bearings?',
- '[0,1,0,0]', 'bearing-inspection',
+ '[0.11,0.96,0.10,0.12]', 'bearing-inspection',
  'dim 2 is the structural axis; the Kestrel check is second on it, which is the point of Act 9'),
 ('consent', 'What consents do we need before we can start?',
- '[0,0,1,0]', 'consent-note',
+ '[0.16,0.10,0.95,0.12]', 'consent-note',
  'dim 3 is the consent axis and no other document is near it'),
 ('cost',    'What will each option cost?',
- '[0,0,0,1]', 'cost-plan',
+ '[0.17,0.18,0.12,0.94]', 'cost-plan',
  'dim 4 is the commercial axis; the cost plan is the only document on it');
+
+-- EVERY PROBE MUST BE NEARER ITS OWN CHUNK THAN ANY CHUNK ALREADY IN THE
+-- CORPUS. This is the check whose absence voided Act 4 on the first
+-- performance, and the only thing that makes it work is WHERE IT LOOKS: at
+-- `aiq.emb_demo_quad_a`, the space the query actually ranks over, and not at
+-- `journey.chunks`, which is this file's own rows and cannot disagree with
+-- itself. The journey's own chunks are not in that space yet -- Act 3 puts them
+-- there -- so the comparison is against what is already in it, which on a
+-- dev/reload.sh database is the sample corpus. That is the interference, and it
+-- is exactly what was missed.
+do $$
+declare v_bad text;
+begin
+    -- round()::text, not format('%.4f'): Postgres format() has no precision
+    -- specifier and raises "unrecognized format() type specifier" -- which is a
+    -- check failing for a reason other than the one it names, caught here only
+    -- because this assertion was made to fail on purpose before being trusted.
+    select string_agg(format('%s: own %s, nearest other journey doc %s, nearest corpus chunk %s',
+                             name, round(own::numeric,5), round(sibling::numeric,5), round(rival::numeric,5)), E'\n  ')
+      into v_bad
+      from (
+        select p.name,
+               (select min(j.embedding <=> p.embedding) from journey.chunks j
+                 where j.doc_slug = p.expect_top_doc)          as own,
+               (select min(e.embedding <=> p.embedding) from aiq.emb_demo_quad_a e) as rival,
+               -- AND THE OTHER HALF, which the first version of this check
+               -- missed and which cost a second round: a probe must also beat
+               -- every OTHER journey document, not just the corpus. The Kestrel
+               -- check is scour-flavoured on purpose (it comments on the scour
+               -- comparison) and at [0.95,0.12,0.15,0.10] it beat the scour
+               -- survey itself, 0.0015 to 0.0016. `expect_top_doc` is a claim
+               -- about the whole ranking; checking half of it is how the first
+               -- version passed while being wrong.
+               (select min(j.embedding <=> p.embedding) from journey.chunks j
+                 where j.doc_slug <> p.expect_top_doc)         as sibling
+          from journey.probes p
+      ) d
+     where (rival is not null and rival <= own) or sibling <= own;
+    if v_bad is not null then
+        raise exception E'a probe does not rank the document it names first:\n  %\n'
+            'Act 4 would report whichever chunk actually won, and the journey '
+            'would read the collision as a retrieval defect. Move the probe '
+            'vectors, not the expectation.', v_bad;
+    end if;
+end $$;
 
 -- ---------------------------------------------------------------------
 -- 3. THE GRAPH an extractor would have proposed from those documents.
