@@ -1,0 +1,72 @@
+name: workflow.http_call.input
+title: The input JSON of a kind='http_call' task
+owner: workflow-engine
+
+# Where this shape is READ. Not decoration: it is the list of things that break
+# if the shape changes, and it is the answer to "who else has to agree with
+# this" -- which, before this file existed, was answerable only by grep.
+consumed_by:
+  - percolate_core.worker.http.build_request
+  - percolate_core.worker.http.http_call
+
+why: >-
+  schema.sql's `tasks.kind` comment described this object in prose --
+  {"url","method","headers"?,"credential_ref"?,"body"?,"timeout_ms"?,
+  "mode":"sync"|"async"} -- and that comment was the only specification of it.
+  Two keys the worker actually reads were absent from it (`auth_scheme`,
+  `jsonpath`), so the documented shape and the honoured shape were different
+  objects. `mode` is the sharp edge: the worker tests `spec.get("mode") ==
+  "async"` and treats every other value, including a typo of "async", as sync
+  -- so a step written to fire-and-park silently blocks instead, and nothing
+  reports it. An enum here is what makes that a rejected write.
+
+schema:
+  type: object
+  required: [url]
+  additionalProperties: false
+  properties:
+    url:
+      type: string
+      pattern: '^https?://'
+    method:
+      type: string
+      # Upper-cased by the worker before dispatch, so a lower-case spelling
+      # works today. Declared upper-case only: the round trip through the
+      # database should not depend on a normalisation the reader happens to do.
+      enum: [GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS]
+      default: GET
+    headers:
+      type: object
+      additionalProperties: {type: string}
+    body:
+      description: >-
+        An object or array is JSON-encoded and sent with Content-Type
+        application/json; anything else is str()'d and sent raw.
+      type: [object, array, string, number, boolean, "null"]
+    credential_ref:
+      description: >-
+        A NAME resolved from the worker's environment, never material. The
+        database stores only the reference, so a dump of workflow.tasks never
+        contains a secret and a task stays inspectable and replayable.
+      type: string
+    auth_scheme:
+      type: string
+      default: Bearer
+    timeout_ms:
+      type: integer
+      minimum: 1
+      default: 30000
+    mode:
+      description: >-
+        async fires the request and parks the task in waiting_external until
+        something calls signal_task. It reuses that status rather than inventing
+        an "in flight externally" one, because the semantics are identical.
+      type: string
+      enum: [sync, async]
+      default: sync
+    jsonpath:
+      description: >-
+        Dotted path extracted from the response, so a step hands the NEXT step a
+        clean value instead of a provider envelope whose shape the next
+        template must know. Matching nothing is a terminal failure, not a null.
+      type: string

@@ -1,0 +1,45 @@
+name: content.connector.paging
+title: The paging block of a content.connectors row
+owner: world-model-ingestion
+
+consumed_by:
+  - specs/world-model-ingestion/reference/connector.py next_page
+
+why: >-
+  The same shape as content.connector.auth and the same gap, one column along:
+  content.connectors_validate() admits nine cursor kinds, the runner implements
+  six, and `high_water`, `sequence` and `etag` raise ValueError at 03:00 on a
+  row the database accepted at registration. sources.md §4.1 calls this "the
+  closed taxonomy" and it is closed in the writer and open in the reader.
+
+schema:
+  type: object
+  required: [type]
+  properties:
+    type:
+      type: string
+      enum: [none, link_header, next_url, page_token, offset, page, high_water, sequence, etag]
+    field:
+      description: Dotted path to the cursor in the body, for next_url and page_token.
+      type: string
+    param:
+      description: Query parameter carrying the cursor, for page_token, offset and page.
+      type: string
+    size:
+      description: Page size, for offset and page. Defaults to the first page's record count.
+      type: integer
+      minimum: 1
+    start:
+      type: integer
+      default: 0
+
+implemented:
+  none: true
+  link_header: true
+  next_url: true
+  page_token: true
+  offset: true
+  page: true
+  high_water: false
+  sequence: false
+  etag: false

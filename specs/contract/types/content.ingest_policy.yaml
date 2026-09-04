@@ -1,0 +1,92 @@
+name: content.ingest_policy
+title: What to do with an uploaded file
+owner: world-model-ingestion
+
+consumed_by:
+  - percolate_core.ingest.policy.IngestPolicy
+  - content.merge_policy
+  - content.record_ingest
+
+why: >-
+  THE CLEAREST CASE OF THE TRAP THIS CONTRACT EXISTS TO CLOSE. This policy is
+  stored in the database -- content.channels.config.ingest_policy and
+  content.resources.metadata.ingest_policy -- merged by a SQL function, and
+  read back by SQL (content.record_ingest stores `mode` into
+  metadata.ingest.mode). But its only specification is a pydantic model in
+  percolate-core, and percolate-core is one service instance among however many
+  a deployment runs. A user pointing their own worker at this database has no
+  way to learn what an ingest policy may contain, because the answer lives in
+  somebody else's Python.
+
+  So the vocabulary is enforced nowhere the database can see: `mode` is a
+  Literal in Python and an unvalidated `p_outcome->>'mode'` in SQL, and
+  `parser` is checked against a dict of installed readers at PARSE time -- long
+  after the write that named a reader this deployment does not have.
+
+  `additionalProperties: false` is not tidiness here. The pydantic model is
+  strict on purpose ("a policy with a misspelled key is refused by name rather
+  than silently ignored, because a silently-ignored override is a chunking
+  strategy that the uploader believes is in force and is not"), and that
+  strictness has to survive the trip through the database to be worth anything.
+
+schema:
+  type: object
+  additionalProperties: false
+  properties:
+    mode:
+      description: >-
+        text parses to markdown, chunks and embeds; tabular converts to Parquet
+        and chunks NOTHING; store keeps the bytes and produces no chunks; skip
+        does not even fetch them.
+      type: string
+      enum: [text, tabular, store, skip]
+      default: text
+    parser:
+      description: >-
+        Which reader. Null takes the family default. The admissible set is the
+        readers INSTALLED in the worker, which is a per-deployment fact -- so
+        this is a hint, not a closed enum, and naming one that cannot read the
+        family is refused at parse time.
+      type: [string, "null"]
+    keep_markdown:
+      type: boolean
+      default: true
+    chunking:
+      type: object
+      additionalProperties: false
+      properties:
+        target_tokens: {type: integer, minimum: 32, maximum: 8000, default: 700}
+        overlap: {type: number, minimum: 0, default: 0.08}
+        tokenizer:
+          description: >-
+            `estimate` is characters/4 -- offline, identical on every machine,
+            never reaches the network. `tiktoken:<encoding>` DOWNLOADS its
+            encoding on first use, which is a bad thing to discover inside a
+            chunker in a container with no egress.
+          type: string
+          pattern: '^(estimate|tiktoken:[A-Za-z0-9_]+)$'
+          default: estimate
+        min_chars: {type: integer, minimum: 0, default: 120}
+    transcribe:
+      type: object
+      additionalProperties: false
+      properties:
+        endpoint: {type: string}
+        model: {type: string}
+        credential:
+          description: A NAME resolved from the worker's environment, as credential_ref is.
+          type: string
+        language: {type: [string, "null"]}
+        prompt: {type: [string, "null"]}
+    table:
+      type: object
+      additionalProperties: false
+      properties:
+        name: {type: [string, "null"]}
+        mode:
+          type: string
+          enum: [append, replace]
+          default: append
+        partition_by: {type: array, items: {type: string}}
+        delimiter: {type: [string, "null"]}
+        header: {type: boolean, default: true}

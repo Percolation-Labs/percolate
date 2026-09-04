@@ -91,6 +91,11 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
 
+      # build-sql.py compiles specs/contract/types/*.yaml into the percolate.types
+      # rows. A BUILD-time dependency only: the generated SQL carries the
+      # shapes as jsonb, so installing the extension needs no Python at all.
+      - run: pip install pyyaml
+
       # ---------------------------------------------------------------
       # PREFLIGHT -- everything that can refuse, before anything mutates.
       #

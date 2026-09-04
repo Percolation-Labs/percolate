@@ -1,0 +1,302 @@
+-- ============================================================
+-- p8 -- THE CONTRACT. What this database admits, published by the database.
+--
+-- WHY THIS EXISTS, AND WHY IT IS IN THE EXTENSION.
+--
+-- `percolate-core` is a service INSTANCE. A deployment may run several, may
+-- run none, may run somebody else's worker written in another language against
+-- the same Postgres. So the moment a closed vocabulary or a payload shape is
+-- defined in that package, the answer to "what may I write here?" lives in one
+-- client of the database rather than in the database -- and every other client
+-- has to either import that package or guess. That is the trap: it makes an
+-- optional service load-bearing for knowledge that is not its to own.
+--
+-- The rule is `challenge-the-process` §9: a fact belongs at the lowest layer
+-- that can refuse a violation of it, and the extension is what every client
+-- shares. So the contract ships HERE, and a client -- pydantic model,
+-- TypeScript union, another language's struct -- is COMPILED AGAINST it. A
+-- client may still rederive it by hand for now; what it may not be is the
+-- source.
+--
+-- TWO HALVES, AND THEY ARE DIFFERENT KINDS OF FACT.
+--
+--   percolate.enums()   DERIVED. Read out of the catalog at call time -- CHECK
+--                constraints, foreign keys onto text vocabularies, and the
+--                enums inside declared type schemas. Nothing is restated, so
+--                nothing can fall behind: whatever the database actually
+--                refuses is what this reports. The same discipline
+--                workflow.compiler_capabilities() uses, and for the same
+--                reason -- "derived, not declared".
+--
+--   percolate.types     DECLARED, because it cannot be derived. A jsonb column has
+--                no shape in the catalog; `workflow.tasks.input` is `jsonb`
+--                and that is all Postgres knows. So the shapes are authored as
+--                JSON Schema in `specs/contract/types/*.yaml` and compiled into
+--                the rows below by build-sql.py. Authored in YAML because a
+--                human writes and reviews them; stored as jsonb because a
+--                machine reads them.
+--
+-- WHAT THIS IS NOT. It is not a generic `enums(name, value)` table, and that
+-- was considered and rejected. Such a table cannot be the target of a
+-- single-column foreign key, so it could not enforce anything; and it holds
+-- labels while losing meaning -- workflow.lifecycle_states carries is_terminal
+-- and is_success, which purge_completed reads, and tradecraft.evidence_classes
+-- carries derives_from, which the corroboration algorithm computes over. One
+-- table per vocabulary, and a derived view ACROSS them. There is no registry of
+-- vocabularies to keep up to date, because a registry is a list and a list runs
+-- one way: it asks "does everything I listed exist?" and never notices the
+-- constraint added last week.
+-- ============================================================
+
+-- NAMED `percolate`, AND EMPHATICALLY NOT `p8`, WHICH IS WHAT IT WAS FIRST.
+--
+-- The default search_path is `"$user", public`. `p8` is the owner role in every
+-- connection string in this repository, so a schema called `p8` made `"$user"`
+-- resolve for the first time -- and every unqualified CREATE by that role
+-- silently stopped landing in `public`. It was found by a test that creates a
+-- toy `widgets` table and then reads it as `authenticated`: the table was
+-- created, granted, and then did not exist, because it had gone into this
+-- schema and the reader's search_path does not include it.
+--
+-- Nothing errors when this happens. An operator doing `create table foo (...)`
+-- as the owner gets a table in the contract namespace and no indication of it.
+--
+-- The rule, since the next person will want a short name too: a schema must not
+-- be named after any role that creates objects. `percolate` is the extension's
+-- own name and is not a role here; if a deployment ever creates a role called
+-- `percolate`, this comment is the thing that was warned about.
+create schema if not exists percolate;
+comment on schema percolate is
+    'The published contract: what this database admits. Derived where it can be '
+    '(percolate.enums), declared where it cannot (percolate.types). Clients compile against '
+    'this; no client owns it.';
+
+
+-- ------------------------------------------------------------
+-- 1. Declared payload shapes
+-- ------------------------------------------------------------
+create table if not exists percolate.types (
+    name         text primary key,
+    title        text not null,
+    owner        text not null,          -- the subsystem whose spec defines it
+    -- Where the shape is READ. The list of things that break if it changes,
+    -- which before this table was answerable only by grep.
+    consumed_by  text[] not null default '{}',
+    -- JSON Schema. The same representation agentic.agents.structured_output_schema
+    -- already uses, so a client that can read one can read the other.
+    schema       jsonb not null,
+    -- For a vocabulary the database admits but nothing in this collection can
+    -- execute: {"basic": false, ...}. Kept separate from the schema's enum
+    -- because "may be written" and "will actually run" are different facts, and
+    -- collapsing them either narrows the contract to one runner's coverage or
+    -- claims support that does not exist.
+    implemented  jsonb,
+    why          text,
+    constraint schema_is_an_object check (jsonb_typeof(schema) = 'object')
+);
+
+comment on table percolate.types is
+    'Payload shapes that cannot be derived from the catalog, because a jsonb '
+    'column has no shape in it. Authored in specs/contract/types/*.yaml.';
+
+
+-- ------------------------------------------------------------
+-- 2. Every closed vocabulary this database enforces -- derived
+--
+-- A function rather than a view, because the reference half READS the rows of
+-- whatever table each foreign key points at, and that needs dynamic SQL.
+-- ------------------------------------------------------------
+create or replace function percolate.enums()
+returns table (
+    schema_name  text,
+    table_name   text,
+    column_name  text,
+    -- check     a CHECK constraint. Fixed at install; changing it is a migration.
+    -- reference a foreign key onto a text key. The set is ROWS, so it may grow
+    --           without a schema change -- which is the point of the pattern.
+    -- type      an `enum` inside a declared percolate.types schema. Enforced by a
+    --           trigger or by the reader, never by the catalog, which is
+    --           exactly why it would otherwise be invisible here.
+    enforced_by  text,
+    vocabulary   text,
+    -- `admits`, not `values`: VALUES is a reserved word in SQL and a column
+    -- spelled that way has to be double-quoted at every use site forever. The
+    -- same reasoning aiq.relation_types.is_symmetric records.
+    admits       text[]
+)
+language plpgsql stable
+set search_path = pg_catalog, public
+as $fn$
+declare
+    r    record;
+    vals text[];
+begin
+    -- (a) CHECK constraints of the form `col = ANY (ARRAY[...])`. Postgres
+    -- normalises `col in ('a','b')` to exactly this, so both spellings arrive
+    -- here identically and neither has to be parsed out of the source text.
+    for r in
+        select n.nspname as sch, t.relname as tbl, a.attname as col,
+               pg_get_constraintdef(c.oid) as def
+        from pg_constraint c
+        join pg_class t on t.oid = c.conrelid
+        join pg_namespace n on n.oid = t.relnamespace
+        join pg_attribute a on a.attrelid = t.oid and a.attnum = c.conkey[1]
+        where c.contype = 'c'
+          and array_length(c.conkey, 1) = 1
+          and pg_get_constraintdef(c.oid) ~ '= ANY \(ARRAY\['
+          and n.nspname not in ('pg_catalog', 'information_schema')
+        order by 1, 2, 3
+    loop
+        select array_agg(m[1] order by ord) into vals
+          from regexp_matches(r.def, '''([^'']*)''::text', 'g')
+               with ordinality as x(m, ord);
+        if array_length(vals, 1) >= 2 then
+            schema_name := r.sch; table_name := r.tbl; column_name := r.col;
+            enforced_by := 'check'; vocabulary := null; admits := vals;
+            return next;
+        end if;
+    end loop;
+
+    -- (b) Single-column foreign keys onto a text key. The admissible set is
+    -- rows rather than a constraint body, so it is READ rather than parsed.
+    --
+    -- Data references (agents.plugin -> plugins.name) come back alongside
+    -- shipped vocabularies (runs.status -> lifecycle_states.state) and are NOT
+    -- filtered out, because no honest test separates them: both are closed at
+    -- any instant, and both answer a real question a caller has. `enforced_by`
+    -- carries the difference instead, so a client that wants only the frozen
+    -- vocabulary filters on it rather than trusting a list somebody maintained.
+    --
+    -- A column may appear under BOTH 'check' and 'reference', and that is
+    -- information rather than duplication: workflow.tasks.status is CHECKed to
+    -- the subset a task can reach and REFERENCES the vocabulary shared with
+    -- every other status column.
+    for r in
+        select n.nspname as sch, t.relname as tbl, a.attname as col,
+               fn.nspname as fsch, ft.relname as ftbl, fa.attname as fcol,
+               -- Whether THIS caller may read the vocabulary's rows. Checked
+               -- rather than assumed: see the NULL/{} distinction below.
+               pg_catalog.has_table_privilege(ft.oid, 'select') as may_read
+        from pg_constraint c
+        join pg_class t on t.oid = c.conrelid
+        join pg_namespace n on n.oid = t.relnamespace
+        join pg_attribute a on a.attrelid = t.oid and a.attnum = c.conkey[1]
+        join pg_class ft on ft.oid = c.confrelid
+        join pg_namespace fn on fn.oid = ft.relnamespace
+        join pg_attribute fa on fa.attrelid = ft.oid and fa.attnum = c.confkey[1]
+        where c.contype = 'f'
+          and array_length(c.conkey, 1) = 1
+          and fa.atttypid = 'text'::regtype
+          and n.nspname not in ('pg_catalog', 'information_schema')
+        order by 1, 2, 3
+    loop
+        -- THE POINTER IS PUBLIC; THE CONTENTS ARE NOT, and that distinction is
+        -- the reason this function is SECURITY INVOKER.
+        --
+        -- The obvious spelling -- read every referenced table and publish the
+        -- rows -- made percolate.contract() raise `permission denied for table
+        -- plugins` for web_anon, which is the one role that most needs to read
+        -- a contract: an unauthenticated client discovering what it would have
+        -- to send. Measured on a from-zero install, not reasoned about.
+        --
+        -- The fix is NOT to make this SECURITY DEFINER. A reference vocabulary
+        -- is a real table, and reading its rows on behalf of a caller who
+        -- cannot read them would turn a contract-publishing function into a
+        -- read-anything side channel the moment somebody adds a foreign key
+        -- onto a text column of something sensitive. The shape of the door is
+        -- public; what is behind it is not.
+        --
+        -- So a caller always learns that the column is constrained and WHICH
+        -- vocabulary constrains it, and learns the members only if it could
+        -- have selected them itself. NULL and '{}' are deliberately different
+        -- answers: NULL is "you may not see these", '{}' is "there are none".
+        if r.may_read then
+            execute format('select array_agg(%I::text order by %I::text) from %I.%I',
+                           r.fcol, r.fcol, r.fsch, r.ftbl)
+               into vals;
+            admits := coalesce(vals, '{}'::text[]);
+        else
+            admits := null;
+        end if;
+        schema_name := r.sch; table_name := r.tbl; column_name := r.col;
+        enforced_by := 'reference';
+        vocabulary  := r.fsch || '.' || r.ftbl;
+        return next;
+    end loop;
+
+    -- (c) Enums inside declared type schemas. content.connectors' auth and
+    -- paging taxonomies ARE enforced -- connectors_validate() refuses an
+    -- unknown type at the write -- but they are enforced inside a trigger BODY,
+    -- which no catalog reader can see. Without this branch the published
+    -- contract would omit two closed vocabularies that the database genuinely
+    -- refuses, which is the worst kind of gap: silent, and on the permissive
+    -- side.
+    for r in
+        select t.name,
+               split_part(t.name, '.', 1) as sch,
+               k.key   as prop,
+               k.value as spec
+        from percolate.types t,
+             lateral jsonb_each(coalesce(t.schema->'properties', '{}'::jsonb)) k
+        where k.value ? 'enum'
+        order by 1, 3
+    loop
+        select array_agg(value order by value) into vals
+          from jsonb_array_elements_text(r.spec->'enum');
+        if array_length(vals, 1) >= 2 then
+            schema_name := r.sch; table_name := r.name; column_name := r.prop;
+            enforced_by := 'type'; vocabulary := r.name; admits := vals;
+            return next;
+        end if;
+    end loop;
+end;
+$fn$;
+
+comment on function percolate.enums() is
+    'Every closed vocabulary this database enforces, read from the catalog at '
+    'call time. Nothing here is restated, so nothing here can fall behind.';
+
+
+-- ------------------------------------------------------------
+-- 3. The whole contract, as one document
+--
+-- What a client actually fetches. One call rather than two, because a client
+-- assembling a contract from two round trips can assemble half of one.
+-- ------------------------------------------------------------
+create or replace function percolate.contract()
+returns jsonb
+language sql stable
+set search_path = pg_catalog, public
+as $$
+    select jsonb_build_object(
+        'extension', (select extversion from pg_extension where extname = 'percolate'),
+        'generated_at', now(),
+        'enums', coalesce((
+            select jsonb_agg(jsonb_build_object(
+                       'schema', schema_name, 'table', table_name,
+                       'column', column_name, 'enforced_by', enforced_by,
+                       'vocabulary', vocabulary, 'admits', admits)
+                   order by schema_name, table_name, column_name, enforced_by)
+            from percolate.enums()), '[]'::jsonb),
+        'types', coalesce((
+            select jsonb_agg(jsonb_build_object(
+                       'name', name, 'title', title, 'owner', owner,
+                       'consumed_by', consumed_by, 'schema', schema,
+                       'implemented', implemented)
+                   order by name)
+            from percolate.types), '[]'::jsonb));
+$$;
+
+comment on function percolate.contract() is
+    'The published contract as one document: what this database admits. Clients '
+    'compile against this rather than restating it.';
+
+
+-- Readable by anyone who can connect. A contract nobody may read is not a
+-- contract -- and there is nothing sensitive in it: it is the shape of the
+-- door, not what is behind it. Granted to web_anon too, so an unauthenticated
+-- client can discover what it would have to send before it has credentials.
+grant usage on schema percolate to web_anon, authenticated, api_viewer;
+grant select on percolate.types to web_anon, authenticated, api_viewer;
+grant execute on function percolate.enums() to web_anon, authenticated, api_viewer;
+grant execute on function percolate.contract() to web_anon, authenticated, api_viewer;

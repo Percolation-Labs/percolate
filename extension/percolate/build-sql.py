@@ -231,6 +231,7 @@ ORDER = [
     ("agentic/schema.sql",                      "agents, sessions, runs, messages -- the conversation plane"),
     ("world-model-ingestion/graph.sql",         "graph indexing: the soft/lake reference tables and upsert_graph -- after agentic, because it registers an extractor agent"),
     ("world-model-ingestion/ingestion.sql",     "the default ingestion pipeline -- LAST: it installs a workflow, so it needs the lint (agentic), the embedding registry and the graph indexer to already exist"),
+    ("contract/schema.sql",                     "the published contract: percolate.enums() reads what every schema above enforces, so it goes after all of them"),
 ]
 
 # Every specs/*/*.sql file is either in ORDER above or named here, with the
@@ -488,6 +489,91 @@ def write_upgrades(body: str) -> None:
     print(f"wrote {len(written)} upgrade script(s): {', '.join(written)}")
 
 
+def sql_str(s):
+    """A SQL string literal, or NULL. Doubling is the whole escape rule."""
+    if s is None:
+        return "null"
+    return "'" + str(s).replace("'", "''") + "'"
+
+
+def compile_types():
+    """specs/contract/types/*.yaml -> the inserts that populate percolate.types.
+
+    Authored as YAML because a person writes and reviews these; stored as jsonb
+    because a machine reads them. Compiled rather than loaded at runtime for the
+    reason everything else here is compiled: the extension script is what a
+    database installs, and a contract that needed a YAML parser at install time
+    would be a contract only a Python deployment could have.
+
+    Deterministic -- sorted files, sorted keys -- because build-sql.py --check
+    compares the generated artifact byte for byte.
+    """
+    import json
+
+    try:
+        import yaml
+    except ModuleNotFoundError:
+        raise SystemExit(
+            "specs/contract/types/*.yaml needs PyYAML to compile into percolate.types.\n"
+            "  pip install pyyaml\n"
+            "It is a build-time dependency only: the generated SQL carries the "
+            "shapes as jsonb, so installing the extension needs no Python at all.")
+
+    d = ROOT / "specs" / "contract" / "types"
+    if not d.is_dir():
+        return ""
+
+    rows = []
+    for path in sorted(d.glob("*.yaml")):
+        doc = yaml.safe_load(path.read_text())
+        missing = {"name", "title", "owner", "schema"} - set(doc or {})
+        if missing:
+            raise SystemExit(
+                f"{path.relative_to(ROOT)}: missing {', '.join(sorted(missing))}. "
+                "A type contract has to say what it is called, what it is, who "
+                "owns it, and what shape it has.")
+        # The filename IS the name, so a reader finding a type in the database
+        # can find the file without grepping, and two files cannot claim one
+        # name while looking like two contracts.
+        if doc["name"] != path.stem:
+            raise SystemExit(
+                f"{path.relative_to(ROOT)}: declares name {doc['name']!r} but is "
+                f"filed as {path.stem!r}. The filename is the name.")
+        consumed = doc.get("consumed_by") or []
+        arr = "array[" + ", ".join(sql_str(c) for c in consumed) + "]::text[]" \
+            if consumed else "'{}'::text[]"
+        rows.append(
+            f"    ({sql_str(doc['name'])}, {sql_str(doc['title'])}, "
+            f"{sql_str(doc['owner'])}, {arr},\n"
+            f"     {sql_str(json.dumps(doc['schema'], sort_keys=True))}::jsonb,\n"
+            f"     {sql_str(json.dumps(doc['implemented'], sort_keys=True)) if doc.get('implemented') else 'null'}"
+            f"{'::jsonb' if doc.get('implemented') else ''},\n"
+            f"     {sql_str((doc.get('why') or '').strip() or None)})")
+
+    if not rows:
+        return ""
+
+    return (
+        "\n-- ============================================================\n"
+        "-- contract/types/*.yaml\n"
+        "--   the declared payload shapes, compiled from YAML into percolate.types\n"
+        "-- ============================================================\n\n"
+        "insert into percolate.types (name, title, owner, consumed_by, schema, implemented, why)\nvalues\n"
+        + ",\n".join(rows)
+        # A re-install and an upgrade both re-run this file, and a type whose
+        # shape was corrected has to land rather than be skipped -- `do nothing`
+        # here would make every edit to a YAML a no-op on every database that
+        # already had the row, which is the silent-partial-write shape this
+        # collection keeps finding.
+        + "\non conflict (name) do update\n"
+          "   set title = excluded.title,\n"
+          "       owner = excluded.owner,\n"
+          "       consumed_by = excluded.consumed_by,\n"
+          "       schema = excluded.schema,\n"
+          "       implemented = excluded.implemented,\n"
+          "       why = excluded.why;\n")
+
+
 def main() -> int:
     check_every_spec_is_accounted_for()
     parts = [HEADER]
@@ -510,6 +596,10 @@ def main() -> int:
             f"-- {rel}\n--   {why}\n"
             f"-- ============================================================\n")
         parts.append(body)
+
+    # After every schema file, because percolate.enums() reads percolate.types for the enums
+    # that live inside declared shapes, and the table has to exist first.
+    parts.append(compile_types())
 
     report_cross_file_redefinitions(sigs_by_file)
 

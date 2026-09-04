@@ -1,0 +1,39 @@
+name: agentic.citation
+title: One entry of agentic.messages.citations
+owner: agentic
+
+consumed_by:
+  - percolate_core.agentic.contracts.conversation.Citation
+  - percolate_core.agentic.runtime.citations.derive_citations
+
+why: >-
+  brief.md §5.3 calls this "a tagged union, deliberately -- not one column
+  trying to mean both things", and the schema comment on the column writes the
+  two shapes out in prose. Prose in a comment is not a discriminator: the column
+  is jsonb, and the only thing standing between it and a malformed citation is
+  the runtime that writes it. A chunk citation never carries a node_id because
+  resource_chunk rows are machine-generated data-plane rows rather than graph
+  nodes -- which is a rule the shape can express and a comment can only assert.
+
+  Citations are derived by the runtime from the turn's tool_response rows and
+  are NEVER authored by the model, so this shape is also the boundary that keeps
+  provenance a construction rather than a claim.
+
+schema:
+  type: array
+  items:
+    oneOf:
+      - type: object
+        required: [kind, resource_type, resource_id]
+        additionalProperties: false
+        properties:
+          kind: {const: chunk}
+          resource_type: {type: string}
+          resource_id: {type: string, format: uuid}
+          chunk_id: {type: [string, "null"], format: uuid}
+      - type: object
+        required: [kind, node_id]
+        additionalProperties: false
+        properties:
+          kind: {const: node}
+          node_id: {type: string, format: uuid}

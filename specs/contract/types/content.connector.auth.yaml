@@ -1,0 +1,63 @@
+name: content.connector.auth
+title: The auth block of a content.connectors row
+owner: world-model-ingestion
+
+consumed_by:
+  - specs/world-model-ingestion/reference/connector.py apply_auth
+
+why: >-
+  This taxonomy IS enforced -- content.connectors_validate() refuses an unknown
+  `type` at the write, and its comment says why: "A typo in an auth type is a
+  rejected INSERT rather than a worker crash at 03:00." But it is enforced
+  inside a trigger BODY, which means it is invisible to pg_constraint and
+  therefore invisible to every catalog reader, including p8.enums(). Declaring
+  it here is what puts it back in the published contract.
+
+  It also records a real disagreement rather than hiding it. The trigger admits
+  eight types; the only runner in this collection implements five and raises
+  ValueError on `basic`, `oauth2_cc` and `signed`. sources.md excuses the last
+  two as deliberately-listed-but-unbuilt -- it does not excuse `basic`, which
+  the same document names against a real corpus source (Companies House). So
+  the permissive side is the WRITER, and the crash at 03:00 that the trigger's
+  comment claims to prevent is exactly what a `basic` registration produces.
+  `implemented` below is that gap, written down instead of discovered.
+
+schema:
+  type: object
+  required: [type]
+  properties:
+    type:
+      type: string
+      enum: [none, user_agent, header, bearer, query_param, basic, oauth2_cc, signed]
+    credential_ref:
+      description: A NAME. The trigger refuses a row carrying `value`, `secret` or `token`.
+      type: string
+    header:
+      description: Header name, for type=header.
+      type: string
+    param:
+      description: Query parameter name, for type=query_param.
+      type: string
+    template:
+      description: For type=user_agent -- SEC requires an identifying UA, which is a credential.
+      type: string
+  not:
+    anyOf:
+      - {required: [value]}
+      - {required: [secret]}
+      - {required: [token]}
+
+# Declared, not derived, and deliberately separate from the enum above: the
+# database admits the full set, and this says which of them anything can
+# actually execute. Two different facts; collapsing them would either narrow
+# the schema to what one runner happens to support, or claim support that does
+# not exist.
+implemented:
+  none: true
+  user_agent: true
+  header: true
+  bearer: true
+  query_param: true
+  basic: false
+  oauth2_cc: false
+  signed: false
