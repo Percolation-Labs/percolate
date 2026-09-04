@@ -13129,6 +13129,49 @@ $$ language plpgsql volatile security invoker;
 -- none of them. `SCHEMA` is the one query answerable before you know
 -- anything, and bare `SCHEMA` returns the index of what you may ask about.
 --
+-- ------------------------------------------------------------
+-- 13a. PROGRESSIVE DISCLOSURE, which is the contract every facet owes.
+--
+-- SCHEMA answers at three depths, and each depth names the next:
+--
+--   L0  SCHEMA                      which facets exist, and the query for each
+--   L1  SCHEMA "<facet>"            the VOCABULARY of that facet: every name
+--                                   you may use, with enough to choose between
+--                                   them
+--   L2  SCHEMA "<facet>" FROM <n>   the DETAIL of one name
+--
+-- THE RULE THAT DECIDES WHICH LEVEL A FIELD BELONGS TO: L1 must be answerable
+-- BEFORE you know which name you want; L2 is what you ask once you do. So
+-- per-instance detail -- every column of every relation, every (src, dst)
+-- triple of every relation type -- is L2 by construction, and a per-name fact
+-- that helps you CHOOSE (a description, a count, whether RLS applies) is L1.
+--
+-- WHY THIS IS A CONTRACT AND NOT A PREFERENCE. Both facets that dump detail at
+-- L1 grew past `workflow.max_payload_bytes` (65,536), which means a `sql` step
+-- calling them fails terminally -- and `p8ql-schema-first`, the skill shipped
+-- with the sample agent, tells every agent to call SCHEMA FIRST. Two correct
+-- designs that could not both be followed. Measured, as `authenticated`:
+--
+--     SCHEMA "graph"   83,598 -> 8,599 bytes   (439 triples -> 19 relations)
+--     SCHEMA "sql"     71,482 -> 11,549        (60 relations, columns moved to L2)
+--
+-- Not one fact was dropped; both are reachable at L2. All four facets together
+-- are now 43,616 bytes, so an agent can read the WHOLE schema and still fit in
+-- one step's output, which is the property that makes "start with SCHEMA"
+-- followable advice rather than a trap.
+--
+-- The cost of the L1 dump was never only the limit, either: 94% of the graph
+-- facet was one `relations` array repeating each per-relation fact once per
+-- pair, including one identical `description` string 439 times for 18KB. That
+-- is paid in context on every conversation's first call, limit or no limit.
+--
+-- Found by walking scenarios/evals/J1-mill-lane.md Act 6, where the workflow a
+-- user would actually write failed on it; runs/2026-09-04-J1.md §3.2.
+-- `dev/tests/query/03-schema.sql` §7 holds the contract: every registered
+-- facet fits the budget at L1, states how to narrow, and narrows to something
+-- smaller.
+-- ------------------------------------------------------------
+--
 -- The reason to build it here rather than hand agents markdown: the registries
 -- it reports on ALREADY EXIST and are already the truth --
 -- `aiq.entity_registry`, `aiq.relation_types`, `aiq.semantic_sources`,
@@ -13745,7 +13788,25 @@ returns jsonb as $$
                     -- result as an absent fact.
                     'row_level_security', v.relrowsecurity,
                     'comment', v.comment,
-                    'columns', (
+                    -- COLUMNS AND CONSTRAINTS ARE LEVEL-2 DETAIL -- §13a.
+                    -- Unnarrowed, this facet answers "which relations may I
+                    -- read", which is the question you have BEFORE you know
+                    -- which one you want; every column of every one of them is
+                    -- what you ask for once you have chosen. Measured as
+                    -- `authenticated` on a dev database: 60 relations with
+                    -- every column is 70,600 bytes, which is over
+                    -- workflow.max_payload_bytes, while `SCHEMA "sql" FROM
+                    -- chunks` is 880. The directory is a twentieth of the size
+                    -- and is what the narrowing pointer is FOR.
+                    --
+                    -- `column_count` stays because it is the one per-relation
+                    -- fact that helps you choose, and because a relation that
+                    -- reports columns and then returns none on narrowing is a
+                    -- difference worth being able to see.
+                    'column_count', (
+                        select count(*) from pg_attribute a
+                        where a.attrelid = v.oid and a.attnum > 0 and not a.attisdropped),
+                    'columns', case when p_name is null then null else (
                         select jsonb_agg(jsonb_build_object(
                             'name', a.attname,
                             'type', format_type(a.atttypid, a.atttypmod),
@@ -13754,12 +13815,12 @@ returns jsonb as $$
                         order by a.attnum)
                         from pg_attribute a
                         left join pg_attrdef d on d.adrelid = a.attrelid and d.adnum = a.attnum
-                        where a.attrelid = v.oid and a.attnum > 0 and not a.attisdropped),
-                    'constraints', (
+                        where a.attrelid = v.oid and a.attnum > 0 and not a.attisdropped) end,
+                    'constraints', case when p_name is null then null else (
                         select jsonb_agg(jsonb_build_object(
                             'name', co.conname, 'definition', pg_get_constraintdef(co.oid))
                         order by co.conname)
-                        from pg_constraint co where co.conrelid = v.oid))
+                        from pg_constraint co where co.conrelid = v.oid) end)
                 order by v.nspname, v.relname)
                 from visible v), '[]'::jsonb)),
         'examples', aiq.facet_examples('sql'));
@@ -13783,7 +13844,12 @@ returns jsonb as $$
                      'keys in aiq.node_keys are how the dialect NAMES them; edges are soft '
                      '(authored) links validated against the relation catalogue below.',
             'traversal', 'GRAPH "<key>" [DEPTH n] [TYPE <relation>] -- the key is resolved '
-                         'once and the walk proceeds by id, never by name.'),
+                         'once and the walk proceeds by id, never by name.',
+            -- The level-2 pointer. Every facet states one, because a document
+            -- that has deliberately withheld detail owes the reader the query
+            -- that produces it -- see §13a.
+            'narrow_with', 'SCHEMA "graph" FROM <entity_type|relation> -- the (src, dst) '
+                           'pairs and sample keys for one name, rather than the vocabulary.'),
         'derived', jsonb_build_object(
             -- How to WRITE one, not just which ones exist. The catalogue told
             -- an author that `competes_with` runs company -> company and
@@ -13838,19 +13904,52 @@ returns jsonb as $$
                     order by r.entity_type)
                 from aiq.entity_registry r
                 where p_name is null or r.entity_type = p_name), '[]'::jsonb),
-            'relations', coalesce((select jsonb_agg(jsonb_build_object(
-                    'src_type', src_type, 'relation', relation, 'dst_type', dst_type,
-                    'inverse_label', inverse_label, 'description', description,
-                    -- Coalesced, because the column is nullable to keep
-                    -- "undeclared" distinct from "declared false" INSIDE the
-                    -- catalogue; a consumer reading the published shape wants
-                    -- the effective answer, and null would only invite each of
-                    -- them to coalesce it again differently.
-                    'is_symmetric', coalesce(is_symmetric, false))
-                    order by src_type, relation, dst_type)
-                from aiq.relation_types
-                where p_name is null
-                   or p_name in (src_type, relation, dst_type)), '[]'::jsonb),
+            -- ONE ENTRY PER RELATION, NOT PER TRIPLE -- §13a, progressive
+            -- disclosure. aiq.relation_types is src_type x relation x dst_type,
+            -- so emitting it row-wise repeats every per-RELATION fact once per
+            -- pair: measured on six entity types and nineteen relations, 439
+            -- rows, 78,250 bytes, of which one identical `description` string
+            -- appeared 439 times for 18KB, and twelve of the nineteen relations
+            -- admitted all thirty-six pairs. Grouped, with the universal case
+            -- collapsed to `* > *`: 3,050 bytes. Twenty-five times smaller and
+            -- not one fact fewer.
+            --
+            -- That mattered because the row-wise form put this facet 1.27x OVER
+            -- workflow.max_payload_bytes, so a `sql` step calling the mode that
+            -- `p8ql-schema-first` tells every agent to call FIRST failed
+            -- terminally. Found by walking scenarios/evals/J1-mill-lane.md Act
+            -- 6; the run log is runs/2026-09-04-J1.md §3.2.
+            --
+            -- `pairs` is the level-2 detail: which (src, dst) a relation admits
+            -- is what you need once you have CHOSEN a relation, and the choice
+            -- is made from the name and the description. A caller who wants the
+            -- triples for one type asks `SCHEMA "graph" FROM <entity_type>`.
+            'relations', coalesce((
+                select jsonb_agg(z.entry order by z.rel)
+                from (
+                    select relation as rel,
+                           jsonb_build_object(
+                               'relation', relation,
+                               'description', min(description),
+                               'inverse_label', min(inverse_label),
+                               -- Coalesced, because the column is nullable to
+                               -- keep "undeclared" distinct from "declared
+                               -- false" INSIDE the catalogue; a consumer reading
+                               -- the published shape wants the effective answer,
+                               -- and null would only invite each of them to
+                               -- coalesce it again differently.
+                               'is_symmetric', bool_or(coalesce(is_symmetric, false)),
+                               'pairs', case
+                                   when p_name is null
+                                    and count(*) = (select count(*) * count(*)
+                                                      from aiq.entity_registry)
+                                   then jsonb_build_array('* > *')
+                                   else jsonb_agg(distinct src_type || ' > ' || dst_type)
+                               end) as entry
+                    from aiq.relation_types
+                    where p_name is null
+                       or p_name in (src_type, relation, dst_type)
+                    group by relation) z), '[]'::jsonb),
             'semantic_sources', coalesce((select jsonb_agg(jsonb_build_object(
                     'name', name, 'source_table', source_table, 'content_col', content_col)
                     order by name) from aiq.semantic_sources), '[]'::jsonb),

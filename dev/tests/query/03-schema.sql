@@ -315,12 +315,37 @@ do $$
 declare v jsonb;
 begin
     v := aiq.schema('graph')->'doc'->'derived';
+    -- ONE ENTRY PER RELATION, WITH ITS PAIRS -- not one per triple. This
+    -- assertion read `src_type`/`dst_type` off each element until schema.sql
+    -- §13a moved the catalogue to the grouped shape, and it went red on the
+    -- change, which is the assertion doing its job: the facet's contract is
+    -- what an author reads to write an edge, and that contract moved.
+    --
+    -- What still has to be true is what an author actually needs: the relation
+    -- NAME, what it means, and which (src, dst) it admits -- `* > *` where it
+    -- admits every registered pair, an explicit list where it does not.
     if not exists (
         select 1 from jsonb_array_elements(v->'relations') r
-        where r->>'relation' is not null and r->>'src_type' is not null
-          and r->>'dst_type' is not null)
+        where r->>'relation' is not null
+          and r->>'description' is not null
+          and jsonb_array_length(r->'pairs') > 0)
     then
         raise exception 'the graph facet does not serve the edge catalogue: %', v->'relations';
+    end if;
+    -- And a relation that does NOT admit everything must say so specifically,
+    -- or `* > *` is not a collapse, it is a wrong answer that happens to be
+    -- short. works_at is person -> company and nothing else.
+    if not exists (
+        select 1 from jsonb_array_elements(v->'relations') r
+        where r->>'relation' = 'works_at'
+          and r->'pairs' = '["person > company"]'::jsonb)
+    then
+        raise exception
+            'works_at is person -> company in aiq.relation_types and the facet '
+            'reports its pairs as %, so the collapse to `* > *` is not reading '
+            'the catalogue it claims to serve',
+            (select r->'pairs' from jsonb_array_elements(v->'relations') r
+              where r->>'relation' = 'works_at');
     end if;
     if not exists (select 1 from jsonb_array_elements(v->'entity_types') e
                    where e->>'source_table' is not null) then
@@ -367,4 +392,142 @@ do $$ begin
     raise notice 'query/03: a real change moves the hash, capture appends a revision, a no-op writes nothing';
     raise notice 'query/03: the sql facet is caller-scoped, and claims no verdict it did not produce';
     raise notice 'query/03: the graph facet serves the edge catalogue the trigger enforces';
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 8. PROGRESSIVE DISCLOSURE -- schema.sql §13a, made checkable.
+--
+-- The contract: L0 `SCHEMA` indexes the facets, L1 `SCHEMA "<facet>"` is the
+-- VOCABULARY of one, L2 `SCHEMA "<facet>" FROM <name>` is the DETAIL of one
+-- name -- and L1 must fit in a workflow step's output, because the skill
+-- shipped with the sample agent tells every agent to call SCHEMA first.
+--
+-- This is not a size preference. Both facets that dumped L2 detail at L1 had
+-- grown PAST workflow.max_payload_bytes: `SCHEMA "graph"` at 83,598 bytes and
+-- `SCHEMA "sql"` at 71,482 against a 65,536 limit, so a `sql` step calling
+-- either failed terminally with "this is terminal: the same response will be
+-- the same size on every attempt". Two correct designs that could not both be
+-- followed. Found by walking scenarios/evals/J1-mill-lane.md Act 6.
+--
+-- THE LIMIT IS READ FROM WHERE THE ENGINE READS IT, never retyped: the same
+-- coalesce(current_setting(...), 65536) as workflow.enforce_payload_ref_size,
+-- so raising the limit deliberately moves this test with it and a second copy
+-- cannot drift.
+--
+-- CALLER-SCOPED FACETS ARE WIDEST FOR THE MOST PRIVILEGED ROLE, so measuring
+-- as the suite's own role is the conservative direction -- `SCHEMA "sql"` is
+-- 16,510 bytes as app_owner against 11,549 as authenticated. A check that
+-- measured the narrow seat would pass while the wide one blew the budget.
+-- ---------------------------------------------------------------------
+do $$
+declare
+    v_max  int := coalesce(nullif(current_setting('workflow.max_payload_bytes', true), '')::int,
+                           65536);
+    v_bad  text;
+    v_rpt  text;
+begin
+    select string_agg(format('%s: %s bytes, over the %s limit', name, bytes, v_max), E'\n       '
+                      order by bytes desc) filter (where bytes > v_max),
+           string_agg(format('%s %s (%s%% of budget)', name, bytes,
+                             round(100.0 * bytes / v_max)), ', ' order by name)
+      into v_bad, v_rpt
+      from (select f.name, length(aiq.query('SCHEMA "' || f.name || '"')::text) as bytes
+              from aiq.schema_facets f) z;
+
+    if v_bad is not null then
+        raise exception
+            E'these SCHEMA facets do not fit in a workflow step''s output:\n       %\n\n'
+            'A `sql` step calling one fails terminally, and p8ql-schema-first '
+            'tells every agent to call SCHEMA first -- so the facet and the '
+            'skill cannot both be followed. Move per-instance detail to L2 '
+            '(SCHEMA "<facet>" FROM <name>) rather than raising the limit: '
+            'schema.sql §13a says which fields belong at which level.', v_bad;
+    end if;
+    raise notice 'query/03: every SCHEMA facet fits a workflow step -- %', v_rpt;
+end $$;
+
+-- 8b. A FACET THAT NAMES A NARROWING OWES ONE THAT DOES SOMETHING, and the two
+-- facets that narrow do DIFFERENT things -- which the first version of this
+-- test got wrong by assuming one shape for both.
+--
+--   `sql`   DISCLOSES: `columns` and `constraints` are absent at L1 and present
+--           at L2. That is what took it from 71,482 bytes to 11,549.
+--   `graph` FILTERS: nothing is withheld -- the pairs are collapsed, not
+--           removed -- so narrowing returns FEWER relations, not new fields.
+--
+-- The first version asserted `sample_keys` was L2-only for `graph` and went red,
+-- correctly: sample keys are at L1 on purpose and the reason is in
+-- schema.sql's own comment -- an agent that reads the catalogue but never sees
+-- the SHAPE of a key guesses `sterling`, `gbp`, `gbp_usd`, `gbpusd`, gets four
+-- empty results and gives up, which was observed on the first real question
+-- ever put to the sample agent. Three keys is exactly the per-name fact that
+-- helps a caller CHOOSE, which is the §13a test for belonging at L1.
+--
+-- `p8ql` and `workflow` are absent from this list on purpose: they describe a
+-- dialect and an authoring format, have no per-name detail, declare no
+-- narrow_with, and are 7.5KB and 16KB unnarrowed.
+do $$
+declare
+    v_l1_n int; v_l2_n int; v_l1 text; v_l2 text;
+begin
+    -- Both facets that narrow must SAY they narrow.
+    if exists (select 1 from (values ('graph'),('sql')) f(name)
+                where not (aiq.schema(f.name) -> 'doc' -> 'declared' ? 'narrow_with')) then
+        raise exception
+            'a facet that narrows declares no narrow_with -- a reader has no way '
+            'to reach the detail it did not print';
+    end if;
+
+    -- sql DISCLOSES: columns absent at L1, present at L2.
+    v_l1 := aiq.schema('sql')::text;
+    -- `resource_chunks`, not `chunks`. The dialect's OTHER modes take the
+    -- registered SOURCE name (`TEXT "x" FROM chunks`), and this facet takes a
+    -- RELATION name -- so the example a reader is most likely to try,
+    -- `SCHEMA "sql" FROM chunks`, matches nothing and returns
+    -- `relation_count: 0` with no error. Asserted below so the mismatch is
+    -- recorded rather than rediscovered; whether the facet should resolve a
+    -- source name to its table is a change to what FROM means here, not a
+    -- fix to make while testing something else.
+    v_l2 := aiq.schema('sql', 'resource_chunks')::text;
+    if (v_l2 ~ '"columns"') is not true then
+        raise exception
+            'SCHEMA "sql" FROM resource_chunks carries no `columns` -- the narrowing '
+            'pointer names a query that returns nothing the directory did not '
+            'already have, which reads as a complete answer and is not one';
+    end if;
+    if (v_l1 ~ '"columns": \[') is not false then
+        raise exception
+            'SCHEMA "sql" prints every column at L1 -- per-instance detail '
+            'belongs at L2 (schema.sql §13a), and this is exactly how it grew '
+            'to 71,482 bytes against a 65,536 byte step limit';
+    end if;
+
+    -- graph FILTERS: same fields, strictly fewer relations.
+    select jsonb_array_length(aiq.schema('graph')->'doc'->'derived'->'relations'),
+           jsonb_array_length(aiq.schema('graph','company')->'doc'->'derived'->'relations')
+      into v_l1_n, v_l2_n;
+    if v_l1_n is null or v_l2_n is null then
+        raise exception 'the graph facet served no relations at L1 (%) or L2 (%) -- '
+            'a null count here would silence every comparison below it',
+            v_l1_n, v_l2_n;
+    end if;
+    if v_l2_n >= v_l1_n then
+        raise exception
+            'SCHEMA "graph" FROM company returns % relations against % at L1 -- '
+            'narrowing that does not narrow is a pointer to nowhere',
+            v_l2_n, v_l1_n;
+    end if;
+    -- The source-name mismatch, pinned. A reader following the facet's own
+    -- `narrow_with` with the name every other mode uses gets an empty
+    -- document; if that ever starts resolving, this assertion is where the
+    -- change gets noticed rather than being a silent widening.
+    if (aiq.schema('sql','chunks')->'doc'->'derived'->>'relation_count') is distinct from '0' then
+        raise notice
+            'SCHEMA "sql" FROM chunks now resolves the SOURCE name (%) -- if that '
+            'was deliberate, say so here; it used to return relation_count 0 and '
+            'the mismatch with TEXT/SEMANTIC''s FROM was a documented trap',
+            (aiq.schema('sql','chunks')->'doc'->'derived'->>'relation_count');
+    end if;
+    raise notice 'query/03: sql discloses on narrowing (columns L2-only), graph filters (% relations -> %)',
+        v_l1_n, v_l2_n;
 end $$;
