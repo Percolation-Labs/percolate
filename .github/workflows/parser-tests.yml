@@ -1,7 +1,9 @@
 # The parser's own tests, run by something other than nobody.
 #
 # There were 41 of them -- 20 pure ones in `plan_graph.rs` and 21 `#[pg_test]`s
-# in `lib.rs` -- and NOTHING IN EITHER REPOSITORY EXECUTED THEM. `suite.yml`
+# in `lib.rs` -- and NOTHING IN EITHER REPOSITORY EXECUTED THEM. (43 now: two
+# more `#[pg_test]`s tie the mode list to the error message that offers it and
+# to the grammar that publishes it, after the two had drifted apart.) `suite.yml`
 # says so in as many words ("a change to the Rust is NOT tested here") and is
 # honest about why: it runs the published `.so` and a pgrx build is minutes.
 # get-percolate's `parser.yml` compiles the crate but only ever runs `cargo
@@ -34,8 +36,8 @@
 #
 #   * `--features pg_test`. Without it the `#[pg_test]` macro expands to a
 #     plain `#[test]` that grabs the framework mutex and finds no server, and
-#     all 21 fail with "Could not obtain test mutex" -- which reads like a
-#     harness bug rather than a missing flag.
+#     every one of them fails with "Could not obtain test mutex" -- which reads
+#     like a harness bug rather than a missing flag.
 #   * A NON-ROOT user with a writable sharedir. `initdb` refuses to run as
 #     root, and `cargo pgrx test` installs the extension into
 #     `pg_config --sharedir` before it can load it, which root owns. Running as

@@ -2020,6 +2020,15 @@ $$ language plpgsql stable security definer set search_path = pg_catalog, public
 
 -- (b) Deny by default, then grant only the entry points -- same rule and same
 -- reasoning as user-rbac/schema.sql §9(a).
+--
+-- THIS IS NOT THE LAST WORD, and reading it as one is how fifty functions
+-- below this line kept PUBLIC's EXECUTE. `create or replace function` after a
+-- revoke gets the default back, and this file goes on for another five
+-- thousand lines. The statement that actually holds the invariant is the last
+-- one in `world-model-ingestion/ingestion.sql` -- the last file in
+-- build-sql.py's ORDER -- with the check that fails the install if it stops
+-- holding. This line states the intent where a reader of this file will look
+-- for it; that one makes it true.
 revoke execute on all functions in schema workflow from public;
 
 grant usage on schema workflow to worker, scheduler, authenticated;
@@ -7645,6 +7654,32 @@ create table if not exists rbac.role_permissions (
         references rbac.permission_kinds (resource, action)
 );
 
+-- AND ON A DATABASE THAT ALREADY HAS THE TABLE, where the line above is a
+-- no-op. `permission_kinds` and this foreign key were added to a table that
+-- already existed, so every database created before them kept a
+-- `role_permissions` with no constraint at all -- and the constraint IS the
+-- point of the table above it: a pair nothing checks cannot be granted. An
+-- upgraded deployment could grant `('admin','anything','whatever')` and
+-- `has_permission` would answer true for a resource no policy consults.
+--
+-- Found by `dev/upgrade-converges.sh`, which diffs a fresh install against an
+-- upgraded one and is the only thing that could have: build-sql.py enforces
+-- idempotency for statements that CREATE, and `create table if not exists` is
+-- perfectly idempotent while being silently incomplete. Same shape as the
+-- `alter column status set default` in section 1.
+--
+-- Dropped before it is added because a constraint has neither OR REPLACE nor
+-- IF NOT EXISTS -- build-sql.py's check_idempotent() refuses the pair written
+-- the other way round. The name is the one Postgres generates for the inline
+-- form, so a fresh install replaces its own constraint with an identical one
+-- and the two paths land in the same place.
+alter table rbac.role_permissions
+    drop constraint if exists role_permissions_resource_action_fkey;
+alter table rbac.role_permissions
+    add constraint role_permissions_resource_action_fkey
+    foreign key (resource, action)
+        references rbac.permission_kinds (resource, action);
+
 -- One function every module's RLS policy calls. Add a new module
 -- (resource search, agentic tools) by inserting rows here, not by
 -- writing new authz code.
@@ -9707,6 +9742,23 @@ begin
         end;
         $b$ language plpgsql;
     $f$, v_del, p_entity_type);
+
+    -- DENY-BY-DEFAULT REACHES THE GENERATED FUNCTIONS TOO.
+    --
+    -- These two are created at RUNTIME, by whoever registers an entity type --
+    -- long after the extension script's own revoke has run. So they were the
+    -- one path in the collection that could still mint a function carrying
+    -- PUBLIC's EXECUTE, and it is the path a deployment uses most: six of them
+    -- were sitting public on a stack whose install-time invariant passed
+    -- cleanly, because the seeds that registered them ran afterwards.
+    --
+    -- Harmless in themselves -- a trigger function called directly raises --
+    -- but "harmless because of how it happens to be reached" is the reasoning
+    -- user-rbac 1 records about set_password and answers with "never trust
+    -- that again". A generator that emits functions owes the same revoke a
+    -- file does.
+    execute format('revoke execute on function aiq.%I() from public', v_ins);
+    execute format('revoke execute on function aiq.%I() from public', v_del);
 
     execute format('drop trigger if exists trg_aiq_project_ins on %s', p_source_table);
     execute format($f$
@@ -12494,6 +12546,11 @@ alter default privileges for role app_owner in schema aiq
 -- them SECURITY DEFINER would silently return every tenant's rows, which is
 -- precisely the bug the ownership split exists to prevent.
 -- ------------------------------------------------------------
+-- Not the last word: `graph-algorithms.sql` and `world-model-ingestion/
+-- graph.sql` both define aiq functions after this line, and PUBLIC's default
+-- comes back with each one. The statement that holds the invariant for every
+-- schema, after the last file that can add to any of them, is at the end of
+-- `world-model-ingestion/ingestion.sql`.
 revoke execute on all functions in schema aiq from public;
 
 grant execute on function aiq.query(text, vector) to authenticated;
@@ -13931,12 +13988,56 @@ returns boolean as $$
     -- migration, psql -- which is the same exemption workflow's worker-facing
     -- functions get from their grant being the authorization.
     --
-    -- A null org is the single-tenant case and the fixture case: it is readable
-    -- by everyone under resources_org_scoped, so writing it is not a
-    -- cross-tenant act.
-    select nullif(current_setting('request.jwt.claims', true), '') is null
-        or p_org_id is null
-        or p_org_id in (select aiq.current_org_ids());
+    -- A NULL ORG IS THE ORG EVERYONE READS, WHICH IS WHY WRITING ONE IS THE
+    -- STRONGEST CROSS-TENANT ACT AND NOT THE ABSENCE OF ONE.
+    --
+    -- This used to read `or p_org_id is null`, on the reasoning written here:
+    -- "a null org is the single-tenant case and the fixture case: it is
+    -- readable by everyone under resources_org_scoped, so writing it is not a
+    -- cross-tenant act." The premise is right and the conclusion inverts it.
+    -- `resources_org_scoped` is `org_id is null or org_id in (...)`, so a null
+    -- org is not unscoped -- it is scoped to EVERY tenant. Being allowed to
+    -- write one is permission to put a document in every other tenant's
+    -- corpus, which is a wider act than writing into any single named org, not
+    -- a narrower one.
+    --
+    -- It needed no missing check to reach, and no argument an attacker had to
+    -- guess: `register_upload`'s `p_org_id` DEFAULTS to null, and the channel
+    -- lookup accepts a null-org channel -- of which the extension ships three
+    -- (`uploads`, `workflow_artifacts`, `sample-corpus`). MEASURED on a stock
+    -- install, as an ordinary `authenticated` user of org B holding nothing:
+    --
+    --     select content.register_upload('uploads', ...)   -- no org argument
+    --     -> resource written with org_id NULL
+    --     -> org A, a different tenant, reads the row:        1
+    --     -> org A's TEXT search over the `chunks` corpus:    1 matching row
+    --
+    -- That is §4a's own threat sentence -- "an agent asking its own tenant's
+    -- documents a question would retrieve the attacker's text and act on it" --
+    -- reached through the default value of an optional argument. §4a closed
+    -- writing into ANOTHER NAMED org and left open writing into the one every
+    -- org reads.
+    --
+    -- THE TEST IS WHETHER THE CALLER IS A TENANT, not whether the org is null.
+    -- A token that names one or more orgs is a tenant's, and a tenant writes
+    -- inside its tenancy. A token that names none is the single-tenant
+    -- deployment (auth, one org, everything shared) and still writes the null
+    -- org, because for it null means "ours". No token at all is a service
+    -- connection, a migration or psql, and is unchanged.
+    --
+    -- `p_org_id is not null` guards the IN: `null in (select ...)` is NULL
+    -- rather than false, which would make the whole predicate NULL and read as
+    -- a refusal by accident rather than by rule.
+    select
+        -- no request identity at all -- service connection, migration, psql
+        nullif(current_setting('request.jwt.claims', true), '') is null
+        -- the caller's token names this org
+        or (p_org_id is not null
+            and p_org_id in (select aiq.current_org_ids()))
+        -- the single-tenant case: a token that names no org writing the org
+        -- that, for that deployment, means "ours"
+        or (p_org_id is null
+            and not exists (select 1 from aiq.current_org_ids()));
 $$ language sql stable security definer set search_path = pg_catalog, public;
 
 create or replace function content.assert_org_write(p_org_id uuid, p_what text)

@@ -374,6 +374,23 @@ begin
         $b$ language plpgsql;
     $f$, v_del, p_entity_type);
 
+    -- DENY-BY-DEFAULT REACHES THE GENERATED FUNCTIONS TOO.
+    --
+    -- These two are created at RUNTIME, by whoever registers an entity type --
+    -- long after the extension script's own revoke has run. So they were the
+    -- one path in the collection that could still mint a function carrying
+    -- PUBLIC's EXECUTE, and it is the path a deployment uses most: six of them
+    -- were sitting public on a stack whose install-time invariant passed
+    -- cleanly, because the seeds that registered them ran afterwards.
+    --
+    -- Harmless in themselves -- a trigger function called directly raises --
+    -- but "harmless because of how it happens to be reached" is the reasoning
+    -- user-rbac 1 records about set_password and answers with "never trust
+    -- that again". A generator that emits functions owes the same revoke a
+    -- file does.
+    execute format('revoke execute on function aiq.%I() from public', v_ins);
+    execute format('revoke execute on function aiq.%I() from public', v_del);
+
     execute format('drop trigger if exists trg_aiq_project_ins on %s', p_source_table);
     execute format($f$
         create trigger trg_aiq_project_ins

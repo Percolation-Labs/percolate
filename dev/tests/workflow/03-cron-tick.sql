@@ -1,3 +1,5 @@
+-- requires: pg_cron
+--
 -- THE CLOCK IS ACTUALLY RUNNING.
 --
 -- 02-schedules.sql tests the scheduler by driving tick() itself, which proves

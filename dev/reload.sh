@@ -15,11 +15,19 @@
 # rest of the stack -- PostgREST, the worker, the MCP server -- keeps running
 # against whatever it was already pointed at.
 #
-# It is deliberately NOT an `ALTER EXTENSION UPDATE`. Pre-1.0 there is no
-# in-place upgrade path (PACKAGING.md), and pretending otherwise here would
-# mean maintaining migration scripts for a schema that is still moving. A fresh
-# database from the current specs is the honest reload, and it is fast because
-# the samples in init/ are small on purpose.
+# It is deliberately NOT an `ALTER EXTENSION UPDATE`, and the reason is no
+# longer the one this comment used to give. It said "pre-1.0 there is no
+# in-place upgrade path (PACKAGING.md)"; PACKAGING.md §"in-place upgrade" now
+# opens by retracting exactly that, and `.github/workflows/suite.yml` upgrades
+# a real database with real data from the last release on every run.
+#
+# What survives is the argument for the INNER LOOP specifically: an update
+# converges an existing database, and what you want after editing one line of
+# SQL is a database that has never seen the old line at all. A fresh one from
+# the current specs is both the stronger check and the faster path, and it is
+# fast because the samples in init/ are small on purpose. The upgrade has its
+# own test, in CI, where the thing under test is the upgrade rather than the
+# edit.
 #
 # The image only has to be rebuilt when something COMPILED changes -- the
 # Dockerfile, pgvector, pg_cron, the parser .so. Editing SQL is not that.

@@ -5,6 +5,24 @@
 #   DB=p8reload ./run.sh              # against what dev/reload.sh just built
 #   DSN="postgres://…" ./run.sh       # against anything else
 #   ./run.sh query                    # one surface
+#   REQUIRE_ALL=1 ./run.sh            # and refuse to skip anything (CI)
+#
+# A FILE MAY DECLARE WHAT IT NEEDS, with `-- requires: <extension>` on its
+# first lines, and is SKIPPED where that extension is absent. Exactly one file
+# uses it -- `workflow/03-cron-tick.sql` needs pg_cron, whose worker is bound
+# to one database by `cron.database_name`, so it cannot pass against the
+# scratch database `dev/reload.sh` builds.
+#
+# That made the two commands this file's header, `suite.yml`'s "if billing runs
+# out" fallback and `githooks/pre-push` all name into a run that ALWAYS ends
+# red, and the hook had grown a grep to filter the known failure back out --
+# which is a hook with a known red in it wearing a disguise. A skip that says
+# so is honest; a suite that cannot go green is not.
+#
+# `REQUIRE_ALL=1` turns a skip back into a failure, and CI sets it. That is the
+# half that keeps this from becoming the "green because it looked nowhere"
+# failure the rest of this collection keeps finding: locally the file is
+# skipped and named, in CI it must run.
 #
 # DB exists because the two halves of the inner loop did not compose. reload.sh
 # builds `p8reload` by default and this file only ever asked `p8experiment`, so
@@ -76,7 +94,21 @@ banner() {
 }
 banner
 
+# Is <extension> installed on the database under test? Asked once per name and
+# cached, because the answer cannot change mid-run.
+have_ext() {
+    local ext="$1"
+    local sql="select 1 from pg_extension where extname = '$ext'"
+    if [ -n "$DSN" ]; then
+        psql "$DSN" -tAc "$sql" 2>/dev/null | grep -q 1
+    else
+        docker exec -i "$CONTAINER" psql -U p8 -d "$DB" -tAc "$sql" 2>/dev/null | grep -q 1
+    fi
+}
+
 failed=0
+skipped=0
+skipped_names=""
 for surface in ${SURFACES[@]}; do
     [ -d "$HERE/$surface" ] || { echo "no such surface: $surface" >&2; exit 2; }
     echo
@@ -84,6 +116,19 @@ for surface in ${SURFACES[@]}; do
     for f in "$HERE/$surface"/*.sql; do
         [ -e "$f" ] || continue
         printf '  %-34s ' "$(basename "$f")"
+        need=$(sed -n 's/^-- requires:[[:space:]]*//p' "$f" | head -1)
+        if [ -n "$need" ] && ! have_ext "$need"; then
+            if [ -n "${REQUIRE_ALL:-}" ]; then
+                echo "FAILED"
+                echo "      $need is not installed on $DB, and REQUIRE_ALL is set."
+                failed=1
+            else
+                echo "skipped (needs $need)"
+                skipped=$((skipped + 1))
+                skipped_names="$skipped_names $surface/$(basename "$f")"
+            fi
+            continue
+        fi
         if out=$(run_sql "$f" 2>&1); then
             echo "ok"
             echo "$out" | grep '^NOTICE:' | sed 's/^NOTICE:  /      /' || true
@@ -96,6 +141,13 @@ for surface in ${SURFACES[@]}; do
 done
 
 echo
+if [ "$skipped" -ne 0 ]; then
+    # Named, every time, and never folded into the pass line. A skip is a
+    # guarantee nobody checked, and the run that hides one is the run that
+    # reports green for something it never looked at.
+    echo "$skipped file(s) skipped for a missing extension:$skipped_names"
+    echo "  (REQUIRE_ALL=1 makes this a failure -- .github/workflows/suite.yml sets it)"
+fi
 if [ "$failed" -ne 0 ]; then
     echo "FAILED -- a guarantee the specs make is no longer held."
     exit 1

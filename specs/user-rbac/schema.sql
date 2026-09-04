@@ -249,6 +249,32 @@ create table if not exists rbac.role_permissions (
         references rbac.permission_kinds (resource, action)
 );
 
+-- AND ON A DATABASE THAT ALREADY HAS THE TABLE, where the line above is a
+-- no-op. `permission_kinds` and this foreign key were added to a table that
+-- already existed, so every database created before them kept a
+-- `role_permissions` with no constraint at all -- and the constraint IS the
+-- point of the table above it: a pair nothing checks cannot be granted. An
+-- upgraded deployment could grant `('admin','anything','whatever')` and
+-- `has_permission` would answer true for a resource no policy consults.
+--
+-- Found by `dev/upgrade-converges.sh`, which diffs a fresh install against an
+-- upgraded one and is the only thing that could have: build-sql.py enforces
+-- idempotency for statements that CREATE, and `create table if not exists` is
+-- perfectly idempotent while being silently incomplete. Same shape as the
+-- `alter column status set default` in section 1.
+--
+-- Dropped before it is added because a constraint has neither OR REPLACE nor
+-- IF NOT EXISTS -- build-sql.py's check_idempotent() refuses the pair written
+-- the other way round. The name is the one Postgres generates for the inline
+-- form, so a fresh install replaces its own constraint with an identical one
+-- and the two paths land in the same place.
+alter table rbac.role_permissions
+    drop constraint if exists role_permissions_resource_action_fkey;
+alter table rbac.role_permissions
+    add constraint role_permissions_resource_action_fkey
+    foreign key (resource, action)
+        references rbac.permission_kinds (resource, action);
+
 -- One function every module's RLS policy calls. Add a new module
 -- (resource search, agentic tools) by inserting rows here, not by
 -- writing new authz code.

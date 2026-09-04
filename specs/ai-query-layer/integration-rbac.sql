@@ -150,6 +150,11 @@ alter default privileges for role app_owner in schema aiq
 -- them SECURITY DEFINER would silently return every tenant's rows, which is
 -- precisely the bug the ownership split exists to prevent.
 -- ------------------------------------------------------------
+-- Not the last word: `graph-algorithms.sql` and `world-model-ingestion/
+-- graph.sql` both define aiq functions after this line, and PUBLIC's default
+-- comes back with each one. The statement that holds the invariant for every
+-- schema, after the last file that can add to any of them, is at the end of
+-- `world-model-ingestion/ingestion.sql`.
 revoke execute on all functions in schema aiq from public;
 
 grant execute on function aiq.query(text, vector) to authenticated;
