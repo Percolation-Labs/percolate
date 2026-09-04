@@ -218,9 +218,9 @@ class TurnSequencer:
         """
         if request.session_id is not None:
             self._record("open_session", "brief §4", f"attached {request.session_id}")
-            return Session(id=request.session_id, user_id=context.user_id)
+            return Session(id=request.session_id, owner_id=context.user_id)
         session = await self.repo.create_session(
-            Session(user_id=context.user_id, agui_thread_id=None)
+            Session(owner_id=context.user_id, agui_thread_id=None)
         )
         self._record("open_session", "brief §4", f"created {session.id}")
         return session

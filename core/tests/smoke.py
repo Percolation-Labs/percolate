@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from percolate_core.agentic import authoring
 from percolate_core.agentic.contracts import (
+    AgentSpec,
     ChatRequest,
     InboundMessage,
     RequestContext,
@@ -287,8 +288,135 @@ def check_every_model_provider_we_ship_can_be_constructed() -> None:
             pass  # missing credentials or region: the provider loaded, which is the point
 
 
+def check_our_vocabularies_match_the_published_contract() -> None:
+    """The stated guarantee: this package is a CLIENT of the schema, not its author.
+
+    A closed vocabulary — the roles a message may have, the statuses a run may
+    reach, the kinds a tool server may be — belongs to the database, because a
+    deployment may run several of these services, or none, or somebody else's
+    worker in another language against the same Postgres. The moment the
+    authoritative list of run statuses is a ``Literal`` in this package, every
+    other client has to import this package or guess.
+
+    So the extension publishes the contract (``percolate.enums()``/``percolate.types``), and
+    ``percolate_core/contract.json`` is that contract exported at a version. The
+    ``Literal``s below are still hand-written — this check is what makes that
+    safe rather than authoritative. When it fails, the schema is right and this
+    package is behind; the fix is here, never there.
+
+    Refresh the artifact from a live database with, in the p8-subsystems tree:
+
+        dev/contract-export.py --psql '<psql cmd>'
+        cp extension/percolate/contract.json <here>/percolate_core/contract.json
+    """
+    import json
+    from typing import Literal, get_args, get_origin
+
+    from percolate_core.agentic.contracts import conversation, tools
+
+    path = Path(__file__).resolve().parents[1] / "percolate_core" / "contract.json"
+    if not path.exists():
+        raise AssertionError(
+            f"{path.name} is missing — this package cannot check itself against "
+            "the schema it is a client of. Export it from the p8-subsystems tree."
+        )
+    contract = json.loads(path.read_text())
+
+    # Keyed by the database column the alias mirrors, because that is the join
+    # the reader has to make anyway, and writing it down is what turns "these
+    # look similar" into "these are the same vocabulary".
+    bound = {
+        ("agentic", "messages", "role"): conversation.Role,
+        ("agentic", "runs", "status"): conversation.RunStatus,
+        ("agentic", "runs", "trigger_kind"): conversation.TriggerKind,
+        ("agentic", "messages", "error_kind"): tools.ToolErrorKind,
+        ("agentic", "tool_servers", "kind"): tools.ToolServerKind,
+    }
+
+    published = {
+        (e["schema"], e["table"], e["column"]): set(e["admits"] or [])
+        for e in contract["enums"] if e["enforced_by"] == "check"
+    }
+
+    for key, alias in bound.items():
+        assert get_origin(alias) is Literal, f"{key}: not a Literal"
+        ours = set(get_args(alias))
+        theirs = published.get(key)
+        if theirs is None:
+            raise AssertionError(
+                f"{'.'.join(key)} is not in the published contract, but this "
+                f"package defines a Literal for it. Either the column was "
+                f"renamed or the constraint was dropped — ask percolate.enums()."
+            )
+        if ours != theirs:
+            extra, missing = sorted(ours - theirs), sorted(theirs - ours)
+            raise AssertionError(
+                f"{'.'.join(key)}: this package and the database disagree.\n"
+                f"  we admit and it refuses: {extra or '-'}\n"
+                f"  it admits and we lack:   {missing or '-'}\n"
+                f"The database is right: a value only we believe in is refused "
+                f"at the write, and one only it believes in is a row we cannot "
+                f"represent."
+            )
+
+    # The other direction, which is the one that catches drift: a vocabulary the
+    # database enforces on a table this package writes to, with nothing here
+    # bound to it. Reported rather than failed — most columns legitimately need
+    # no Python type — but it is how a new constraint becomes visible instead of
+    # arriving as a failed INSERT in production.
+    writes_to = {"agentic"}
+    unbound = sorted(
+        ".".join(k) for k in published
+        if k[0] in writes_to and k not in bound
+    )
+    if unbound:
+        print(f"  note: {len(unbound)} agentic vocabularies have no Literal here: "
+              f"{', '.join(unbound)}")
+
+
+def check_a_partial_write_mentions_only_what_it_sets() -> None:
+    """``agentic.upsert_agent``'s guarantee, from this side of the wire.
+
+    That function decides column by column on the PRESENCE OF THE KEY — an
+    omitted key means leave it alone, never set it to the default — and its
+    comment records that the obvious spelling was "a silent, total data-loss
+    bug ... found by doing it".
+
+    The guard is only worth as much as the payload that reaches it, and
+    ``model_dump()`` is dense: it emits every field, so a partial edit arrived
+    claiming ``system_prompt: ""`` and ``tools: []`` as things the caller had
+    asked for. Measured against a live database before this was fixed: changing
+    only an agent's model took its system prompt from 61 characters to 0, and
+    returned success.
+
+    Checked here rather than against Postgres because the defect is entirely on
+    this side — the payload either mentions a field the caller never set, or it
+    does not — and a check needing a database is a check that does not run.
+    """
+    partial = AgentSpec(name="probe", model="openai:gpt-4.1-mini")
+    payload = partial.model_dump(
+        mode="json", exclude={"id", "created_at", "updated_at"}, exclude_unset=True
+    )
+    assert set(payload) == {"name", "model"}, (
+        f"a partial AgentSpec must mention only what was set, got {sorted(payload)}. "
+        "Every extra key overwrites a column the caller never spoke about."
+    )
+
+    server = ToolServer(name="probe", kind="mcp", url="http://x/mcp")
+    spayload = server.model_dump(
+        mode="json", exclude={"id", "created_at", "updated_at"}, exclude_unset=True
+    )
+    assert "cached_tools" not in spayload, (
+        "a ToolServer that never set cached_tools must not mention them: the key's "
+        "presence erases a discovered toolset AND stamps synced_at, claiming a "
+        "fetch that never happened."
+    )
+
+
 async def main() -> None:
     check_the_document_round_trips()
+    check_our_vocabularies_match_the_published_contract()
+    check_a_partial_write_mentions_only_what_it_sets()
     check_a_code_authored_agent_is_the_same_document()
     check_a_schema_document_becomes_a_row_with_its_prompt()
     check_every_model_provider_we_ship_can_be_constructed()
@@ -296,7 +424,7 @@ async def main() -> None:
     await check_quota_denial_is_terminal_not_a_crash()
     await check_window_is_bounded()
     await check_a_sub_run_does_not_inherit_its_parents_history()
-    print("smoke: 8 checks passed")
+    print("smoke: 10 checks passed")
 
 
 if __name__ == "__main__":

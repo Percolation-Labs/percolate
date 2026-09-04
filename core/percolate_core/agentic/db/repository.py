@@ -117,8 +117,28 @@ class PgRepository:
         Gated on ``rbac.has_permission(uid, 'agents', 'update')`` inside the
         function, not here: an authorization check the client performs is a
         suggestion, one the database performs is a rule.
+
+        ``exclude_unset`` is the load-bearing word, and omitting it was a
+        silent, total data-loss bug on the most ordinary edit there is.
+        ``agentic.upsert_agent`` decides column by column on **the presence of
+        the key** — "AN OMITTED KEY MEANS LEAVE IT ALONE, NOT SET IT TO THE
+        DEFAULT", which that function's own comment records as found by doing
+        it. But ``model_dump()`` is not sparse: it emits every field of the
+        model, so ``AgentSpec(name="x", model="openai:gpt-5")`` sent
+        ``system_prompt: ""`` and ``tools: []`` as *present* keys, and the
+        guard the schema was careful to build could not tell "not mentioned"
+        from "explicitly emptied". Changing an agent's model left it with no
+        prompt and no tools — still existing, still resolving by name, and able
+        to do nothing.
+
+        Worth keeping in mind: the fields this model does NOT carry
+        (``audience``, ``category``, ``tags``, ``skills``, ``plugin``) were the
+        only ones that survived, because absent from the model meant absent
+        from the payload. The half that was modelled was the half that was lost.
         """
-        payload = agent.model_dump(mode="json", exclude={"id", "created_at", "updated_at"})
+        payload = agent.model_dump(
+            mode="json", exclude={"id", "created_at", "updated_at"}, exclude_unset=True
+        )
         async with self.client.as_user(self.user_id) as conn:
             row = await conn.fetchrow("select * from agentic.upsert_agent($1::jsonb)", payload)
         result = _agent(row)
@@ -143,8 +163,20 @@ class PgRepository:
         ``cached_tools`` is written by the caller having already discovered them
         — this method never fetches anything itself, which is what keeps
         discovery a rare, scheduled operation rather than a per-run one.
+
+        ``exclude_unset`` for the same reason as ``upsert_agent``, and here the
+        schema names this exact failure: ``cached_tools`` is preserved when the
+        key is absent because erasing it was a bug fixed "one function away and
+        not here". A dense ``model_dump()`` reintroduced it from this side —
+        ``ToolServer(name="p8-query", kind="mcp", url=...)`` sent
+        ``cached_tools: []`` as a present key, wiping the discovered toolset
+        **and** stamping ``synced_at = now()``, claiming a fetch that never
+        happened. ``surface.sql`` excludes ``synced_at`` from the write contract
+        for precisely that reason; this is the path that got around it.
         """
-        payload = server.model_dump(mode="json", exclude={"id", "created_at", "updated_at"})
+        payload = server.model_dump(
+            mode="json", exclude={"id", "created_at", "updated_at"}, exclude_unset=True
+        )
         async with self.client.as_user(self.user_id) as conn:
             row = await conn.fetchrow(
                 "select * from agentic.upsert_tool_server($1::jsonb)", payload
@@ -158,7 +190,7 @@ class PgRepository:
     async def create_session(self, session: Session) -> Session:
         async with self.client.as_user(self.user_id) as conn:
             row = await conn.fetchrow("select * from agentic.create_session($1)", session.title)
-        return Session(**{k: row[k] for k in ("id", "user_id", "agui_thread_id", "title", "created_at")})
+        return Session(**{k: row[k] for k in ("id", "owner_id", "agui_thread_id", "title", "created_at")})
 
     async def get_session(self, session_id: UUID) -> Session | None:
         """``select * from agentic.sessions_api where id = $1``.

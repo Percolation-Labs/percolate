@@ -1,0 +1,1073 @@
+{
+  "enums": [
+    {
+      "admits": [
+        "user",
+        "internal",
+        "system"
+      ],
+      "column": "audience",
+      "enforced_by": "check",
+      "schema": "agentic",
+      "table": "agents",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "general",
+        "extractor",
+        "summariser",
+        "classifier",
+        "router",
+        "critic",
+        "tool_user",
+        "evaluator"
+      ],
+      "column": "category",
+      "enforced_by": "check",
+      "schema": "agentic",
+      "table": "agents",
+      "vocabulary": null
+    },
+    {
+      "admits": [],
+      "column": "plugin",
+      "enforced_by": "reference",
+      "schema": "agentic",
+      "table": "agents",
+      "vocabulary": "agentic.plugins"
+    },
+    {
+      "admits": [
+        "org",
+        "private",
+        "public"
+      ],
+      "column": "visibility",
+      "enforced_by": "reference",
+      "schema": "agentic",
+      "table": "agents",
+      "vocabulary": "rbac.visibilities"
+    },
+    {
+      "admits": [
+        "tool_error",
+        "dispatch_error"
+      ],
+      "column": "error_kind",
+      "enforced_by": "check",
+      "schema": "agentic",
+      "table": "messages",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "system",
+        "user",
+        "assistant",
+        "tool_call",
+        "tool_response",
+        "summary"
+      ],
+      "column": "role",
+      "enforced_by": "check",
+      "schema": "agentic",
+      "table": "messages",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "org",
+        "private",
+        "public"
+      ],
+      "column": "visibility",
+      "enforced_by": "reference",
+      "schema": "agentic",
+      "table": "plugins",
+      "vocabulary": "rbac.visibilities"
+    },
+    {
+      "admits": [
+        "pending",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "quota_exceeded"
+      ],
+      "column": "status",
+      "enforced_by": "check",
+      "schema": "agentic",
+      "table": "runs",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "cancelled",
+        "failed",
+        "pending",
+        "quota_exceeded",
+        "ready",
+        "running",
+        "succeeded",
+        "waiting_external"
+      ],
+      "column": "status",
+      "enforced_by": "reference",
+      "schema": "agentic",
+      "table": "runs",
+      "vocabulary": "workflow.lifecycle_states"
+    },
+    {
+      "admits": [
+        "interactive",
+        "scheduled"
+      ],
+      "column": "trigger_kind",
+      "enforced_by": "check",
+      "schema": "agentic",
+      "table": "runs",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "org",
+        "private",
+        "public"
+      ],
+      "column": "visibility",
+      "enforced_by": "reference",
+      "schema": "agentic",
+      "table": "runs",
+      "vocabulary": "rbac.visibilities"
+    },
+    {
+      "admits": [
+        "org",
+        "private",
+        "public"
+      ],
+      "column": "visibility",
+      "enforced_by": "reference",
+      "schema": "agentic",
+      "table": "sessions",
+      "vocabulary": "rbac.visibilities"
+    },
+    {
+      "admits": [
+        "user",
+        "internal",
+        "system"
+      ],
+      "column": "audience",
+      "enforced_by": "check",
+      "schema": "agentic",
+      "table": "skills",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "procedure",
+        "reference",
+        "style",
+        "safety"
+      ],
+      "column": "category",
+      "enforced_by": "check",
+      "schema": "agentic",
+      "table": "skills",
+      "vocabulary": null
+    },
+    {
+      "admits": [],
+      "column": "plugin",
+      "enforced_by": "reference",
+      "schema": "agentic",
+      "table": "skills",
+      "vocabulary": "agentic.plugins"
+    },
+    {
+      "admits": [
+        "org",
+        "private",
+        "public"
+      ],
+      "column": "visibility",
+      "enforced_by": "reference",
+      "schema": "agentic",
+      "table": "skills",
+      "vocabulary": "rbac.visibilities"
+    },
+    {
+      "admits": [
+        "mcp",
+        "openapi"
+      ],
+      "column": "kind",
+      "enforced_by": "check",
+      "schema": "agentic",
+      "table": "tool_servers",
+      "vocabulary": null
+    },
+    {
+      "admits": [],
+      "column": "plugin",
+      "enforced_by": "reference",
+      "schema": "agentic",
+      "table": "tool_servers",
+      "vocabulary": "agentic.plugins"
+    },
+    {
+      "admits": [
+        "org",
+        "private",
+        "public"
+      ],
+      "column": "visibility",
+      "enforced_by": "reference",
+      "schema": "agentic",
+      "table": "tool_servers",
+      "vocabulary": "rbac.visibilities"
+    },
+    {
+      "admits": [
+        "vector_cosine_ops",
+        "vector_l2_ops",
+        "vector_ip_ops"
+      ],
+      "column": "distance_op",
+      "enforced_by": "check",
+      "schema": "aiq",
+      "table": "embedding_models",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "ollama",
+        "openai"
+      ],
+      "column": "provider",
+      "enforced_by": "reference",
+      "schema": "aiq",
+      "table": "embedding_models",
+      "vocabulary": "aiq.embedding_providers"
+    },
+    {
+      "admits": [
+        "org",
+        "private",
+        "public"
+      ],
+      "column": "visibility",
+      "enforced_by": "reference",
+      "schema": "aiq",
+      "table": "lake_nodes",
+      "vocabulary": "rbac.visibilities"
+    },
+    {
+      "admits": [
+        "canonical",
+        "short",
+        "alias"
+      ],
+      "column": "kind",
+      "enforced_by": "check",
+      "schema": "aiq",
+      "table": "node_keys",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "org",
+        "private",
+        "public"
+      ],
+      "column": "visibility",
+      "enforced_by": "reference",
+      "schema": "aiq",
+      "table": "nodes",
+      "vocabulary": "rbac.visibilities"
+    },
+    {
+      "admits": [
+        "graph",
+        "p8ql",
+        "sql",
+        "workflow"
+      ],
+      "column": "facet",
+      "enforced_by": "reference",
+      "schema": "aiq",
+      "table": "schema_examples",
+      "vocabulary": "aiq.schema_facets"
+    },
+    {
+      "admits": [
+        "p8ql",
+        "workflow_yaml"
+      ],
+      "column": "kind",
+      "enforced_by": "check",
+      "schema": "aiq",
+      "table": "schema_examples",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "graph",
+        "p8ql",
+        "sql",
+        "workflow"
+      ],
+      "column": "facet",
+      "enforced_by": "reference",
+      "schema": "aiq",
+      "table": "schema_revisions",
+      "vocabulary": "aiq.schema_facets"
+    },
+    {
+      "admits": [
+        "org",
+        "private",
+        "public"
+      ],
+      "column": "visibility",
+      "enforced_by": "reference",
+      "schema": "aiq",
+      "table": "soft_nodes",
+      "vocabulary": "rbac.visibilities"
+    },
+    {
+      "admits": [
+        "file_upload",
+        "http_pull",
+        "ftp_pull",
+        "feed",
+        "telegram",
+        "manual"
+      ],
+      "column": "kind",
+      "enforced_by": "check",
+      "schema": "content",
+      "table": "channels",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "org",
+        "private",
+        "public"
+      ],
+      "column": "visibility",
+      "enforced_by": "reference",
+      "schema": "content",
+      "table": "channels",
+      "vocabulary": "rbac.visibilities"
+    },
+    {
+      "admits": [
+        "basic",
+        "bearer",
+        "header",
+        "none",
+        "oauth2_cc",
+        "query_param",
+        "signed",
+        "user_agent"
+      ],
+      "column": "type",
+      "enforced_by": "type",
+      "schema": "content",
+      "table": "content.connector.auth",
+      "vocabulary": "content.connector.auth"
+    },
+    {
+      "admits": [
+        "etag",
+        "high_water",
+        "link_header",
+        "next_url",
+        "none",
+        "offset",
+        "page",
+        "page_token",
+        "sequence"
+      ],
+      "column": "type",
+      "enforced_by": "type",
+      "schema": "content",
+      "table": "content.connector.paging",
+      "vocabulary": "content.connector.paging"
+    },
+    {
+      "admits": [
+        "skip",
+        "store",
+        "tabular",
+        "text"
+      ],
+      "column": "mode",
+      "enforced_by": "type",
+      "schema": "content",
+      "table": "content.ingest_policy",
+      "vocabulary": "content.ingest_policy"
+    },
+    {
+      "admits": [
+        "append",
+        "replace"
+      ],
+      "column": "mode",
+      "enforced_by": "check",
+      "schema": "content",
+      "table": "datasets",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "org",
+        "private",
+        "public"
+      ],
+      "column": "visibility",
+      "enforced_by": "reference",
+      "schema": "content",
+      "table": "datasets",
+      "vocabulary": "rbac.visibilities"
+    },
+    {
+      "admits": [
+        "pending",
+        "ready",
+        "stored",
+        "failed",
+        "superseded"
+      ],
+      "column": "status",
+      "enforced_by": "check",
+      "schema": "content",
+      "table": "resources",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "org",
+        "private",
+        "public"
+      ],
+      "column": "visibility",
+      "enforced_by": "reference",
+      "schema": "content",
+      "table": "resources",
+      "vocabulary": "rbac.visibilities"
+    },
+    {
+      "admits": [
+        "member",
+        "admin"
+      ],
+      "column": "role",
+      "enforced_by": "check",
+      "schema": "rbac",
+      "table": "org_members",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "admin",
+        "member"
+      ],
+      "column": "role",
+      "enforced_by": "reference",
+      "schema": "rbac",
+      "table": "role_permissions",
+      "vocabulary": "rbac.roles"
+    },
+    {
+      "admits": [
+        "admin",
+        "member"
+      ],
+      "column": "role",
+      "enforced_by": "reference",
+      "schema": "rbac",
+      "table": "user_roles",
+      "vocabulary": "rbac.roles"
+    },
+    {
+      "admits": [
+        "active",
+        "disabled",
+        "pending_verification"
+      ],
+      "column": "status",
+      "enforced_by": "check",
+      "schema": "rbac",
+      "table": "users",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "none",
+        "compensating",
+        "compensated"
+      ],
+      "column": "compensation_state",
+      "enforced_by": "check",
+      "schema": "workflow",
+      "table": "runs",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ],
+      "column": "status",
+      "enforced_by": "check",
+      "schema": "workflow",
+      "table": "runs",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "cancelled",
+        "failed",
+        "pending",
+        "quota_exceeded",
+        "ready",
+        "running",
+        "succeeded",
+        "waiting_external"
+      ],
+      "column": "status",
+      "enforced_by": "reference",
+      "schema": "workflow",
+      "table": "runs",
+      "vocabulary": "workflow.lifecycle_states"
+    },
+    {
+      "admits": [
+        "org",
+        "private",
+        "public"
+      ],
+      "column": "visibility",
+      "enforced_by": "reference",
+      "schema": "workflow",
+      "table": "runs",
+      "vocabulary": "rbac.visibilities"
+    },
+    {
+      "admits": [
+        "skip",
+        "allow"
+      ],
+      "column": "overlap_policy",
+      "enforced_by": "check",
+      "schema": "workflow",
+      "table": "schedules",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "org",
+        "private",
+        "public"
+      ],
+      "column": "visibility",
+      "enforced_by": "reference",
+      "schema": "workflow",
+      "table": "schedules",
+      "vocabulary": "rbac.visibilities"
+    },
+    {
+      "admits": [
+        "work",
+        "decision",
+        "timer",
+        "signal",
+        "sub_workflow",
+        "http_call",
+        "sql",
+        "matrix"
+      ],
+      "column": "kind",
+      "enforced_by": "check",
+      "schema": "workflow",
+      "table": "tasks",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "pending",
+        "ready",
+        "running",
+        "waiting_external",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ],
+      "column": "status",
+      "enforced_by": "check",
+      "schema": "workflow",
+      "table": "tasks",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "cancelled",
+        "failed",
+        "pending",
+        "quota_exceeded",
+        "ready",
+        "running",
+        "succeeded",
+        "waiting_external"
+      ],
+      "column": "status",
+      "enforced_by": "reference",
+      "schema": "workflow",
+      "table": "tasks",
+      "vocabulary": "workflow.lifecycle_states"
+    },
+    {
+      "admits": [
+        "DELETE",
+        "GET",
+        "HEAD",
+        "OPTIONS",
+        "PATCH",
+        "POST",
+        "PUT"
+      ],
+      "column": "method",
+      "enforced_by": "type",
+      "schema": "workflow",
+      "table": "workflow.http_call.input",
+      "vocabulary": "workflow.http_call.input"
+    },
+    {
+      "admits": [
+        "async",
+        "sync"
+      ],
+      "column": "mode",
+      "enforced_by": "type",
+      "schema": "workflow",
+      "table": "workflow.http_call.input",
+      "vocabulary": "workflow.http_call.input"
+    }
+  ],
+  "exported_by_role": "p8",
+  "extension": "0.1.4",
+  "types": [
+    {
+      "consumed_by": [
+        "percolate_core.agentic.contracts.conversation.Citation",
+        "percolate_core.agentic.runtime.citations.derive_citations"
+      ],
+      "implemented": null,
+      "name": "agentic.citation",
+      "owner": "agentic",
+      "schema": {
+        "items": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "chunk_id": {
+                  "format": "uuid",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "kind": {
+                  "const": "chunk"
+                },
+                "resource_id": {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                "resource_type": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "resource_type",
+                "resource_id"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "node"
+                },
+                "node_id": {
+                  "format": "uuid",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "node_id"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "type": "array"
+      },
+      "title": "One entry of agentic.messages.citations"
+    },
+    {
+      "consumed_by": [
+        "specs/world-model-ingestion/reference/connector.py apply_auth"
+      ],
+      "implemented": {
+        "basic": false,
+        "bearer": true,
+        "header": true,
+        "none": true,
+        "oauth2_cc": false,
+        "query_param": true,
+        "signed": false,
+        "user_agent": true
+      },
+      "name": "content.connector.auth",
+      "owner": "world-model-ingestion",
+      "schema": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "value"
+              ]
+            },
+            {
+              "required": [
+                "secret"
+              ]
+            },
+            {
+              "required": [
+                "token"
+              ]
+            }
+          ]
+        },
+        "properties": {
+          "credential_ref": {
+            "description": "A NAME. The trigger refuses a row carrying `value`, `secret` or `token`.",
+            "type": "string"
+          },
+          "header": {
+            "description": "Header name, for type=header.",
+            "type": "string"
+          },
+          "param": {
+            "description": "Query parameter name, for type=query_param.",
+            "type": "string"
+          },
+          "template": {
+            "description": "For type=user_agent -- SEC requires an identifying UA, which is a credential.",
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "none",
+              "user_agent",
+              "header",
+              "bearer",
+              "query_param",
+              "basic",
+              "oauth2_cc",
+              "signed"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "title": "The auth block of a content.connectors row"
+    },
+    {
+      "consumed_by": [
+        "specs/world-model-ingestion/reference/connector.py next_page"
+      ],
+      "implemented": {
+        "etag": false,
+        "high_water": false,
+        "link_header": true,
+        "next_url": true,
+        "none": true,
+        "offset": true,
+        "page": true,
+        "page_token": true,
+        "sequence": false
+      },
+      "name": "content.connector.paging",
+      "owner": "world-model-ingestion",
+      "schema": {
+        "properties": {
+          "field": {
+            "description": "Dotted path to the cursor in the body, for next_url and page_token.",
+            "type": "string"
+          },
+          "param": {
+            "description": "Query parameter carrying the cursor, for page_token, offset and page.",
+            "type": "string"
+          },
+          "size": {
+            "description": "Page size, for offset and page. Defaults to the first page's record count.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "start": {
+            "default": 0,
+            "type": "integer"
+          },
+          "type": {
+            "enum": [
+              "none",
+              "link_header",
+              "next_url",
+              "page_token",
+              "offset",
+              "page",
+              "high_water",
+              "sequence",
+              "etag"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "title": "The paging block of a content.connectors row"
+    },
+    {
+      "consumed_by": [
+        "percolate_core.ingest.policy.IngestPolicy",
+        "content.merge_policy",
+        "content.record_ingest"
+      ],
+      "implemented": null,
+      "name": "content.ingest_policy",
+      "owner": "world-model-ingestion",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "chunking": {
+            "additionalProperties": false,
+            "properties": {
+              "min_chars": {
+                "default": 120,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "overlap": {
+                "default": 0.08,
+                "minimum": 0,
+                "type": "number"
+              },
+              "target_tokens": {
+                "default": 700,
+                "maximum": 8000,
+                "minimum": 32,
+                "type": "integer"
+              },
+              "tokenizer": {
+                "default": "estimate",
+                "description": "`estimate` is characters/4 -- offline, identical on every machine, never reaches the network. `tiktoken:<encoding>` DOWNLOADS its encoding on first use, which is a bad thing to discover inside a chunker in a container with no egress.",
+                "pattern": "^(estimate|tiktoken:[A-Za-z0-9_]+)$",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "keep_markdown": {
+            "default": true,
+            "type": "boolean"
+          },
+          "mode": {
+            "default": "text",
+            "description": "text parses to markdown, chunks and embeds; tabular converts to Parquet and chunks NOTHING; store keeps the bytes and produces no chunks; skip does not even fetch them.",
+            "enum": [
+              "text",
+              "tabular",
+              "store",
+              "skip"
+            ],
+            "type": "string"
+          },
+          "parser": {
+            "description": "Which reader. Null takes the family default. The admissible set is the readers INSTALLED in the worker, which is a per-deployment fact -- so this is a hint, not a closed enum, and naming one that cannot read the family is refused at parse time.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "table": {
+            "additionalProperties": false,
+            "properties": {
+              "delimiter": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "header": {
+                "default": true,
+                "type": "boolean"
+              },
+              "mode": {
+                "default": "append",
+                "enum": [
+                  "append",
+                  "replace"
+                ],
+                "type": "string"
+              },
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "partition_by": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "transcribe": {
+            "additionalProperties": false,
+            "properties": {
+              "credential": {
+                "description": "A NAME resolved from the worker's environment, as credential_ref is.",
+                "type": "string"
+              },
+              "endpoint": {
+                "type": "string"
+              },
+              "language": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "model": {
+                "type": "string"
+              },
+              "prompt": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "title": "What to do with an uploaded file"
+    },
+    {
+      "consumed_by": [
+        "percolate_core.worker.http.build_request",
+        "percolate_core.worker.http.http_call"
+      ],
+      "implemented": null,
+      "name": "workflow.http_call.input",
+      "owner": "workflow-engine",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "auth_scheme": {
+            "default": "Bearer",
+            "type": "string"
+          },
+          "body": {
+            "description": "An object or array is JSON-encoded and sent with Content-Type application/json; anything else is str()'d and sent raw.",
+            "type": [
+              "object",
+              "array",
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ]
+          },
+          "credential_ref": {
+            "description": "A NAME resolved from the worker's environment, never material. The database stores only the reference, so a dump of workflow.tasks never contains a secret and a task stays inspectable and replayable.",
+            "type": "string"
+          },
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "jsonpath": {
+            "description": "Dotted path extracted from the response, so a step hands the NEXT step a clean value instead of a provider envelope whose shape the next template must know. Matching nothing is a terminal failure, not a null.",
+            "type": "string"
+          },
+          "method": {
+            "default": "GET",
+            "enum": [
+              "GET",
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE",
+              "HEAD",
+              "OPTIONS"
+            ],
+            "type": "string"
+          },
+          "mode": {
+            "default": "sync",
+            "description": "async fires the request and parks the task in waiting_external until something calls signal_task. It reuses that status rather than inventing an \"in flight externally\" one, because the semantics are identical.",
+            "enum": [
+              "sync",
+              "async"
+            ],
+            "type": "string"
+          },
+          "timeout_ms": {
+            "default": 30000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "url": {
+            "pattern": "^https?://",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "title": "The input JSON of a kind='http_call' task"
+    }
+  ]
+}

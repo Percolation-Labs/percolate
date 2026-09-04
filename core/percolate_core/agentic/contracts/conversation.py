@@ -66,7 +66,7 @@ class Session(BaseModel):
     """
 
     id: UUID = Field(default_factory=uuid4)
-    user_id: UUID | None = None
+    owner_id: UUID | None = None
     agui_thread_id: str | None = None
     title: str | None = None
     created_at: datetime | None = None
