@@ -358,7 +358,14 @@ begin
     select string_agg(c.table_name||'.'||c.column_name, ', ') into v_bad
     from information_schema.columns c
     where c.table_schema='aiq' and c.table_name in ('soft_nodes','lake_nodes')
+      -- owner_id and visibility are scope, not adjacency. The invariant is
+      -- about a column POINTING AT ANOTHER NODE -- that is what would put
+      -- edges in two places and reverse README.md's rejection of the kv_store
+      -- cache. `resolved_node_id` is on the allow-list because it is the one
+      -- such pointer the design does want; who may read the row is not one at
+      -- all, and it sits beside org_id for the same reason org_id does.
       and c.column_name not in ('id','kind','key','label','attrs','org_id',
+                                'owner_id','visibility',
                                 'first_seen_at','last_seen_at','resolved_node_id',
                                 'dataset','row_key');
     if v_bad is not null then

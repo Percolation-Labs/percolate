@@ -428,14 +428,40 @@ create index if not exists idx_skills_plugin on agentic.skills (plugin)
 -- ------------------------------------------------------------
 create table if not exists agentic.sessions (
     id             uuid primary key default gen_random_uuid(),
-    user_id        uuid not null default rbac.current_user_id(),
+    -- RENAMED from user_id, and the rename is the point rather than tidying.
+    -- Every other owned table in the collection spells this owner_id, and
+    -- rbac.scope_predicate() -- the single home of the read expression every
+    -- policy is generated from -- names that column. A table that spelled its
+    -- owner differently would need its own variant of a security predicate
+    -- there is deliberately only one of.
+    owner_id       uuid not null default rbac.current_user_id(),
     agui_thread_id text,
     title          text,
     created_at     timestamptz not null default now(),
     updated_at     timestamptz not null default now()
 );
 
-create index if not exists sessions_user_id_created_at_idx on agentic.sessions (user_id, created_at desc);
+-- ...and on a database that already has the table, where `create table if not
+-- exists` above is a no-op and the column is still called user_id. Guarded,
+-- because RENAME COLUMN has no IF EXISTS and this file is replayed on every
+-- upgrade: unguarded it succeeds exactly once and fails every run after.
+do $$
+begin
+    if exists (select 1 from information_schema.columns
+                where table_schema = 'agentic' and table_name = 'sessions'
+                  and column_name = 'user_id') then
+        alter table agentic.sessions rename column user_id to owner_id;
+    end if;
+end $$;
+
+-- AFTER the rename, not before. `create table if not exists` is a no-op on an
+-- upgrading database, so until the block above runs the column there is still
+-- called user_id and this index is `ERROR: column "owner_id" does not exist`
+-- -- on every existing deployment and on no fresh install. Found by
+-- dev/upgrade-converges.sh, which is the only thing that applies this file to
+-- a database that has the old shape.
+create index if not exists sessions_owner_id_created_at_idx on agentic.sessions (owner_id, created_at desc);
+
 
 create or replace trigger trg_sessions_updated
     before update on agentic.sessions
@@ -448,7 +474,7 @@ create or replace trigger trg_sessions_updated
 -- own span_id, never independently maintained, and trace_id is shared across
 -- an entire tree -- one trace per top-level session or scheduled trigger.
 --
--- owner_id is not redundant with sessions.user_id (brief §3): a scheduled run
+-- owner_id is not redundant with sessions.owner_id (brief §3): a scheduled run
 -- has no session, so scoping RLS through a session join would put background
 -- runs outside tenant isolation entirely.
 -- ------------------------------------------------------------
@@ -598,20 +624,21 @@ create or replace trigger trg_notify_message
 -- ------------------------------------------------------------
 -- 7. RLS -- ENABLE, not FORCE (see header note 1)
 -- ------------------------------------------------------------
-alter table agentic.sessions enable row level security;
-alter table agentic.runs     enable row level security;
-alter table agentic.messages enable row level security;
-
-drop policy if exists sessions_owner on agentic.sessions;
-create policy sessions_owner on agentic.sessions
-    for select using (user_id = rbac.current_user_id());
-
+-- Owner-only WAS the whole policy here, and it is the idiom scope replaces.
+-- `owner_id = current_user_id()` cannot say "my colleague may see this
+-- conversation" at all -- not to an org, not to anyone -- so a shared agent
+-- session had no expression short of copying the rows. The default is
+-- unchanged (a session is private), and org and public are now sayable.
+--
 -- Scoped on the run's own owner, never through the session join: a scheduled
 -- run has no session, and an escape hatch for that case is how a table ends up
 -- with rows nobody can see and everybody can read (brief §3).
-drop policy if exists runs_owner on agentic.runs;
-create policy runs_owner on agentic.runs
-    for select using (owner_id = rbac.current_user_id());
+select rbac.add_scope_columns('agentic.sessions');
+select rbac.add_scope_policy ('agentic.sessions');
+select rbac.add_scope_columns('agentic.runs');
+select rbac.add_scope_policy ('agentic.runs');
+
+alter table agentic.messages enable row level security;
 
 drop policy if exists messages_via_run on agentic.messages;
 create policy messages_via_run on agentic.messages
@@ -621,7 +648,7 @@ create policy messages_via_run on agentic.messages
                   and r.owner_id = rbac.current_user_id())
         or exists (select 1 from agentic.sessions s
                    where s.id = messages.session_id
-                     and s.user_id = rbac.current_user_id())
+                     and s.owner_id = rbac.current_user_id())
     );
 
 -- Agents and tool_servers are configuration, not tenant data: readable by any
@@ -646,18 +673,30 @@ alter table agentic.tool_servers enable row level security;
 alter table agentic.skills       enable row level security;
 alter table agentic.plugins      enable row level security;
 
-drop policy if exists agents_are_shared_config on agentic.agents;
-create policy agents_are_shared_config on agentic.agents
-    for select using (true);
-drop policy if exists tool_servers_are_shared_config on agentic.tool_servers;
-create policy tool_servers_are_shared_config on agentic.tool_servers
-    for select using (true);
-drop policy if exists skills_are_shared_config on agentic.skills;
-create policy skills_are_shared_config on agentic.skills
-    for select using (true);
-drop policy if exists plugins_are_shared_config on agentic.plugins;
-create policy plugins_are_shared_config on agentic.plugins
-    for select using (true);
+-- THE OPEN CONSEQUENCE ABOVE IS CLOSED, and this is the column it named.
+--
+-- `using (true)` was the right default for a shared procedure and the wrong
+-- one for a skill encoding a customer's internal process, and the comment
+-- above says so while pointing at "a column that does not exist yet". It
+-- exists: these four get owner_id/org_id/visibility like every other owned
+-- table, so an agent can belong to one tenant.
+--
+-- WHAT A DEPLOYMENT SEES TODAY IS UNCHANGED. Every existing row is backfilled
+-- to `public` by the migration, which is what `using (true)` meant, said
+-- explicitly. What changes is the default for rows written from now on --
+-- `private`, like everything else -- so registering an agent no longer
+-- publishes it to the deployment as a side effect of not thinking about it.
+--
+-- The seeded agents the extension itself installs are set `public` where they
+-- are created, because they ARE deployment configuration; a tenant's is not.
+select rbac.add_scope_columns('agentic.agents', 'public');
+select rbac.add_scope_policy ('agentic.agents',       'agents');
+select rbac.add_scope_columns('agentic.tool_servers', 'public');
+select rbac.add_scope_policy ('agentic.tool_servers', 'tool_servers');
+select rbac.add_scope_columns('agentic.skills', 'public');
+select rbac.add_scope_policy ('agentic.skills',       'skills');
+select rbac.add_scope_columns('agentic.plugins', 'public');
+select rbac.add_scope_policy ('agentic.plugins',      'plugins');
 -- ------------------------------------------------------------
 -- 8. The write path -- SECURITY DEFINER, ownership checked explicitly
 --
@@ -670,7 +709,7 @@ returns agentic.sessions
 language sql security definer
 set search_path = pg_catalog, public
 as $$
-    insert into agentic.sessions (user_id, title)
+    insert into agentic.sessions (owner_id, title)
     values (rbac.current_user_id(), p_title)
     returning *;
 $$;
@@ -704,7 +743,7 @@ begin
 
     if p_session_id is not null then
         if not exists (select 1 from agentic.sessions
-                       where id = p_session_id and user_id = v_owner) then
+                       where id = p_session_id and owner_id = v_owner) then
             raise exception 'session % is not yours', p_session_id;
         end if;
 
@@ -853,7 +892,7 @@ declare
     v_row agentic.messages;
 begin
     if not exists (select 1 from agentic.sessions
-                   where id = p_session_id and user_id = rbac.current_user_id()) then
+                   where id = p_session_id and owner_id = rbac.current_user_id()) then
         raise exception 'session % is not yours', p_session_id;
     end if;
 
@@ -1071,7 +1110,8 @@ begin
                                 structured_output_schema, chained_action,
                                 summarizer_agent_id, context_policy,
                                 audience, category, tags,
-                                extracts_source, extracts_doctype, plugin)
+                                extracts_source, extracts_doctype, plugin,
+                                owner_id, org_id, visibility)
     values (p_spec->>'name',
             coalesce(p_spec->>'system_prompt', ''),
             p_spec->>'model',
@@ -1088,7 +1128,18 @@ begin
                         from jsonb_array_elements_text(p_spec->'tags')), '{}'),
             p_spec->>'extracts_source',
             p_spec->>'extracts_doctype',
-            p_spec->>'plugin')
+            p_spec->>'plugin',
+            -- SCOPE IS SET BY THE WRITER, never left to the column default.
+            -- This function is SECURITY DEFINER and bypasses RLS, so a
+            -- `private` default with a null owner writes a row its own author
+            -- cannot select. rbac.default_visibility() states the rule once --
+            -- an operator installing deployment configuration gets `public`, a
+            -- caller gets their own org or themselves -- and `visibility` in
+            -- the spec overrides it for somebody who means something else.
+            coalesce((p_spec->>'owner_id')::uuid, rbac.current_user_id()),
+            (p_spec->>'org_id')::uuid,
+            coalesce(p_spec->>'visibility',
+                     rbac.default_visibility((p_spec->>'org_id')::uuid)))
     -- AN OMITTED KEY MEANS "LEAVE IT ALONE", NOT "SET IT TO THE DEFAULT".
     --
     -- Written the obvious way -- `set x = excluded.x` for every column -- this
@@ -1146,7 +1197,21 @@ begin
                                       else agentic.agents.extracts_doctype end,
            plugin                   = case when p_spec ? 'plugin'
                                       then excluded.plugin
-                                      else agentic.agents.plugin end
+                                      else agentic.agents.plugin end,
+           -- Scope follows the same presence rule as every column above: an
+           -- edit that does not mention visibility does not change who can see
+           -- the thing. owner_id is deliberately in the list -- transferring
+           -- an agent to another owner is a legitimate edit -- but it takes
+           -- saying so.
+           owner_id                 = case when p_spec ? 'owner_id'
+                                      then excluded.owner_id
+                                      else agentic.agents.owner_id end,
+           org_id                   = case when p_spec ? 'org_id'
+                                      then excluded.org_id
+                                      else agentic.agents.org_id end,
+           visibility               = case when p_spec ? 'visibility'
+                                      then excluded.visibility
+                                      else agentic.agents.visibility end
     returning * into v_row;
     return v_row;
 end;
@@ -1167,7 +1232,8 @@ begin
     insert into agentic.tool_servers (name, kind, url, credential_ref,
                                       emits_citations, serves_agents,
                                       serves_skills, default_headers,
-                                      cached_tools, synced_at, plugin)
+                                      cached_tools, synced_at, plugin,
+                                      owner_id, org_id, visibility)
     -- kind and url are NOT NULL, so unlike every other column here they
     -- cannot be left to the ON CONFLICT arm: the tuple has to be VALID before
     -- Postgres will even look for the conflict, and a partial registration
@@ -1189,7 +1255,15 @@ begin
             coalesce(p_spec->'default_headers', '{}'::jsonb),
             coalesce(p_spec->'cached_tools', '[]'::jsonb),
             case when p_spec ? 'cached_tools' then now() end,
-            p_spec->>'plugin')
+            p_spec->>'plugin',
+            -- Scope set by the writer, never left to the column default: this
+            -- function is SECURITY DEFINER and bypasses RLS, so a `private`
+            -- default with a null owner writes a row its own author cannot
+            -- select. rbac.default_visibility() states the rule once.
+            coalesce((p_spec->>'owner_id')::uuid, rbac.current_user_id()),
+            (p_spec->>'org_id')::uuid,
+            coalesce(p_spec->>'visibility',
+                     rbac.default_visibility((p_spec->>'org_id')::uuid)))
     -- Same rule as upsert_agent, and it reached every column here for the
     -- same reason: `cached_tools` was fixed alone because that is the column
     -- whose loss was noticed, while a registration omitting `credential_ref`
@@ -1223,7 +1297,19 @@ begin
            cached_tools    = case when p_spec ? 'cached_tools'
                                   then excluded.cached_tools
                                   else agentic.tool_servers.cached_tools end,
-           synced_at       = coalesce(excluded.synced_at, agentic.tool_servers.synced_at)
+           synced_at       = coalesce(excluded.synced_at, agentic.tool_servers.synced_at),
+           -- Scope follows the same presence rule as every column above: an
+           -- edit that does not mention visibility does not change who can see
+           -- the thing.
+           owner_id        = case when p_spec ? 'owner_id'
+                                  then excluded.owner_id
+                                  else agentic.tool_servers.owner_id end,
+           org_id          = case when p_spec ? 'org_id'
+                                  then excluded.org_id
+                                  else agentic.tool_servers.org_id end,
+           visibility      = case when p_spec ? 'visibility'
+                                  then excluded.visibility
+                                  else agentic.tool_servers.visibility end
     returning * into v_row;
     return v_row;
 end;
@@ -1252,7 +1338,8 @@ begin
     end if;
 
     insert into agentic.skills (name, description, when_to_use, content,
-                                requires_tools, audience, category, tags, plugin)
+                                requires_tools, audience, category, tags, plugin,
+                                owner_id, org_id, visibility)
     values (p_spec->>'name',
             coalesce(p_spec->>'description',
                      (select k.description from agentic.skills k
@@ -1267,7 +1354,15 @@ begin
             coalesce(p_spec->>'category', 'procedure'),
             coalesce((select array_agg(value)
                         from jsonb_array_elements_text(p_spec->'tags')), '{}'),
-            p_spec->>'plugin')
+            p_spec->>'plugin',
+            -- Scope set by the writer, never left to the column default: this
+            -- function is SECURITY DEFINER and bypasses RLS, so a `private`
+            -- default with a null owner writes a row its own author cannot
+            -- select. rbac.default_visibility() states the rule once.
+            coalesce((p_spec->>'owner_id')::uuid, rbac.current_user_id()),
+            (p_spec->>'org_id')::uuid,
+            coalesce(p_spec->>'visibility',
+                     rbac.default_visibility((p_spec->>'org_id')::uuid)))
     on conflict (name) do update
        set description    = case when p_spec ? 'description'
                                  then excluded.description
@@ -1303,7 +1398,22 @@ begin
                when (p_spec ? 'content'     and excluded.content     is distinct from agentic.skills.content)
                  or (p_spec ? 'description' and excluded.description is distinct from agentic.skills.description)
                  or (p_spec ? 'when_to_use' and excluded.when_to_use is distinct from agentic.skills.when_to_use)
-               then 1 else 0 end
+               then 1 else 0 end,
+           -- Scope follows the same presence rule as every column above: an
+           -- edit that does not mention visibility does not change who can see
+           -- the thing. It is deliberately NOT one of the three fields that
+           -- bump `version` -- resharing a skill is not a new version of its
+           -- text, and a provenance record that moved because somebody changed
+           -- an audience would point at a body that never changed.
+           owner_id       = case when p_spec ? 'owner_id'
+                                 then excluded.owner_id
+                                 else agentic.skills.owner_id end,
+           org_id         = case when p_spec ? 'org_id'
+                                 then excluded.org_id
+                                 else agentic.skills.org_id end,
+           visibility     = case when p_spec ? 'visibility'
+                                 then excluded.visibility
+                                 else agentic.skills.visibility end
     returning * into v_row;
     return v_row;
 end;
@@ -1435,6 +1545,27 @@ $$;
 -- Order is not cosmetic. Servers before skills before agents, because an
 -- agent's pinned skills must already exist for upsert_agent to validate them,
 -- and a skill's requires_tools names servers the agent must already bind.
+-- The scope keys a plugin passes down to everything it installs, as jsonb so
+-- they merge with `||` onto each entry's own spec.
+--
+-- A COMPONENT'S OWN KEY WINS, because `||` is right-biased and this is applied
+-- on the right... which is exactly why it is NOT: an entry that names its own
+-- visibility is overridden here on purpose. A plugin scoped to one org cannot
+-- contain a skill that publishes itself to the deployment, or packaging a
+-- tenant's internal procedures would be how they escape the tenant. The
+-- plugin is the boundary; its contents do not get to widen it.
+--
+-- Returns an EMPTY object when the manifest says nothing, so an unscoped
+-- plugin leaves each component to rbac.default_visibility() exactly as before.
+create or replace function agentic.plugin_scope(p_manifest jsonb)
+returns jsonb as $$
+    select coalesce(
+        (select jsonb_object_agg(k, p_manifest -> k)
+           from unnest(array['owner_id','org_id','visibility']) k
+          where p_manifest ? k),
+        '{}'::jsonb);
+$$ language sql immutable;
+
 create or replace function agentic.apply_plugin(p_manifest jsonb)
 returns jsonb
 language plpgsql security definer
@@ -1470,28 +1601,57 @@ begin
                              from jsonb_array_elements(
                                   coalesce(p_manifest->'agents', '[]'::jsonb)) e), '{}');
 
-    insert into agentic.plugins (name, version, description, author, homepage, manifest)
+    insert into agentic.plugins (name, version, description, author, homepage, manifest,
+                                 owner_id, org_id, visibility)
     values (v_name, coalesce(p_manifest->>'version', '0.0.0'),
             p_manifest->>'description', p_manifest->'author',
-            p_manifest->>'homepage', p_manifest)
+            p_manifest->>'homepage', p_manifest,
+            -- Scope set by the writer, never left to the column default: this
+            -- function is SECURITY DEFINER and bypasses RLS, so a `private`
+            -- default with a null owner installs a plugin its own installer
+            -- cannot see. A plugin installed from a shell by an operator has
+            -- no request identity and is deployment configuration, which is
+            -- the case rbac.default_visibility() answers `public`.
+            coalesce((p_manifest->>'owner_id')::uuid, rbac.current_user_id()),
+            (p_manifest->>'org_id')::uuid,
+            coalesce(p_manifest->>'visibility',
+                     rbac.default_visibility((p_manifest->>'org_id')::uuid)))
     on conflict (name) do update
        set version     = excluded.version,
            description = excluded.description,
            author      = excluded.author,
            homepage    = excluded.homepage,
-           manifest    = excluded.manifest;
+           manifest    = excluded.manifest,
+           owner_id    = case when p_manifest ? 'owner_id'
+                              then excluded.owner_id else agentic.plugins.owner_id end,
+           org_id      = case when p_manifest ? 'org_id'
+                              then excluded.org_id else agentic.plugins.org_id end,
+           visibility  = case when p_manifest ? 'visibility'
+                              then excluded.visibility else agentic.plugins.visibility end;
+
+    -- THE PLUGIN'S OWN SCOPE IS PROPAGATED TO WHAT IT INSTALLS. A plugin
+    -- scoped to one org whose skills defaulted to `public` would be a tenant's
+    -- internal procedures published to the deployment by the act of packaging
+    -- them, which is the opposite of what scoping a plugin means.
+    
 
     for v_e in select * from jsonb_array_elements(
                             coalesce(p_manifest->'tool_servers', '[]'::jsonb)) loop
-        perform agentic.upsert_tool_server(v_e || jsonb_build_object('plugin', v_name));
+        perform agentic.upsert_tool_server(
+            v_e || jsonb_build_object('plugin', v_name)
+                || agentic.plugin_scope(p_manifest));
     end loop;
     for v_e in select * from jsonb_array_elements(
                             coalesce(p_manifest->'skills', '[]'::jsonb)) loop
-        perform agentic.upsert_skill(v_e || jsonb_build_object('plugin', v_name));
+        perform agentic.upsert_skill(
+            v_e || jsonb_build_object('plugin', v_name)
+                || agentic.plugin_scope(p_manifest));
     end loop;
     for v_e in select * from jsonb_array_elements(
                             coalesce(p_manifest->'agents', '[]'::jsonb)) loop
-        perform agentic.upsert_agent(v_e || jsonb_build_object('plugin', v_name));
+        perform agentic.upsert_agent(
+            v_e || jsonb_build_object('plugin', v_name)
+                || agentic.plugin_scope(p_manifest));
     end loop;
 
     -- Agents first: nothing in this schema references an agent except a RUN,
@@ -1611,12 +1771,23 @@ $$;
 grant usage on schema agentic to web_anon, authenticated, api_viewer;
 
 create or replace view agentic.sessions_api as
-    select id, user_id, agui_thread_id, title, created_at from agentic.sessions;
+-- The scope columns are APPENDED rather than slotted in beside owner_id, and
+-- the position is forced rather than chosen: `create or replace view` may only
+-- ADD columns at the end. Inserting one in the middle is
+-- `ERROR: cannot change name of view column "status" to "org_id"`, which a
+-- fresh install never sees -- the view is being created, not replaced -- and
+-- every upgrading database hits. Found by dev/upgrade-converges.sh, which is
+-- the only check that applies this file to a database that already has the
+-- old view.
+    select id, owner_id, agui_thread_id, title, created_at,
+           org_id, visibility
+      from agentic.sessions;
 create or replace view agentic.runs_api as
     select id, session_id, agent_id, owner_id, parent_run_id,
            delegated_by_message_id, trigger_kind, workflow_task_id,
            trace_id, span_id, parent_span_id, depth, state, status,
-           created_at, finished_at
+           created_at, finished_at,
+           org_id, visibility
       from agentic.runs;
 create or replace view agentic.messages_api as
     select id, run_id, session_id, role, content, tool_calls, tool_call_id,
@@ -1637,7 +1808,7 @@ create or replace view agentic.messages_api as
 create or replace view agentic.tool_servers_api as
     select id, name, kind, url, credential_ref, emits_citations, serves_agents,
            serves_skills, default_headers, cached_tools, synced_at, plugin,
-           created_at
+           created_at, owner_id, org_id, visibility
       from agentic.tool_servers;
 
 -- Skills, through the same read path as everything else. `content` is IN this
@@ -1654,7 +1825,7 @@ create or replace view agentic.tool_servers_api as
 create or replace view agentic.skills_api as
     select id, name, description, when_to_use, content, discovery_text,
            requires_tools, audience, category, tags, version, plugin,
-           created_at, updated_at
+           created_at, updated_at, owner_id, org_id, visibility
       from agentic.skills;
 
 -- The manifest is in the view on purpose: "what did this plugin install" is a
@@ -1663,7 +1834,7 @@ create or replace view agentic.skills_api as
 -- edited in place afterwards (brief.md §11.8).
 create or replace view agentic.plugins_api as
     select name, version, description, author, homepage, manifest,
-           installed_at, updated_at
+           installed_at, updated_at, owner_id, org_id, visibility
       from agentic.plugins;
 -- The view an interactive UI reads. `audience = 'user'` is the whole point of
 -- the column: a thousand extractors are invisible here without anyone having
@@ -1714,11 +1885,15 @@ order by extracts_source, extracts_doctype;
 -- does not receive, which is precisely the failure the author-time check in
 -- upsert_agent exists to prevent, reintroduced at the read path.
 create or replace view agentic.agents_api as
+-- owner_id/org_id/visibility are IN the view rather than declared out, and
+-- that is the same call `audience` records: a client that cannot see who an
+-- agent belongs to cannot show it, and "why can my colleague not see this
+-- agent" is answerable from this view or from nowhere.
     select id, name, system_prompt, model, tools, skills,
            structured_output_schema,
            chained_action, summarizer_agent_id, context_policy,
            audience, category, tags, extracts_source, extracts_doctype,
-           plugin, created_at
+           plugin, created_at, owner_id, org_id, visibility
       from agentic.agents;
 
 grant select on agentic.sessions, agentic.runs, agentic.messages,

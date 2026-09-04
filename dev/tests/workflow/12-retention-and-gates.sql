@@ -87,7 +87,7 @@ begin
             -- anything: its reference nulls out cleanly. This is the case the
             -- old clause wrongly held back, and it is most of them.
             select id into v_task from workflow.tasks where run_id = v_plain limit 1;
-            insert into agentic.sessions (id, user_id, title)
+            insert into agentic.sessions (id, owner_id, title)
             values (v_session, gen_random_uuid(), 'retention fixture');
             insert into agentic.runs (agent_id, owner_id, trigger_kind, session_id,
                                       workflow_task_id, status)

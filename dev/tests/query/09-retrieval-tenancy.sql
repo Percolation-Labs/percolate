@@ -46,7 +46,7 @@ begin
     select count(*) into v_owner from content.resource_chunks;
 
     set local role authenticated;
-    set local request.jwt.claims = '{"orgs":["a0000000-0000-0000-0000-00000000000b"]}';
+    set local request.jwt.claims = '{"sub":"22222222-2222-2222-2222-222222222222","orgs":["a0000000-0000-0000-0000-00000000000b"]}';
     select count(*) into v_b from content.resource_chunks;
     reset role;
 
@@ -71,7 +71,7 @@ end $$;
 -- caller". A count would keep passing if the fixture grew.
 -- ---------------------------------------------------------------------
 set local role authenticated;
-set local request.jwt.claims = '{"orgs":["a0000000-0000-0000-0000-00000000000b"]}';
+set local request.jwt.claims = '{"sub":"22222222-2222-2222-2222-222222222222","orgs":["a0000000-0000-0000-0000-00000000000b"]}';
 
 do $$
 declare v_leaked uuid[];
@@ -170,9 +170,9 @@ do $$
 declare v_a jsonb; v_b jsonb; v_owner jsonb;
 begin
     set local role authenticated;
-    set local request.jwt.claims = '{"orgs":["a0000000-0000-0000-0000-00000000000a"]}';
+    set local request.jwt.claims = '{"sub":"11111111-1111-1111-1111-111111111111","orgs":["a0000000-0000-0000-0000-00000000000a"]}';
     v_a := aiq.query('SEARCH "R7 recall" FROM chunks LIMIT 10', '[1,0,0,0]');
-    set local request.jwt.claims = '{"orgs":["a0000000-0000-0000-0000-00000000000b"]}';
+    set local request.jwt.claims = '{"sub":"22222222-2222-2222-2222-222222222222","orgs":["a0000000-0000-0000-0000-00000000000b"]}';
     v_b := aiq.query('SEARCH "R7 recall" FROM chunks LIMIT 10', '[1,0,0,0]');
     reset role;
     v_owner := aiq.query('SEARCH "R7 recall" FROM chunks LIMIT 10', '[1,0,0,0]');
@@ -234,7 +234,7 @@ do $$
 declare v_direct int; v_via_mode int;
 begin
     set local role authenticated;
-    set local request.jwt.claims = '{"orgs":["a0000000-0000-0000-0000-00000000000b"]}';
+    set local request.jwt.claims = '{"sub":"22222222-2222-2222-2222-222222222222","orgs":["a0000000-0000-0000-0000-00000000000b"]}';
     select count(*) into v_direct from aiq.emb_demo_quad_a;
     select count(*) into v_via_mode from aiq.semantic_in('chunks','[1,0,0,0]','demo-quad-a',50);
     reset role;

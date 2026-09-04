@@ -48,10 +48,22 @@
 
 create temporary table expected (
     subsystem text,
-    kind      text,     -- schema | table | view | column | function | policy | yaml_feature
-                      -- | extension | registration | agent | tool_server
-                      -- | entity_type | graph_example | property_graph
-                      -- | corpus | embedding_space | channel
+    -- Every value here has a branch in the CASE that computes `present`, and
+    -- that CASE ends in `else false`. So a typo'd kind does not fail loudly --
+    -- it reports the object as MISSING, and sends somebody looking for a
+    -- schema object that is in fact present. The constraint moves that to the
+    -- INSERT, where the row names itself.
+    --
+    -- Kept in step with the CASE by hand, which is the one place in this file
+    -- that is true, and it is acceptable only because both are in this file,
+    -- forty lines apart: adding a branch without adding the word here fails the
+    -- next run that uses it.
+    kind      text check (kind in (
+                  'schema', 'table', 'view', 'column', 'function', 'extension',
+                  'yaml_feature', 'registration', 'agent', 'skill',
+                  'skill_binding', 'tool_server', 'entity_type',
+                  'graph_example', 'property_graph', 'corpus',
+                  'embedding_space', 'channel')),
     name      text,
     detail    text,
     why       text      -- the spec sentence this row exists to keep honest
@@ -202,7 +214,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','function','aiq.sql_passthrough','text','§12: the escape hatch'),
 ('ai-query-layer','function','aiq.check_drift','text','graph-identity.md D7'),
 ('ai-query-layer','function','aiq.rebuild_entity_type','text','graph-identity.md: rebuild'),
-('ai-query-layer','function','aiq.register_entity_table','text,text,text,text,text,text','graph-identity.md D6: a consumer gets projection by registering, not by hand-writing three triggers'),
+('ai-query-layer','function','aiq.register_entity_table','text,text,text,text,text,text,text','graph-identity.md D6: a consumer gets projection by registering, not by hand-writing three triggers'),
 ('ai-query-layer','table','aiq.entity_registry',null,'graph-identity.md "Inclusion policy": rebuild and live projection read ONE predicate'),
 ('ai-query-layer','table','aiq.relation_types',null,'graph-identity.md "Catalogue": an unlisted triple is refused at write'),
 -- Aliases and short keys are two thirds of LOOKUP's cascade and invariant 5
@@ -242,7 +254,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('world-model-ingestion','table','content.resources',null,'brief.md §2: unit of ingested content'),
 ('world-model-ingestion','table','content.resource_chunks',null,'brief.md §3: what SEMANTIC searches'),
 ('world-model-ingestion','function','content.register_upload',
-     'text,text,text,text,bigint,text,text,text,uuid,jsonb,text,text','brief.md §3.5: upload registers AND starts ingestion'),
+     'text,text,text,text,bigint,text,text,text,uuid,jsonb,text,text,text','brief.md §3.5: upload registers AND starts ingestion'),
 ('world-model-ingestion','function','content.register_fetched','text,text,text,text,uuid,jsonb','brief.md §2: pulled sources'),
 ('world-model-ingestion','function','content.resolve_file','uuid','brief.md §3.5: proxied reads'),
 ('world-model-ingestion','function','content.record_chunks','uuid,jsonb','brief.md §3: chunking writes back'),
@@ -396,15 +408,26 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('agentic','function','agentic.upsert_summary','uuid,text','context compaction: a session''s rolling summary is written through one path'),
 ('agentic','function','agentic.apply_summary','jsonb','the runtime hands back a summary it generated; this is where it lands'),
 ('agentic','function','agentic.channel_for','uuid','a session''s notify channel, so a client can subscribe to its own run'),
-('ai-query-layer','function','aiq.current_org_ids','','the org filter every graph policy calls -- the aiq twin of rbac.current_user_id'),
+('user-rbac','function','rbac.current_org_ids','','the orgs this caller belongs to, read from rbac.org_members and narrowed by the token -- moved here from aiq, which had no membership to read'),
 ('ai-query-layer','function','aiq.graph_schema','','plan-graph.md: what the graph contains, answered from the registry'),
 ('ai-query-layer','function','aiq.is_graph_schema','jsonb','the shape check upsert_graph applies, exposed so a caller can validate before sending'),
 ('ai-query-layer','function','aiq.facet_examples','text','worked examples per facet, which is what makes the schema legible to a model'),
 ('ai-query-layer','function','aiq.resolve_ref','text,text,boolean,real,uuid','name to node, fuzzily -- the entry point for turning prose into a graph reference'),
 ('ai-query-layer','function','aiq.embed_call','jsonb,text','the embedding marker a step leaves for the worker to fulfil'),
-('world-model-ingestion','function','content.may_access_org','uuid','the org read check, called by policy'),
+('user-rbac','function','rbac.may_access_org','uuid','may this caller act inside this org at all -- moved here from content, which owned it only by being first to need it'),
 ('world-model-ingestion','function','content.assert_org_write','uuid,text','the org WRITE check -- the half that raises rather than filtering'),
 ('world-model-ingestion','function','content.windows_to_index','uuid','ingest.md: the windows an indexing pass must cover for a resource'),
+('user-rbac','table','rbac.orgs',null,'spec.md §2b: the tenant, which had no table at all until scope landed'),
+('user-rbac','table','rbac.org_members',null,'spec.md §2b: who belongs to a tenant -- the fact the JWT orgs claim used to assert with nothing behind it'),
+('user-rbac','table','rbac.visibilities',null,'spec.md §2b: private/org/public as rows, so p8.enums() publishes the vocabulary and a foreign key enforces it'),
+('user-rbac','function','rbac.may_read','uuid,uuid,text','the scope rule as a function, for SECURITY DEFINER callers that check one row rather than filter a table'),
+('user-rbac','function','rbac.may_write','uuid,uuid,text','the WITH CHECK half: own the row, belong to the org, and do not say org without one'),
+('user-rbac','function','rbac.scope_predicate','','the single home of the read expression every scoped policy is generated from'),
+('user-rbac','function','rbac.scope_write_predicate','','the same for the write half'),
+('user-rbac','function','rbac.add_scope_columns','regclass,text','a module adopts scope with this and add_scope_policy, not with hand-written DDL'),
+('user-rbac','function','rbac.add_scope_policy','regclass,text','generates the RLS policies, so sixteen tables cannot drift into sixteen predicates'),
+('user-rbac','function','rbac.add_org_member','uuid,uuid,text','tenant self-administration, gated like grant_role and never on a caller-supplied actor'),
+('user-rbac','function','rbac.remove_org_member','uuid,uuid','revoking membership, which takes effect on the next request rather than at token expiry'),
 ('user-rbac','function','rbac.change_password','text,text','spec.md §4: a caller rotates their own password, old one required'),
 ('user-rbac','function','rbac.grant_role','uuid,text','spec.md §4: role assignment, gated on users/admin -- the escalation guard dev/tests/rbac/07 pins'),
 ('user-rbac','function','rbac.refresh_session','text,text','spec.md §4.3: refresh token rotation'),
@@ -421,7 +444,18 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('cross','registration','semantic:chunks',null,'USAGE.md tells readers SEMANTIC searches "chunks"'),
 ('cross','registration','step:p8ql',null,'YAML.md: p8ql: steps must resolve'),
 ('cross','registration','step:record_chunks',null,'ingestion pipeline is declarative'),
-('cross','registration','entity:document',null,'integration.sql: resources become graph nodes');
+('cross','registration','entity:document',null,'integration.sql: resources become graph nodes'),
+
+-- ---------- the published contract (specs/contract) ---------------------
+-- What this database admits, published BY the database. Declared here because
+-- the whole point of it is that a client does not need percolate-core -- or any
+-- other service instance -- to learn what a column accepts, and a contract that
+-- silently stopped shipping would return the collection to exactly the state
+-- this schema was added to end.
+('cross','schema','percolate',null,'contract/schema.sql: the contract namespace'),
+('cross','table','percolate.types',null,'contract/schema.sql: payload shapes a jsonb column cannot carry in the catalog'),
+('cross','function','percolate.enums','','contract/schema.sql: every closed vocabulary, derived from the catalog at call time'),
+('cross','function','percolate.contract','','contract/schema.sql: enums and types as one document, which is what a client fetches');
 
 -- ============================================================
 -- Check each expectation against the catalog.
@@ -579,7 +613,20 @@ end $$;
 create temporary table api_exclusions (
     api_view    text,
     column_name text,
-    kind        text,     -- secret | internal
+    -- CONSTRAINED, because the whole file below turns on this word matching.
+    --
+    -- The leak check is `where in_view and kind = 'secret'`, and it is the one
+    -- assertion here that reports a breach rather than a gap. Spelled
+    -- 'secrets', 'Secret' or 'credential', a genuinely leaked secret falls
+    -- through to the `when in_view then 'STALE EXCLUSION'` arm, v_leak counts
+    -- zero, and the SECRET EXPOSED exception never fires -- the run still
+    -- fails, but as "ROUND TRIP INCOMPLETE ... declare it excluded with a
+    -- reason", which reads as bookkeeping.
+    --
+    -- One character, downgrading this file's loudest security assertion into a
+    -- housekeeping notice, in the file whose entire job is to stop a promise
+    -- being made with nothing checking it. Found by dev/vocab-audit.py.
+    kind        text check (kind in ('secret', 'internal')),
     why         text
 );
 

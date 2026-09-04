@@ -148,6 +148,21 @@ begin
         end if;
     end if;
 
+    -- Null is a real answer since embedding_models.provider gained a foreign
+    -- key onto embedding_providers: a space whose vectors are written directly
+    -- -- the demo fixture spaces -- says so with NULL rather than by inventing
+    -- a provider name. It is a different mistake from naming a provider nobody
+    -- registered, so it gets a different message; one error for both would send
+    -- the reader to the wrong fix, and the generic arm below renders a null as
+    -- the literal '<NULL>', which explains nothing.
+    if m.provider is null then
+        raise exception
+            'step ''%'' embeds with model ''%'', whose vectors are written '
+            'directly rather than produced here -- it has no provider, so there '
+            'is nothing to call. Embed against a model that has one.',
+            p_step_key, m.name;
+    end if;
+
     select * into p from aiq.embedding_providers where provider = m.provider;
     if not found then
         raise exception

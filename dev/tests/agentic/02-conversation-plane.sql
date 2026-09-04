@@ -52,8 +52,8 @@ begin
 
     v_s := agentic.create_session('a probe conversation');
     if v_s.id is null then raise exception 'create_session returned no session'; end if;
-    if v_s.user_id <> 'c1a11111-0000-0000-0000-00000000c001'::uuid then
-        raise exception 'a session was created owned by % rather than its caller', v_s.user_id;
+    if v_s.owner_id <> 'c1a11111-0000-0000-0000-00000000c001'::uuid then
+        raise exception 'a session was created owned by % rather than its caller', v_s.owner_id;
     end if;
 
     v_parent := agentic.start_run('conv_probe', v_s.id, null, null, 'trace-conv-1');

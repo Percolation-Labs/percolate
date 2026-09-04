@@ -100,7 +100,16 @@ begin
              -- whether the address exists.
              ('rbac', 'request_password_reset'),     -- email -> a token it does not reveal
              ('rbac', 'reset_password'),             -- reset token -> new password
-             ('rbac', 'has_permission'));            -- read-only, and every policy calls it
+             ('rbac', 'has_permission'),             -- read-only, and every policy calls it
+             -- Same case as has_permission, and SECURITY DEFINER for a reason
+             -- worth stating: rbac.org_members carries its own RLS policy and
+             -- that policy calls this function, so invoker rights here is a
+             -- two-hop recursion Postgres reports as `stack depth limit
+             -- exceeded` rather than as policy recursion. It returns the
+             -- caller's OWN orgs and nobody else's -- there is no argument to
+             -- ask it about somebody else -- so an anonymous caller reaching
+             -- it learns that it belongs to no orgs, which it already knew.
+             ('rbac', 'current_org_ids'));
 
     if v_bad is not null then
         raise exception

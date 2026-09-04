@@ -69,12 +69,54 @@ end;
 $$ language plpgsql volatile;
 
 -- Convenience for the most common dev case: "be somebody in this org".
--- Generates a throwaway subject rather than requiring a real users row, since
--- most query-layer testing cares about ORG scoping, not which user.
+--
+-- IT NOW MAKES THE USER AND THE MEMBERSHIP ROW, and the comment it replaces is
+-- the reason it had to. That comment said: "generates a throwaway subject
+-- rather than requiring a real users row, since most query-layer testing cares
+-- about ORG scoping, not which user." That was true while `orgs` was an array
+-- on the token and the token was the membership. It is now false in the way
+-- that matters: rbac.current_org_ids() intersects the claim with
+-- rbac.org_members, so a throwaway subject belongs to nothing, and this helper
+-- would hand back a token that reads exactly what an anonymous caller reads --
+-- silently, and while appearing to be scoped to the org you asked for.
+--
+-- Making the rows rather than requiring them is the point. Fifteen fixtures and
+-- test files across this repository set an `orgs` claim with no `sub` at all,
+-- because that was sufficient for years; every one of them had to be corrected
+-- by hand. A helper whose whole job is "be somebody in this org" is where that
+-- correctness belongs, so the sixteenth fixture cannot get it wrong.
+--
+-- Deterministic in the org, not random: calling it twice for one org gives the
+-- same identity, so a fixture that assumes an org, writes a row, and assumes it
+-- again still owns what it wrote. A fresh uuid each time made that fail in a
+-- way that looks like an RLS bug.
+--
+-- dev-mode guarded like everything else here, and it INSERTS -- which is why it
+-- is in this file and not in rbac. A production helper that creates users on
+-- demand is a different and much worse thing.
 create or replace function aiq.dev_assume_org(p_org uuid)
 returns text as $$
-    select aiq.dev_assume(gen_random_uuid(), array[p_org]);
-$$ language sql volatile;
+declare v_sub uuid;
+begin
+    perform aiq.assert_dev_mode();
+
+    -- uuid v5-style determinism without the extension: hash the org, take the
+    -- first 32 hex digits. Stable per org, and visibly synthetic in a table.
+    v_sub := (substr(md5('dev_assume_org:' || p_org::text), 1, 32))::uuid;
+
+    insert into rbac.orgs (id, slug, name)
+    values (p_org, 'dev-' || left(p_org::text, 8), 'dev org ' || left(p_org::text, 8))
+    on conflict (id) do nothing;
+    insert into rbac.users (id, email, status)
+    values (v_sub, 'dev-' || left(v_sub::text, 8) || '@example.invalid', 'active')
+    on conflict (id) do nothing;
+    insert into rbac.org_members (org_id, user_id)
+    values (p_org, v_sub)
+    on conflict (org_id, user_id) do nothing;
+
+    return aiq.dev_assume(v_sub, array[p_org]);
+end;
+$$ language plpgsql volatile;
 
 -- Drop back to anonymous, to check what an unauthenticated caller sees --
 -- the case most easily forgotten, and the one where a missing policy shows up.
@@ -99,7 +141,7 @@ returns table(db_role text, is_superuser boolean, rls_applies boolean,
            -- filtered?" is a different question from "is RLS enabled?"
            not (select rolsuper from pg_roles where rolname = current_user),
            rbac.current_user_id(),
-           coalesce(array(select aiq.current_org_ids()), '{}'::uuid[]),
+           coalesce(array(select rbac.current_org_ids()), '{}'::uuid[]),
            coalesce(nullif(current_setting('request.jwt.claims', true), ''), '(none)');
 $$ language sql stable;
 

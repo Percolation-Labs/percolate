@@ -290,8 +290,24 @@ create table if not exists workflow.tasks (
     -- ({"url","method","headers"?,"credential_ref"?,"body"?,"timeout_ms"?,
     -- "mode":"sync"|"async"}), `output` carries the response, existing
     -- max_attempts/run_after drive retry/backoff exactly like any other kind.
-    kind             text not null default 'work'
-                         check (kind in ('work','decision','timer','signal','sub_workflow','http_call','sql')),
+    -- NO INLINE CHECK. The admissible kinds are declared ONCE, by the
+    -- `alter table ... add constraint tasks_kind_check` further down this file,
+    -- and this column deliberately carries no second copy of them.
+    --
+    -- Which of the two copies to delete is not a coin toss. `create table if
+    -- not exists` is a no-op on a database that already has the table, so an
+    -- inline CHECK only ever applies to fresh installs -- and the upgrade
+    -- script is this file replayed, which is the path every existing
+    -- deployment takes. That is exactly how `matrix` came to be admitted by
+    -- one of three declarations: it was added to the ALTER, which runs
+    -- everywhere, and the inline copies went on saying something else. The
+    -- shipped behaviour was right by luck of ordering, since the last
+    -- declaration wins.
+    --
+    -- So the ALTER is the home that works on both paths, and this is the copy
+    -- that goes. Found by `dev/vocab-audit.py`, which pairs vocabularies on
+    -- their contents and reported one column declared three times, differently.
+    kind             text not null default 'work',
     queue            text not null default 'default',
     status           text not null default 'pending'
                          check (status in
@@ -2106,13 +2122,21 @@ end $$;
 --      transaction open indefinitely.
 -- ============================================================
 
--- The kind is added by ALTER as well as in the CREATE TABLE above, so an
--- existing installation picks it up. `create table` is skipped when the table
--- exists, which silently leaves the old constraint in place -- caught by a
--- `sql` step being rejected on a database that had already been installed.
-alter table workflow.tasks drop constraint if exists tasks_kind_check;
-alter table workflow.tasks add constraint tasks_kind_check
-    check (kind in ('work','decision','timer','signal','sub_workflow','http_call','sql'));
+-- The kind vocabulary is re-declared by ALTER at §22c, where `matrix` joins it,
+-- so an existing installation picks the change up -- `create table` is skipped
+-- when the table exists, which silently leaves the old constraint in place.
+-- That was caught by a `sql` step being rejected on a database that had already
+-- been installed.
+--
+-- The ALTER that used to be HERE has been deleted rather than updated. It
+-- listed the vocabulary WITHOUT `matrix`, and §22c's later ALTER dropped and
+-- re-added the same constraint name with it -- so this one never survived a
+-- load, and the file carried three declarations of one column of which only the
+-- last was live. That is the same defect `build-sql.py:check_single_definition`
+-- refuses for functions ("a maintainer fixing a bug has no way to tell which
+-- copy is live"), and it had already produced the state it warns about: two of
+-- the three spellings here were wrong and reading either of them told you the
+-- wrong thing about what the database admits. Found by `dev/vocab-audit.py`.
 
 create table if not exists workflow.step_functions (
     name          text primary key,        -- what a step spec names

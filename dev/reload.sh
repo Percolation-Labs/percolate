@@ -100,8 +100,22 @@ SQL
 for f in init/0[2-9]-*.sql; do
   [ -e "$f" ] || continue
   docker cp "$f" "$CONTAINER:/tmp/$(basename "$f")" >/dev/null
-  docker exec -i "$CONTAINER" psql -U "$SUPERUSER" -d "$DB" -q \
-    -f "/tmp/$(basename "$f")" 2>&1 | grep -iE '^(ERROR|WARNING)' || true
+  # ON_ERROR_STOP and the exit code, not a grep for a line that never matched.
+  # This loop used to filter psql's output with `grep -iE '^(ERROR|WARNING)'`,
+  # and psql prefixes every diagnostic with `psql:<file>:<line>: ` -- so the
+  # anchor matched nothing, ever. Seed failures printed nothing and the loop
+  # went on to the next file: the graph sample failed every insert against a
+  # new foreign key and `reload.sh` reported a clean build, with only the
+  # surface audit two steps later noticing that the sample entity types were
+  # missing. A check that can only pass is not a check.
+  if ! docker exec -i "$CONTAINER" psql -U "$SUPERUSER" -d "$DB" -q \
+       -v ON_ERROR_STOP=1 -f "/tmp/$(basename "$f")" 2>&1 | grep -iE 'ERROR|WARNING'; then
+    :
+  fi
+  if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+    echo "==> FAILED: init/$(basename "$f") -- see the error above" >&2
+    exit 1
+  fi
 done
 
 echo "==> auditing"

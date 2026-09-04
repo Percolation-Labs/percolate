@@ -59,29 +59,36 @@ end $$;
 -- question about SEMANTIC is not "does cosine distance work" -- it is whether
 -- a caller can learn that a chunk exists in a tenant they cannot read.
 -- ------------------------------------------------------------
-insert into content.channels (id, name, kind, org_id) values
-    ('11110000-0000-0000-0000-000000000001','sample-corpus','manual',null)
-on conflict (id) do update set name = excluded.name;
+-- visibility IS SPELLED OUT ON EVERY ROW BELOW, and having to write it is the
+-- change worth noticing rather than a chore. This fixture used to say tenancy
+-- with `org_id` alone: null meant "every tenant reads this" and a uuid meant
+-- "only that one". The null tier was doing two jobs -- deliberately shared, and
+-- nobody filled it in -- and world-model-ingestion/schema.sql measured a real
+-- cross-tenant read through the second. Now the shared rows say `public`
+-- because they are shared on purpose, and a row that says nothing is private.
+insert into content.channels (id, name, kind, org_id, visibility) values
+    ('11110000-0000-0000-0000-000000000001','sample-corpus','manual',null,'public')
+on conflict (id) do update set name = excluded.name, visibility = excluded.visibility;
 
-insert into content.resources (id, channel_id, external_id, uri, title, status, org_id) values
+insert into content.resources (id, channel_id, external_id, uri, title, status, org_id, visibility) values
     ('22220000-0000-0000-0000-000000000001','11110000-0000-0000-0000-000000000001',
-     'rec-r7','memo://recall/r7','R7 recall notice','ready',null),
+     'rec-r7','memo://recall/r7','R7 recall notice','ready',null,'public'),
     ('22220000-0000-0000-0000-000000000002','11110000-0000-0000-0000-000000000001',
-     'rec-eng','memo://engineering/actuators','Actuator failure analysis','ready',null),
+     'rec-eng','memo://engineering/actuators','Actuator failure analysis','ready',null,'public'),
     ('22220000-0000-0000-0000-000000000003','11110000-0000-0000-0000-000000000001',
-     'rec-fin','memo://finance/q3','Q3 revenue commentary','ready',null),
+     'rec-fin','memo://finance/q3','Q3 revenue commentary','ready',null,'public'),
     -- Org-scoped, and it MENTIONS THE SAME RARE TOKEN as the shared one. That
     -- is what makes the tenancy assertions sharp: a leak shows up as an extra
     -- hit for a query the other tenant is entitled to run.
     ('22220000-0000-0000-0000-000000000004','11110000-0000-0000-0000-000000000001',
      'rec-nw','memo://northwind/exposure','Northwind R7 exposure','ready',
-     'a0000000-0000-0000-0000-00000000000a'),
+     'a0000000-0000-0000-0000-00000000000a','org'),
     ('22220000-0000-0000-0000-000000000005','11110000-0000-0000-0000-000000000001',
      'rec-eg','memo://eastgate/position','Eastgate position note','ready',
-     'a0000000-0000-0000-0000-00000000000b')
+     'a0000000-0000-0000-0000-00000000000b','org')
 on conflict (id) do update set
     title = excluded.title, status = excluded.status, org_id = excluded.org_id,
-    uri = excluded.uri;
+    visibility = excluded.visibility, uri = excluded.uri;
 
 -- ------------------------------------------------------------
 -- 2. The chunks.
@@ -127,10 +134,15 @@ insert into aiq.semantic_sources (name, source_table, content_col, embedding_col
 values ('chunks', 'content.resource_chunks', 'content', 'embedding')
 on conflict (name) do update set source_table = excluded.source_table;
 
+-- provider NULL, not 'fixture'. These vectors are written by hand below; there
+-- is no service that produces them, and saying so is what the null means. The
+-- old spelling invented a provider name to satisfy a NOT NULL, which nothing
+-- could have resolved -- found the moment embedding_models.provider gained a
+-- foreign key onto embedding_providers.
 insert into aiq.embedding_models (name, dim, provider, distance_op, is_default, notes) values
-    ('demo-quad-a', 4, 'fixture', 'vector_cosine_ops', true,
+    ('demo-quad-a', 4, null, 'vector_cosine_ops', true,
      'four literal dimensions, not a model. See dev/init/05-corpus-sample.sql.'),
-    ('demo-quad-b', 4, 'fixture', 'vector_cosine_ops', false,
+    ('demo-quad-b', 4, null, 'vector_cosine_ops', false,
      'the same four dimensions, a DIFFERENT space -- two models of equal size '
      'whose vectors are not comparable, which is schema.sql §10''s whole point.')
 on conflict (name) do update set dim = excluded.dim, provider = excluded.provider,

@@ -222,4 +222,183 @@ begin
                  'so the policy that calls it cannot recurse into itself';
 end $$;
 
+-- ---------------------------------------------------------------------
+-- 7. rbac.current_org_ids IS SECURITY DEFINER, for the identical reason.
+--
+-- rbac.org_members has its own SELECT policy and that policy calls this
+-- function, so invoker rights here is the same two-hop cycle laundered through
+-- a function that §6 documents for has_permission. Asserted separately rather
+-- than folded into §6 because the two failures look nothing alike from the
+-- outside: has_permission's recursion needs a caller who owns nothing, while
+-- this one fires for every caller who belongs to any org -- which after
+-- multi-tenancy is most of them.
+-- ---------------------------------------------------------------------
+do $$
+declare v_secdef boolean; v_config text[];
+begin
+    select prosecdef, proconfig into v_secdef, v_config
+    from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'rbac' and p.proname = 'current_org_ids';
+    if not v_secdef then
+        raise exception 'rbac.current_org_ids is SECURITY INVOKER -- it will recurse '
+                        'through org_members'' own policy until the backend runs out '
+                        'of stack';
+    end if;
+    if v_config is null or not (v_config::text like '%search_path%') then
+        raise exception 'rbac.current_org_ids is SECURITY DEFINER with no pinned '
+                        'search_path';
+    end if;
+    raise notice 'rbac/02: current_org_ids runs as definer with a pinned search_path';
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 8. EVERY SCOPED TABLE CARRIES THE GENERATED PREDICATE, UNMODIFIED.
+--
+-- THE DIRECTION MATTERS, and it is the one this file was otherwise missing.
+-- §3 above iterates tables that HAVE policies and checks something about them,
+-- which is the direction that can only find a policy somebody wrote. It cannot
+-- find the table somebody added a `visibility` column to and forgot to scope,
+-- and that table reads as scoped to anyone looking at its columns while being
+-- readable by everyone with a grant.
+--
+-- So this runs from the DATABASE outward: enumerate every table that carries
+-- the scope columns, and require of each that it has the generated policy.
+-- Nothing has to be kept up to date -- there is no list of scoped tables here,
+-- because a list is the thing that goes stale.
+--
+-- Compared against rbac.scope_predicate() through a freshly generated policy
+-- rather than against a string written here, for the reason
+-- dev/vocab-audit.py asks p8.enums() instead of running its own catalog query:
+-- an audit that restates the thing it audits is one more copy free to drift.
+-- pg_get_expr returns the PARSED form -- casts explicit, whitespace
+-- regularised -- so the only honest comparison is parsed-against-parsed, which
+-- means generating one.
+-- ---------------------------------------------------------------------
+create table rls_probe_generated (id int);
+select rbac.add_scope_columns('public.rls_probe_generated');
+select rbac.add_scope_policy ('public.rls_probe_generated');
+
+do $$
+declare
+    v_expected text;
+    r record;
+    v_bad text := '';
+begin
+    select pg_get_expr(polqual, polrelid) into v_expected
+      from pg_policy p join pg_class c on c.oid = p.polrelid
+     where c.relname = 'rls_probe_generated' and p.polname = 'rls_probe_generated_scoped';
+    -- The OUTERMOST parens are stripped before comparing, and finding out why
+    -- is worth the line: Postgres FLATTENS nested ORs when it parses a policy,
+    -- so the probe's three-arm predicate comes back as `(a OR b OR c)` while a
+    -- table that also carries the has_permission override comes back as
+    -- `(a OR b OR c OR d)` -- not as `(a OR b OR c) OR d`. A prefix match
+    -- against the parenthesised form therefore fails on the closing bracket
+    -- for exactly the six tables that have an override, which is the majority
+    -- of them. Compare the arms, not the punctuation.
+    v_expected := left(right(v_expected, -1), -1);
+
+    for r in
+        select n.nspname as sch, c.relname as tbl
+        from pg_class c
+        join pg_namespace n on n.oid = c.relnamespace
+        join pg_attribute a on a.attrelid = c.oid and a.attname = 'visibility'
+                           and not a.attisdropped
+        where c.relkind = 'r'
+          and n.nspname in ('rbac','workflow','aiq','content','agentic')
+        order by 1, 2
+    loop
+        -- The generated read policy is <table>_scoped, and its expression is
+        -- the probe's plus, optionally, the has_permission override arm --
+        -- which differs per table because it names that table's resource. So
+        -- the requirement is that it STARTS WITH the generated predicate: a
+        -- policy that adds an arm is a deliberate widening somebody wrote,
+        -- and a policy that changes the first three arms is drift.
+        if not exists (
+            select 1 from pg_policy p
+            join pg_class c on c.oid = p.polrelid
+            join pg_namespace n2 on n2.oid = c.relnamespace
+            where n2.nspname = r.sch and c.relname = r.tbl
+              and p.polname = r.tbl || '_scoped'
+              and pg_get_expr(p.polqual, p.polrelid) like '(' || v_expected || '%')
+        then
+            v_bad := v_bad || format('%s.%s ', r.sch, r.tbl);
+        end if;
+    end loop;
+
+    if v_bad <> '' then
+        raise exception
+            'these tables carry the scope columns and not the generated scope '
+            'policy: %. A `visibility` column with no policy consulting it is '
+            'a table that READS as scoped and is not -- add it with '
+            'rbac.add_scope_policy(), never by hand. A table that deliberately '
+            'reads differently -- workflow.pools takes the columns and keeps '
+            '`using (true)`, because a worker must see the queue it serves -- '
+            'belongs in an exemption stated here, not in silence.', v_bad;
+    end if;
+    raise notice 'rbac/08 precondition: every table with a visibility column carries the generated predicate';
+end $$;
+
+-- ...and the trigger, which is the half a policy cannot do. The policy holds
+-- `org needs an org` for callers arriving through RLS; every SECURITY DEFINER
+-- write path bypasses RLS by design, so the trigger is the only thing standing
+-- between register_upload and a row that is invisible to everyone.
+do $$
+declare v_bad text;
+begin
+    select string_agg(n.nspname || '.' || c.relname, ', ' order by n.nspname, c.relname)
+      into v_bad
+      from pg_class c
+      join pg_namespace n on n.oid = c.relnamespace
+      join pg_attribute a on a.attrelid = c.oid and a.attname = 'visibility'
+                         and not a.attisdropped
+     where c.relkind = 'r'
+       and n.nspname in ('rbac','workflow','aiq','content','agentic')
+       and not exists (select 1 from pg_trigger t
+                        where t.tgrelid = c.oid and not t.tgisinternal
+                          and t.tgfoid = 'rbac.enforce_visibility'::regproc);
+    if v_bad is not null then
+        raise exception
+            'these scoped tables have no rbac.enforce_visibility trigger: %. '
+            'They will accept visibility ''org'' with a null org_id from every '
+            'SECURITY DEFINER writer, which is a row nobody can read.', v_bad;
+    end if;
+    raise notice 'rbac/02: every scoped table carries the enforce_visibility trigger';
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 9. THE RETIRED PREDICATES ARE GONE FROM EVERY POLICY, NOT MOST.
+--
+-- `aiq.current_org_ids()` read the orgs array off the JWT and
+-- `content.may_access_org()` inferred a caller's intent from whether their
+-- token named any org. Both were replaced; what this asserts is that the
+-- replacement reached every policy rather than the files somebody remembered.
+--
+-- A partial migration here is the worst possible state: half the tables scoped
+-- against membership rows and half against a claim, with no symptom until the
+-- two disagree -- which is precisely when somebody has been removed from an
+-- org and it matters.
+-- ---------------------------------------------------------------------
+do $$
+declare v_bad text;
+begin
+    select string_agg(n.nspname || '.' || c.relname || ' (' || p.polname || ')',
+                      ', ' order by n.nspname, c.relname)
+      into v_bad
+      from pg_policy p
+      join pg_class c on c.oid = p.polrelid
+      join pg_namespace n on n.oid = c.relnamespace
+     where coalesce(pg_get_expr(p.polqual, p.polrelid), '')
+             ~ '(aiq\.current_org_ids|content\.may_access_org)'
+        or coalesce(pg_get_expr(p.polwithcheck, p.polrelid), '')
+             ~ '(aiq\.current_org_ids|content\.may_access_org)';
+    if v_bad is not null then
+        raise exception
+            'these policies still call a retired predicate: %. aiq.current_org_ids '
+            'trusted the token as the membership and content.may_access_org guessed '
+            'intent from it -- both are rbac.current_org_ids now, which reads '
+            'rbac.org_members.', v_bad;
+    end if;
+    raise notice 'rbac/02: no policy still scopes on the retired org predicates';
+end $$;
+
 rollback;

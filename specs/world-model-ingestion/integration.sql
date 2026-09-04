@@ -66,17 +66,22 @@ on conflict do nothing;
 -- nodes.org_id drift and made LOOKUP silently return nothing; one source of
 -- truth makes that impossible rather than merely detectable.
 -- ------------------------------------------------------------
-alter table content.channels        enable row level security;
-alter table content.resources       enable row level security;
+-- Two calls per table and no policy written here: rbac.add_scope_policy()
+-- generates the predicate from its one home, for the reason its header gives
+-- (calling the equivalent function per row measured 58x slower, and sixteen
+-- hand-copies of a security predicate is how one of them drifts).
+--
+-- What changes for this file specifically: `org_id is null` no longer means
+-- "everyone may read it". §4b of schema.sql measured that conflation as a real
+-- cross-tenant read -- register_upload() without its optional org argument
+-- wrote a null org and another tenant retrieved the text. A row nobody scoped
+-- is now `private`, and global is something somebody chose.
+select rbac.add_scope_columns('content.channels', 'public');
+select rbac.add_scope_policy ('content.channels');
+select rbac.add_scope_columns('content.resources', 'public');
+select rbac.add_scope_policy ('content.resources');
+
 alter table content.resource_chunks enable row level security;
-
-drop policy if exists channels_org_scoped on content.channels;
-create policy channels_org_scoped on content.channels for select
-  using (org_id is null or org_id in (select aiq.current_org_ids()));
-
-drop policy if exists resources_org_scoped on content.resources;
-create policy resources_org_scoped on content.resources for select
-  using (org_id is null or org_id in (select aiq.current_org_ids()));
 
 drop policy if exists chunks_via_resource on content.resource_chunks;
 create policy chunks_via_resource on content.resource_chunks for select
@@ -118,12 +123,11 @@ grant select on content.channels, content.resources, content.resource_chunks
 -- ingest_target hands back a bucket and an object key for the caller's own
 -- resources, and the read path a user is offered is the Content Server's
 -- proxy precisely so that a storage location never becomes one.
-revoke execute on function content.register_upload(text,text,text,text,bigint,text,text,text,uuid,jsonb,text,text) from public;
+revoke execute on function content.register_upload(text,text,text,text,bigint,text,text,text,uuid,jsonb,text,text,text) from public;
 revoke execute on function content.register_fetched(text,text,text,text,uuid,jsonb) from public;
 revoke execute on function content.record_chunks(uuid,jsonb) from public;
 revoke execute on function content.resolve_file(uuid) from public;
 revoke execute on function content.check_drift() from public;
-revoke execute on function content.may_access_org(uuid) from public;
 revoke execute on function content.assert_org_write(uuid,text) from public;
 revoke execute on function content.ingest_target(uuid) from public;
 revoke execute on function content.record_ingest(uuid,jsonb) from public;
@@ -139,7 +143,7 @@ revoke execute on function content.dataset_uri(text) from public;
 -- The Content Server registers uploads and the ingestion workflow records
 -- chunks; both go through SECURITY DEFINER functions, so neither needs a write
 -- grant on any table.
-grant execute on function content.register_upload(text,text,text,text,bigint,text,text,text,uuid,jsonb,text,text) to authenticated;
+grant execute on function content.register_upload(text,text,text,text,bigint,text,text,text,uuid,jsonb,text,text,text) to authenticated;
 grant execute on function content.register_fetched(text,text,text,text,uuid,jsonb) to authenticated;
 grant execute on function content.record_chunks(uuid,jsonb) to worker, authenticated;
 grant execute on function content.resolve_file(uuid) to authenticated;
@@ -361,12 +365,11 @@ grant execute on function aiq.record_embeddings(text, jsonb) to worker;
 -- capability. dataset_files carries no org of its own -- it inherits, the way
 -- chunks do, because duplicating a tenancy fact is how node_keys and nodes
 -- drifted.
-alter table content.datasets      enable row level security;
+-- The COLUMNS are added in schema.sql, next to content.dataset_uri() -- a
+-- `language sql` body is validated at CREATE time and that one reads them, so
+-- they cannot wait until this file. Only the policy is here.
+select rbac.add_scope_policy ('content.datasets');
 alter table content.dataset_files enable row level security;
-
-drop policy if exists datasets_org_scoped on content.datasets;
-create policy datasets_org_scoped on content.datasets for select
-  using (org_id is null or org_id in (select aiq.current_org_ids()));
 
 drop policy if exists dataset_files_via_dataset on content.dataset_files;
 create policy dataset_files_via_dataset on content.dataset_files for select

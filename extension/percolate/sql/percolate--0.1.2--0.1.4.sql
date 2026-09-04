@@ -370,8 +370,24 @@ create table if not exists workflow.tasks (
     -- ({"url","method","headers"?,"credential_ref"?,"body"?,"timeout_ms"?,
     -- "mode":"sync"|"async"}), `output` carries the response, existing
     -- max_attempts/run_after drive retry/backoff exactly like any other kind.
-    kind             text not null default 'work'
-                         check (kind in ('work','decision','timer','signal','sub_workflow','http_call','sql')),
+    -- NO INLINE CHECK. The admissible kinds are declared ONCE, by the
+    -- `alter table ... add constraint tasks_kind_check` further down this file,
+    -- and this column deliberately carries no second copy of them.
+    --
+    -- Which of the two copies to delete is not a coin toss. `create table if
+    -- not exists` is a no-op on a database that already has the table, so an
+    -- inline CHECK only ever applies to fresh installs -- and the upgrade
+    -- script is this file replayed, which is the path every existing
+    -- deployment takes. That is exactly how `matrix` came to be admitted by
+    -- one of three declarations: it was added to the ALTER, which runs
+    -- everywhere, and the inline copies went on saying something else. The
+    -- shipped behaviour was right by luck of ordering, since the last
+    -- declaration wins.
+    --
+    -- So the ALTER is the home that works on both paths, and this is the copy
+    -- that goes. Found by `dev/vocab-audit.py`, which pairs vocabularies on
+    -- their contents and reported one column declared three times, differently.
+    kind             text not null default 'work',
     queue            text not null default 'default',
     status           text not null default 'pending'
                          check (status in
@@ -2186,13 +2202,21 @@ end $$;
 --      transaction open indefinitely.
 -- ============================================================
 
--- The kind is added by ALTER as well as in the CREATE TABLE above, so an
--- existing installation picks it up. `create table` is skipped when the table
--- exists, which silently leaves the old constraint in place -- caught by a
--- `sql` step being rejected on a database that had already been installed.
-alter table workflow.tasks drop constraint if exists tasks_kind_check;
-alter table workflow.tasks add constraint tasks_kind_check
-    check (kind in ('work','decision','timer','signal','sub_workflow','http_call','sql'));
+-- The kind vocabulary is re-declared by ALTER at §22c, where `matrix` joins it,
+-- so an existing installation picks the change up -- `create table` is skipped
+-- when the table exists, which silently leaves the old constraint in place.
+-- That was caught by a `sql` step being rejected on a database that had already
+-- been installed.
+--
+-- The ALTER that used to be HERE has been deleted rather than updated. It
+-- listed the vocabulary WITHOUT `matrix`, and §22c's later ALTER dropped and
+-- re-added the same constraint name with it -- so this one never survived a
+-- load, and the file carried three declarations of one column of which only the
+-- last was live. That is the same defect `build-sql.py:check_single_definition`
+-- refuses for functions ("a maintainer fixing a bug has no way to tell which
+-- copy is live"), and it had already produced the state it warns about: two of
+-- the three spellings here were wrong and reading either of them told you the
+-- wrong thing about what the database admits. Found by `dev/vocab-audit.py`.
 
 create table if not exists workflow.step_functions (
     name          text primary key,        -- what a step spec names
@@ -7744,8 +7768,17 @@ insert into rbac.permission_kinds (resource, action, checked_by) values
     ('auth_events',        'select', 'policy auth_events_self_or_admin'),
     ('refresh_tokens',     'select', 'policy refresh_tokens_self_or_admin'),
     ('password_reset_tokens', 'select', 'policy password_reset_tokens_self_or_admin'),
-    ('workflow_runs',      'select', 'policy runs_owner_or_permitted'),
-    ('workflow_schedules', 'select', 'policy schedules_owner_or_permitted'),
+    -- The policy names are the ones rbac.add_scope_policy() generates:
+    -- <table>_scoped for the read and <table>_scoped_write for the write.
+    ('workflow_runs',      'select', 'policy runs_scoped'),
+    ('workflow_schedules', 'select', 'policy schedules_scoped'),
+    -- Agents, tool servers, skills and plugins are scoped like anything else
+    -- now, so each needs a read pair alongside the authoring pair below --
+    -- the override for an operator who must see every tenant's configuration.
+    ('agents',             'select', 'policy agents_scoped'),
+    ('tool_servers',       'select', 'policy tool_servers_scoped'),
+    ('skills',             'select', 'policy skills_scoped'),
+    ('plugins',            'select', 'policy plugins_scoped'),
     -- Function guards.
     ('users',              'admin',  'rbac.grant_role'),
     ('workflows',          'update', 'workflow.may_define'),
@@ -7922,12 +7955,610 @@ create or replace function rbac.current_trace_id() returns text as $$
     );
 $$ language sql stable;
 
--- Example RLS policy shape any module adopts. current_user_id()/
--- has_permission() are called from OUTSIDE rbac here (any other schema's
--- own RLS policy) -- explicitly qualified, per this file's header note,
--- not left to a search_path that would have to include rbac to work:
--- create policy select_own_or_permitted on <table> for select
---   using (owner_id = rbac.current_user_id() or rbac.has_permission(rbac.current_user_id(), '<resource>', 'select'));
+-- ------------------------------------------------------------
+-- 2b. SCOPE -- who may see a row, as distinct from what a role may do.
+--
+-- has_permission() answers "may this kind of person do this to this kind of
+-- thing". It has never been able to answer "may this person see THIS ROW",
+-- and three different idioms grew up in the collection to fill that gap:
+--
+--   owner-only     agentic.sessions/runs  -- mine, forever, unshareable
+--   owner-or-role  workflow.runs/schedules, every rbac.* table
+--   org-or-null    aiq.nodes, content.resources, workflow.deposits
+--
+-- No two of them compose. An org-scoped table had no owner and an owner-scoped
+-- table had no org, so "my private draft inside my org" and "a document my
+-- whole org may read" were both unsayable, and agentic.agents/skills settled
+-- for `using (true)` -- every authenticated caller in the deployment reads
+-- every skill -- with a comment naming the column that did not exist.
+--
+-- Worse, the third idiom overloaded ONE value. `org_id is null` meant both
+-- "shared reference data, deliberately global" and "nobody set it", and
+-- world-model-ingestion/schema.sql records the measured consequence: an
+-- ordinary tenant calling register_upload() without the optional org argument
+-- wrote org_id NULL, and a DIFFERENT tenant read the row and retrieved its
+-- text through TEXT search. The patch was content.may_access_org(), which
+-- infers what the caller meant from whether their token happens to name any
+-- org at all. That is a workaround for a missing column, and this is the
+-- column.
+--
+-- Three values, one predicate, and the scope is stated rather than inferred:
+--
+--   private   the owner only                        (THE DEFAULT)
+--   org       every member of the owning org
+--   public    every authenticated caller
+--
+-- Orthogonal to roles, deliberately: a policy asks may_read() OR
+-- has_permission(), so an administrator still reads what the role grants and a
+-- scope never has to encode "except for admins".
+--
+-- NOT this: sharing with one NAMED user. spec.md §5's resource_grants is a
+-- separate mechanism with its own revocation and expiry story, and it lands as
+-- a fourth disjunct in may_read() when it lands. Coarse scope first.
+-- ------------------------------------------------------------
+
+-- THE VOCABULARY IS A TABLE, for the reason permission_kinds is one, and it
+-- carries what the vocabulary MEANS rather than only its labels.
+--
+-- `requires_org` is the fact that lets anything refuse `visibility = 'org'` on
+-- a row with no org; without it that rule would be a CHECK constraint written
+-- out once per scoped table, which is sixteen homes for one fact. `rank`
+-- orders the tiers so "no more open than" is comparable rather than a case
+-- expression somebody writes again each time.
+--
+-- Spelled `private` and not `me`: it is a property of the row, and `me` would
+-- be a property of whoever is reading.
+--
+-- A foreign key onto this table is also what publishes the vocabulary --
+-- percolate.enums() reads single-column foreign keys onto a text key and returns
+-- their admissible set, so every scoped column shows up in percolate.contract() with
+-- no line written in contract/schema.sql and nothing to keep in step.
+create table if not exists rbac.visibilities (
+    scope        text primary key,
+    rank         int  not null unique,
+    requires_org boolean not null,
+    description  text not null
+);
+
+insert into rbac.visibilities (scope, rank, requires_org, description) values
+    ('private', 0, false, 'the owner only'),
+    ('org',     1, true,  'every member of the owning org'),
+    ('public',  2, false, 'every authenticated caller')
+on conflict (scope) do update
+    set rank = excluded.rank,
+        requires_org = excluded.requires_org,
+        description = excluded.description;
+
+-- ORGS AND MEMBERSHIP -- the model specs/README.md defers and
+-- scenarios/round-4.md names as the open one.
+--
+-- Until now `aiq.current_org_ids()` read an `orgs` array off the JWT and
+-- nothing in Postgres said which orgs existed or who belonged to one. That is
+-- a working seam and not a tenancy system: the database could not refuse a
+-- token naming an org the user had been removed from, and the service minting
+-- the token had no table to read in order to fill the claim honestly. Removing
+-- somebody from an org took effect when their token expired, which is the one
+-- moment it must not wait for.
+create table if not exists rbac.orgs (
+    id          uuid primary key default gen_random_uuid(),
+    slug        text not null unique,
+    name        text not null,
+    created_at  timestamptz not null default now(),
+    updated_at  timestamptz not null default now()
+);
+create or replace trigger trg_rbac_orgs_touch before update on rbac.orgs
+    for each row execute function public.touch_updated_at();
+
+-- `role` here is the role WITHIN the org (who may administer it), and is
+-- deliberately not rbac.roles: those are deployment-wide capability grants,
+-- and conflating "admin of this org" with "admin of this installation" is how
+-- a tenant administrator ends up holding users/admin.
+create table if not exists rbac.org_members (
+    org_id  uuid not null references rbac.orgs(id) on delete cascade,
+    user_id uuid not null references rbac.users(id) on delete cascade,
+    role    text not null default 'member' check (role in ('member','admin')),
+    added_at timestamptz not null default now(),
+    primary key (org_id, user_id)
+);
+create index if not exists idx_org_members_user on rbac.org_members (user_id);
+
+-- THE MEMBERSHIP ROWS ARE THE TRUTH; THE TOKEN MAY ONLY NARROW THEM.
+--
+-- A token that carries no `orgs` claim gets the caller's full membership. A
+-- token that carries one gets the INTERSECTION -- so a claim can never widen
+-- reach beyond what the table grants, and revoking membership takes effect on
+-- the very next request rather than at token expiry. The narrowing direction
+-- is kept because it is load-bearing rather than tidy: an API key or an agent
+-- token issued for one org out of a user's several is exactly a claim that
+-- says less than the table does.
+--
+-- SECURITY DEFINER, and for the same non-obvious reason has_permission() is --
+-- see its header. org_members carries its own RLS policy, and that policy
+-- calls this function, so an invoker-rights read here is the identical two-hop
+-- cycle: policy -> function -> table -> policy. Postgres does not report it as
+-- policy recursion because the self-reference is laundered through a function;
+-- it reports `stack depth limit exceeded` from inside this function with
+-- nothing naming RLS at all. app_owner owns both this function and the table,
+-- and a table owner bypasses RLS by default, so running as the definer breaks
+-- the cycle at the first hop.
+--
+-- SETOF rather than uuid[], for the reason aiq.current_org_ids() gave when it
+-- held this job: `org_id = any (f())` gives up the SubPlan hoisting that
+-- `org_id in (select f())` gets, and at real table sizes that is the
+-- difference between evaluating the membership query once and once per row
+-- scanned.
+--
+-- The empty-string guard on the raw GUC is current_user_id()'s, for its
+-- reason: a pooled connection that has had request.jwt.claims SET LOCAL in any
+-- prior transaction resets an unregistered custom GUC to '' rather than NULL,
+-- and casting '' to jsonb throws.
+create or replace function rbac.current_org_ids() returns setof uuid as $$
+    with claim as (
+        select nullif(current_setting('request.jwt.claims', true), '')::jsonb -> 'orgs' as orgs
+    ), member_of as (
+        select m.org_id from rbac.org_members m
+         where m.user_id = rbac.current_user_id()
+    )
+    select m.org_id
+      from member_of m, claim c
+     where c.orgs is null
+        or m.org_id::text in (select jsonb_array_elements_text(c.orgs));
+$$ language sql stable security definer set search_path = pg_catalog, public;
+
+-- THE RULE, AS TEXT, BECAUSE A POLICY CANNOT AFFORD TO CALL IT AS A FUNCTION.
+--
+-- This was written first as `rbac.may_read(owner_id, org_id, visibility)` and
+-- every policy called it, which is the obvious shape and is 58 times slower.
+--
+-- MEASURED, on 52,000 rows in one table, same query, same session, PG19:
+--
+--     using (rbac.may_read(owner_id, org_id, visibility))   360.574 ms  792 buffers
+--     using (<the text below>)                                6.205 ms  392 buffers
+--
+-- The reason is structural rather than tunable. §9's InitPlan finding says an
+-- argument-free STABLE call wrapped in `(select ...)` is hoisted and evaluated
+-- once; a function taking ROW COLUMNS has nothing constant to hoist, so the
+-- usual escape is to let Postgres INLINE the function and hoist what is inside
+-- it. Postgres refuses to inline any `language sql` function whose body
+-- contains a sublink -- and `org_id in (select rbac.current_org_ids())` is
+-- one, necessarily, because the SubPlan is the whole point. So the two
+-- optimisations are mutually exclusive: a body that can be hoisted cannot be
+-- inlined, and the call therefore runs the membership query once per row
+-- scanned. Confirmed from the plan, not inferred -- `Filter:
+-- rbac.may_read(...)` with no InitPlan at all, against `Filter: ((visibility =
+-- 'public') OR (owner_id = (InitPlan expr_1).col1) OR (... (hashed SubPlan
+-- any_1) ...))`.
+--
+-- So the expression is GENERATED into each policy rather than called from it.
+-- That keeps one home for the fact -- this function is the only place the
+-- sentence is written, add_scope_policy() below is the only thing that emits
+-- it, and dev/tests/rbac/02 asserts every scoped table's live policy still
+-- matches what this returns -- while giving every consumer the hoisted plan.
+--
+-- Reading a row you own is deliberately independent of scope: `private` is a
+-- statement about everybody else.
+--
+-- Null comparisons fail closed on their own. A null owner_id against a null
+-- current_user_id() is NULL rather than true, so an anonymous caller reading
+-- an unowned private row gets nothing, and workflow's rule that a system-owned
+-- run is "not owned by everyone" falls out rather than needing its own clause.
+create or replace function rbac.scope_predicate() returns text as $fn$
+    select $q$(visibility = 'public'
+       or owner_id = (select rbac.current_user_id())
+       or (visibility = 'org' and org_id in (select rbac.current_org_ids())))$q$;
+$fn$ language sql immutable;
+
+-- The WITH CHECK half. Same generation, same reason -- a bulk insert would pay
+-- the membership query per row otherwise -- and the same three rules stated
+-- once:
+--   you may write only rows you own,
+--   into an org you belong to,
+--   and 'org' needs an org.
+--
+-- The first arm is content.may_access_org()'s, kept: a connection with no
+-- request.jwt.claims at all is a service connection, a migration or a psql
+-- session, and is not a caller this is about.
+create or replace function rbac.scope_write_predicate() returns text as $fn$
+    select $q$(nullif(current_setting('request.jwt.claims', true), '') is null
+       or ((owner_id is null or owner_id = (select rbac.current_user_id()))
+           and (org_id is null or org_id in (select rbac.current_org_ids()))
+           and (visibility <> 'org' or org_id is not null)))$q$;
+$fn$ language sql immutable;
+
+-- THE SAME TWO RULES AS FUNCTIONS, for the callers that are not policies.
+--
+-- These are what a SECURITY DEFINER function calls -- once, about one row it
+-- has already fetched -- where the per-row cost above does not arise and a
+-- readable name is worth more than an inlined expression. may_write() is the
+-- direct replacement for content.may_access_org() at its ten call sites in
+-- world-model-ingestion and three in trace-field.
+--
+-- That function lived in the content schema and was called from trace-field's
+-- policies, so the rule about who may write into which org was owned by
+-- whichever subsystem happened to need it first and imported across a boundary
+-- by the next. It also had to INFER the caller's intent -- "a token that names
+-- no org is a single-tenant deployment, so null means ours" -- because there
+-- was no column in which to say it. There is now, so the inference is gone: a
+-- null org with `public` is a deliberate global write, and a null org with
+-- `org` is refused by the trigger below rather than guessed about.
+--
+-- Not STRICT: owner_id and org_id are legitimately null on the same row (an
+-- unowned public reference node), and a strict function would answer null for
+-- exactly the row the rule is clearest about.
+create or replace function rbac.may_read(
+    p_owner_id uuid, p_org_id uuid, p_visibility text
+) returns boolean as $$
+    select p_visibility = 'public'
+        or p_owner_id = rbac.current_user_id()
+        or (p_visibility = 'org'
+            and p_org_id is not null
+            and p_org_id in (select rbac.current_org_ids()));
+$$ language sql stable parallel safe;
+
+create or replace function rbac.may_write(
+    p_owner_id uuid, p_org_id uuid, p_visibility text
+) returns boolean as $$
+    select nullif(current_setting('request.jwt.claims', true), '') is null
+        or ((p_owner_id is null or p_owner_id = rbac.current_user_id())
+            and (p_org_id is null or p_org_id in (select rbac.current_org_ids()))
+            and (p_visibility <> 'org' or p_org_id is not null));
+$$ language sql stable parallel safe;
+
+-- The org half on its own, for callers that have an org and not yet a row --
+-- "may I act inside this tenancy at all". This is the direct rename of
+-- content.may_access_org(), whose thirteen call sites across
+-- world-model-ingestion and trace-field are what makes it worth having as a
+-- name rather than as a third of may_write().
+--
+-- ONE ARM OF THAT FUNCTION IS DELIBERATELY GONE. It refused a null org to any
+-- caller whose token named one, and the reasoning was sound for the schema it
+-- was written against: `org_id is null` meant "every tenant reads this", so
+-- writing one was the widest cross-tenant act available and not the absence of
+-- an act. It was measured as a real disclosure, through nothing more than
+-- register_upload()'s optional argument defaulting to null.
+--
+-- Scope removes the premise rather than the check. A null org is now just a
+-- row with no tenancy; whether anyone else reads it is `visibility`, which
+-- defaults to `private`. Publishing to everyone is spelled `public` and is a
+-- thing somebody chose, so the act that needed refusing cannot be performed by
+-- omission any more -- which is the outcome that check was standing in for.
+create or replace function rbac.may_access_org(p_org_id uuid)
+returns boolean as $$
+    select nullif(current_setting('request.jwt.claims', true), '') is null
+        or p_org_id is null
+        or p_org_id in (select rbac.current_org_ids());
+$$ language sql stable parallel safe;
+
+-- WHAT A WRITE PATH SHOULD SET WHEN NOBODY SAID.
+--
+-- Every SECURITY DEFINER writer in this collection -- register_upload,
+-- upsert_agent, upsert_skill, apply_plugin -- bypasses RLS, so the column
+-- default cannot help it: it will cheerfully write a `private` row with a null
+-- owner, which is a row NOBODY can read, including whoever just created it.
+-- That is not a theoretical failure mode; it is what each of those functions
+-- did the moment the columns existed, and the symptom is an upload that
+-- succeeds and then cannot be found.
+--
+-- So the rule is stated once, here, and every writer calls it:
+--
+--   an org is named           -> org      (working inside a tenancy, whoever
+--                                          is doing the working)
+--   no org, no request identity -> public  (an operator installing deployment
+--                                          configuration: the seeded agents,
+--                                          the sample corpus, a migration)
+--   no org, a caller            -> private (yours until you say otherwise)
+--
+-- The middle arm is the one worth arguing with, so: it is the same signal
+-- may_write() already treats as trusted, it is unreachable over PostgREST
+-- (which always sets the GUC), and the alternative -- seeding the extension's
+-- own agents as `private` with a null owner -- installs configuration no user
+-- can see and no user can fix.
+create or replace function rbac.default_visibility(p_org_id uuid default null)
+returns text as $$
+    select case
+        -- THE ORG IS CHECKED FIRST, and the order is the whole correctness of
+        -- this function. Written the other way round -- claimless first -- a
+        -- caller who NAMED an org and had no request identity got `public`:
+        -- the migration, the seed and every test fixture that registers
+        -- content on a tenant's behalf published that tenant's document to the
+        -- deployment. Measured as `org B can see org A's resource row` from
+        -- dev/tests/content/01, which is the exact sentence §4b's original bug
+        -- was reported in, reached from the opposite direction. Naming an org
+        -- is a statement about scope in any reading; nothing should override
+        -- it.
+        when p_org_id is not null then 'org'
+        -- No org and no request identity: an operator installing deployment
+        -- configuration -- the seeded agents, the sample corpus, a migration.
+        -- These are for everyone by construction, and it is the only case
+        -- where "for everyone" is not a decision somebody should have to make.
+        when nullif(current_setting('request.jwt.claims', true), '') is null then 'public'
+        else 'private'
+    end;
+$$ language sql stable parallel safe;
+
+-- AND THE SAME RULE AT A LAYER NOTHING CAN ROUTE AROUND.
+--
+-- The write policy holds it for callers arriving through RLS. Every SECURITY
+-- DEFINER write path in this collection bypasses RLS by design -- that is what
+-- makes register_upload() and complete_task() work -- so a rule enforced only
+-- in a policy is not enforced on the paths that have historically got it
+-- wrong. register_upload() is precisely the function that wrote the row two
+-- tenants could read.
+--
+-- A trigger and not a CHECK constraint, because the fact is `requires_org` in
+-- rbac.visibilities and a CHECK cannot read another table. Written out inline
+-- it would be sixteen copies of one sentence, and a fourth scope added later
+-- would need all sixteen edited. One function, attached by
+-- add_scope_columns() to every table that gets the columns, reading the
+-- vocabulary -- so the day `team` is added, nothing here changes.
+create or replace function rbac.enforce_visibility() returns trigger as $$
+declare v_requires_org boolean;
+begin
+    select requires_org into v_requires_org
+      from rbac.visibilities where scope = new.visibility;
+    if v_requires_org and new.org_id is null then
+        raise exception
+            'visibility ''%'' requires an org_id, and this row has none',
+            new.visibility
+            using hint = 'set org_id, or use a visibility that does not '
+                         'require one (see rbac.visibilities.requires_org)';
+    end if;
+    return new;
+end;
+$$ language plpgsql;
+
+-- ADDING SCOPE TO A TABLE IS ONE CALL, not a paragraph of DDL repeated per
+-- consumer -- which is the only way sixteen tables end up with identical
+-- columns, an identical foreign key, an identical trigger and identical
+-- indexes. The failure this prevents is specific and quiet: a table that gets
+-- the `visibility` column and not the trigger accepts `org` with a null org
+-- and reads as scoped while being invisible to everyone.
+--
+-- regclass rather than text for the argument: Postgres resolves it before the
+-- function body runs, so an unknown table fails at the call rather than inside
+-- a format() string, and there is no name to inject through.
+--
+-- The `alter column ... set default` after `add column if not exists` is §1's
+-- lesson about users.status: `if not exists` is a no-op on a table that
+-- already has the column, so on every database that already ran an earlier
+-- version the default would silently be whatever it was before. The upgrade
+-- script is this file replayed, which is exactly that path.
+--
+-- The indexes are created only when nothing already leads with that column.
+-- agentic.runs carries (owner_id, created_at desc) and workflow.runs carries
+-- idx_runs_owner; a second index on the leading column of an existing one is
+-- write cost for no read.
+create or replace function rbac.add_scope_columns(
+    p_table regclass,
+    -- WHAT EXISTING ROWS WITH NO ORG BECOME, and it is the entire upgrade
+    -- story for this change, so it lives here rather than in
+    -- specs/migrations/.
+    --
+    -- A prepended migration delta cannot express this: the delta runs BEFORE
+    -- the replayed schema, so at that point the `visibility` column does not
+    -- exist on the database being upgraded and there is nothing to backfill
+    -- into. What CAN express it is the statement that adds the column, which
+    -- is this one, and which knows whether it is adding it for the first time.
+    --
+    -- The value differs per table because the idiom being replaced differed:
+    --
+    --   'public'  for the tables that were org-or-null -- aiq.nodes,
+    --             content.resources, workflow.deposits. There, `org_id is
+    --             null` genuinely meant "every tenant reads this", so
+    --             backfilling anything else would HIDE rows that were visible,
+    --             and the sample graph's shared tier is exactly that.
+    --   'public'  for agentic.agents/skills/tool_servers/plugins, whose policy
+    --             was literally `using (true)`.
+    --   'private' for the owner-scoped tables -- workflow.runs,
+    --             agentic.sessions -- where nobody but the owner could ever
+    --             see a row and 'public' would be a disclosure.
+    --
+    -- Rows that DO have an org always become 'org' regardless, because that is
+    -- what an org_id meant on every one of those tables.
+    --
+    -- The default is 'private' so that a caller who does not think about it
+    -- gets the fail-closed answer; the tables above each pass their own.
+    p_backfill_visibility text default 'private'
+) returns void as $$
+declare v_tbl text; v_added boolean;
+begin
+    select c.relname into v_tbl from pg_class c where c.oid = p_table;
+
+    -- Whether THIS call is the one adding the column decides whether the
+    -- backfill runs. The schema is replayed on every upgrade, so a backfill
+    -- that ran unconditionally would rewrite `visibility` on every existing
+    -- row at every upgrade -- silently undoing every sharing decision anyone
+    -- had made since. Once is a migration; every time is data loss with a
+    -- changelog entry.
+    v_added := not exists (
+        select 1 from pg_attribute a
+         where a.attrelid = p_table and a.attname = 'visibility'
+           and not a.attisdropped);
+
+    execute format(
+        'alter table %s add column if not exists owner_id uuid references rbac.users(id)', p_table);
+    execute format(
+        'alter table %s add column if not exists org_id uuid', p_table);
+    -- The org foreign key is stated separately rather than inline, because
+    -- `add column if not exists` is a NO-OP on a table that already has the
+    -- column -- and most of the tables adopting scope already have an org_id
+    -- that was never a reference to anything. aiq.nodes, content.resources and
+    -- workflow.schedules all carried a bare uuid, so an org_id naming no org
+    -- was a row nobody could ever see and nothing could report.
+    execute format('alter table %s drop constraint if exists %I',
+                   p_table, v_tbl || '_org_id_fkey');
+    execute format(
+        'alter table %s add constraint %I foreign key (org_id) references rbac.orgs(id)',
+        p_table, v_tbl || '_org_id_fkey');
+    -- Added NULLABLE, backfilled, then made NOT NULL -- three statements where
+    -- one would do on an empty table, because on a table with rows in it the
+    -- one-statement form fills every row with the DEFAULT and the backfill has
+    -- nowhere left to run.
+    execute format(
+        'alter table %s add column if not exists visibility text', p_table);
+    if v_added then
+        execute format(
+            'update %s set visibility = case when org_id is null then %L else ''org'' end',
+            p_table, p_backfill_visibility);
+    end if;
+    execute format(
+        'update %s set visibility = %L where visibility is null',
+        p_table, p_backfill_visibility);
+    execute format(
+        'alter table %s alter column visibility set not null', p_table);
+    -- Restated after the add for §1's reason about users.status: `add column
+    -- if not exists` is a no-op on a database that already has the column, so
+    -- a default stated only there would apply to fresh installs alone -- and
+    -- the upgrade script is this file replayed, which is precisely the path an
+    -- existing deployment takes.
+    execute format(
+        'alter table %s alter column visibility set default ''private''', p_table);
+
+    -- Dropped before added: a constraint has neither OR REPLACE nor IF NOT
+    -- EXISTS, and build-sql.py's idempotency check refuses the pair written
+    -- the other way round.
+    execute format('alter table %s drop constraint if exists %I',
+                   p_table, v_tbl || '_visibility_fkey');
+    execute format(
+        'alter table %s add constraint %I foreign key (visibility) references rbac.visibilities(scope)',
+        p_table, v_tbl || '_visibility_fkey');
+
+    if not exists (select 1 from pg_index i
+                   join pg_attribute a on a.attrelid = i.indrelid and a.attnum = i.indkey[0]
+                   where i.indrelid = p_table and a.attname = 'org_id') then
+        execute format('create index %I on %s (org_id) where org_id is not null',
+                       'idx_' || v_tbl || '_org', p_table);
+    end if;
+    if not exists (select 1 from pg_index i
+                   join pg_attribute a on a.attrelid = i.indrelid and a.attnum = i.indkey[0]
+                   where i.indrelid = p_table and a.attname = 'owner_id') then
+        execute format('create index %I on %s (owner_id)',
+                       'idx_' || v_tbl || '_owner', p_table);
+    end if;
+
+    execute format(
+        'create or replace trigger trg_%s_visibility before insert or update on %s '
+        'for each row execute function rbac.enforce_visibility()', v_tbl, p_table);
+end;
+$$ language plpgsql;
+
+-- Membership administration, following grant_role()'s shape exactly --
+-- including the lesson it was rewritten for: the TARGET is a parameter and the
+-- ACTOR never is. p_actor_id as an argument was a working privilege escalation
+-- there, and would be the identical one here.
+--
+-- Either a deployment-wide users/admin or an admin OF THAT ORG may write
+-- membership, which is what makes tenant self-administration possible without
+-- handing a tenant the installation.
+create or replace function rbac.add_org_member(
+    p_org_id uuid, p_user_id uuid, p_role text default 'member'
+) returns void as $$
+begin
+    if not (rbac.has_permission(rbac.current_user_id(), 'orgs', 'admin')
+            or exists (select 1 from rbac.org_members m
+                        where m.org_id = p_org_id
+                          and m.user_id = rbac.current_user_id()
+                          and m.role = 'admin')) then
+        raise exception 'not authorized to administer this org';
+    end if;
+    insert into rbac.org_members (org_id, user_id, role)
+    values (p_org_id, p_user_id, p_role)
+    on conflict (org_id, user_id) do update set role = excluded.role;
+    insert into rbac.auth_events (user_id, event_type, detail)
+    values (p_user_id, 'org_member_added',
+            jsonb_build_object('org_id', p_org_id, 'role', p_role,
+                               'by', rbac.current_user_id()));
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+create or replace function rbac.remove_org_member(p_org_id uuid, p_user_id uuid)
+returns void as $$
+begin
+    if not (rbac.has_permission(rbac.current_user_id(), 'orgs', 'admin')
+            or exists (select 1 from rbac.org_members m
+                        where m.org_id = p_org_id
+                          and m.user_id = rbac.current_user_id()
+                          and m.role = 'admin')) then
+        raise exception 'not authorized to administer this org';
+    end if;
+    delete from rbac.org_members where org_id = p_org_id and user_id = p_user_id;
+    insert into rbac.auth_events (user_id, event_type, detail)
+    values (p_user_id, 'org_member_removed',
+            jsonb_build_object('org_id', p_org_id, 'by', rbac.current_user_id()));
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- The pairs the two functions and the two policies below consult, declared so
+-- role_permissions' foreign key will accept them. bootstrap_admin() grants
+-- every pair in permission_kinds, so the first administrator picks these up
+-- with no line added there.
+insert into rbac.permission_kinds (resource, action, checked_by) values
+    ('orgs',        'select', 'policy orgs_member_visible'),
+    ('orgs',        'admin',  'rbac.add_org_member / rbac.remove_org_member'),
+    ('org_members', 'select', 'policy org_members_own_orgs')
+on conflict do nothing;
+
+-- ADDING SCOPE TO A TABLE IS TWO CALLS, AND NEITHER IS A POLICY SOMEBODY WROTE.
+--
+--     select rbac.add_scope_columns('<schema>.<table>');
+--     select rbac.add_scope_policy ('<schema>.<table>', '<resource>');
+--
+-- That is the whole of what a consuming module writes, and the second call
+-- generates exactly this, from scope_predicate() and scope_write_predicate():
+--
+--   create policy <t>_scoped on <schema>.<table> for select
+--     using ((visibility = 'public'
+--             or owner_id = (select rbac.current_user_id())
+--             or (visibility = 'org' and org_id in (select rbac.current_org_ids())))
+--            or (select rbac.has_permission(rbac.current_user_id(), '<resource>', 'select')));
+--
+-- Generated rather than written out, because it has to be written out --
+-- calling may_read() from the policy measured 58x slower (see its header) --
+-- and sixteen hand-copies of a security predicate is how one of them ends up
+-- subtly different from the other fifteen with nothing to notice. The
+-- expression has one home, every table gets that home's current text, and
+-- dev/tests/rbac/02 asserts each live policy still equals what
+-- scope_predicate() returns rather than trusting that nobody edited one.
+--
+-- Every arm is wrapped in (select ...) and none takes a row column, so §9's
+-- InitPlan hoisting applies to all of them: the caller's id and org set are
+-- each computed once per query rather than once per row scanned.
+--
+-- The `<resource>` argument is optional and omitting it means no role
+-- override -- correct for a table where a deployment-wide permission to read
+-- every tenant's rows should not exist at all.
+--
+-- A table whose visibility DERIVES from another's (tasks from runs, chunks
+-- from resources, node_keys from nodes) takes neither call: it keeps its
+-- `exists (select 1 from <parent> ...)` join. Two copies of one tenancy fact
+-- is what let node_keys.org_id drift from nodes.org_id and made LOOKUP return
+-- nothing while reporting no such key.
+create or replace function rbac.add_scope_policy(
+    p_table regclass, p_resource text default null
+) returns void as $$
+declare v_tbl text; v_using text;
+begin
+    select c.relname into v_tbl from pg_class c where c.oid = p_table;
+
+    v_using := rbac.scope_predicate();
+    if p_resource is not null then
+        v_using := v_using || format(
+            E'\n       or (select rbac.has_permission(rbac.current_user_id(), %L, ''select''))',
+            p_resource);
+    end if;
+
+    execute format('alter table %s enable row level security', p_table);
+    -- Dropped before created, for the reason every policy in this collection
+    -- is: CREATE POLICY has no OR REPLACE, and an absent policy is not the
+    -- same as a corrected one on a database that already has the old text.
+    execute format('drop policy if exists %I on %s', v_tbl || '_scoped', p_table);
+    execute format('create policy %I on %s for select using (%s)',
+                   v_tbl || '_scoped', p_table, v_using);
+    execute format('drop policy if exists %I on %s', v_tbl || '_scoped_write', p_table);
+    execute format('create policy %I on %s for insert with check (%s)',
+                   v_tbl || '_scoped_write', p_table, rbac.scope_write_predicate());
+end;
+$$ language plpgsql;
 
 -- ------------------------------------------------------------
 -- 3. Refresh tokens — JWTs are stateless and can't be revoked, so
@@ -8671,6 +9302,48 @@ grant execute on function rbac.revoke_all_sessions() to authenticated;
 -- widened search_path anywhere.
 grant execute on function rbac.has_permission(uuid, text, text) to web_anon, authenticated;
 grant execute on function rbac.current_user_id() to web_anon, authenticated;
+-- §2b's scope predicates, granted for exactly the reason above: they are
+-- called from RLS policies in five other schemas, and a USING clause has no
+-- security-definer indirection to hide behind. current_org_ids() is granted
+-- rather than the membership table -- it is SECURITY DEFINER, so no caller
+-- needs SELECT on rbac.org_members to be scoped by it, which is the point.
+--
+-- `worker` is on this list and holds no table grant anywhere (rbac/02 asserts
+-- that). It needs may_write() because content's SECURITY DEFINER write path
+-- calls it while running work on a user's behalf, exactly as it needed
+-- content.may_access_org() before.
+grant execute on function rbac.current_org_ids() to web_anon, authenticated, api_viewer, worker;
+grant execute on function rbac.may_read(uuid, uuid, text) to web_anon, authenticated, api_viewer, worker;
+grant execute on function rbac.may_write(uuid, uuid, text) to web_anon, authenticated, api_viewer, worker;
+grant execute on function rbac.may_access_org(uuid) to web_anon, authenticated, api_viewer, worker;
+-- scope_predicate/scope_write_predicate/default_visibility are NOT granted,
+-- and surface.sql's reverse check is what settled it: they were, and it
+-- reported them as reachable-but-undeclared, which is the right complaint.
+--
+-- None of the three is called at query time. The two predicates are consumed
+-- by add_scope_policy() at DDL time and what ends up in a policy is their
+-- expanded TEXT, not a call to them; default_visibility() is called only from
+-- inside SECURITY DEFINER writers, which run as app_owner. So the grants bought
+-- nothing and widened the anonymous surface by three functions -- exactly the
+-- allow-by-omission this section exists to refuse.
+grant execute on function rbac.add_org_member(uuid, uuid, text) to authenticated;
+grant execute on function rbac.remove_org_member(uuid, uuid) to authenticated;
+-- add_scope_columns() executes DDL and stays owner-only, like
+-- aiq.register_entity_table(): a deployment calls it during migration, never
+-- a caller over REST.
+
+-- The vocabulary is readable by everyone, and that is not a leak -- it is the
+-- published contract. percolate.enums() resolves a foreign key onto a text key by
+-- READING the referenced rows, and it runs as its caller, so without this
+-- grant every scoped column would come back from percolate.contract() with an empty
+-- admissible set: a vocabulary reported as unconstrained rather than as
+-- three values, which is the worst direction for that error to point.
+-- NOT to `worker`, and the omission is a rule rather than an oversight:
+-- rbac/02 §4 asserts that no service role holds a direct table grant anywhere,
+-- because a worker's only reachable surface being SECURITY DEFINER functions
+-- is what makes "bring your own worker" safe to offer. A worker never needs to
+-- read the vocabulary -- it calls functions that enforce it.
+grant select on rbac.visibilities to web_anon, authenticated, api_viewer;
 -- set_password, verify_password, issue_refresh_token, attempt_login,
 -- request_password_reset: stay internal-only (owner-only EXECUTE), reachable
 -- only from within the security-definer functions above that call them, or
@@ -8723,6 +9396,13 @@ alter table rbac.refresh_tokens enable row level security;
 alter table rbac.api_keys enable row level security;
 alter table rbac.auth_events enable row level security;
 alter table rbac.user_roles enable row level security;
+alter table rbac.orgs enable row level security;
+alter table rbac.org_members enable row level security;
+-- The vocabulary gets RLS ENABLEd with an explicitly permissive policy rather
+-- than left off, for agentic's reason: "no policy" reads as an oversight and a
+-- policy that says true reads as a decision. There is nothing tenant-specific
+-- about the fact that 'org' requires an org.
+alter table rbac.visibilities enable row level security;
 
 -- Every predicate below wraps current_user_id()/has_permission() in a scalar
 -- subquery -- (select ...) -- rather than calling them bare. Both are STABLE
@@ -8761,6 +9441,26 @@ create policy auth_events_self_or_admin on rbac.auth_events for select
 drop policy if exists user_roles_self_or_admin on rbac.user_roles;
 create policy user_roles_self_or_admin on rbac.user_roles for select
   using (user_id = (select rbac.current_user_id()) or (select rbac.has_permission(rbac.current_user_id(), 'user_roles', 'select')));
+
+-- An org is visible to its members. Not to everyone: the list of orgs in a
+-- deployment is the customer list, and `select * from orgs` answering it for
+-- any authenticated caller is the same disclosure request_password_reset
+-- refuses to answer for addresses.
+drop policy if exists orgs_member_visible on rbac.orgs;
+create policy orgs_member_visible on rbac.orgs for select
+  using (id in (select rbac.current_org_ids())
+         or (select rbac.has_permission(rbac.current_user_id(), 'orgs', 'select')));
+-- Membership is visible for the orgs you are in -- "who else is here" is a
+-- question a member of a tenant may ask, and one nobody else may. This is the
+-- policy whose existence makes current_org_ids() have to be SECURITY DEFINER;
+-- see its header for the recursion it would otherwise cause.
+drop policy if exists org_members_own_orgs on rbac.org_members;
+create policy org_members_own_orgs on rbac.org_members for select
+  using (org_id in (select rbac.current_org_ids())
+         or (select rbac.has_permission(rbac.current_user_id(), 'org_members', 'select')));
+drop policy if exists visibilities_are_the_contract on rbac.visibilities;
+create policy visibilities_are_the_contract on rbac.visibilities for select
+  using (true);
 
 -- Read paths for users/refresh_tokens/api_keys are VIEWS, not column-level
 -- grants on the base table -- confirmed empirically that a partial
@@ -8806,6 +9506,11 @@ grant usage on schema rbac to api_viewer;
 grant select on rbac.users, rbac.refresh_tokens, rbac.api_keys to api_viewer;
 grant execute on function rbac.current_user_id() to api_viewer;
 grant execute on function rbac.has_permission(uuid, text, text) to api_viewer;
+-- Same reasoning for §2b's predicates: the *_api views are owner-privileged,
+-- so every policy on a scoped table is evaluated as api_viewer.
+grant execute on function rbac.current_org_ids() to api_viewer;
+grant execute on function rbac.may_read(uuid, uuid, text) to api_viewer;
+grant select on rbac.orgs, rbac.org_members to api_viewer;
 -- has_permission() joins these two, so the view owner must be able to read
 -- them for the policy predicate to evaluate at all.
 grant select on rbac.user_roles, rbac.role_permissions to api_viewer;
@@ -8942,18 +9647,17 @@ end $$;
 -- spec.md §13 actually meant. owner_id is nullable on purpose: a run started
 -- by the system (a scheduled poll, a consolidation run) has no human owner,
 -- and must not be forced to invent one.
-alter table workflow.runs add column if not exists owner_id uuid references rbac.users(id);
-create index if not exists idx_runs_owner on workflow.runs (owner_id);
+-- A RUN GAINS AN ORG AND A SCOPE, not just an owner.
+--
+-- Ownership alone made a run unshareable: `owner_id = current_user_id()` has
+-- no way to say "my colleague may watch this", so the only route to a run
+-- somebody else started was a deployment-wide workflow_runs/select, which is
+-- permission to read EVERY tenant's runs. The two available answers were
+-- nobody and everybody.
+select rbac.add_scope_columns('workflow.runs');
+select rbac.add_scope_policy ('workflow.runs', 'workflow_runs');
 
-alter table workflow.runs enable row level security;
 alter table workflow.tasks enable row level security;
-
--- Same (select ...) InitPlan wrapping as user-rbac/schema.sql's policies --
--- has_permission() runs a join, so bare calls re-evaluate it per row scanned.
-drop policy if exists runs_owner_or_permitted on workflow.runs;
-create policy runs_owner_or_permitted on workflow.runs for select
-  using (owner_id = (select rbac.current_user_id())
-         or (select rbac.has_permission(rbac.current_user_id(), 'workflow_runs', 'select')));
 
 -- Tasks inherit their run's visibility rather than restating the rule -- one
 -- place to change it, and a task has no owner of its own.
@@ -8965,8 +9669,17 @@ create policy tasks_via_run on workflow.tasks for select
 -- ownership split user-rbac/roles.sql §2 exists for. A view owned by the
 -- table owner bypasses RLS and returns every row to every caller.
 create or replace view workflow.runs_api as
+-- The scope columns are APPENDED rather than slotted in beside owner_id, and
+-- the position is forced rather than chosen: `create or replace view` may only
+-- ADD columns at the end. Inserting one in the middle is
+-- `ERROR: cannot change name of view column "status" to "org_id"`, which a
+-- fresh install never sees -- the view is being created, not replaced -- and
+-- every upgrading database hits. Found by dev/upgrade-converges.sh, which is
+-- the only check that applies this file to a database that already has the
+-- old view.
   select id, workflow_def_id, owner_id, status, compensation_state,
-         external_id, input, context, trace_id, created_at, updated_at, completed_at
+         external_id, input, context, trace_id, created_at, updated_at, completed_at,
+         org_id, visibility
   from workflow.runs;
 create or replace view workflow.tasks_api as
   select id, run_id, step_key, kind, queue, status, attempts, max_attempts,
@@ -9367,13 +10080,11 @@ create or replace trigger trg_set_schedule_owner
     before insert on workflow.schedules
     for each row execute function workflow.set_schedule_owner();
 
-alter table workflow.schedules enable row level security;
-
--- (select ...) wrapping, as everywhere: has_permission() runs a join.
-drop policy if exists schedules_owner_or_permitted on workflow.schedules;
-create policy schedules_owner_or_permitted on workflow.schedules for select
-  using (owner_id = (select rbac.current_user_id())
-         or (select rbac.has_permission(rbac.current_user_id(), 'workflow_schedules', 'select')));
+-- schedules already carried BOTH owner_id and org_id and used only the first:
+-- the org column was added for a scheduled run to be RLS-scoped by and then
+-- had no policy that read it. It has one now.
+select rbac.add_scope_columns('workflow.schedules');
+select rbac.add_scope_policy ('workflow.schedules', 'workflow_schedules');
 
 -- The real check, replacing schema.sql §19's deny-by-default stand-in.
 -- Mirrors assert_run_access() exactly, including its rule about system-owned
@@ -9436,7 +10147,9 @@ create or replace view workflow.schedules_api as
   select id, name, workflow_name, cron_expr, timezone, input, enabled,
          overlap_policy, owner_id, org_id, last_tick_at, last_fired_at,
          last_run_id, fire_count, skip_count, last_error, last_error_at,
-         created_at, updated_at
+         created_at, updated_at,
+         -- appended, not slotted in: see runs_api above
+         visibility
   from workflow.schedules;
 
 grant select on workflow.schedules to api_viewer;
@@ -9776,9 +10489,34 @@ create table if not exists aiq.entity_registry (
     key_expr      text not null,          -- SQL expr -> canonical key
     summary_expr  text not null default 'null',
     org_expr      text not null default 'null',
+    -- SQL expr -> one of rbac.visibilities.scope. Defaulted from org_expr
+    -- rather than required, because that default IS the semantics this layer
+    -- had before scope existed: a node with no org was readable by everyone
+    -- and a node with one was readable by that org. Stating it as an
+    -- expression is what makes the OTHER case sayable -- a source table with
+    -- its own visibility column projects private rows -- which `org_id is
+    -- null means public` never could.
+    visibility_expr text not null default 'null',
     include_where text not null default 'true',
     registered_at timestamptz not null default now()
 );
+-- ...AND ON A DATABASE THAT ALREADY HAS THE TABLE, where the line above is a
+-- no-op. Same shape as rbac's `alter column status set default`: the upgrade
+-- script is this file replayed, and `create table if not exists` is perfectly
+-- idempotent while being silently incomplete.
+alter table aiq.entity_registry
+    add column if not exists visibility_expr text not null default 'null';
+
+-- THE PREVIOUS SIGNATURE IS DROPPED, not left beside this one. Adding
+-- p_visibility_expr with a default does not replace the six-argument function;
+-- it creates a seventh-argument OVERLOAD, and then every existing six-argument
+-- call is `function aiq.register_entity_table(unknown, unknown, unknown,
+-- unknown, unknown, unknown) is not unique` -- ambiguous, because both
+-- candidates match. A fresh install never sees it (there is no old function to
+-- be ambiguous with) and every upgrading database fails on the first
+-- registration. Found by dev/upgrade-converges.sh; the same drop is in front
+-- of content.register_upload for the same reason.
+drop function if exists aiq.register_entity_table(text,text,text,text,text,text);
 
 create or replace function aiq.register_entity_table(
     p_entity_type   text,
@@ -9786,7 +10524,17 @@ create or replace function aiq.register_entity_table(
     p_key_expr      text,
     p_summary_expr  text default 'null',
     p_org_expr      text default 'null',
-    p_include_where text default 'true'
+    p_include_where text default 'true',
+    -- LAST, and that position is not cosmetic. Added before p_include_where,
+    -- every existing positional caller silently handed its inclusion predicate
+    -- to this parameter instead: `content.resources` registered with
+    -- visibility_expr = "n.status = 'ready'", which projects the text `true`
+    -- or `false` into a column whose foreign key admits neither. Measured as
+    -- `insert or update on table "nodes" violates foreign key constraint
+    -- "nodes_visibility_fkey"` from the corpus seed -- loud, but loud in a
+    -- place that named neither the argument nor the caller. A new optional
+    -- parameter goes at the end.
+    p_visibility_expr text default null
 ) returns void as $$
 declare
     -- Named after the ENTITY TYPE, not after the source table's short name.
@@ -9802,6 +10550,14 @@ declare
     v_ins   text := quote_ident('project_' || p_entity_type || '_ins');
     v_del   text := quote_ident('project_' || p_entity_type || '_del');
     v_other text;
+    -- Defaulted HERE and not in the signature, because the default is derived
+    -- from another argument: "no org means everyone, an org means that org" is
+    -- exactly what this layer meant by org_id before rbac.visibilities existed,
+    -- so a registration that says nothing about visibility keeps the behaviour
+    -- it had rather than projecting every node private and going dark.
+    v_vis text := coalesce(p_visibility_expr,
+                           format('case when %s is null then ''public'' else ''org'' end',
+                                  p_org_expr));
 begin
     -- One table, one entity type. Two types over one table cannot both work
     -- anyway -- the trigger names are fixed, so the second registration's
@@ -9818,11 +10574,14 @@ begin
     end if;
 
     insert into aiq.entity_registry
-        (entity_type, source_table, key_expr, summary_expr, org_expr, include_where)
-    values (p_entity_type, p_source_table, p_key_expr, p_summary_expr, p_org_expr, p_include_where)
+        (entity_type, source_table, key_expr, summary_expr, org_expr,
+         visibility_expr, include_where)
+    values (p_entity_type, p_source_table, p_key_expr, p_summary_expr, p_org_expr,
+            v_vis, p_include_where)
     on conflict (entity_type) do update
         set source_table = excluded.source_table, key_expr = excluded.key_expr,
             summary_expr = excluded.summary_expr, org_expr = excluded.org_expr,
+            visibility_expr = excluded.visibility_expr,
             include_where = excluded.include_where;
 
     -- One projection function per registered type, generated from the
@@ -9845,11 +10604,15 @@ begin
         create or replace function aiq.%1$s() returns trigger as $b$
         begin
             -- 1. Rows that belong: upsert identity.
-            insert into aiq.nodes (entity_type, entity_id, org_id, summary)
-            select %2$L, n.id, %3$s, %4$s from new_rows n where %5$s
+            insert into aiq.nodes (entity_type, entity_id, org_id, summary, visibility)
+            select %2$L, n.id, %3$s, %4$s, %7$s from new_rows n where %5$s
             on conflict (entity_type, entity_id) do update
+                -- visibility is projected on UPDATE for org_id's reason: the
+                -- source row is the truth, and a node left at the scope it had
+                -- when it was first projected would go on being readable after
+                -- the row it mirrors stopped being.
                 set summary = excluded.summary, org_id = excluded.org_id,
-                    updated_at = now();
+                    visibility = excluded.visibility, updated_at = now();
 
             -- 2. Rows that no longer belong: evict. coalesce(..., false)
             --    rather than `not (...)` because a predicate that evaluates to
@@ -9886,7 +10649,8 @@ begin
             return null;
         end;
         $b$ language plpgsql;
-    $f$, v_ins, p_entity_type, p_org_expr, p_summary_expr, p_include_where, p_key_expr);
+    $f$, v_ins, p_entity_type, p_org_expr, p_summary_expr, p_include_where,
+        p_key_expr, v_vis);
 
     execute format($f$
         create or replace function aiq.%1$s() returns trigger as $b$
@@ -9966,12 +10730,23 @@ begin
     select * into r from aiq.entity_registry where entity_type = p_entity_type;
     if not found then raise exception 'entity type % not registered -- SCHEMA "graph" lists the registered ones', p_entity_type; end if;
 
+    -- visibility_expr is projected here as well as in the live trigger, and
+    -- the two agreeing is the whole point of both reading the registry row.
+    -- Omitting it here was a real bug for the length of one test run: a rebuild
+    -- left every node at the column default, so the sample graph came back
+    -- `private` and each tenant reported "a tenant cannot see its own node" --
+    -- from a rebuild that had just projected it correctly in every other
+    -- respect. Same class as the `n` / `s` alias mismatch this function
+    -- already carries a scar from: two code paths that must agree, with
+    -- nothing forcing them to.
     execute format($q$
-        insert into aiq.nodes (entity_type, entity_id, org_id, summary)
-        select %1$L, n.id, %2$s, %3$s from %4$s n where %5$s
+        insert into aiq.nodes (entity_type, entity_id, org_id, summary, visibility)
+        select %1$L, n.id, %2$s, %3$s, %6$s from %4$s n where %5$s
         on conflict (entity_type, entity_id) do update
-            set summary = excluded.summary, org_id = excluded.org_id, updated_at = now()
-    $q$, r.entity_type, r.org_expr, r.summary_expr, r.source_table, r.include_where);
+            set summary = excluded.summary, org_id = excluded.org_id,
+                visibility = excluded.visibility, updated_at = now()
+    $q$, r.entity_type, r.org_expr, r.summary_expr, r.source_table,
+         r.include_where, r.visibility_expr);
 
     execute format($q$
         insert into aiq.node_keys (node_id, entity_type, key, kind, org_id)
@@ -10022,44 +10797,27 @@ end;
 $$ language plpgsql;
 
 -- ------------------------------------------------------------
--- 5b. The org-membership seam.
+-- 5b. WAS: the org-membership seam, aiq.current_org_ids().
 --
--- This lives in the CORE schema and not in integration-rbac.sql, where its
--- policies live and where it was first written, for a reason found by building
--- a pristine database from the generated extension script: `aiq.schema_graph`
--- -- a core §13 facet -- scopes the sample keys it shows to the caller's orgs,
--- and a `language sql` function is validated at CREATE time. The integration
--- file is applied AFTER this one, so the facet could not be created at all on a
--- fresh install: SCHEMA "graph" was missing from every new database and present
--- in every database where somebody had loaded the file by hand. Existence is
--- not currency, and this is the shape currency.sh exists to catch.
+-- Deleted, and the deletion is the point rather than a tidy-up. This function
+-- read an `orgs` array straight off the JWT because user-rbac had no org model
+-- to ask -- a working seam, never a tenancy system, and the file's own comment
+-- said so: "a real deployment replaces this", and scenarios/round-4.md carried
+-- it as the open item that would close "when it lands, this function is the
+-- single place that changes".
 --
--- The design point it was written with is unchanged and still applies: this
--- layer does not invent a second notion of tenancy. user-rbac has no org model
--- yet (specs/README.md defers tenant management deliberately), so the predicate
--- is expressed against a single function that a real deployment replaces.
--- Shipping a permissive default silently would be the worst option; this errs
--- closed for org-scoped rows when no membership source exists.
+-- It landed. rbac.orgs/rbac.org_members are real tables and
+-- rbac.current_org_ids() reads them, so membership is a fact the database can
+-- refuse a token about instead of one the token asserts about itself. Every
+-- predicate in this file and in integration-rbac.sql calls the rbac function
+-- now.
 --
--- Returns SETOF rather than an array, deliberately: `org_id = any (select ...)`
--- against an array-returning function compares uuid to uuid[] and fails, while
--- the array form `= any (f())` gives up the InitPlan hoisting that
--- user-rbac/schema.sql §9 measured as the difference between evaluating a
--- predicate once per query and once per row scanned. SETOF gives both --
--- `in (select ...)` type-checks and plans as a hashed SubPlan.
+-- The build-ordering reason this lived in the core schema rather than in
+-- integration-rbac.sql is gone with it: user-rbac/schema.sql is loaded before
+-- this file, so `aiq.schema_graph` -- the §13 facet whose CREATE-time
+-- validation forced the move -- resolves rbac.current_org_ids() on a pristine
+-- install without anything being reordered.
 -- ------------------------------------------------------------
-create or replace function aiq.current_org_ids() returns setof uuid as $$
-    -- Reads the same request-scoped GUC mechanism as rbac.current_user_id():
-    -- PostgREST sets request.jwt.claims per request, so an org claim rides in
-    -- the verified token rather than being supplied as a spoofable argument.
-    select (value #>> '{}')::uuid
-    from jsonb_array_elements(
-        coalesce(
-            nullif(current_setting('request.jwt.claims', true), '')::jsonb -> 'orgs',
-            '[]'::jsonb
-        )
-    );
-$$ language sql stable;
 
 -- ------------------------------------------------------------
 -- 6b. Aliases and short keys -- the only supported write path into node_keys.
@@ -11264,6 +12022,48 @@ alter table aiq.embedding_providers
     add column if not exists batch_request_template jsonb,
     add column if not exists batch_response_path text;
 
+-- A MODEL MAY NOT NAME A PROVIDER THAT DOES NOT EXIST.
+--
+-- `embedding_models.provider` was free text with a comment ('ollama' | 'openai'
+-- | ...) and `embedding_providers.provider` is a primary key declared seventy
+-- lines above it in this same file -- a vocabulary table and a column that
+-- should reference it, sitting next to each other, joined by nothing.
+--
+-- embed_call() already raises a good error for the mismatch, and that is the
+-- problem rather than the mitigation: it raises at CALL time. A registration
+-- naming a provider with no row installs clean, reports success, and surfaces
+-- on somebody's first SEMANTIC search -- which is the furthest possible point
+-- from the mistake. The foreign key moves it to the INSERT that made it.
+--
+-- Added by ALTER rather than in the CREATE TABLE because both tables already
+-- exist in every installed database, and written drop-then-add so an upgrade
+-- picks it up -- the discipline tasks_kind_check and runs_status_fk are
+-- written with.
+-- NULL IS A REAL ANSWER HERE, and adding the key is what made that visible.
+--
+-- `provider` was `not null`, and the fixture spaces the demo corpus registers
+-- (`demo-quad-a`, `demo-quad-b`) satisfied it by inventing the word 'fixture'
+-- -- a provider that is not one, has no request template, and would never have
+-- matched a row in embedding_providers. It went unnoticed for exactly the
+-- reason this key exists: nothing joined the two tables, so an invented word
+-- and a real one were indistinguishable until something tried to embed with it.
+--
+-- A model whose vectors are supplied directly genuinely HAS no provider, so
+-- the column is made nullable rather than the fiction being given a row. The
+-- key then reads correctly in both directions: a name that is not null must
+-- resolve, and null means "nothing here embeds this -- the vectors come from
+-- outside". Dropping the NOT NULL is safe on an existing database; every row
+-- that satisfied it still does.
+alter table aiq.embedding_models alter column provider drop not null;
+alter table aiq.embedding_models drop constraint if exists embedding_models_provider_fk;
+alter table aiq.embedding_models add  constraint embedding_models_provider_fk
+    foreign key (provider) references aiq.embedding_providers(provider);
+
+comment on column aiq.embedding_models.provider is
+    'References aiq.embedding_providers. NULL means this space is not embedded '
+    'by this system -- its vectors are written directly, as the demo fixture '
+    'spaces are -- so aiq.embed_call refuses it rather than guessing.';
+
 comment on column aiq.embedding_providers.batch_request_template is
     'The request body for MANY texts at once, with {{texts}} where the array goes. '
     'Null means the provider embeds one text per call and a batch is N calls.';
@@ -11301,6 +12101,18 @@ begin
         raise exception
             'embedding model % is not registered -- SCHEMA "graph" lists the '
             'registered ones', coalesce(p_model, '(the default)');
+    end if;
+
+    -- Null is now reachable and means something specific, so it is answered
+    -- specifically: a caller who asks a fixture space to embed text has made a
+    -- different mistake from one who named a provider nobody registered, and
+    -- one error message for both would send them to the wrong fix.
+    if m.provider is null then
+        raise exception
+            'embedding model ''%'' has no provider: its vectors are written '
+            'directly rather than produced here, so there is nothing to call. '
+            'Set aiq.embedding_models.provider, or embed against a model that '
+            'has one.', m.name;
     end if;
 
     select * into p from aiq.embedding_providers where provider = m.provider;
@@ -12432,7 +13244,7 @@ returns jsonb as $$
                                where n.entity_type = r.entity_type
                                  and nk.kind = 'canonical'
                                  and (n.org_id is null
-                                      or n.org_id in (select aiq.current_org_ids()))
+                                      or n.org_id in (select rbac.current_org_ids()))
                                order by nk.key
                                limit 3) k), '[]'::jsonb))
                     order by r.entity_type)
@@ -12648,36 +13460,47 @@ revoke execute on function aiq.register_schema_example(text, text, text, text, t
 -- ============================================================
 
 -- ------------------------------------------------------------
--- 1. Tenant scoping.
+-- 1. Scope.
 --
--- nodes/node_keys/edges already carry org_id. The rule, stated once:
---   org_id IS NULL  -> shared reference data, visible to everyone
---   org_id = <uuid> -> visible only to members of that org
+-- WAS: `org_id is null or org_id in (select aiq.current_org_ids())`, with the
+-- rule stated as "org_id IS NULL -> shared reference data, visible to
+-- everyone; org_id = <uuid> -> visible only to members of that org".
 --
--- "Shared reference data" is a real category here, not a loophole: a public
--- SEC filing or a well-known company is legitimately global, and forcing it
+-- That rule was right about what it wanted and wrong about how it said it,
+-- because `org_id is null` also means "nobody set it". world-model-ingestion
+-- measured the consequence on this exact predicate: register_upload() called
+-- without its optional org argument wrote a null org, and a different tenant
+-- read the row. One value cannot be both "deliberately global" and "not filled
+-- in" while a policy treats it as the first.
+--
+-- user-rbac §2b's scope column says which one is meant, so the null org stops
+-- being load-bearing: a shared SEC filing is `public` because somebody chose
+-- it, and a row nobody scoped is `private` because that is the default.
+--
+-- "Shared reference data" is still a real category and not a loophole -- a
+-- public filing or a well-known company is legitimately global, and forcing it
 -- to be duplicated per tenant would defeat the whole point of one identity
--- registry (graph-identity.md "Node registry", org_id "null = shared").
+-- registry. It is now spelled `public`.
 --
--- Membership lives in rbac. This layer does not invent a second notion of
--- tenancy -- it asks the one that already exists.
+-- Membership lives in rbac, as it always claimed to. What has changed is that
+-- there is now something there to ask: rbac.org_members rather than an array
+-- the caller's own token asserts.
 -- ------------------------------------------------------------
 
--- The org-membership seam, `aiq.current_org_ids()`, is defined in
--- ai-query-layer/schema.sql rather than here, and the reason is a build
--- ordering one rather than a design one -- see the comment at its definition.
--- What belongs here is the POLICIES that use it, below.
+-- Two calls, and no policy written by hand -- see rbac.add_scope_policy()'s
+-- header for why the predicate is generated rather than copied. nodes gains
+-- owner_id and visibility; its existing org_id gains the foreign key to
+-- rbac.orgs it never had, so an org_id naming no org is refused at the write
+-- instead of producing a row nobody can see.
+--
+-- No `<resource>` argument, deliberately: there is no deployment-wide
+-- permission to read every tenant's graph, and adding one here would create it.
+select rbac.add_scope_columns('aiq.nodes', 'public');
+select rbac.add_scope_policy ('aiq.nodes');
 
-alter table aiq.nodes     enable row level security;
 alter table aiq.node_keys enable row level security;
 alter table aiq.edges     enable row level security;
 
--- (select ...) wrapping for InitPlan caching, same as every other RLS policy
--- in this collection -- current_org_ids() is STABLE but that alone does not
--- get it hoisted (user-rbac/schema.sql §9's EXPLAIN finding).
-drop policy if exists nodes_org_scoped on aiq.nodes;
-create policy nodes_org_scoped on aiq.nodes for select
-  using (org_id is null or org_id in (select aiq.current_org_ids()));
 -- node_keys INHERITS its node's visibility rather than re-deriving it from
 -- its own org_id copy. That copy exists for the canonical-key unique index
 -- (two orgs may each have their own 'acme' -- graph-identity.md "Keys"), and
@@ -12693,7 +13516,9 @@ create policy nodes_org_scoped on aiq.nodes for select
 --
 -- One source of truth: visibility lives on nodes, keys inherit it. Drift is
 -- now impossible rather than merely detected. (Same shape as workflow.tasks
--- inheriting visibility from workflow.runs.)
+-- inheriting visibility from workflow.runs.) This is also why node_keys does
+-- NOT get add_scope_columns -- a second `visibility` column here would be the
+-- identical bug one generation later.
 drop policy if exists node_keys_via_node on aiq.node_keys;
 create policy node_keys_via_node on aiq.node_keys for select
   using (exists (select 1 from aiq.nodes n where n.id = aiq.node_keys.node_id));
@@ -12711,7 +13536,16 @@ create policy edges_via_endpoints on aiq.edges for select
 --    A view owned by app_owner would bypass the policies above.
 -- ------------------------------------------------------------
 create or replace view aiq.nodes_api as
-  select id, entity_type, entity_id, org_id, summary, created_at, updated_at
+-- The scope columns are APPENDED rather than slotted in beside owner_id, and
+-- the position is forced rather than chosen: `create or replace view` may only
+-- ADD columns at the end. Inserting one in the middle is
+-- `ERROR: cannot change name of view column "status" to "org_id"`, which a
+-- fresh install never sees -- the view is being created, not replaced -- and
+-- every upgrading database hits. Found by dev/upgrade-converges.sh, which is
+-- the only check that applies this file to a database that already has the
+-- old view.
+  select id, entity_type, entity_id, org_id, summary, created_at, updated_at,
+         owner_id, visibility
   from aiq.nodes;
 create or replace view aiq.edges_api as
   select id, src_id, dst_id, relation, weight, valid_from, valid_to, org_id, created_at
@@ -12719,7 +13553,9 @@ create or replace view aiq.edges_api as
 
 grant usage on schema aiq to api_viewer, authenticated;
 grant select on aiq.nodes, aiq.node_keys, aiq.edges to api_viewer;
-grant execute on function aiq.current_org_ids() to api_viewer, authenticated;
+-- rbac.current_org_ids() and the scope predicates are granted in user-rbac
+-- §9, to api_viewer and authenticated among others -- the policies above are
+-- evaluated as the view owner, so api_viewer is who must be able to run them.
 
 grant create on schema aiq to api_viewer;
 alter view aiq.nodes_api owner to api_viewer;
@@ -13026,6 +13862,21 @@ begin
                 'step ''%'' embeds with model ''%'', which is not registered. '
                 'SCHEMA "graph" lists the registered ones.', p_step_key, v_named;
         end if;
+    end if;
+
+    -- Null is a real answer since embedding_models.provider gained a foreign
+    -- key onto embedding_providers: a space whose vectors are written directly
+    -- -- the demo fixture spaces -- says so with NULL rather than by inventing
+    -- a provider name. It is a different mistake from naming a provider nobody
+    -- registered, so it gets a different message; one error for both would send
+    -- the reader to the wrong fix, and the generic arm below renders a null as
+    -- the literal '<NULL>', which explains nothing.
+    if m.provider is null then
+        raise exception
+            'step ''%'' embeds with model ''%'', whose vectors are written '
+            'directly rather than produced here -- it has no provider, so there '
+            'is nothing to call. Embed against a model that has one.',
+            p_step_key, m.name;
     end if;
 
     select * into p from aiq.embedding_providers where provider = m.provider;
@@ -14206,84 +15057,30 @@ create index if not exists idx_chunks_resource on content.resource_chunks (resou
 -- connection could WRITE an org's content and not READ it, and the worker that
 -- ingests a document could record its chunks but not resolve the file it was
 -- meant to chunk. Whichever answer is right, it cannot be two answers.
-create or replace function content.may_access_org(p_org_id uuid)
-returns boolean as $$
-    -- IDENTITY COMES FROM THE VERIFIED TOKEN, NOT FROM THE ROLE, and the first
-    -- version of this check got that wrong in the most instructive way: it
-    -- asked `pg_has_role(current_user, 'worker', ...)`, and inside a SECURITY
-    -- DEFINER function current_user is the DEFINER. Every caller looked like
-    -- app_owner, so the check exempted everyone and the probe that found the
-    -- hole walked straight through the fix. session_user is no better -- every
-    -- PostgREST request shares one login role, `authenticator`.
-    --
-    -- So the signal is the one aiq.current_org_ids() itself documents: an org
-    -- claim rides in the request-scoped GUC PostgREST sets from a verified JWT.
-    -- No claims at all means no request identity -- a service connection, a
-    -- migration, psql -- which is the same exemption workflow's worker-facing
-    -- functions get from their grant being the authorization.
-    --
-    -- A NULL ORG IS THE ORG EVERYONE READS, WHICH IS WHY WRITING ONE IS THE
-    -- STRONGEST CROSS-TENANT ACT AND NOT THE ABSENCE OF ONE.
-    --
-    -- This used to read `or p_org_id is null`, on the reasoning written here:
-    -- "a null org is the single-tenant case and the fixture case: it is
-    -- readable by everyone under resources_org_scoped, so writing it is not a
-    -- cross-tenant act." The premise is right and the conclusion inverts it.
-    -- `resources_org_scoped` is `org_id is null or org_id in (...)`, so a null
-    -- org is not unscoped -- it is scoped to EVERY tenant. Being allowed to
-    -- write one is permission to put a document in every other tenant's
-    -- corpus, which is a wider act than writing into any single named org, not
-    -- a narrower one.
-    --
-    -- It needed no missing check to reach, and no argument an attacker had to
-    -- guess: `register_upload`'s `p_org_id` DEFAULTS to null, and the channel
-    -- lookup accepts a null-org channel -- of which the extension ships three
-    -- (`uploads`, `workflow_artifacts`, `sample-corpus`). MEASURED on a stock
-    -- install, as an ordinary `authenticated` user of org B holding nothing:
-    --
-    --     select content.register_upload('uploads', ...)   -- no org argument
-    --     -> resource written with org_id NULL
-    --     -> org A, a different tenant, reads the row:        1
-    --     -> org A's TEXT search over the `chunks` corpus:    1 matching row
-    --
-    -- That is §4a's own threat sentence -- "an agent asking its own tenant's
-    -- documents a question would retrieve the attacker's text and act on it" --
-    -- reached through the default value of an optional argument. §4a closed
-    -- writing into ANOTHER NAMED org and left open writing into the one every
-    -- org reads.
-    --
-    -- THE TEST IS WHETHER THE CALLER IS A TENANT, not whether the org is null.
-    -- A token that names one or more orgs is a tenant's, and a tenant writes
-    -- inside its tenancy. A token that names none is the single-tenant
-    -- deployment (auth, one org, everything shared) and still writes the null
-    -- org, because for it null means "ours". No token at all is a service
-    -- connection, a migration or psql, and is unchanged.
-    --
-    -- `p_org_id is not null` guards the IN: `null in (select ...)` is NULL
-    -- rather than false, which would make the whole predicate NULL and read as
-    -- a refusal by accident rather than by rule.
-    select
-        -- no request identity at all -- service connection, migration, psql
-        nullif(current_setting('request.jwt.claims', true), '') is null
-        -- the caller's token names this org
-        or (p_org_id is not null
-            and p_org_id in (select aiq.current_org_ids()))
-        -- the single-tenant case: a token that names no org writing the org
-        -- that, for that deployment, means "ours"
-        or (p_org_id is null
-            and not exists (select 1 from aiq.current_org_ids()));
-$$ language sql stable security definer set search_path = pg_catalog, public;
+-- MOVED, to rbac.may_access_org(). The rule is about orgs, and orgs are
+-- rbac's now -- this schema owned it only because it was the first to need it,
+-- and trace-field's policies then imported a content function to ask an
+-- identity question, which is a subsystem boundary crossed the wrong way.
+--
+-- Its history is worth following to the new home: the check began as
+-- `pg_has_role(current_user, 'worker', ...)` and exempted everyone, because
+-- inside a SECURITY DEFINER function current_user is the DEFINER. The fix --
+-- read the org claim from the request-scoped GUC PostgREST sets from a
+-- verified JWT -- is what rbac.current_org_ids() now does against real
+-- membership rows rather than against the claim alone.
+--
+-- One arm of it is deliberately not carried over; rbac.may_access_org()'s own
+-- header states which and why.
 
 create or replace function content.assert_org_write(p_org_id uuid, p_what text)
 returns void as $$
 begin
-    if not content.may_access_org(p_org_id) then
+    if not rbac.may_access_org(p_org_id) then
         raise exception 'not authorized to % for that organization', p_what;
     end if;
 end;
 $$ language plpgsql stable security definer set search_path = pg_catalog, public;
 
-grant execute on function content.may_access_org(uuid) to authenticated, worker;
 
 grant execute on function content.assert_org_write(uuid, text) to authenticated, worker;
 
@@ -14303,6 +15100,15 @@ grant execute on function content.assert_org_write(uuid, text) to authenticated,
 -- and counting. p_external_id is now the caller's own idea of identity, used
 -- by pullers to avoid re-ingesting; an upload normally leaves it null and gets
 -- a new resource every time.
+-- THE PREVIOUS SIGNATURE IS DROPPED, not left beside this one. `create or
+-- replace` matches on the argument list, so adding p_visibility creates a
+-- SECOND function rather than replacing the first -- and every existing caller
+-- keeps resolving to the old one, which writes no owner and no scope. An
+-- overload that silently wins is worse than a broken call: the upload
+-- succeeds and the row is invisible to the person who made it.
+drop function if exists content.register_upload(
+    text,text,text,text,bigint,text,text,text,uuid,jsonb,text,text);
+
 create or replace function content.register_upload(
     p_channel     text,
     p_checksum    text,
@@ -14315,7 +15121,15 @@ create or replace function content.register_upload(
     p_org_id      uuid default null,
     p_metadata    jsonb default '{}'::jsonb,
     p_external_id text default null,
-    p_trace_id    text default null
+    p_trace_id    text default null,
+    -- Defaulted through rbac.default_visibility() rather than to a constant,
+    -- and the choice is the whole of §4b's fix rather than a convenience. An
+    -- upload named an org and got a row every OTHER org could read, because
+    -- `org_id is null` was the everyone tier and this argument defaulted into
+    -- it. Now: name an org and the row is that org's; name none and the row is
+    -- yours. Neither default publishes anything to another tenant, and
+    -- publishing is `public`, spelled out by whoever meant it.
+    p_visibility  text default null
 ) returns uuid as $$
 declare
     v_channel  uuid;
@@ -14323,6 +15137,7 @@ declare
     v_res      uuid;
     v_workflow text;
     v_run      uuid;
+    v_vis      text := coalesce(p_visibility, rbac.default_visibility(p_org_id));
 begin
     perform content.assert_org_write(p_org_id, 'register content');
 
@@ -14346,8 +15161,17 @@ begin
     on conflict (checksum) do update set checksum = excluded.checksum
     returning id into v_file;
 
-    insert into content.resources (channel_id, file_id, uri, title, org_id, metadata, external_id)
-    values (v_channel, v_file, p_uri, p_title, p_org_id, p_metadata, p_external_id)
+    -- owner_id IS SET HERE OR THE ROW IS UNREADABLE BY ANYONE. This function
+    -- is SECURITY DEFINER and bypasses RLS, so it will happily write a row
+    -- that its own writer cannot then select -- which is exactly what a
+    -- `private` default with a null owner produces. The uploader is the owner;
+    -- a service connection with no request identity leaves it null, and such a
+    -- row is reachable only through its org or by being public, which is the
+    -- correct reading of "nobody in particular uploaded this".
+    insert into content.resources (channel_id, file_id, uri, title, org_id,
+                                   owner_id, visibility, metadata, external_id)
+    values (v_channel, v_file, p_uri, p_title, p_org_id,
+            rbac.current_user_id(), v_vis, p_metadata, p_external_id)
     on conflict (channel_id, external_id) do update set updated_at = now()
     returning id into v_res;
 
@@ -14438,7 +15262,7 @@ returns table(bucket text, object_key text, content_type text, size_bytes bigint
     from content.resources r
     join content.files f on f.id = r.file_id
     where r.id = p_resource_id
-      and content.may_access_org(r.org_id);
+      and rbac.may_access_org(r.org_id);
 $$ language sql stable security definer set search_path = pg_catalog, public;
 
 -- Record chunks produced by the ingestion workflow, and flip the resource
@@ -14462,7 +15286,7 @@ begin
     -- first version of this check fell straight through it into a foreign-key
     -- error that named the missing row.
     select r.org_id into v_org from content.resources r where r.id = p_resource_id;
-    if not found or not content.may_access_org(v_org) then
+    if not found or not rbac.may_access_org(v_org) then
         raise exception 'no such resource, or it is not yours';
     end if;
 
@@ -14646,7 +15470,7 @@ returns jsonb as $$
     join content.channels c on c.id = r.channel_id
     left join content.files f on f.id = r.file_id
     where r.id = p_resource_id
-      and content.may_access_org(r.org_id);
+      and rbac.may_access_org(r.org_id);
 $$ language sql stable security definer set search_path = pg_catalog, public;
 
 -- What the worker calls when it is done. ONE call, so a resource is never
@@ -14679,7 +15503,7 @@ declare
     v_status text;
 begin
     select r.org_id into v_org from content.resources r where r.id = p_resource_id;
-    if not found or not content.may_access_org(v_org) then
+    if not found or not rbac.may_access_org(v_org) then
         raise exception 'no such resource, or it is not yours';
     end if;
 
@@ -14736,7 +15560,7 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- its own authorization rather than relying on the grant: a definer function
 -- that returned any resource's chunks to anyone holding its id would hand a
 -- tenant's corpus to whoever guessed a uuid. The predicate is the one
--- content.may_access_org states, so there is one rule and not a second copy of
+-- rbac.may_access_org states, so there is one rule and not a second copy of
 -- it -- and a claimless connection (a worker, a migration) is exempt exactly
 -- as it is everywhere else in this schema.
 --
@@ -14750,7 +15574,7 @@ returns jsonb as $$
     from content.resource_chunks c
     where c.resource_id = p_resource_id
       and exists (select 1 from content.resources r
-                  where r.id = p_resource_id and content.may_access_org(r.org_id));
+                  where r.id = p_resource_id and rbac.may_access_org(r.org_id));
 $$ language sql stable security definer set search_path = pg_catalog, public;
 
 -- The row set the GRAPH indexer fans out over.
@@ -14776,7 +15600,7 @@ returns jsonb as $$
     from content.resource_chunks c
     where c.resource_id = p_resource_id
       and exists (select 1 from content.resources r
-                  where r.id = p_resource_id and content.may_access_org(r.org_id));
+                  where r.id = p_resource_id and rbac.may_access_org(r.org_id));
 $$ language sql stable security definer set search_path = pg_catalog, public;
 
 -- ------------------------------------------------------------
@@ -14879,7 +15703,7 @@ declare
     v_ds     uuid;
 begin
     select r.org_id into v_org from content.resources r where r.id = p_resource_id;
-    if not found or not content.may_access_org(v_org) then
+    if not found or not rbac.may_access_org(v_org) then
         raise exception 'no such resource, or it is not yours';
     end if;
 
@@ -14922,6 +15746,25 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- is the whole reader integration and there is no client-side convention to
 -- keep in step with this table.
 --
+-- THE SCOPE COLUMNS ARE ADDED HERE, ahead of the function below, and not with
+-- the rest of content's scoping in integration.sql -- which is where they were,
+-- and where they produced a fresh install that could not be built.
+--
+-- `dataset_uri` is `language sql`, and a `language sql` body is PARSED AND
+-- VALIDATED AT CREATE TIME. Referencing d.owner_id before the column exists is
+-- `ERROR: column d.owner_id does not exist`, from a CREATE FUNCTION three
+-- hundred lines from the ALTER TABLE that was going to add it.
+--
+-- The reason nothing noticed for several runs is worth more than the fix:
+-- CREATE EXTENSION executes its script with `check_function_bodies` OFF, so
+-- installing the extension the way a deployment does succeeded, the whole test
+-- suite passed, and only `dev/upgrade-converges.sh` -- which loads the
+-- generated .sql as a plain file -- failed. Two ways of applying the same
+-- script that do not agree about what is an error, with the strict one used by
+-- nobody in the inner loop. plpgsql bodies are never checked this way, which is
+-- why register_upload's identical reference is fine and this one is not.
+select rbac.add_scope_columns('content.datasets', 'public');
+
 -- SECURITY INVOKER: a caller who cannot see the dataset's org gets no row and
 -- therefore no bucket path. A storage location is a capability.
 create or replace function content.dataset_uri(p_name text)
@@ -14929,7 +15772,7 @@ returns text as $$
     select 's3://' || d.bucket || '/' || d.prefix || '/*.parquet'
     from content.datasets d
     where d.name = p_name
-      and (d.org_id is null or d.org_id in (select aiq.current_org_ids()))
+      and rbac.may_read(d.owner_id, d.org_id, d.visibility)
     order by d.org_id nulls last
     limit 1;
 $$ language sql stable;
@@ -15008,17 +15851,22 @@ on conflict do nothing;
 -- nodes.org_id drift and made LOOKUP silently return nothing; one source of
 -- truth makes that impossible rather than merely detectable.
 -- ------------------------------------------------------------
-alter table content.channels        enable row level security;
-alter table content.resources       enable row level security;
+-- Two calls per table and no policy written here: rbac.add_scope_policy()
+-- generates the predicate from its one home, for the reason its header gives
+-- (calling the equivalent function per row measured 58x slower, and sixteen
+-- hand-copies of a security predicate is how one of them drifts).
+--
+-- What changes for this file specifically: `org_id is null` no longer means
+-- "everyone may read it". §4b of schema.sql measured that conflation as a real
+-- cross-tenant read -- register_upload() without its optional org argument
+-- wrote a null org and another tenant retrieved the text. A row nobody scoped
+-- is now `private`, and global is something somebody chose.
+select rbac.add_scope_columns('content.channels', 'public');
+select rbac.add_scope_policy ('content.channels');
+select rbac.add_scope_columns('content.resources', 'public');
+select rbac.add_scope_policy ('content.resources');
+
 alter table content.resource_chunks enable row level security;
-
-drop policy if exists channels_org_scoped on content.channels;
-create policy channels_org_scoped on content.channels for select
-  using (org_id is null or org_id in (select aiq.current_org_ids()));
-
-drop policy if exists resources_org_scoped on content.resources;
-create policy resources_org_scoped on content.resources for select
-  using (org_id is null or org_id in (select aiq.current_org_ids()));
 
 drop policy if exists chunks_via_resource on content.resource_chunks;
 create policy chunks_via_resource on content.resource_chunks for select
@@ -15060,12 +15908,11 @@ grant select on content.channels, content.resources, content.resource_chunks
 -- ingest_target hands back a bucket and an object key for the caller's own
 -- resources, and the read path a user is offered is the Content Server's
 -- proxy precisely so that a storage location never becomes one.
-revoke execute on function content.register_upload(text,text,text,text,bigint,text,text,text,uuid,jsonb,text,text) from public;
+revoke execute on function content.register_upload(text,text,text,text,bigint,text,text,text,uuid,jsonb,text,text,text) from public;
 revoke execute on function content.register_fetched(text,text,text,text,uuid,jsonb) from public;
 revoke execute on function content.record_chunks(uuid,jsonb) from public;
 revoke execute on function content.resolve_file(uuid) from public;
 revoke execute on function content.check_drift() from public;
-revoke execute on function content.may_access_org(uuid) from public;
 revoke execute on function content.assert_org_write(uuid,text) from public;
 revoke execute on function content.ingest_target(uuid) from public;
 revoke execute on function content.record_ingest(uuid,jsonb) from public;
@@ -15081,7 +15928,7 @@ revoke execute on function content.dataset_uri(text) from public;
 -- The Content Server registers uploads and the ingestion workflow records
 -- chunks; both go through SECURITY DEFINER functions, so neither needs a write
 -- grant on any table.
-grant execute on function content.register_upload(text,text,text,text,bigint,text,text,text,uuid,jsonb,text,text) to authenticated;
+grant execute on function content.register_upload(text,text,text,text,bigint,text,text,text,uuid,jsonb,text,text,text) to authenticated;
 grant execute on function content.register_fetched(text,text,text,text,uuid,jsonb) to authenticated;
 grant execute on function content.record_chunks(uuid,jsonb) to worker, authenticated;
 grant execute on function content.resolve_file(uuid) to authenticated;
@@ -15303,12 +16150,11 @@ grant execute on function aiq.record_embeddings(text, jsonb) to worker;
 -- capability. dataset_files carries no org of its own -- it inherits, the way
 -- chunks do, because duplicating a tenancy fact is how node_keys and nodes
 -- drifted.
-alter table content.datasets      enable row level security;
+-- The COLUMNS are added in schema.sql, next to content.dataset_uri() -- a
+-- `language sql` body is validated at CREATE time and that one reads them, so
+-- they cannot wait until this file. Only the policy is here.
+select rbac.add_scope_policy ('content.datasets');
 alter table content.dataset_files enable row level security;
-
-drop policy if exists datasets_org_scoped on content.datasets;
-create policy datasets_org_scoped on content.datasets for select
-  using (org_id is null or org_id in (select aiq.current_org_ids()));
 
 drop policy if exists dataset_files_via_dataset on content.dataset_files;
 create policy dataset_files_via_dataset on content.dataset_files for select
@@ -15806,14 +16652,40 @@ create index if not exists idx_skills_plugin on agentic.skills (plugin)
 -- ------------------------------------------------------------
 create table if not exists agentic.sessions (
     id             uuid primary key default gen_random_uuid(),
-    user_id        uuid not null default rbac.current_user_id(),
+    -- RENAMED from user_id, and the rename is the point rather than tidying.
+    -- Every other owned table in the collection spells this owner_id, and
+    -- rbac.scope_predicate() -- the single home of the read expression every
+    -- policy is generated from -- names that column. A table that spelled its
+    -- owner differently would need its own variant of a security predicate
+    -- there is deliberately only one of.
+    owner_id       uuid not null default rbac.current_user_id(),
     agui_thread_id text,
     title          text,
     created_at     timestamptz not null default now(),
     updated_at     timestamptz not null default now()
 );
 
-create index if not exists sessions_user_id_created_at_idx on agentic.sessions (user_id, created_at desc);
+-- ...and on a database that already has the table, where `create table if not
+-- exists` above is a no-op and the column is still called user_id. Guarded,
+-- because RENAME COLUMN has no IF EXISTS and this file is replayed on every
+-- upgrade: unguarded it succeeds exactly once and fails every run after.
+do $$
+begin
+    if exists (select 1 from information_schema.columns
+                where table_schema = 'agentic' and table_name = 'sessions'
+                  and column_name = 'user_id') then
+        alter table agentic.sessions rename column user_id to owner_id;
+    end if;
+end $$;
+
+-- AFTER the rename, not before. `create table if not exists` is a no-op on an
+-- upgrading database, so until the block above runs the column there is still
+-- called user_id and this index is `ERROR: column "owner_id" does not exist`
+-- -- on every existing deployment and on no fresh install. Found by
+-- dev/upgrade-converges.sh, which is the only thing that applies this file to
+-- a database that has the old shape.
+create index if not exists sessions_owner_id_created_at_idx on agentic.sessions (owner_id, created_at desc);
+
 
 create or replace trigger trg_sessions_updated
     before update on agentic.sessions
@@ -15826,7 +16698,7 @@ create or replace trigger trg_sessions_updated
 -- own span_id, never independently maintained, and trace_id is shared across
 -- an entire tree -- one trace per top-level session or scheduled trigger.
 --
--- owner_id is not redundant with sessions.user_id (brief §3): a scheduled run
+-- owner_id is not redundant with sessions.owner_id (brief §3): a scheduled run
 -- has no session, so scoping RLS through a session join would put background
 -- runs outside tenant isolation entirely.
 -- ------------------------------------------------------------
@@ -15976,20 +16848,21 @@ create or replace trigger trg_notify_message
 -- ------------------------------------------------------------
 -- 7. RLS -- ENABLE, not FORCE (see header note 1)
 -- ------------------------------------------------------------
-alter table agentic.sessions enable row level security;
-alter table agentic.runs     enable row level security;
-alter table agentic.messages enable row level security;
-
-drop policy if exists sessions_owner on agentic.sessions;
-create policy sessions_owner on agentic.sessions
-    for select using (user_id = rbac.current_user_id());
-
+-- Owner-only WAS the whole policy here, and it is the idiom scope replaces.
+-- `owner_id = current_user_id()` cannot say "my colleague may see this
+-- conversation" at all -- not to an org, not to anyone -- so a shared agent
+-- session had no expression short of copying the rows. The default is
+-- unchanged (a session is private), and org and public are now sayable.
+--
 -- Scoped on the run's own owner, never through the session join: a scheduled
 -- run has no session, and an escape hatch for that case is how a table ends up
 -- with rows nobody can see and everybody can read (brief §3).
-drop policy if exists runs_owner on agentic.runs;
-create policy runs_owner on agentic.runs
-    for select using (owner_id = rbac.current_user_id());
+select rbac.add_scope_columns('agentic.sessions');
+select rbac.add_scope_policy ('agentic.sessions');
+select rbac.add_scope_columns('agentic.runs');
+select rbac.add_scope_policy ('agentic.runs');
+
+alter table agentic.messages enable row level security;
 
 drop policy if exists messages_via_run on agentic.messages;
 create policy messages_via_run on agentic.messages
@@ -15999,7 +16872,7 @@ create policy messages_via_run on agentic.messages
                   and r.owner_id = rbac.current_user_id())
         or exists (select 1 from agentic.sessions s
                    where s.id = messages.session_id
-                     and s.user_id = rbac.current_user_id())
+                     and s.owner_id = rbac.current_user_id())
     );
 
 -- Agents and tool_servers are configuration, not tenant data: readable by any
@@ -16024,18 +16897,30 @@ alter table agentic.tool_servers enable row level security;
 alter table agentic.skills       enable row level security;
 alter table agentic.plugins      enable row level security;
 
-drop policy if exists agents_are_shared_config on agentic.agents;
-create policy agents_are_shared_config on agentic.agents
-    for select using (true);
-drop policy if exists tool_servers_are_shared_config on agentic.tool_servers;
-create policy tool_servers_are_shared_config on agentic.tool_servers
-    for select using (true);
-drop policy if exists skills_are_shared_config on agentic.skills;
-create policy skills_are_shared_config on agentic.skills
-    for select using (true);
-drop policy if exists plugins_are_shared_config on agentic.plugins;
-create policy plugins_are_shared_config on agentic.plugins
-    for select using (true);
+-- THE OPEN CONSEQUENCE ABOVE IS CLOSED, and this is the column it named.
+--
+-- `using (true)` was the right default for a shared procedure and the wrong
+-- one for a skill encoding a customer's internal process, and the comment
+-- above says so while pointing at "a column that does not exist yet". It
+-- exists: these four get owner_id/org_id/visibility like every other owned
+-- table, so an agent can belong to one tenant.
+--
+-- WHAT A DEPLOYMENT SEES TODAY IS UNCHANGED. Every existing row is backfilled
+-- to `public` by the migration, which is what `using (true)` meant, said
+-- explicitly. What changes is the default for rows written from now on --
+-- `private`, like everything else -- so registering an agent no longer
+-- publishes it to the deployment as a side effect of not thinking about it.
+--
+-- The seeded agents the extension itself installs are set `public` where they
+-- are created, because they ARE deployment configuration; a tenant's is not.
+select rbac.add_scope_columns('agentic.agents', 'public');
+select rbac.add_scope_policy ('agentic.agents',       'agents');
+select rbac.add_scope_columns('agentic.tool_servers', 'public');
+select rbac.add_scope_policy ('agentic.tool_servers', 'tool_servers');
+select rbac.add_scope_columns('agentic.skills', 'public');
+select rbac.add_scope_policy ('agentic.skills',       'skills');
+select rbac.add_scope_columns('agentic.plugins', 'public');
+select rbac.add_scope_policy ('agentic.plugins',      'plugins');
 -- ------------------------------------------------------------
 -- 8. The write path -- SECURITY DEFINER, ownership checked explicitly
 --
@@ -16048,7 +16933,7 @@ returns agentic.sessions
 language sql security definer
 set search_path = pg_catalog, public
 as $$
-    insert into agentic.sessions (user_id, title)
+    insert into agentic.sessions (owner_id, title)
     values (rbac.current_user_id(), p_title)
     returning *;
 $$;
@@ -16082,7 +16967,7 @@ begin
 
     if p_session_id is not null then
         if not exists (select 1 from agentic.sessions
-                       where id = p_session_id and user_id = v_owner) then
+                       where id = p_session_id and owner_id = v_owner) then
             raise exception 'session % is not yours', p_session_id;
         end if;
 
@@ -16231,7 +17116,7 @@ declare
     v_row agentic.messages;
 begin
     if not exists (select 1 from agentic.sessions
-                   where id = p_session_id and user_id = rbac.current_user_id()) then
+                   where id = p_session_id and owner_id = rbac.current_user_id()) then
         raise exception 'session % is not yours', p_session_id;
     end if;
 
@@ -16449,7 +17334,8 @@ begin
                                 structured_output_schema, chained_action,
                                 summarizer_agent_id, context_policy,
                                 audience, category, tags,
-                                extracts_source, extracts_doctype, plugin)
+                                extracts_source, extracts_doctype, plugin,
+                                owner_id, org_id, visibility)
     values (p_spec->>'name',
             coalesce(p_spec->>'system_prompt', ''),
             p_spec->>'model',
@@ -16466,7 +17352,18 @@ begin
                         from jsonb_array_elements_text(p_spec->'tags')), '{}'),
             p_spec->>'extracts_source',
             p_spec->>'extracts_doctype',
-            p_spec->>'plugin')
+            p_spec->>'plugin',
+            -- SCOPE IS SET BY THE WRITER, never left to the column default.
+            -- This function is SECURITY DEFINER and bypasses RLS, so a
+            -- `private` default with a null owner writes a row its own author
+            -- cannot select. rbac.default_visibility() states the rule once --
+            -- an operator installing deployment configuration gets `public`, a
+            -- caller gets their own org or themselves -- and `visibility` in
+            -- the spec overrides it for somebody who means something else.
+            coalesce((p_spec->>'owner_id')::uuid, rbac.current_user_id()),
+            (p_spec->>'org_id')::uuid,
+            coalesce(p_spec->>'visibility',
+                     rbac.default_visibility((p_spec->>'org_id')::uuid)))
     -- AN OMITTED KEY MEANS "LEAVE IT ALONE", NOT "SET IT TO THE DEFAULT".
     --
     -- Written the obvious way -- `set x = excluded.x` for every column -- this
@@ -16524,7 +17421,21 @@ begin
                                       else agentic.agents.extracts_doctype end,
            plugin                   = case when p_spec ? 'plugin'
                                       then excluded.plugin
-                                      else agentic.agents.plugin end
+                                      else agentic.agents.plugin end,
+           -- Scope follows the same presence rule as every column above: an
+           -- edit that does not mention visibility does not change who can see
+           -- the thing. owner_id is deliberately in the list -- transferring
+           -- an agent to another owner is a legitimate edit -- but it takes
+           -- saying so.
+           owner_id                 = case when p_spec ? 'owner_id'
+                                      then excluded.owner_id
+                                      else agentic.agents.owner_id end,
+           org_id                   = case when p_spec ? 'org_id'
+                                      then excluded.org_id
+                                      else agentic.agents.org_id end,
+           visibility               = case when p_spec ? 'visibility'
+                                      then excluded.visibility
+                                      else agentic.agents.visibility end
     returning * into v_row;
     return v_row;
 end;
@@ -16545,7 +17456,8 @@ begin
     insert into agentic.tool_servers (name, kind, url, credential_ref,
                                       emits_citations, serves_agents,
                                       serves_skills, default_headers,
-                                      cached_tools, synced_at, plugin)
+                                      cached_tools, synced_at, plugin,
+                                      owner_id, org_id, visibility)
     -- kind and url are NOT NULL, so unlike every other column here they
     -- cannot be left to the ON CONFLICT arm: the tuple has to be VALID before
     -- Postgres will even look for the conflict, and a partial registration
@@ -16567,7 +17479,15 @@ begin
             coalesce(p_spec->'default_headers', '{}'::jsonb),
             coalesce(p_spec->'cached_tools', '[]'::jsonb),
             case when p_spec ? 'cached_tools' then now() end,
-            p_spec->>'plugin')
+            p_spec->>'plugin',
+            -- Scope set by the writer, never left to the column default: this
+            -- function is SECURITY DEFINER and bypasses RLS, so a `private`
+            -- default with a null owner writes a row its own author cannot
+            -- select. rbac.default_visibility() states the rule once.
+            coalesce((p_spec->>'owner_id')::uuid, rbac.current_user_id()),
+            (p_spec->>'org_id')::uuid,
+            coalesce(p_spec->>'visibility',
+                     rbac.default_visibility((p_spec->>'org_id')::uuid)))
     -- Same rule as upsert_agent, and it reached every column here for the
     -- same reason: `cached_tools` was fixed alone because that is the column
     -- whose loss was noticed, while a registration omitting `credential_ref`
@@ -16601,7 +17521,19 @@ begin
            cached_tools    = case when p_spec ? 'cached_tools'
                                   then excluded.cached_tools
                                   else agentic.tool_servers.cached_tools end,
-           synced_at       = coalesce(excluded.synced_at, agentic.tool_servers.synced_at)
+           synced_at       = coalesce(excluded.synced_at, agentic.tool_servers.synced_at),
+           -- Scope follows the same presence rule as every column above: an
+           -- edit that does not mention visibility does not change who can see
+           -- the thing.
+           owner_id        = case when p_spec ? 'owner_id'
+                                  then excluded.owner_id
+                                  else agentic.tool_servers.owner_id end,
+           org_id          = case when p_spec ? 'org_id'
+                                  then excluded.org_id
+                                  else agentic.tool_servers.org_id end,
+           visibility      = case when p_spec ? 'visibility'
+                                  then excluded.visibility
+                                  else agentic.tool_servers.visibility end
     returning * into v_row;
     return v_row;
 end;
@@ -16630,7 +17562,8 @@ begin
     end if;
 
     insert into agentic.skills (name, description, when_to_use, content,
-                                requires_tools, audience, category, tags, plugin)
+                                requires_tools, audience, category, tags, plugin,
+                                owner_id, org_id, visibility)
     values (p_spec->>'name',
             coalesce(p_spec->>'description',
                      (select k.description from agentic.skills k
@@ -16645,7 +17578,15 @@ begin
             coalesce(p_spec->>'category', 'procedure'),
             coalesce((select array_agg(value)
                         from jsonb_array_elements_text(p_spec->'tags')), '{}'),
-            p_spec->>'plugin')
+            p_spec->>'plugin',
+            -- Scope set by the writer, never left to the column default: this
+            -- function is SECURITY DEFINER and bypasses RLS, so a `private`
+            -- default with a null owner writes a row its own author cannot
+            -- select. rbac.default_visibility() states the rule once.
+            coalesce((p_spec->>'owner_id')::uuid, rbac.current_user_id()),
+            (p_spec->>'org_id')::uuid,
+            coalesce(p_spec->>'visibility',
+                     rbac.default_visibility((p_spec->>'org_id')::uuid)))
     on conflict (name) do update
        set description    = case when p_spec ? 'description'
                                  then excluded.description
@@ -16681,7 +17622,22 @@ begin
                when (p_spec ? 'content'     and excluded.content     is distinct from agentic.skills.content)
                  or (p_spec ? 'description' and excluded.description is distinct from agentic.skills.description)
                  or (p_spec ? 'when_to_use' and excluded.when_to_use is distinct from agentic.skills.when_to_use)
-               then 1 else 0 end
+               then 1 else 0 end,
+           -- Scope follows the same presence rule as every column above: an
+           -- edit that does not mention visibility does not change who can see
+           -- the thing. It is deliberately NOT one of the three fields that
+           -- bump `version` -- resharing a skill is not a new version of its
+           -- text, and a provenance record that moved because somebody changed
+           -- an audience would point at a body that never changed.
+           owner_id       = case when p_spec ? 'owner_id'
+                                 then excluded.owner_id
+                                 else agentic.skills.owner_id end,
+           org_id         = case when p_spec ? 'org_id'
+                                 then excluded.org_id
+                                 else agentic.skills.org_id end,
+           visibility     = case when p_spec ? 'visibility'
+                                 then excluded.visibility
+                                 else agentic.skills.visibility end
     returning * into v_row;
     return v_row;
 end;
@@ -16813,6 +17769,27 @@ $$;
 -- Order is not cosmetic. Servers before skills before agents, because an
 -- agent's pinned skills must already exist for upsert_agent to validate them,
 -- and a skill's requires_tools names servers the agent must already bind.
+-- The scope keys a plugin passes down to everything it installs, as jsonb so
+-- they merge with `||` onto each entry's own spec.
+--
+-- A COMPONENT'S OWN KEY WINS, because `||` is right-biased and this is applied
+-- on the right... which is exactly why it is NOT: an entry that names its own
+-- visibility is overridden here on purpose. A plugin scoped to one org cannot
+-- contain a skill that publishes itself to the deployment, or packaging a
+-- tenant's internal procedures would be how they escape the tenant. The
+-- plugin is the boundary; its contents do not get to widen it.
+--
+-- Returns an EMPTY object when the manifest says nothing, so an unscoped
+-- plugin leaves each component to rbac.default_visibility() exactly as before.
+create or replace function agentic.plugin_scope(p_manifest jsonb)
+returns jsonb as $$
+    select coalesce(
+        (select jsonb_object_agg(k, p_manifest -> k)
+           from unnest(array['owner_id','org_id','visibility']) k
+          where p_manifest ? k),
+        '{}'::jsonb);
+$$ language sql immutable;
+
 create or replace function agentic.apply_plugin(p_manifest jsonb)
 returns jsonb
 language plpgsql security definer
@@ -16848,28 +17825,57 @@ begin
                              from jsonb_array_elements(
                                   coalesce(p_manifest->'agents', '[]'::jsonb)) e), '{}');
 
-    insert into agentic.plugins (name, version, description, author, homepage, manifest)
+    insert into agentic.plugins (name, version, description, author, homepage, manifest,
+                                 owner_id, org_id, visibility)
     values (v_name, coalesce(p_manifest->>'version', '0.0.0'),
             p_manifest->>'description', p_manifest->'author',
-            p_manifest->>'homepage', p_manifest)
+            p_manifest->>'homepage', p_manifest,
+            -- Scope set by the writer, never left to the column default: this
+            -- function is SECURITY DEFINER and bypasses RLS, so a `private`
+            -- default with a null owner installs a plugin its own installer
+            -- cannot see. A plugin installed from a shell by an operator has
+            -- no request identity and is deployment configuration, which is
+            -- the case rbac.default_visibility() answers `public`.
+            coalesce((p_manifest->>'owner_id')::uuid, rbac.current_user_id()),
+            (p_manifest->>'org_id')::uuid,
+            coalesce(p_manifest->>'visibility',
+                     rbac.default_visibility((p_manifest->>'org_id')::uuid)))
     on conflict (name) do update
        set version     = excluded.version,
            description = excluded.description,
            author      = excluded.author,
            homepage    = excluded.homepage,
-           manifest    = excluded.manifest;
+           manifest    = excluded.manifest,
+           owner_id    = case when p_manifest ? 'owner_id'
+                              then excluded.owner_id else agentic.plugins.owner_id end,
+           org_id      = case when p_manifest ? 'org_id'
+                              then excluded.org_id else agentic.plugins.org_id end,
+           visibility  = case when p_manifest ? 'visibility'
+                              then excluded.visibility else agentic.plugins.visibility end;
+
+    -- THE PLUGIN'S OWN SCOPE IS PROPAGATED TO WHAT IT INSTALLS. A plugin
+    -- scoped to one org whose skills defaulted to `public` would be a tenant's
+    -- internal procedures published to the deployment by the act of packaging
+    -- them, which is the opposite of what scoping a plugin means.
+    
 
     for v_e in select * from jsonb_array_elements(
                             coalesce(p_manifest->'tool_servers', '[]'::jsonb)) loop
-        perform agentic.upsert_tool_server(v_e || jsonb_build_object('plugin', v_name));
+        perform agentic.upsert_tool_server(
+            v_e || jsonb_build_object('plugin', v_name)
+                || agentic.plugin_scope(p_manifest));
     end loop;
     for v_e in select * from jsonb_array_elements(
                             coalesce(p_manifest->'skills', '[]'::jsonb)) loop
-        perform agentic.upsert_skill(v_e || jsonb_build_object('plugin', v_name));
+        perform agentic.upsert_skill(
+            v_e || jsonb_build_object('plugin', v_name)
+                || agentic.plugin_scope(p_manifest));
     end loop;
     for v_e in select * from jsonb_array_elements(
                             coalesce(p_manifest->'agents', '[]'::jsonb)) loop
-        perform agentic.upsert_agent(v_e || jsonb_build_object('plugin', v_name));
+        perform agentic.upsert_agent(
+            v_e || jsonb_build_object('plugin', v_name)
+                || agentic.plugin_scope(p_manifest));
     end loop;
 
     -- Agents first: nothing in this schema references an agent except a RUN,
@@ -16989,12 +17995,23 @@ $$;
 grant usage on schema agentic to web_anon, authenticated, api_viewer;
 
 create or replace view agentic.sessions_api as
-    select id, user_id, agui_thread_id, title, created_at from agentic.sessions;
+-- The scope columns are APPENDED rather than slotted in beside owner_id, and
+-- the position is forced rather than chosen: `create or replace view` may only
+-- ADD columns at the end. Inserting one in the middle is
+-- `ERROR: cannot change name of view column "status" to "org_id"`, which a
+-- fresh install never sees -- the view is being created, not replaced -- and
+-- every upgrading database hits. Found by dev/upgrade-converges.sh, which is
+-- the only check that applies this file to a database that already has the
+-- old view.
+    select id, owner_id, agui_thread_id, title, created_at,
+           org_id, visibility
+      from agentic.sessions;
 create or replace view agentic.runs_api as
     select id, session_id, agent_id, owner_id, parent_run_id,
            delegated_by_message_id, trigger_kind, workflow_task_id,
            trace_id, span_id, parent_span_id, depth, state, status,
-           created_at, finished_at
+           created_at, finished_at,
+           org_id, visibility
       from agentic.runs;
 create or replace view agentic.messages_api as
     select id, run_id, session_id, role, content, tool_calls, tool_call_id,
@@ -17015,7 +18032,7 @@ create or replace view agentic.messages_api as
 create or replace view agentic.tool_servers_api as
     select id, name, kind, url, credential_ref, emits_citations, serves_agents,
            serves_skills, default_headers, cached_tools, synced_at, plugin,
-           created_at
+           created_at, owner_id, org_id, visibility
       from agentic.tool_servers;
 
 -- Skills, through the same read path as everything else. `content` is IN this
@@ -17032,7 +18049,7 @@ create or replace view agentic.tool_servers_api as
 create or replace view agentic.skills_api as
     select id, name, description, when_to_use, content, discovery_text,
            requires_tools, audience, category, tags, version, plugin,
-           created_at, updated_at
+           created_at, updated_at, owner_id, org_id, visibility
       from agentic.skills;
 
 -- The manifest is in the view on purpose: "what did this plugin install" is a
@@ -17041,7 +18058,7 @@ create or replace view agentic.skills_api as
 -- edited in place afterwards (brief.md §11.8).
 create or replace view agentic.plugins_api as
     select name, version, description, author, homepage, manifest,
-           installed_at, updated_at
+           installed_at, updated_at, owner_id, org_id, visibility
       from agentic.plugins;
 -- The view an interactive UI reads. `audience = 'user'` is the whole point of
 -- the column: a thousand extractors are invisible here without anyone having
@@ -17092,11 +18109,15 @@ order by extracts_source, extracts_doctype;
 -- does not receive, which is precisely the failure the author-time check in
 -- upsert_agent exists to prevent, reintroduced at the read path.
 create or replace view agentic.agents_api as
+-- owner_id/org_id/visibility are IN the view rather than declared out, and
+-- that is the same call `audience` records: a client that cannot see who an
+-- agent belongs to cannot show it, and "why can my colleague not see this
+-- agent" is answerable from this view or from nowhere.
     select id, name, system_prompt, model, tools, skills,
            structured_output_schema,
            chained_action, summarizer_agent_id, context_policy,
            audience, category, tags, extracts_source, extracts_doctype,
-           plugin, created_at
+           plugin, created_at, owner_id, org_id, visibility
       from agentic.agents;
 
 grant select on agentic.sessions, agentic.runs, agentic.messages,
@@ -17884,8 +18905,17 @@ begin
         if v_id is null
            and coalesce(v_scheme,'') in ('lake','')
            and exists (select 1 from content.datasets where name = v_kind) then
-            insert into aiq.lake_nodes (dataset, row_key, label, attrs, org_id)
-            values (v_kind, v_key, v_name, coalesce(v_node->'a','{}'::jsonb), v_org)
+            -- visibility set explicitly, because this function is SECURITY
+            -- DEFINER and runs for a WORKER extracting on some tenant's
+            -- behalf: the column default (`private`) with a null owner writes
+            -- a reference row nobody -- not the tenant, not the worker's next
+            -- pass -- can read. rbac.default_visibility() gives it the org's
+            -- scope when the extraction named one and `public` when this is
+            -- shared reference data, which is the same rule everything else
+            -- in the collection uses.
+            insert into aiq.lake_nodes (dataset, row_key, label, attrs, org_id, visibility)
+            values (v_kind, v_key, v_name, coalesce(v_node->'a','{}'::jsonb), v_org,
+                    rbac.default_visibility(v_org))
             on conflict (org_id, dataset, row_key) do update
                 set last_seen_at = now(),
                     label = coalesce(aiq.lake_nodes.label, excluded.label),
@@ -17912,8 +18942,17 @@ begin
         --     job. What this contributes is the claim, written down with its
         --     provenance, so that cascade has something to resolve.
         if v_id is null then
-            insert into aiq.soft_nodes (kind, key, label, attrs, org_id)
-            values (v_kind, v_key, v_name, coalesce(v_node->'a','{}'::jsonb), v_org)
+            -- visibility set explicitly, because this function is SECURITY
+            -- DEFINER and runs for a WORKER extracting on some tenant's
+            -- behalf: the column default (`private`) with a null owner writes
+            -- a reference row nobody -- not the tenant, not the worker's next
+            -- pass -- can read. rbac.default_visibility() gives it the org's
+            -- scope when the extraction named one and `public` when this is
+            -- shared reference data, which is the same rule everything else
+            -- in the collection uses.
+            insert into aiq.soft_nodes (kind, key, label, attrs, org_id, visibility)
+            values (v_kind, v_key, v_name, coalesce(v_node->'a','{}'::jsonb), v_org,
+                    rbac.default_visibility(v_org))
             on conflict (org_id, kind, key) do update
                 set last_seen_at = now(),
                     label = coalesce(aiq.soft_nodes.label, excluded.label),
@@ -18310,15 +19349,10 @@ grant select on aiq.soft_nodes, aiq.lake_nodes, aiq.graph_vocabulary to authenti
 -- Nothing on the write path changes: the worker reaches these through
 -- SECURITY DEFINER functions owned by app_owner, and an owner is not subject
 -- to its own policies (rbac/02 §3 asserts that is still true).
-alter table aiq.soft_nodes enable row level security;
-alter table aiq.lake_nodes enable row level security;
-
-drop policy if exists soft_nodes_org_scoped on aiq.soft_nodes;
-create policy soft_nodes_org_scoped on aiq.soft_nodes
-    for select using (org_id is null or org_id in (select aiq.current_org_ids()));
-drop policy if exists lake_nodes_org_scoped on aiq.lake_nodes;
-create policy lake_nodes_org_scoped on aiq.lake_nodes
-    for select using (org_id is null or org_id in (select aiq.current_org_ids()));
+select rbac.add_scope_columns('aiq.soft_nodes', 'public');
+select rbac.add_scope_policy ('aiq.soft_nodes');
+select rbac.add_scope_columns('aiq.lake_nodes', 'public');
+select rbac.add_scope_policy ('aiq.lake_nodes');
 
 -- ------------------------------------------------------------
 -- 11. The default vocabulary, installed rather than left to a first caller.
@@ -18808,12 +19842,24 @@ $y$, (aiq.extractor_call(p_graph_agent, p_graph_model, '{{item.content}}'))::tex
     --
     -- The rule, stated rather than implied: a model the CALLER named must
     -- work, and a failure raises. A default this function chose for itself may
-    -- turn out to be uncallable -- the committed corpus fixture registers
-    -- `demo-quad-a` as the DEFAULT with provider `fixture` and no endpoint, so
-    -- installing on a database carrying the sample once failed with "provider
-    -- 'fixture' has no row in aiq.embedding_providers", an install broken by a
-    -- fixture -- and then the pipeline degrades to what it can run and SAYS
-    -- SO, carrying the compiler's own message rather than a summary of it.
+    -- turn out to be uncallable -- and then the pipeline degrades to what it
+    -- can run and SAYS SO, carrying the compiler's own message rather than a
+    -- summary of it.
+    --
+    -- The case that produced this block: the committed corpus fixture
+    -- registers `demo-quad-a` as the DEFAULT, and its vectors are written by
+    -- hand rather than produced by anything, so it cannot embed. It used to say
+    -- that by naming a provider called `fixture`, which resolved to nothing and
+    -- failed the install with "provider 'fixture' has no row in
+    -- aiq.embedding_providers" -- an install broken by a fixture.
+    --
+    -- That spelling is now unrepresentable: embedding_models.provider carries a
+    -- foreign key onto embedding_providers, and a space whose vectors come from
+    -- outside says so with NULL. So the failure this degradation path catches
+    -- is no longer an invented provider name; it is the honest case of a
+    -- default that genuinely cannot embed. The path stays, because that case is
+    -- real -- a model with a null provider or no endpoint is still a default
+    -- this function may find itself holding.
     begin
         if v_model is not null then
             perform aiq.embed_batch_call(v_model, '[]'::jsonb);

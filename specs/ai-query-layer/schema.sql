@@ -252,9 +252,34 @@ create table if not exists aiq.entity_registry (
     key_expr      text not null,          -- SQL expr -> canonical key
     summary_expr  text not null default 'null',
     org_expr      text not null default 'null',
+    -- SQL expr -> one of rbac.visibilities.scope. Defaulted from org_expr
+    -- rather than required, because that default IS the semantics this layer
+    -- had before scope existed: a node with no org was readable by everyone
+    -- and a node with one was readable by that org. Stating it as an
+    -- expression is what makes the OTHER case sayable -- a source table with
+    -- its own visibility column projects private rows -- which `org_id is
+    -- null means public` never could.
+    visibility_expr text not null default 'null',
     include_where text not null default 'true',
     registered_at timestamptz not null default now()
 );
+-- ...AND ON A DATABASE THAT ALREADY HAS THE TABLE, where the line above is a
+-- no-op. Same shape as rbac's `alter column status set default`: the upgrade
+-- script is this file replayed, and `create table if not exists` is perfectly
+-- idempotent while being silently incomplete.
+alter table aiq.entity_registry
+    add column if not exists visibility_expr text not null default 'null';
+
+-- THE PREVIOUS SIGNATURE IS DROPPED, not left beside this one. Adding
+-- p_visibility_expr with a default does not replace the six-argument function;
+-- it creates a seventh-argument OVERLOAD, and then every existing six-argument
+-- call is `function aiq.register_entity_table(unknown, unknown, unknown,
+-- unknown, unknown, unknown) is not unique` -- ambiguous, because both
+-- candidates match. A fresh install never sees it (there is no old function to
+-- be ambiguous with) and every upgrading database fails on the first
+-- registration. Found by dev/upgrade-converges.sh; the same drop is in front
+-- of content.register_upload for the same reason.
+drop function if exists aiq.register_entity_table(text,text,text,text,text,text);
 
 create or replace function aiq.register_entity_table(
     p_entity_type   text,
@@ -262,7 +287,17 @@ create or replace function aiq.register_entity_table(
     p_key_expr      text,
     p_summary_expr  text default 'null',
     p_org_expr      text default 'null',
-    p_include_where text default 'true'
+    p_include_where text default 'true',
+    -- LAST, and that position is not cosmetic. Added before p_include_where,
+    -- every existing positional caller silently handed its inclusion predicate
+    -- to this parameter instead: `content.resources` registered with
+    -- visibility_expr = "n.status = 'ready'", which projects the text `true`
+    -- or `false` into a column whose foreign key admits neither. Measured as
+    -- `insert or update on table "nodes" violates foreign key constraint
+    -- "nodes_visibility_fkey"` from the corpus seed -- loud, but loud in a
+    -- place that named neither the argument nor the caller. A new optional
+    -- parameter goes at the end.
+    p_visibility_expr text default null
 ) returns void as $$
 declare
     -- Named after the ENTITY TYPE, not after the source table's short name.
@@ -278,6 +313,14 @@ declare
     v_ins   text := quote_ident('project_' || p_entity_type || '_ins');
     v_del   text := quote_ident('project_' || p_entity_type || '_del');
     v_other text;
+    -- Defaulted HERE and not in the signature, because the default is derived
+    -- from another argument: "no org means everyone, an org means that org" is
+    -- exactly what this layer meant by org_id before rbac.visibilities existed,
+    -- so a registration that says nothing about visibility keeps the behaviour
+    -- it had rather than projecting every node private and going dark.
+    v_vis text := coalesce(p_visibility_expr,
+                           format('case when %s is null then ''public'' else ''org'' end',
+                                  p_org_expr));
 begin
     -- One table, one entity type. Two types over one table cannot both work
     -- anyway -- the trigger names are fixed, so the second registration's
@@ -294,11 +337,14 @@ begin
     end if;
 
     insert into aiq.entity_registry
-        (entity_type, source_table, key_expr, summary_expr, org_expr, include_where)
-    values (p_entity_type, p_source_table, p_key_expr, p_summary_expr, p_org_expr, p_include_where)
+        (entity_type, source_table, key_expr, summary_expr, org_expr,
+         visibility_expr, include_where)
+    values (p_entity_type, p_source_table, p_key_expr, p_summary_expr, p_org_expr,
+            v_vis, p_include_where)
     on conflict (entity_type) do update
         set source_table = excluded.source_table, key_expr = excluded.key_expr,
             summary_expr = excluded.summary_expr, org_expr = excluded.org_expr,
+            visibility_expr = excluded.visibility_expr,
             include_where = excluded.include_where;
 
     -- One projection function per registered type, generated from the
@@ -321,11 +367,15 @@ begin
         create or replace function aiq.%1$s() returns trigger as $b$
         begin
             -- 1. Rows that belong: upsert identity.
-            insert into aiq.nodes (entity_type, entity_id, org_id, summary)
-            select %2$L, n.id, %3$s, %4$s from new_rows n where %5$s
+            insert into aiq.nodes (entity_type, entity_id, org_id, summary, visibility)
+            select %2$L, n.id, %3$s, %4$s, %7$s from new_rows n where %5$s
             on conflict (entity_type, entity_id) do update
+                -- visibility is projected on UPDATE for org_id's reason: the
+                -- source row is the truth, and a node left at the scope it had
+                -- when it was first projected would go on being readable after
+                -- the row it mirrors stopped being.
                 set summary = excluded.summary, org_id = excluded.org_id,
-                    updated_at = now();
+                    visibility = excluded.visibility, updated_at = now();
 
             -- 2. Rows that no longer belong: evict. coalesce(..., false)
             --    rather than `not (...)` because a predicate that evaluates to
@@ -362,7 +412,8 @@ begin
             return null;
         end;
         $b$ language plpgsql;
-    $f$, v_ins, p_entity_type, p_org_expr, p_summary_expr, p_include_where, p_key_expr);
+    $f$, v_ins, p_entity_type, p_org_expr, p_summary_expr, p_include_where,
+        p_key_expr, v_vis);
 
     execute format($f$
         create or replace function aiq.%1$s() returns trigger as $b$
@@ -442,12 +493,23 @@ begin
     select * into r from aiq.entity_registry where entity_type = p_entity_type;
     if not found then raise exception 'entity type % not registered -- SCHEMA "graph" lists the registered ones', p_entity_type; end if;
 
+    -- visibility_expr is projected here as well as in the live trigger, and
+    -- the two agreeing is the whole point of both reading the registry row.
+    -- Omitting it here was a real bug for the length of one test run: a rebuild
+    -- left every node at the column default, so the sample graph came back
+    -- `private` and each tenant reported "a tenant cannot see its own node" --
+    -- from a rebuild that had just projected it correctly in every other
+    -- respect. Same class as the `n` / `s` alias mismatch this function
+    -- already carries a scar from: two code paths that must agree, with
+    -- nothing forcing them to.
     execute format($q$
-        insert into aiq.nodes (entity_type, entity_id, org_id, summary)
-        select %1$L, n.id, %2$s, %3$s from %4$s n where %5$s
+        insert into aiq.nodes (entity_type, entity_id, org_id, summary, visibility)
+        select %1$L, n.id, %2$s, %3$s, %6$s from %4$s n where %5$s
         on conflict (entity_type, entity_id) do update
-            set summary = excluded.summary, org_id = excluded.org_id, updated_at = now()
-    $q$, r.entity_type, r.org_expr, r.summary_expr, r.source_table, r.include_where);
+            set summary = excluded.summary, org_id = excluded.org_id,
+                visibility = excluded.visibility, updated_at = now()
+    $q$, r.entity_type, r.org_expr, r.summary_expr, r.source_table,
+         r.include_where, r.visibility_expr);
 
     execute format($q$
         insert into aiq.node_keys (node_id, entity_type, key, kind, org_id)
@@ -498,44 +560,27 @@ end;
 $$ language plpgsql;
 
 -- ------------------------------------------------------------
--- 5b. The org-membership seam.
+-- 5b. WAS: the org-membership seam, aiq.current_org_ids().
 --
--- This lives in the CORE schema and not in integration-rbac.sql, where its
--- policies live and where it was first written, for a reason found by building
--- a pristine database from the generated extension script: `aiq.schema_graph`
--- -- a core §13 facet -- scopes the sample keys it shows to the caller's orgs,
--- and a `language sql` function is validated at CREATE time. The integration
--- file is applied AFTER this one, so the facet could not be created at all on a
--- fresh install: SCHEMA "graph" was missing from every new database and present
--- in every database where somebody had loaded the file by hand. Existence is
--- not currency, and this is the shape currency.sh exists to catch.
+-- Deleted, and the deletion is the point rather than a tidy-up. This function
+-- read an `orgs` array straight off the JWT because user-rbac had no org model
+-- to ask -- a working seam, never a tenancy system, and the file's own comment
+-- said so: "a real deployment replaces this", and scenarios/round-4.md carried
+-- it as the open item that would close "when it lands, this function is the
+-- single place that changes".
 --
--- The design point it was written with is unchanged and still applies: this
--- layer does not invent a second notion of tenancy. user-rbac has no org model
--- yet (specs/README.md defers tenant management deliberately), so the predicate
--- is expressed against a single function that a real deployment replaces.
--- Shipping a permissive default silently would be the worst option; this errs
--- closed for org-scoped rows when no membership source exists.
+-- It landed. rbac.orgs/rbac.org_members are real tables and
+-- rbac.current_org_ids() reads them, so membership is a fact the database can
+-- refuse a token about instead of one the token asserts about itself. Every
+-- predicate in this file and in integration-rbac.sql calls the rbac function
+-- now.
 --
--- Returns SETOF rather than an array, deliberately: `org_id = any (select ...)`
--- against an array-returning function compares uuid to uuid[] and fails, while
--- the array form `= any (f())` gives up the InitPlan hoisting that
--- user-rbac/schema.sql §9 measured as the difference between evaluating a
--- predicate once per query and once per row scanned. SETOF gives both --
--- `in (select ...)` type-checks and plans as a hashed SubPlan.
+-- The build-ordering reason this lived in the core schema rather than in
+-- integration-rbac.sql is gone with it: user-rbac/schema.sql is loaded before
+-- this file, so `aiq.schema_graph` -- the §13 facet whose CREATE-time
+-- validation forced the move -- resolves rbac.current_org_ids() on a pristine
+-- install without anything being reordered.
 -- ------------------------------------------------------------
-create or replace function aiq.current_org_ids() returns setof uuid as $$
-    -- Reads the same request-scoped GUC mechanism as rbac.current_user_id():
-    -- PostgREST sets request.jwt.claims per request, so an org claim rides in
-    -- the verified token rather than being supplied as a spoofable argument.
-    select (value #>> '{}')::uuid
-    from jsonb_array_elements(
-        coalesce(
-            nullif(current_setting('request.jwt.claims', true), '')::jsonb -> 'orgs',
-            '[]'::jsonb
-        )
-    );
-$$ language sql stable;
 
 -- ------------------------------------------------------------
 -- 6b. Aliases and short keys -- the only supported write path into node_keys.
@@ -1740,6 +1785,48 @@ alter table aiq.embedding_providers
     add column if not exists batch_request_template jsonb,
     add column if not exists batch_response_path text;
 
+-- A MODEL MAY NOT NAME A PROVIDER THAT DOES NOT EXIST.
+--
+-- `embedding_models.provider` was free text with a comment ('ollama' | 'openai'
+-- | ...) and `embedding_providers.provider` is a primary key declared seventy
+-- lines above it in this same file -- a vocabulary table and a column that
+-- should reference it, sitting next to each other, joined by nothing.
+--
+-- embed_call() already raises a good error for the mismatch, and that is the
+-- problem rather than the mitigation: it raises at CALL time. A registration
+-- naming a provider with no row installs clean, reports success, and surfaces
+-- on somebody's first SEMANTIC search -- which is the furthest possible point
+-- from the mistake. The foreign key moves it to the INSERT that made it.
+--
+-- Added by ALTER rather than in the CREATE TABLE because both tables already
+-- exist in every installed database, and written drop-then-add so an upgrade
+-- picks it up -- the discipline tasks_kind_check and runs_status_fk are
+-- written with.
+-- NULL IS A REAL ANSWER HERE, and adding the key is what made that visible.
+--
+-- `provider` was `not null`, and the fixture spaces the demo corpus registers
+-- (`demo-quad-a`, `demo-quad-b`) satisfied it by inventing the word 'fixture'
+-- -- a provider that is not one, has no request template, and would never have
+-- matched a row in embedding_providers. It went unnoticed for exactly the
+-- reason this key exists: nothing joined the two tables, so an invented word
+-- and a real one were indistinguishable until something tried to embed with it.
+--
+-- A model whose vectors are supplied directly genuinely HAS no provider, so
+-- the column is made nullable rather than the fiction being given a row. The
+-- key then reads correctly in both directions: a name that is not null must
+-- resolve, and null means "nothing here embeds this -- the vectors come from
+-- outside". Dropping the NOT NULL is safe on an existing database; every row
+-- that satisfied it still does.
+alter table aiq.embedding_models alter column provider drop not null;
+alter table aiq.embedding_models drop constraint if exists embedding_models_provider_fk;
+alter table aiq.embedding_models add  constraint embedding_models_provider_fk
+    foreign key (provider) references aiq.embedding_providers(provider);
+
+comment on column aiq.embedding_models.provider is
+    'References aiq.embedding_providers. NULL means this space is not embedded '
+    'by this system -- its vectors are written directly, as the demo fixture '
+    'spaces are -- so aiq.embed_call refuses it rather than guessing.';
+
 comment on column aiq.embedding_providers.batch_request_template is
     'The request body for MANY texts at once, with {{texts}} where the array goes. '
     'Null means the provider embeds one text per call and a batch is N calls.';
@@ -1777,6 +1864,18 @@ begin
         raise exception
             'embedding model % is not registered -- SCHEMA "graph" lists the '
             'registered ones', coalesce(p_model, '(the default)');
+    end if;
+
+    -- Null is now reachable and means something specific, so it is answered
+    -- specifically: a caller who asks a fixture space to embed text has made a
+    -- different mistake from one who named a provider nobody registered, and
+    -- one error message for both would send them to the wrong fix.
+    if m.provider is null then
+        raise exception
+            'embedding model ''%'' has no provider: its vectors are written '
+            'directly rather than produced here, so there is nothing to call. '
+            'Set aiq.embedding_models.provider, or embed against a model that '
+            'has one.', m.name;
     end if;
 
     select * into p from aiq.embedding_providers where provider = m.provider;
@@ -2908,7 +3007,7 @@ returns jsonb as $$
                                where n.entity_type = r.entity_type
                                  and nk.kind = 'canonical'
                                  and (n.org_id is null
-                                      or n.org_id in (select aiq.current_org_ids()))
+                                      or n.org_id in (select rbac.current_org_ids()))
                                order by nk.key
                                limit 3) k), '[]'::jsonb))
                     order by r.entity_type)

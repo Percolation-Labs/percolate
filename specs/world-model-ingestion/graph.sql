@@ -463,8 +463,17 @@ begin
         if v_id is null
            and coalesce(v_scheme,'') in ('lake','')
            and exists (select 1 from content.datasets where name = v_kind) then
-            insert into aiq.lake_nodes (dataset, row_key, label, attrs, org_id)
-            values (v_kind, v_key, v_name, coalesce(v_node->'a','{}'::jsonb), v_org)
+            -- visibility set explicitly, because this function is SECURITY
+            -- DEFINER and runs for a WORKER extracting on some tenant's
+            -- behalf: the column default (`private`) with a null owner writes
+            -- a reference row nobody -- not the tenant, not the worker's next
+            -- pass -- can read. rbac.default_visibility() gives it the org's
+            -- scope when the extraction named one and `public` when this is
+            -- shared reference data, which is the same rule everything else
+            -- in the collection uses.
+            insert into aiq.lake_nodes (dataset, row_key, label, attrs, org_id, visibility)
+            values (v_kind, v_key, v_name, coalesce(v_node->'a','{}'::jsonb), v_org,
+                    rbac.default_visibility(v_org))
             on conflict (org_id, dataset, row_key) do update
                 set last_seen_at = now(),
                     label = coalesce(aiq.lake_nodes.label, excluded.label),
@@ -491,8 +500,17 @@ begin
         --     job. What this contributes is the claim, written down with its
         --     provenance, so that cascade has something to resolve.
         if v_id is null then
-            insert into aiq.soft_nodes (kind, key, label, attrs, org_id)
-            values (v_kind, v_key, v_name, coalesce(v_node->'a','{}'::jsonb), v_org)
+            -- visibility set explicitly, because this function is SECURITY
+            -- DEFINER and runs for a WORKER extracting on some tenant's
+            -- behalf: the column default (`private`) with a null owner writes
+            -- a reference row nobody -- not the tenant, not the worker's next
+            -- pass -- can read. rbac.default_visibility() gives it the org's
+            -- scope when the extraction named one and `public` when this is
+            -- shared reference data, which is the same rule everything else
+            -- in the collection uses.
+            insert into aiq.soft_nodes (kind, key, label, attrs, org_id, visibility)
+            values (v_kind, v_key, v_name, coalesce(v_node->'a','{}'::jsonb), v_org,
+                    rbac.default_visibility(v_org))
             on conflict (org_id, kind, key) do update
                 set last_seen_at = now(),
                     label = coalesce(aiq.soft_nodes.label, excluded.label),
@@ -889,15 +907,10 @@ grant select on aiq.soft_nodes, aiq.lake_nodes, aiq.graph_vocabulary to authenti
 -- Nothing on the write path changes: the worker reaches these through
 -- SECURITY DEFINER functions owned by app_owner, and an owner is not subject
 -- to its own policies (rbac/02 §3 asserts that is still true).
-alter table aiq.soft_nodes enable row level security;
-alter table aiq.lake_nodes enable row level security;
-
-drop policy if exists soft_nodes_org_scoped on aiq.soft_nodes;
-create policy soft_nodes_org_scoped on aiq.soft_nodes
-    for select using (org_id is null or org_id in (select aiq.current_org_ids()));
-drop policy if exists lake_nodes_org_scoped on aiq.lake_nodes;
-create policy lake_nodes_org_scoped on aiq.lake_nodes
-    for select using (org_id is null or org_id in (select aiq.current_org_ids()));
+select rbac.add_scope_columns('aiq.soft_nodes', 'public');
+select rbac.add_scope_policy ('aiq.soft_nodes');
+select rbac.add_scope_columns('aiq.lake_nodes', 'public');
+select rbac.add_scope_policy ('aiq.lake_nodes');
 
 -- ------------------------------------------------------------
 -- 11. The default vocabulary, installed rather than left to a first caller.

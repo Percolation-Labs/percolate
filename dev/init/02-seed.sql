@@ -95,4 +95,38 @@ insert into rbac.role_permissions (role, resource, action) values
     ('admin', 'workflows',    'update')
 on conflict do nothing;
 
+-- ------------------------------------------------------------
+-- THE TWO SAMPLE ORGS, AND THE TWO USERS THAT BELONG TO THEM.
+--
+-- These uuids are not new: 04-graph-sample.sql, 05-corpus-sample.sql and four
+-- test files have written `org_id = 'a0000000-...-a'` since the graph fixture
+-- was added, and nothing anywhere said what an org WAS. The `orgs` array on a
+-- token was the whole of it.
+--
+-- rbac.orgs and rbac.org_members are real tables now, and every scoped table's
+-- org_id references the first of them -- so seeding these is not fixture
+-- decoration, it is what stops the sample data failing its own foreign key.
+-- The seeds are where they belong rather than in the graph sample, because two
+-- other files and the test suite use the same two ids.
+--
+-- alice and bob are the deployment's two identities (dev/tests/rbac/01 records
+-- why they are stable rather than recreated). One in each org is what makes
+-- "a tenant sees its own and not the other's" expressible at all: before this,
+-- every fixture asserted tenancy with a token that named an org and no user,
+-- which under a real membership model is an anonymous caller.
+insert into rbac.orgs (id, slug, name) values
+    ('a0000000-0000-0000-0000-00000000000a', 'org-a', 'Org A'),
+    ('a0000000-0000-0000-0000-00000000000b', 'org-b', 'Org B')
+on conflict (id) do nothing;
+
+insert into rbac.users (id, email) values
+    ('11111111-1111-1111-1111-111111111111', 'alice@test.com'),
+    ('22222222-2222-2222-2222-222222222222', 'bob@test.com')
+on conflict (id) do nothing;
+
+insert into rbac.org_members (org_id, user_id, role) values
+    ('a0000000-0000-0000-0000-00000000000a', '11111111-1111-1111-1111-111111111111', 'admin'),
+    ('a0000000-0000-0000-0000-00000000000b', '22222222-2222-2222-2222-222222222222', 'admin')
+on conflict (org_id, user_id) do nothing;
+
 reset role;

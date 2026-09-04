@@ -211,23 +211,48 @@ $y$);
         if v_msg not like '%has no endpoint%' then raise; end if;
     end;
 
-    -- (c) a provider whose request shape nothing knows
+    -- (c) a provider whose request shape nothing knows.
+    --
+    -- THIS ONE NO LONGER REACHES THE AUTHORING GATE, and that is the fix
+    -- rather than a regression. It used to register clean and be refused by
+    -- define_yaml, which was already an improvement on failing at run time --
+    -- but embedding_models.provider now carries a foreign key onto
+    -- embedding_providers, so the mistake is refused by the INSERT that makes
+    -- it. Two tables that should have been joined were sitting seventy lines
+    -- apart in one file, joined by nothing.
+    --
+    -- The guarantee under test is unchanged -- a model naming a provider
+    -- nothing knows must be refused -- so what moves is only WHERE, and it
+    -- moves toward the mistake, which is the direction this collection keeps
+    -- pushing things.
+    begin
+        insert into aiq.embedding_models (name, dim, provider, endpoint)
+        values ('t-embed-weird', 768, 'homegrown', 'http://x/embed');
+        raise exception 'a model naming an unregistered provider was accepted';
+    exception when foreign_key_violation then
+        null;  -- refused at the write, which is the point
+    end;
+
+    -- And the honest null: a space whose vectors are written directly has no
+    -- provider, so it is registrable -- and still not embeddable, which the
+    -- authoring gate is what says.
     insert into aiq.embedding_models (name, dim, provider, endpoint)
-    values ('t-embed-weird', 768, 'homegrown', 'http://x/embed');
+    values ('t-embed-fixture', 4, null, null);
     begin
         perform workflow.define_yaml($y$
-name: t_embed_weird
+name: t_embed_fixture
 steps:
   - id: q
-    embed: {text: 'x', model: t-embed-weird}
+    embed: {text: 'x', model: t-embed-fixture}
 $y$);
-        raise exception 'a provider with no request shape was accepted';
+        raise exception 'a model with no provider was accepted for embedding';
     exception when others then
         v_msg := sqlerrm;
-        if v_msg not like '%aiq.embedding_providers%' then raise; end if;
+        if v_msg not like '%has no provider%' then raise; end if;
     end;
 
     raise notice 'workflow/09: a model that is a space but not a call is refused while authoring, not while running';
+    raise notice 'workflow/09: a provider nothing knows is refused at the INSERT; a null provider is a fixture space that cannot embed';
 end $$;
 
 -- ---------------------------------------------------------------------

@@ -98,17 +98,21 @@ end $$;
 -- ---------------------------------------------------------------------
 begin;
 
-insert into aiq.soft_nodes (kind, key, label, org_id, attrs) values
-  ('company', 't-rs-org-a', 'A', 'a0000000-0000-0000-0000-00000000000a', '{"deal":"condor"}'),
-  ('company', 't-rs-org-b', 'B', 'a0000000-0000-0000-0000-00000000000b', '{"deal":"heron"}'),
-  ('company', 't-rs-shared', 'S', null, '{}');
+-- visibility is stated per row, because the fixture is now saying two things
+-- that `org_id` alone used to conflate. The shared row is `public` BECAUSE
+-- SOMEBODY DECIDED IT IS, not because its org happens to be null -- which is
+-- the change scope makes, and the reason the row below had to grow a column.
+insert into aiq.soft_nodes (kind, key, label, org_id, visibility, attrs) values
+  ('company', 't-rs-org-a', 'A', 'a0000000-0000-0000-0000-00000000000a', 'org', '{"deal":"condor"}'),
+  ('company', 't-rs-org-b', 'B', 'a0000000-0000-0000-0000-00000000000b', 'org', '{"deal":"heron"}'),
+  ('company', 't-rs-shared', 'S', null, 'public', '{}');
 
 do $$
 declare v_n int; v_keys text;
 begin
     set local role authenticated;
     perform set_config('request.jwt.claims',
-        '{"orgs":["a0000000-0000-0000-0000-00000000000b"]}', true);
+        '{"sub":"22222222-2222-2222-2222-222222222222","orgs":["a0000000-0000-0000-0000-00000000000b"]}', true);
 
     select count(*), coalesce(string_agg(key, ', ' order by key), '')
       into v_n, v_keys

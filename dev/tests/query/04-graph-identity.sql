@@ -489,8 +489,16 @@ begin
     select string_agg(attname, ', ') into v_extra
     from pg_attribute
     where attrelid = 'aiq.nodes'::regclass and attnum > 0 and not attisdropped
-      and attname not in ('id','entity_type','entity_id','org_id','summary',
-                          'created_at','updated_at');
+      -- owner_id and visibility join org_id on this list rather than counting
+      -- as payload, and the distinction the invariant is actually making is
+      -- worth stating: it forbids ATTRIBUTES OF THE ENTITY -- a company's
+      -- ticker, a person's role -- because those have a typed table that owns
+      -- them and a second copy here would be a second source of truth. Who may
+      -- SEE the node is not an attribute of the company; it is a property of
+      -- the registry row, it has no typed table to live in, and the projection
+      -- derives it from the source rather than duplicating a source column.
+      and attname not in ('id','entity_type','entity_id','org_id','owner_id',
+                          'visibility','summary','created_at','updated_at');
     if v_extra is not null then
         raise exception
             'aiq.nodes has grown payload columns (%). Typed tables own '

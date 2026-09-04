@@ -133,7 +133,7 @@ rollback;
 -- role and the fixture above needed an owner.
 begin;
 set local role authenticated;
-set local request.jwt.claims = '{"orgs":["a0000000-0000-0000-0000-00000000000b"]}';
+set local request.jwt.claims = '{"sub":"22222222-2222-2222-2222-222222222222","orgs":["a0000000-0000-0000-0000-00000000000b"]}';
 
 do $$
 declare

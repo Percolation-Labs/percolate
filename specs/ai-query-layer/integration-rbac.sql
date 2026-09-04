@@ -18,36 +18,47 @@
 -- ============================================================
 
 -- ------------------------------------------------------------
--- 1. Tenant scoping.
+-- 1. Scope.
 --
--- nodes/node_keys/edges already carry org_id. The rule, stated once:
---   org_id IS NULL  -> shared reference data, visible to everyone
---   org_id = <uuid> -> visible only to members of that org
+-- WAS: `org_id is null or org_id in (select aiq.current_org_ids())`, with the
+-- rule stated as "org_id IS NULL -> shared reference data, visible to
+-- everyone; org_id = <uuid> -> visible only to members of that org".
 --
--- "Shared reference data" is a real category here, not a loophole: a public
--- SEC filing or a well-known company is legitimately global, and forcing it
+-- That rule was right about what it wanted and wrong about how it said it,
+-- because `org_id is null` also means "nobody set it". world-model-ingestion
+-- measured the consequence on this exact predicate: register_upload() called
+-- without its optional org argument wrote a null org, and a different tenant
+-- read the row. One value cannot be both "deliberately global" and "not filled
+-- in" while a policy treats it as the first.
+--
+-- user-rbac §2b's scope column says which one is meant, so the null org stops
+-- being load-bearing: a shared SEC filing is `public` because somebody chose
+-- it, and a row nobody scoped is `private` because that is the default.
+--
+-- "Shared reference data" is still a real category and not a loophole -- a
+-- public filing or a well-known company is legitimately global, and forcing it
 -- to be duplicated per tenant would defeat the whole point of one identity
--- registry (graph-identity.md "Node registry", org_id "null = shared").
+-- registry. It is now spelled `public`.
 --
--- Membership lives in rbac. This layer does not invent a second notion of
--- tenancy -- it asks the one that already exists.
+-- Membership lives in rbac, as it always claimed to. What has changed is that
+-- there is now something there to ask: rbac.org_members rather than an array
+-- the caller's own token asserts.
 -- ------------------------------------------------------------
 
--- The org-membership seam, `aiq.current_org_ids()`, is defined in
--- ai-query-layer/schema.sql rather than here, and the reason is a build
--- ordering one rather than a design one -- see the comment at its definition.
--- What belongs here is the POLICIES that use it, below.
+-- Two calls, and no policy written by hand -- see rbac.add_scope_policy()'s
+-- header for why the predicate is generated rather than copied. nodes gains
+-- owner_id and visibility; its existing org_id gains the foreign key to
+-- rbac.orgs it never had, so an org_id naming no org is refused at the write
+-- instead of producing a row nobody can see.
+--
+-- No `<resource>` argument, deliberately: there is no deployment-wide
+-- permission to read every tenant's graph, and adding one here would create it.
+select rbac.add_scope_columns('aiq.nodes', 'public');
+select rbac.add_scope_policy ('aiq.nodes');
 
-alter table aiq.nodes     enable row level security;
 alter table aiq.node_keys enable row level security;
 alter table aiq.edges     enable row level security;
 
--- (select ...) wrapping for InitPlan caching, same as every other RLS policy
--- in this collection -- current_org_ids() is STABLE but that alone does not
--- get it hoisted (user-rbac/schema.sql §9's EXPLAIN finding).
-drop policy if exists nodes_org_scoped on aiq.nodes;
-create policy nodes_org_scoped on aiq.nodes for select
-  using (org_id is null or org_id in (select aiq.current_org_ids()));
 -- node_keys INHERITS its node's visibility rather than re-deriving it from
 -- its own org_id copy. That copy exists for the canonical-key unique index
 -- (two orgs may each have their own 'acme' -- graph-identity.md "Keys"), and
@@ -63,7 +74,9 @@ create policy nodes_org_scoped on aiq.nodes for select
 --
 -- One source of truth: visibility lives on nodes, keys inherit it. Drift is
 -- now impossible rather than merely detected. (Same shape as workflow.tasks
--- inheriting visibility from workflow.runs.)
+-- inheriting visibility from workflow.runs.) This is also why node_keys does
+-- NOT get add_scope_columns -- a second `visibility` column here would be the
+-- identical bug one generation later.
 drop policy if exists node_keys_via_node on aiq.node_keys;
 create policy node_keys_via_node on aiq.node_keys for select
   using (exists (select 1 from aiq.nodes n where n.id = aiq.node_keys.node_id));
@@ -81,7 +94,16 @@ create policy edges_via_endpoints on aiq.edges for select
 --    A view owned by app_owner would bypass the policies above.
 -- ------------------------------------------------------------
 create or replace view aiq.nodes_api as
-  select id, entity_type, entity_id, org_id, summary, created_at, updated_at
+-- The scope columns are APPENDED rather than slotted in beside owner_id, and
+-- the position is forced rather than chosen: `create or replace view` may only
+-- ADD columns at the end. Inserting one in the middle is
+-- `ERROR: cannot change name of view column "status" to "org_id"`, which a
+-- fresh install never sees -- the view is being created, not replaced -- and
+-- every upgrading database hits. Found by dev/upgrade-converges.sh, which is
+-- the only check that applies this file to a database that already has the
+-- old view.
+  select id, entity_type, entity_id, org_id, summary, created_at, updated_at,
+         owner_id, visibility
   from aiq.nodes;
 create or replace view aiq.edges_api as
   select id, src_id, dst_id, relation, weight, valid_from, valid_to, org_id, created_at
@@ -89,7 +111,9 @@ create or replace view aiq.edges_api as
 
 grant usage on schema aiq to api_viewer, authenticated;
 grant select on aiq.nodes, aiq.node_keys, aiq.edges to api_viewer;
-grant execute on function aiq.current_org_ids() to api_viewer, authenticated;
+-- rbac.current_org_ids() and the scope predicates are granted in user-rbac
+-- §9, to api_viewer and authenticated among others -- the policies above are
+-- evaluated as the view owner, so api_viewer is who must be able to run them.
 
 grant create on schema aiq to api_viewer;
 alter view aiq.nodes_api owner to api_viewer;

@@ -459,12 +459,21 @@ create policy pools_read on workflow.pools
     for select to authenticated
     using (true);
 
+-- Pools take the scope COLUMNS but keep their own write policy, and the
+-- asymmetry is deliberate: reading a pool is `using (true)` above because a
+-- worker has to see the queue it serves, so there is no read to scope. What
+-- the columns buy is the write side being able to say "this pool belongs to
+-- this org" once a deployment has more than one tenant running workers.
+select rbac.add_scope_columns('workflow.pools');
+
 drop policy if exists pools_write on workflow.pools;
 create policy pools_write on workflow.pools
     for all to authenticated
     using      (owner_id = (select rbac.current_user_id())
+                or org_id in (select rbac.current_org_ids())
                 or (select rbac.has_permission(rbac.current_user_id(), 'workflow_pools', 'update')))
     with check (owner_id = (select rbac.current_user_id())
+                or org_id in (select rbac.current_org_ids())
                 or (select rbac.has_permission(rbac.current_user_id(), 'workflow_pools', 'update')));
 
 drop policy if exists pool_queues_read on workflow.pool_queues;

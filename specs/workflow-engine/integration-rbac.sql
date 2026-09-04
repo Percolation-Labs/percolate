@@ -27,18 +27,17 @@
 -- spec.md §13 actually meant. owner_id is nullable on purpose: a run started
 -- by the system (a scheduled poll, a consolidation run) has no human owner,
 -- and must not be forced to invent one.
-alter table workflow.runs add column if not exists owner_id uuid references rbac.users(id);
-create index if not exists idx_runs_owner on workflow.runs (owner_id);
+-- A RUN GAINS AN ORG AND A SCOPE, not just an owner.
+--
+-- Ownership alone made a run unshareable: `owner_id = current_user_id()` has
+-- no way to say "my colleague may watch this", so the only route to a run
+-- somebody else started was a deployment-wide workflow_runs/select, which is
+-- permission to read EVERY tenant's runs. The two available answers were
+-- nobody and everybody.
+select rbac.add_scope_columns('workflow.runs');
+select rbac.add_scope_policy ('workflow.runs', 'workflow_runs');
 
-alter table workflow.runs enable row level security;
 alter table workflow.tasks enable row level security;
-
--- Same (select ...) InitPlan wrapping as user-rbac/schema.sql's policies --
--- has_permission() runs a join, so bare calls re-evaluate it per row scanned.
-drop policy if exists runs_owner_or_permitted on workflow.runs;
-create policy runs_owner_or_permitted on workflow.runs for select
-  using (owner_id = (select rbac.current_user_id())
-         or (select rbac.has_permission(rbac.current_user_id(), 'workflow_runs', 'select')));
 
 -- Tasks inherit their run's visibility rather than restating the rule -- one
 -- place to change it, and a task has no owner of its own.
@@ -50,8 +49,17 @@ create policy tasks_via_run on workflow.tasks for select
 -- ownership split user-rbac/roles.sql §2 exists for. A view owned by the
 -- table owner bypasses RLS and returns every row to every caller.
 create or replace view workflow.runs_api as
+-- The scope columns are APPENDED rather than slotted in beside owner_id, and
+-- the position is forced rather than chosen: `create or replace view` may only
+-- ADD columns at the end. Inserting one in the middle is
+-- `ERROR: cannot change name of view column "status" to "org_id"`, which a
+-- fresh install never sees -- the view is being created, not replaced -- and
+-- every upgrading database hits. Found by dev/upgrade-converges.sh, which is
+-- the only check that applies this file to a database that already has the
+-- old view.
   select id, workflow_def_id, owner_id, status, compensation_state,
-         external_id, input, context, trace_id, created_at, updated_at, completed_at
+         external_id, input, context, trace_id, created_at, updated_at, completed_at,
+         org_id, visibility
   from workflow.runs;
 create or replace view workflow.tasks_api as
   select id, run_id, step_key, kind, queue, status, attempts, max_attempts,
@@ -452,13 +460,11 @@ create or replace trigger trg_set_schedule_owner
     before insert on workflow.schedules
     for each row execute function workflow.set_schedule_owner();
 
-alter table workflow.schedules enable row level security;
-
--- (select ...) wrapping, as everywhere: has_permission() runs a join.
-drop policy if exists schedules_owner_or_permitted on workflow.schedules;
-create policy schedules_owner_or_permitted on workflow.schedules for select
-  using (owner_id = (select rbac.current_user_id())
-         or (select rbac.has_permission(rbac.current_user_id(), 'workflow_schedules', 'select')));
+-- schedules already carried BOTH owner_id and org_id and used only the first:
+-- the org column was added for a scheduled run to be RLS-scoped by and then
+-- had no policy that read it. It has one now.
+select rbac.add_scope_columns('workflow.schedules');
+select rbac.add_scope_policy ('workflow.schedules', 'workflow_schedules');
 
 -- The real check, replacing schema.sql §19's deny-by-default stand-in.
 -- Mirrors assert_run_access() exactly, including its rule about system-owned
@@ -521,7 +527,9 @@ create or replace view workflow.schedules_api as
   select id, name, workflow_name, cron_expr, timezone, input, enabled,
          overlap_policy, owner_id, org_id, last_tick_at, last_fired_at,
          last_run_id, fire_count, skip_count, last_error, last_error_at,
-         created_at, updated_at
+         created_at, updated_at,
+         -- appended, not slotted in: see runs_api above
+         visibility
   from workflow.schedules;
 
 grant select on workflow.schedules to api_viewer;

@@ -43,7 +43,7 @@ end $$;
 -- from "no such key" and is how the drift was found in the first place.
 -- ---------------------------------------------------------------------
 set local role authenticated;
-set local request.jwt.claims = '{"orgs":["a0000000-0000-0000-0000-00000000000a"]}';
+set local request.jwt.claims = '{"sub":"11111111-1111-1111-1111-111111111111","orgs":["a0000000-0000-0000-0000-00000000000a"]}';
 
 do $$
 begin
@@ -152,11 +152,11 @@ declare v_a int; v_b int; v_none int; v_all int;
 begin
     set local role authenticated;
 
-    set local request.jwt.claims = '{"orgs":["a0000000-0000-0000-0000-00000000000a"]}';
+    set local request.jwt.claims = '{"sub":"11111111-1111-1111-1111-111111111111","orgs":["a0000000-0000-0000-0000-00000000000a"]}';
     select count(*) into v_a from aiq.nodes;
-    set local request.jwt.claims = '{"orgs":["a0000000-0000-0000-0000-00000000000b"]}';
+    set local request.jwt.claims = '{"sub":"22222222-2222-2222-2222-222222222222","orgs":["a0000000-0000-0000-0000-00000000000b"]}';
     select count(*) into v_b from aiq.nodes;
-    set local request.jwt.claims = '{"orgs":[]}';
+    set local request.jwt.claims = '{"sub":"11111111-1111-1111-1111-111111111111","orgs":[]}';
     select count(*) into v_none from aiq.nodes;
     reset role;
     select count(*) into v_all from aiq.nodes;

@@ -220,84 +220,30 @@ create index if not exists idx_chunks_resource on content.resource_chunks (resou
 -- connection could WRITE an org's content and not READ it, and the worker that
 -- ingests a document could record its chunks but not resolve the file it was
 -- meant to chunk. Whichever answer is right, it cannot be two answers.
-create or replace function content.may_access_org(p_org_id uuid)
-returns boolean as $$
-    -- IDENTITY COMES FROM THE VERIFIED TOKEN, NOT FROM THE ROLE, and the first
-    -- version of this check got that wrong in the most instructive way: it
-    -- asked `pg_has_role(current_user, 'worker', ...)`, and inside a SECURITY
-    -- DEFINER function current_user is the DEFINER. Every caller looked like
-    -- app_owner, so the check exempted everyone and the probe that found the
-    -- hole walked straight through the fix. session_user is no better -- every
-    -- PostgREST request shares one login role, `authenticator`.
-    --
-    -- So the signal is the one aiq.current_org_ids() itself documents: an org
-    -- claim rides in the request-scoped GUC PostgREST sets from a verified JWT.
-    -- No claims at all means no request identity -- a service connection, a
-    -- migration, psql -- which is the same exemption workflow's worker-facing
-    -- functions get from their grant being the authorization.
-    --
-    -- A NULL ORG IS THE ORG EVERYONE READS, WHICH IS WHY WRITING ONE IS THE
-    -- STRONGEST CROSS-TENANT ACT AND NOT THE ABSENCE OF ONE.
-    --
-    -- This used to read `or p_org_id is null`, on the reasoning written here:
-    -- "a null org is the single-tenant case and the fixture case: it is
-    -- readable by everyone under resources_org_scoped, so writing it is not a
-    -- cross-tenant act." The premise is right and the conclusion inverts it.
-    -- `resources_org_scoped` is `org_id is null or org_id in (...)`, so a null
-    -- org is not unscoped -- it is scoped to EVERY tenant. Being allowed to
-    -- write one is permission to put a document in every other tenant's
-    -- corpus, which is a wider act than writing into any single named org, not
-    -- a narrower one.
-    --
-    -- It needed no missing check to reach, and no argument an attacker had to
-    -- guess: `register_upload`'s `p_org_id` DEFAULTS to null, and the channel
-    -- lookup accepts a null-org channel -- of which the extension ships three
-    -- (`uploads`, `workflow_artifacts`, `sample-corpus`). MEASURED on a stock
-    -- install, as an ordinary `authenticated` user of org B holding nothing:
-    --
-    --     select content.register_upload('uploads', ...)   -- no org argument
-    --     -> resource written with org_id NULL
-    --     -> org A, a different tenant, reads the row:        1
-    --     -> org A's TEXT search over the `chunks` corpus:    1 matching row
-    --
-    -- That is §4a's own threat sentence -- "an agent asking its own tenant's
-    -- documents a question would retrieve the attacker's text and act on it" --
-    -- reached through the default value of an optional argument. §4a closed
-    -- writing into ANOTHER NAMED org and left open writing into the one every
-    -- org reads.
-    --
-    -- THE TEST IS WHETHER THE CALLER IS A TENANT, not whether the org is null.
-    -- A token that names one or more orgs is a tenant's, and a tenant writes
-    -- inside its tenancy. A token that names none is the single-tenant
-    -- deployment (auth, one org, everything shared) and still writes the null
-    -- org, because for it null means "ours". No token at all is a service
-    -- connection, a migration or psql, and is unchanged.
-    --
-    -- `p_org_id is not null` guards the IN: `null in (select ...)` is NULL
-    -- rather than false, which would make the whole predicate NULL and read as
-    -- a refusal by accident rather than by rule.
-    select
-        -- no request identity at all -- service connection, migration, psql
-        nullif(current_setting('request.jwt.claims', true), '') is null
-        -- the caller's token names this org
-        or (p_org_id is not null
-            and p_org_id in (select aiq.current_org_ids()))
-        -- the single-tenant case: a token that names no org writing the org
-        -- that, for that deployment, means "ours"
-        or (p_org_id is null
-            and not exists (select 1 from aiq.current_org_ids()));
-$$ language sql stable security definer set search_path = pg_catalog, public;
+-- MOVED, to rbac.may_access_org(). The rule is about orgs, and orgs are
+-- rbac's now -- this schema owned it only because it was the first to need it,
+-- and trace-field's policies then imported a content function to ask an
+-- identity question, which is a subsystem boundary crossed the wrong way.
+--
+-- Its history is worth following to the new home: the check began as
+-- `pg_has_role(current_user, 'worker', ...)` and exempted everyone, because
+-- inside a SECURITY DEFINER function current_user is the DEFINER. The fix --
+-- read the org claim from the request-scoped GUC PostgREST sets from a
+-- verified JWT -- is what rbac.current_org_ids() now does against real
+-- membership rows rather than against the claim alone.
+--
+-- One arm of it is deliberately not carried over; rbac.may_access_org()'s own
+-- header states which and why.
 
 create or replace function content.assert_org_write(p_org_id uuid, p_what text)
 returns void as $$
 begin
-    if not content.may_access_org(p_org_id) then
+    if not rbac.may_access_org(p_org_id) then
         raise exception 'not authorized to % for that organization', p_what;
     end if;
 end;
 $$ language plpgsql stable security definer set search_path = pg_catalog, public;
 
-grant execute on function content.may_access_org(uuid) to authenticated, worker;
 
 grant execute on function content.assert_org_write(uuid, text) to authenticated, worker;
 
@@ -317,6 +263,15 @@ grant execute on function content.assert_org_write(uuid, text) to authenticated,
 -- and counting. p_external_id is now the caller's own idea of identity, used
 -- by pullers to avoid re-ingesting; an upload normally leaves it null and gets
 -- a new resource every time.
+-- THE PREVIOUS SIGNATURE IS DROPPED, not left beside this one. `create or
+-- replace` matches on the argument list, so adding p_visibility creates a
+-- SECOND function rather than replacing the first -- and every existing caller
+-- keeps resolving to the old one, which writes no owner and no scope. An
+-- overload that silently wins is worse than a broken call: the upload
+-- succeeds and the row is invisible to the person who made it.
+drop function if exists content.register_upload(
+    text,text,text,text,bigint,text,text,text,uuid,jsonb,text,text);
+
 create or replace function content.register_upload(
     p_channel     text,
     p_checksum    text,
@@ -329,7 +284,15 @@ create or replace function content.register_upload(
     p_org_id      uuid default null,
     p_metadata    jsonb default '{}'::jsonb,
     p_external_id text default null,
-    p_trace_id    text default null
+    p_trace_id    text default null,
+    -- Defaulted through rbac.default_visibility() rather than to a constant,
+    -- and the choice is the whole of §4b's fix rather than a convenience. An
+    -- upload named an org and got a row every OTHER org could read, because
+    -- `org_id is null` was the everyone tier and this argument defaulted into
+    -- it. Now: name an org and the row is that org's; name none and the row is
+    -- yours. Neither default publishes anything to another tenant, and
+    -- publishing is `public`, spelled out by whoever meant it.
+    p_visibility  text default null
 ) returns uuid as $$
 declare
     v_channel  uuid;
@@ -337,6 +300,7 @@ declare
     v_res      uuid;
     v_workflow text;
     v_run      uuid;
+    v_vis      text := coalesce(p_visibility, rbac.default_visibility(p_org_id));
 begin
     perform content.assert_org_write(p_org_id, 'register content');
 
@@ -360,8 +324,17 @@ begin
     on conflict (checksum) do update set checksum = excluded.checksum
     returning id into v_file;
 
-    insert into content.resources (channel_id, file_id, uri, title, org_id, metadata, external_id)
-    values (v_channel, v_file, p_uri, p_title, p_org_id, p_metadata, p_external_id)
+    -- owner_id IS SET HERE OR THE ROW IS UNREADABLE BY ANYONE. This function
+    -- is SECURITY DEFINER and bypasses RLS, so it will happily write a row
+    -- that its own writer cannot then select -- which is exactly what a
+    -- `private` default with a null owner produces. The uploader is the owner;
+    -- a service connection with no request identity leaves it null, and such a
+    -- row is reachable only through its org or by being public, which is the
+    -- correct reading of "nobody in particular uploaded this".
+    insert into content.resources (channel_id, file_id, uri, title, org_id,
+                                   owner_id, visibility, metadata, external_id)
+    values (v_channel, v_file, p_uri, p_title, p_org_id,
+            rbac.current_user_id(), v_vis, p_metadata, p_external_id)
     on conflict (channel_id, external_id) do update set updated_at = now()
     returning id into v_res;
 
@@ -452,7 +425,7 @@ returns table(bucket text, object_key text, content_type text, size_bytes bigint
     from content.resources r
     join content.files f on f.id = r.file_id
     where r.id = p_resource_id
-      and content.may_access_org(r.org_id);
+      and rbac.may_access_org(r.org_id);
 $$ language sql stable security definer set search_path = pg_catalog, public;
 
 -- Record chunks produced by the ingestion workflow, and flip the resource
@@ -476,7 +449,7 @@ begin
     -- first version of this check fell straight through it into a foreign-key
     -- error that named the missing row.
     select r.org_id into v_org from content.resources r where r.id = p_resource_id;
-    if not found or not content.may_access_org(v_org) then
+    if not found or not rbac.may_access_org(v_org) then
         raise exception 'no such resource, or it is not yours';
     end if;
 
@@ -660,7 +633,7 @@ returns jsonb as $$
     join content.channels c on c.id = r.channel_id
     left join content.files f on f.id = r.file_id
     where r.id = p_resource_id
-      and content.may_access_org(r.org_id);
+      and rbac.may_access_org(r.org_id);
 $$ language sql stable security definer set search_path = pg_catalog, public;
 
 -- What the worker calls when it is done. ONE call, so a resource is never
@@ -693,7 +666,7 @@ declare
     v_status text;
 begin
     select r.org_id into v_org from content.resources r where r.id = p_resource_id;
-    if not found or not content.may_access_org(v_org) then
+    if not found or not rbac.may_access_org(v_org) then
         raise exception 'no such resource, or it is not yours';
     end if;
 
@@ -750,7 +723,7 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- its own authorization rather than relying on the grant: a definer function
 -- that returned any resource's chunks to anyone holding its id would hand a
 -- tenant's corpus to whoever guessed a uuid. The predicate is the one
--- content.may_access_org states, so there is one rule and not a second copy of
+-- rbac.may_access_org states, so there is one rule and not a second copy of
 -- it -- and a claimless connection (a worker, a migration) is exempt exactly
 -- as it is everywhere else in this schema.
 --
@@ -764,7 +737,7 @@ returns jsonb as $$
     from content.resource_chunks c
     where c.resource_id = p_resource_id
       and exists (select 1 from content.resources r
-                  where r.id = p_resource_id and content.may_access_org(r.org_id));
+                  where r.id = p_resource_id and rbac.may_access_org(r.org_id));
 $$ language sql stable security definer set search_path = pg_catalog, public;
 
 -- The row set the GRAPH indexer fans out over.
@@ -790,7 +763,7 @@ returns jsonb as $$
     from content.resource_chunks c
     where c.resource_id = p_resource_id
       and exists (select 1 from content.resources r
-                  where r.id = p_resource_id and content.may_access_org(r.org_id));
+                  where r.id = p_resource_id and rbac.may_access_org(r.org_id));
 $$ language sql stable security definer set search_path = pg_catalog, public;
 
 -- ------------------------------------------------------------
@@ -893,7 +866,7 @@ declare
     v_ds     uuid;
 begin
     select r.org_id into v_org from content.resources r where r.id = p_resource_id;
-    if not found or not content.may_access_org(v_org) then
+    if not found or not rbac.may_access_org(v_org) then
         raise exception 'no such resource, or it is not yours';
     end if;
 
@@ -936,6 +909,25 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- is the whole reader integration and there is no client-side convention to
 -- keep in step with this table.
 --
+-- THE SCOPE COLUMNS ARE ADDED HERE, ahead of the function below, and not with
+-- the rest of content's scoping in integration.sql -- which is where they were,
+-- and where they produced a fresh install that could not be built.
+--
+-- `dataset_uri` is `language sql`, and a `language sql` body is PARSED AND
+-- VALIDATED AT CREATE TIME. Referencing d.owner_id before the column exists is
+-- `ERROR: column d.owner_id does not exist`, from a CREATE FUNCTION three
+-- hundred lines from the ALTER TABLE that was going to add it.
+--
+-- The reason nothing noticed for several runs is worth more than the fix:
+-- CREATE EXTENSION executes its script with `check_function_bodies` OFF, so
+-- installing the extension the way a deployment does succeeded, the whole test
+-- suite passed, and only `dev/upgrade-converges.sh` -- which loads the
+-- generated .sql as a plain file -- failed. Two ways of applying the same
+-- script that do not agree about what is an error, with the strict one used by
+-- nobody in the inner loop. plpgsql bodies are never checked this way, which is
+-- why register_upload's identical reference is fine and this one is not.
+select rbac.add_scope_columns('content.datasets', 'public');
+
 -- SECURITY INVOKER: a caller who cannot see the dataset's org gets no row and
 -- therefore no bucket path. A storage location is a capability.
 create or replace function content.dataset_uri(p_name text)
@@ -943,7 +935,7 @@ returns text as $$
     select 's3://' || d.bucket || '/' || d.prefix || '/*.parquet'
     from content.datasets d
     where d.name = p_name
-      and (d.org_id is null or d.org_id in (select aiq.current_org_ids()))
+      and rbac.may_read(d.owner_id, d.org_id, d.visibility)
     order by d.org_id nulls last
     limit 1;
 $$ language sql stable;

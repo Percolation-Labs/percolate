@@ -20,6 +20,25 @@ set local role app_owner;
 create temp table t_ctx (org_a uuid, org_b uuid, res_a uuid);
 insert into t_ctx values (gen_random_uuid(), gen_random_uuid(), null);
 
+-- THE ORGS ARE ROWS NOW, so a fixture cannot invent a uuid and call it a
+-- tenant. content.channels.org_id references rbac.orgs, which is the point --
+-- an org_id naming no org used to produce rows nobody could see and nothing
+-- could report. The two users exist for the same reason: membership is what
+-- rbac.current_org_ids() reads, so a claim naming an org with no member behind
+-- it is an anonymous caller, correctly.
+do $$
+declare a uuid; b uuid;
+begin
+    select org_a, org_b into a, b from t_ctx;
+    insert into rbac.orgs (id, slug, name) values
+        (a, 't-org-a-' || left(a::text, 8), 'Test Org A'),
+        (b, 't-org-b-' || left(b::text, 8), 'Test Org B');
+    insert into rbac.org_members (org_id, user_id) values
+        (a, '11111111-1111-1111-1111-111111111111'),
+        (b, '22222222-2222-2222-2222-222222222222')
+    on conflict do nothing;
+end $$;
+
 do $$
 declare a uuid; b uuid;
 begin
@@ -191,7 +210,8 @@ begin
     select org_a, org_b, res_a into a, b, v_res from t_ctx;
 
     set local role authenticated;
-    perform set_config('request.jwt.claims', json_build_object('orgs', array[b])::text, true);
+    perform set_config('request.jwt.claims',
+        json_build_object('sub', '22222222-2222-2222-2222-222222222222', 'orgs', array[b])::text, true);
 
     -- the read side was always right, and is asserted so the write assertions
     -- below cannot be satisfied by the caller simply seeing nothing
@@ -263,25 +283,51 @@ end $$;
 -- to nobody and no RLS policy could scope it; the same rule lives on
 -- content.resources as a policy. The schema says that duplication is the cost
 -- of the design. A test is what keeps a cost from becoming a divergence.
+--
+-- THE POLICY HALF IS NOW ASSERTED AGAINST ITS GENERATOR rather than against a
+-- substring. It used to check `position('current_org_ids' in v_policy) <> 0`,
+-- which passes for any policy that mentions the function -- including one
+-- somebody rewrote by hand into something weaker that still calls it. The
+-- predicate has one home, rbac.scope_predicate(), and every scoped policy in
+-- the collection is generated from it, so the honest question is whether this
+-- table's live policy is still that text. Asking the generator rather than
+-- restating its output is the same rule dev/vocab-audit.py follows against
+-- p8.enums(): an audit that keeps its own copy is one more copy free to drift.
 -- ---------------------------------------------------------------------
 do $$
-declare v_policy text; v_fn text;
+declare v_policy text; v_fn text; v_expected text;
 begin
     select pg_get_expr(polqual, polrelid) into v_policy
       from pg_policy p join pg_class c on c.oid = p.polrelid
       join pg_namespace n on n.oid = c.relnamespace
-     where n.nspname = 'content' and c.relname = 'resources' and polname = 'resources_org_scoped';
+     where n.nspname = 'content' and c.relname = 'resources' and polname = 'resources_scoped';
     select prosrc into v_fn from pg_proc p join pg_namespace n on n.oid = p.pronamespace
      where n.nspname = 'content' and p.proname = 'resolve_file';
 
     if v_policy is null or v_fn is null then
         raise exception 'the resources policy or resolve_file is missing';
     end if;
-    if position('current_org_ids' in v_policy) = 0
-       or position('may_access_org' in v_fn) = 0 then
+
+    -- The three things the predicate must consult. A string comparison against
+    -- scope_predicate() itself is not available here: pg_get_expr returns the
+    -- PARSED form -- casts made explicit, whitespace regularised -- while the
+    -- generator returns source text, so the two never match literally.
+    -- dev/tests/rbac/02 does the exact comparison, by generating a throwaway
+    -- table's policy in the same database and diffing the two parsed forms;
+    -- this file asserts the weaker property, that all three axes are present,
+    -- which is what content specifically cares about.
+    if position('rbac.current_org_ids' in v_policy) = 0
+       or position('rbac.current_user_id' in v_policy) = 0
+       or position('visibility' in v_policy) = 0 then
         raise exception
-            'the read predicate and the policy no longer agree about org scoping -- '
-            'policy: %', v_policy;
+            'the resources policy is no longer the generated scope predicate -- '
+            'it must consult the owner, the org AND the visibility. policy: %',
+            v_policy;
+    end if;
+    if position('may_access_org' in v_fn) = 0 then
+        raise exception
+            'resolve_file no longer applies the org check, so a caller could '
+            'resolve storage keys for a resource they cannot read';
     end if;
     -- and the read path and the write path share ONE predicate, so a service
     -- connection cannot end up able to write what it cannot read
@@ -296,21 +342,29 @@ end $$;
 -- THE ORG EVERYONE READS IS THE ONE A TENANT MAY NOT WRITE.
 --
 -- The block above asserts that org B cannot plant into org A. It says nothing
--- about the org that is neither, and that was the hole: `may_access_org` let
--- ANY caller write a null org, on the reasoning that a null org "is readable
--- by everyone ... so writing it is not a cross-tenant act". `resources_org_scoped`
--- is `org_id is null or org_id in (...)`, so a null org is not unscoped -- it
--- is scoped to EVERY tenant, and writing one is the widest cross-tenant act
--- available, not the absence of one.
+-- about the org that is NEITHER, and that was the hole. `may_access_org` let
+-- any caller write a null org, on the reasoning that a null org "is readable
+-- by everyone ... so writing it is not a cross-tenant act". The policy was
+-- `org_id is null or org_id in (...)`, so a null org was not unscoped -- it was
+-- scoped to EVERY tenant, and writing one was the widest cross-tenant act
+-- available, not the absence of one. It took no missing check and no guessed
+-- argument to reach: `p_org_id` DEFAULTS to null and the extension ships three
+-- null-org channels, so an ordinary user of one org planted a document that
+-- another org's TEXT search over the shipped corpus returned.
 --
--- It took no missing check and no guessed argument to reach: `p_org_id`
--- DEFAULTS to null and the extension ships three null-org channels. An
--- ordinary authenticated user of one org, holding nothing, planted a document
--- that another org's TEXT search over the shipped `chunks` corpus returned.
--- That is §4a's own threat sentence reached through a default value.
+-- THE GUARANTEE THIS FILE ASSERTS HAS CHANGED, and it is now the stronger one.
+-- The old fix REFUSED the write, because a written row would have been
+-- readable by everyone. Scope removes that premise: a resource carries
+-- `visibility`, an omitted org means the row is the uploader's own, and being
+-- readable by everyone is `public` -- a value somebody types. So the write is
+-- allowed and the disclosure is not, which is a better answer than refusing a
+-- legitimate upload. What must hold, and is asserted below:
 --
--- All four callers are asserted, because the fix is a discrimination and the
--- risk of getting it wrong is refusing the deployment rather than the attacker.
+--   1. a tenant CAN register without naming an org...
+--   2. ...and no other tenant can read what they wrote
+--   3. the single-tenant deployment is untouched
+--   4. a claimless service connection is untouched
+--   5. a tenant still writes its own org, and it is org-visible there
 -- ---------------------------------------------------------------------
 do $$
 declare
@@ -318,53 +372,100 @@ declare
     v_b uuid := gen_random_uuid();
     v_u uuid;
     v_res uuid;
-    v_planted boolean := false;
+    v_vis text;
+    v_org uuid;
 begin
+    insert into rbac.orgs (id, slug, name) values
+        (v_a, 'probe-a-' || left(v_a::text, 8), 'Probe A'),
+        (v_b, 'probe-b-' || left(v_b::text, 8), 'Probe B');
     insert into rbac.users (email, status)
     values ('tenancy-probe@example.com', 'active') returning id into v_u;
+    -- MEMBERSHIP, not just a claim. This is the change the whole suite turns
+    -- on: rbac.current_org_ids() reads rbac.org_members and intersects the
+    -- token's claim with it, so a token naming an org the user does not belong
+    -- to is not that org's caller. Before, the array in the token WAS the
+    -- membership, and this probe would have passed while asserting nothing.
+    insert into rbac.org_members (org_id, user_id) values (v_b, v_u);
 
-    -- 1. A TENANT MAY NOT WRITE THE NULL ORG. The attack, as an ordinary user
-    --    with a valid token, against the channel the extension itself ships.
+    -- 1. A TENANT REGISTERS WITHOUT NAMING AN ORG. Allowed now -- the act the
+    --    old rule refused -- because the row it produces is private.
     set local role authenticated;
     perform set_config('request.jwt.claims',
         json_build_object('sub', v_u, 'orgs', array[v_b])::text, true);
-    begin
-        v_res := content.register_upload('uploads', 't-null-1', 'bucket', 'k-null-1',
-                                         42, 'text/markdown', 'planted');
-        v_planted := true;
-    exception when others then
-        null;
-    end;
+    v_res := content.register_upload('uploads', 't-null-1', 'bucket', 'k-null-1',
+                                     42, 'text/markdown', 'planted');
     reset role;
-    if v_planted then
-        raise exception
-            'a tenant wrote a resource with org_id NULL, which resources_org_scoped '
-            'makes readable by EVERY other tenant -- content injection into every '
-            'corpus in the deployment, through an argument they did not even pass';
+    if v_res is null then
+        raise exception 'a tenant can no longer register content without naming an org';
     end if;
 
-    -- 2. THE SINGLE-TENANT DEPLOYMENT STILL WORKS. A token that names no org
-    --    is not a tenant, and for it a null org means "ours".
+    -- 2. ...AND IT IS NOT READABLE BY ANYBODY ELSE. This is the assertion that
+    --    replaces "the write is refused", and it is the one that actually
+    --    matters: the old failure was a READ by another tenant, and refusing
+    --    the write was one way to prevent it rather than the guarantee itself.
+    select visibility, org_id into v_vis, v_org
+      from content.resources where id = v_res;
+    if v_vis <> 'private' or v_org is not null then
+        raise exception
+            'a resource registered with no org came out as (%, %), not a private '
+            'row owned by its uploader -- which is what stops another tenant '
+            'reading it', v_vis, v_org;
+    end if;
+    -- and prove it by reading, as org A, rather than by trusting the column
+    set local role authenticated;
+    perform set_config('request.jwt.claims',
+        json_build_object('sub', '11111111-1111-1111-1111-111111111111')::text, true);
+    if exists (select 1 from content.resources where id = v_res) then
+        reset role;
+        raise exception
+            'another tenant can read a resource registered with no org -- this is '
+            'the cross-tenant read the null-org tier used to produce, arrived at '
+            'through the scope column instead';
+    end if;
+    reset role;
+
+    -- 3. THE SINGLE-TENANT DEPLOYMENT STILL WORKS. A token that names no org
+    --    is not a tenant, and its uploads are simply its own.
     set local role authenticated;
     perform set_config('request.jwt.claims', json_build_object('sub', v_u)::text, true);
     v_res := content.register_upload('uploads', 't-null-2', 'bucket', 'k-null-2',
                                      42, 'text/markdown', 'single tenant');
     reset role;
     if v_res is null then
-        raise exception 'a token carrying no org claim can no longer write the shared org';
+        raise exception 'a token carrying no org claim can no longer register content';
     end if;
 
-    -- 3. A SERVICE CONNECTION STILL WORKS -- no claims at all: a migration,
-    --    psql, the ingest worker. This is the exemption the function is built
-    --    around and the one most easily broken by tightening the others.
+    -- 4. A SERVICE CONNECTION STILL WORKS -- no claims at all: a migration,
+    --    psql, the ingest worker. This is the exemption the rule is built
+    --    around and the one most easily broken by tightening the others. It
+    --    lands `public`, because a connection with no request identity is an
+    --    operator installing deployment content (rbac.default_visibility).
+    --
+    --    THE CLAIMS ARE CLEARED EXPLICITLY, and they were not: `reset role`
+    --    puts back the Postgres role and does nothing to request.jwt.claims,
+    --    which set_config(..., true) leaves set for the rest of the
+    --    transaction. So every "service connection" case in this file was
+    --    running as whoever the previous case impersonated, and the assertion
+    --    passed for the wrong reason -- it only checked that the call
+    --    succeeded, which it does either way. Caught by asserting the
+    --    visibility as well: the row came back `private`, which is the answer
+    --    for a logged-in caller and not for a migration.
+    perform set_config('request.jwt.claims', '', true);
     v_res := content.register_upload('uploads', 't-null-3', 'bucket', 'k-null-3',
                                      42, 'text/markdown', 'service');
     if v_res is null then
         raise exception 'a claimless service connection can no longer register content';
     end if;
+    if (select visibility from content.resources where id = v_res) <> 'public' then
+        raise exception
+            'a service connection registered content as %, not public -- the '
+            'operator-installs-configuration arm of rbac.default_visibility',
+            (select visibility from content.resources where id = v_res);
+    end if;
 
-    -- 4. AND A TENANT STILL WRITES ITS OWN ORG.
-    insert into content.channels (name, kind, org_id) values ('tenancy-probe-b', 'file_upload', v_b);
+    -- 5. AND A TENANT STILL WRITES ITS OWN ORG, org-visible there.
+    insert into content.channels (name, kind, org_id, visibility)
+    values ('tenancy-probe-b', 'file_upload', v_b, 'org');
     set local role authenticated;
     perform set_config('request.jwt.claims',
         json_build_object('sub', v_u, 'orgs', array[v_b])::text, true);
@@ -372,16 +473,15 @@ begin
                                      42, 'text/markdown', 'own', null, v_b);
     reset role;
     if v_res is null then
-        raise exception 'the tightened check refuses a tenant writing its own org';
+        raise exception 'a tenant can no longer register into its own org';
+    end if;
+    if (select visibility from content.resources where id = v_res) <> 'org' then
+        raise exception 'a resource registered into an org did not come out org-scoped';
     end if;
 
-    -- And org A, the bystander, sees none of it.
-    if exists (select 1 from content.resources where org_id is null and title = 'planted') then
-        raise exception 'the planted resource exists despite the write being refused';
-    end if;
     perform v_a;
 
-    raise notice 'content/01: a tenant cannot write the null org that every tenant reads, and the single-tenant, service and own-org paths are untouched';
+    raise notice 'content/01: registering without an org is allowed and private, no other tenant can read it, and the single-tenant, service and own-org paths are untouched';
 end $$;
 
 rollback;

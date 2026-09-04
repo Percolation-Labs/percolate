@@ -38,7 +38,7 @@ set role app_owner;
 -- be the worse answer -- same division of labour as 04-graph-sample.sql.
 do $$
 begin
-    if to_regprocedure('aiq.register_entity_table(text,text,text,text,text,text)') is null
+    if to_regprocedure('aiq.register_entity_table(text,text,text,text,text,text,text)') is null
        or to_regprocedure('aiq.register_lexical_source(text,text,text,text)') is null then
         raise exception
             'this database predates aiq.register_entity_table / '
@@ -505,10 +505,15 @@ on conflict (name) do update set source_table = excluded.source_table;
 -- USING resolves to demo-quad-a, and moving the default here would break a
 -- test of a different surface to make this one convenient.
 insert into aiq.embedding_models (name, dim, provider, distance_op, is_default, notes)
-values ('calder-quad', 4, 'fixture', 'vector_cosine_ops', false,
+-- provider NULL: the notes below already said "no model server exists or is
+-- needed", and the column now has a way to say it. `fixture` was a word that
+-- resolved to nothing, which embedding_models.provider's foreign key onto
+-- embedding_providers no longer admits.
+values ('calder-quad', 4, null, 'vector_cosine_ops', false,
         'a 4-dimension fixture space over calder.chunks. Vectors are literals; '
         'no model server exists or is needed.')
-on conflict (name) do update set dim = excluded.dim, notes = excluded.notes;
+on conflict (name) do update set dim = excluded.dim, provider = excluded.provider,
+                                 notes = excluded.notes;
 
 select aiq.register_embedding_space('calder-quad');
 
@@ -756,12 +761,17 @@ begin
                              'investigators','sites','case_reports',
                              'registry_records']
     loop
-        execute format('alter table calder.%I enable row level security', t);
+        -- Through rbac.add_scope_columns/add_scope_policy rather than a
+        -- hand-written predicate, which is what every shipped consumer does
+        -- now. The predicate this used to spell out -- `org_id is null or
+        -- org_id in (select aiq.current_org_ids())` -- is the idiom scope
+        -- replaced: the null tier meant both "shared" and "unset", and the
+        -- membership came from an array in the token rather than from a table.
+        -- A fixture that keeps its own copy of a security predicate is a
+        -- sixteenth copy that nothing regenerates.
+        execute format('select rbac.add_scope_columns(''calder.%I'', ''public'')', t);
+        execute format('select rbac.add_scope_policy(''calder.%I'')', t);
         execute format('drop policy if exists %I on calder.%I', t || '_read', t);
-        execute format(
-            'create policy %I on calder.%I for select to public '
-            'using (org_id is null or org_id in (select aiq.current_org_ids()))',
-            t || '_read', t);
     end loop;
 end $rls$;
 

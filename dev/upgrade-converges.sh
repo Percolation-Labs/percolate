@@ -95,10 +95,25 @@ SQL
 # every subsystem raises a notice from its own load-time self-check, and three
 # full installs of it bury the one thing this script is here to print. Errors
 # and warnings still come through, and ON_ERROR_STOP still stops.
+# A FAILED LOAD SAYS WHAT WENT WRONG. It used to be `>/dev/null 2>&1` with
+# `set -e` doing the rest, so a script that could not build either database
+# exited 3 having printed only its own header -- no error, no statement, no
+# hint that the failure was in the LOAD rather than in the comparison this file
+# exists to make. Measured while adding the scope columns: the fresh install
+# failed on `column d.owner_id does not exist` and this reported nothing at all,
+# which cost a bisect that the error message would have ended immediately.
+#
+# The output is captured rather than passed through because a clean load is
+# thousands of lines of NOTICE; only a failure is worth printing.
 load() {
-    docker exec -i "$CONTAINER" psql -U p8 -d "$1" -v ON_ERROR_STOP=1 -q \
-        -c "set client_min_messages = warning;" \
-        -c "set role app_owner;" -f - < "$2" >/dev/null 2>&1
+    local out
+    if ! out=$(docker exec -i "$CONTAINER" psql -U p8 -d "$1" -v ON_ERROR_STOP=1 -q \
+                   -c "set client_min_messages = warning;" \
+                   -c "set role app_owner;" -f - < "$2" 2>&1); then
+        echo "==> FAILED to load $2 into $1:" >&2
+        echo "$out" | grep -E '^psql.*(ERROR|FATAL)' | tail -5 >&2
+        return 1
+    fi
 }
 
 mk p8conv_fresh

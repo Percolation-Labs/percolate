@@ -443,12 +443,24 @@ $y$, (aiq.extractor_call(p_graph_agent, p_graph_model, '{{item.content}}'))::tex
     --
     -- The rule, stated rather than implied: a model the CALLER named must
     -- work, and a failure raises. A default this function chose for itself may
-    -- turn out to be uncallable -- the committed corpus fixture registers
-    -- `demo-quad-a` as the DEFAULT with provider `fixture` and no endpoint, so
-    -- installing on a database carrying the sample once failed with "provider
-    -- 'fixture' has no row in aiq.embedding_providers", an install broken by a
-    -- fixture -- and then the pipeline degrades to what it can run and SAYS
-    -- SO, carrying the compiler's own message rather than a summary of it.
+    -- turn out to be uncallable -- and then the pipeline degrades to what it
+    -- can run and SAYS SO, carrying the compiler's own message rather than a
+    -- summary of it.
+    --
+    -- The case that produced this block: the committed corpus fixture
+    -- registers `demo-quad-a` as the DEFAULT, and its vectors are written by
+    -- hand rather than produced by anything, so it cannot embed. It used to say
+    -- that by naming a provider called `fixture`, which resolved to nothing and
+    -- failed the install with "provider 'fixture' has no row in
+    -- aiq.embedding_providers" -- an install broken by a fixture.
+    --
+    -- That spelling is now unrepresentable: embedding_models.provider carries a
+    -- foreign key onto embedding_providers, and a space whose vectors come from
+    -- outside says so with NULL. So the failure this degradation path catches
+    -- is no longer an invented provider name; it is the honest case of a
+    -- default that genuinely cannot embed. The path stays, because that case is
+    -- real -- a model with a null provider or no endpoint is still a default
+    -- this function may find itself holding.
     begin
         if v_model is not null then
             perform aiq.embed_batch_call(v_model, '[]'::jsonb);

@@ -32,9 +32,9 @@ delete from agentic.sessions where id = :'sess';
 delete from agentic.agents   where id = :'agent';
 
 -- 1. Fixture, as the owner: one session belonging to alice, carrying one
---    message. user_id is given explicitly rather than defaulted, since the
+--    message. owner_id is given explicitly rather than defaulted, since the
 --    default reads a jwt claim that is not set here.
-insert into agentic.sessions (id, user_id, title)
+insert into agentic.sessions (id, owner_id, title)
 values (:'sess', :'alice', 'boundary probe');
 
 -- A message needs a run unless it is a summary (only_summaries_may_be_runless),

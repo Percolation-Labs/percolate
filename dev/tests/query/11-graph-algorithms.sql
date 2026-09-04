@@ -538,10 +538,10 @@ grant insert, select on t_snap to authenticated;
 
 set local role authenticated;
 
-set local request.jwt.claims = '{"orgs":["a0000000-0000-0000-0000-00000000000a"]}';
+set local request.jwt.claims = '{"sub":"11111111-1111-1111-1111-111111111111","orgs":["a0000000-0000-0000-0000-00000000000a"]}';
 insert into t_snap select 'a', aiq.graph_snapshot(true);
 
-set local request.jwt.claims = '{"orgs":["a0000000-0000-0000-0000-00000000000b"]}';
+set local request.jwt.claims = '{"sub":"22222222-2222-2222-2222-222222222222","orgs":["a0000000-0000-0000-0000-00000000000b"]}';
 insert into t_snap select 'b', aiq.graph_snapshot(false);
 
 do $$
@@ -597,7 +597,7 @@ grant insert, select on t_filt to authenticated;
 
 set local role authenticated;
 
-set local request.jwt.claims = '{"orgs":["a0000000-0000-0000-0000-00000000000a"]}';
+set local request.jwt.claims = '{"sub":"11111111-1111-1111-1111-111111111111","orgs":["a0000000-0000-0000-0000-00000000000a"]}';
 insert into t_filt select 'subset', aiq.graph_snapshot(true, array['knows']);
 
 -- The graph moves under that caller. Written as the owner because
@@ -617,7 +617,7 @@ end $$;
 set local role authenticated;
 insert into t_filt select 'after_own_write', aiq.graph_snapshot(false);
 
-set local request.jwt.claims = '{"orgs":["a0000000-0000-0000-0000-00000000000b"]}';
+set local request.jwt.claims = '{"sub":"22222222-2222-2222-2222-222222222222","orgs":["a0000000-0000-0000-0000-00000000000b"]}';
 insert into t_filt select 'other_identity', aiq.graph_snapshot(false);
 
 do $$
