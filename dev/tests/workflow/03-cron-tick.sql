@@ -64,6 +64,7 @@ declare
     v_failures bigint;
     v_latest   timestamptz;
     v_waited   int := 0;
+    v_seen     timestamptz;
 begin
     -- WAIT FOR THE FIRST TICK RATHER THAN REQUIRING THE CALLER TO.
     --
@@ -76,14 +77,45 @@ begin
     -- someone learns to expect this file to be red.
     --
     -- pg_cron's finest granularity is one minute, so the bound is 100 seconds
-    -- and it costs nothing on a stack that has been up. The failure below is
-    -- unchanged -- it just means it now.
+    -- and it costs nothing on a stack that has been up. The failures below are
+    -- unchanged -- they just mean it now.
+    --
+    -- AND WAIT FOR THE CONDITION THE ASSERTIONS ACTUALLY NEED, which is not
+    -- the same as "a row exists". A tick row appears in `cron.job_run_details`
+    -- the moment pg_cron starts opening its connection, with status
+    -- `connecting`, and `workflow.schedules.last_tick_at` is not stamped until
+    -- that tick has connected and run. Measured on a database CI had just
+    -- built:
+    --
+    --     FIRST TICK ROW SEEN after 26s: rows=1 statuses=connecting
+    --                                    last_tick_at=NULL
+    --
+    -- On `v_runs > 0` alone the loop exited in exactly that state and the
+    -- schedules assertion below then read NULL and reported *"tick() is
+    -- running but is not reaching workflow.schedules"* -- which sends a reader
+    -- to `cron.database_name` on a deployment where it is correct. That is
+    -- this collection's characteristic failure wearing a race's clothes: not a
+    -- check that says fail, a check that says fail for a reason other than the
+    -- one it names.
+    --
+    -- IT NEVER WAITED AT ALL, which is the part worth keeping. The red run
+    -- (33894105831) failed 13 seconds into a `dev/check.sh` that started 4
+    -- seconds after the database was created -- the loop exited on its first
+    -- pass. So this is not "CI is slow": it passes on every machine where
+    -- anything slow happened first, and that is the whole of why it survived
+    -- from the day it was written.
+    --
+    -- The three lines below are the same three conditions the three assertions
+    -- make, so a timeout still reaches whichever assertion is the true one and
+    -- fails with its message. This waits; it does not excuse.
     loop
         select count(*), max(start_time) into v_runs, v_latest
           from cron.job_run_details d
           join cron.job j on j.jobid = d.jobid
          where j.jobname = 'workflow-tick';
-        exit when v_runs > 0 or v_waited >= 100;
+        select last_tick_at into v_seen
+          from workflow.schedules where name = 'content-reconcile';
+        exit when (v_runs > 0 and v_seen is not null) or v_waited >= 100;
         perform pg_sleep(5);
         v_waited := v_waited + 5;
     end loop;
