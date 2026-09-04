@@ -153,7 +153,21 @@ def bootstrap(
     # matters ("rbac is already bootstrapped") somewhere in the middle.
     try:
         asyncio.run(_run())
-    except Exception as exc:  # asyncpg.exceptions.RaiseError, without the import
+    except Exception as exc:  # asyncpg errors, matched by name to avoid the import
+        # The work moved into rbac.bootstrap_admin(), which arrived in extension
+        # 0.1.2 -- so this command, pointed at an older database, now fails on a
+        # function that is not there. Said plainly, because the raw
+        # UndefinedFunctionError traceback reads as a broken CLI rather than as
+        # a database that predates it.
+        if type(exc).__name__ == "UndefinedFunctionError":
+            typer.secho(
+                "error: this database does not have rbac.bootstrap_admin(), which "
+                "arrived in the percolate extension 0.1.2.", fg="red", err=True)
+            typer.secho(
+                "hint:  upgrade it first -- `set role app_owner; "
+                "alter extension percolate update;` -- or use a percolate-core "
+                "before 0.1.7, which did the inserts itself.", err=True)
+            raise typer.Exit(1) from None
         if type(exc).__name__ != "RaiseError":
             raise
         # .message, not str(exc): asyncpg's __str__ already appends "HINT: ..."

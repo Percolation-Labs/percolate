@@ -239,7 +239,11 @@ jobs:
   # -------------------------------------------------------------------------
   chart:
     needs: [version, pypi, image]
-    if: inputs.publish
+    # NOT `if: inputs.publish`. This job checks out another repository and
+    # pushes to it, which makes it the riskiest thing here -- so a dry run that
+    # skipped it was exercising everything except the part worth rehearsing.
+    # It now runs either way and stops short of the commit, which is the same
+    # correction p8-subsystems' release.yml needed for the same reason.
     runs-on: ubuntu-latest
     steps:
       - name: Require the token, rather than skipping quietly
@@ -285,6 +289,11 @@ jobs:
           python3 ci/versions.py --set published.core=${{ needs.version.outputs.version }}
           python3 ci/versions.py --check
           git diff --quiet && { echo "already at ${{ needs.version.outputs.version }}"; exit 0; }
+          git --no-pager diff --stat
+          if [ "${{ inputs.publish }}" != "true" ]; then
+            echo "::notice::dry run -- the diff above is what a real release would commit to get-percolate"
+            exit 0
+          fi
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -am "percolate-core ${{ needs.version.outputs.version }}: chart and docs"
@@ -302,6 +311,7 @@ jobs:
       # choice somebody makes, not a number derived from a release -- it pins
       # what the tests were last run against on purpose.
       - name: Ask p8-subsystems to catch up
+        if: inputs.publish
         env:
           GH_TOKEN: ${{ secrets.P8_RELEASE_TOKEN }}
           V: ${{ needs.version.outputs.version }}

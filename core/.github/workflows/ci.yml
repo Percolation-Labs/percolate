@@ -1,0 +1,60 @@
+# The gate this repository did not have.
+#
+# Until now the only workflows here were `release` and `claude`: nothing ran on
+# a push, so every change was verified by whoever made it, in whatever way they
+# chose, and the record of that verification was a sentence in a commit message.
+# That held while the package was small and stopped holding the day its CLI
+# started calling functions in another repository's schema.
+#
+# Deliberately two cheap things rather than a suite. `tests/smoke.py` says in its
+# own header that a large test suite written before the thing has been used is
+# backwards, and that the checks worth keeping are the ones protecting a STATED
+# guarantee. This runs those, plus the version guard, and nothing else.
+name: ci
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md']
+  pull_request:
+    paths-ignore: ['**.md']
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Tags, because check-version.sh asks whether this version is already
+          # published and a shallow clone has none -- it would pass by knowing
+          # nothing.
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+
+      # [all], not the base install: one of the checks asserts that every model
+      # provider the package claims to ship can actually be constructed, and it
+      # can only fail meaningfully when they are present. With the base install
+      # it reports "provider not installed", which is true of the environment
+      # rather than of the package.
+      - name: Install with every extra it claims to ship
+        run: pip install --quiet ".[all]"
+
+      - name: The stated guarantees still hold
+        run: python tests/smoke.py
+
+      - name: A released version number may not be reused
+        run: dev/check-version.sh
+
+      # The CLI is what the documentation tells people to run, and it is the
+      # part that broke when `auth bootstrap` moved into the extension. Checking
+      # the subcommands exist is not a deep test; it is the one that would have
+      # caught three doc pages naming a command no published artifact had.
+      - name: Every documented subcommand exists
+        run: |
+          for cmd in worker agent content ingest auth sample; do
+            percolate "$cmd" --help >/dev/null \
+              || { echo "::error::`percolate $cmd` is documented but missing"; exit 1; }
+          done
+          echo "worker, agent, content, ingest, auth, sample all present"
