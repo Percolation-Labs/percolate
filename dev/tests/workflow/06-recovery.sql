@@ -172,7 +172,7 @@ begin
     if v_ctx ? 'a' then
         raise exception 'a worker whose lease was revoked published its result anyway: %', v_ctx;
     end if;
-    if (select status from workflow.tasks where id = v_a) = 'succeeded' then
+    if coalesce((select status from workflow.tasks where id = v_a), 'succeeded') = 'succeeded' then
         raise exception 'a revoked worker completed the task it no longer held';
     end if;
     if (select status from workflow.tasks where run_id = v_run and step_key = 'b') is distinct from 'pending' then

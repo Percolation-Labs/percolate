@@ -514,15 +514,69 @@ create table if not exists workflow.rate_limits (
     updated_at  timestamptz not null default now()
 );
 
+-- THE BUCKET'S INVARIANTS, WHERE THEY CAN BE REFUSED RATHER THAN INTENDED.
+--
+-- `0 <= tokens <= capacity` is the whole definition of a token bucket, and it
+-- was enforced by nothing: the admission test below read an UNCAPPED refill
+-- while the write applied a capped one, so the two disagreed for any amount
+-- larger than the bucket. Measured on a live database, before the WHERE clause
+-- was fixed: capacity 1, idle 100 seconds, consume 5 -> admitted, and the row
+-- left holding -4 tokens. A negative amount was accepted the same way and
+-- minted 1000 tokens into a bucket of 1.
+--
+-- Neither was reachable from the shipped callers -- claim_tasks and
+-- rbac.attempt_login both consume exactly 1 against a capacity of 2 or more --
+-- which is precisely why it needed a constraint rather than a fix: the defect
+-- was invisible from every call site that existed, and the next call site is
+-- the one that would have found it. §9's rule, applied to arithmetic.
+--
+-- Written drop-then-add, not inside the CREATE TABLE above, so an installation
+-- that already has the table picks them up (the discipline runs_status_check
+-- is written with). The clamp runs first because a database that ran the old
+-- function may be holding a row these constraints refuse; it is idempotent and
+-- a no-op on every row written by the corrected function.
+--
+-- `capacity` is deliberately NOT clamped. A bucket declaring no capacity is a
+-- configuration mistake rather than an arithmetic one -- it reads as "blocked"
+-- and admits one request per refill period -- and there is no value to silently
+-- substitute for it. An upgrade carrying such a row fails on
+-- rate_limits_capacity_check by name, which is where that should be found.
+update workflow.rate_limits
+   set tokens = least(greatest(tokens, 0), capacity)
+ where tokens < 0 or tokens > capacity;
+
+alter table workflow.rate_limits drop constraint if exists rate_limits_capacity_check;
+alter table workflow.rate_limits add  constraint rate_limits_capacity_check
+    check (capacity > 0);
+alter table workflow.rate_limits drop constraint if exists rate_limits_refill_check;
+alter table workflow.rate_limits add  constraint rate_limits_refill_check
+    check (refill_rate >= 0);
+alter table workflow.rate_limits drop constraint if exists rate_limits_tokens_check;
+alter table workflow.rate_limits add  constraint rate_limits_tokens_check
+    check (tokens >= 0 and tokens <= capacity);
+
+-- ONE EXPRESSION FOR THE REFILL, read by both the test and the write.
+--
+-- The bug was that there were two: `least(capacity, refilled) - p_amount` on
+-- the SET and a bare `refilled >= p_amount` on the WHERE. They agree only
+-- while p_amount <= capacity, which is a condition no caller states and none
+-- of them could see. Naming the capped value once removes the pair.
 create or replace function workflow.try_consume_rate_limit(p_key text, p_amount numeric default 1)
 returns boolean as $$
 declare v_ok boolean;
 begin
+    -- A refusal, not a top-up: a bucket cannot be filled by asking it for a
+    -- negative amount, and a caller that meant to add capacity should say so
+    -- by updating the row.
+    if p_amount is null or p_amount <= 0 then
+        raise exception 'rate limit amount must be positive, got %', p_amount;
+    end if;
+
     update workflow.rate_limits
     set tokens = least(capacity, tokens + refill_rate * extract(epoch from now() - updated_at)) - p_amount,
         updated_at = now()
     where key = p_key
-      and (tokens + refill_rate * extract(epoch from now() - updated_at)) >= p_amount
+      and least(capacity, tokens + refill_rate * extract(epoch from now() - updated_at)) >= p_amount
     returning true into v_ok;
     return coalesce(v_ok, false);
 end;
@@ -797,6 +851,54 @@ create or replace function workflow.check_compensation_completion(p_run_id uuid)
 $$ language sql;
 
 -- ------------------------------------------------------------
+-- 8b. pending_deps, decided in ONE place.
+--
+-- `pending_deps` is a cached count of this task's rows in
+-- workflow.task_dependencies, and it was maintained by three functions that
+-- each counted the caller's list and then inserted the rows `on conflict do
+-- nothing`. Those two operations disagree the moment a caller names the same
+-- dependency twice -- `needs: [a, a]` in YAML, or `array[t, t]` into add_task
+-- -- because the primary key collapses the second row and nothing collapsed
+-- the second count. The task is then created with pending_deps = 2 against one
+-- dependency row, the cascade decrements once, and the task sits at
+-- pending_deps = 1 in `pending` FOR EVER.
+--
+-- That failure is the worst shape this engine has: no error, no failed task,
+-- no reaper interest (the reaper collects `running` leases, and this task
+-- never ran), and a run stuck at `running` with nothing claimable. Confirmed
+-- by doing it, through both entry points, before this function existed.
+--
+-- So the count is derived from the same set the insert is: DISTINCT ids. One
+-- home for the rule (§8), and the locking that workflow.add_task's "fix #1"
+-- comment describes moves in here with it -- every dependency row is locked
+-- FOR UPDATE before its status is read, so a concurrent complete_task on that
+-- dependency serializes against this count rather than racing it.
+--
+-- A dependency that has already succeeded is not counted, because the cascade
+-- decrements on the transition INTO a terminal state and that transition has
+-- already happened. A dependency id that names no task counts as outstanding;
+-- the foreign key on task_dependencies refuses the row a moment later, which
+-- is where that mistake should be reported.
+create or replace function workflow.outstanding_deps(p_deps uuid[])
+returns int as $$
+declare
+    v_dep    uuid;
+    v_status text;
+    v_n      int := 0;
+begin
+    for v_dep in
+        select distinct d from unnest(coalesce(p_deps, '{}'::uuid[])) d where d is not null
+    loop
+        select status into v_status from workflow.tasks where id = v_dep for update;
+        if v_status is distinct from 'succeeded' then
+            v_n := v_n + 1;
+        end if;
+    end loop;
+    return v_n;
+end;
+$$ language plpgsql;
+
+-- ------------------------------------------------------------
 -- 9. FIX #3: workflow bootstrap — the piece that was missing entirely.
 --    Two-pass: insert all step rows first (so every step_key has an
 --    id), then wire workflow.task_dependencies + compute real pending_deps once all
@@ -819,6 +921,7 @@ declare
     v_new_id    uuid;
     v_dep_key   text;
     v_dep_id    uuid;
+    v_dep_ids   uuid[];
     v_count     int;
     v_comp      text[];
 begin
@@ -869,7 +972,7 @@ begin
     loop
         continue when (v_step->>'key') = any(v_comp);
         v_new_id := (v_step_ids ->> (v_step->>'key'))::uuid;
-        v_count := 0;
+        v_dep_ids := '{}'::uuid[];
         for v_dep_key in select jsonb_array_elements_text(coalesce(v_step->'depends_on', '[]'::jsonb))
         loop
             if v_dep_key = any(v_comp) then
@@ -881,8 +984,12 @@ begin
             v_dep_id := (v_step_ids ->> v_dep_key)::uuid;
             insert into workflow.task_dependencies (task_id, depends_on_task_id)
             values (v_new_id, v_dep_id) on conflict do nothing;
-            v_count := v_count + 1;
+            v_dep_ids := v_dep_ids || v_dep_id;
         end loop;
+        -- §8b, and NOT `v_count := v_count + 1` per key: `needs: [a, a]` is one
+        -- dependency ROW and used to be a count of two, which is a step that
+        -- never becomes ready in a run that never ends.
+        v_count := workflow.outstanding_deps(v_dep_ids);
         update workflow.tasks
         set pending_deps = v_count,
             status = case when v_count > 0 then 'pending'
@@ -1585,24 +1692,20 @@ create or replace function workflow.add_task(
 declare
     v_id uuid;
     v_dep uuid;
-    v_dep_status text;
     v_count int := 0;
 begin
     if exists (select 1 from workflow.runs where id = p_run_id and status = 'cancelled') then
         return null;   -- fix #4: no new work under a cancelled run
     end if;
 
-    -- fix #1: lock every dependency row BEFORE deciding pending_deps.
-    -- This serializes against any concurrent workflow.complete_task on the same
-    -- dependency: whichever transaction wins the lock, the other sees
-    -- (or produces) a consistent outcome -- no stuck task is possible.
-    foreach v_dep in array coalesce(p_depends_on, '{}')
-    loop
-        select status into v_dep_status from workflow.tasks where id = v_dep for update;
-        if v_dep_status is distinct from 'succeeded' then
-            v_count := v_count + 1;
-        end if;
-    end loop;
+    -- fix #1 lives in workflow.outstanding_deps (§8b) now, along with the
+    -- DISTINCT this loop did not have: it locks every dependency row BEFORE
+    -- deciding pending_deps, so a concurrent workflow.complete_task on the same
+    -- dependency serializes against the count rather than racing it -- and it
+    -- counts the rows the insert below will actually create, so
+    -- `array[t, t]` no longer produces a task whose pending_deps cannot reach
+    -- zero.
+    v_count := workflow.outstanding_deps(p_depends_on);
 
     insert into workflow.tasks (run_id, step_key, queue, kind, input, rate_key, pending_deps, status)
     values (
@@ -1648,7 +1751,7 @@ declare
     v_new_id uuid;
     v_dep_text text;
     v_dep uuid;
-    v_dep_status text;
+    v_dep_ids uuid[];
     v_count int;
     v_new_hash text;
     v_prior_hash text;
@@ -1692,16 +1795,12 @@ begin
 
     for v_item in select * from jsonb_array_elements(coalesce(p_new_tasks, '[]'::jsonb))
     loop
-        v_count := 0;
-        -- fix #1: lock dependencies before inserting, same as workflow.add_task
-        for v_dep_text in select jsonb_array_elements_text(coalesce(v_item->'depends_on', '[]'::jsonb))
-        loop
-            v_dep := v_dep_text::uuid;
-            select status into v_dep_status from workflow.tasks where id = v_dep for update;
-            if v_dep_status is distinct from 'succeeded' then
-                v_count := v_count + 1;
-            end if;
-        end loop;
+        -- fix #1 + the DISTINCT, both in workflow.outstanding_deps (§8b), the
+        -- third copy of a count that had to agree with an ON CONFLICT DO
+        -- NOTHING insert and did not.
+        select coalesce(array_agg(e::uuid), '{}'::uuid[]) into v_dep_ids
+          from jsonb_array_elements_text(coalesce(v_item->'depends_on', '[]'::jsonb)) e;
+        v_count := workflow.outstanding_deps(v_dep_ids);
 
         insert into workflow.tasks (run_id, step_key, queue, kind, input, rate_key, pending_deps, status)
         values (
@@ -3013,20 +3112,18 @@ begin
 end;
 $$ language plpgsql immutable;
 
--- Does a 5-field cron expression match this instant, in this zone?
---
--- Matching rather than "compute the next run time" is deliberate, and it is
--- what cron itself does: the ticker wakes once a minute and asks whether now
--- matches. A next_run_at column would be a cached derivation that goes stale
--- the moment a DST boundary, a timezone edit or a clock change disagrees
--- with it -- and it would have to be recomputed correctly in every path that
--- edits a schedule. There is nothing to keep in sync here.
-create or replace function workflow.cron_matches(
-    p_expr text, p_ts timestamptz, p_timezone text default 'UTC')
+-- MATCHING A LOCAL WALL CLOCK, which is the only thing a cron expression has
+-- ever described. Split out of cron_matches() so that workflow.tick() can ask
+-- the question about a local minute that has no instant -- 02:30 on the
+-- morning a clock springs forward is a real entry in somebody's crontab and
+-- not a timestamptz at all. cron_matches() below is this function plus a zone
+-- conversion, so there is one parser rather than two.
+create or replace function workflow.cron_matches_local(
+    p_expr text, p_local timestamp)
 returns boolean as $$
 declare
     f               text[];
-    v_local         timestamp;
+    v_local         timestamp := p_local;
     v_dow           int;
     v_min_ok        boolean;
     v_hour_ok       boolean;
@@ -3040,10 +3137,6 @@ begin
             'cron: expected 5 fields (minute hour day-of-month month day-of-week), got % in "%"',
             coalesce(array_length(f, 1), 0), p_expr;
     end if;
-
-    -- Raises for an unknown zone, which is the point: a typo'd timezone is
-    -- caught when the schedule is created rather than never firing.
-    v_local := p_ts at time zone p_timezone;
 
     -- All five fields are evaluated before any of them is allowed to decide
     -- the answer. Short-circuiting on the first non-match is the obvious
@@ -3076,7 +3169,38 @@ begin
     end if;
     return v_dom_ok and v_dow_ok;
 end;
-$$ language plpgsql stable;
+$$ language plpgsql immutable;
+
+-- Does a 5-field cron expression match this instant, in this zone?
+--
+-- Matching rather than "compute the next run time" is deliberate, and it is
+-- what cron itself does: the ticker wakes once a minute and asks whether now
+-- matches. A next_run_at column would be a cached derivation that goes stale
+-- the moment a DST boundary, a timezone edit or a clock change disagrees
+-- with it -- and it would have to be recomputed correctly in every path that
+-- edits a schedule. There is nothing to keep in sync here.
+create or replace function workflow.cron_matches(
+    p_expr text, p_ts timestamptz, p_timezone text default 'UTC')
+returns boolean as $$
+    -- `at time zone` raises for an unknown zone, which is the point: a typo'd
+    -- timezone is caught when the schedule is created rather than never firing.
+    select workflow.cron_matches_local(p_expr, p_ts at time zone p_timezone);
+$$ language sql stable;
+
+-- IS THIS EXPRESSION AN APPOINTMENT, OR A POLL?
+--
+-- The distinction only matters twice a year, and it is Vixie cron's own: a job
+-- whose HOUR field is a star runs many times a day, so it should ride through
+-- a daylight-saving transition unchanged -- an hour repeated means an extra
+-- hour of polling, an hour skipped means an hour less. A job that NAMES an
+-- hour is somebody's 03:00 report, and it has to happen once: not twice when
+-- the clock goes back over it, and not never when the clock jumps over it.
+--
+-- `*` or `*/n` in the hour field is a poll; anything else is an appointment.
+create or replace function workflow.cron_is_wall_clock(p_expr text)
+returns boolean as $$
+    select (regexp_split_to_array(btrim(p_expr), '\s+'))[2] not like '*%';
+$$ language sql immutable;
 
 -- The ticker. Call once a minute, from pg_cron or from anything else.
 --
@@ -3093,6 +3217,13 @@ declare
     v_run_id  uuid;
     v_started int := 0;
     v_active  boolean;
+    v_wall    boolean;
+    v_local   timestamp;
+    v_prev    timestamp;
+    v_scan    timestamp;
+    v_missed  timestamp;
+    v_guard   int;
+    v_due     boolean;
 begin
     for s in
         select * from workflow.schedules
@@ -3104,7 +3235,69 @@ begin
          for update skip locked
     loop
         begin
-            if not workflow.cron_matches(s.cron_expr, v_minute, s.timezone) then
+            -- THE LOCAL CLOCK IS THE ONE THE EXPRESSION TALKS ABOUT, and twice
+            -- a year it is not a function of the UTC minute. Both halves below
+            -- were found by asking the engine directly, and neither had a test
+            -- or a line of documentation:
+            --
+            --   * Clocks back. 2026-11-01 in America/New_York: 05:30Z and
+            --     06:30Z are BOTH 01:30 local, and `30 1 * * *` matched at
+            --     each. The external_id is keyed on the UTC minute, so the
+            --     engine's own idempotency did not collapse them either -- a
+            --     nightly reconcile ran twice, once a year, quietly.
+            --   * Clocks forward. 2026-03-08 in the same zone: 01:59 local is
+            --     followed by 03:00 local, so `30 2 * * *` matched no minute
+            --     at all and the run simply did not happen. Nothing was
+            --     recorded, because nothing failed.
+            --
+            -- Vixie cron's distinction is the one that resolves both, and
+            -- workflow.cron_is_wall_clock() carries it: a POLL (`*` in the
+            -- hour field) rides the transition unchanged, and an APPOINTMENT
+            -- fires exactly once per local wall-clock minute.
+            v_wall  := workflow.cron_is_wall_clock(s.cron_expr);
+            v_local := v_minute at time zone s.timezone;
+            v_due   := workflow.cron_matches_local(s.cron_expr, v_local);
+
+            -- Clocks back: this appointment's local minute has already been
+            -- served. Bounded to three hours so that EDITING a schedule's
+            -- timezone cannot suppress it -- the longest DST step in the
+            -- tz database is an hour, and this is not a general "did it fire
+            -- today" memory.
+            if v_due and v_wall and s.last_fired_at is not null
+               and v_minute - s.last_fired_at < interval '3 hours'
+               and v_local <= (s.last_fired_at at time zone s.timezone) then
+                update workflow.schedules
+                   set last_tick_at = v_minute, skip_count = skip_count + 1
+                 where id = s.id;
+                continue;
+            end if;
+
+            -- Clocks forward: the local clock advanced further than the UTC
+            -- clock did, so some local minutes have no instant. A ticker that
+            -- was merely DOWN for an hour advances both by the same amount and
+            -- is deliberately not caught here -- catching up an outage is a
+            -- different decision, and not this one.
+            if not v_due and v_wall and s.last_tick_at is not null then
+                v_prev := s.last_tick_at at time zone s.timezone;
+                if (v_local - v_prev) > (v_minute - s.last_tick_at) then
+                    v_scan   := date_trunc('minute', v_prev) + interval '1 minute';
+                    v_missed := null;
+                    v_guard  := 0;
+                    while v_scan < v_local and v_guard < 180 loop
+                        if workflow.cron_matches_local(s.cron_expr, v_scan) then
+                            v_missed := v_scan;
+                            exit;
+                        end if;
+                        v_scan  := v_scan + interval '1 minute';
+                        v_guard := v_guard + 1;
+                    end loop;
+                    -- Fire it now rather than not at all, which is what cron
+                    -- does and what the person who wrote "02:30" meant.
+                    v_due := v_missed is not null;
+                end if;
+            end if;
+
+            if not v_due then
                 update workflow.schedules set last_tick_at = v_minute where id = s.id;
                 continue;
             end if;

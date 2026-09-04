@@ -364,6 +364,119 @@ begin
     end if;
 end $$;
 
+-- ---------------------------------------------------------------------
+-- 7b. THE TWO MORNINGS A YEAR WHEN LOCAL TIME IS NOT A FUNCTION OF UTC.
+--
+-- schema.sql §19 sells the schedule's timezone as the point ("a scheduler that
+-- silently means 09:00 UTC is wrong in a way nobody notices until a report
+-- lands at 4am"), and until this section existed nothing checked the two days
+-- when that mapping is not one-to-one. Both defects were found by asking the
+-- engine, on a live database, and neither raised anything:
+--
+--   * clocks back  -- 05:30Z and 06:30Z are both 01:30 in New York, and a
+--                     `30 1 * * *` schedule started a run at each. The
+--                     external_id carries the UTC minute, so the engine's own
+--                     idempotency did not collapse them either.
+--   * clocks forward -- 01:59 local is followed by 03:00 local, so a
+--                     `30 2 * * *` schedule matched nothing at all and simply
+--                     did not run that day.
+--
+-- The rule now is Vixie cron's: a POLL (`*` in the hour field) rides the
+-- transition unchanged; an APPOINTMENT fires once per local wall-clock minute,
+-- and a minute the clock jumped over fires at the first tick after the jump.
+-- The three cases below are driven a minute at a time across the real
+-- transitions in the tz database, because that is the only way to tell a
+-- scheduler that is right from one that has never been asked.
+-- ---------------------------------------------------------------------
+do $$
+declare
+    v_fired int;
+    v_skipped int;
+    v_local timestamp;
+begin
+    -- (a) The repeated hour, for an appointment. Two hours of ticks from
+    --     05:29Z on 2026-11-01, spanning 01:30 local TWICE.
+    perform workflow.schedule_workflow('t_dst_back', 't_sched_drift', '30 1 * * *',
+                                       '{}'::jsonb, 'America/New_York', 'allow');
+    update workflow.schedules set last_tick_at = '2026-11-01 05:29:00+00'
+     where name = 't_dst_back';
+    for i in 1..120 loop
+        perform workflow.tick('2026-11-01 05:29:00+00'::timestamptz + (i || ' minutes')::interval);
+    end loop;
+    select fire_count, skip_count into v_fired, v_skipped
+      from workflow.schedules where name = 't_dst_back';
+    if v_fired <> 1 then
+        raise exception
+            'a 01:30 appointment ran % times on the morning 01:30 happened twice -- '
+            'once a year, a nightly job runs twice and nothing says so', v_fired;
+    end if;
+    if v_skipped <> 1 then
+        raise exception
+            'the suppressed repeat was not counted (skip_count = %) -- a schedule that '
+            'silently declines to fire is the failure this table has two counters for',
+            v_skipped;
+    end if;
+
+    -- (b) The same two hours, for a poll. A repeated hour means an extra hour
+    --     of polling, and `*/30` must produce four runs, not two.
+    perform workflow.schedule_workflow('t_dst_poll', 't_sched_drift', '*/30 * * * *',
+                                       '{}'::jsonb, 'America/New_York', 'allow');
+    update workflow.schedules set last_tick_at = '2026-11-01 05:29:00+00'
+     where name = 't_dst_poll';
+    for i in 1..120 loop
+        perform workflow.tick('2026-11-01 05:29:00+00'::timestamptz + (i || ' minutes')::interval);
+    end loop;
+    select fire_count into v_fired from workflow.schedules where name = 't_dst_poll';
+    if v_fired <> 4 then
+        raise exception
+            'a */30 poll fired % times in two hours of wall clock -- the once-per-local-'
+            'minute rule for appointments must not reach a schedule that polls', v_fired;
+    end if;
+
+    -- (c) The hour that does not exist. 02:30 local never happens on
+    --     2026-03-08 in New York; the appointment must still happen, once,
+    --     at the first tick after the jump.
+    perform workflow.schedule_workflow('t_dst_gap', 't_sched_drift', '30 2 * * *',
+                                       '{}'::jsonb, 'America/New_York', 'allow');
+    update workflow.schedules set last_tick_at = '2026-03-08 06:00:00+00'
+     where name = 't_dst_gap';
+    for i in 1..120 loop
+        perform workflow.tick('2026-03-08 06:00:00+00'::timestamptz + (i || ' minutes')::interval);
+    end loop;
+    select fire_count, last_fired_at at time zone 'America/New_York'
+      into v_fired, v_local
+      from workflow.schedules where name = 't_dst_gap';
+    if v_fired <> 1 then
+        raise exception
+            'a 02:30 appointment fired % times on the morning 02:30 did not exist -- '
+            '0 is the silence this whole file is about', v_fired;
+    end if;
+    if v_local is distinct from '2026-03-08 03:00:00'::timestamp then
+        raise exception
+            'the skipped appointment did not run at the first tick after the jump, '
+            'it ran at % local', v_local;
+    end if;
+
+    -- And a ticker that was merely DOWN is not the same event: local and UTC
+    -- advance together, so an hour-long outage must not be replayed as if the
+    -- clock had jumped.
+    perform workflow.schedule_workflow('t_dst_outage', 't_sched_drift', '30 2 * * *',
+                                       '{}'::jsonb, 'UTC', 'allow');
+    update workflow.schedules set last_tick_at = '2026-03-08 01:00:00+00'
+     where name = 't_dst_outage';
+    perform workflow.tick('2026-03-08 04:00:00+00');
+    if (select fire_count from workflow.schedules where name = 't_dst_outage') <> 0 then
+        raise exception
+            'a three-hour gap in the ticker was replayed as missed appointments -- '
+            'catching up an outage is a different decision from a DST jump';
+    end if;
+
+    perform workflow.unschedule_workflow('t_dst_back');
+    perform workflow.unschedule_workflow('t_dst_poll');
+    perform workflow.unschedule_workflow('t_dst_gap');
+    perform workflow.unschedule_workflow('t_dst_outage');
+end $$;
+
 rollback;
 
 -- ---------------------------------------------------------------------
@@ -499,5 +612,6 @@ do $$ begin
     raise notice 'workflow/02: one run per matching minute, none on a repeat tick';
     raise notice 'workflow/02: overlap skipped, counted, and resumed';
     raise notice 'workflow/02: a broken schedule records why and does not stop the others';
+    raise notice 'workflow/02: an appointment survives both DST transitions -- once when the hour repeats, and at all when it is skipped';
     raise notice 'workflow/02: a schedule cannot be repointed, disabled or deleted by a non-owner';
 end $$;

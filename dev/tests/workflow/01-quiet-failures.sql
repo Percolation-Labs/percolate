@@ -120,4 +120,79 @@ begin
     raise notice 'workflow/01: saga compensation is distinguishable';
 end $$;
 
+-- ---------------------------------------------------------------------
+-- 8. A DEPENDENCY NAMED TWICE IS STILL ONE DEPENDENCY.
+--
+-- workflow.task_dependencies is keyed on (task_id, depends_on_task_id) and
+-- every writer inserts `on conflict do nothing`, so naming the same
+-- dependency twice produces ONE row. pending_deps was counted from the
+-- caller's list instead, in three separate functions, so it was 2. The
+-- cascade decrements once per dependency that finishes, the count stops at 1,
+-- and the step sits in `pending` for ever under a run that stays `running`
+-- for ever.
+--
+-- It is the quietest failure in this file: no exception, no failed task, and
+-- nothing for the reaper to collect -- reap_stale_tasks() looks for expired
+-- leases on `running` tasks, and a task that never became ready never ran.
+-- The only symptom is a run that does not end.
+--
+-- Both entry points are asserted because both had it, and a fix that landed
+-- in one of two copies is this collection's most-repeated mistake.
+-- ---------------------------------------------------------------------
+insert into workflow.definitions (name, spec) values
+('t_dupdep', '{"steps":[
+    {"key":"a", "kind":"work", "queue":"t"},
+    {"key":"b", "kind":"work", "queue":"t", "depends_on":["a","a"]}
+ ]}');
+
+do $$
+declare
+    v_run uuid;
+    v_a   uuid;
+    v_c   uuid;
+begin
+    -- (a) through start_workflow, which is what `needs: [a, a]` in YAML
+    --     compiles to.
+    v_run := workflow.start_workflow('t_dupdep', '{}'::jsonb);
+    select id into v_a from workflow.tasks where run_id = v_run and step_key = 'a';
+
+    if (select pending_deps from workflow.tasks where run_id = v_run and step_key = 'b')
+       is distinct from (select count(*)::int from workflow.task_dependencies d
+                          join workflow.tasks t on t.id = d.task_id
+                         where t.run_id = v_run and t.step_key = 'b') then
+        raise exception
+            'pending_deps disagrees with the dependency rows it counts: % against % rows',
+            (select pending_deps from workflow.tasks where run_id = v_run and step_key = 'b'),
+            (select count(*) from workflow.task_dependencies d
+              join workflow.tasks t on t.id = d.task_id
+             where t.run_id = v_run and t.step_key = 'b');
+    end if;
+
+    perform workflow.complete_task(v_a, '{"result":"ok"}'::jsonb);
+
+    if (select status from workflow.tasks where run_id = v_run and step_key = 'b')
+       is distinct from 'ready' then
+        raise exception
+            'a step that named its one dependency twice never became ready (it is %) -- '
+            'the run can no longer finish and nothing reported anything',
+            (select status from workflow.tasks where run_id = v_run and step_key = 'b');
+    end if;
+
+    -- (b) through add_task, the dynamic path, with the same id twice.
+    v_run := workflow.start_workflow('t_dupdep', '{}'::jsonb);
+    select id into v_a from workflow.tasks where run_id = v_run and step_key = 'a';
+    v_c := workflow.add_task(v_run, 'c', 't', array[v_a, v_a]);
+
+    perform workflow.complete_task(v_a, '{"result":"ok"}'::jsonb);
+
+    if (select status from workflow.tasks where id = v_c) is distinct from 'ready' then
+        raise exception
+            'add_task counted one dependency twice: the task is % with pending_deps %',
+            (select status from workflow.tasks where id = v_c),
+            (select pending_deps from workflow.tasks where id = v_c);
+    end if;
+
+    raise notice 'workflow/01: a dependency named twice is one dependency, through both writers';
+end $$;
+
 rollback;

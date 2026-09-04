@@ -376,8 +376,10 @@ begin
     perform workflow.complete_task(
         (select id from workflow.tasks where run_id = v_run and step_key = 'a'),
         '{"result":"late"}'::jsonb);
-    if (select status from workflow.tasks where run_id = v_run and step_key = 'a') = 'succeeded' then
-        raise exception 'a task completed under a cancelled run';
+    if coalesce((select status from workflow.tasks where run_id = v_run and step_key = 'a'),
+                '<no such task>') <> 'cancelled' then
+        raise exception 'a task completed under a cancelled run: it is %',
+            (select status from workflow.tasks where run_id = v_run and step_key = 'a');
     end if;
 end $$;
 
@@ -413,14 +415,94 @@ begin
             'as configured and is not is worse than no throttle -- it is why a fan-out '
             'gets pointed at a regulator''s API believing it is polite.', v_claimed;
     end if;
-    if (select tokens from workflow.rate_limits where key = 't_f_limit') >= 2 then
-        raise exception 'the bucket was never consumed';
+    -- `is distinct from` / a null guard rather than `>= 2`: a scalar subquery
+    -- over a row that is not there is NULL, `NULL >= 2` is NULL, and the IF
+    -- does not fire -- so this assertion used to pass on a bucket that was
+    -- never created at all, which is the one state it exists to refuse.
+    -- (failure-modes.md, "An assertion that cannot fail".)
+    if coalesce((select tokens from workflow.rate_limits where key = 't_f_limit'), 99) >= 2 then
+        raise exception 'the bucket was never consumed (tokens = %)',
+            coalesce((select tokens::text from workflow.rate_limits where key = 't_f_limit'), 'no bucket row');
     end if;
     -- Unthrottled tasks are unaffected: identical behaviour where no rate_key.
     if (select count(*) from workflow.tasks
         where run_id = v_run and status = 'ready' and rate_key is not null) <> 1 then
         raise exception 'the throttled task was consumed rather than left ready';
     end if;
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 6a2. THE BUCKET'S OWN ARITHMETIC, WHICH NO CALLER COULD REACH.
+--
+-- try_consume_rate_limit tested admission against an UNCAPPED refill and then
+-- wrote a CAPPED one, so the two disagreed for any amount larger than the
+-- bucket: capacity 1, idle 100 seconds, consume 5 was ADMITTED and left the row
+-- holding -4. A negative amount went the other way and minted 1000 tokens into
+-- a bucket of 1.
+--
+-- Neither was reachable from a shipped caller -- claim_task and
+-- rbac.attempt_login both consume exactly 1 against a capacity of 2 or more --
+-- and that is the reason it is asserted here rather than assumed: a defect no
+-- existing call site can express is one the NEXT call site finds. The
+-- constraints on workflow.rate_limits are the half that cannot be bypassed by
+-- a caller at all.
+-- ---------------------------------------------------------------------
+insert into workflow.rate_limits (key, capacity, tokens, refill_rate)
+values ('t_bucket', 1, 0, 1);
+
+do $$
+declare v_ok boolean;
+begin
+    -- Idle long enough to refill far past the ceiling, then ask for more than
+    -- the ceiling. The refill is capped, so the answer is no.
+    update workflow.rate_limits set updated_at = now() - interval '100 seconds'
+     where key = 't_bucket';
+    if workflow.try_consume_rate_limit('t_bucket', 5) then
+        raise exception
+            'a bucket of capacity 1 admitted 5 tokens after sitting idle -- the '
+            'admission test and the write were reading different refills';
+    end if;
+    if (select tokens from workflow.rate_limits where key = 't_bucket') < 0 then
+        raise exception 'a refused consume still debited the bucket, to %',
+            (select tokens from workflow.rate_limits where key = 't_bucket');
+    end if;
+
+    -- One token, which the same idle period does cover.
+    update workflow.rate_limits set updated_at = now() - interval '100 seconds'
+     where key = 't_bucket';
+    if not workflow.try_consume_rate_limit('t_bucket', 1) then
+        raise exception 'a full bucket refused a single token';
+    end if;
+
+    -- A bucket is not filled by asking it for a negative amount.
+    begin
+        v_ok := workflow.try_consume_rate_limit('t_bucket', -1000);
+        raise exception 'a negative amount was accepted and minted tokens';
+    exception when others then
+        if sqlerrm like 'a negative amount%' then raise; end if;
+    end;
+
+    -- And the invariants are the table's, not the function's: every writer is
+    -- refused, including one that never calls try_consume_rate_limit.
+    begin
+        insert into workflow.rate_limits (key, capacity, tokens, refill_rate)
+        values ('t_bucket_over', 1, 5, 1);
+        raise exception 'a bucket holding more than its capacity was accepted';
+    exception when check_violation then null;
+    end;
+    begin
+        insert into workflow.rate_limits (key, capacity, tokens, refill_rate)
+        values ('t_bucket_neg', 1, -1, 1);
+        raise exception 'a bucket holding a negative balance was accepted';
+    exception when check_violation then null;
+    end;
+    begin
+        insert into workflow.rate_limits (key, capacity, tokens, refill_rate)
+        values ('t_bucket_zero', 0, 0, 1);
+        raise exception 'a bucket with no capacity was accepted -- it admits one '
+                        'request per refill period while reading as "blocked"';
+    exception when check_violation then null;
+    end;
 end $$;
 
 -- ---------------------------------------------------------------------
@@ -466,8 +548,9 @@ begin
             v_n;
     end if;
 
-    if (select tokens from workflow.rate_limits where key = 't_fb_limit') >= 2 then
-        raise exception 'the batch claim did not consume the bucket';
+    if coalesce((select tokens from workflow.rate_limits where key = 't_fb_limit'), 99) >= 2 then
+        raise exception 'the batch claim did not consume the bucket (tokens = %)',
+            coalesce((select tokens::text from workflow.rate_limits where key = 't_fb_limit'), 'no bucket row');
     end if;
 
     -- The rest are LEFT READY, not consumed and not failed: a throttled task
@@ -511,6 +594,8 @@ begin
     end if;
     raise notice 'workflow/05: claim_task AND claim_tasks consume the rate key, so a '
                  'throttle works with any worker, batched or not';
+    raise notice 'workflow/05: the bucket never admits over its capacity and never holds '
+                 'more than it -- enforced by a constraint, not by the callers that exist';
 end $$;
 
 -- ---------------------------------------------------------------------

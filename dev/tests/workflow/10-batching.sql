@@ -764,12 +764,12 @@ begin
     if v_after <> 10 then
         raise exception 're-expanding a batched matrix re-chunked it: % children', v_after;
     end if;
-    if (select status from workflow.tasks where id = v_fan) <> 'succeeded' then
+    if (select status from workflow.tasks where id = v_fan) is distinct from 'succeeded' then
         raise exception 'a re-expanded matrix did not settle back to done: %',
             (select status from workflow.tasks where id = v_fan);
     end if;
     if (select pending_deps from workflow.tasks
-        where run_id = v_run and step_key = 'rollup') <> 10 then
+        where run_id = v_run and step_key = 'rollup') is distinct from 10 then
         raise exception 'a re-expansion double-counted the fan-in over batches';
     end if;
 end $$;
@@ -850,7 +850,7 @@ $y$);
             'a YAML-authored batch did not run as 2/1/2/1 across three tenants: %',
             coalesce(v_shape, '<nothing ran>');
     end if;
-    if (select status from workflow.runs where id = v_run) <> 'succeeded' then
+    if (select status from workflow.runs where id = v_run) is distinct from 'succeeded' then
         raise exception 'a YAML-authored batched fan-out did not complete';
     end if;
     raise notice 'workflow/10: a batch authored in YAML compiles, expands and reduces -- both halves are installed and agree';

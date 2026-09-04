@@ -64,7 +64,7 @@ begin
     if (v_out#>>'{0,fy}')::int <> 2026 then
         raise exception 'the ORDER BY the author wrote was not honoured: %', v_out;
     end if;
-    if (select status from workflow.runs where id = v_run) <> 'succeeded' then
+    if (select status from workflow.runs where id = v_run) is distinct from 'succeeded' then
         raise exception 'a run whose only step was a statement did not complete';
     end if;
 end $$;
@@ -99,7 +99,7 @@ begin
 
     v_run := workflow.start_workflow('t_os_sneak', '{}'::jsonb);
 
-    if (select status from workflow.tasks where run_id = v_run and step_key = 'w') <> 'failed' then
+    if (select status from workflow.tasks where run_id = v_run and step_key = 'w') is distinct from 'failed' then
         raise exception
             'a data-modifying CTE ran from a step that did not declare `write: true` '
             '-- the keyword check does not see it, so transaction_read_only must';
@@ -235,7 +235,7 @@ begin
     end if;
 
     v_run := workflow.start_workflow('t_os_read', '{"cik": "0000320193"}'::jsonb);
-    if (select status from workflow.tasks where run_id = v_run and step_key = 'q') <> 'failed' then
+    if (select status from workflow.tasks where run_id = v_run and step_key = 'q') is distinct from 'failed' then
         raise exception 'a statement ran under sql_policy = registered';
     end if;
     select detail#>>'{error,error}' into v_err from workflow.task_events
