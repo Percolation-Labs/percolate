@@ -1,5 +1,5 @@
 -- ============================================================
--- percolate 0.1.2 -- the whole schema, as one extension script.
+-- percolate 0.1.3 -- the whole schema, as one extension script.
 --
 -- GENERATED from specs/ by extension/percolate/build-sql.py. Do not edit.
 --
@@ -7451,12 +7451,26 @@ create table if not exists rbac.users (
     id            uuid primary key default gen_random_uuid(),
     email         text not null unique,
     password_hash text,                 -- null for API-key-only / SSO-only accounts
-    status        text not null default 'active'
+    -- DEFAULT 'pending_verification', because 1a's whole argument is that
+    -- nothing in this collection activates an account. The default used to be
+    -- 'active', which meant the policy held only for callers who remembered to
+    -- spell status out -- create_user_with_password does, and every other
+    -- insert path got the opposite of what the file two hundred lines below
+    -- says the system does. A default is what happens when somebody forgets,
+    -- so it is exactly where the safe answer belongs.
+    status        text not null default 'pending_verification'
                       check (status in ('active','disabled','pending_verification')),
     mfa_secret    text,                 -- TOTP secret, set only after MFA enrollment
     created_at    timestamptz not null default now(),
     updated_at    timestamptz not null default now()
 );
+
+-- AND ON A DATABASE THAT ALREADY HAS THE TABLE. `create table if not exists`
+-- is a no-op there, so the column default above would have applied to fresh
+-- installs only -- and the upgrade script is this file replayed, which is
+-- precisely the path an existing deployment takes. Idempotent, so it costs
+-- nothing on the install that just created it with this default.
+alter table rbac.users alter column status set default 'pending_verification';
 
 -- Password verification pushed to pgcrypto -- no password ever leaves
 -- Postgres in plaintext, and hashing cost (bcrypt work factor) is
@@ -7919,11 +7933,24 @@ create or replace function rbac.request_password_reset(
 returns void as $$
 declare v_user_id uuid;
 begin
+    -- KEYED ON THE ADDRESS THIS FUNCTION ACTUALLY LOOKS UP, which was
+    -- `lower(p_email)` while the lookup below is an exact match on a
+    -- case-sensitive `text` column with a plain unique index. Two accounts
+    -- differing only in case are two accounts everywhere else in this file --
+    -- login, reset, role assignment all compare with `=` -- so lowercasing
+    -- here alone gave them one shared bucket, and either could spend the
+    -- other's allowance.
+    --
+    -- Whether email SHOULD be case-insensitive is a real question and a
+    -- different one: it is a unique index and a comparison at every call site,
+    -- which is a migration rather than a line. Recorded here rather than half
+    -- applied, because a throttle that folds case while the lookup does not is
+    -- the worst of both readings.
     insert into workflow.rate_limits (key, capacity, tokens, refill_rate)
-    values ('reset:' || lower(p_email), 3, 3, 0.0056)   -- 3 burst, ~1 per 3 min
+    values ('reset:' || p_email, 3, 3, 0.0056)   -- 3 burst, ~1 per 3 min
     on conflict (key) do nothing;
 
-    if not workflow.try_consume_rate_limit('reset:' || lower(p_email)) then
+    if not workflow.try_consume_rate_limit('reset:' || p_email) then
         raise exception 'too many password reset requests for that address, try again shortly';
     end if;
 
@@ -8412,6 +8439,33 @@ grant execute on function rbac.refresh_session(text, text) to web_anon, authenti
 -- its own choosing for any address and redeem it on the next line. It stays
 -- owner-only: the caller that mints and delivers is a trusted one.
 grant execute on function rbac.reset_password(text, text) to web_anon;
+
+-- AND EXPLICITLY REVOKED, because DELETING THE GRANT LINE FIXES NOTHING THAT
+-- IS ALREADY BROKEN.
+--
+-- `create or replace function` preserves the existing ACL, and the upgrade
+-- script is this schema REPLAYED -- so removing the grant above corrects a
+-- fresh install and leaves every database that is already running 0.1.2
+-- exactly as it was. That is every database that has the vulnerability.
+--
+-- MEASURED, after making precisely that mistake: install the published
+-- percolate--0.1.2.sql, replay percolate--0.1.2--0.1.3.sql over it, and
+-- `has_function_privilege('web_anon', 'rbac.request_password_reset(text,text,
+-- interval)', 'execute')` still answered true. The security fix propagated to
+-- new installs only, which is the half that never had the problem.
+--
+-- Same shape as the policies and constraints in this collection, which are
+-- dropped before they are created for the same reason: a REVOKE has no IF NOT
+-- EXISTS, an absent GRANT is not a revocation, and an idempotent script has to
+-- state the removal rather than the absence. The blanket `revoke execute on
+-- all functions in schema rbac from public` above does not cover this -- it
+-- takes away PUBLIC's grant, and this one was made to a named role.
+--
+-- `authenticated` is in the list although it was never granted: this is the
+-- statement of who may NOT call it, and the two PostgREST-facing roles are the
+-- answer regardless of which of them happened to hold it.
+revoke execute on function rbac.request_password_reset(text, text, interval)
+    from web_anon, authenticated;
 grant execute on function rbac.verify_api_key(text) to web_anon, authenticated;
 grant execute on function rbac.change_password(text, text) to authenticated;
 grant execute on function rbac.grant_role(uuid, text) to authenticated;
@@ -18475,4 +18529,79 @@ begin
                'ingest_workflow', 'ingest_file')
     where not exists (
         select 1 from content.channels where name = 'uploads' and org_id is null);
+end $$;
+
+
+-- ============================================================
+-- THE LAST WORD ON PUBLIC EXECUTE, for every schema this extension owns.
+--
+-- Postgres grants EXECUTE on a new function to PUBLIC unless somebody takes it
+-- away, and user-rbac 9(a) states the rule that follows as a structural one
+-- for the whole collection: "a new function added later is unreachable via
+-- REST until someone deliberately grants it. Deny-by-default, not
+-- allow-by-omission."
+--
+-- IT DID NOT HOLD. Four of the five schemas revoke mid-file and then keep
+-- defining functions -- `workflow-engine/schema.sql` revokes at its 9(b) and
+-- defines FIFTY more functions below it in the same file; `aiq` revokes in
+-- `integration-rbac.sql` and again in `graph-algorithms.sql`, and then
+-- `world-model-ingestion/graph.sql` adds fourteen projection triggers,
+-- `resolve_ref` and `graph_schema` after both. Measured on a clean install:
+-- FORTY-SIX functions across `workflow` and `aiq` still carried EXECUTE for
+-- PUBLIC, including `workflow.p8ql`, `workflow.plan_graph`,
+-- `workflow.lint_spec` and `workflow.resolve_statement`.
+--
+-- Not a live leak, for the same accidental reason `agentic` 9's own header
+-- gives about the three IT had missed: `web_anon` holds USAGE on neither
+-- schema, and the three that are SECURITY DEFINER are two trigger functions
+-- and a read-only capability probe. An accident of grant ordering is not a
+-- control -- user-rbac 1 says exactly that, about set_password, and says
+-- "never trust that again".
+--
+-- SO THE REVOKE MOVES TO WHERE NOTHING CAN BE DEFINED AFTER IT. This is the
+-- last file in build-sql.py's ORDER, and its last statement. A revoke placed
+-- beside the definitions it covers is the readable shape and it is the shape
+-- that failed four times, because a file goes on being edited after the line
+-- that was its end; there is no "later" than here.
+--
+-- REVOKE ... FROM PUBLIC removes only PUBLIC's own grant, so every
+-- role-specific grant made above -- in this file and in the eleven before it
+-- -- survives untouched. That is what makes one statement per schema safe
+-- rather than a re-grant exercise.
+--
+-- The per-file revokes above are kept and are not redundant: they state the
+-- intent at the point of definition, and they are what a reader of one file
+-- sees. This is what makes the intent true.
+-- ============================================================
+revoke execute on all functions in schema workflow from public;
+revoke execute on all functions in schema rbac     from public;
+revoke execute on all functions in schema aiq      from public;
+revoke execute on all functions in schema content  from public;
+revoke execute on all functions in schema agentic  from public;
+
+-- And the check that makes forgetting it a load-time failure rather than a
+-- quiet one, generalised from the one `agentic/schema.sql` 10(c) added for a
+-- single schema. `proacl is null` matters as much as the explode: a function
+-- nobody has touched has a NULL ACL, which MEANS the default, which means
+-- PUBLIC holds EXECUTE -- a check that only inspected non-null ACLs would pass
+-- every function it is written to catch.
+do $$
+declare v_bad text;
+begin
+    select string_agg(n.nspname || '.' || p.proname, ', ' order by n.nspname, p.proname)
+      into v_bad
+      from pg_proc p
+      join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname in ('workflow','rbac','aiq','content','agentic')
+       and (p.proacl is null
+            or exists (select 1 from aclexplode(p.proacl) a
+                        where a.grantee = 0 and a.privilege_type = 'EXECUTE'));
+    if v_bad is not null then
+        raise exception
+            'PUBLIC EXECUTE INVARIANT VIOLATED: % still carries EXECUTE for PUBLIC. '
+            'Every function this extension ships is deny-by-default; add the schema '
+            'to the revoke block above this check, then grant the callers it is '
+            'meant to have.', v_bad;
+    end if;
+    raise notice 'no function in workflow, rbac, aiq, content or agentic is executable by PUBLIC';
 end $$;

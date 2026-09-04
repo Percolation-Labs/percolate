@@ -509,3 +509,78 @@ begin
     where not exists (
         select 1 from content.channels where name = 'uploads' and org_id is null);
 end $$;
+
+
+-- ============================================================
+-- THE LAST WORD ON PUBLIC EXECUTE, for every schema this extension owns.
+--
+-- Postgres grants EXECUTE on a new function to PUBLIC unless somebody takes it
+-- away, and user-rbac 9(a) states the rule that follows as a structural one
+-- for the whole collection: "a new function added later is unreachable via
+-- REST until someone deliberately grants it. Deny-by-default, not
+-- allow-by-omission."
+--
+-- IT DID NOT HOLD. Four of the five schemas revoke mid-file and then keep
+-- defining functions -- `workflow-engine/schema.sql` revokes at its 9(b) and
+-- defines FIFTY more functions below it in the same file; `aiq` revokes in
+-- `integration-rbac.sql` and again in `graph-algorithms.sql`, and then
+-- `world-model-ingestion/graph.sql` adds fourteen projection triggers,
+-- `resolve_ref` and `graph_schema` after both. Measured on a clean install:
+-- FORTY-SIX functions across `workflow` and `aiq` still carried EXECUTE for
+-- PUBLIC, including `workflow.p8ql`, `workflow.plan_graph`,
+-- `workflow.lint_spec` and `workflow.resolve_statement`.
+--
+-- Not a live leak, for the same accidental reason `agentic` 9's own header
+-- gives about the three IT had missed: `web_anon` holds USAGE on neither
+-- schema, and the three that are SECURITY DEFINER are two trigger functions
+-- and a read-only capability probe. An accident of grant ordering is not a
+-- control -- user-rbac 1 says exactly that, about set_password, and says
+-- "never trust that again".
+--
+-- SO THE REVOKE MOVES TO WHERE NOTHING CAN BE DEFINED AFTER IT. This is the
+-- last file in build-sql.py's ORDER, and its last statement. A revoke placed
+-- beside the definitions it covers is the readable shape and it is the shape
+-- that failed four times, because a file goes on being edited after the line
+-- that was its end; there is no "later" than here.
+--
+-- REVOKE ... FROM PUBLIC removes only PUBLIC's own grant, so every
+-- role-specific grant made above -- in this file and in the eleven before it
+-- -- survives untouched. That is what makes one statement per schema safe
+-- rather than a re-grant exercise.
+--
+-- The per-file revokes above are kept and are not redundant: they state the
+-- intent at the point of definition, and they are what a reader of one file
+-- sees. This is what makes the intent true.
+-- ============================================================
+revoke execute on all functions in schema workflow from public;
+revoke execute on all functions in schema rbac     from public;
+revoke execute on all functions in schema aiq      from public;
+revoke execute on all functions in schema content  from public;
+revoke execute on all functions in schema agentic  from public;
+
+-- And the check that makes forgetting it a load-time failure rather than a
+-- quiet one, generalised from the one `agentic/schema.sql` 10(c) added for a
+-- single schema. `proacl is null` matters as much as the explode: a function
+-- nobody has touched has a NULL ACL, which MEANS the default, which means
+-- PUBLIC holds EXECUTE -- a check that only inspected non-null ACLs would pass
+-- every function it is written to catch.
+do $$
+declare v_bad text;
+begin
+    select string_agg(n.nspname || '.' || p.proname, ', ' order by n.nspname, p.proname)
+      into v_bad
+      from pg_proc p
+      join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname in ('workflow','rbac','aiq','content','agentic')
+       and (p.proacl is null
+            or exists (select 1 from aclexplode(p.proacl) a
+                        where a.grantee = 0 and a.privilege_type = 'EXECUTE'));
+    if v_bad is not null then
+        raise exception
+            'PUBLIC EXECUTE INVARIANT VIOLATED: % still carries EXECUTE for PUBLIC. '
+            'Every function this extension ships is deny-by-default; add the schema '
+            'to the revoke block above this check, then grant the callers it is '
+            'meant to have.', v_bad;
+    end if;
+    raise notice 'no function in workflow, rbac, aiq, content or agentic is executable by PUBLIC';
+end $$;

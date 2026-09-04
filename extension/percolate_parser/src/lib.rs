@@ -134,6 +134,29 @@ impl ParsedQuery {
 /// step later regardless.
 const SQL_OPENERS: [&str; 5] = ["SELECT", "WITH", "TABLE", "VALUES", "EXPLAIN"];
 
+/// Every mode the dialect spells, in the order the error message names them.
+///
+/// ONE list, read by the check that refuses an unknown mode AND by the
+/// sentence that mode prints -- because they were two lists and they drifted.
+/// `RELEVANCE` and `PATH` (graph-algorithms.md 9) were added to the match and
+/// not to the message, so for as long as both modes had existed a caller who
+/// typed `RELEVENCE "acme"` was told the expected modes and the one they meant
+/// was not among them. Exactly the rot `parser-tests.yml` found in
+/// `a_list_is_still_refused_where_it_means_nothing`, one message along; a
+/// second copy is the whole mechanism.
+///
+/// SCHEMA is LAST because the message ends by pointing at it: it is the one
+/// mode that answers "what may I ask for", and a caller who reached that error
+/// by guessing a name is exactly the one who should be told there is a query
+/// that lists them.
+///
+/// `SQL` is deliberately not here. It is not spelled -- it is sniffed, from
+/// SQL_OPENERS above -- so it is not a name a caller can get wrong, and the
+/// message gives it its own clause rather than a slot in this list.
+const MODES: [&str; 8] = [
+    "LOOKUP", "SEMANTIC", "TEXT", "SEARCH", "GRAPH", "RELEVANCE", "PATH", "SCHEMA",
+];
+
 #[derive(Debug, PartialEq)]
 pub enum ParseError {
     Empty,
@@ -152,14 +175,14 @@ impl ParseError {
     pub fn message(&self) -> String {
         match self {
             ParseError::Empty => "empty query".into(),
-            // SCHEMA is named last and with a nudge, because it is the one
-            // mode that answers "what may I ask for" -- a caller who got here
-            // by guessing a mode name is exactly the caller who should be
-            // told there is a query that lists them.
+            // The modes come from MODES rather than from a sentence written
+            // beside it: see that constant for the two this list was missing
+            // and for how long. SCHEMA is last there, and the nudge below
+            // depends on it staying last.
             ParseError::UnknownMode(m) => format!(
-                "unknown mode '{m}' -- expected one of LOOKUP, SEMANTIC, TEXT, SEARCH, GRAPH, \
-                 SCHEMA, or an ordinary SQL statement. Write SCHEMA to see what this \
-                 database can answer."
+                "unknown mode '{m}' -- expected one of {}, or an ordinary SQL \
+                 statement. Write SCHEMA to see what this database can answer.",
+                MODES.join(", ")
             ),
             ParseError::MissingArgument(m) => format!("{m}"),
             ParseError::UnterminatedQuote => "unterminated quoted string".into(),
@@ -294,11 +317,7 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, ParseError> {
         ));
     }
 
-    if !matches!(
-        mode.as_str(),
-        "LOOKUP" | "SEMANTIC" | "GRAPH" | "TEXT" | "SEARCH" | "SCHEMA" | "RELEVANCE"
-            | "PATH"
-    ) {
+    if !MODES.contains(&mode.as_str()) {
         return Err(ParseError::UnknownMode(mode));
     }
 
@@ -678,6 +697,52 @@ fn p8_workflow_grammar() -> pgrx::JsonB {
 #[pg_schema]
 mod tests {
     use crate::*;
+
+    /// THE MESSAGE NAMES EVERY MODE THE PARSER ACCEPTS.
+    ///
+    /// Not a spelling test on a sentence -- `a_list_is_still_refused_where_it
+    /// _means_nothing` records why pinning prose is how a test rots. This
+    /// asserts the RELATION between two things that had drifted: for every
+    /// mode `parse_query` accepts, the unknown-mode error offers it. `RELEVANCE`
+    /// and `PATH` had been accepted and unlisted since the day they landed, so
+    /// a caller who typed `RELEVENCE` was told, by the parser that implements
+    /// it, that RELEVANCE was not a mode.
+    ///
+    /// Written over MODES rather than over a literal list, because a literal
+    /// here would be the third copy and would drift with the other two.
+    #[pg_test]
+    fn the_unknown_mode_error_offers_every_mode_that_parses() {
+        let msg = ParseError::UnknownMode("NOPE".into()).message();
+        for m in MODES {
+            assert!(msg.contains(m), "{m} parses but the error does not offer it: {msg}");
+            // And the other direction: a name in the list is one the parser
+            // takes, so the message cannot advertise a mode that does not run.
+            assert!(
+                !matches!(parse_query(&format!("{m} \"x\", \"y\"")),
+                          Err(ParseError::UnknownMode(_))),
+                "the error offers {m}, which the parser rejects as unknown");
+        }
+        assert!(msg.contains("SQL statement"), "the SQL clause is gone: {msg}");
+    }
+
+    /// The grammar an agent is handed and the modes the parser takes are the
+    /// same set, plus `SQL` -- which is sniffed rather than spelled, so it is a
+    /// grammar row and not a MODES entry. A mode added to one and not the other
+    /// is a documented mode that does not run, or a running mode nobody can
+    /// discover; `p8_query_grammar`'s own header makes that argument and
+    /// nothing checked it.
+    #[pg_test]
+    fn the_published_grammar_lists_exactly_the_modes_that_parse() {
+        let g = p8_query_grammar().0;
+        let mut published: Vec<String> = g["modes"].as_array().unwrap().iter()
+            .map(|m| m["mode"].as_str().unwrap().to_string())
+            .filter(|m| m != "SQL")
+            .collect();
+        published.sort();
+        let mut spelled: Vec<String> = MODES.iter().map(|m| m.to_string()).collect();
+        spelled.sort();
+        assert_eq!(published, spelled);
+    }
 
     #[pg_test]
     fn parses_plain_lookup() {

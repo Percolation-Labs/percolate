@@ -513,8 +513,24 @@ fn mark_pending(slot: i32) -> i32 {
     slot
 }
 
-/// Give back a slot taken for a build that never installed one. Called from
-/// every entry point, because after a longjmp that is where control lands.
+/// Give back a slot taken for a build that never installed one.
+///
+/// Called from the two functions that can CREATE a pending slot -- `snapshot()`
+/// and `snapshot_filtered()` -- and from `graph_snapshot_drop()`, rather than
+/// from every entry point. It used to hang off `reset_build_clock()`, and that
+/// was wrong twice over: slot accounting is not clock accounting, and three
+/// entry points that read an existing snapshot (`p8_graph_distance`,
+/// `p8_graph_community_of`, `p8_graph_induced`) reset no clock -- so a slot
+/// burned by a raised build reached one of them, `snapshot()` acquired a
+/// second, and `mark_pending` OVERWROTE the record of the first. The leak the
+/// pending slot exists to close was still open, one entry point along, and the
+/// overwritten slot could not be recovered by anything short of ending the
+/// session.
+///
+/// Releasing where the slot is taken rather than where control happens to land
+/// is what makes that structural instead of remembered: a new entry point
+/// cannot forget, because the only way to take a pending slot is to go through
+/// a function that has already given the last one back.
 fn release_pending_slot() {
     unsafe {
         if PENDING_SLOT >= 0 {
@@ -526,7 +542,6 @@ fn release_pending_slot() {
 }
 
 fn reset_build_clock() {
-    release_pending_slot();
     unsafe { LAST_BUILD_MS = 0.0 }
 }
 
@@ -948,6 +963,11 @@ fn release_slot(slot: i32) {
 /// draw: a filter is a caller's choice about their own graph, so it survives
 /// their own writes and does not outlive them.
 fn snapshot(refresh: bool) -> &'static mut Snapshot {
+    // A slot owed back by a build that raised, before this call can take
+    // another. Safe unconditionally: PENDING_SLOT is only ever set on the
+    // acquire arm below and is cleared by install(), so a non-negative value
+    // here means a previous build longjmped and nothing owns that slot.
+    release_pending_slot();
     let id = identity();
     let ct = counters();
     if !refresh {
@@ -974,6 +994,9 @@ fn snapshot(refresh: bool) -> &'static mut Snapshot {
 /// The builder's way in: a filter is an instruction to build, not a preference
 /// to be matched against a cache, so a different filter always rebuilds.
 fn snapshot_filtered(bf: BuildFilter, refresh: bool) -> &'static mut Snapshot {
+    // Same as snapshot(): give back a slot a raised build never installed,
+    // before taking one of our own.
+    release_pending_slot();
     let id = identity();
     let ct = counters();
     if !refresh {
