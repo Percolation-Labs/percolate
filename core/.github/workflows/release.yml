@@ -266,11 +266,21 @@ jobs:
   # -------------------------------------------------------------------------
   chart:
     needs: [version, pypi, image]
-    # NOT `if: inputs.publish`. This job checks out another repository and
-    # pushes to it, which makes it the riskiest thing here -- so a dry run that
-    # skipped it was exercising everything except the part worth rehearsing.
-    # It now runs either way and stops short of the commit, which is the same
-    # correction p8-subsystems' release.yml needed for the same reason.
+    # Removing `if: inputs.publish` was not enough, and the dry run proved it:
+    # this job `needs` pypi, pypi is gated on publish, and a job whose
+    # dependency is SKIPPED is skipped in turn. So the rehearsal still skipped
+    # the riskiest thing here -- checking out another repository and pushing to
+    # it -- while reporting success.
+    #
+    # `always()` re-enables it, and the rest of the condition keeps a real
+    # release honest: on a dry run it goes ahead regardless, and on a real one
+    # it requires the publishes it is about to describe to have actually
+    # happened. Without that second half, `always()` would bump the chart to a
+    # version PyPI had just rejected.
+    if: >-
+      always() && needs.version.result == 'success'
+      && (inputs.publish != true
+          || (needs.pypi.result == 'success' && needs.image.result == 'success'))
     runs-on: ubuntu-latest
     steps:
       - name: Require the token, rather than skipping quietly
