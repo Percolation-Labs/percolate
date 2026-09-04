@@ -238,19 +238,36 @@ insert into aiq.emb_demo_quad_a (chunk_id, embedding) values
 on conflict (chunk_id) do update set embedding = excluded.embedding;
 
 -- ------------------------------------------------------------
--- 6. A person.
+-- 6. A person, and the one role authoring takes.
 --
--- The human-in-the-loop example needs one, because `signal_task` refuses a
--- run nobody owns: a run with owner_id null is not "owned by everyone", it
+-- The human-in-the-loop example needs somebody, because `signal_task` refuses
+-- a run nobody owns: a run with owner_id null is not "owned by everyone", it
 -- takes an explicit permission. The owner is set from the `sub` claim when
 -- the run starts, so the examples that signal must run as somebody.
+--
+-- THE ROLE IS NOT DECORATION. `workflow.may_define()` has two branches: a
+-- caller with no `sub` falls through to "does session_user hold insert on
+-- workflow.definitions", which app_owner does -- so 06 and 07, which set orgs
+-- and no sub, define workflows without a role. The moment a claim carries a
+-- `sub` the other branch runs, and asks whether THAT USER holds
+-- workflows:update. Naming a person therefore makes authoring stricter, not
+-- looser, and 08 and 09 broke on exactly that: they set a sub so the run has
+-- an owner to signal, and the user they named held nothing.
+--
+-- admin, because it is the only role that carries workflows:update -- a step
+-- may carry its own SQL that runs as the engine owner, so defining one is an
+-- authoring privilege rather than a read, which is what the refusal says.
 -- ------------------------------------------------------------
 insert into rbac.users (id, email, status) values
     ('80000000-0000-0000-0000-000000000001','harbourmaster@meridian.example','active')
 on conflict (id) do update set email = excluded.email;
 
+insert into rbac.user_roles (user_id, role) values
+    ('80000000-0000-0000-0000-000000000001','admin')
+on conflict do nothing;
+
 -- ------------------------------------------------------------
--- 6. One step function, for the fan-out example.
+-- 7. One step function, for the fan-out example.
 --
 -- `matrix: rows:` names a function in the workflow.step_functions allow-list
 -- rather than taking an inline SELECT, so a workflow document cannot smuggle

@@ -31,6 +31,14 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 CONTROL = ROOT / "extension/percolate/percolate.control"
 PARSER_CONTROL = ROOT / "extension/percolate_parser/percolate_parser.control"
 CARGO = ROOT / "extension/percolate_parser/Cargo.toml"
+# The FIFTH file carrying the number, and the one that drifted: a kind manifest
+# mounts the generated script BY NAME, and the release renames that file. up.sh
+# rewrites it with sed at apply time so the cluster works either way, which is
+# exactly what let it rot unnoticed -- `dev/references.sh` found it at 0.1.1
+# against a control file saying 0.1.2. A real version is kept there rather than
+# a placeholder so `kubectl kustomize` alone still renders something
+# installable, so the number has to be moved rather than removed.
+K8S_MANIFEST = ROOT / "k8s/kind/manifests/postgres.yaml"
 SQL_DIR = ROOT / "extension/percolate/sql"
 
 
@@ -86,6 +94,15 @@ def main() -> None:
     sub_once(CONTROL, r"^default_version = '.*'", f"default_version = '{new}'")
     sub_once(PARSER_CONTROL, r"^default_version = '.*'", f"default_version = '{new}'")
     sub_once(CARGO, r'^version = ".*"', f'version = "{new}"')
+    # Two occurrences (mountPath and subPath), so not sub_once.
+    txt = K8S_MANIFEST.read_text()
+    swapped, n = re.subn(r"percolate--[0-9]+\.[0-9]+\.[0-9]+\.sql",
+                         f"percolate--{new}.sql", txt)
+    if n == 0:
+        fail(f"{K8S_MANIFEST.relative_to(ROOT)}: no percolate--<version>.sql to move -- "
+             "the manifest changed shape and this bump would leave it stale")
+    K8S_MANIFEST.write_text(swapped)
+    print(f"  {K8S_MANIFEST.relative_to(ROOT)}: {n} reference(s) -> {new}")
 
     # Regenerate under the new name, then drop the old artifact. In that order:
     # if the build fails the tree still holds a valid, installable extension.
