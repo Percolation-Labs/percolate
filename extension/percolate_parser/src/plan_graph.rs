@@ -1601,6 +1601,56 @@ pub fn plan_document(spec: &Value, catalog: &Value) -> Value {
 mod tests {
     use super::*;
 
+    /// A relation is something the statement READS, not a word that appears in
+    /// it. The tokeniser is a heuristic by design, but it was heuristic about
+    /// what is even code: `from` inside a string literal or a comment produced
+    /// a relation that does not exist, and then a defect warning naming it.
+    ///
+    /// That matters more than a wrong name in a document. The plan graph exists
+    /// to report defects BEFORE a run, and a warning that fires on any
+    /// statement with "from" in a sentence is what teaches a reader to stop
+    /// reading the warnings.
+    #[test]
+    fn prose_is_not_a_relation() {
+        // A string literal.
+        assert_eq!(
+            statement_relations("select 1 where note = 'shipped from warehouse'"),
+            Vec::<String>::new(),
+            "a word inside a string literal was read as a table");
+
+        // A line comment, including the shape a author leaves behind on edit.
+        assert_eq!(
+            statement_relations("-- was: select * from legacy_ledger\nselect 1"),
+            Vec::<String>::new(),
+            "a word inside a line comment was read as a table");
+
+        // A block comment.
+        assert_eq!(
+            statement_relations("/* join old_audit here later */ select 1"),
+            Vec::<String>::new(),
+            "a word inside a block comment was read as a table");
+
+        // An escaped quote must not end the literal early and let the rest of
+        // it be tokenised as code.
+        assert_eq!(
+            statement_relations("select 1 where s = 'it''s from nowhere'"),
+            Vec::<String>::new(),
+            "'' inside a literal ended it early");
+
+        // ...and the real ones still resolve, so this is a filter and not a wall.
+        assert_eq!(statement_relations("select * from sec.facts"),
+                   vec!["sec.facts".to_string()]);
+        assert_eq!(
+            statement_relations("select * from a join b on a.id = b.id -- from c"),
+            vec!["a".to_string(), "b".to_string()],
+            "stripping comments also removed the statement");
+        // A CTE is still not a relation, with a literal in the body.
+        assert_eq!(
+            statement_relations(
+                "with x as (select 1 where n = 'from y') select * from x"),
+            Vec::<String>::new());
+    }
+
     fn catalog() -> Value {
         json!({
             "agents": {
