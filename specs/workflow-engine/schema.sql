@@ -6301,6 +6301,38 @@ registered after the workflow that names it.$c$;
 -- the reference first. An earlier version of this parsed pg_get_constraintdef
 -- with a regex to assert the agreement, which is a lot of clever code to
 -- restate something the database already enforces.
+-- AND THE INLINE CHECKS, WHICH A REPLAY CANNOT REACH.
+--
+-- `runs.status` and `tasks.status` carry a CHECK written inside `create table
+-- if not exists`, so on a database that already has the table the CREATE is a
+-- no-op and the OLD constraint survives -- still spelling the terminal state
+-- `completed` on runs and `done` on tasks. The FKs above are written
+-- drop-then-add for exactly this reason; the CHECKs they sit beside were not,
+-- and the vocabulary change would therefore have landed on fresh installs only.
+--
+-- What that leaves on an upgraded database is a column nothing can be written
+-- to at all: `succeeded` fails the stale CHECK, and `completed` fails the new
+-- FK, so the first run to finish after the upgrade fails both ways. Caught by
+-- dev/upgrade-converges.sh, which diffs a fresh install against a replayed
+-- upgrade and reported the two constraints differing by one word:
+--
+--     <  ... ARRAY['running', 'succeeded', 'failed', 'cancelled']     fresh
+--     >  ... ARRAY['running', 'completed', 'failed', 'cancelled']     upgraded
+--
+-- Restated here drop-then-add, the discipline tasks_kind_check and
+-- resources_status_check already use, so an existing installation picks the
+-- change up. The ROWS holding the old words are rewritten first, in
+-- specs/migrations/0.1.2--0.1.3.sql -- a replay cannot express that either, and
+-- adding the FK below to a table still holding a `completed` row would fail the
+-- upgrade outright.
+alter table workflow.runs  drop constraint if exists runs_status_check;
+alter table workflow.runs  add  constraint runs_status_check
+    check (status in ('running','succeeded','failed','cancelled'));
+alter table workflow.tasks drop constraint if exists tasks_status_check;
+alter table workflow.tasks add  constraint tasks_status_check
+    check (status in ('pending','ready','running','waiting_external',
+                      'succeeded','failed','cancelled'));
+
 alter table workflow.runs  drop constraint if exists runs_status_fk;
 alter table workflow.runs  add  constraint runs_status_fk
     foreign key (status) references workflow.lifecycle_states(state);

@@ -390,9 +390,16 @@ def check_every_spec_is_accounted_for() -> None:
     """
     shipped = {rel for rel, _ in ORDER}
     known = shipped | set(NOT_SHIPPED)
+    # `specs/migrations/` is NOT a subsystem and has its own consumer:
+    # write_upgrades() prepends `<old>--<new>.sql` to the generated upgrade
+    # script, for the part of a version change a replay cannot express. Left in
+    # this glob, the first migration anybody wrote made the build refuse to run
+    # -- "in neither ORDER nor NOT_SHIPPED" -- which is this check firing on a
+    # file it was never about. Found by writing one.
     found = {
         str(p.relative_to(ROOT / "specs"))
         for p in sorted((ROOT / "specs").glob("*/*.sql"))
+        if p.parent.name != "migrations"
     }
     unaccounted = sorted(found - known)
     if unaccounted:
