@@ -29,6 +29,24 @@ services:
       - shared_preload_libraries=pg_cron
       - -c
       - cron.database_name=p8experiment
+    # /dev/shm, because Docker's default for it is 64 MB and Postgres's
+    # default `maintenance_work_mem` is ALSO 64 MB -- and pgvector sizes a
+    # parallel HNSW build's shared-memory segment from the latter. The two
+    # defaults collide exactly, so building or reindexing an HNSW index over a
+    # corpus large enough to earn a parallel build fails with
+    #
+    #     could not resize shared memory segment ... to 63999392 bytes:
+    #     No space left on device
+    #
+    # Measured: a REINDEX over a 200k-row, 64-dimension space fails on the
+    # default and completes in 52 s with `max_parallel_maintenance_workers = 0`
+    # -- which is what identifies the parallel segment as the thing that does
+    # not fit, rather than the index itself. Nothing in dev/tests hits this,
+    # because the committed corpus is six chunks and never builds in parallel.
+    #
+    # 1 GB rather than 128 MB so that raising maintenance_work_mem -- the first
+    # thing anyone does to a slow index build -- does not walk back into it.
+    shm_size: 1gb
     environment:
       POSTGRES_USER: p8
       POSTGRES_PASSWORD: p8

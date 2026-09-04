@@ -12497,6 +12497,7 @@ declare
     m aiq.embedding_models;
     src aiq.semantic_sources;
     v_tbl text;
+    v_iter text;
 begin
     if p_source is null then
         raise exception
@@ -12543,16 +12544,72 @@ begin
             vector_dims(p_query), m.name, m.dim;
     end if;
 
-    -- The join is the filter. `c` is the consumer's table, read as the caller,
-    -- so the consumer's policies decide which chunks may rank at all -- and
-    -- ranks are computed after it, so a chunk the caller cannot see does not
-    -- silently occupy a position and shift everyone else's fused score.
+    -- THE JOIN IS THE FILTER, AND THE FILTER IS WHY THE INDEX MUST ITERATE.
+    --
+    -- `c` is the consumer's table, read as the caller, so the consumer's
+    -- policies decide which chunks may rank at all -- and ranks are computed
+    -- after it, so a chunk the caller cannot see does not silently occupy a
+    -- position and shift everyone else's fused score. That is the precision
+    -- half, and it has been right since 09-retrieval-tenancy.sql was written.
+    --
+    -- The RECALL half was wrong, and only above fixture scale. An HNSW scan
+    -- with `hnsw.iterative_scan = off` -- pgvector's default -- yields a
+    -- BOUNDED candidate set (ef_search, 40 by default) and is then exhausted.
+    -- The join runs afterwards. So a tenant who owns a small share of a large
+    -- corpus has every one of those candidates removed by their own policy and
+    -- receives an EMPTY answer to a query that has a thousand correct ones:
+    -- measured at 200k chunks, a tenant holding 0.5% of them asked for 10 and
+    -- got 0, and asking for 50 also got 0 -- because the limit is not what
+    -- bounds the index scan. Nothing raises. `aiq.search` inherits it and
+    -- degrades to lexical-only while still reporting success, which is the
+    -- worse half: its `semantic_rank` is null on every row and no other symptom
+    -- exists.
+    --
+    -- Six chunks cannot show this. Below a few thousand rows the planner does
+    -- not choose the HNSW index at all, so every test in dev/tests/query
+    -- exercised the exact path and passed.
+    --
+    -- `strict_order` makes the scan resume instead of stopping, and it is
+    -- strict rather than relaxed because aiq.search fuses these ranks with RRF
+    -- and relaxed ordering would corrupt the rank it fuses on. Measured cost at
+    -- 200k chunks: on the common path -- a caller who can see most of the
+    -- corpus -- 0.86 ms p50 against 0.94 ms with it off, which is noise. On the
+    -- narrow-tenant path it is 29 ms against 1.5 ms, and that is the trade
+    -- being made deliberately: a right answer in 29 ms beats an empty one in
+    -- 1.5 ms.
+    --
+    -- The residue is `hnsw.max_scan_tuples` (20000 by default), which bounds
+    -- the resumed scan. A tenant owning a small enough share of a large enough
+    -- corpus still gets a SHORT answer rather than a full one -- but a short
+    -- best effort under a named ceiling, not silence. Operators with very
+    -- narrow tenants should raise it.
+    --
+    -- Probed rather than assumed, and probed HERE rather than in the function
+    -- header: `create function ... set hnsw.iterative_scan` is refused at
+    -- install time because pgvector's GUCs are registered when its module
+    -- loads, not when the extension is created, so the parameter is still an
+    -- unrecognised placeholder and only a superuser may name one. By this line
+    -- vector_dims() above has loaded the module, so current_setting() answers
+    -- and an end-user role may set it.
+    v_iter := current_setting('hnsw.iterative_scan', true);
+    if v_iter is not null and v_iter <> 'strict_order' then
+        perform set_config('hnsw.iterative_scan', 'strict_order', true);
+    end if;
+
     return query execute format(
         'select e.chunk_id, (e.embedding <=> $1)::float8, %L
          from aiq.%I e
          join %s c on c.id = e.chunk_id
          order by e.embedding <=> $1 limit $2', m.name, v_tbl, src.source_table)
         using p_query, p_limit;
+
+    -- Restored rather than left set, because SET LOCAL lasts to the end of the
+    -- caller's TRANSACTION and not the end of this function. Leaving it on
+    -- would silently change the index behaviour of every later vector query in
+    -- the same transaction, including ones this layer did not write.
+    if v_iter is not null and v_iter <> 'strict_order' then
+        perform set_config('hnsw.iterative_scan', v_iter, true);
+    end if;
 end;
 $$ language plpgsql stable;
 
