@@ -16,7 +16,7 @@ the workflow suite had ten live instances of one particular spelling of it:
 A scalar subquery over a row that is not there returns NULL. `NULL <>
 'succeeded'` is NULL. `if NULL then` does not fire. So the check passes exactly
 when its subject is **missing**, which is the one state most of them were
-written to catch. From postmortems/2026-09-04-workflow-engine-review.md:
+written to catch. From meta/postmortems/2026-09-04-workflow-engine-review.md:
 
     05-faults.sql guarded "the bucket was never consumed" with
     `(select tokens ...) >= 2`. With no bucket row at all it read green -- and
