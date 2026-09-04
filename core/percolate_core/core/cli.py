@@ -444,8 +444,15 @@ def sample_load(
         raise typer.Exit(1)
 
     typer.echo("")
-    typer.echo("loaded. The corpus embeds asynchronously -- watch it with:")
-    typer.echo("  select step_key, status, attempts from workflow.tasks where queue = 'ingest';")
+    if skip_documents:
+        # No documents were posted, so nothing is queued on `ingest` and the
+        # embed-watch below would show an empty result forever. Point at the
+        # thing that is actually loaded instead.
+        typer.echo("loaded (documents skipped). Load the corpus later with the same "
+                   "command and no --skip-documents, once LLM_API_KEY is set.")
+    else:
+        typer.echo("loaded. The corpus embeds asynchronously -- watch it with:")
+        typer.echo("  select step_key, status, attempts from workflow.tasks where queue = 'ingest';")
 
 
 async def _upload_documents(where: Any, content_url: str, token: str, yaml: Any) -> list[str]:

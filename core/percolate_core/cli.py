@@ -15,6 +15,31 @@ import typer
 
 app = typer.Typer(help="percolate — Postgres-native subsystems", no_args_is_help=True)
 
+
+def _version_callback(value: bool) -> None:
+    if value:
+        from . import __version__
+
+        typer.echo(__version__)
+        raise typer.Exit()
+
+
+@app.callback()
+def _main(
+    version: bool = typer.Option(
+        None,
+        "--version",
+        "-V",
+        help="Show the version and exit.",
+        callback=_version_callback,
+        is_eager=True,
+    ),
+) -> None:
+    # A callback is the only place a Typer *app* (as opposed to a command) can
+    # carry an option, so `percolate --version` works the way every CLI's does.
+    # The `version` subcommand stays: scripts that already call it keep working.
+    pass
+
 _EXTRAS = {
     "content": ("boto3", "fastapi", "uvicorn"),
     "ingest": ("semchunk", "pymupdf4llm", "pymupdf", "docx", "pydantic"),
@@ -105,7 +130,7 @@ def worker(
     run(queue=queue, worker_id=worker_id)
 
 
-@app.command()
+@app.command(help="Show the version and exit (same as --version).")
 def version() -> None:
     from . import __version__
 
