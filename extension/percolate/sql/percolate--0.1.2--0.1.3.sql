@@ -11008,8 +11008,7 @@ insert into aiq.embedding_providers (provider, request_template, response_path, 
     ('ollama', '{"model": "{{model}}", "prompt": "{{text}}"}'::jsonb, 'embedding',
      'POST /api/embeddings -- one vector, at the top level under "embedding".'),
     ('openai', '{"model": "{{model}}", "input": "{{text}}"}'::jsonb, 'data.0.embedding',
-     'POST /v1/embeddings -- a list, because the API embeds a batch
-on conflict do nothing; a single '
+     'POST /v1/embeddings -- a list, because the API embeds a batch; a single '
      'text still comes back as data[0]. Needs credential_ref on the model row.')
 on conflict (provider) do nothing;
 
@@ -11018,10 +11017,76 @@ on conflict (provider) do nothing;
 -- what the model actually produces.
 create or replace function aiq.register_embedding_space(p_model text)
 returns void as $$
-declare m aiq.embedding_models;
+declare
+    m       aiq.embedding_models;
+    v_tbl   text;
+    v_other text;
+    v_dim   int;
 begin
     select * into m from aiq.embedding_models where name = p_model;
     if not found then raise exception 'embedding model % not registered -- SCHEMA "graph" lists the registered ones', p_model; end if;
+
+    -- THE DERIVED NAME IS NOT UNIQUE, WHICH IS THE BUG register_entity_table
+    -- ALREADY RECORDS, ONE FUNCTION ALONG.
+    --
+    -- The storage table is `emb_` || replace(name, '-', '_'), and that mapping
+    -- is not injective: `text-embedding-3-small` and `text_embedding_3_small`
+    -- derive the same table. `create table if not exists` then silently adopts
+    -- whichever was registered FIRST, at the FIRST model's dimension, and this
+    -- function returns void -- reporting success for a space it did not create.
+    --
+    -- Measured, registering two models in one transaction:
+    --
+    --     probe-x (dim 768) and probe_x (dim 1536)
+    --       -> 1 storage table, aiq.emb_probe_x
+    --       -> vector(768), the first registration's dimension
+    --
+    -- What follows from that is the failure §10 of this file exists to prevent:
+    -- the second model's vectors either fail to land on the dimension check or,
+    -- where the dimensions happen to agree, share one table keyed by chunk_id
+    -- and overwrite each other -- so `semantic` ranks a query vector from one
+    -- model against stored vectors from another, which §10 states plainly is
+    -- not a thing that can be done ("two different 768-dimension models are not
+    -- interchangeable").
+    --
+    -- REFUSED RATHER THAN RENAMED. Hashing the name or quoting it whole would
+    -- make the mapping injective and would rename every existing space, which a
+    -- replayed upgrade cannot express -- it would orphan the vectors in the old
+    -- table while reporting success, trading a loud collision for a silent one.
+    -- Refusing is the honest form of the same limit, which is the phrase
+    -- register_entity_table settles the identical question with.
+    v_tbl := 'emb_' || replace(m.name, '-', '_');
+
+    select name into v_other from aiq.embedding_models
+     where name <> m.name and 'emb_' || replace(name, '-', '_') = v_tbl
+     limit 1;
+    if v_other is not null then
+        raise exception
+            'embedding models % and % both derive the storage table aiq.% -- '
+            '"-" and "_" are the same character once the table name is built, so '
+            'the second registration would silently reuse the first model''s table '
+            'and its dimension. Rename one of them.',
+            m.name, v_other, v_tbl;
+    end if;
+
+    -- And if the table is already there, it has to be the right shape. A space
+    -- registered before this check existed, or a model whose dim was edited
+    -- after its space was built, both land here -- and both are the same
+    -- silent-wrong-answer as the collision above.
+    select a.atttypmod into v_dim
+      from pg_attribute a
+      join pg_class c on c.oid = a.attrelid
+      join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname = 'aiq' and c.relname = v_tbl and a.attname = 'embedding';
+    if v_dim is not null and v_dim <> m.dim then
+        raise exception
+            'aiq.% already stores vector(%) and model % declares dimension % -- '
+            'the existing space was built for a different model or a different '
+            'dimension, and reusing it would rank one model''s query against '
+            'another''s vectors. Drop the table deliberately, or register the '
+            'model under a name that does not collide.',
+            v_tbl, v_dim, m.name, m.dim;
+    end if;
 
     execute format($q$
         create table if not exists aiq.%1$I (
