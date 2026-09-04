@@ -485,7 +485,48 @@ static mut SNAP: *mut Snapshot = std::ptr::null_mut();
 /// invisible in any number that only measures the algorithm.
 static mut LAST_BUILD_MS: f64 = 0.0;
 
+/// A slot that has been TAKEN but not yet attached to a snapshot.
+///
+/// `acquire_slot()` runs before `build()`, and `build()` does not always
+/// return: the snapshot ceiling raises deliberately, `check_for_interrupts!`
+/// raises on a cancelled query, and a cursor fetch can raise on its own. A
+/// raise in pgrx is a longjmp, so `install()` never runs -- and the slot is
+/// then recorded on no snapshot at all, which means `drop_cached()`, whose
+/// only source of a slot number is `SNAP`, cannot give it back.
+///
+/// That made the leak worst exactly where it hurt most: the ceiling error
+/// tells the operator to "retry, or release one with select
+/// aiq.graph_snapshot_drop()", and neither could recover the slot that error
+/// had just burned. Six of them on one pooled backend exhausted the
+/// cluster-wide admission control until the session ended.
+///
+/// So a freshly taken slot is written down BEFORE the build that may not
+/// return, and released by whichever gets there first: `install()`, which
+/// adopts it, or the next entry point, which finds it still pending. Only a
+/// FRESHLY ACQUIRED slot is ever pending -- a rebuild that reuses the cached
+/// snapshot's slot must not mark it, because that slot is still owned by a
+/// live `SNAP` and releasing it would be giving away one we are still using.
+static mut PENDING_SLOT: i32 = -1;
+
+fn mark_pending(slot: i32) -> i32 {
+    unsafe { PENDING_SLOT = slot }
+    slot
+}
+
+/// Give back a slot taken for a build that never installed one. Called from
+/// every entry point, because after a longjmp that is where control lands.
+fn release_pending_slot() {
+    unsafe {
+        if PENDING_SLOT >= 0 {
+            let slot = PENDING_SLOT;
+            PENDING_SLOT = -1;
+            release_slot(slot);
+        }
+    }
+}
+
 fn reset_build_clock() {
+    release_pending_slot();
     unsafe { LAST_BUILD_MS = 0.0 }
 }
 
@@ -499,11 +540,23 @@ fn cached() -> Option<&'static mut Snapshot> {
 
 fn install(mut s: Snapshot, slot: i32) -> &'static mut Snapshot {
     unsafe {
+        // The build returned, so the slot is this snapshot's now rather than
+        // owed back by the next entry point. Cleared before anything below can
+        // itself raise.
+        PENDING_SLOT = -1;
         LAST_BUILD_MS += s.build_ms;
         // The outgoing snapshot's slot is reused rather than released and
         // retaken: a backend that already holds one is not a new admission,
         // and releasing first would let another backend take it and leave this
         // one refused for a rebuild it was already entitled to make.
+        //
+        // The `prev != slot` arm is unreachable from the two callers below,
+        // which pass the cached snapshot's own slot whenever there is one --
+        // so `prev` and `slot` are the same number in every path that exists
+        // today. Kept rather than collapsed because it is the arm that keeps
+        // the accounting right for a caller that acquires independently, and
+        // an install that silently dropped one of two held slots would be a
+        // leak of the same shape PENDING_SLOT above exists to close.
         if !SNAP.is_null() {
             let prev = (*SNAP).slot;
             drop(Box::from_raw(SNAP));
@@ -908,9 +961,12 @@ fn snapshot(refresh: bool) -> &'static mut Snapshot {
         Some(s) if s.identity == id => s.build_filter.clone(),
         _ => BuildFilter::default(),
     };
+    // mark_pending only on the acquire arm: a slot inherited from the cached
+    // snapshot is already owned by a live SNAP, and marking it would hand it
+    // back on the next entry point while we were still using it.
     let slot = match cached() {
         Some(c) if c.slot >= 0 => c.slot,
-        _ => acquire_slot(),
+        _ => mark_pending(acquire_slot()),
     };
     install(build(&bf), slot)
 }
@@ -927,9 +983,12 @@ fn snapshot_filtered(bf: BuildFilter, refresh: bool) -> &'static mut Snapshot {
             }
         }
     }
+    // mark_pending only on the acquire arm: a slot inherited from the cached
+    // snapshot is already owned by a live SNAP, and marking it would hand it
+    // back on the next entry point while we were still using it.
     let slot = match cached() {
         Some(c) if c.slot >= 0 => c.slot,
-        _ => acquire_slot(),
+        _ => mark_pending(acquire_slot()),
     };
     install(build(&bf), slot)
 }
@@ -2341,6 +2400,12 @@ fn p8_graph_snapshot(
 /// is the largest allocation this extension makes.
 #[pg_extern]
 fn p8_graph_snapshot_drop() -> JsonB {
+    // A slot owed back by a build that raised is released here too, and that
+    // is the point rather than tidiness: the snapshot ceiling's own error
+    // message names this function as the remedy, and until PENDING_SLOT
+    // existed the slot that error had just burned was the one thing this
+    // could not give back.
+    release_pending_slot();
     let had = drop_cached();
     JsonB(json!({ "ok": true, "dropped": had }))
 }
