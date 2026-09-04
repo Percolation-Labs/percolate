@@ -410,8 +410,8 @@ begin
             'granting the graph algorithms to web_anon: these are reachable '
             'without authentication, and graph_snapshot holds a per-backend '
             'adjacency snapshot in one of a fixed number of admission slots. '
-            'See graph-algorithms.md 2.3 for what an unauthenticated caller '
-            'can therefore cost you.';
+            'An unauthenticated caller can therefore hold slots and force '
+            'rebuilds, which is a cost you cannot attribute to anyone.';
     end if;
     for r in
         -- The query entry points and the compiled functions under them.
@@ -459,8 +459,8 @@ begin
         -- Said out loud, because the reason this gate exists is that the cost
         -- is not in the call, it is in the first call.
         'note', case when p_enabled
-                then 'the first call in each backend builds an adjacency snapshot; '
-                     'see graph-algorithms.md §2.3 for what that costs per connection'
+                then 'the first call in each backend builds an adjacency snapshot, '
+                     'so the cost is paid once per connection rather than once per query'
                 else 'revoked' end);
 end $$;
 

@@ -7716,8 +7716,7 @@ comment on function workflow.plan_document(text, int) is
 comment on function workflow.plan_graph(text, int) is
     'A stored definition expanded along the entities it names -- agents, tool '
     'servers, tools, corpora, spaces, models, functions, queues, rate keys -- '
-    'with every reach that does not resolve reported as a defect. See '
-    'specs/workflow-engine/plan-graph.md.';
+    'with every reach that does not resolve reported as a defect.';
 
 
 -- ============================================================
@@ -12115,8 +12114,7 @@ begin
             raise exception
                 'PATH needs the graph algorithms, which ship switched off. '
                 'Turn them on for this role with '
-                'select aiq.enable_graph_algorithms(''%'') -- see '
-                'ai-query-layer/graph-algorithms.md §11.', current_user;
+                'select aiq.enable_graph_algorithms(''%'')', current_user;
         end;
 
     when 'RELEVANCE' then
@@ -12150,8 +12148,7 @@ begin
             raise exception
                 'RELEVANCE needs the graph algorithms, which ship switched off. '
                 'Turn them on for this role with '
-                'select aiq.enable_graph_algorithms(''%'') -- see '
-                'ai-query-layer/graph-algorithms.md §11.', current_user;
+                'select aiq.enable_graph_algorithms(''%'')', current_user;
         end;
 
     else
@@ -14909,7 +14906,7 @@ begin
     if v_missing > 0 then
         raise exception
             '% of % embed children completed with no vector in their output -- they '
-            'were offloaded as artifacts (workflow-engine/outputs.md class 4) because '
+            'were offloaded as artifacts because '
             'the response exceeded workflow.max_payload_bytes. A vector that is not in '
             'the payload cannot be landed from here; raise the cap for the queue that '
             'embeds, or embed with a smaller model.', v_missing, v_total;
@@ -15531,8 +15528,8 @@ begin
             'granting the graph algorithms to web_anon: these are reachable '
             'without authentication, and graph_snapshot holds a per-backend '
             'adjacency snapshot in one of a fixed number of admission slots. '
-            'See graph-algorithms.md 2.3 for what an unauthenticated caller '
-            'can therefore cost you.';
+            'An unauthenticated caller can therefore hold slots and force '
+            'rebuilds, which is a cost you cannot attribute to anyone.';
     end if;
     for r in
         -- The query entry points and the compiled functions under them.
@@ -15580,8 +15577,8 @@ begin
         -- Said out loud, because the reason this gate exists is that the cost
         -- is not in the call, it is in the first call.
         'note', case when p_enabled
-                then 'the first call in each backend builds an adjacency snapshot; '
-                     'see graph-algorithms.md §2.3 for what that costs per connection'
+                then 'the first call in each backend builds an adjacency snapshot, '
+                     'so the cost is paid once per connection rather than once per query'
                 else 'revoked' end);
 end $$;
 
@@ -21168,7 +21165,7 @@ create table if not exists percolate.types (
 
 comment on table percolate.types is
     'Payload shapes that cannot be derived from the catalog, because a jsonb '
-    'column has no shape in it. Authored in specs/contract/types/*.yaml.';
+    'column has no shape in it.';
 
 
 -- ------------------------------------------------------------

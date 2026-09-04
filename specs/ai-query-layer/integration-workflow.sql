@@ -480,7 +480,7 @@ begin
     if v_missing > 0 then
         raise exception
             '% of % embed children completed with no vector in their output -- they '
-            'were offloaded as artifacts (workflow-engine/outputs.md class 4) because '
+            'were offloaded as artifacts because '
             'the response exceeded workflow.max_payload_bytes. A vector that is not in '
             'the payload cannot be landed from here; raise the cap for the queue that '
             'embeds, or embed with a smaller model.', v_missing, v_total;

@@ -1523,8 +1523,7 @@ begin
             raise exception
                 'PATH needs the graph algorithms, which ship switched off. '
                 'Turn them on for this role with '
-                'select aiq.enable_graph_algorithms(''%'') -- see '
-                'ai-query-layer/graph-algorithms.md §11.', current_user;
+                'select aiq.enable_graph_algorithms(''%'')', current_user;
         end;
 
     when 'RELEVANCE' then
@@ -1558,8 +1557,7 @@ begin
             raise exception
                 'RELEVANCE needs the graph algorithms, which ship switched off. '
                 'Turn them on for this role with '
-                'select aiq.enable_graph_algorithms(''%'') -- see '
-                'ai-query-layer/graph-algorithms.md §11.', current_user;
+                'select aiq.enable_graph_algorithms(''%'')', current_user;
         end;
 
     else

@@ -97,7 +97,7 @@ create table if not exists percolate.types (
 
 comment on table percolate.types is
     'Payload shapes that cannot be derived from the catalog, because a jsonb '
-    'column has no shape in it. Authored in specs/contract/types/*.yaml.';
+    'column has no shape in it.';
 
 
 -- ------------------------------------------------------------

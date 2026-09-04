@@ -7636,5 +7636,4 @@ comment on function workflow.plan_document(text, int) is
 comment on function workflow.plan_graph(text, int) is
     'A stored definition expanded along the entities it names -- agents, tool '
     'servers, tools, corpora, spaces, models, functions, queues, rate keys -- '
-    'with every reach that does not resolve reported as a defect. See '
-    'specs/workflow-engine/plan-graph.md.';
+    'with every reach that does not resolve reported as a defect.';

@@ -130,7 +130,7 @@ grant select, insert on workflow.deposits to worker, authenticated;
 create or replace function workflow.refuse_field_mutation() returns trigger as $$
 begin
     raise exception
-        '% is append-only (trace-field/brief.md invariant 4). Retract with a '
+        '% is append-only. Retract with a '
         'counter-deposit: the same locus with polarity = -1. A % here would '
         'rewrite the gradient''s past.', tg_table_name, tg_op;
 end;
@@ -386,7 +386,7 @@ begin
     if rbac.current_user_id() is null then
         raise exception
             'an anchor is a person''s judgement and this call has no user '
-            'identity. A process cannot anchor (trace-field/brief.md §4.4).';
+            'identity. A process cannot anchor.';
     end if;
     if not rbac.may_access_org((p_spec->>'org_id')::uuid) then
         raise exception 'not authorized to anchor for that organization';
