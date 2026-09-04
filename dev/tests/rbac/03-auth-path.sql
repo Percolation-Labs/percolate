@@ -205,7 +205,7 @@ begin
     for r in select * from (values ('sk-nope'), (null), (''), ('SK-PROBE-RAW-KEY')) t(k)
     loop
         select count(*) into v_n from rbac.verify_api_key(r.k);
-        if v_n <> 0 then
+        if v_n is distinct from 0 then
             raise exception 'verify_api_key accepted %L', coalesce(r.k, '<null>');
         end if;
     end loop;
@@ -411,7 +411,10 @@ begin
 
     update rbac.users set status = 'disabled' where id = v_u;
     select updated_at into t from rbac.users where id = v_u;
-    if t = timestamptz '2000-01-01' then
+    -- `t is null` is in the condition because a missing row is not a pass. The
+    -- bare `t = ...` reads green when the probe user is gone, which is the one
+    -- state that makes every other assertion in this block meaningless.
+    if t is null or t = timestamptz '2000-01-01' then
         raise exception
             'disabling an account left updated_at at %, so the column tracks password '
             'changes rather than row changes -- and disabling is the single most '
@@ -421,8 +424,9 @@ begin
     update rbac.users set updated_at = timestamptz '2000-01-01' where id = v_u;
     update rbac.users set email = 'touch-probe-renamed@example.com' where id = v_u;
     select updated_at into t from rbac.users where id = v_u;
-    if t = timestamptz '2000-01-01' then
-        raise exception 'changing an email left updated_at at %', t;
+    if t is null or t = timestamptz '2000-01-01' then
+        raise exception 'changing an email left updated_at at % (null means the probe '
+                        'user is gone, which is also a failure)', t;
     end if;
 
     raise notice 'rbac/03: updated_at is maintained by the trigger, so it moves for '

@@ -348,7 +348,7 @@ begin
         raise exception 'an empty matrix created children';
     end if;
     select status into v_st from workflow.tasks where run_id = v_run and step_key = 'rollup';
-    if v_st <> 'ready' then
+    if v_st is distinct from 'ready' then
         raise exception 'an empty matrix must release its successor immediately, got %', v_st;
     end if;
     if (select (context#>>'{fan,result,fanout}')::int from workflow.runs where id = v_run) is distinct from 0 then
@@ -472,7 +472,7 @@ begin
     update workflow.tasks set status = 'ready', run_after = now() where id = v_fan;
 
     select status, error into v_st, v_err from workflow.tasks where id = v_fan;
-    if v_st <> 'failed' then
+    if v_st is distinct from 'failed' then
         raise exception 'a re-expansion over a changed row set was allowed: %', v_st;
     end if;
     if v_err->>'error' not like '%DIFFERENT row set%' then

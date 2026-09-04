@@ -405,7 +405,7 @@ begin
     --    the write was one way to prevent it rather than the guarantee itself.
     select visibility, org_id into v_vis, v_org
       from content.resources where id = v_res;
-    if v_vis <> 'private' or v_org is not null then
+    if v_vis is distinct from 'private' or v_org is not null then
         raise exception
             'a resource registered with no org came out as (%, %), not a private '
             'row owned by its uploader -- which is what stops another tenant '

@@ -153,6 +153,73 @@ def findings_in(path: pathlib.Path) -> list[tuple[int, str]]:
     return out
 
 
+# THE SAME DEFECT, SPELT OVER TWO STATEMENTS, which is how it survived the first
+# version of this file and how one more instance landed the day after that
+# version shipped:
+#
+#     select machine_weight into v_w from aiq.graph_vocabulary where relation = 'x';
+#     if v_w <> 0.2::real then raise exception '...'; end if;
+#
+# No row means SELECT INTO leaves v_w NULL -- plpgsql does not raise
+# NO_DATA_FOUND for a plain SELECT INTO -- so `v_w <> 0.2` is NULL and the raise
+# never fires. Identical consequence to the inline form, invisible to a scan that
+# only looks inside `if ... then`, and the more common spelling in this suite by
+# a wide margin: thirteen live instances against sixteen inline ones.
+#
+# THE PATTERN THAT IS CORRECT, and it is already in the suite -- dev/tests/rbac/03
+# guards with an explicit `is null` first and then compares. So a variable is
+# cleared by any of: `if v is null then`, `if v is not null`, a coalesce() around
+# it, or `is distinct from`. Anything else that compares it two-valuedly before
+# one of those is a check that passes when its subject is missing.
+SELECT_INTO = re.compile(
+    r"\bselect\b[^;]*?\binto\s+(?:strict\s+)?([a-z_][a-z0-9_]*)\b[^;]*;", re.I | re.S)
+
+
+def two_step_findings(raw: str, s: str) -> list[tuple[int, str]]:
+    out: list[tuple[int, str]] = []
+    for m in SELECT_INTO.finditer(s):
+        # `select ... into strict` raises NO_DATA_FOUND itself, so the absent
+        # case is already an error and nothing here can be silenced by it.
+        if re.search(r"\binto\s+strict\b", m.group(0), re.I):
+            continue
+        # count(...) without GROUP BY is 0 over an empty set, never NULL, and it
+        # is the commonest spelling of `select ... into` in this suite by a long
+        # way -- 107 of the 120 the first draft of this pass reported. Flagging
+        # them would have made the audit unreadable, which is the failure mode
+        # that matters most for a lint. max/min/sum/array_agg are NOT excluded:
+        # every one of those does return NULL over an empty set.
+        head = m.group(0)
+        sel = head[head.lower().index("select") + 6: head.lower().rindex(" into")].strip().lower()
+        if sel.startswith("count"):
+            continue
+        # NO `from`, NO MISSING ROW. `select length(...) into v_768;` is an
+        # expression, not a query over rows -- it returns exactly one row by
+        # construction, so nothing about it can be silenced by an absent one.
+        # This class is about a row that is not there; a select with no FROM
+        # cannot have one. (Checked after `into`, because the FROM of a
+        # SUBQUERY inside the select list -- `(select ... from generate_series)`
+        # -- is not this statement's FROM and does not make it a row query.)
+        if not re.search(r"\bfrom\b", head[head.lower().rindex(" into"):], re.I):
+            continue
+        var = m.group(1)
+        # Only as far as the next SELECT INTO of the same variable: past that
+        # point the value being compared is a different one.
+        rest = s[m.end():]
+        nxt = re.search(rf"\bselect\b[^;]*?\binto\s+(?:strict\s+)?{re.escape(var)}\b", rest, re.I | re.S)
+        window = rest[:nxt.start()] if nxt else rest
+        # Cleared the moment the absent case is named.
+        guard = re.search(rf"\b{re.escape(var)}\s+is\s+(not\s+)?null\b"
+                          rf"|coalesce\s*\(\s*{re.escape(var)}\b"
+                          rf"|\b{re.escape(var)}\s+is\s+(not\s+)?distinct\s+from\b", window, re.I)
+        limit = guard.start() if guard else len(window)
+        for c in re.finditer(rf"\b(?:els)?if\b[^;]*?\b{re.escape(var)}\s*({OPS})\s*(?!=)", window[:limit], re.I | re.S):
+            at = m.end() + c.start()
+            line = raw[:at].count("\n") + 1
+            out.append((line, f"{c.group(1)}  {var} -- compared with no `{var} is null` "
+                              f"guard after `select ... into {var}`"))
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true",
@@ -162,7 +229,8 @@ def main() -> int:
     files = sorted(TESTS.rglob("*.sql"))
     total = 0
     for f in files:
-        hits = findings_in(f)
+        raw = f.read_text()
+        hits = sorted(set(findings_in(f) + two_step_findings(raw, strip_noise(raw))))
         if not hits:
             continue
         total += len(hits)

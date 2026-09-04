@@ -315,7 +315,7 @@ begin
     -- -- so every step finishing in one transaction shared it and LIFO
     -- degraded to arbitrary. It compensated charge before reserve.
     select string_agg(action, ',' order by seq) into v_ledger from t_f_ledger;
-    if v_ledger <> 'charge,reserve,RELEASE,REFUND' then
+    if v_ledger is distinct from 'charge,reserve,RELEASE,REFUND' then
         raise exception
             'compensation did not run in reverse order: %  (expected charge,reserve,RELEASE,REFUND)',
             v_ledger;
@@ -666,6 +666,12 @@ begin
     select run_after, created_at into v_after, v_created from workflow.tasks
     where run_id = v_run and step_key = 'wait';
 
+    -- Before either comparison, because both are two-valued: with no `wait` task
+    -- at all v_after is NULL, neither `<=` nor `<` fires, and the pair reads
+    -- green for a timer that was never created.
+    if v_after is null then
+        raise exception 'there is no wait task, so its delay cannot be checked';
+    end if;
     if v_after <= clock_timestamp() then
         raise exception 'the timer is already due -- its delay was never applied';
     end if;

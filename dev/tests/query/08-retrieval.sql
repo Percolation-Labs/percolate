@@ -108,14 +108,22 @@ declare v_a uuid; v_b uuid;
 begin
     select chunk_id into v_a from aiq.semantic_in('chunks','[1,0,0,0]','demo-quad-a',1);
     select chunk_id into v_b from aiq.semantic_in('chunks','[1,0,0,0]','demo-quad-b',1);
+    -- Guarded before compared, because `NULL = NULL` is NULL and the raise below
+    -- would not fire: a probe that ranked NOTHING in either space would read as
+    -- "the two spaces disagree", which is the pass this test least deserves.
+    if v_a is null or v_b is null then
+        raise exception 'a probe ranked nothing at all (a=%, b=%) -- the index or '
+                        'the fixture is gone, and the comparison below cannot mean '
+                        'anything', v_a, v_b;
+    end if;
     if v_a = v_b then
         raise exception
             'the same probe ranks the same chunk first in both spaces, so the '
             'fixture no longer demonstrates that a space is identified by its '
             'model -- and neither does anything else';
     end if;
-    if v_a <> '33330000-0000-0000-0000-000000000001'
-       or v_b <> '33330000-0000-0000-0000-000000000003' then
+    if v_a is distinct from '33330000-0000-0000-0000-000000000001'
+       or v_b is distinct from '33330000-0000-0000-0000-000000000003' then
         raise exception 'the spaces do not rank as the fixture documents (a=%, b=%)',
             v_a, v_b;
     end if;
@@ -268,6 +276,13 @@ begin
     select chunk_id into v_first from aiq.search('chunks','Northwind exposure','[1,0,0,0]','demo-quad-a',6) limit 1;
     select chunk_id into v_lex   from aiq.lexical('chunks','Northwind exposure',1);
     select chunk_id into v_sem   from aiq.semantic_in('chunks','[1,0,0,0]','demo-quad-a',1);
+    -- Same guard, same reason: two branches that both returned nothing are not
+    -- two branches that disagree.
+    if v_first is null or v_lex is null or v_sem is null then
+        raise exception 'a retrieval branch returned nothing (fused=%, lexical=%, '
+                        'semantic=%), so fusion cannot be compared with either half',
+                        v_first, v_lex, v_sem;
+    end if;
     if v_lex = v_sem then
         raise exception 'the fixture no longer makes the two branches disagree, so '
                         'fusion cannot be distinguished from either half';

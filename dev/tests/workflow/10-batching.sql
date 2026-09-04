@@ -174,7 +174,7 @@ begin
 
     select array_agg(jsonb_array_length(input->'items') order by created_at, step_key)
     into v_sizes from workflow.tasks where matrix_parent_id = v_fan;
-    if v_sizes <> array[30,30,30,10] then
+    if v_sizes is distinct from array[30,30,30,10] then
         raise exception 'the remainder batch is wrong: %', v_sizes;
     end if;
 
@@ -483,7 +483,7 @@ begin
                       jsonb_array_length(input->'items'), ' ' order by created_at, step_key)
     into v_shape from workflow.tasks where matrix_parent_id = v_fan;
 
-    if v_shape <> 'acme:2 acme:1 beta:2 ceta:1' then
+    if v_shape is distinct from 'acme:2 acme:1 beta:2 ceta:1' then
         raise exception
             'partition_by and batch_size do not compose -- expected the cap applied '
             'WITHIN each partition, got: %', v_shape;
@@ -934,7 +934,7 @@ begin
         v_run := workflow.start_workflow('t_bx_gappy', '{}'::jsonb);
         select status into v_msg from workflow.tasks
          where run_id = v_run and step_key = 'fan';
-        if v_msg <> 'failed' then
+        if v_msg is distinct from 'failed' then
             raise exception
                 'a row missing its partition column expanded anyway (matrix status %) '
                 '-- those rows would have been grouped under a null key', v_msg;

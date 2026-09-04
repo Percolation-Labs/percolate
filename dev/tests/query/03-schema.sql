@@ -228,7 +228,7 @@ begin
     perform aiq.capture_schema_revisions();
     select revision into v_new from aiq.schema_revisions
     where facet = 'workflow' order by revision desc limit 1;
-    if v_new <> v_rev + 1 then
+    if v_new is distinct from v_rev + 1 then
         raise exception 'capture did not append a revision (was %, now %)', v_rev, v_new;
     end if;
     if not exists (select 1 from aiq.schema_revisions

@@ -107,7 +107,7 @@ begin
 
     select role into v_first from agentic.messages
      where run_id = v_run.id order by seq limit 1;
-    if v_first <> 'user' then
+    if v_first is distinct from 'user' then
         raise exception 'seq did not follow conversation order: first row is %', v_first;
     end if;
     raise notice 'agentic/02: a turn is one call, the runtime keeps the id it streamed, and seq follows the conversation';

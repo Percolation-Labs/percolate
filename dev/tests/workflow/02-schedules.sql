@@ -405,7 +405,7 @@ begin
     end loop;
     select fire_count, skip_count into v_fired, v_skipped
       from workflow.schedules where name = 't_dst_back';
-    if v_fired <> 1 then
+    if v_fired is distinct from 1 then
         raise exception
             'a 01:30 appointment ran % times on the morning 01:30 happened twice -- '
             'once a year, a nightly job runs twice and nothing says so', v_fired;
@@ -427,7 +427,7 @@ begin
         perform workflow.tick('2026-11-01 05:29:00+00'::timestamptz + (i || ' minutes')::interval);
     end loop;
     select fire_count into v_fired from workflow.schedules where name = 't_dst_poll';
-    if v_fired <> 4 then
+    if v_fired is distinct from 4 then
         raise exception
             'a */30 poll fired % times in two hours of wall clock -- the once-per-local-'
             'minute rule for appointments must not reach a schedule that polls', v_fired;
@@ -446,7 +446,7 @@ begin
     select fire_count, last_fired_at at time zone 'America/New_York'
       into v_fired, v_local
       from workflow.schedules where name = 't_dst_gap';
-    if v_fired <> 1 then
+    if v_fired is distinct from 1 then
         raise exception
             'a 02:30 appointment fired % times on the morning 02:30 did not exist -- '
             '0 is the silence this whole file is about', v_fired;

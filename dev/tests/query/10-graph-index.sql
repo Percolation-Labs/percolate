@@ -214,7 +214,7 @@ begin
 
     select key into v_key from aiq.node_keys
      where node_id = (v_r->'node_ids'->>0)::uuid and kind = 'canonical';
-    if v_key <> 't_shipments/abc-771' then
+    if v_key is distinct from 't_shipments/abc-771' then
         raise exception 'lake key is %, expected t_shipments/abc-771 -- the residence '
                         'scheme must be stripped before the key (G4)', v_key;
     end if;
@@ -259,7 +259,7 @@ begin
 
     select jsonb_array_length(provenance->'sources') into v_srcs
       from aiq.edges where src_id=v_n1 and dst_id=v_n2 and relation='supplies';
-    if v_srcs <> 2 then
+    if v_srcs is distinct from 2 then
         raise exception 'expected 2 distinct-document provenances, got % -- re-asserting '
                         'the same edge from the SAME document must not inflate it', v_srcs;
     end if;
@@ -344,7 +344,7 @@ begin
 
     select weight, provenance into v_w, v_p
       from aiq.edges where src_id=v_a and dst_id=v_b and relation='owns';
-    if v_w <> 1.0 then
+    if v_w is distinct from 1.0 then
         raise exception 'a machine re-assertion demoted an authored edge to % -- weight '
                         'is the BEST tier that asserted the edge, and a cheap model '
                         'agreeing with an analyst is not evidence against them', v_w;
@@ -464,7 +464,7 @@ begin
     -- numeric, and 0.9::real is 0.89999997615814209, so the untyped literal
     -- makes this assertion fail against a column holding exactly what it was
     -- given. A test that cries wolf is worse than no test.
-    if v_w <> 0.9::real then
+    if v_w is distinct from 0.9::real then
         raise exception
             're-registering without a weight reset machine_weight to % -- an absent '
             'value and an explicit 0.5 have become the same value again', v_w;
@@ -478,7 +478,7 @@ begin
     perform aiq.register_graph_vocabulary(
         '[{"relation":"tuned_rel","machine_weight":0.2}]'::jsonb);
     select machine_weight into v_w from aiq.graph_vocabulary where relation = 'tuned_rel';
-    if v_w <> 0.2::real then
+    if v_w is distinct from 0.2::real then
         raise exception 'an explicit weight did not take: %', v_w;
     end if;
     raise notice 'graph-index: a re-registration without a weight preserves the tuned one';

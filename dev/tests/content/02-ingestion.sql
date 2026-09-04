@@ -424,7 +424,7 @@ begin
     select array_agg(s->>'key' order by ord) into v_keys
       from jsonb_array_elements(v_spec->'steps') with ordinality t(s, ord);
 
-    if v_keys <> array['parse','embed','graph','land_graph'] then
+    if v_keys is distinct from array['parse','embed','graph','land_graph'] then
         raise exception 'the two-index pipeline is not parse/embed/graph/land_graph: %', v_keys;
     end if;
 

@@ -136,7 +136,7 @@ begin
     select coalesce(string_agg(label, ', ' order by label), '(nothing)')
       into v_got from scope_probe;
     reset role;
-    if v_got <> 'a-public, unowned' then
+    if v_got is distinct from 'a-public, unowned' then
         raise exception
             'a token WIDENED its holder''s reach: bob claimed org A and read [%]. '
             'The orgs claim must be intersected with rbac.org_members, never '
@@ -152,7 +152,7 @@ begin
     select coalesce(string_agg(label, ', ' order by label), '(nothing)')
       into v_got from scope_probe;
     reset role;
-    if v_got <> 'a-public, unowned' then
+    if v_got is distinct from 'a-public, unowned' then
         raise exception
             'a token could not NARROW: carol presented an empty orgs claim and '
             'still read [%]. Without this a token cannot be issued for fewer '
@@ -169,7 +169,7 @@ begin
     select coalesce(string_agg(label, ', ' order by label), '(nothing)')
       into v_got from scope_probe;
     reset role;
-    if v_got <> 'a-org, a-public, unowned' then
+    if v_got is distinct from 'a-org, a-public, unowned' then
         raise exception
             'a token with NO orgs claim was treated as a token with an EMPTY '
             'one: carol read [%] rather than her full membership', v_got;

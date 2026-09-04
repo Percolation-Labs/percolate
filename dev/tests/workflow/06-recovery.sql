@@ -116,11 +116,11 @@ begin
     select attempts, status, error->>'error' into v_att, v_st, v_err
     from workflow.tasks where id = v_a;
 
-    if v_st <> 'failed' then
+    if v_st is distinct from 'failed' then
         raise exception 'a task whose worker dies every time is still %, on attempt % of % '
                         '-- the crash budget is not enforced', v_st, v_att, v_max;
     end if;
-    if v_att <> v_max then
+    if v_att is distinct from v_max then
         raise exception 'the crash loop stopped at % attempts, not the declared %', v_att, v_max;
     end if;
     -- The error has to name the worker and the attempt, or the operator learns
