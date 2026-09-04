@@ -456,7 +456,7 @@ begin
     if v_res is null then
         raise exception 'a claimless service connection can no longer register content';
     end if;
-    if (select visibility from content.resources where id = v_res) <> 'public' then
+    if (select visibility from content.resources where id = v_res) is distinct from 'public' then
         raise exception
             'a service connection registered content as %, not public -- the '
             'operator-installs-configuration arm of rbac.default_visibility',
@@ -475,7 +475,7 @@ begin
     if v_res is null then
         raise exception 'a tenant can no longer register into its own org';
     end if;
-    if (select visibility from content.resources where id = v_res) <> 'org' then
+    if (select visibility from content.resources where id = v_res) is distinct from 'org' then
         raise exception 'a resource registered into an org did not come out org-scoped';
     end if;
 

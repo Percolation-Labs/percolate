@@ -326,7 +326,7 @@ begin
     v_run := workflow.start_workflow('t_bx_landing', '{}'::jsonb);
     select id into v_fan from workflow.tasks where run_id = v_run and step_key = 'fan';
 
-    if (select status from workflow.runs where id = v_run) <> 'succeeded' then
+    if (select status from workflow.runs where id = v_run) is distinct from 'succeeded' then
         raise exception 'a batched sql fan-out did not complete in-transaction: %',
             (select status from workflow.runs where id = v_run);
     end if;
@@ -407,7 +407,7 @@ begin
     end if;
     -- Uneven on purpose: 3/2/1.
     if (select array_agg(jsonb_array_length(input->'items') order by created_at, step_key)
-        from workflow.tasks where matrix_parent_id = v_fan) <> array[3,2,1] then
+        from workflow.tasks where matrix_parent_id = v_fan) is distinct from array[3,2,1] then
         raise exception 'the partitions are the wrong sizes';
     end if;
 end $$;

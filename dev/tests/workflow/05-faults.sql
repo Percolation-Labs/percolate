@@ -462,8 +462,13 @@ begin
             'a bucket of capacity 1 admitted 5 tokens after sitting idle -- the '
             'admission test and the write were reading different refills';
     end if;
-    if (select tokens from workflow.rate_limits where key = 't_bucket') < 0 then
-        raise exception 'a refused consume still debited the bucket, to %',
+    -- coalesced to -1 rather than compared bare: a missing bucket row makes the
+    -- subquery NULL, `NULL < 0` is NULL, and `if NULL then` does not fire -- so
+    -- the check passed in exactly the state that once made rbac.attempt_login
+    -- refuse every user in the collection. Absence is a failure here, not a pass.
+    if coalesce((select tokens from workflow.rate_limits where key = 't_bucket'), -1) < 0 then
+        raise exception 'a refused consume still debited the bucket, to % '
+                        '(null means the bucket row is gone entirely)',
             (select tokens from workflow.rate_limits where key = 't_bucket');
     end if;
 

@@ -465,7 +465,7 @@ begin
     update workflow.schedules set last_tick_at = '2026-03-08 01:00:00+00'
      where name = 't_dst_outage';
     perform workflow.tick('2026-03-08 04:00:00+00');
-    if (select fire_count from workflow.schedules where name = 't_dst_outage') <> 0 then
+    if (select fire_count from workflow.schedules where name = 't_dst_outage') is distinct from 0 then
         raise exception
             'a three-hour gap in the ticker was replayed as missed appointments -- '
             'catching up an outage is a different decision from a DST jump';

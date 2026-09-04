@@ -71,7 +71,7 @@ begin
     if v_user is null then
         raise exception 'a live refresh token could not be rotated';
     end if;
-    if v_user <> (select id from rbac.users where email = 'rotation-a@test.com') then
+    if v_user is distinct from (select id from rbac.users where email = 'rotation-a@test.com') then
         raise exception 'rotation returned the wrong user';
     end if;
 
@@ -89,7 +89,7 @@ begin
     end if;
     -- The device label follows the chain: a session list that renames every
     -- device to null on the first refresh is a worse answer than no list.
-    if (select device_label from rbac.refresh_tokens where id = v_new) <> 'a laptop' then
+    if (select device_label from rbac.refresh_tokens where id = v_new) is distinct from 'a laptop' then
         raise exception 'the rotation lost the device label';
     end if;
 

@@ -68,7 +68,7 @@ begin
         raise exception 'the passthrough executed a write: %', v_allowed;
     end if;
     if (select count(*) from t_sp_target) <> 1
-       or (select v from t_sp_target where id = 1) <> 'before' then
+       or (select v from t_sp_target where id = 1) is distinct from 'before' then
         raise exception 'a refused statement still changed the table -- % row(s), id 1 is %',
             (select count(*) from t_sp_target), (select v from t_sp_target where id = 1);
     end if;

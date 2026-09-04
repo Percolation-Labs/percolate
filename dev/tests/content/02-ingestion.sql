@@ -136,17 +136,17 @@ begin
     end if;
 
     if (select metadata->'ingest'->>'parser' from content.resources where id = v_res)
-       <> 'pymupdf4llm' then
+       is distinct from 'pymupdf4llm' then
         raise exception 'the parser that produced these chunks was not recorded';
     end if;
     if (select metadata->'ingest'->'markdown'->>'object_key' from content.resources
-         where id = v_res) <> 'md/x' then
+         where id = v_res) is distinct from 'md/x' then
         raise exception 'the parsed markdown reference was not kept';
     end if;
     -- The policy the resource carried must survive: record_ingest patches
     -- metadata, it does not replace it.
     if (select metadata->'ingest_policy'->'chunking'->>'target_tokens'
-          from content.resources where id = v_res) <> '300' then
+          from content.resources where id = v_res) is distinct from '300' then
         raise exception 'record_ingest overwrote the uploader''s own policy';
     end if;
     raise notice 'record_ingest: 2 chunks with spans, parser and markdown recorded, ready';
@@ -221,8 +221,8 @@ begin
             '[{"name":"month","type":"string"},{"name":"amount","type":"double"}]'::jsonb,
             50, 'append');
 
-    if (select row_count from content.datasets where name='sales') <> 150
-       or (select file_count from content.datasets where name='sales') <> 2 then
+    if (select row_count from content.datasets where name='sales') is distinct from 150
+       or (select file_count from content.datasets where name='sales') is distinct from 2 then
         raise exception 'an append did not accumulate: %',
             (select to_jsonb(d) from content.datasets d where name='sales');
     end if;
@@ -238,8 +238,8 @@ begin
     -- is not this function's authority.
     perform content.register_dataset(v_r2, 'sales', 'p8-content',
             'datasets/sales/ccc.parquet', '[]'::jsonb, 70, 'replace');
-    if (select file_count from content.datasets where name='sales') <> 1
-       or (select row_count from content.datasets where name='sales') <> 70 then
+    if (select file_count from content.datasets where name='sales') is distinct from 1
+       or (select row_count from content.datasets where name='sales') is distinct from 70 then
         raise exception 'replace did not replace';
     end if;
     if not exists (select 1 from content.resources where id = v_r1) then
