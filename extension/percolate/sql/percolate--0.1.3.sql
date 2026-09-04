@@ -10968,6 +10968,29 @@ create table if not exists aiq.embedding_models (
 create unique index if not exists idx_embedding_models_one_default
     on aiq.embedding_models ((true)) where is_default;
 
+-- TWO MODELS MAY NOT DERIVE ONE STORAGE TABLE.
+--
+-- `register_embedding_space` builds `aiq.emb_<name with - replaced by _>`, and
+-- that mapping is not injective: `text-embedding-3-small` and
+-- `text_embedding_3_small` are two models and one table. `create table if not
+-- exists` then adopts whichever was registered first, at the FIRST model's
+-- dimension, and the second registration returns void as though it had built
+-- something. Measured: probe-x (768) and probe_x (1536) produced one table,
+-- vector(768).
+--
+-- Refused HERE rather than in register_embedding_space, because this is where
+-- the mistake is made -- the second model is the one that cannot exist, and
+-- refusing at space-build time would also refuse the first model, which owns
+-- the name and has done nothing wrong. The derived name is the real key, so it
+-- is the one carrying the constraint; `name` remains the primary key because
+-- it is what every other table and every document refers to.
+--
+-- An expression index rather than a stored column: nothing should be able to
+-- write a derived value, and a generated column would be a second place the
+-- derivation lives -- which is the thing this collection keeps removing.
+create unique index if not exists idx_embedding_models_derived_space
+    on aiq.embedding_models ((('emb_' || replace(name, '-', '_'))));
+
 -- ------------------------------------------------------------
 -- 10a. What an embedding CALL looks like -- one row per provider.
 --
@@ -11018,10 +11041,9 @@ on conflict (provider) do nothing;
 create or replace function aiq.register_embedding_space(p_model text)
 returns void as $$
 declare
-    m       aiq.embedding_models;
-    v_tbl   text;
-    v_other text;
-    v_dim   int;
+    m     aiq.embedding_models;
+    v_tbl text;
+    v_dim int;
 begin
     select * into m from aiq.embedding_models where name = p_model;
     if not found then raise exception 'embedding model % not registered -- SCHEMA "graph" lists the registered ones', p_model; end if;
@@ -11041,33 +11063,25 @@ begin
     --       -> 1 storage table, aiq.emb_probe_x
     --       -> vector(768), the first registration's dimension
     --
-    -- What follows from that is the failure §10 of this file exists to prevent:
-    -- the second model's vectors either fail to land on the dimension check or,
-    -- where the dimensions happen to agree, share one table keyed by chunk_id
-    -- and overwrite each other -- so `semantic` ranks a query vector from one
-    -- model against stored vectors from another, which §10 states plainly is
-    -- not a thing that can be done ("two different 768-dimension models are not
-    -- interchangeable").
+    -- What follows is the failure §10 of this file exists to prevent: the
+    -- second model's vectors either fail the dimension check or, where the
+    -- dimensions happen to agree, share one table keyed by chunk_id and
+    -- overwrite each other -- so `semantic` ranks a query vector from one model
+    -- against stored vectors from another, which §10 states plainly cannot be
+    -- done ("two different 768-dimension models are not interchangeable").
     --
-    -- REFUSED RATHER THAN RENAMED. Hashing the name or quoting it whole would
-    -- make the mapping injective and would rename every existing space, which a
-    -- replayed upgrade cannot express -- it would orphan the vectors in the old
-    -- table while reporting success, trading a loud collision for a silent one.
-    -- Refusing is the honest form of the same limit, which is the phrase
-    -- register_entity_table settles the identical question with.
+    -- THE COLLISION IS REFUSED WHERE IT IS MADE -- a unique index on the
+    -- derived name, beside the table, so registering the second MODEL fails
+    -- rather than registering its space. Putting it here instead was tried and
+    -- was wrong in a way worth recording: with both rows already inserted, a
+    -- check for "another model deriving my table" refuses the FIRST
+    -- registration too, which has done nothing wrong and owns the name.
+    --
+    -- What stays here is the shape of a table that ALREADY EXISTS, which the
+    -- index cannot speak to: a space built before that index existed, or a
+    -- model whose `dim` was edited after its space was built. Same silent wrong
+    -- answer, different route in.
     v_tbl := 'emb_' || replace(m.name, '-', '_');
-
-    select name into v_other from aiq.embedding_models
-     where name <> m.name and 'emb_' || replace(name, '-', '_') = v_tbl
-     limit 1;
-    if v_other is not null then
-        raise exception
-            'embedding models % and % both derive the storage table aiq.% -- '
-            '"-" and "_" are the same character once the table name is built, so '
-            'the second registration would silently reuse the first model''s table '
-            'and its dimension. Rename one of them.',
-            m.name, v_other, v_tbl;
-    end if;
 
     -- And if the table is already there, it has to be the right shape. A space
     -- registered before this check existed, or a model whose dim was edited

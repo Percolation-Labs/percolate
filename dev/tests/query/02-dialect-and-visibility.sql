@@ -251,6 +251,75 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
+-- ...AND TWO MODEL NAMES MAY NOT DERIVE ONE STORAGE TABLE.
+--
+-- The block above asserts the KEY is the model name. That is necessary and was
+-- not sufficient: the storage table is `emb_` || replace(name, '-', '_'), which
+-- is not injective, so `text-embedding-3-small` and `text_embedding_3_small`
+-- are two correctly-keyed models and one table. `create table if not exists`
+-- adopted whichever registered first, at the FIRST model's dimension, and
+-- register_embedding_space returned void as though it had built something.
+--
+-- Measured before the fix: probe-x (768) and probe_x (1536) produced ONE table,
+-- vector(768) -- so the second model's vectors either fail the dimension check
+-- or, at equal dimensions, silently overwrite the first's, and `semantic` ranks
+-- one model's query against another's vectors. Exactly what the block above
+-- exists to prevent, reached through the table name instead of the key.
+--
+-- Same bug register_entity_table records for `project_<short name>_ins`, one
+-- function along, which is why both halves are asserted here: the collision is
+-- refused where the MODEL is written, and a space whose shape no longer matches
+-- its model is refused where the SPACE is built.
+-- ---------------------------------------------------------------------
+do $$
+declare v_refused boolean := false; v_n int;
+begin
+    insert into aiq.embedding_models (name, dim, provider, endpoint)
+    values ('q02-probe-x', 768, 'ollama', 'http://x');
+    perform aiq.register_embedding_space('q02-probe-x');
+
+    -- The first model owns the name and registers normally -- the guard must
+    -- not refuse the innocent half, which an earlier version of it did.
+    select count(*) into v_n from information_schema.tables
+     where table_schema = 'aiq' and table_name = 'emb_q02_probe_x';
+    if v_n <> 1 then
+        raise exception 'the first model did not get its storage table';
+    end if;
+
+    begin
+        insert into aiq.embedding_models (name, dim, provider, endpoint)
+        values ('q02_probe_x', 1536, 'ollama', 'http://y');
+    exception when unique_violation then
+        v_refused := true;
+    end;
+    if not v_refused then
+        raise exception
+            'two model names deriving the same storage table were both accepted -- '
+            'the second registration silently reuses the first model''s table and '
+            'its dimension, and semantic then ranks one model against another';
+    end if;
+
+    -- And the shape guard, for the route the index cannot see: a space that
+    -- already exists, whose model's dim has since changed.
+    v_refused := false;
+    update aiq.embedding_models set dim = 1536 where name = 'q02-probe-x';
+    begin
+        perform aiq.register_embedding_space('q02-probe-x');
+    exception when others then
+        v_refused := sqlerrm like '%already stores vector%';
+    end;
+    if not v_refused then
+        raise exception
+            'a model whose dimension no longer matches its existing space was '
+            'registered anyway -- the table keeps the old width and the vectors '
+            'that land in it are not the ones the model produces';
+    end if;
+
+    raise notice 'query/02: two model names cannot derive one storage table, and a '
+                 'space that no longer matches its model is refused rather than reused';
+end $$;
+
+-- ---------------------------------------------------------------------
 -- A NUMBER THE ENGINE CANNOT HONOUR IS REFUSED, NOT ROUNDED.
 --
 -- GRAPH has refused `DEPTH 0` since a measured failure, with the right

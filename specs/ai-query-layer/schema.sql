@@ -1564,6 +1564,29 @@ create table if not exists aiq.embedding_models (
 create unique index if not exists idx_embedding_models_one_default
     on aiq.embedding_models ((true)) where is_default;
 
+-- TWO MODELS MAY NOT DERIVE ONE STORAGE TABLE.
+--
+-- `register_embedding_space` builds `aiq.emb_<name with - replaced by _>`, and
+-- that mapping is not injective: `text-embedding-3-small` and
+-- `text_embedding_3_small` are two models and one table. `create table if not
+-- exists` then adopts whichever was registered first, at the FIRST model's
+-- dimension, and the second registration returns void as though it had built
+-- something. Measured: probe-x (768) and probe_x (1536) produced one table,
+-- vector(768).
+--
+-- Refused HERE rather than in register_embedding_space, because this is where
+-- the mistake is made -- the second model is the one that cannot exist, and
+-- refusing at space-build time would also refuse the first model, which owns
+-- the name and has done nothing wrong. The derived name is the real key, so it
+-- is the one carrying the constraint; `name` remains the primary key because
+-- it is what every other table and every document refers to.
+--
+-- An expression index rather than a stored column: nothing should be able to
+-- write a derived value, and a generated column would be a second place the
+-- derivation lives -- which is the thing this collection keeps removing.
+create unique index if not exists idx_embedding_models_derived_space
+    on aiq.embedding_models ((('emb_' || replace(name, '-', '_'))));
+
 -- ------------------------------------------------------------
 -- 10a. What an embedding CALL looks like -- one row per provider.
 --
