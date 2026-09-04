@@ -11,8 +11,15 @@
 # testing the edit you just made meant either reloading over the stack's own
 # database or having psql on the host for DSN -- and the container has one.
 #
-# Exits nonzero on the first failure, so it works as a CI gate alongside
-# ../../surface.sql. The two are complementary and neither replaces the other:
+# Runs EVERY file and exits nonzero at the end if any failed, so it works as a
+# CI gate alongside ../../surface.sql. It does not stop at the first failure,
+# and that is the useful behaviour rather than a compromise: one broken
+# guarantee usually breaks several, and a run that stops at the first tells you
+# how many surfaces are red only after you have fixed one and run it again.
+# (This header used to say "exits nonzero on the first failure", which is what
+# the code did before the loop learned to carry `failed` to the end.)
+#
+# The two are complementary and neither replaces the other:
 # surface.sql asks "does every promised capability EXIST"; this asks "does it
 # still BEHAVE the way the spec promised".
 set -euo pipefail
