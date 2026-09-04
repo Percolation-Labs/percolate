@@ -87,6 +87,12 @@ insert into expected (subsystem, kind, name, detail, why) values
 -- returning false while the role looked populated.
 ('user-rbac','function','rbac.bootstrap_admin','text,text,text','install: the first administrator, granted what the policies actually check'),
 ('user-rbac','function','rbac.verify_api_key','text','spec.md §4.6: API-key path'),
+-- Password reset, spec.md §5's deferred item. Declared because the whole
+-- point of this audit is that a capability the specs promise is checked
+-- against a live database rather than assumed from the file it was written in.
+('user-rbac','table','rbac.password_reset_tokens',null,'spec.md §5: single-use, short-lived reset tokens'),
+('user-rbac','function','rbac.request_password_reset','text,text,interval','spec.md §5: issue one, without revealing whether the address exists'),
+('user-rbac','function','rbac.reset_password','text,text','spec.md §5: consume one, set the password, end every session'),
 
 -- ---------- ai-query-layer: SCHEMA facets (schema.sql §13) --------------
 ('ai-query-layer','function','aiq.schema','text,text','§13: the mode answerable before you know anything'),

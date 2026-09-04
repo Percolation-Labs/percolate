@@ -204,6 +204,7 @@ insert into rbac.permission_kinds (resource, action, checked_by) values
     ('api_keys',           'select', 'policy api_keys_self_or_admin'),
     ('auth_events',        'select', 'policy auth_events_self_or_admin'),
     ('refresh_tokens',     'select', 'policy refresh_tokens_self_or_admin'),
+    ('password_reset_tokens', 'select', 'policy password_reset_tokens_self_or_admin'),
     ('workflow_runs',      'select', 'policy runs_owner_or_permitted'),
     ('workflow_schedules', 'select', 'policy schedules_owner_or_permitted'),
     -- Function guards.
@@ -430,6 +431,96 @@ create or replace function rbac.revoke_all_sessions() returns void as $$
     update rbac.refresh_tokens set revoked_at = now()
     where user_id = rbac.current_user_id() and revoked_at is null;
 $$ language sql security definer set search_path = pg_catalog, public;
+
+-- ------------------------------------------------------------
+-- 3b. Password reset -- spec.md §5's "straightforward to add but not
+--     written here", written.
+-- ------------------------------------------------------------
+-- The same shape as refresh_session, deliberately: a raw token the caller
+-- holds, only its sha256 stored, checked for existence, revocation and expiry
+-- in that order. What differs is that a reset token is SINGLE USE and short
+-- lived, because the two are doing different jobs -- a refresh token proves a
+-- session is still alive, a reset token proves control of an inbox once.
+create table if not exists rbac.password_reset_tokens (
+    id         uuid primary key default gen_random_uuid(),
+    user_id    uuid not null references rbac.users(id) on delete cascade,
+    token_hash text not null unique,     -- sha256 of the raw token; raw never stored
+    issued_at  timestamptz not null default now(),
+    expires_at timestamptz not null,
+    used_at    timestamptz
+);
+create index if not exists idx_password_reset_tokens_user
+    on rbac.password_reset_tokens (user_id) where used_at is null;
+
+-- ASKING FOR A RESET SUCCEEDS WHETHER OR NOT THE ADDRESS EXISTS, and returns
+-- nothing about it. An endpoint that errors on an unknown email is an account
+-- enumeration oracle: it answers "is this person a customer" to anybody who
+-- asks, which is a disclosure the account holder never consented to. The caller
+-- generates the raw token and is responsible for delivering it (the
+-- email-via-workflow-task pattern in §4.1); this only records its hash.
+--
+-- Returns void rather than the row id for the same reason -- a caller that can
+-- tell "issued" from "not issued" has the oracle back.
+create or replace function rbac.request_password_reset(
+    p_email text, p_raw_token text, p_ttl interval default interval '1 hour')
+returns void as $$
+declare v_user_id uuid;
+begin
+    select id into v_user_id from rbac.users where email = p_email;
+    if v_user_id is null then
+        return;                          -- deliberately indistinguishable
+    end if;
+
+    -- Any earlier unused token is spent now. Two live reset tokens mean two
+    -- live chances for one that leaked, and the person who just asked is
+    -- holding the newest.
+    update rbac.password_reset_tokens
+       set used_at = now()
+     where user_id = v_user_id and used_at is null;
+
+    insert into rbac.password_reset_tokens (user_id, token_hash, expires_at)
+    values (v_user_id, encode(digest(p_raw_token, 'sha256'), 'hex'), now() + p_ttl);
+
+    insert into rbac.auth_events (user_id, event_type, detail)
+    values (v_user_id, 'password_reset_requested', jsonb_build_object('ttl', p_ttl::text));
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+-- Consuming one resets the password AND ends every session, which is not an
+-- extra: the reason to reset is usually that somebody else may hold the old
+-- credential, and leaving their refresh tokens alive resets nothing. That is
+-- the same reasoning revoke_all_sessions exists for, applied to a user who is
+-- not the caller -- there is no caller identity here at all, which is why this
+-- is gated on token possession rather than on rbac.current_user_id().
+create or replace function rbac.reset_password(p_raw_token text, p_new_password text)
+returns uuid as $$
+declare v_row rbac.password_reset_tokens;
+begin
+    select * into v_row from rbac.password_reset_tokens
+     where token_hash = encode(digest(p_raw_token, 'sha256'), 'hex');
+
+    if v_row.id is null then
+        raise exception 'invalid reset token';
+    end if;
+    if v_row.used_at is not null then
+        raise exception 'reset token already used';
+    end if;
+    if v_row.expires_at < now() then
+        raise exception 'reset token expired';
+    end if;
+
+    perform rbac.set_password(v_row.user_id, p_new_password);
+
+    update rbac.password_reset_tokens set used_at = now() where id = v_row.id;
+    update rbac.refresh_tokens set revoked_at = now()
+     where user_id = v_row.user_id and revoked_at is null;
+
+    insert into rbac.auth_events (user_id, event_type, detail)
+    values (v_row.user_id, 'password_reset', jsonb_build_object('token_id', v_row.id));
+
+    return v_row.user_id;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
 
 -- ------------------------------------------------------------
 -- 4. API keys — for agents/service accounts that shouldn't hold a
@@ -819,6 +910,11 @@ revoke execute on all functions in schema rbac from public;
 grant execute on function rbac.create_user_with_password(text, text) to web_anon;
 grant execute on function rbac.login(text, text, text, text) to web_anon;
 grant execute on function rbac.refresh_session(text, text) to web_anon, authenticated;
+-- web_anon on purpose: somebody who has forgotten their password cannot be
+-- authenticated, which is the whole situation. Both are self-authenticating by
+-- token possession, exactly as refresh_session is.
+grant execute on function rbac.request_password_reset(text, text, interval) to web_anon;
+grant execute on function rbac.reset_password(text, text) to web_anon;
 grant execute on function rbac.verify_api_key(text) to web_anon, authenticated;
 grant execute on function rbac.change_password(text, text) to authenticated;
 grant execute on function rbac.grant_role(uuid, text) to authenticated;
@@ -902,6 +998,15 @@ alter table rbac.user_roles enable row level security;
 drop policy if exists users_self_or_admin on rbac.users;
 create policy users_self_or_admin on rbac.users for select
   using (id = (select rbac.current_user_id()) or (select rbac.has_permission(rbac.current_user_id(), 'users', 'select')));
+-- Readable by its owner or an admin, and by nobody else. The row holds only a
+-- HASH, so this is not protecting the token -- it is protecting the fact that a
+-- reset was requested, which is a signal about an account either way.
+alter table rbac.password_reset_tokens enable row level security;
+drop policy if exists password_reset_tokens_self_or_admin on rbac.password_reset_tokens;
+create policy password_reset_tokens_self_or_admin on rbac.password_reset_tokens for select
+    using (user_id = (select rbac.current_user_id())
+           or (select rbac.has_permission(rbac.current_user_id(), 'password_reset_tokens', 'select')));
+
 drop policy if exists refresh_tokens_self_or_admin on rbac.refresh_tokens;
 create policy refresh_tokens_self_or_admin on rbac.refresh_tokens for select
   using (user_id = (select rbac.current_user_id()) or (select rbac.has_permission(rbac.current_user_id(), 'refresh_tokens', 'select')));

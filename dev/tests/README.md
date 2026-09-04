@@ -12,8 +12,9 @@ workflows over content, the graph is queries over RBAC-scoped rows, an agent is
 a workflow that calls a query. A defect in one of the three does not stay in
 one of the three.
 
-`agentic/` is the fourth and it is a different kind of entry, added when that
-subsystem stopped being unexercised and gained a worked binding
+`content/` and `agentic/` are the fourth and fifth, and both are a different
+kind of entry. `agentic/` was added when that subsystem stopped being
+unexercised and gained a worked binding
 (`specs/agentic/reference/`). It asserts nothing the three cover; it covers the
 one thing composing them introduced — a **binding**, which is a row naming a
 server by name and a tool by name, with no foreign key able to hold either.
@@ -44,8 +45,9 @@ wrong password found that the rate limiter and the audit log were both being
 rolled back by the failure they existed to record. Neither is subtle. Both
 survived because existing is not running.
 
-`query/` is the largest of the four because the graph half of it was, until
-recently, the least exercised: `04-graph-identity.sql`, `05-graph-traversal.sql`
+`workflow/` is the largest of the five, at 13 files; `query/` is next, at 12,
+and grew there because the graph half of it was, until recently, the least
+exercised: `04-graph-identity.sql`, `05-graph-traversal.sql`
 and `06-graph-tenancy.sql` execute the eight criteria
 `specs/ai-query-layer/graph-identity.md` lists under "Verification" — a section
 that opens "A design is correct if all of these hold" and which nothing had ever

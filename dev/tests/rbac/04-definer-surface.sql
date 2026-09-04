@@ -91,6 +91,15 @@ begin
              ('rbac', 'refresh_session'),            -- refresh token -> session
              ('rbac', 'verify_api_key'),             -- api key -> identity
              ('rbac', 'create_user_with_password'),  -- signup, user-rbac spec 6
+             -- Account recovery. Anonymous BY NECESSITY: somebody who has
+             -- forgotten their password cannot be authenticated, which is the
+             -- situation. Both are self-authenticating by token possession,
+             -- exactly as refresh_session above is, and neither returns
+             -- anything an anonymous caller could not already infer --
+             -- request_password_reset returns void precisely so it cannot say
+             -- whether the address exists.
+             ('rbac', 'request_password_reset'),     -- email -> a token it does not reveal
+             ('rbac', 'reset_password'),             -- reset token -> new password
              ('rbac', 'has_permission'));            -- read-only, and every policy calls it
 
     if v_bad is not null then
