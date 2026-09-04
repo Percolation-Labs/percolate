@@ -236,12 +236,56 @@ returns boolean as $$
     -- migration, psql -- which is the same exemption workflow's worker-facing
     -- functions get from their grant being the authorization.
     --
-    -- A null org is the single-tenant case and the fixture case: it is readable
-    -- by everyone under resources_org_scoped, so writing it is not a
-    -- cross-tenant act.
-    select nullif(current_setting('request.jwt.claims', true), '') is null
-        or p_org_id is null
-        or p_org_id in (select aiq.current_org_ids());
+    -- A NULL ORG IS THE ORG EVERYONE READS, WHICH IS WHY WRITING ONE IS THE
+    -- STRONGEST CROSS-TENANT ACT AND NOT THE ABSENCE OF ONE.
+    --
+    -- This used to read `or p_org_id is null`, on the reasoning written here:
+    -- "a null org is the single-tenant case and the fixture case: it is
+    -- readable by everyone under resources_org_scoped, so writing it is not a
+    -- cross-tenant act." The premise is right and the conclusion inverts it.
+    -- `resources_org_scoped` is `org_id is null or org_id in (...)`, so a null
+    -- org is not unscoped -- it is scoped to EVERY tenant. Being allowed to
+    -- write one is permission to put a document in every other tenant's
+    -- corpus, which is a wider act than writing into any single named org, not
+    -- a narrower one.
+    --
+    -- It needed no missing check to reach, and no argument an attacker had to
+    -- guess: `register_upload`'s `p_org_id` DEFAULTS to null, and the channel
+    -- lookup accepts a null-org channel -- of which the extension ships three
+    -- (`uploads`, `workflow_artifacts`, `sample-corpus`). MEASURED on a stock
+    -- install, as an ordinary `authenticated` user of org B holding nothing:
+    --
+    --     select content.register_upload('uploads', ...)   -- no org argument
+    --     -> resource written with org_id NULL
+    --     -> org A, a different tenant, reads the row:        1
+    --     -> org A's TEXT search over the `chunks` corpus:    1 matching row
+    --
+    -- That is §4a's own threat sentence -- "an agent asking its own tenant's
+    -- documents a question would retrieve the attacker's text and act on it" --
+    -- reached through the default value of an optional argument. §4a closed
+    -- writing into ANOTHER NAMED org and left open writing into the one every
+    -- org reads.
+    --
+    -- THE TEST IS WHETHER THE CALLER IS A TENANT, not whether the org is null.
+    -- A token that names one or more orgs is a tenant's, and a tenant writes
+    -- inside its tenancy. A token that names none is the single-tenant
+    -- deployment (auth, one org, everything shared) and still writes the null
+    -- org, because for it null means "ours". No token at all is a service
+    -- connection, a migration or psql, and is unchanged.
+    --
+    -- `p_org_id is not null` guards the IN: `null in (select ...)` is NULL
+    -- rather than false, which would make the whole predicate NULL and read as
+    -- a refusal by accident rather than by rule.
+    select
+        -- no request identity at all -- service connection, migration, psql
+        nullif(current_setting('request.jwt.claims', true), '') is null
+        -- the caller's token names this org
+        or (p_org_id is not null
+            and p_org_id in (select aiq.current_org_ids()))
+        -- the single-tenant case: a token that names no org writing the org
+        -- that, for that deployment, means "ours"
+        or (p_org_id is null
+            and not exists (select 1 from aiq.current_org_ids()));
 $$ language sql stable security definer set search_path = pg_catalog, public;
 
 create or replace function content.assert_org_write(p_org_id uuid, p_what text)

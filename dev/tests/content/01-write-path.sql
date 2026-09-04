@@ -292,4 +292,96 @@ begin
     raise notice 'content/01: the read path, the write path and the policy all scope on the same claim';
 end $$;
 
+-- ---------------------------------------------------------------------
+-- THE ORG EVERYONE READS IS THE ONE A TENANT MAY NOT WRITE.
+--
+-- The block above asserts that org B cannot plant into org A. It says nothing
+-- about the org that is neither, and that was the hole: `may_access_org` let
+-- ANY caller write a null org, on the reasoning that a null org "is readable
+-- by everyone ... so writing it is not a cross-tenant act". `resources_org_scoped`
+-- is `org_id is null or org_id in (...)`, so a null org is not unscoped -- it
+-- is scoped to EVERY tenant, and writing one is the widest cross-tenant act
+-- available, not the absence of one.
+--
+-- It took no missing check and no guessed argument to reach: `p_org_id`
+-- DEFAULTS to null and the extension ships three null-org channels. An
+-- ordinary authenticated user of one org, holding nothing, planted a document
+-- that another org's TEXT search over the shipped `chunks` corpus returned.
+-- That is §4a's own threat sentence reached through a default value.
+--
+-- All four callers are asserted, because the fix is a discrimination and the
+-- risk of getting it wrong is refusing the deployment rather than the attacker.
+-- ---------------------------------------------------------------------
+do $$
+declare
+    v_a uuid := gen_random_uuid();
+    v_b uuid := gen_random_uuid();
+    v_u uuid;
+    v_res uuid;
+    v_planted boolean := false;
+begin
+    insert into rbac.users (email, status)
+    values ('tenancy-probe@example.com', 'active') returning id into v_u;
+
+    -- 1. A TENANT MAY NOT WRITE THE NULL ORG. The attack, as an ordinary user
+    --    with a valid token, against the channel the extension itself ships.
+    set local role authenticated;
+    perform set_config('request.jwt.claims',
+        json_build_object('sub', v_u, 'orgs', array[v_b])::text, true);
+    begin
+        v_res := content.register_upload('uploads', 't-null-1', 'bucket', 'k-null-1',
+                                         42, 'text/markdown', 'planted');
+        v_planted := true;
+    exception when others then
+        null;
+    end;
+    reset role;
+    if v_planted then
+        raise exception
+            'a tenant wrote a resource with org_id NULL, which resources_org_scoped '
+            'makes readable by EVERY other tenant -- content injection into every '
+            'corpus in the deployment, through an argument they did not even pass';
+    end if;
+
+    -- 2. THE SINGLE-TENANT DEPLOYMENT STILL WORKS. A token that names no org
+    --    is not a tenant, and for it a null org means "ours".
+    set local role authenticated;
+    perform set_config('request.jwt.claims', json_build_object('sub', v_u)::text, true);
+    v_res := content.register_upload('uploads', 't-null-2', 'bucket', 'k-null-2',
+                                     42, 'text/markdown', 'single tenant');
+    reset role;
+    if v_res is null then
+        raise exception 'a token carrying no org claim can no longer write the shared org';
+    end if;
+
+    -- 3. A SERVICE CONNECTION STILL WORKS -- no claims at all: a migration,
+    --    psql, the ingest worker. This is the exemption the function is built
+    --    around and the one most easily broken by tightening the others.
+    v_res := content.register_upload('uploads', 't-null-3', 'bucket', 'k-null-3',
+                                     42, 'text/markdown', 'service');
+    if v_res is null then
+        raise exception 'a claimless service connection can no longer register content';
+    end if;
+
+    -- 4. AND A TENANT STILL WRITES ITS OWN ORG.
+    insert into content.channels (name, kind, org_id) values ('tenancy-probe-b', 'file_upload', v_b);
+    set local role authenticated;
+    perform set_config('request.jwt.claims',
+        json_build_object('sub', v_u, 'orgs', array[v_b])::text, true);
+    v_res := content.register_upload('tenancy-probe-b', 't-own-1', 'bucket', 'k-own-1',
+                                     42, 'text/markdown', 'own', null, v_b);
+    reset role;
+    if v_res is null then
+        raise exception 'the tightened check refuses a tenant writing its own org';
+    end if;
+
+    -- And org A, the bystander, sees none of it.
+    if exists (select 1 from content.resources where org_id is null and title = 'planted') then
+        raise exception 'the planted resource exists despite the write being refused';
+    end if;
+    perform v_a;
+
+    raise notice 'content/01: a tenant cannot write the null org that every tenant reads, and the single-tenant, service and own-org paths are untouched';
+end $$;
+
 rollback;
