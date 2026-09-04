@@ -358,6 +358,149 @@ comment on function percolate.contract() is
     'compile against this rather than restating it.';
 
 
+-- ------------------------------------------------------------
+-- 4. WHOSE ROWS SURVIVE A BACKUP
+--
+-- `pg_dump` DOES NOT DUMP THE DATA OF AN EXTENSION'S TABLES. It dumps `CREATE
+-- EXTENSION percolate` and stops, on the reasoning that an extension recreates
+-- its own contents -- which is right for a vocabulary and catastrophic for a
+-- table holding somebody's users. The escape hatch is
+-- pg_extension_config_dump(), which marks a table whose CONTENTS are user data
+-- so that pg_dump carries the rows.
+--
+-- MEASURED, on a database this repository builds, before any of these lines
+-- existed. 52 tables belong to the extension; two were registered; `pg_dump`
+-- emitted 14 COPY blocks, of which the only extension members were those two.
+-- The database held 2 users, 5 workflow definitions, 2 agents, 21 graph nodes
+-- and 5 content resources. The dump held none of them:
+--
+--     COPY rbac.users            0
+--     COPY workflow.definitions  0
+--     COPY agentic.agents        0
+--     COPY aiq.nodes             0
+--     COPY content.resources     0
+--
+-- So every backup taken of every database this collection has ever produced
+-- contained the schema and nothing else, and a restore would have come up
+-- empty and working. `specs/trace-field/brief.md` says supervision state
+-- "survives a `pg_dump`"; it did not.
+--
+-- LISTED, NOT DERIVED, AND THE ATTEMPT TO DERIVE IT IS WHY. The obvious rule --
+-- a table the install script never INSERTs into holds deployment data -- was
+-- written and measured against a bare install, and disagreed on nine tables.
+-- Seven have rows and no top-level insert, because they are seeded by function
+-- calls and DO blocks the scan cannot see (aiq.graph_vocabulary,
+-- aiq.entity_registry, workflow.step_functions...). Two have a top-level insert
+-- and no rows, because the insert is a SELECT that matches nothing at install
+-- (rbac.role_permissions, workflow.rate_limits). Whose rows these are is a
+-- design decision per table, not a property of the text, and a derivation that
+-- is wrong about nine of fifty-two would have registered vocabularies whose
+-- shipped rows then collide on restore.
+--
+-- What IS derived is the check: `dev/check.sh` builds a bare install and
+-- asserts that every extension table which is EMPTY there appears below. That
+-- catches the fifty-third table on the day it is added, which is the only
+-- moment anybody could reasonably be expected to notice.
+--
+-- STILL BROKEN, AND MEASURED RATHER THAN IMPLIED. Seven tables hold shipped rows
+-- AND take deployment rows: workflow.definitions (ships `ingest_file`),
+-- aiq.entity_registry (3 shipped, 6 after seeding), content.channels (2 and 3),
+-- aiq.graph_vocabulary, aiq.lexical_sources, aiq.semantic_sources,
+-- aiq.schema_examples. Registering one of those with an empty condition makes
+-- `CREATE EXTENSION` insert the shipped rows and the restore COPY them again,
+-- so the restore dies on a duplicate key. Each needs a WHERE excluding its own
+-- shipped rows, and that is not done here.
+--
+-- IT IS WORSE THAN "those seven lose their deployment rows", which is what this
+-- comment said until the round trip was actually run. Those tables are
+-- REFERENCED by tables in the list above, so their missing rows take registered
+-- data down with them. Restoring the dump of a seeded database into a fresh
+-- install, measured:
+--
+--     ERROR: insert or update on "resources" violates foreign key
+--            "resources_channel_id_fkey"
+--     ERROR: relation (company, competes_with, company) is not in the catalogue
+--
+-- content.resources references content.channels, and the deployment's third
+-- channel was not dumped; aiq.edges names a relation the deployment added to
+-- the vocabulary. So `resources`, `resource_chunks` and `edges` restored EMPTY
+-- despite being registered here -- 5, 6 and 15 rows lost to two absent parents.
+--
+-- The shape of the fix, since the next person should not have to rediscover it:
+-- a `shipped boolean not null default false` on each of the seven, set true by
+-- the statement that seeds them (which replays on upgrade, so existing
+-- databases mark themselves and no literal list is needed), and registered as
+-- `WHERE NOT shipped`. Derived, and it cannot go stale the way a hand-written
+-- key list would.
+--
+-- WHAT THIS CHANGE IS WORTH, stated honestly: before it, a backup contained the
+-- schema and nothing else and a restore came up empty and working. After it, a
+-- backup contains almost everything and a restore fails loudly, naming the two
+-- parents it could not find. Both are broken. Only the second one tells you.
+-- ------------------------------------------------------------
+do $$
+declare
+    t text;
+    -- Every table whose rows are the DEPLOYMENT's rather than the extension's,
+    -- verified empty on a from-zero install.
+    deployment_tables text[] := array[
+        'agentic.agents',
+        'agentic.messages',
+        'agentic.plugins',
+        'agentic.runs',
+        'agentic.sessions',
+        'agentic.skills',
+        'agentic.tool_servers',
+        'aiq.edges',
+        'aiq.embedding_models',
+        'aiq.lake_nodes',
+        'aiq.node_keys',
+        'aiq.nodes',
+        'aiq.schema_revisions',
+        'aiq.soft_nodes',
+        'content.dataset_files',
+        'content.datasets',
+        'content.files',
+        'content.resource_chunks',
+        'content.resources',
+        'public.percolate_build',
+        'rbac.api_keys',
+        'rbac.auth_events',
+        'rbac.org_members',
+        'rbac.orgs',
+        'rbac.password_reset_tokens',
+        'rbac.refresh_tokens',
+        'rbac.role_permissions',
+        'rbac.roles',
+        'rbac.user_roles',
+        'rbac.users',
+        'workflow.queue_config',
+        'workflow.rate_limits',
+        'workflow.runs',
+        'workflow.schedules',
+        'workflow.task_dependencies',
+        'workflow.task_events',
+        'workflow.tasks'
+    ];
+begin
+    foreach t in array deployment_tables loop
+        -- Guarded on extension membership for the reason the registrations
+        -- this replaced carried: pg_extension_config_dump() raises outside
+        -- CREATE EXTENSION / ALTER EXTENSION UPDATE, and this schema is loaded
+        -- raw by dev/upgrade-converges.sh, which installs the old version from
+        -- a git tag and cannot go through CREATE EXTENSION at all. The 'e'
+        -- dependency is recorded as each object is created, so by this point
+        -- the table already belongs to the extension being installed.
+        if exists (select 1 from pg_catalog.pg_depend d
+                    where d.classid = 'pg_class'::regclass
+                      and d.objid = t::regclass
+                      and d.deptype = 'e') then
+            perform pg_catalog.pg_extension_config_dump(t, '');
+        end if;
+    end loop;
+end $$;
+
+
 -- Readable by anyone who can connect. A contract nobody may read is not a
 -- contract -- and there is nothing sensitive in it: it is the shape of the
 -- door, not what is behind it. Granted to web_anon too, so an unauthenticated
