@@ -64,9 +64,9 @@ jobs:
     permissions:
       contents: write        # commit the bump and push the tag
     outputs:
-      version: ${{ steps.bump.outputs.version }}
+      version: ${{ steps.bump.outputs.version || steps.pre.outputs.version }}
       previous: ${{ steps.bump.outputs.previous }}
-      tag: v${{ steps.bump.outputs.version }}
+      tag: v${{ steps.bump.outputs.version || steps.pre.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -75,8 +75,28 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
 
+      # An unreleased version in the tree is a release that did not finish, not
+      # a reason to burn another number. 0.1.7 sat here untagged while three
+      # documentation pages named it; bumping past it would have published 0.1.8
+      # and left every one of those pages pointing at a version that never
+      # existed. Same preflight p8-subsystems' release.yml uses, reading the
+      # same fact -- a version with a tag is spent.
+      - name: Retry an unfinished version, or bump
+        id: pre
+        run: |
+          CUR=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
+          if git rev-parse -q --verify "refs/tags/v$CUR" >/dev/null; then
+            echo "mode=bump" >> "$GITHUB_OUTPUT"
+            echo "v$CUR is published; this run will bump ${{ inputs.bump }}"
+          else
+            echo "mode=retry" >> "$GITHUB_OUTPUT"
+            echo "version=$CUR" >> "$GITHUB_OUTPUT"
+            echo "::notice::$CUR is in the tree and untagged -- publishing THAT rather than bumping"
+          fi
+
       - name: Bump the version
         id: bump
+        if: steps.pre.outputs.mode == 'bump' 
         # Two files, not one. pyproject.toml is what PyPI publishes and
         # percolate_core/__init__.py is what `percolate --version` and both
         # FastAPI titles report -- they drifted once already (0.1.3 shipped
@@ -88,7 +108,7 @@ jobs:
         # Cheap, and the alternative is finding out from PyPI's rejection after
         # the image has already been pushed -- half a release, unwound by hand.
         run: |
-          v="${{ steps.bump.outputs.version }}"
+          v="${{ steps.bump.outputs.version || steps.pre.outputs.version }}"
           if git rev-parse -q --verify "refs/tags/v$v" >/dev/null; then
             echo "::error::tag v$v already exists" >&2; exit 1
           fi
@@ -96,19 +116,22 @@ jobs:
             echo "::error::percolate-core $v is already on PyPI" >&2; exit 1
           fi
 
-      - name: Commit and tag
-        if: inputs.publish
+      # THE BUMP LANDS UNTAGGED. The tag is created by `tag` below, after PyPI
+      # and the image exist -- it used to happen here, so a failed publish left
+      # v<version> on origin naming a wheel nobody could install, and the
+      # duplicate check above then blocked the retry. Skipped entirely in retry
+      # mode, where the bump did not run and there is nothing to commit.
+      - name: Commit the bump
+        if: inputs.publish && steps.bump.outcome == 'success'
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -am "${{ steps.bump.outputs.version }}: release"
-          git tag -a "v${{ steps.bump.outputs.version }}" \
-                  -m "percolate-core ${{ steps.bump.outputs.version }}"
-          git push origin HEAD:"${{ github.ref_name }}" --follow-tags
+          git diff --quiet || git commit -am "${{ steps.bump.outputs.version || steps.pre.outputs.version }}: bump"
+          git push origin HEAD:"${{ github.ref_name }}"
 
       - name: Summary
         run: |
-          echo "### percolate-core ${{ steps.bump.outputs.previous }} -> ${{ steps.bump.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "### percolate-core ${{ steps.bump.outputs.version || steps.pre.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
           [ "${{ inputs.publish }}" = "true" ] || \
             echo "_dry run: nothing committed, nothing published_" >> "$GITHUB_STEP_SUMMARY"
 
@@ -208,7 +231,11 @@ jobs:
   # 5. The GitHub release, once the things it describes actually exist.
   # -------------------------------------------------------------------------
   github_release:
-    needs: [version, pypi, image]
+    # AFTER `tag`, because softprops/action-gh-release CREATES the tag when it is
+    # missing -- so leaving it earlier would have had the release job quietly
+    # doing the one thing the ordering exists to defer. With the tag already
+    # there it annotates rather than creates.
+    needs: [version, pypi, image, tag]
     if: inputs.publish
     runs-on: ubuntu-latest
     permissions:
@@ -334,3 +361,32 @@ jobs:
           gh issue create --repo "${{ vars.SPECS_REPO || 'percolating-sirsh/p8-subsystems' }}" \
             --title "percolate-core $V: the dev pin and PACKAGING" \
             --body-file specs-issue.md
+
+  # -------------------------------------------------------------------------
+  # THE COMMIT POINT, and it is last on purpose.
+  #
+  # Everything above can fail and leave a bumped, untagged tree that the next
+  # run finishes. Past here the version is on PyPI and Docker Hub and the tag
+  # says so -- which is the fact `dev/check-version.sh` and the preflight above
+  # both read to decide whether a number is spent.
+  # -------------------------------------------------------------------------
+  tag:
+    needs: [version, pypi, image]
+    if: inputs.publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - name: Tag it, now that it exists
+        run: |
+          V=${{ needs.version.outputs.version }}
+          # Set here, not only in the bump step -- that step is skipped on the
+          # retry path, and `git tag -a` without an identity dies on
+          # `fatal: empty ident name` with everything already published.
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$V" -m "percolate-core $V"
+          git push origin "v$V"
+          echo "::notice::v$V tagged -- the wheel and image it names are already published"
