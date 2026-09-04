@@ -1,0 +1,102 @@
+# The parser's own tests, run by something other than nobody.
+#
+# There were 41 of them -- 20 pure ones in `plan_graph.rs` and 21 `#[pg_test]`s
+# in `lib.rs` -- and NOTHING IN EITHER REPOSITORY EXECUTED THEM. `suite.yml`
+# says so in as many words ("a change to the Rust is NOT tested here") and is
+# honest about why: it runs the published `.so` and a pgrx build is minutes.
+# get-percolate's `parser.yml` compiles the crate but only ever runs `cargo
+# pgrx package`. So the tests were written, committed, and never once run in
+# CI.
+#
+# What that cost, found by running them for the first time: one was red, and
+# had been since `PATH` was added to the modes that take an argument list.
+# `a_list_is_still_refused_where_it_means_nothing` asserted the error message
+# said "only LOOKUP and RELEVANCE take a list" when the parser had been saying
+# "only LOOKUP, RELEVANCE and PATH" for as long as PATH had existed. Harmless
+# to the product and exactly the kind of rot an unrun test collects -- which is
+# the argument for this file rather than against those tests.
+#
+# WHY IT IS A SEPARATE WORKFLOW. `suite.yml`'s whole affordability argument is
+# that it does almost nothing: 26 seconds, no compiler. This job compiles a
+# pgrx crate and initdbs a PostgreSQL, which is minutes. Putting it in
+# `suite.yml` would make every Markdown-adjacent push pay for a Rust build.
+# Scoped to the paths that can change the answer instead, so it runs when the
+# parser moves and never otherwise.
+#
+# THE IMAGE IS THIS REPOSITORY'S OWN BUILDER, not a hand-assembled toolchain.
+# `dev/Dockerfile.pgrx-builder` already installs postgresql-server-dev-19 and
+# the pinned cargo-pgrx, and get-percolate's `parser.yml` already builds the
+# release artefacts with it -- so the ABI these tests run against is the ABI
+# the shipped `.so` is compiled against, by construction rather than by two
+# lists agreeing.
+#
+# TWO THINGS THE INVOCATION NEEDS, both found by getting them wrong:
+#
+#   * `--features pg_test`. Without it the `#[pg_test]` macro expands to a
+#     plain `#[test]` that grabs the framework mutex and finds no server, and
+#     all 21 fail with "Could not obtain test mutex" -- which reads like a
+#     harness bug rather than a missing flag.
+#   * A NON-ROOT user with a writable sharedir. `initdb` refuses to run as
+#     root, and `cargo pgrx test` installs the extension into
+#     `pg_config --sharedir` before it can load it, which root owns. Running as
+#     `postgres` fixes the first and breaks the second, so the directory is
+#     opened up for the run. It is a throwaway container.
+name: parser-tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'extension/percolate_parser/**'
+      - 'dev/Dockerfile.pgrx-builder'
+      - '.github/workflows/parser-tests.yml'
+  pull_request:
+    paths:
+      - 'extension/percolate_parser/**'
+      - 'dev/Dockerfile.pgrx-builder'
+      - '.github/workflows/parser-tests.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: parser-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keyed on what actually invalidates it: the builder's Dockerfile and the
+      # lockfile. Same reasoning parser.yml's cache header gives, and
+      # deliberately NOT keyed on Cargo.toml -- the release bumps its version
+      # every time, so a key derived from it would change every release by
+      # construction and the cache would never hit.
+      - name: Cache the crate build
+        uses: actions/cache@v4
+        with:
+          path: extension/percolate_parser/target-test
+          key: parser-tests-${{ hashFiles('dev/Dockerfile.pgrx-builder', 'extension/percolate_parser/Cargo.lock') }}
+          restore-keys: parser-tests-
+
+      - name: Build the pgrx toolchain image
+        working-directory: dev
+        run: docker build -f Dockerfile.pgrx-builder -t pgrx-builder .
+
+      - name: cargo pgrx test
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE/extension/percolate_parser":/work \
+            -w /work pgrx-builder bash -c '
+              set -euo pipefail
+              chown -R postgres:postgres /work /opt/cargo
+              chmod -R a+w "$(pg_config --sharedir)/extension" "$(pg_config --pkglibdir)"
+              su postgres -s /bin/bash -c "
+                export PATH=/opt/cargo/bin:\$PATH
+                export PGRX_HOME=/work/.pgrx CARGO_TARGET_DIR=/work/target-test
+                cd /work
+                cargo pgrx init --pg19 /usr/bin/pg_config
+                cargo pgrx test pg19 --features pg_test --no-default-features"'
+          # The container writes as root and postgres; the cache action reads it
+          # back as the runner.
+          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/extension/percolate_parser"

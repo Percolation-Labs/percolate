@@ -734,7 +734,14 @@ mod tests {
     #[pg_test]
     fn a_list_is_still_refused_where_it_means_nothing() {
         let e = parse_query("GRAPH \"acme\", \"ndlr\"").unwrap_err();
-        assert!(e.message().contains("only LOOKUP and RELEVANCE take a list"),
+        // The refusal is the assertion; the list of modes that DO take one is
+        // not, and pinning the whole sentence is what made this test rot. It
+        // read "only LOOKUP and RELEVANCE take a list" from the day PATH was
+        // added to that list -- red, correct code underneath, and nothing ran
+        // it to say so. See .github/workflows/parser.yml: these had never been
+        // executed by anything.
+        assert!(e.message().contains("takes one argument")
+                && e.message().contains("GRAPH"),
                 "got: {}", e.message());
     }
 
