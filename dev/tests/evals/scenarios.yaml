@@ -1817,7 +1817,7 @@ scenarios:
         is: "1"
         because: "a machine that can create rows in a human's typed table is a machine that can invent a drug"
       - name: carrying what the model called it
-        sql: "select kind from aiq.soft_nodes where key='hepatic injury'"
+        sql: "select claimed_kind from aiq.soft_nodes where key='hepatic injury'"
         is: "adverse_event"
         because: "the claimed kind is the evidence somebody needs to decide whether to promote it or to register a new entity type"
       - name: and no product row was invented

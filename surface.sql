@@ -39,8 +39,23 @@
 --    up` producing a registered agent is asserted below; that agent
 --    answering anything is asserted nowhere in this repository.
 --
--- Both are debts, not decisions. `meta/skills/spec-driven-development` says
--- the audit should exist before the thing it describes.
+-- 3. REACHABILITY. Every check below asks whether an object EXISTS. None asks
+--    whether the role running the audit -- or any role -- may execute it, and
+--    the two are different facts wherever a surface ships granted to nobody.
+--    The graph algorithms do exactly that, deliberately: on a stock install
+--    all nine entry points are present, this file reports SURFACE COMPLETE,
+--    and `select * from aiq.graph_components(2, 30000)` as `authenticated` is
+--    `permission denied for function graph_components` until somebody runs
+--    `aiq.enable_graph_algorithms('authenticated')`.
+--
+--    `aiq.extension_boundary()` now answers the reachability question for the
+--    compiled crossings and folds it into its own `ok`, so the instrument
+--    exists; this file has not yet grown the equivalent column, and a consumer
+--    reading a clean run here should not conclude their role can call what it
+--    lists.
+--
+-- All three are debts, not decisions. `meta/skills/spec-driven-development`
+-- says the audit should exist before the thing it describes.
 -- ============================================================
 
 \set ON_ERROR_STOP on
@@ -240,9 +255,9 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','function','aiq.upsert_graph','jsonb,jsonb','graph-index.md §5: one writer for an extracted graph, holding invariants 1-5'),
 ('ai-query-layer','function','aiq.land_graph','jsonb,uuid','graph-index.md §6.1: the whole-document shape, no fan-in'),
 ('ai-query-layer','function','aiq.land_graph_fanout','uuid','graph-index.md §6.2: the windowed shape''s fan-in'),
-('ai-query-layer','function','aiq.register_graph_vocabulary','jsonb','graph-index.md §5.3: an unlisted relation is refused at write, so the vocabulary has to exist'),
+('ai-query-layer','function','aiq.register_graph_vocabulary','jsonb','graph-index.md §5.3: the closed relation vocabulary, and the symmetry and inverses of each'),
 ('ai-query-layer','function','aiq.install_structure_null','text','graph-index.md §1: the null extractor is a row, installed like the ingest workflow'),
-('ai-query-layer','function','aiq.extractor_call','text,text,text,text,text','graph-index.md §6: the model half -- registered, never yet called'),
+('ai-query-layer','function','aiq.extractor_call','text,text,text,text,text','graph-index.md §6: the model half -- an OpenAI-shaped chat call, built as a row'),
 ('ai-query-layer','function','aiq.plan_facet','','plan-graph.md §4: the sources and models half of the plan catalog'),
 ('ai-query-layer','function','aiq.space_populated','text,text','plan-graph.md §4: which models a corpus is ACTUALLY embedded in, as opposed to registered'),
 ('ai-query-layer','view','aiq.v_plan_sources','','plan-graph.md §4: one row per source name, with the columns and spaces a plan expands'),

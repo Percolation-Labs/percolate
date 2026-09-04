@@ -218,6 +218,20 @@ select aiq.rebuild_entity_type('company');
 select aiq.rebuild_entity_type('person');
 select aiq.rebuild_entity_type('event');
 
+-- THE REFRESH OBLIGATION, discharged where it is incurred. Registering a new
+-- entity type does not widen the machine relation catalogue -- the triples are
+-- (every registered type + soft + lake)^2 x relations, generated at
+-- registration time and deliberately NOT by a trigger on entity_registry,
+-- because one module silently writing another's catalogue is worse than a
+-- legible failure. The legible failure is real: without this line the stack
+-- came up with `party_to` catalogued over the three types that existed when
+-- the extension installed and none of the three added here, so
+-- specs/world-model-ingestion/graph-demo.sql -- whose own header says it needs
+-- this call -- died on `relation (document, party_to, company) is not in the
+-- catalogue`. The error names the remedy, and this is the remedy; a sample
+-- stack that ships needing an undocumented manual step is a step nobody runs.
+select aiq.register_graph_vocabulary() -> 'triples_added' as catalogue_widened;
+
 -- ------------------------------------------------------------
 -- 4. Aliases and short keys.
 --
@@ -249,12 +263,21 @@ select aiq.add_node_key('Borealis strike', 'borealis', 'short');
 -- inverse label is read-time only: the reverse edge is never stored.
 -- ------------------------------------------------------------
 insert into aiq.relation_types (src_type, relation, dst_type, inverse_label, description) values
+    -- NOT declared is_symmetric, and the description used to say it was.
+    -- `competes_with` IS symmetric by meaning, and declaring it here would make
+    -- the catalogue trigger normalise endpoint order -- which would reorder the
+    -- sample's own edges and with them the `out`/`in` column of the walk output
+    -- USAGE.md 5 quotes as measured. The fixture is what several documented
+    -- outputs are measured against, so the flag is a fixture change rather than
+    -- a one-line fix, and the honest thing in the meantime is a description
+    -- that does not claim behaviour the flag never produced.
     ('company','competes_with','company','competes_with',
-     'symmetric rivalry; stored once, walked both ways'),
+     'rivalry; symmetric by meaning, stored with direction here (see above)'),
     ('company','subsidiary_of','company','parent_of',
      'ownership as an authored claim, not a foreign key'),
     ('person','works_at','company','employs', 'current employment'),
-    ('person','knows','person','knows', 'symmetric acquaintance'),
+    ('person','knows','person','knows',
+     'acquaintance; symmetric by meaning, stored with direction (see competes_with)'),
     ('event','mentions','company','mentioned_in', 'the event names this company'),
     ('event','mentions','person','mentioned_in', 'the event names this person'),
     ('company','partners_with','company','partners_with',

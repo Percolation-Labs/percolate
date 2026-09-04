@@ -71,10 +71,33 @@
 -- closed this becomes `agent: structure_null` and this function is deleted --
 -- and because the prompt and schema come from the same row either way, the
 -- extraction does not change when it does.
+-- WHAT p_endpoint MAY POINT AT, said here because the signature on its own
+-- promises more than the body delivers. Everything this function builds is
+-- OpenAI chat-completions: `messages` with an inline system role,
+-- `response_format.json_schema`, and a `choices.0.message.content` extraction
+-- path. So the parameter means "same wire shape, different HOST" -- Azure
+-- OpenAI, vLLM, OpenRouter, Together, LiteLLM and anything else serving that
+-- API -- and NOT "any provider".
+--
+-- Pointed at https://api.anthropic.com/v1/messages it produces a well-formed
+-- POST to an API that wants `system` as a top-level field, a required
+-- `max_tokens`, a tool carrying `input_schema` for structured output, and an
+-- answer at `content.0.input`. That fails at request time in a worker rather
+-- than at registration, which is the worst place for it to fail, and a consumer
+-- who brought an Anthropic key and no OpenAI key has to write their own worker
+-- for this and this alone.
+--
+-- Kept as a parameter rather than a constant because the hosts above are real
+-- and are the common case; a second provider is a second branch here plus a
+-- second `jsonpath`, and the `jsonpath` is already a RETURNED field rather than
+-- a hard-coded reader, so the seam is half-built. What is not acceptable is
+-- leaving the signature to imply the branch exists.
 create or replace function aiq.extractor_call(
     p_agent      text,
     p_model      text,
     p_text       text,
+    -- Any host serving the OpenAI chat-completions API. NOT any provider --
+    -- see the note above.
     p_endpoint   text default 'https://api.openai.com/v1/chat/completions',
     p_credential text default 'LLM_API_KEY'
 ) returns jsonb as $$

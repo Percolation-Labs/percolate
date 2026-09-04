@@ -102,7 +102,7 @@ begin;
 -- that `org_id` alone used to conflate. The shared row is `public` BECAUSE
 -- SOMEBODY DECIDED IT IS, not because its org happens to be null -- which is
 -- the change scope makes, and the reason the row below had to grow a column.
-insert into aiq.soft_nodes (kind, key, label, org_id, visibility, attrs) values
+insert into aiq.soft_nodes (claimed_kind, key, label, org_id, visibility, attrs) values
   ('company', 't-rs-org-a', 'A', 'a0000000-0000-0000-0000-00000000000a', 'org', '{"deal":"condor"}'),
   ('company', 't-rs-org-b', 'B', 'a0000000-0000-0000-0000-00000000000b', 'org', '{"deal":"heron"}'),
   ('company', 't-rs-shared', 'S', null, 'public', '{}');

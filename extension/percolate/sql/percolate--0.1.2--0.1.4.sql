@@ -10656,6 +10656,23 @@ create table if not exists aiq.node_keys (
     org_id       uuid,
     primary key (node_id, key, kind)
 );
+
+-- `kind` HERE IS THE KEY'S CLASS, not the thing's kind, and the distinction is
+-- worth a comment because the neighbouring table spends the same word on the
+-- other meaning: aiq.soft_nodes.claimed_kind is 'company' or 'person', while
+-- this one is always one of canonical/short/alias. A consumer filtering
+-- entities on aiq.node_keys.kind gets 'canonical' for every row, filters
+-- nothing, and gets no error -- which is how a real identity pass clustered a
+-- company with a product. Neither name is wrong in isolation; the collision is
+-- obvious once and invisible before, so it is written down at both ends.
+comment on column aiq.node_keys.kind is
+    'The KEY''s class: canonical, short or alias. Not the entity''s kind -- '
+    'that is aiq.soft_nodes.claimed_kind for a candidate, and the entity_type '
+    'of the registered table for anything resolved.';
+comment on column aiq.nodes.entity_type is
+    'Where the node LIVES -- soft, lake, document, or a registered entity '
+    'type. Residence, never a claimed kind: everything the null extractor '
+    'produces is ''soft'' whatever it claims to be.';
 -- Canonical keys are unique per (org, type). Short keys and aliases are
 -- deliberately NOT unique -- 'bakhmut' may be canonical for a place and an
 -- event, and short-key lookup may legitimately return several nodes.
@@ -10697,13 +10714,139 @@ create table if not exists aiq.relation_types (
     -- two. Declared per triple because that is this table's key, but it is a
     -- property of the TERM: the trigger reads it with bool_or over the term,
     -- and a term marked symmetric in one triple and not another is a
-    -- modelling error rather than a supported state.
+    -- modelling error rather than a supported state -- which the two triggers
+    -- below now make it, instead of leaving it as prose in this comment.
+    --
+    -- NULLABLE, and that is the whole reason the inheritance below can work.
+    -- `not null default false` made a writer that DID NOT SAY and a writer
+    -- that said false the same row, so there was nothing for a new triple to
+    -- inherit and nothing a disagreement check could distinguish. That is the
+    -- same defect aiq.graph_vocabulary.machine_weight had -- a default applied
+    -- at write, erasing the difference between an absent value and an explicit
+    -- one -- and it is worth naming twice because it reads as a tightening
+    -- both times. null means UNDECLARED; every reader coalesces to false, so
+    -- the effective default is unchanged.
+    --
     -- Named `is_symmetric`, not `symmetric`: SYMMETRIC is a reserved word in
     -- SQL (it belongs to BETWEEN), so the obvious spelling is a column that
     -- has to be double-quoted at every single use site forever.
-    is_symmetric boolean not null default false,
+    is_symmetric boolean,
     primary key (src_type, relation, dst_type)
 );
+
+-- ...and on a database that already has the table, where `create table if not
+-- exists` above is a no-op and the column is still NOT NULL. Guarded for the
+-- same reason agentic.sessions' rename is: this file is replayed on every
+-- upgrade, and DROP NOT NULL has no IF EXISTS to make the second run a no-op.
+-- (It is idempotent in effect -- dropping a constraint that is already gone
+-- succeeds -- but the guard keeps the intent legible next to the column.)
+do $$
+begin
+    if exists (select 1 from information_schema.columns
+                where table_schema = 'aiq' and table_name = 'relation_types'
+                  and column_name = 'is_symmetric' and is_nullable = 'NO') then
+        alter table aiq.relation_types alter column is_symmetric drop not null;
+        alter table aiq.relation_types alter column is_symmetric drop default;
+    end if;
+end $$;
+
+-- ------------------------------------------------------------
+-- 3a. is_symmetric and inverse_label are properties of the RELATION, and this
+--     table is keyed by the TRIPLE. Two triggers reconcile that, and which one
+--     fires is decided by whether the writer said anything at all.
+--
+-- THE RULE THIS IMPLEMENTS is graph-identity.md's own, applied to the
+-- catalogue rather than to the edge: "a rule the writer has to know before it
+-- can insert is a rule every writer gets wrong once". A term-level fact stored
+-- per triple gives every writer of a NEW triple a fact to repeat, and the
+-- writers in this tree demonstrate the failure rather than merely risking it:
+-- dev/scale/graph/01-generate.sql catalogues `owns` and `mentions` over
+-- scale_entity naming neither column, and dev/init/04-graph-sample.sql
+-- catalogues `competes_with` and `knows` with a description that SAYS
+-- symmetric and a flag that says nothing. Refusing all three would be correct
+-- and useless.
+--
+-- So: absence INHERITS, and disagreement is REFUSED.
+--   * A row that leaves either column null takes the term's value, if the term
+--     has one. The scale generator keeps working and its `owns` triples get
+--     `owned_by` without naming it.
+--   * A row that names a value differing from the term's raises. That is the
+--     modelling error the column comment has always described, and it is now
+--     the database that says so rather than a reader of this file.
+--
+-- Statement-level for the check, with a transition table, so the cost is one
+-- pass over the terms this statement touched rather than over the catalogue --
+-- and so a pre-existing split somewhere else in the table cannot fail an
+-- unrelated insert, which is how a global assertion becomes a mystery.
+-- ------------------------------------------------------------
+create or replace function aiq.relation_term_inherit() returns trigger as $$
+declare
+    v_sym boolean;
+    v_inv text;
+begin
+    if new.is_symmetric is null or new.inverse_label is null then
+        select bool_or(rt.is_symmetric), min(rt.inverse_label)
+          into v_sym, v_inv
+          from aiq.relation_types rt
+         where rt.relation = new.relation
+           and (rt.src_type, rt.dst_type) is distinct from (new.src_type, new.dst_type);
+        if new.is_symmetric is null then
+            new.is_symmetric := v_sym;
+        end if;
+        if new.inverse_label is null then
+            new.inverse_label := v_inv;
+        end if;
+    end if;
+    return new;
+end $$ language plpgsql;
+
+create or replace trigger relation_types_inherit_term
+    before insert or update on aiq.relation_types
+    for each row execute function aiq.relation_term_inherit();
+
+create or replace function aiq.check_relation_term() returns trigger as $$
+declare v_bad text;
+begin
+    select string_agg(format('%s (%s)', s.relation, s.saw), '; ' order by s.relation)
+      into v_bad
+      from (select rt.relation,
+                   string_agg(distinct coalesce(rt.is_symmetric::text, 'null')
+                              || '/' || coalesce(rt.inverse_label, 'null'), ', ') as saw
+              from aiq.relation_types rt
+             where rt.relation in (select t.relation from touched t)
+             group by rt.relation
+            having count(distinct rt.is_symmetric) > 1
+                or count(distinct rt.inverse_label) > 1) s;
+    if v_bad is not null then
+        raise exception
+            'these relations declare symmetry or an inverse differently on '
+            'different triples: %', v_bad
+        using hint =
+            'is_symmetric and inverse_label describe the RELATION, not the '
+            '(src_type, relation, dst_type) triple this table is keyed by. '
+            'aiq.check_edge_catalogue reads symmetry with bool_or over the '
+            'term, so a split term means an edge normalises or does not '
+            'depending on which types are at its ends -- a wrong number rather '
+            'than an error. Leave the column null to inherit the term''s value.';
+    end if;
+    return null;
+end $$ language plpgsql;
+
+-- TWO TRIGGERS, ONE FUNCTION, because `referencing new table` is refused on a
+-- trigger with more than one event: "transition tables cannot be specified for
+-- triggers with more than one event". The alternative -- dropping the
+-- transition table and re-scanning the catalogue on every statement -- would
+-- also let a pre-existing split somewhere else in the table fail an unrelated
+-- insert, so the split pair is the better shape as well as the legal one.
+create or replace trigger relation_types_term_consistent_ins
+    after insert on aiq.relation_types
+    referencing new table as touched
+    for each statement execute function aiq.check_relation_term();
+
+create or replace trigger relation_types_term_consistent_upd
+    after update on aiq.relation_types
+    referencing new table as touched
+    for each statement execute function aiq.check_relation_term();
 
 -- ------------------------------------------------------------
 -- 4. Edges — canonical store for SOFT (authored) links only.
@@ -13662,7 +13805,13 @@ returns jsonb as $$
                 where p_name is null or r.entity_type = p_name), '[]'::jsonb),
             'relations', coalesce((select jsonb_agg(jsonb_build_object(
                     'src_type', src_type, 'relation', relation, 'dst_type', dst_type,
-                    'inverse_label', inverse_label, 'description', description)
+                    'inverse_label', inverse_label, 'description', description,
+                    -- Coalesced, because the column is nullable to keep
+                    -- "undeclared" distinct from "declared false" INSIDE the
+                    -- catalogue; a consumer reading the published shape wants
+                    -- the effective answer, and null would only invite each of
+                    -- them to coalesce it again differently.
+                    'is_symmetric', coalesce(is_symmetric, false))
                     order by src_type, relation, dst_type)
                 from aiq.relation_types
                 where p_name is null
@@ -15171,6 +15320,21 @@ begin
     if not exists (select 1 from pg_roles where rolname = p_role) then
         raise exception 'no such role: %', p_role;
     end if;
+    -- SAID OUT LOUD, because it is the one argument to this function that
+    -- changes who is on the other side of the gate rather than which of our own
+    -- roles is. web_anon is the UNAUTHENTICATED REST caller, so this grants the
+    -- compiled traversals -- graph_snapshot among them, a resident per-backend
+    -- CSR holding one of a fixed number of admission slots -- to anyone who can
+    -- reach the endpoint. It remains an operator's decision to make and this
+    -- does not refuse it; what it stops being is a decision made in silence.
+    if p_role = 'web_anon' and p_enabled then
+        raise notice
+            'granting the graph algorithms to web_anon: these are reachable '
+            'without authentication, and graph_snapshot holds a per-backend '
+            'adjacency snapshot in one of a fixed number of admission slots. '
+            'See graph-algorithms.md 2.3 for what an unauthenticated caller '
+            'can therefore cost you.';
+    end if;
     for r in
         -- The query entry points and the compiled functions under them.
         -- `enable_graph_algorithms` itself is deliberately absent: a gate an
@@ -15209,7 +15373,11 @@ begin
     return jsonb_build_object(
         'role', p_role,
         'enabled', p_enabled,
-        'functions', cardinality(v_did),
+        -- `grants`, not `functions`. This is the number of objects the loop
+        -- touched -- eleven wrappers plus every compiled p8_graph_* under them
+        -- -- and named `functions` beside 'role' and 'enabled' it read as the
+        -- count of graph algorithms, which is a different and smaller number.
+        'grants', cardinality(v_did),
         -- Said out loud, because the reason this gate exists is that the cost
         -- is not in the call, it is in the first call.
         'note', case when p_enabled
@@ -18951,22 +19119,58 @@ comment on table aiq.graph_vocabulary is
 -- writing another module's catalogue is worse than a legible failure.
 -- ------------------------------------------------------------
 create or replace function aiq.register_graph_vocabulary(
-    p_relations jsonb default null   -- [{"relation":..,"machine_weight":..,"description":..}]
+    p_relations jsonb default null
+    -- [{"relation":..,"machine_weight":..,"description":..,
+    --   "is_symmetric":..,"inverse_label":..}]
 ) returns jsonb as $$
 declare
-    v_types text[];
-    v_rels  int;
-    v_trip  int;
+    v_types  text[];
+    v_rels   int;
+    v_trip   int;
+    v_before int;
 begin
     if p_relations is not null then
-        insert into aiq.graph_vocabulary (relation, machine_weight, description)
-        select e->>'relation',
-               coalesce((e->>'machine_weight')::real, 0.5),
-               e->>'description'
+        -- INSERT THEN UPDATE, rather than one INSERT ... ON CONFLICT, and the
+        -- shape is the fix rather than a style choice.
+        --
+        -- What was wrong: `coalesce((e->>'machine_weight')::real, 0.5)` ran in
+        -- the SELECT, so by the time `excluded` was formed a caller who named
+        -- no weight and a caller who named 0.5 were the same caller -- and the
+        -- unconditional `set machine_weight = excluded.machine_weight` then
+        -- reset a tuned weight to the prior on every re-registration.
+        -- `description` was protected against exactly this one line below it.
+        --
+        -- That was not a hypothetical bootstrap. The shipped vocabulary at the
+        -- foot of this file re-registers all twelve relations on every
+        -- ALTER EXTENSION percolate UPDATE, so an operator's tuning was undone
+        -- by UPGRADING. And it was invisible: aiq.upsert_graph seeds a new edge
+        -- from this column and merges with `greatest(edges.weight,
+        -- excluded.weight)`, so existing edges refuse the demotion and only
+        -- edges written after the reset carry it -- a silent retune of
+        -- everything ingested from then on.
+        --
+        -- Why not just move the coalesce into the conflict clause: a column
+        -- default applies when the column is OMITTED, never when NULL is
+        -- supplied for it, so the same statement cannot both pass NULL through
+        -- to `excluded` and fall back to `default 0.5`. It fails with a
+        -- not-null violation on the first registration -- which is what
+        -- dev/tests/query/10 caught before this comment was true.
+        --
+        -- Insert-then-update has neither problem, and keeps 0.5 in ONE place:
+        -- the column. A new relation takes the column default because the
+        -- insert does not name the column; then the update applies whatever
+        -- the payload ACTUALLY said, and nothing when it said nothing. A caller
+        -- who genuinely means 0.5 says 0.5.
+        insert into aiq.graph_vocabulary (relation, description)
+        select e->>'relation', e->>'description'
         from jsonb_array_elements(p_relations) e
-        on conflict (relation) do update
-            set machine_weight = excluded.machine_weight,
-                description    = coalesce(excluded.description, aiq.graph_vocabulary.description);
+        on conflict (relation) do nothing;
+
+        update aiq.graph_vocabulary g
+           set machine_weight = coalesce((e->>'machine_weight')::real, g.machine_weight),
+               description    = coalesce(e->>'description',            g.description)
+          from jsonb_array_elements(p_relations) e
+         where g.relation = e->>'relation';
     end if;
 
     -- Every type an extracted edge can have at either end.
@@ -18975,13 +19179,67 @@ begin
           union select 'soft' union select 'lake') s;
 
     select count(*) into v_rels from aiq.graph_vocabulary;
+    select count(*) into v_before from aiq.relation_types;
 
-    insert into aiq.relation_types (src_type, relation, dst_type, description)
-    select s, v.relation, d,
-           'machine-extractable (aiq.graph_vocabulary)'
-    from unnest(v_types) s, unnest(v_types) d, aiq.graph_vocabulary v
-    on conflict (src_type, relation, dst_type) do nothing;
-    get diagnostics v_trip = row_count;
+    -- SYMMETRY AND INVERSES COME THROUGH HERE, because this is the only path
+    -- that writes a machine relation's triples and it used to write four
+    -- columns and no others -- so every relation any consumer registered took
+    -- `is_symmetric` false and `inverse_label` null, with no later pass and no
+    -- other function exposing either. The only remaining way to declare a
+    -- relation symmetric was to connect as app_owner and hand-write SQL
+    -- against a base table (integration-rbac.sql grants SELECT and nothing
+    -- else), which is the one thing the whole grant design exists to avoid.
+    -- The catalogue trigger that normalises endpoint order was therefore built
+    -- and unreachable, and every symmetric relation a consumer registers is
+    -- stored in both orientations: twice the mass in a ranked walk and a degree
+    -- of two in k-core, which is a wrong number rather than an error.
+    --
+    -- Both are properties of the RELATION and this table is keyed by the
+    -- triple, so they are written across every triple the relation generates.
+    -- aiq.relation_types' own triggers hold that invariant for writers who are
+    -- not this function.
+    --
+    -- READ FROM THE PAYLOAD FIRST AND FROM THE EXISTING TRIPLES SECOND,
+    -- because the no-payload call is the REFRESH call -- registering a new
+    -- entity table re-runs this to widen the cross product (see the refresh
+    -- obligation above), and a refresh that reset symmetry to the column
+    -- default would be the machine_weight bug wearing a different column.
+    with declared as (
+        select e->>'relation'                as relation,
+               (e->>'is_symmetric')::boolean as is_symmetric,
+               e->>'inverse_label'           as inverse_label
+          from jsonb_array_elements(coalesce(p_relations, '[]'::jsonb)) e
+    ), term as (
+        select v.relation,
+               coalesce(d.is_symmetric,  x.is_symmetric)  as is_symmetric,
+               coalesce(d.inverse_label, x.inverse_label) as inverse_label
+          from aiq.graph_vocabulary v
+          left join declared d on d.relation = v.relation
+          left join lateral (
+              select bool_or(rt.is_symmetric) as is_symmetric,
+                     min(rt.inverse_label)    as inverse_label
+                from aiq.relation_types rt
+               where rt.relation = v.relation) x on true
+    )
+    insert into aiq.relation_types (src_type, relation, dst_type, description,
+                                    is_symmetric, inverse_label)
+    select s, t.relation, d,
+           'machine-extractable (aiq.graph_vocabulary)',
+           t.is_symmetric, t.inverse_label
+    from unnest(v_types) s, unnest(v_types) d, term t
+    -- `do update` rather than `do nothing`: a second registration that adds a
+    -- declaration has to reach the triples the first one already made, or the
+    -- only way to declare symmetry would be to get it right before the first
+    -- call. description is deliberately not in the SET -- an authored triple
+    -- keeps its own words.
+    on conflict (src_type, relation, dst_type) do update
+        set is_symmetric  = excluded.is_symmetric,
+            inverse_label = excluded.inverse_label;
+
+    -- Counted by difference rather than by `get diagnostics`: row_count now
+    -- includes the updated rows, so the old reading would report every triple
+    -- in the catalogue as newly added on every refresh.
+    select count(*) - v_before into v_trip from aiq.relation_types;
 
     return jsonb_build_object(
         'relations', v_rels,
@@ -19003,7 +19261,27 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- 3a. Candidates: an entity the extractor named that resolved to nothing.
 create table if not exists aiq.soft_nodes (
     id               uuid primary key default gen_random_uuid(),
-    kind             text not null,     -- normalized claimed kind
+    -- RENAMED from `kind`, and the rename is the point rather than tidying.
+    -- graph-index.md §4.3(c) and (d) have called this `claimed_kind` in prose
+    -- since it was designed, and the column did not -- while the ADJACENT table
+    -- in the same schema spends the same four letters on the other meaning:
+    -- aiq.node_keys.kind is the KEY's class, always canonical/short/alias.
+    --
+    -- The collision is obvious once and invisible before, and it costs a real
+    -- wrong answer rather than a moment's confusion. node_keys is the table a
+    -- consumer reaches FIRST, because it is the one carrying the name they
+    -- matched on; filtering entities on its `kind` returns 'canonical' for
+    -- every row, filters nothing, and raises nothing. A real identity pass
+    -- clustered `company/nxp semiconductors` with `product/semiconductors` on
+    -- exactly this, and naming the column what the design already called it cut
+    -- its candidate pairs by more than half.
+    --
+    -- CLAIMED, not asserted: this is what the extractor SAID the thing was,
+    -- recorded verbatim, including kinds no registered table has. The kind
+    -- vocabulary is open (§4.3(d)) precisely so an unindexed corpus is not
+    -- refused, which makes "claimed" the honest half of the name as well as the
+    -- disambiguating one.
+    claimed_kind     text not null,     -- normalized claimed kind
     key              text not null,     -- normalized name
     label            text,              -- name as first seen, for display
     attrs            jsonb not null default '{}'::jsonb,
@@ -19026,10 +19304,48 @@ create table if not exists aiq.soft_nodes (
 -- data, which is the normal state, and under the default two NULLs never
 -- conflict: the constraint would hold for tenants and not at all for the tier
 -- with the most rows.
+-- ...and on a database that already has the table, where `create table if not
+-- exists` above is a no-op and the column is still called kind. Guarded,
+-- because RENAME COLUMN has no IF EXISTS and this file is replayed on every
+-- upgrade: unguarded it succeeds exactly once and fails every run after. Same
+-- shape as agentic.sessions' user_id -> owner_id, and no delta file is needed
+-- for the same reason that one needed half of one -- no view selects this
+-- column, so nothing has to be dropped and recreated around it.
+do $$
+begin
+    if exists (select 1 from information_schema.columns
+                where table_schema = 'aiq' and table_name = 'soft_nodes'
+                  and column_name = 'kind') then
+        alter table aiq.soft_nodes rename column kind to claimed_kind;
+    end if;
+    -- AND THE CONSTRAINT THE COLUMN CARRIES. Postgres 17 gave NOT NULL its own
+    -- catalog entry with a generated name, and RENAME COLUMN moves the
+    -- constraint without renaming it -- so an upgraded database ended up with
+    -- `soft_nodes_kind_not_null` on a column called claimed_kind while a fresh
+    -- install had `soft_nodes_claimed_kind_not_null`. Same enforcement, two
+    -- names, and the two ways of reaching 0.1.4 no longer agree.
+    --
+    -- Found by dev/upgrade-converges.sh rather than by reasoning about it,
+    -- which is the entire argument for that script: nothing else in this
+    -- repository compares an upgraded database to a fresh one, so this would
+    -- have shipped as an invisible difference and surfaced years later as a
+    -- migration that works on one deployment and not another.
+    if exists (select 1 from pg_constraint
+                where conrelid = 'aiq.soft_nodes'::regclass
+                  and conname = 'soft_nodes_kind_not_null') then
+        alter table aiq.soft_nodes
+            rename constraint soft_nodes_kind_not_null to soft_nodes_claimed_kind_not_null;
+    end if;
+end $$;
+
+-- AFTER the rename, not before: on an upgrading database the statement above is
+-- what makes the column exist under this name, and `create index if not exists`
+-- is matched on the index NAME, so it would neither fail nor fix an index built
+-- over the old column. (It does not have to: a rename carries its indexes.)
 create unique index if not exists idx_soft_nodes_key
-    on aiq.soft_nodes (org_id, kind, key) nulls not distinct;
+    on aiq.soft_nodes (org_id, claimed_kind, key) nulls not distinct;
 create index if not exists idx_soft_nodes_unresolved
-    on aiq.soft_nodes (kind, key) where resolved_node_id is null;
+    on aiq.soft_nodes (claimed_kind, key) where resolved_node_id is null;
 
 -- 3b. Lake references: the entity's row is in Parquet, not in Postgres.
 --
@@ -19076,7 +19392,11 @@ create unique index if not exists idx_lake_nodes_key
 select aiq.register_entity_table(
     p_entity_type   => 'soft',
     p_source_table  => 'aiq.soft_nodes',
-    p_key_expr      => 'n.kind || ''/'' || n.key',
+    -- The canonical key keeps its `company/acme corp` shape: the prefix is
+    -- the claimed kind, and it is the only place the kind survives into
+    -- node_keys -- which is why a consumer that needs it has been doing
+    -- string surgery on the key instead of joining the column.
+    p_key_expr      => 'n.claimed_kind || ''/'' || n.key',
     p_summary_expr  => 'coalesce(n.label, n.key)',
     p_org_expr      => 'n.org_id',
     p_include_where => 'n.resolved_node_id is null');
@@ -19270,6 +19590,10 @@ declare
     v_self int := 0;
     v_merged int := 0;
     v_before bigint;
+    v_fwd text;                 -- the forward relation an inverse resolves to
+    v_swap int;
+    v_unknown text[] := '{}';   -- relations the model invented, for the receipt
+    v_flipped int := 0;
 begin
     -- ---- Validate. This gate is LOAD-BEARING, not belt-and-braces: the
     -- step-level output_schema check is reported unimplemented by
@@ -19395,10 +19719,10 @@ begin
             -- scope when the extraction named one and `public` when this is
             -- shared reference data, which is the same rule everything else
             -- in the collection uses.
-            insert into aiq.soft_nodes (kind, key, label, attrs, org_id, visibility)
+            insert into aiq.soft_nodes (claimed_kind, key, label, attrs, org_id, visibility)
             values (v_kind, v_key, v_name, coalesce(v_node->'a','{}'::jsonb), v_org,
                     rbac.default_visibility(v_org))
-            on conflict (org_id, kind, key) do update
+            on conflict (org_id, claimed_kind, key) do update
                 set last_seen_at = now(),
                     label = coalesce(aiq.soft_nodes.label, excluded.label),
                     attrs = content.merge_policy(aiq.soft_nodes.attrs, excluded.attrs)
@@ -19427,11 +19751,56 @@ begin
                 'Ordinals are positions in the `nodes` array as the model wrote it.',
                 v_s, v_t, v_n;
         end if;
+        -- AN UNLISTED RELATION IS DROPPED AND COUNTED, not raised. The closed
+        -- vocabulary is right and is not in question here -- an extractor that
+        -- can emit anything cannot be checked, costed, or swapped for a cheaper
+        -- one. What was wrong was the BLAST RADIUS: raising aborts the
+        -- transaction, so one invented relation discarded every node and every
+        -- valid edge the document produced. Measured on a four-node, five-edge
+        -- payload with one bad edge: 4 nodes and 4 good edges lost.
+        --
+        -- This file already makes the opposite choice one screen down, for the
+        -- same species of thing -- "a self-edge is a model artefact, not a
+        -- wiring bug, so it is dropped, but COUNTED IN THE RECEIPT, never
+        -- silently, which is how this collection has previously reported
+        -- success while losing data". A relation the model invented is a model
+        -- artefact by the same reading. An out-of-range ORDINAL still raises,
+        -- and the comment above says why: that one is a wiring bug.
+        --
+        -- FIRST, THOUGH, TRY THE INVERSE. On 159 real documents 8 of 1,041
+        -- edges were refused this way and all eight were `owned_by` or `owned`
+        -- -- the model reaching for the inverse of `owns`, which the catalogue
+        -- can express and the extractor's enum cannot offer. If the name is
+        -- some relation's inverse_label, the edge is not wrong, it is written
+        -- backwards: swap the endpoints and store the forward form, which is
+        -- the one orientation this design stores precisely so a reader can ask
+        -- either way. Vocabulary membership is checked FIRST, so a term that is
+        -- also some other term's inverse stays forward.
         if not exists (select 1 from aiq.graph_vocabulary where relation = v_rel) then
-            raise exception
-                'relation ''%'' is not in aiq.graph_vocabulary. The vocabulary is closed: '
-                'an extractor that can emit anything cannot be checked, costed, or '
-                'swapped for a cheaper one.', v_rel;
+            -- Joined to the vocabulary rather than merely existing in the
+            -- catalogue: the flip may only land a relation the extractor was
+            -- allowed to emit in the first place, or an invented name could
+            -- reach an authored-only term through its inverse and the closed
+            -- vocabulary would have a side door.
+            select rt.relation into v_fwd
+              from aiq.relation_types rt
+              join aiq.graph_vocabulary gv on gv.relation = rt.relation
+             where rt.inverse_label = v_rel
+             limit 1;
+            if v_fwd is not null then
+                v_rel := v_fwd;
+                v_swap := v_s; v_s := v_t; v_t := v_swap;
+                v_flipped := v_flipped + 1;
+            else
+                -- Named, not merely counted: "3 edges dropped" sends a reader
+                -- to the extractor with nothing to look for, and the whole
+                -- point of a closed vocabulary is that the gap between what a
+                -- model says and what the schema admits is a thing you act on.
+                if not (v_rel = any(v_unknown)) then
+                    v_unknown := v_unknown || v_rel;
+                end if;
+                continue;
+            end if;
         end if;
 
         -- A self-edge is a model artefact ("Acme, a subsidiary of Acme"), not
@@ -19506,12 +19875,26 @@ begin
     end loop;
 
     -- A receipt (outputs.md §2): counts and what was written, never the rows.
+    --
+    -- `residence` was a jsonb of three totals while v_res -- commented "ordinal
+    -- -> residence, for the receipt" and appended in all three residence
+    -- branches -- was never returned by anything. A consumer that wants to know
+    -- WHICH node landed soft had to re-derive it by querying back the ids. Both
+    -- are here now: the totals because they are what a workflow logs, and the
+    -- per-ordinal array because it is what a caller actually asks next, and it
+    -- lines up with node_ids index for index.
     return jsonb_build_object(
         'nodes', v_n,
         'residence', v_counts,
+        'node_residence', to_jsonb(v_res),
         'edges_new', v_edges_written,
         'edges_merged', v_merged,
         'self_edges_dropped', v_self,
+        -- Beside self_edges_dropped, in the same place, for the same reason:
+        -- an edge the schema refused is a fact about the extractor, and a
+        -- receipt that omitted it would be reporting success while losing data.
+        'edges_flipped_to_inverse', v_flipped,
+        'edges_dropped_unknown_relation', to_jsonb(v_unknown),
         'node_ids', to_jsonb(v_ids));
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
@@ -19551,7 +19934,9 @@ returns jsonb as $$
 declare
     v_run uuid; v_child record;
     v_missing int; v_total int;
-    v_acc jsonb := jsonb_build_object('graphs',0,'edges_new',0,'edges_merged',0,'self_edges_dropped',0);
+    v_acc jsonb := jsonb_build_object('graphs',0,'edges_new',0,'edges_merged',0,
+                                      'self_edges_dropped',0,'edges_flipped_to_inverse',0,
+                                      'edges_dropped_unknown_relation','[]'::jsonb);
     v_r jsonb;
 begin
     -- Raises unless this task belongs to the run being executed: a registered
@@ -19582,11 +19967,21 @@ begin
         v_r := aiq.upsert_graph(v_child.graph, jsonb_build_object(
             'resource_id', v_child.rid, 'run_id', v_run,
             'window', v_child.win, 'agent', 'structure_null'));
+        -- The dropped relations are UNIONED rather than summed: the useful
+        -- fact across a fan-in is which names the model kept inventing, and a
+        -- count of 40 says nothing a reader can act on.
         v_acc := jsonb_build_object(
             'graphs',             (v_acc->>'graphs')::int + 1,
             'edges_new',          (v_acc->>'edges_new')::int + (v_r->>'edges_new')::int,
             'edges_merged',       (v_acc->>'edges_merged')::int + (v_r->>'edges_merged')::int,
-            'self_edges_dropped', (v_acc->>'self_edges_dropped')::int + (v_r->>'self_edges_dropped')::int);
+            'self_edges_dropped', (v_acc->>'self_edges_dropped')::int + (v_r->>'self_edges_dropped')::int,
+            'edges_flipped_to_inverse',
+                (v_acc->>'edges_flipped_to_inverse')::int + (v_r->>'edges_flipped_to_inverse')::int,
+            'edges_dropped_unknown_relation', (
+                select coalesce(jsonb_agg(distinct x), '[]'::jsonb)
+                  from jsonb_array_elements(
+                        (v_acc->'edges_dropped_unknown_relation')
+                        || (v_r->'edges_dropped_unknown_relation')) x));
     end loop;
 
     return v_acc || jsonb_build_object('children', v_total);
@@ -19820,17 +20215,45 @@ select rbac.add_scope_policy ('aiq.lake_nodes');
 -- IT IS AN ARGUMENT, NOT A MEASUREMENT, unlike extraction.md's eight motifs,
 -- which came from 32 real documents. The first operational task after this
 -- ships is to count which of these are ever emitted and which never resolve.
+--
+-- `affiliated_with` IS SYMMETRIC, and is the first shipped relation to say so.
+-- "connected, unspecified" has no direction to lose -- a is affiliated with b
+-- exactly when b is affiliated with a -- and storing both rows would give the
+-- pair twice its share of the mass in a ranked walk and a degree of two in
+-- k-core. aiq.relation_types has carried the mechanism from the start and
+-- nothing could reach it, so until now the catalogue declared no symmetric
+-- relation at all, here or in any consumer's.
+--
+-- THE INVERSES are declared because a model reaching for one is the single
+-- largest source of dropped edges: on a 159-document extraction, 8 of 1,041
+-- edges were refused and all eight were `owned_by` or `owned`. aiq.upsert_graph
+-- now flips an edge naming a relation's inverse instead of refusing it, and
+-- these are the labels it flips on. They also repair the read path, which was
+-- reporting an in-edge of `owns` as `owns_by` -- graph_neighbors falls back to
+-- `relation || '_by'` when there is no label, and there was never a label.
+--
+-- `part_of` deliberately gets none: its natural inverse is `contains`, which is
+-- a relation in its own right one line down, and a label that is also a term
+-- would make the flip below ambiguous with the forward edge.
+--
+-- Comments live out here rather than beside the entries because everything
+-- between the dollar quotes is a JSON literal, where `--` is two characters of
+-- invalid JSON rather than a comment.
 -- ------------------------------------------------------------
 select aiq.register_graph_vocabulary($v$[
   {"relation":"is_a",            "machine_weight":0.6,  "description":"classification (extraction.md motif)"},
   {"relation":"part_of",         "machine_weight":0.6,  "description":"composition, ownership (motif)"},
   {"relation":"succession",      "machine_weight":0.5,  "description":"replacement over time (motif)"},
   {"relation":"causal",          "machine_weight":0.25, "description":"deliberately low-confidence (motif)"},
-  {"relation":"mentions",        "machine_weight":0.4,  "description":"co-occurrence; the weakest useful edge"},
+  {"relation":"mentions",        "machine_weight":0.4,  "description":"co-occurrence; the weakest useful edge",
+                                 "inverse_label":"mentioned_in"},
   {"relation":"located_in",      "machine_weight":0.6,  "description":"physical or jurisdictional containment"},
-  {"relation":"affiliated_with", "machine_weight":0.5,  "description":"connected, unspecified"},
-  {"relation":"owns",            "machine_weight":0.6,  "description":"ownership or control"},
-  {"relation":"supplies",        "machine_weight":0.6,  "description":"provides goods or services to"},
+  {"relation":"affiliated_with", "machine_weight":0.5,  "description":"connected, unspecified",
+                                 "is_symmetric":true},
+  {"relation":"owns",            "machine_weight":0.6,  "description":"ownership or control",
+                                 "inverse_label":"owned_by"},
+  {"relation":"supplies",        "machine_weight":0.6,  "description":"provides goods or services to",
+                                 "inverse_label":"supplied_by"},
   {"relation":"party_to",        "machine_weight":0.7,  "description":"a named party of an agreement"},
   {"relation":"binds",           "machine_weight":0.7,  "description":"a clause imposing an obligation on a party"},
   {"relation":"contains",        "machine_weight":0.8,  "description":"a document containing a part of itself"}
@@ -19915,10 +20338,33 @@ select aiq.register_graph_vocabulary($v$[
 -- closed this becomes `agent: structure_null` and this function is deleted --
 -- and because the prompt and schema come from the same row either way, the
 -- extraction does not change when it does.
+-- WHAT p_endpoint MAY POINT AT, said here because the signature on its own
+-- promises more than the body delivers. Everything this function builds is
+-- OpenAI chat-completions: `messages` with an inline system role,
+-- `response_format.json_schema`, and a `choices.0.message.content` extraction
+-- path. So the parameter means "same wire shape, different HOST" -- Azure
+-- OpenAI, vLLM, OpenRouter, Together, LiteLLM and anything else serving that
+-- API -- and NOT "any provider".
+--
+-- Pointed at https://api.anthropic.com/v1/messages it produces a well-formed
+-- POST to an API that wants `system` as a top-level field, a required
+-- `max_tokens`, a tool carrying `input_schema` for structured output, and an
+-- answer at `content.0.input`. That fails at request time in a worker rather
+-- than at registration, which is the worst place for it to fail, and a consumer
+-- who brought an Anthropic key and no OpenAI key has to write their own worker
+-- for this and this alone.
+--
+-- Kept as a parameter rather than a constant because the hosts above are real
+-- and are the common case; a second provider is a second branch here plus a
+-- second `jsonpath`, and the `jsonpath` is already a RETURNED field rather than
+-- a hard-coded reader, so the seam is half-built. What is not acceptable is
+-- leaving the signature to imply the branch exists.
 create or replace function aiq.extractor_call(
     p_agent      text,
     p_model      text,
     p_text       text,
+    -- Any host serving the OpenAI chat-completions API. NOT any provider --
+    -- see the note above.
     p_endpoint   text default 'https://api.openai.com/v1/chat/completions',
     p_credential text default 'LLM_API_KEY'
 ) returns jsonb as $$

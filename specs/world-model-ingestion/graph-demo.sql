@@ -124,7 +124,7 @@ select 'contract 1 ->' as step, aiq.land_graph($g${
 --   * "Acme Robotics" resolves to the SAME company node contract 1 used, so
 --     the two documents now share a vertex -- which is the entire mechanism
 --     behind §7's traversal.
---   * "Limitation of Liability" is the same (kind, key) as contract 1's
+--   * "Limitation of Liability" is the same (claimed_kind, key) as contract 1's
 --     clause, so it is the SAME candidate row, its observation updated rather
 --     than a second near-identical node created.
 -- ------------------------------------------------------------
@@ -160,8 +160,8 @@ order by 1, 2;
 
 \echo ''
 \echo '--- 5b. The same clause named by both contracts is ONE candidate ---'
-select s.kind, s.key, s.label, s.attrs
-from aiq.soft_nodes s order by s.kind, s.key;
+select s.claimed_kind, s.key, s.label, s.attrs
+from aiq.soft_nodes s order by s.claimed_kind, s.key;
 
 -- ------------------------------------------------------------
 -- 6. Corroboration -- the same edge from two documents is one row.

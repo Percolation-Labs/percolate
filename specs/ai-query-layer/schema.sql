@@ -66,6 +66,23 @@ create table if not exists aiq.node_keys (
     org_id       uuid,
     primary key (node_id, key, kind)
 );
+
+-- `kind` HERE IS THE KEY'S CLASS, not the thing's kind, and the distinction is
+-- worth a comment because the neighbouring table spends the same word on the
+-- other meaning: aiq.soft_nodes.claimed_kind is 'company' or 'person', while
+-- this one is always one of canonical/short/alias. A consumer filtering
+-- entities on aiq.node_keys.kind gets 'canonical' for every row, filters
+-- nothing, and gets no error -- which is how a real identity pass clustered a
+-- company with a product. Neither name is wrong in isolation; the collision is
+-- obvious once and invisible before, so it is written down at both ends.
+comment on column aiq.node_keys.kind is
+    'The KEY''s class: canonical, short or alias. Not the entity''s kind -- '
+    'that is aiq.soft_nodes.claimed_kind for a candidate, and the entity_type '
+    'of the registered table for anything resolved.';
+comment on column aiq.nodes.entity_type is
+    'Where the node LIVES -- soft, lake, document, or a registered entity '
+    'type. Residence, never a claimed kind: everything the null extractor '
+    'produces is ''soft'' whatever it claims to be.';
 -- Canonical keys are unique per (org, type). Short keys and aliases are
 -- deliberately NOT unique -- 'bakhmut' may be canonical for a place and an
 -- event, and short-key lookup may legitimately return several nodes.
@@ -107,13 +124,139 @@ create table if not exists aiq.relation_types (
     -- two. Declared per triple because that is this table's key, but it is a
     -- property of the TERM: the trigger reads it with bool_or over the term,
     -- and a term marked symmetric in one triple and not another is a
-    -- modelling error rather than a supported state.
+    -- modelling error rather than a supported state -- which the two triggers
+    -- below now make it, instead of leaving it as prose in this comment.
+    --
+    -- NULLABLE, and that is the whole reason the inheritance below can work.
+    -- `not null default false` made a writer that DID NOT SAY and a writer
+    -- that said false the same row, so there was nothing for a new triple to
+    -- inherit and nothing a disagreement check could distinguish. That is the
+    -- same defect aiq.graph_vocabulary.machine_weight had -- a default applied
+    -- at write, erasing the difference between an absent value and an explicit
+    -- one -- and it is worth naming twice because it reads as a tightening
+    -- both times. null means UNDECLARED; every reader coalesces to false, so
+    -- the effective default is unchanged.
+    --
     -- Named `is_symmetric`, not `symmetric`: SYMMETRIC is a reserved word in
     -- SQL (it belongs to BETWEEN), so the obvious spelling is a column that
     -- has to be double-quoted at every single use site forever.
-    is_symmetric boolean not null default false,
+    is_symmetric boolean,
     primary key (src_type, relation, dst_type)
 );
+
+-- ...and on a database that already has the table, where `create table if not
+-- exists` above is a no-op and the column is still NOT NULL. Guarded for the
+-- same reason agentic.sessions' rename is: this file is replayed on every
+-- upgrade, and DROP NOT NULL has no IF EXISTS to make the second run a no-op.
+-- (It is idempotent in effect -- dropping a constraint that is already gone
+-- succeeds -- but the guard keeps the intent legible next to the column.)
+do $$
+begin
+    if exists (select 1 from information_schema.columns
+                where table_schema = 'aiq' and table_name = 'relation_types'
+                  and column_name = 'is_symmetric' and is_nullable = 'NO') then
+        alter table aiq.relation_types alter column is_symmetric drop not null;
+        alter table aiq.relation_types alter column is_symmetric drop default;
+    end if;
+end $$;
+
+-- ------------------------------------------------------------
+-- 3a. is_symmetric and inverse_label are properties of the RELATION, and this
+--     table is keyed by the TRIPLE. Two triggers reconcile that, and which one
+--     fires is decided by whether the writer said anything at all.
+--
+-- THE RULE THIS IMPLEMENTS is graph-identity.md's own, applied to the
+-- catalogue rather than to the edge: "a rule the writer has to know before it
+-- can insert is a rule every writer gets wrong once". A term-level fact stored
+-- per triple gives every writer of a NEW triple a fact to repeat, and the
+-- writers in this tree demonstrate the failure rather than merely risking it:
+-- dev/scale/graph/01-generate.sql catalogues `owns` and `mentions` over
+-- scale_entity naming neither column, and dev/init/04-graph-sample.sql
+-- catalogues `competes_with` and `knows` with a description that SAYS
+-- symmetric and a flag that says nothing. Refusing all three would be correct
+-- and useless.
+--
+-- So: absence INHERITS, and disagreement is REFUSED.
+--   * A row that leaves either column null takes the term's value, if the term
+--     has one. The scale generator keeps working and its `owns` triples get
+--     `owned_by` without naming it.
+--   * A row that names a value differing from the term's raises. That is the
+--     modelling error the column comment has always described, and it is now
+--     the database that says so rather than a reader of this file.
+--
+-- Statement-level for the check, with a transition table, so the cost is one
+-- pass over the terms this statement touched rather than over the catalogue --
+-- and so a pre-existing split somewhere else in the table cannot fail an
+-- unrelated insert, which is how a global assertion becomes a mystery.
+-- ------------------------------------------------------------
+create or replace function aiq.relation_term_inherit() returns trigger as $$
+declare
+    v_sym boolean;
+    v_inv text;
+begin
+    if new.is_symmetric is null or new.inverse_label is null then
+        select bool_or(rt.is_symmetric), min(rt.inverse_label)
+          into v_sym, v_inv
+          from aiq.relation_types rt
+         where rt.relation = new.relation
+           and (rt.src_type, rt.dst_type) is distinct from (new.src_type, new.dst_type);
+        if new.is_symmetric is null then
+            new.is_symmetric := v_sym;
+        end if;
+        if new.inverse_label is null then
+            new.inverse_label := v_inv;
+        end if;
+    end if;
+    return new;
+end $$ language plpgsql;
+
+create or replace trigger relation_types_inherit_term
+    before insert or update on aiq.relation_types
+    for each row execute function aiq.relation_term_inherit();
+
+create or replace function aiq.check_relation_term() returns trigger as $$
+declare v_bad text;
+begin
+    select string_agg(format('%s (%s)', s.relation, s.saw), '; ' order by s.relation)
+      into v_bad
+      from (select rt.relation,
+                   string_agg(distinct coalesce(rt.is_symmetric::text, 'null')
+                              || '/' || coalesce(rt.inverse_label, 'null'), ', ') as saw
+              from aiq.relation_types rt
+             where rt.relation in (select t.relation from touched t)
+             group by rt.relation
+            having count(distinct rt.is_symmetric) > 1
+                or count(distinct rt.inverse_label) > 1) s;
+    if v_bad is not null then
+        raise exception
+            'these relations declare symmetry or an inverse differently on '
+            'different triples: %', v_bad
+        using hint =
+            'is_symmetric and inverse_label describe the RELATION, not the '
+            '(src_type, relation, dst_type) triple this table is keyed by. '
+            'aiq.check_edge_catalogue reads symmetry with bool_or over the '
+            'term, so a split term means an edge normalises or does not '
+            'depending on which types are at its ends -- a wrong number rather '
+            'than an error. Leave the column null to inherit the term''s value.';
+    end if;
+    return null;
+end $$ language plpgsql;
+
+-- TWO TRIGGERS, ONE FUNCTION, because `referencing new table` is refused on a
+-- trigger with more than one event: "transition tables cannot be specified for
+-- triggers with more than one event". The alternative -- dropping the
+-- transition table and re-scanning the catalogue on every statement -- would
+-- also let a pre-existing split somewhere else in the table fail an unrelated
+-- insert, so the split pair is the better shape as well as the legal one.
+create or replace trigger relation_types_term_consistent_ins
+    after insert on aiq.relation_types
+    referencing new table as touched
+    for each statement execute function aiq.check_relation_term();
+
+create or replace trigger relation_types_term_consistent_upd
+    after update on aiq.relation_types
+    referencing new table as touched
+    for each statement execute function aiq.check_relation_term();
 
 -- ------------------------------------------------------------
 -- 4. Edges — canonical store for SOFT (authored) links only.
@@ -3072,7 +3215,13 @@ returns jsonb as $$
                 where p_name is null or r.entity_type = p_name), '[]'::jsonb),
             'relations', coalesce((select jsonb_agg(jsonb_build_object(
                     'src_type', src_type, 'relation', relation, 'dst_type', dst_type,
-                    'inverse_label', inverse_label, 'description', description)
+                    'inverse_label', inverse_label, 'description', description,
+                    -- Coalesced, because the column is nullable to keep
+                    -- "undeclared" distinct from "declared false" INSIDE the
+                    -- catalogue; a consumer reading the published shape wants
+                    -- the effective answer, and null would only invite each of
+                    -- them to coalesce it again differently.
+                    'is_symmetric', coalesce(is_symmetric, false))
                     order by src_type, relation, dst_type)
                 from aiq.relation_types
                 where p_name is null

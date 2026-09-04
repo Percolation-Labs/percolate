@@ -75,7 +75,7 @@ begin
         raise exception 'the extractor CREATED A ROW in a registered typed table';
     end if;
     if not exists (select 1 from aiq.soft_nodes
-                    where kind = 'ttype_org' and key = 'a company that does not exist') then
+                    where claimed_kind = 'ttype_org' and key = 'a company that does not exist') then
         raise exception 'an unresolved registered kind did not become a candidate '
                         'carrying its claimed kind';
     end if;
@@ -94,7 +94,7 @@ do $$
 begin
     perform aiq.upsert_graph($g${
       "nodes": [{"k":"ttype_org","n":"Ambi Ltd"}], "edges": []}$g$::jsonb, '{"agent":"t"}'::jsonb);
-    if not exists (select 1 from aiq.soft_nodes where kind='ttype_org' and key='ambi ltd') then
+    if not exists (select 1 from aiq.soft_nodes where claimed_kind='ttype_org' and key='ambi ltd') then
         raise exception 'an ambiguous short key resolved to ONE of its matches '
                         'instead of becoming a candidate';
     end if;
@@ -121,10 +121,10 @@ begin
 
     select n.id into v_n1 from aiq.nodes n join aiq.soft_nodes s
       on s.id = n.entity_id and n.entity_type='soft'
-     where s.kind='ord' and s.key='alpha';
+     where s.claimed_kind='ord' and s.key='alpha';
     select n.id into v_n2 from aiq.nodes n join aiq.soft_nodes s
       on s.id = n.entity_id and n.entity_type='soft'
-     where s.kind='ord' and s.key='beta';
+     where s.claimed_kind='ord' and s.key='beta';
 
     -- Both directions now exist: alpha->beta from the first, beta->alpha from
     -- the reordered second. Two edges, not one.
@@ -167,18 +167,29 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
--- 7. A RELATION OUTSIDE THE VOCABULARY IS REFUSED.
+-- 7. A RELATION OUTSIDE THE VOCABULARY IS NOT WRITTEN -- and is NAMED.
 --    The vocabulary is closed for extraction.md's reason: an extractor that
---    can emit anything cannot be checked, costed, or swapped.
+--    can emit anything cannot be checked, costed, or swapped. What changed is
+--    only the blast radius. This used to raise, which aborted the transaction
+--    and discarded every node and every valid edge the document produced -- so
+--    the assertion below is now "the edge did not land AND the document did",
+--    which is the property the closed vocabulary was always for.
 -- ---------------------------------------------------------------------
 do $$
+declare v_r jsonb;
 begin
-    perform aiq.upsert_graph($g${
+    v_r := aiq.upsert_graph($g${
       "nodes": [{"k":"ord","n":"A"},{"k":"ord","n":"B"}],
       "edges": [{"s":0,"t":1,"r":"vibes_with"}]}$g$::jsonb, '{"agent":"t"}'::jsonb);
-    raise exception 'an out-of-vocabulary relation was accepted';
-exception when others then
-    if sqlerrm not like '%not in aiq.graph_vocabulary%' then raise; end if;
+    if (v_r->>'edges_new')::int <> 0 then
+        raise exception 'an out-of-vocabulary relation was written: %', v_r;
+    end if;
+    if (v_r->'edges_dropped_unknown_relation') <> '["vibes_with"]'::jsonb then
+        raise exception 'the refused relation was not named in the receipt: %', v_r;
+    end if;
+    if (v_r->>'nodes')::int <> 2 then
+        raise exception 'the nodes went with the bad edge: %', v_r;
+    end if;
 end $$;
 
 -- ---------------------------------------------------------------------
@@ -242,9 +253,9 @@ begin
       '{"agent":"t","resource_id":"33330000-0000-0000-0000-000000000002"}'::jsonb);
 
     select n.id into v_n1 from aiq.nodes n join aiq.soft_nodes s
-      on s.id=n.entity_id and n.entity_type='soft' where s.kind='corr' and s.key='p';
+      on s.id=n.entity_id and n.entity_type='soft' where s.claimed_kind='corr' and s.key='p';
     select n.id into v_n2 from aiq.nodes n join aiq.soft_nodes s
-      on s.id=n.entity_id and n.entity_type='soft' where s.kind='corr' and s.key='q';
+      on s.id=n.entity_id and n.entity_type='soft' where s.claimed_kind='corr' and s.key='q';
 
     select jsonb_array_length(provenance->'sources') into v_srcs
       from aiq.edges where src_id=v_n1 and dst_id=v_n2 and relation='supplies';
@@ -282,7 +293,7 @@ begin
 
     select s.id, n.id into v_cand_soft, v_cand_node
       from aiq.soft_nodes s join aiq.nodes n on n.entity_id = s.id and n.entity_type='soft'
-     where s.kind='ttype_org' and s.key='zephyr haulage';
+     where s.claimed_kind='ttype_org' and s.key='zephyr haulage';
     select node_id into v_target from aiq.node_keys
      where key='ambi ltd (north)' and kind='canonical';
 
@@ -364,7 +375,7 @@ begin
       -- cache. `resolved_node_id` is on the allow-list because it is the one
       -- such pointer the design does want; who may read the row is not one at
       -- all, and it sits beside org_id for the same reason org_id does.
-      and c.column_name not in ('id','kind','key','label','attrs','org_id',
+      and c.column_name not in ('id','claimed_kind','key','label','attrs','org_id',
                                 'owner_id','visibility',
                                 'first_seen_at','last_seen_at','resolved_node_id',
                                 'dataset','row_key');
@@ -424,6 +435,204 @@ begin
         raise exception 'shared reference data stopped resolving for a tenant -- the '
                         'org filter must admit org_id is null';
     end if;
+end $$;
+
+-- ---------------------------------------------------------------------
+-- A RE-REGISTRATION THAT NAMES NO WEIGHT KEEPS THE TUNED ONE.
+--
+-- Asserted rather than trusted because the failure is SILENT and lands late:
+-- aiq.upsert_graph seeds a new edge from machine_weight and then merges with
+-- `greatest(edges.weight, excluded.weight)`, so a reset demotes nothing that
+-- already exists and every edge written afterwards carries the prior. Nothing
+-- raises, no count changes, and the graph is quietly retuned. The shape that
+-- triggers it is the shape every bootstrap has -- and the one this collection
+-- ships, since the vocabulary at the foot of graph.sql re-registers on every
+-- ALTER EXTENSION percolate UPDATE.
+-- ---------------------------------------------------------------------
+do $$
+declare v_w real; v_d text;
+begin
+    perform aiq.register_graph_vocabulary(
+        '[{"relation":"tuned_rel","machine_weight":0.9,"description":"tuned by hand"}]'::jsonb);
+
+    -- The idempotent bootstrap runs a second time and names no weight.
+    perform aiq.register_graph_vocabulary('[{"relation":"tuned_rel"}]'::jsonb);
+
+    select machine_weight, description into v_w, v_d
+      from aiq.graph_vocabulary where relation = 'tuned_rel';
+    -- Compared as `real`, which is the column's type: `0.9` on its own is
+    -- numeric, and 0.9::real is 0.89999997615814209, so the untyped literal
+    -- makes this assertion fail against a column holding exactly what it was
+    -- given. A test that cries wolf is worse than no test.
+    if v_w <> 0.9::real then
+        raise exception
+            're-registering without a weight reset machine_weight to % -- an absent '
+            'value and an explicit 0.5 have become the same value again', v_w;
+    end if;
+    if v_d <> 'tuned by hand' then
+        raise exception 'description lost its protection: %', v_d;
+    end if;
+
+    -- ...and a caller who MEANS to change it still can. A fix that made the
+    -- column write-once would pass the assertion above and be worse.
+    perform aiq.register_graph_vocabulary(
+        '[{"relation":"tuned_rel","machine_weight":0.2}]'::jsonb);
+    select machine_weight into v_w from aiq.graph_vocabulary where relation = 'tuned_rel';
+    if v_w <> 0.2::real then
+        raise exception 'an explicit weight did not take: %', v_w;
+    end if;
+    raise notice 'graph-index: a re-registration without a weight preserves the tuned one';
+end $$;
+
+-- ---------------------------------------------------------------------
+-- SYMMETRY AND INVERSES ARE REACHABLE THROUGH THE REGISTRATION PAYLOAD.
+--
+-- The mechanism has always been in aiq.relation_types and register_graph_
+-- vocabulary wrote four columns and no others, so no consumer -- and no
+-- shipped relation -- could declare either. The assertion is that the ONE
+-- path a consumer has now carries them, and carries them to every triple,
+-- because is_symmetric is a property of the term and this table is keyed by
+-- the triple.
+-- ---------------------------------------------------------------------
+do $$
+declare v_n int; v_sym int; v_inv int;
+begin
+    perform aiq.register_graph_vocabulary($j$[
+      {"relation":"sym_rel", "machine_weight":0.7, "is_symmetric":true},
+      {"relation":"fwd_rel", "machine_weight":0.7, "inverse_label":"bwd_rel"}]$j$::jsonb);
+
+    select count(*) filter (where relation = 'sym_rel' and is_symmetric),
+           count(*) filter (where relation = 'sym_rel'),
+           count(*) filter (where relation = 'fwd_rel' and inverse_label = 'bwd_rel')
+      into v_sym, v_n, v_inv
+      from aiq.relation_types;
+    if v_sym = 0 or v_sym <> v_n then
+        raise exception
+            'symmetry reached % of the % triples generated for the term -- it is a '
+            'property of the relation, not of the (src,relation,dst) triple', v_sym, v_n;
+    end if;
+    if v_inv <> v_n then
+        raise exception 'the inverse label reached % of % triples', v_inv, v_n;
+    end if;
+
+    -- A REFRESH must not un-declare them. This is the no-payload call every
+    -- consumer makes after registering a new entity table, and resetting the
+    -- columns to their defaults here would be the machine_weight bug again.
+    perform aiq.register_graph_vocabulary();
+    select count(*) filter (where relation = 'sym_rel' and is_symmetric)
+      into v_sym from aiq.relation_types;
+    if v_sym <> v_n then
+        raise exception 'a refresh un-declared symmetry on % of % triples',
+            v_n - v_sym, v_n;
+    end if;
+    raise notice 'graph-index: symmetry and inverses reach every triple, and survive a refresh';
+end $$;
+
+-- ---------------------------------------------------------------------
+-- A TERM CANNOT DECLARE SYMMETRY TWO WAYS -- absence inherits, disagreement raises.
+-- ---------------------------------------------------------------------
+do $$
+declare v_sym boolean;
+begin
+    -- Says nothing -> inherits the term's value. This is the case that makes
+    -- the rule usable: a writer cataloguing a new type pair should not have to
+    -- know what the term already decided.
+    insert into aiq.relation_types (src_type, relation, dst_type)
+    values ('soft', 'sym_rel', 'ttype_org')
+    on conflict (src_type, relation, dst_type) do nothing;
+    select is_symmetric into v_sym from aiq.relation_types
+     where src_type = 'soft' and relation = 'sym_rel' and dst_type = 'ttype_org';
+    if not coalesce(v_sym, false) then
+        raise exception 'a new triple did not inherit its term''s symmetry';
+    end if;
+
+    -- Says the opposite -> refused. The failure this prevents is a wrong
+    -- number, not an error: check_edge_catalogue reads symmetry with bool_or
+    -- over the term, so a split term normalises an edge or not depending on
+    -- which types are at its ends.
+    begin
+        insert into aiq.relation_types (src_type, relation, dst_type, is_symmetric)
+        values ('lake', 'sym_rel', 'lake', false);
+        raise exception 'a term was allowed to declare symmetry two ways';
+    exception when others then
+        if sqlerrm like '%allowed to declare symmetry two ways%' then raise; end if;
+    end;
+    raise notice 'graph-index: a split term is refused and an absent one inherits';
+end $$;
+
+-- ---------------------------------------------------------------------
+-- ONE BAD RELATION NO LONGER LOSES THE WHOLE DOCUMENT.
+--
+-- Measured before the fix, on this exact shape: 4 nodes and 4 valid edges
+-- discarded for 1 invented relation, because the refusal raised and the
+-- transaction went with it. The vocabulary stays closed -- the edge is still
+-- not written -- but a receipt naming what was dropped is the difference
+-- between a gap you can act on and a document that silently never arrived.
+-- ---------------------------------------------------------------------
+do $$
+declare v_r jsonb;
+begin
+    v_r := aiq.upsert_graph($g${
+      "nodes": [{"k":"ord","n":"Beta Ltd"},{"k":"ord","n":"Gadget"},
+                {"k":"ord","n":"Sam Poe"},{"k":"ord","n":"Gamma SA"}],
+      "edges": [{"s":0,"t":1,"r":"owns"},
+                {"s":2,"t":0,"r":"affiliated_with"},
+                {"s":1,"t":0,"r":"owned_by"},
+                {"s":3,"t":1,"r":"supplies"},
+                {"s":3,"t":0,"r":"party_to"}]}$g$::jsonb, '{"agent":"t"}'::jsonb);
+
+    if (v_r->>'nodes')::int <> 4 then
+        raise exception 'the document was lost for one bad edge: %', v_r;
+    end if;
+
+    -- `owned_by` is `owns`'s declared inverse, so it is FLIPPED rather than
+    -- dropped -- all eight of the edges this lost on a real 159-document run
+    -- were this exact case.
+    if (v_r->>'edges_flipped_to_inverse')::int <> 1 then
+        raise exception 'an edge naming a declared inverse was not flipped: %', v_r;
+    end if;
+    if jsonb_array_length(v_r->'edges_dropped_unknown_relation') <> 0 then
+        raise exception 'a recoverable inverse was counted as dropped: %', v_r;
+    end if;
+    -- The flip stored the FORWARD form, in the forward direction: Gadget
+    -- owned_by Beta is Beta owns Gadget, not a second `owned_by` row.
+    if not exists (
+        select 1 from aiq.edges e
+          join aiq.node_keys s on s.node_id = e.src_id and s.key = 'ord/beta ltd'
+          join aiq.node_keys d on d.node_id = e.dst_id and d.key = 'ord/gadget'
+         where e.relation = 'owns') then
+        raise exception 'the flipped edge was not stored in its forward orientation';
+    end if;
+    raise notice 'graph-index: an inverse is recovered and the document survives';
+end $$;
+
+do $$
+declare v_r jsonb;
+begin
+    -- ...and a relation that is nobody's inverse is dropped, NAMED, and does
+    -- not take the rest of the payload with it.
+    v_r := aiq.upsert_graph($g${
+      "nodes": [{"k":"ord","n":"Delta Ltd"},{"k":"ord","n":"Sprocket"}],
+      "edges": [{"s":0,"t":1,"r":"owns"},
+                {"s":0,"t":1,"r":"reticulates"}]}$g$::jsonb, '{"agent":"t"}'::jsonb);
+
+    if (v_r->'edges_dropped_unknown_relation') <> '["reticulates"]'::jsonb then
+        raise exception 'the dropped relation was not named in the receipt: %', v_r;
+    end if;
+    if (v_r->>'edges_new')::int <> 1 then
+        raise exception 'the valid edge did not survive the invalid one: %', v_r;
+    end if;
+    -- And an out-of-range ORDINAL still raises. That one is a wiring bug, not
+    -- a model artefact, and the distinction is the whole basis of the change.
+    begin
+        perform aiq.upsert_graph($g${
+          "nodes": [{"k":"ord","n":"Only One"}],
+          "edges": [{"s":0,"t":7,"r":"owns"}]}$g$::jsonb, '{"agent":"t"}'::jsonb);
+        raise exception 'an out-of-range ordinal was tolerated';
+    exception when others then
+        if sqlerrm like '%out-of-range ordinal was tolerated%' then raise; end if;
+    end;
+    raise notice 'graph-index: an unknown relation is dropped and named, a bad ordinal still raises';
 end $$;
 
 rollback;
