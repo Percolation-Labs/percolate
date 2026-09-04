@@ -172,7 +172,7 @@ begin
     if v_ctx ? 'a' then
         raise exception 'a worker whose lease was revoked published its result anyway: %', v_ctx;
     end if;
-    if (select status from workflow.tasks where id = v_a) = 'done' then
+    if (select status from workflow.tasks where id = v_a) = 'succeeded' then
         raise exception 'a revoked worker completed the task it no longer held';
     end if;
     if (select status from workflow.tasks where run_id = v_run and step_key = 'b') is distinct from 'pending' then
@@ -521,7 +521,7 @@ begin
         raise exception 'a due timer was not promoted -- the run waits forever '
                         'while reporting running (% fired)', v_fired;
     end if;
-    if (select status from workflow.tasks where id = v_wait) is distinct from 'done' then
+    if (select status from workflow.tasks where id = v_wait) is distinct from 'succeeded' then
         raise exception 'a promoted timer is not done';
     end if;
     if (select completed_at from workflow.tasks where id = v_wait) is null then
@@ -566,7 +566,7 @@ begin
 
     perform workflow.signal_task(v_run, 'approved', '{"by":"a human"}'::jsonb);
 
-    if (select status from workflow.tasks where id = v_await) is distinct from 'done' then
+    if (select status from workflow.tasks where id = v_await) is distinct from 'succeeded' then
         raise exception 'signal_task did not resolve the waiting task';
     end if;
     if (select completed_at from workflow.tasks where id = v_await) is null then

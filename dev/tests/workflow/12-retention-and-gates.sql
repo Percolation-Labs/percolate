@@ -61,7 +61,7 @@ begin
                 where run_id in (v_plain, v_agenty) loop
         perform workflow.complete_task(v_r.id, '{"result": "ok"}'::jsonb);
     end loop;
-    update workflow.runs set status = 'completed', completed_at = now() - interval '90 days'
+    update workflow.runs set status = 'succeeded', completed_at = now() - interval '90 days'
      where id in (v_plain, v_agenty);
 
     select count(*) into v_events from workflow.task_events
@@ -160,7 +160,7 @@ begin
 
     for i in 1..10 loop
         v_run := workflow.start_workflow('t_ret', '{}'::jsonb);
-        update workflow.runs set status = 'completed',
+        update workflow.runs set status = 'succeeded',
                completed_at = now() - interval '90 days'
          where id = v_run;
     end loop;
@@ -185,7 +185,7 @@ declare
     v_res record;
 begin
     v_run := workflow.start_workflow('t_ret', '{}'::jsonb);
-    update workflow.runs set status = 'completed',
+    update workflow.runs set status = 'succeeded',
            completed_at = now() - interval '90 days'
      where id = v_run;
     insert into workflow.schedules (name, workflow_name, cron_expr, last_run_id)

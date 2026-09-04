@@ -536,6 +536,15 @@ create unique index if not exists one_summary_per_session
 create index if not exists messages_session_id_seq_idx on agentic.messages (session_id, seq);
 create index if not exists messages_run_id_seq_idx on agentic.messages (run_id, seq);
 
+-- agentic.runs draws its states from the same table workflow does. The two
+-- lifecycles are genuinely different -- only an agent run can be
+-- `quota_exceeded`, only a task can be `ready` -- so the SUBSET stays a CHECK
+-- here while the WORDS come from one place. This is the dependency that already
+-- exists in the other direction too: agentic.runs references workflow.tasks.
+alter table agentic.runs drop constraint if exists agentic_runs_status_fk;
+alter table agentic.runs add  constraint agentic_runs_status_fk
+    foreign key (status) references workflow.lifecycle_states(state);
+
 alter table agentic.runs drop constraint if exists runs_delegated_by_message_fk;
 alter table agentic.runs
     add constraint runs_delegated_by_message_fk

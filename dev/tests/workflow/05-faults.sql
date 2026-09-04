@@ -144,7 +144,7 @@ begin
     -- The same step, answering correctly on the next attempt.
     update workflow.tasks set status = 'running' where id = v_t;
     perform workflow.complete_task(v_t, '{"result":{"verdict":"SAFETY"}}'::jsonb);
-    if (select status from workflow.tasks where id = v_t) is distinct from 'done' then
+    if (select status from workflow.tasks where id = v_t) is distinct from 'succeeded' then
         raise exception 'a conforming retry did not complete';
     end if;
 
@@ -305,7 +305,7 @@ begin
     -- unrunnable work task on queue 'none' and sat ready forever.
     if exists (select 1 from workflow.tasks
                where run_id = v_run and compensates_task_id is not null
-                 and (kind <> 'sql' or status <> 'done')) then
+                 and (kind <> 'sql' or status <> 'succeeded')) then
         raise exception 'a compensation did not run as its declared kind: %',
             (select jsonb_agg(jsonb_build_object('k',kind,'s',status))
              from workflow.tasks where run_id = v_run and compensates_task_id is not null);
@@ -321,7 +321,7 @@ begin
             v_ledger;
     end if;
     if (select count(distinct completed_at) from workflow.tasks
-        where run_id = v_run and saga_group = 'b' and status = 'done') < 2 then
+        where run_id = v_run and saga_group = 'b' and status = 'succeeded') < 2 then
         raise exception
             'saga members share a completed_at, so LIFO ordering is a coin flip -- '
             'now() is the transaction timestamp; clock_timestamp() advances within one';
@@ -376,7 +376,7 @@ begin
     perform workflow.complete_task(
         (select id from workflow.tasks where run_id = v_run and step_key = 'a'),
         '{"result":"late"}'::jsonb);
-    if (select status from workflow.tasks where run_id = v_run and step_key = 'a') = 'done' then
+    if (select status from workflow.tasks where run_id = v_run and step_key = 'a') = 'succeeded' then
         raise exception 'a task completed under a cancelled run';
     end if;
 end $$;
@@ -545,14 +545,14 @@ begin
             'the child run has no tasks -- start_child_workflow inserted a run row without '
             'expanding its graph, so composition could never have worked';
     end if;
-    if (select status from workflow.runs where id = v_child) is distinct from 'completed' then
+    if (select status from workflow.runs where id = v_child) is distinct from 'succeeded' then
         raise exception 'the child run did not complete: %',
             (select status from workflow.runs where id = v_child);
     end if;
     -- The child of only in-database steps finishes INSIDE start_workflow,
     -- before the parent link exists -- so the parent has to be resolved
     -- explicitly or it waits forever on a run that is already over.
-    if (select status from workflow.tasks where run_id = v_run and step_key = 'call') is distinct from 'done' then
+    if (select status from workflow.tasks where run_id = v_run and step_key = 'call') is distinct from 'succeeded' then
         raise exception 'the parent was not resolved by its already-finished child';
     end if;
     if (select string_agg(action, ',' order by seq) from t_f_ledger) is distinct from 'CHILD,AFTER' then

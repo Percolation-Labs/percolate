@@ -78,7 +78,7 @@ begin
     v_run := workflow.start_workflow('t_mx_fan', '{}'::jsonb);
 
     select * into v_fan from workflow.tasks where run_id = v_run and step_key = 'fan';
-    if v_fan.status <> 'done' then
+    if v_fan.status <> 'succeeded' then
         raise exception 'matrix step did not expand on start: status %', v_fan.status;
     end if;
 
@@ -427,7 +427,7 @@ begin
             (select jsonb_agg(jsonb_build_object('k',step_key,'s',status,'e',error))
              from workflow.tasks where run_id = v_run);
     end if;
-    if (select status from workflow.runs where id = v_run) is distinct from 'completed' then
+    if (select status from workflow.runs where id = v_run) is distinct from 'succeeded' then
         raise exception 'a fan-out of sql steps did not complete with nothing deployed';
     end if;
 end $$;
@@ -494,7 +494,7 @@ begin
 
     update workflow.tasks set status = 'ready', run_after = now() where id = v_fan;
 
-    if (select status from workflow.tasks where id = v_fan) is distinct from 'done' then
+    if (select status from workflow.tasks where id = v_fan) is distinct from 'succeeded' then
         raise exception 'an identical re-expansion did not resolve as done: %',
             (select status from workflow.tasks where id = v_fan);
     end if;
@@ -636,7 +636,7 @@ declare v_run uuid; v jsonb;
 begin
     v_run := workflow.start_workflow('t_mx_gather', '{}'::jsonb);
 
-    if (select status from workflow.runs where id = v_run) is distinct from 'completed' then
+    if (select status from workflow.runs where id = v_run) is distinct from 'succeeded' then
         raise exception 'the gather run did not complete: %',
             (select jsonb_agg(jsonb_build_object('k',step_key,'s',status,'e',error))
              from workflow.tasks where run_id = v_run);
@@ -656,7 +656,7 @@ begin
     -- And its status, unfiltered -- so that when continue-on-failure exists,
     -- an aggregate can see which rows are missing rather than silently
     -- averaging over the survivors.
-    if v->0->>'status' <> 'done' then
+    if v->0->>'status' <> 'succeeded' then
         raise exception 'matrix_outputs does not report per-child status';
     end if;
 end $$;
@@ -750,7 +750,7 @@ begin
         raise exception 'the compiler''s own output does not run on this engine: %',
             coalesce(v_o, '<null>');
     end if;
-    if (select status from workflow.runs where id = v_run) is distinct from 'completed' then
+    if (select status from workflow.runs where id = v_run) is distinct from 'succeeded' then
         raise exception 'a compiled matrix workflow did not complete';
     end if;
 end $$;

@@ -491,9 +491,9 @@ begin
     insert into workflow.deposits (locus_kind, locus, kind, amplitude, polarity,
                                    half_life, origin_key, run_id, task_id, org_id)
     select 'step_key', t.step_key,
-           case when e.to_status = 'done' then 'success' else 'failure' end,
+           case when e.to_status = 'succeeded' then 'success' else 'failure' end,
            1.0,
-           case when e.to_status = 'done' then 1 else -1 end,
+           case when e.to_status = 'succeeded' then 1 else -1 end,
            p_half_life,
            -- ORIGIN IS THE RUN, NOT THE TASK (invariant 5). A fan-out of five
            -- hundred children is ONE run doing one thing five hundred times;
@@ -505,7 +505,7 @@ begin
     join workflow.tasks t on t.id = e.task_id
     left join workflow.runs r on r.id = e.run_id
     where e.at > p_since
-      and e.to_status in ('done','failed');
+      and e.to_status in ('succeeded','failed');
 
     get diagnostics v_n = row_count;
     return v_n;

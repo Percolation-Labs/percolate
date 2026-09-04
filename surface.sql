@@ -111,6 +111,9 @@ insert into expected (subsystem, kind, name, detail, why) values
 -- ---------- workflow-engine --------------------------------------------
 ('workflow-engine','schema','workflow',null,'spec.md: Postgres owns orchestration state'),
 ('workflow-engine','table','workflow.definitions',null,'spec.md §2'),
+-- The lifecycle vocabulary, declared because three tables now reference it
+-- and a missing one would take every status write with it.
+('workflow-engine','table','workflow.lifecycle_states',null,'schema.sql: one home for the words every status column references'),
 ('workflow-engine','table','workflow.runs',null,'spec.md §2'),
 ('workflow-engine','table','workflow.tasks',null,'spec.md §2'),
 ('workflow-engine','table','workflow.step_functions',null,'schema.sql §17: the operations a deployment blesses -- a timeout and a description each, and the whole surface under sql_policy = registered'),

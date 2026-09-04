@@ -659,7 +659,7 @@ begin
     -- Raised rather than skipped: a document silently absent from the index is
     -- a hole in a graph that still answers questions.
     select count(*) into v_missing from workflow.tasks
-     where matrix_parent_id = p_matrix_task and status = 'done'
+     where matrix_parent_id = p_matrix_task and status = 'succeeded'
        and (output is null or not (output ? 'result'));
     if v_missing > 0 then
         raise exception
@@ -672,7 +672,7 @@ begin
         select t.output->'result' as graph, t.input->'item'->>'resource_id' as rid,
                t.input->'item'->'window_ordinal' as win
         from workflow.tasks t
-        where t.matrix_parent_id = p_matrix_task and t.status = 'done'
+        where t.matrix_parent_id = p_matrix_task and t.status = 'succeeded'
     loop
         v_r := aiq.upsert_graph(v_child.graph, jsonb_build_object(
             'resource_id', v_child.rid, 'run_id', v_run,

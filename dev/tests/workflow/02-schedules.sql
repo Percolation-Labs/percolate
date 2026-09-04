@@ -196,7 +196,7 @@ begin
 
     -- And because the only step is a `sql` step, it has already executed --
     -- with nothing deployed anywhere.
-    if (select status from workflow.tasks where run_id = v_run and step_key = 'drift') is distinct from 'done' then
+    if (select status from workflow.tasks where run_id = v_run and step_key = 'drift') is distinct from 'succeeded' then
         raise exception 'the sql step in a scheduled run did not execute in-database';
     end if;
 
@@ -254,7 +254,7 @@ begin
     end if;
 
     -- Once it finishes, the next tick proceeds. A skip is a skip, not a stop.
-    update workflow.runs set status = 'completed' where id = v_run;
+    update workflow.runs set status = 'succeeded' where id = v_run;
     v_started := workflow.tick('2026-08-31 10:02:00+00');
     if v_started <> 1 then
         raise exception 'the schedule did not resume after its run finished';

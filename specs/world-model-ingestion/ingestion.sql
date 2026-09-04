@@ -187,7 +187,7 @@ begin
                (t.input->'item'->>'resource_id')::uuid as rid,
                t.input->'item'->'window_ordinal' as win
         from workflow.tasks t
-        where t.matrix_parent_id = p_matrix_task and t.status = 'done'
+        where t.matrix_parent_id = p_matrix_task and t.status = 'succeeded'
         order by t.created_at
     loop
         v_total := v_total + 1;

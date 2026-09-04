@@ -318,7 +318,7 @@ begin
         perform workflow.merge_step_context(
             r.id, jsonb_build_object('result', p_payload));
         update workflow.tasks
-        set status = 'done', output = jsonb_build_object('result', p_payload),
+        set status = 'succeeded', output = jsonb_build_object('result', p_payload),
             completed_at = clock_timestamp()
         where id = r.id;
     end loop;

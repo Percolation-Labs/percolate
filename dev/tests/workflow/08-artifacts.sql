@@ -146,7 +146,7 @@ begin
         '$artifact', v_res));
 
     select * into t from workflow.tasks where id = v_task;
-    if t.status <> 'done' then
+    if t.status <> 'succeeded' then
         raise exception 'a task that offloaded its bytes did not complete: % / %',
             t.status, t.error;
     end if;
@@ -174,7 +174,7 @@ begin
     --     rest of the section exists to make possible.
     perform workflow.drain_sql_steps(v_run, 10);
     select * into t from workflow.tasks where run_id = v_run and step_key = 'consume';
-    if t.status <> 'done' then
+    if t.status <> 'succeeded' then
         raise exception 'the sql step could not resolve the artifact: % / %',
             t.status, t.error;
     end if;

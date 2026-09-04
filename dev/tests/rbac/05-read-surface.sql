@@ -53,7 +53,11 @@ declare
         'rbac.roles', 'rbac.role_permissions', 'rbac.permission_kinds',
         -- The allow-list a `sql` step may call. Registering is owner-only;
         -- reading the list is how an author knows what they may name.
-        'workflow.step_functions'
+        'workflow.step_functions',
+        -- The lifecycle vocabulary. One home for the words every status column
+        -- references, identical for every tenant, and unreadable it would mean
+        -- a caller could not name the state they are filtering on.
+        'workflow.lifecycle_states'
     ];
 begin
     select string_agg(n.nspname || '.' || c.relname, E'\n       ' order by 1)

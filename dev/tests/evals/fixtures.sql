@@ -627,7 +627,7 @@ create or replace function calder.tally_children(p_task_id uuid)
 returns jsonb language sql stable as $f$
     select jsonb_build_object(
         'children', count(*),
-        'done',     count(*) filter (where c->>'status' = 'done'),
+        'succeeded',     count(*) filter (where c->>'status' = 'succeeded'),
         'failed',   count(*) filter (where c->>'status' = 'failed'))
     from jsonb_array_elements(workflow.matrix_outputs(p_task_id)) c;
 $f$;

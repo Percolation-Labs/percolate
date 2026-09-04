@@ -64,7 +64,7 @@ begin
     if (v_out#>>'{0,fy}')::int <> 2026 then
         raise exception 'the ORDER BY the author wrote was not honoured: %', v_out;
     end if;
-    if (select status from workflow.runs where id = v_run) <> 'completed' then
+    if (select status from workflow.runs where id = v_run) <> 'succeeded' then
         raise exception 'a run whose only step was a statement did not complete';
     end if;
 end $$;
@@ -165,7 +165,7 @@ begin
     v_run := workflow.start_workflow('t_os_rw', '{}'::jsonb);
 
     if (select count(*) from workflow.tasks
-         where run_id = v_run and status <> 'done') > 0 then
+         where run_id = v_run and status <> 'succeeded') > 0 then
         raise exception 'a read followed by a write did not complete: %',
             (select jsonb_object_agg(step_key, status) from workflow.tasks
               where run_id = v_run);

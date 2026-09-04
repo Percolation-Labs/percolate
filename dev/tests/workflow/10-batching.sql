@@ -326,7 +326,7 @@ begin
     v_run := workflow.start_workflow('t_bx_landing', '{}'::jsonb);
     select id into v_fan from workflow.tasks where run_id = v_run and step_key = 'fan';
 
-    if (select status from workflow.runs where id = v_run) <> 'completed' then
+    if (select status from workflow.runs where id = v_run) <> 'succeeded' then
         raise exception 'a batched sql fan-out did not complete in-transaction: %',
             (select status from workflow.runs where id = v_run);
     end if;
@@ -340,7 +340,7 @@ begin
     end if;
 
     select count(*), min((output#>>'{result,landed}')::int) into v_calls, v_min
-    from workflow.tasks where matrix_parent_id = v_fan and status = 'done';
+    from workflow.tasks where matrix_parent_id = v_fan and status = 'succeeded';
     if v_calls <> 10 then
         raise exception 'the reduce ran % times, expected once per batch (10)', v_calls;
     end if;
@@ -623,7 +623,7 @@ begin
     v_run := workflow.start_workflow('t_bx_one', '{}'::jsonb);
     select array_agg((output#>>'{result,width}')::int order by step_key)
     into v_widths from workflow.tasks
-    where run_id = v_run and kind = 'sql' and status = 'done';
+    where run_id = v_run and kind = 'sql' and status = 'succeeded';
 
     if v_widths is distinct from array[1,1,1,1,1,1] then
         raise exception
@@ -764,7 +764,7 @@ begin
     if v_after <> 10 then
         raise exception 're-expanding a batched matrix re-chunked it: % children', v_after;
     end if;
-    if (select status from workflow.tasks where id = v_fan) <> 'done' then
+    if (select status from workflow.tasks where id = v_fan) <> 'succeeded' then
         raise exception 'a re-expanded matrix did not settle back to done: %',
             (select status from workflow.tasks where id = v_fan);
     end if;
@@ -843,14 +843,14 @@ $y$);
     -- way through the compiler -- and the widths prove the engine read it.
     select string_agg((output#>>'{result,width}'), ' ' order by step_key)
     into v_shape from workflow.tasks
-    where matrix_parent_id = v_fan and status = 'done';
+    where matrix_parent_id = v_fan and status = 'succeeded';
 
     if v_shape is distinct from '2 1 2 1' then
         raise exception
             'a YAML-authored batch did not run as 2/1/2/1 across three tenants: %',
             coalesce(v_shape, '<nothing ran>');
     end if;
-    if (select status from workflow.runs where id = v_run) <> 'completed' then
+    if (select status from workflow.runs where id = v_run) <> 'succeeded' then
         raise exception 'a YAML-authored batched fan-out did not complete';
     end if;
     raise notice 'workflow/10: a batch authored in YAML compiles, expands and reduces -- both halves are installed and agree';

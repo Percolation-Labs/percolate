@@ -149,6 +149,50 @@ $$ language plpgsql;
 -- ------------------------------------------------------------
 -- 1. Workflow defs
 -- ------------------------------------------------------------
+-- ------------------------------------------------------------
+-- ONE HOME FOR THE LIFECYCLE VOCABULARY.
+--
+-- Three tables modelled the same idea with three different words for finishing
+-- well: workflow.tasks said 'done', workflow.runs said 'completed',
+-- agentic.runs said 'succeeded'. Nothing was wrong with any of them
+-- individually, which is exactly why it survived -- and both run tables carry a
+-- constraint called runs_status_check, so the wrong vocabulary read as the
+-- right one. It cost a load-time assertion further down this file, added
+-- because a purge written against the wrong word "would have purged NOTHING,
+-- silently, forever, and reported a clean zero every time it ran".
+--
+-- The fix is not three lists that agree. It is one list, referenced. Every
+-- status column below carries a foreign key into this table, so a typo or a
+-- newly-invented state fails at the write instead of at the read that quietly
+-- matches nothing. Which subset of these a given table may use stays a CHECK on
+-- that table, because the sets genuinely differ: only a task can be `ready`,
+-- only an agent run can be `quota_exceeded`.
+--
+-- `succeeded` rather than `completed` or `done`, and that is a correctness
+-- argument rather than a preference: a failed run also completed, also
+-- finished, is also done. Only `succeeded` is the actual opposite of `failed`,
+-- so only that pair is mutually exclusive in MEANING and not merely in the
+-- constraint. It is also what Kubernetes, Argo and Step Functions call it.
+create table if not exists workflow.lifecycle_states (
+    state       text primary key,
+    is_terminal boolean not null,
+    is_success  boolean not null default false,
+    note        text not null
+);
+
+insert into workflow.lifecycle_states (state, is_terminal, is_success, note) values
+    ('pending',          false, false, 'created, not yet eligible to run'),
+    ('ready',            false, false, 'eligible: dependencies satisfied, awaiting a claim'),
+    ('running',          false, false, 'claimed and executing'),
+    ('waiting_external', false, false, 'suspended on a signal or timer from outside'),
+    ('succeeded',        true,  true,  'finished, and did what it was asked'),
+    ('failed',           true,  false, 'finished, and did not'),
+    ('cancelled',        true,  false, 'stopped deliberately before finishing'),
+    ('quota_exceeded',   true,  false, 'stopped because a budget ran out, not because it broke')
+on conflict (state) do nothing;
+
+grant select on workflow.lifecycle_states to authenticated, api_viewer;
+
 create table if not exists workflow.definitions (
     id          uuid primary key default gen_random_uuid(),
     name        text not null,
@@ -296,7 +340,7 @@ create table if not exists workflow.runs (
     parent_task_id   uuid,
     external_id      text unique,     -- caller-supplied idempotency key for workflow.start_workflow
     status           text not null default 'running'
-                         check (status in ('running','completed','failed','cancelled')),
+                         check (status in ('running','succeeded','failed','cancelled')),
     compensation_state text not null default 'none'
                          check (compensation_state in ('none','compensating','compensated')),
     cancel_requested boolean not null default false,
@@ -332,7 +376,7 @@ create table if not exists workflow.tasks (
     status           text not null default 'pending'
                          check (status in
                              ('pending','ready','running','waiting_external',
-                              'done','failed','cancelled')),
+                              'succeeded','failed','cancelled')),
     priority         int not null default 100,
     attempts         int not null default 0,
     max_attempts     int not null default 5,
@@ -356,7 +400,7 @@ create table if not exists workflow.tasks (
     -- tree within that trace.
     span_id          text not null default encode(gen_random_bytes(8), 'hex'),
     parent_span_id   text,
-    completed_at     timestamptz,          -- set on 'done'; drives saga reverse-order compensation
+    completed_at     timestamptz,          -- set on 'succeeded'; drives saga reverse-order compensation
     saga_group       text,                 -- groups tasks that must be compensated together on failure
     compensation_task_key text,            -- step_key to run (in reverse order) if this task must be undone
     compensated_at   timestamptz,          -- set once this task's compensation has run
@@ -615,7 +659,7 @@ begin
 
     -- A terminal state SATISFIES a dependent if it succeeded, or if it failed
     -- and this task was expanded under continue_on.
-    v_satisfies := new.status = 'done'
+    v_satisfies := new.status = 'succeeded'
                    or (new.status in ('failed', 'cancelled') and new.tolerate_failure);
 
     if v_satisfies then
@@ -631,7 +675,7 @@ begin
         if new.matrix_parent_id is not null then
             select count(*) into v_remaining from workflow.tasks
             where matrix_parent_id = new.matrix_parent_id
-              and status not in ('done', 'failed', 'cancelled');
+              and status not in ('succeeded', 'failed', 'cancelled');
 
             if v_remaining = 0 and not workflow.matrix_gate_passes(new.matrix_parent_id) then
                 update workflow.tasks t2 set status = 'cancelled'
@@ -732,7 +776,7 @@ create or replace function workflow.check_compensation_completion(p_run_id uuid)
       and not exists (
           select 1 from workflow.tasks
           where run_id = p_run_id and compensates_task_id is not null
-            and status not in ('done', 'failed', 'cancelled')
+            and status not in ('succeeded', 'failed', 'cancelled')
       );
 $$ language sql;
 
@@ -767,7 +811,7 @@ begin
         from workflow.runs where external_id = p_external_id;
 
         if v_run_id is not null then
-            if v_status in ('running', 'completed') then
+            if v_status in ('running', 'succeeded') then
                 return v_run_id;      -- the work happened; do not repeat it
             end if;
             raise exception
@@ -1002,7 +1046,7 @@ begin
         return format('no task %s', p_task_id);
     end if;
 
-    if t.status in ('done', 'failed', 'cancelled') then
+    if t.status in ('succeeded', 'failed', 'cancelled') then
         v_why := format('task is already %s', t.status);
 
     -- The revoked lease, and the reason this test is on `attempts` rather than
@@ -1223,7 +1267,7 @@ begin
 
     perform workflow.merge_step_context(p_task_id, v_out);
 
-    update workflow.tasks set status = 'done', output = v_out,
+    update workflow.tasks set status = 'succeeded', output = v_out,
         completed_at = clock_timestamp()
     where id = p_task_id;
 
@@ -1341,7 +1385,7 @@ begin
     for v_task in
         select * from workflow.tasks
         where run_id = p_run_id and saga_group = p_saga_group
-          and status = 'done' and compensation_task_key is not null and compensated_at is null
+          and status = 'succeeded' and compensation_task_key is not null and compensated_at is null
         order by completed_at desc, id desc          -- 21c: clock_timestamp, stable tie-break
     loop
         select s into v_step from jsonb_array_elements(v_spec->'steps') s
@@ -1415,7 +1459,7 @@ begin
         perform workflow.merge_step_context(
             r.id, jsonb_build_object('result', p_payload));
         update workflow.tasks
-        set status = 'done', output = jsonb_build_object('result', p_payload),
+        set status = 'succeeded', output = jsonb_build_object('result', p_payload),
             completed_at = clock_timestamp()
         where id = r.id;
     end loop;
@@ -1482,7 +1526,7 @@ begin
     -- completion trigger fired before the link above existed, so resolve the
     -- parent here rather than leaving it blocked on a run that is over.
     select status, context into v_status, v_ctx from workflow.runs where id = v_child;
-    if v_status = 'completed' then
+    if v_status = 'succeeded' then
         perform workflow.complete_task(p_task_id, jsonb_build_object('result', v_ctx));
     elsif v_status in ('failed', 'cancelled') then
         perform workflow.fail_task(p_task_id,
@@ -1495,9 +1539,9 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 
 create or replace function workflow.resolve_parent_on_child_completion() returns trigger as $$
 begin
-    if new.status in ('completed', 'failed', 'cancelled') and old.status = 'running' then
+    if new.status in ('succeeded', 'failed', 'cancelled') and old.status = 'running' then
         if new.parent_task_id is not null then
-            if new.status = 'completed' then
+            if new.status = 'succeeded' then
                 perform workflow.complete_task(new.parent_task_id, new.context);
             else
                 perform workflow.fail_task(new.parent_task_id, jsonb_build_object('child_run_status', new.status));
@@ -1539,7 +1583,7 @@ begin
     foreach v_dep in array coalesce(p_depends_on, '{}')
     loop
         select status into v_dep_status from workflow.tasks where id = v_dep for update;
-        if v_dep_status is distinct from 'done' then
+        if v_dep_status is distinct from 'succeeded' then
             v_count := v_count + 1;
         end if;
     end loop;
@@ -1638,7 +1682,7 @@ begin
         loop
             v_dep := v_dep_text::uuid;
             select status into v_dep_status from workflow.tasks where id = v_dep for update;
-            if v_dep_status is distinct from 'done' then
+            if v_dep_status is distinct from 'succeeded' then
                 v_count := v_count + 1;
             end if;
         end loop;
@@ -1676,7 +1720,7 @@ begin
     -- over. completed_at is the saga's ORDERING column: every task finishing in
     -- one transaction shares now(), so a decision task inside a saga group
     -- compensated in forward order.
-    update workflow.tasks set status = 'done', output = p_output,
+    update workflow.tasks set status = 'succeeded', output = p_output,
         completed_at = clock_timestamp(),
         decision_output_hash = v_new_hash
     where id = p_task_id;
@@ -1706,7 +1750,7 @@ begin
         -- before the transition, for the reason merge_step_context states.
         perform workflow.merge_step_context(
             r.id, '{"result": {"fired": true}}'::jsonb);
-        update workflow.tasks set status = 'done',
+        update workflow.tasks set status = 'succeeded',
             output = '{"result": {"fired": true}}'::jsonb,
             completed_at = clock_timestamp()
         where id = r.id;
@@ -1812,7 +1856,7 @@ create or replace view workflow.v_queue_depth as
 
 create or replace view workflow.v_run_progress as
     select r.id as run_id, d.name as workflow_name, r.status as run_status,
-           count(*) filter (where t.status = 'done') as done,
+           count(*) filter (where t.status = 'succeeded') as done,
            count(*) as total, r.created_at, r.updated_at
     from workflow.runs r
     join workflow.definitions d on d.id = r.workflow_def_id
@@ -1851,7 +1895,7 @@ create or replace view workflow.v_compensation_status as
     select f.run_id, f.saga_group,
            count(*) as total_compensatable,
            count(c.id) as compensations_created,
-           count(*) filter (where c.status = 'done') as compensations_done,
+           count(*) filter (where c.status = 'succeeded') as compensations_done,
            count(*) filter (where c.status = 'failed') as compensations_failed
     from workflow.tasks f
     left join workflow.tasks c on c.compensates_task_id = f.id
@@ -1886,8 +1930,8 @@ create or replace view workflow.v_decision_history as
 -- is null) matches no rows -- and an UPDATE matching zero rows is not an
 -- error. Measured, same procedure, only the function's security mode varying:
 --
---     SECURITY INVOKER -> task status 'done', run.context {}          <-- lost
---     SECURITY DEFINER -> task status 'done', run.context {"gather":...}
+--     SECURITY INVOKER -> task status 'succeeded', run.context {}          <-- lost
+--     SECURITY DEFINER -> task status 'succeeded', run.context {"gather":...}
 --
 -- Every step output silently discarded while the run reports success. The
 -- lesson generalizes past this schema: whenever an RLS-protected table is
@@ -2551,7 +2595,7 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- insert-time autorun therefore executed the whole workflow immediately, in
 -- arbitrary order, ignoring the dependency graph -- and pass 2 then reset the
 -- statuses underneath it, re-running the first step and reverting the second
--- to 'pending' while the run reported 'completed'. The task_events trail
+-- to 'pending' while the run reported 'succeeded'. The task_events trail
 -- showed all of it. During construction the graph is not yet valid, so the
 -- only safe signal is a deliberate transition INTO ready.
 --
@@ -4063,7 +4107,7 @@ begin
             -- completed_at is deliberately NOT touched: it is the marker
             -- 20i uses to know this task has already cascaded, and rewriting
             -- it here would re-decrement every successor's pending_deps.
-            update workflow.tasks set status = 'done' where id = p_task_id;
+            update workflow.tasks set status = 'succeeded' where id = p_task_id;
             return (select count(*)::int from workflow.tasks where matrix_parent_id = p_task_id);
         end if;
 
@@ -5150,7 +5194,7 @@ begin
         return true;
     end if;
 
-    select count(*), count(*) filter (where status = 'done')
+    select count(*), count(*) filter (where status = 'succeeded')
     into v_total, v_ok
     from workflow.tasks where matrix_parent_id = p_matrix_id;
 
@@ -5177,18 +5221,18 @@ $$ language plpgsql stable security definer set search_path = pg_catalog, public
 -- because two copies of a function is how a fix lands in only one of them.
 
 -- A run whose only unfinished tasks are tolerated failures IS finished.
--- Without this a fan-out with continue_on could never reach 'completed' --
+-- Without this a fan-out with continue_on could never reach 'succeeded' --
 -- it would sit in 'running' forever, which is the stall this whole section
 -- exists to avoid.
 create or replace function workflow.check_run_completion(p_run_id uuid) returns void as $$
     update workflow.runs r
-    set status = 'completed', completed_at = now()
+    set status = 'succeeded', completed_at = now()
     where r.id = p_run_id
       and r.status = 'running'
       and not exists (
           select 1 from workflow.tasks t
           where t.run_id = p_run_id
-            and t.status <> 'done'
+            and t.status <> 'succeeded'
             and not (t.status = 'failed' and t.tolerate_failure));
 $$ language sql security definer set search_path = pg_catalog, public;
 
@@ -5742,7 +5786,7 @@ $$ language plpgsql immutable;
 -- already read the other one. So `{{steps.a.result}}` resolved to two
 -- different values over the life of one run, both workers did the work, and
 -- nothing was logged. `complete_task` ended in an unqualified
--- `update workflow.tasks set status = 'done' where id = p_task_id` -- no
+-- `update workflow.tasks set status = 'succeeded' where id = p_task_id` -- no
 -- status guard, no ownership guard -- so this was not an edge case, it was the
 -- only behaviour there was.
 --
@@ -6326,31 +6370,45 @@ registered after the workflow that names it.$c$;
 -- set once, when the run finished, which is the question retention is actually
 -- asking.
 --
--- THE TERMINAL STATUSES ARE ASSERTED, NOT ASSUMED.
+-- The foreign keys that make workflow.lifecycle_states load-bearing rather than
+-- documentation. Added after both tables exist, and written drop-then-add so an
+-- installation that already has them picks the change up -- the discipline
+-- resources_status_check and tasks_kind_check are written with.
 --
--- Written first as ('succeeded','failed','cancelled'), which workflow.runs
--- refuses -- it uses 'completed'. That version would have purged NOTHING,
--- silently, forever, and reported a clean zero every time it ran. agentic.runs
--- does use 'succeeded', and both constraints are named runs_status_check, which
--- is how the wrong vocabulary looked right.
---
--- So the names are checked against the constraint that owns them, at load time.
-do $$
-declare v_def text;
-begin
-    select pg_get_constraintdef(k.oid) into v_def
-    from pg_constraint k
-    join pg_class c on c.oid = k.conrelid
-    join pg_namespace n on n.oid = c.relnamespace
-    where k.conname = 'runs_status_check' and n.nspname = 'workflow';
+-- The FK is the whole guarantee, which is why there is no second check that the
+-- per-table CHECK subsets agree with this table: a CHECK admitting a state the
+-- vocabulary does not define is unreachable, because the write would fail on
+-- the reference first. An earlier version of this parsed pg_get_constraintdef
+-- with a regex to assert the agreement, which is a lot of clever code to
+-- restate something the database already enforces.
+alter table workflow.runs  drop constraint if exists runs_status_fk;
+alter table workflow.runs  add  constraint runs_status_fk
+    foreign key (status) references workflow.lifecycle_states(state);
+alter table workflow.tasks drop constraint if exists tasks_status_fk;
+alter table workflow.tasks add  constraint tasks_status_fk
+    foreign key (status) references workflow.lifecycle_states(state);
 
-    if v_def is null or v_def not like '%completed%' then
-        raise exception
-            'workflow.purge_completed hard-codes the terminal run statuses and '
-            'workflow.runs no longer admits ''completed'' (constraint: %). '
-            'Purging would silently delete nothing.', coalesce(v_def, '(none)');
-    end if;
-end $$;
+-- THE TERMINAL STATUSES COME FROM ONE PLACE NOW.
+--
+-- This was a load-time assertion that workflow.runs still admitted the word
+-- this function hard-codes, and it existed because the collection used three
+-- words for one idea: workflow.tasks said 'done', workflow.runs said
+-- 'completed', agentic.runs said 'succeeded'. The comment it replaces recorded
+-- the cost: a version of purge written against the wrong one "would have purged
+-- NOTHING, silently, forever, and reported a clean zero every time it ran" --
+-- and since both constraints are named runs_status_check, the wrong vocabulary
+-- looked right.
+--
+-- The assertion was the correct response to a vocabulary that could drift. It
+-- is not needed once the vocabulary cannot: `workflow.lifecycle_states` is the
+-- one home for these words and every status column carries a foreign key into
+-- it, so a state this function names either exists everywhere or fails at the
+-- reference rather than at a purge that quietly deletes nothing.
+--
+-- `succeeded`, not `completed`, because a failed run also completed -- the pair
+-- has to be mutually exclusive in MEANING, not only in the constraint. It is
+-- also what Kubernetes, Argo and Step Functions call it, so it is the word a
+-- reader arrives already expecting.
 
 drop function if exists workflow.purge_completed(interval, int, int);
 create or replace function workflow.purge_completed(
@@ -6420,7 +6478,7 @@ begin
         -- than left as a mysteriously growing table.
         v_sql := 'select array_agg(r.id) from ('
               || ' select r.id from workflow.runs r'
-              || ' where r.status in (''completed'',''failed'',''cancelled'')'
+              || ' where r.status in (''succeeded'',''failed'',''cancelled'')'
               || '   and coalesce(r.completed_at, r.updated_at) < $1'
               -- A schedule points at its most recent run. Deleting it would
               -- lose the schedule's own history.
@@ -6478,7 +6536,7 @@ begin
     -- blocking retention when nothing is -- a number that is worse than no
     -- number, because it answers the question wrongly rather than not at all.
     v_sql := 'select count(*) from workflow.runs r'
-          || ' where r.status in (''completed'',''failed'',''cancelled'')'
+          || ' where r.status in (''succeeded'',''failed'',''cancelled'')'
           || '   and coalesce(r.completed_at, r.updated_at) < $1'
           || '   and (exists (select 1 from workflow.schedules s where s.last_run_id = r.id)'
           || '     or exists (select 1 from workflow.tasks t where t.child_run_id = r.id)'
@@ -9143,7 +9201,7 @@ begin
         perform workflow.merge_step_context(
             r.id, jsonb_build_object('result', p_payload));
         update workflow.tasks
-        set status = 'done', output = jsonb_build_object('result', p_payload),
+        set status = 'succeeded', output = jsonb_build_object('result', p_payload),
             completed_at = clock_timestamp()
         where id = r.id;
     end loop;
@@ -13200,7 +13258,7 @@ begin
     -- the failure-reporting-success shape this collection keeps finding.
     select count(*) into v_missing from workflow.tasks
      where matrix_parent_id = p_matrix_task
-       and status = 'done'
+       and status = 'succeeded'
        and (output is null or not (output ? 'result'));
     if v_missing > 0 then
         raise exception
@@ -13233,7 +13291,7 @@ begin
                       from jsonb_array_elements(t.output->'result') with ordinality e(v, ord))::vector
             from workflow.tasks t
             where t.matrix_parent_id = $1
-              and t.status = 'done'
+              and t.status = 'succeeded'
               and t.input->'embed'->>'model' = $2
               and t.input->'item' ? 'chunk_id'
             -- Re-embedding a chunk REPLACES its vector. A run that re-ingests
@@ -15824,6 +15882,15 @@ create unique index if not exists one_summary_per_session
 create index if not exists messages_session_id_seq_idx on agentic.messages (session_id, seq);
 create index if not exists messages_run_id_seq_idx on agentic.messages (run_id, seq);
 
+-- agentic.runs draws its states from the same table workflow does. The two
+-- lifecycles are genuinely different -- only an agent run can be
+-- `quota_exceeded`, only a task can be `ready` -- so the SUBSET stays a CHECK
+-- here while the WORDS come from one place. This is the dependency that already
+-- exists in the other direction too: agentic.runs references workflow.tasks.
+alter table agentic.runs drop constraint if exists agentic_runs_status_fk;
+alter table agentic.runs add  constraint agentic_runs_status_fk
+    foreign key (status) references workflow.lifecycle_states(state);
+
 alter table agentic.runs drop constraint if exists runs_delegated_by_message_fk;
 alter table agentic.runs
     add constraint runs_delegated_by_message_fk
@@ -17981,7 +18048,7 @@ begin
     -- Raised rather than skipped: a document silently absent from the index is
     -- a hole in a graph that still answers questions.
     select count(*) into v_missing from workflow.tasks
-     where matrix_parent_id = p_matrix_task and status = 'done'
+     where matrix_parent_id = p_matrix_task and status = 'succeeded'
        and (output is null or not (output ? 'result'));
     if v_missing > 0 then
         raise exception
@@ -17994,7 +18061,7 @@ begin
         select t.output->'result' as graph, t.input->'item'->>'resource_id' as rid,
                t.input->'item'->'window_ordinal' as win
         from workflow.tasks t
-        where t.matrix_parent_id = p_matrix_task and t.status = 'done'
+        where t.matrix_parent_id = p_matrix_task and t.status = 'succeeded'
     loop
         v_r := aiq.upsert_graph(v_child.graph, jsonb_build_object(
             'resource_id', v_child.rid, 'run_id', v_run,
@@ -18453,7 +18520,7 @@ begin
                (t.input->'item'->>'resource_id')::uuid as rid,
                t.input->'item'->'window_ordinal' as win
         from workflow.tasks t
-        where t.matrix_parent_id = p_matrix_task and t.status = 'done'
+        where t.matrix_parent_id = p_matrix_task and t.status = 'succeeded'
         order by t.created_at
     loop
         v_total := v_total + 1;

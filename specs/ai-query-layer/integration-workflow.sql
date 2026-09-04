@@ -410,7 +410,7 @@ begin
     -- the failure-reporting-success shape this collection keeps finding.
     select count(*) into v_missing from workflow.tasks
      where matrix_parent_id = p_matrix_task
-       and status = 'done'
+       and status = 'succeeded'
        and (output is null or not (output ? 'result'));
     if v_missing > 0 then
         raise exception
@@ -443,7 +443,7 @@ begin
                       from jsonb_array_elements(t.output->'result') with ordinality e(v, ord))::vector
             from workflow.tasks t
             where t.matrix_parent_id = $1
-              and t.status = 'done'
+              and t.status = 'succeeded'
               and t.input->'embed'->>'model' = $2
               and t.input->'item' ? 'chunk_id'
             -- Re-embedding a chunk REPLACES its vector. A run that re-ingests
