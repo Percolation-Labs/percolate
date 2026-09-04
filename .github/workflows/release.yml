@@ -227,8 +227,34 @@ jobs:
       # exists -- dev/check-version.sh, build-sql.py's upgrade scripts and
       # suite.yml's upgrade job all read the tags.
       # ---------------------------------------------------------------
+      # PUSHED WITH THE PAT, BECAUSE GITHUB_TOKEN MAY NOT TOUCH A WORKFLOW FILE.
+      #
+      # 0.1.3 published everything and then failed here:
+      #
+      #   ! [remote rejected] v0.1.3 -> v0.1.3 (refusing to allow a GitHub App
+      #     to create or update workflow `.github/workflows/suite.yml` without
+      #     `workflows` permission)
+      #
+      # The commit being tagged touched `.github/workflows/`, and a GitHub App
+      # token -- which GITHUB_TOKEN is -- is refused any ref push carrying a
+      # workflow change, tags included. There is no `workflows:` scope to add to
+      # the `permissions:` block above; the restriction is on the token kind, not
+      # on its grants. Every earlier release tagged a commit that happened not to
+      # touch those files, so this sat unfound until a release cycle that did.
+      #
+      # It is the worst-shaped failure this workflow has: everything before it is
+      # irreversible and had already succeeded, so the assets and the image were
+      # public while the tag that says so did not exist -- precisely the state
+      # the tag-last ordering exists to prevent. Re-running would have rebuilt
+      # and republished, then failed at the same line.
+      #
+      # P8_RELEASE_TOKEN is a user PAT and can push workflow changes. It is
+      # already required by this workflow -- Preflight refuses without it -- so
+      # this adds a use, not a secret.
       - name: Tag it, now that it exists
         if: inputs.publish
+        env:
+          GH_PAT: ${{ secrets.P8_RELEASE_TOKEN }}
         run: |
           V=${{ steps.v.outputs.version }}
           # Set HERE and not only in the bump step, which is skipped whenever
@@ -239,7 +265,7 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "v$V" -m "percolate extension $V" ${{ steps.sha.outputs.sha }}
-          git push origin "v$V"
+          git push "https://x-access-token:$GH_PAT@github.com/${{ github.repository }}" "v$V"
           echo "::notice::v$V tagged -- the assets and image it names are already published"
 
       - name: Summary
