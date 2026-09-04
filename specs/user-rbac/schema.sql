@@ -2058,6 +2058,34 @@ drop policy if exists org_members_own_orgs on rbac.org_members;
 create policy org_members_own_orgs on rbac.org_members for select
   using (org_id in (select rbac.current_org_ids())
          or (select rbac.has_permission(rbac.current_user_id(), 'org_members', 'select')));
+-- AND THE GRANT THE TWO POLICIES ABOVE ARE WRITTEN FOR, without which both are
+-- dormant and neither says so.
+--
+-- Until this line, SELECT on these two tables was held only by `api_viewer`
+-- (below, for the *_api view owner) -- and `api_viewer` is NOLOGIN. There is no
+-- orgs_api view, so no role that can log in could reach either table by any
+-- path, while `permission_kinds` declared `orgs/select` and
+-- `org_members/select`, `checked_by` named these exact policies, and both
+-- policies existed and were correct. A caller asking "which organisations am I
+-- in?" got `permission denied for table orgs`.
+--
+-- The policies are written for a JWT session that could never arrive:
+-- `current_org_ids()` and `current_user_id()` both read
+-- `request.jwt.claims`, which is meaningless for a NOLOGIN view owner.
+--
+-- Measured after granting, two seats, one deployment: alice sees `org-a` and
+-- her own membership row; bob sees `org-b`. Exactly what the comments above
+-- promise -- the customer list is not disclosed and "who else is here" is
+-- answerable by a member. The scoping was right all along; nobody could reach
+-- it.
+--
+-- Found by walking scenarios/evals/J1-mill-lane.md Act 1, and NOT findable by
+-- either test that covers this ground: dev/tests/rbac/05 enumerates tables a
+-- client role can READ and asks whether each has a policy, so a table nobody
+-- can read never enters its loop; dev/tests/rbac/10 walks `checked_by` and
+-- asserts the named policy EXISTS, which it did. rbac/05 §1b now asks the
+-- mirror question -- a policy with no reader.
+grant select on rbac.orgs, rbac.org_members to authenticated;
 drop policy if exists visibilities_are_the_contract on rbac.visibilities;
 create policy visibilities_are_the_contract on rbac.visibilities for select
   using (true);

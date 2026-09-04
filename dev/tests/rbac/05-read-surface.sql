@@ -91,6 +91,85 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
+-- 1b. AND THE MIRROR: EVERY READ POLICY HAS A READER.
+--
+-- Section 1 asks "readable, with no policy". This asks "policy, with no
+-- reader", and the two are not the same question. Section 1 enumerates what a
+-- client role can already see, so a table NOBODY can see never enters its loop
+-- -- which means "nobody granted it" and "correctly locked down" are
+-- indistinguishable to every check in this repository. rbac/10 does not close
+-- it either: it walks `permission_kinds.checked_by` and asserts the named
+-- policy EXISTS, and an unreachable policy exists perfectly well.
+--
+-- MEASURED, which is why this is a list of three and not of sixteen.
+-- `rbac.orgs` and `rbac.org_members` each carried a correct SELECT policy
+-- written for `current_org_ids()`, and SELECT was held only by `api_viewer` --
+-- which is NOLOGIN and exists to own the *_api views. There is no orgs_api
+-- view, so no role that could log in could reach either table by any path, and
+-- a member asking "which organisations am I in?" got `permission denied`. Both
+-- policies had been dormant since they were written.
+--
+-- The naive form of this check returns SIXTEEN tables, because `users`,
+-- `refresh_tokens`, `runs`, `tasks`, `sessions` and the rest are legitimately
+-- reached through an *_api view or a SECURITY DEFINER function. Excluding
+-- tables that back a view a client role may select brings it to the real set --
+-- and a lint that reports sixteen when three are wrong is one people learn to
+-- skim, which is the failure this file exists to avoid.
+-- ---------------------------------------------------------------------
+do $$
+declare
+    v_bad text;
+    -- Declared, with the reason, exactly as §1's shared-config list is. An
+    -- entry here says "no client role may read this and that is the design",
+    -- which is a decision somebody made rather than a grant somebody forgot.
+    v_no_reader_by_design text[] := array[
+        -- Reset tokens are written by request_password_reset and consumed by
+        -- reset_password, both SECURITY DEFINER. A caller who could read this
+        -- table could redeem somebody else's reset; the policy on it is
+        -- defence in depth behind a grant that must never exist.
+        'rbac.password_reset_tokens'
+    ];
+begin
+    with reachable_via_view as (
+        -- A table is legitimately unreadable when a view over it is readable:
+        -- that is the *_api pattern, where the view owner holds the grant and
+        -- RLS still applies through it.
+        select distinct dep.refobjid as tbl
+          from pg_depend dep
+          join pg_rewrite r on r.oid = dep.objid
+          join pg_class v on v.oid = r.ev_class
+         where dep.classid = 'pg_rewrite'::regclass
+           and dep.refclassid = 'pg_class'::regclass
+           and v.relkind = 'v'
+           and (has_table_privilege('authenticated', v.oid, 'select')
+                or has_table_privilege('web_anon', v.oid, 'select'))
+    )
+    select string_agg(n.nspname || '.' || c.relname, E'\n       ' order by 1)
+      into v_bad
+      from pg_class c
+      join pg_namespace n on n.oid = c.relnamespace
+     where c.relkind = 'r'
+       and n.nspname in ('rbac','workflow','aiq','content','agentic','wm')
+       and exists (select 1 from pg_policy p
+                    where p.polrelid = c.oid and p.polcmd in ('r','*'))
+       and not has_table_privilege('authenticated', c.oid, 'select')
+       and not has_table_privilege('web_anon', c.oid, 'select')
+       and c.oid not in (select tbl from reachable_via_view)
+       and n.nspname || '.' || c.relname <> all (v_no_reader_by_design);
+
+    if v_bad is not null then
+        raise exception
+            E'these tables carry a read policy that no client role can reach:\n       %\n\n'
+            'The policy is dormant and nothing else in this repository will say '
+            'so -- §1 above only walks tables a client role can already read, '
+            'and rbac/10 only asserts the named policy exists. Either grant '
+            'SELECT to the role the policy was written for, or add it to this '
+            'block''s list with the reason it must have no reader.', v_bad;
+    end if;
+    raise notice 'rbac/05: every read policy is reachable by the role it was written for';
+end $$;
+
+-- ---------------------------------------------------------------------
 -- 2. AND THE TWO REFERENCE TABLES ARE SCOPED, ASSERTED BY READING THEM.
 --
 -- Section 1 would catch the missing policy. This catches a policy that is
