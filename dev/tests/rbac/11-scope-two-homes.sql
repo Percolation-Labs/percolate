@@ -301,6 +301,29 @@ begin
       cross join lateral (values ('INSERT'),('UPDATE'),('DELETE'),('TRUNCATE')) p(priv)
      where c.relkind in ('r','v')
        and n.nspname not in ('pg_catalog','information_schema')
+       -- REACHABLE, not merely granted, and the two come apart in CI.
+       --
+       -- A privilege on a table in a schema the role cannot enter is not a
+       -- privilege it holds: every reference to the table is refused at the
+       -- schema before the table ACL is ever consulted. has_table_privilege()
+       -- answers only the second half, so on its own it reports a write that
+       -- cannot be attempted.
+       --
+       -- It reported exactly one: pg_cron grants SELECT and DELETE on
+       -- cron.job_run_details to PUBLIC, web_anon is a member of PUBLIC like
+       -- every role, and `cron` grants USAGE to nobody. So this failed on every
+       -- database that has pg_cron and passed on every database that does not
+       -- -- which is to say it failed in CI and passed locally, because
+       -- dev/reload.sh deliberately skips pg_cron (cron.database_name binds it
+       -- to one database) while suite.yml deliberately installs it.
+       --
+       -- Nothing is weakened by asking the whole question. Grant web_anon USAGE
+       -- on cron and this fires again, correctly; every percolate schema
+       -- already grants it, so every finding this check was written for is
+       -- still a finding. And it is not this collection's business to revoke a
+       -- grant pg_cron makes on its own table -- what is its business is not
+       -- calling somebody else's unreachable grant an anonymous write path.
+       and has_schema_privilege('web_anon', n.oid, 'usage')
        and has_table_privilege('web_anon', c.oid, p.priv);
 
     if v_granted is not null then
@@ -314,8 +337,9 @@ begin
             'SECURITY DEFINER entry points rbac/04 enumerates, never through a '
             'table grant.';
     end if;
-    raise notice 'rbac/11: web_anon holds no write privilege anywhere, which is what '
-                 'stands in for the write policy the claimless arm waves through';
+    raise notice 'rbac/11: web_anon holds no write privilege it could reach anywhere, '
+                 'which is what stands in for the write policy the claimless arm '
+                 'waves through';
 end $$;
 
 rollback;

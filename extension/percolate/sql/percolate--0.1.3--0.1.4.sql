@@ -8038,6 +8038,54 @@ create table if not exists rbac.roles (
     description text
 );
 
+-- WHOSE ROWS THESE ARE, SAID IN THE CATALOG SO THE CONTRACT CAN READ IT.
+--
+-- A role is deployment identity, not schema -- dev/init/02-seed.sql's own
+-- comment says so, and grants `admin` on that basis. The extension creates this
+-- table and ships NOT ONE ROW in it: a from-zero `create extension percolate`
+-- leaves it empty, and every member it ever holds was put there by this
+-- deployment. pg_extension_config_dump() is Postgres's own way of saying
+-- exactly that -- it marks a table inside an extension whose CONTENTS are user
+-- data, which is why pg_dump has to dump them rather than trusting the
+-- extension script to recreate them.
+--
+-- It is registered here for a second reader as well. percolate.enums() reports
+-- a foreign key onto a text key by reading the referenced rows, so this table's
+-- contents land in percolate.contract(); its `members` column is derived from
+-- pg_extension.extconfig, so registering it is what stops
+-- extension/percolate/contract.json freezing one database's data as the
+-- published contract. It was not registered, and contract.json duly published
+-- `member` -- a row dev/tests/rbac/01 inserts and deliberately leaves behind --
+-- as part of the contract, which held CI red for three commits.
+--
+-- Two facts, one registration, and the pg_dump one was already true and already
+-- wrong. That is the whole argument for deriving this rather than listing it
+-- somewhere: a table that needs the marking needs it for a reason that predates
+-- the contract.
+do $$
+begin
+    -- ONLY INSIDE `CREATE EXTENSION` / `ALTER EXTENSION UPDATE`, which is where
+    -- pg_extension_config_dump() is legal -- outside one it does not no-op, it
+    -- raises, and this schema is loaded raw by dev/upgrade-converges.sh, which
+    -- installs the OLD version from a git tag and so cannot go through CREATE
+    -- EXTENSION at all. Unguarded, that check died on line 7948 with
+    -- `pg_extension_config_dump() can only be called from an SQL script executed
+    -- by CREATE EXTENSION` and took the upgrade gate with it.
+    --
+    -- The precondition is stated rather than caught: an `exception when
+    -- feature_not_supported` here would swallow the same message when it means
+    -- something else. The 'e' dependency is recorded as each object is created,
+    -- so by this line the table already belongs to the extension being
+    -- installed, and on an update it has belonged to it since the install.
+    if exists (select 1
+                 from pg_catalog.pg_depend d
+                where d.classid = 'pg_class'::regclass
+                  and d.objid   = 'rbac.roles'::regclass
+                  and d.deptype = 'e') then
+        perform pg_catalog.pg_extension_config_dump('rbac.roles', '');
+    end if;
+end $$;
+
 -- WHAT "ADMIN" MEANS WHEN THE VOCABULARY GROWS UNDER IT.
 --
 -- `bootstrap_admin()` grants its role every pair in `permission_kinds` with a
@@ -17104,6 +17152,36 @@ create or replace trigger trg_plugins_updated
     before update on agentic.plugins
     for each row execute function public.touch_updated_at();
 
+-- WHOSE ROWS THESE ARE. A plugin is something a deployment installs:
+-- apply_plugin() writes these rows and nothing in the extension script does, so
+-- a from-zero install leaves this table empty. Registered for the two reasons
+-- rbac.roles' own registration spells out in full (user-rbac/schema.sql, "WHOSE
+-- ROWS THESE ARE") -- pg_dump must carry them, and percolate.enums() must not
+-- freeze them into the published contract.
+do $$
+begin
+    -- ONLY INSIDE `CREATE EXTENSION` / `ALTER EXTENSION UPDATE`, which is where
+    -- pg_extension_config_dump() is legal -- outside one it does not no-op, it
+    -- raises, and this schema is loaded raw by dev/upgrade-converges.sh, which
+    -- installs the OLD version from a git tag and so cannot go through CREATE
+    -- EXTENSION at all. Unguarded, that check died on line 7948 with
+    -- `pg_extension_config_dump() can only be called from an SQL script executed
+    -- by CREATE EXTENSION` and took the upgrade gate with it.
+    --
+    -- The precondition is stated rather than caught: an `exception when
+    -- feature_not_supported` here would swallow the same message when it means
+    -- something else. The 'e' dependency is recorded as each object is created,
+    -- so by this line the table already belongs to the extension being
+    -- installed, and on an update it has belonged to it since the install.
+    if exists (select 1
+                 from pg_catalog.pg_depend d
+                where d.classid = 'pg_class'::regclass
+                  and d.objid   = 'agentic.plugins'::regclass
+                  and d.deptype = 'e') then
+        perform pg_catalog.pg_extension_config_dump('agentic.plugins', '');
+    end if;
+end $$;
+
 -- Declared here rather than in each table's own definition because the
 -- referenced table is defined last, which is deliberate and visible rather
 -- than an accident of ordering: a plugin is provenance ON config, so it cannot
@@ -20594,6 +20672,18 @@ comment on table percolate.types is
 -- A function rather than a view, because the reference half READS the rows of
 -- whatever table each foreign key points at, and that needs dynamic SQL.
 -- ------------------------------------------------------------
+-- DROPPED FIRST, because `create or replace function` cannot change the return
+-- type of an existing function and this one's return type is its output columns
+-- -- so adding `members` below is a replace that fails with `cannot change
+-- return type of existing function` on every database that already has the old
+-- shape. That is the upgrade path, which is to say every database but a fresh
+-- one. The grants at the foot of this file are what make the drop safe: they
+-- run after the create, so the function comes back with them rather than
+-- silently losing EXECUTE for web_anon. percolate.contract() does not pin this
+-- function -- a `language sql` body given as a string creates no dependency --
+-- so the drop does not cascade.
+drop function if exists percolate.enums();
+
 create or replace function percolate.enums()
 returns table (
     schema_name  text,
@@ -20607,6 +20697,41 @@ returns table (
     --           exactly why it would otherwise be invisible here.
     enforced_by  text,
     vocabulary   text,
+    -- WHOSE ROWS THESE ARE, and it is the difference between a contract and a
+    -- census.
+    --
+    --   shipped     the extension itself puts these members there:
+    --               workflow.lifecycle_states, rbac.visibilities,
+    --               aiq.embedding_providers, aiq.schema_facets. The set moves
+    --               only when a release moves it, so it is safe to freeze into
+    --               extension/percolate/contract.json and compile against.
+    --   deployment  the members are whatever THIS database created --
+    --               rbac.roles, agentic.plugins. A fresh install ships none of
+    --               them; dev/init/02-seed.sql adds `admin`; a deployment adds
+    --               its own. Still a real closed set at any instant, so a live
+    --               caller is told it, but freezing it publishes one
+    --               deployment's data as everybody's contract.
+    --   unreadable  the CALLER may not select the vocabulary's rows. Nothing is
+    --               claimed about them.
+    --
+    -- This exists because `admits` alone could not say which of the three it
+    -- was, and the collapse was not theoretical: contract.json was exported
+    -- from a database dev/tests/rbac/01 had run against, so it published
+    -- rbac.roles as admitting `member` -- a TEST FIXTURE -- and the CI gate was
+    -- red on every push for three commits while the file agreed perfectly with
+    -- the database in front of whoever generated it. `admits: null` meant
+    -- `unreadable` and had no way to also mean "not ours to freeze".
+    --
+    -- DERIVED, not listed. `deployment` is read from pg_extension.extconfig --
+    -- the array pg_extension_config_dump() writes -- so the fact lives in the
+    -- catalog next to the table rather than in a roster here that a new
+    -- vocabulary would have to be remembered into. It is also the SAME fact
+    -- pg_dump already needs: a table registered there is one whose rows a dump
+    -- must carry because the extension will not recreate them. A vocabulary
+    -- whose rows are the deployment's and which is not registered is already a
+    -- pg_dump bug; this makes it a contract bug too, which is the cheaper one
+    -- to notice.
+    members      text,
     -- `admits`, not `values`: VALUES is a reserved word in SQL and a column
     -- spelled that way has to be double-quoted at every use site forever. The
     -- same reasoning aiq.relation_types.is_symmetric records.
@@ -20641,6 +20766,8 @@ begin
         if array_length(vals, 1) >= 2 then
             schema_name := r.sch; table_name := r.tbl; column_name := r.col;
             enforced_by := 'check'; vocabulary := null; admits := vals;
+            -- A CHECK is in the schema, so its members ship with the schema.
+            members := 'shipped';
             return next;
         end if;
     end loop;
@@ -20664,7 +20791,11 @@ begin
                fn.nspname as fsch, ft.relname as ftbl, fa.attname as fcol,
                -- Whether THIS caller may read the vocabulary's rows. Checked
                -- rather than assumed: see the NULL/{} distinction below.
-               pg_catalog.has_table_privilege(ft.oid, 'select') as may_read
+               pg_catalog.has_table_privilege(ft.oid, 'select') as may_read,
+               -- ...and whether they are the extension's rows or this
+               -- deployment's. See `members` in the signature above.
+               exists (select 1 from pg_catalog.pg_extension x
+                        where ft.oid = any (x.extconfig)) as is_deployment_data
         from pg_constraint c
         join pg_class t on t.oid = c.conrelid
         join pg_namespace n on n.oid = t.relnamespace
@@ -20702,9 +20833,18 @@ begin
             execute format('select array_agg(%I::text order by %I::text) from %I.%I',
                            r.fcol, r.fcol, r.fsch, r.ftbl)
                into vals;
-            admits := coalesce(vals, '{}'::text[]);
+            admits  := coalesce(vals, '{}'::text[]);
+            -- The rows are reported EITHER WAY, including for a deployment
+            -- vocabulary, and that is deliberate: a caller holding a connection
+            -- asked what it may write into this column right now, and the rows
+            -- are that answer. What must not happen is freezing them into the
+            -- tracked artifact, and `members` is how contract-export.py knows
+            -- not to.
+            members := case when r.is_deployment_data then 'deployment'
+                            else 'shipped' end;
         else
-            admits := null;
+            admits  := null;
+            members := 'unreadable';
         end if;
         schema_name := r.sch; table_name := r.tbl; column_name := r.col;
         enforced_by := 'reference';
@@ -20734,6 +20874,9 @@ begin
         if array_length(vals, 1) >= 2 then
             schema_name := r.sch; table_name := r.name; column_name := r.prop;
             enforced_by := 'type'; vocabulary := r.name; admits := vals;
+            -- Authored in specs/contract/types/*.yaml and compiled in, so these
+            -- move with a release exactly like a CHECK does.
+            members := 'shipped';
             return next;
         end if;
     end loop;
@@ -20763,7 +20906,8 @@ as $$
             select jsonb_agg(jsonb_build_object(
                        'schema', schema_name, 'table', table_name,
                        'column', column_name, 'enforced_by', enforced_by,
-                       'vocabulary', vocabulary, 'admits', admits)
+                       'vocabulary', vocabulary, 'members', members,
+                       'admits', admits)
                    order by schema_name, table_name, column_name, enforced_by)
             from percolate.enums()), '[]'::jsonb),
         'types', coalesce((

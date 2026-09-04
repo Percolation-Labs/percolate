@@ -209,6 +209,54 @@ create table if not exists rbac.roles (
     description text
 );
 
+-- WHOSE ROWS THESE ARE, SAID IN THE CATALOG SO THE CONTRACT CAN READ IT.
+--
+-- A role is deployment identity, not schema -- dev/init/02-seed.sql's own
+-- comment says so, and grants `admin` on that basis. The extension creates this
+-- table and ships NOT ONE ROW in it: a from-zero `create extension percolate`
+-- leaves it empty, and every member it ever holds was put there by this
+-- deployment. pg_extension_config_dump() is Postgres's own way of saying
+-- exactly that -- it marks a table inside an extension whose CONTENTS are user
+-- data, which is why pg_dump has to dump them rather than trusting the
+-- extension script to recreate them.
+--
+-- It is registered here for a second reader as well. percolate.enums() reports
+-- a foreign key onto a text key by reading the referenced rows, so this table's
+-- contents land in percolate.contract(); its `members` column is derived from
+-- pg_extension.extconfig, so registering it is what stops
+-- extension/percolate/contract.json freezing one database's data as the
+-- published contract. It was not registered, and contract.json duly published
+-- `member` -- a row dev/tests/rbac/01 inserts and deliberately leaves behind --
+-- as part of the contract, which held CI red for three commits.
+--
+-- Two facts, one registration, and the pg_dump one was already true and already
+-- wrong. That is the whole argument for deriving this rather than listing it
+-- somewhere: a table that needs the marking needs it for a reason that predates
+-- the contract.
+do $$
+begin
+    -- ONLY INSIDE `CREATE EXTENSION` / `ALTER EXTENSION UPDATE`, which is where
+    -- pg_extension_config_dump() is legal -- outside one it does not no-op, it
+    -- raises, and this schema is loaded raw by dev/upgrade-converges.sh, which
+    -- installs the OLD version from a git tag and so cannot go through CREATE
+    -- EXTENSION at all. Unguarded, that check died on line 7948 with
+    -- `pg_extension_config_dump() can only be called from an SQL script executed
+    -- by CREATE EXTENSION` and took the upgrade gate with it.
+    --
+    -- The precondition is stated rather than caught: an `exception when
+    -- feature_not_supported` here would swallow the same message when it means
+    -- something else. The 'e' dependency is recorded as each object is created,
+    -- so by this line the table already belongs to the extension being
+    -- installed, and on an update it has belonged to it since the install.
+    if exists (select 1
+                 from pg_catalog.pg_depend d
+                where d.classid = 'pg_class'::regclass
+                  and d.objid   = 'rbac.roles'::regclass
+                  and d.deptype = 'e') then
+        perform pg_catalog.pg_extension_config_dump('rbac.roles', '');
+    end if;
+end $$;
+
 -- WHAT "ADMIN" MEANS WHEN THE VOCABULARY GROWS UNDER IT.
 --
 -- `bootstrap_admin()` grants its role every pair in `permission_kinds` with a

@@ -396,6 +396,36 @@ create or replace trigger trg_plugins_updated
     before update on agentic.plugins
     for each row execute function public.touch_updated_at();
 
+-- WHOSE ROWS THESE ARE. A plugin is something a deployment installs:
+-- apply_plugin() writes these rows and nothing in the extension script does, so
+-- a from-zero install leaves this table empty. Registered for the two reasons
+-- rbac.roles' own registration spells out in full (user-rbac/schema.sql, "WHOSE
+-- ROWS THESE ARE") -- pg_dump must carry them, and percolate.enums() must not
+-- freeze them into the published contract.
+do $$
+begin
+    -- ONLY INSIDE `CREATE EXTENSION` / `ALTER EXTENSION UPDATE`, which is where
+    -- pg_extension_config_dump() is legal -- outside one it does not no-op, it
+    -- raises, and this schema is loaded raw by dev/upgrade-converges.sh, which
+    -- installs the OLD version from a git tag and so cannot go through CREATE
+    -- EXTENSION at all. Unguarded, that check died on line 7948 with
+    -- `pg_extension_config_dump() can only be called from an SQL script executed
+    -- by CREATE EXTENSION` and took the upgrade gate with it.
+    --
+    -- The precondition is stated rather than caught: an `exception when
+    -- feature_not_supported` here would swallow the same message when it means
+    -- something else. The 'e' dependency is recorded as each object is created,
+    -- so by this line the table already belongs to the extension being
+    -- installed, and on an update it has belonged to it since the install.
+    if exists (select 1
+                 from pg_catalog.pg_depend d
+                where d.classid = 'pg_class'::regclass
+                  and d.objid   = 'agentic.plugins'::regclass
+                  and d.deptype = 'e') then
+        perform pg_catalog.pg_extension_config_dump('agentic.plugins', '');
+    end if;
+end $$;
+
 -- Declared here rather than in each table's own definition because the
 -- referenced table is defined last, which is deliberate and visible rather
 -- than an accident of ordering: a plugin is provenance ON config, so it cannot
