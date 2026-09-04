@@ -336,4 +336,54 @@ begin
                  'refresh-token doors together, and reactivating reopens them';
 end $$;
 
+-- ---------------------------------------------------------------------
+-- 6. A TOKEN WHOSE `sub` IS NOT A UUID IS ANONYMOUS, NOT A 500.
+--
+-- `sub` being a uuid is this collection's convention, not the world's:
+-- rbac.login returns rbac.users.id and the install guide mints a token around
+-- it. spec.md names SSO as a seam, and no external identity provider issues
+-- uuid subjects -- Auth0 writes `auth0|abc123`, Google a decimal string, and an
+-- email is common.
+--
+-- current_user_id() used to cast unconditionally, so the first such token would
+-- have raised `invalid input syntax for type uuid` from wherever the function
+-- was called -- inside RLS policies and inside triggers. Reproduced before the
+-- fix: an ordinary upload failed with the error naming workflow.set_run_owner,
+-- a trigger three subsystems away from the token that was actually wrong.
+--
+-- Asserted as NULL rather than as an error, and both halves matter: NULL is the
+-- same answer the function gives for no token at all, and it is fail-closed,
+-- because every policy in this collection compares against it and `owner_id =
+-- null` is NULL rather than true.
+-- ---------------------------------------------------------------------
+do $$
+declare v_case text; v_got uuid;
+begin
+    set local role authenticated;
+    foreach v_case in array array['auth0|abc123', 'someone@example.com', '',
+                                  '1e0f2b8a-0000-4000-8000-00000000000', 'null']
+    loop
+        perform set_config('request.jwt.claims',
+                           json_build_object('sub', v_case)::text, true);
+        v_got := rbac.current_user_id();
+        if v_got is not null then
+            raise exception
+                'a sub of %L resolved to a user id (%). Anything that is not a uuid is '
+                'not one of our users, and treating it as one is worse than refusing it.',
+                v_case, v_got;
+        end if;
+    end loop;
+
+    -- And a real one still resolves, so the guard is a filter and not a wall.
+    perform set_config('request.jwt.claims',
+        '{"sub":"1e0f2b8a-0000-4000-8000-000000000001"}', true);
+    if rbac.current_user_id() <> '1e0f2b8a-0000-4000-8000-000000000001'::uuid then
+        raise exception 'a valid uuid sub no longer resolves';
+    end if;
+    reset role;
+
+    raise notice 'rbac/03: a non-uuid sub reads as anonymous rather than raising a cast '
+                 'error from inside whichever policy or trigger asked';
+end $$;
+
 rollback;

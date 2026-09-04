@@ -7745,8 +7745,43 @@ $$ language sql stable security definer set search_path = pg_catalog, public;
 -- ::json throws before a nullif() applied only to ->>'sub' ever runs; guarding
 -- the raw string first avoids that, and is what makes the very next anonymous
 -- request on a reused pooled connection return zero rows instead of a 500.
+-- A `sub` THAT IS NOT A UUID IS AN ANONYMOUS CALLER, NOT AN ERROR.
+--
+-- The cast used to be unconditional, so a token whose `sub` is anything but a
+-- uuid raised `invalid input syntax for type uuid` -- and raised it from
+-- wherever the function happened to be called, which is inside RLS policies and
+-- inside triggers. Reproduced: a JWT with `sub` set to a plain string turns an
+-- ordinary upload into
+--
+--     ERROR: invalid input syntax for type uuid: "u1"
+--     CONTEXT: PL/pgSQL function workflow.set_run_owner() line 4
+--
+-- an error naming a trigger three subsystems away from the thing that is
+-- actually wrong, which is the token. This collection already refuses that
+-- shape of message everywhere else (check-references.py exists because two
+-- error messages named remedies that did not work).
+--
+-- It matters because `sub` being a uuid is OUR convention, not the world's:
+-- rbac.login returns rbac.users.id and the install guide mints a token around
+-- it, but spec.md names SSO as a seam and no external identity provider issues
+-- uuid subjects -- Auth0 writes `auth0|abc123`, Google writes a decimal string,
+-- and an email is common. The first one of those to arrive would have taken
+-- down every request rather than being unauthenticated.
+--
+-- Returning NULL is the same answer the function already gives for "no token",
+-- and it stays FAIL-CLOSED: every RLS policy in this collection compares
+-- against this value, and `owner_id = null` is NULL, which is not true, so an
+-- unrecognised subject sees nothing. Refusing to answer and refusing to exist
+-- are the same refusal here; only one of them is legible.
+--
+-- The regex is anchored and checked BEFORE the cast rather than after, because
+-- there is no "after": the cast is what raises.
 create or replace function rbac.current_user_id() returns uuid as $$
-    select (nullif(current_setting('request.jwt.claims', true), '')::json->>'sub')::uuid;
+    select case
+        when v ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+        then v::uuid
+    end
+    from (select nullif(current_setting('request.jwt.claims', true), '')::json->>'sub') as t(v);
 $$ language sql stable;
 
 -- OTel ground rule (specs/README.md): the W3C trace_id for the request this
