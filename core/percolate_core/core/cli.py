@@ -293,6 +293,46 @@ def sample_load(
                                       + (" -- needed by the documents step" if wants_documents
                                          else " -- not needed, documents are skipped"))
         )
+        # AND THE DATABASE, which this did not check at all. --dry-run answers
+        # "what would this need", and a run needs a reachable owner DSN before
+        # it needs anything the lines above report -- so a reader could be told
+        # "credentials: all present", run it for real, and be stopped by
+        # `no DSN` on the very next command. Walking the install guide, that
+        # was the third prerequisite discovered one error at a time.
+        #
+        # Reported rather than raised, like the credentials above it, because a
+        # --dry-run that exits on the first missing thing withholds the rest of
+        # the answer -- which is the behaviour that made this worth fixing.
+        chosen = dsn or os.environ.get("P8_ADMIN_DSN") or os.environ.get("P8_DSN")
+        if not chosen:
+            typer.echo(
+                "  database:    NO DSN -- pass --dsn, or set P8_ADMIN_DSN (or P8_DSN).\n"
+                "               On the compose stack that is\n"
+                "               postgres://p8:p8@localhost:5432/percolate"
+            )
+        else:
+            # Connecting is not writing, and an unreachable-or-wrong DSN is the
+            # next stop after a missing one. Checking it here is the difference
+            # between "the environment is ready" and "the environment has the
+            # variable set".
+            async def _probe() -> str | None:
+                try:
+                    conn = await _connect(chosen)
+                except Exception as err:  # asyncpg raises many shapes
+                    return str(err)
+                try:
+                    await conn.fetchval("select 1 from rbac.users limit 1")
+                except Exception as err:
+                    return f"connected, but cannot read rbac.users ({err})"
+                finally:
+                    await conn.close()
+                return None
+
+            problem = asyncio.run(_probe())
+            typer.echo(
+                "  database:    reachable, and can read rbac.*" if problem is None
+                else f"  database:    UNUSABLE -- {problem}"
+            )
         return
 
     if missing and wants_documents:
