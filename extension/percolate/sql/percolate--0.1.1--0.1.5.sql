@@ -18777,6 +18777,7 @@ declare
     v_gone    text[] := '{}';
     v_batch   text[];
     v_gap     text;
+    v_unknown text;
 begin
     if v_name is null then
         raise exception
@@ -18786,6 +18787,48 @@ begin
     end if;
     if not agentic.may_author('plugins', 'agentic.plugins'::regclass) then
         raise exception 'not authorized to install plugins';
+    end if;
+
+    -- A KEY THIS FUNCTION DOES NOT READ IS A MISTAKE, NOT AN EXTENSION, and on
+    -- this function specifically it is a dangerous one. A manifest PRUNES what
+    -- it does not declare -- that is what makes a plugin removable -- so a
+    -- misspelt key is not a no-op that installs nothing. It is a key that
+    -- declares nothing, and everything the correct key installed last time is
+    -- removed to match.
+    --
+    -- Measured on 0.1.5 before this existed, walking scenarios/evals/J2 Act 8:
+    --
+    --   {"name":"p","skils":[...],"agnets":[...]}
+    --     -> {"agents": [], "skills": [], "removed": [], "tool_servers": []}
+    --        and a plugins row claiming version 1.0.0 of something empty
+    --
+    --   re-applying an INSTALLED plugin with "agnets" misspelt
+    --     -> {"removed": ["agent:case-officer"]}   -- reported, and unintended
+    --
+    -- The removal being REPORTED is why that second case is a papercut rather
+    -- than silent data loss, and the envelope deserves the credit. But it
+    -- reports the effect, not the cause: the reader sees an intended-looking
+    -- removal and no mention of the key nobody read. Refusing the manifest is
+    -- the push-down -- the input never becomes an operation -- and it costs a
+    -- caller nothing that a correct manifest was going to use.
+    --
+    -- `workflows` is deliberately NOT in this list. A plugin bundles servers,
+    -- skills and agents; a workflow is defined with workflow.define_yaml and
+    -- carries no plugin stamp. Somebody will write the key anyway, because
+    -- "bundle the pipeline and the agent that reads it" is the obvious thing to
+    -- want, and before this they got a plugin that silently contained no
+    -- pipeline. They now get told.
+    select string_agg(k, ', ' order by k) into v_unknown
+    from jsonb_object_keys(p_manifest) k
+    where k not in ('name', 'version', 'description', 'author', 'homepage',
+                    'tool_servers', 'skills', 'agents');
+    if v_unknown is not null then
+        raise exception
+            'plugin manifest for % carries key(s) this version does not read: %. '
+            'It accepts name, version, description, author, homepage, tool_servers, '
+            'skills, agents. Nothing was changed -- and a manifest prunes what it '
+            'does not declare, so applying this would have removed whatever the '
+            'intended key installed.', v_name, v_unknown;
     end if;
 
     v_servers := coalesce((select array_agg(e->>'name')
