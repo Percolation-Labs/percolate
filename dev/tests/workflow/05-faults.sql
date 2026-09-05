@@ -792,12 +792,17 @@ begin
     -- The check keys off the role that will EXECUTE, not the caller --
     -- to_regprocedure resolves with the caller's privileges, which is why
     -- registering as a superuser used to succeed and tell you nothing.
+    --
+    -- Read from the TRIGGER function, which is where these checks live. They
+    -- used to be in register_step_function's body and this assertion used to
+    -- read them there; both moved together when the rule was pushed down onto
+    -- the table. If they ever move back, §a below fails first and louder.
     v_def := pg_get_functiondef(
-        to_regprocedure('workflow.register_step_function(text,text,text[],integer,text)')::oid);
+        to_regprocedure('workflow.step_function_is_runnable()')::oid);
     if v_def not like '%has_schema_privilege%' or v_def not like '%execute_sql_step%' then
         raise exception
-            'register_step_function no longer checks the definer''s reach -- it is back to '
-            'verifying only that the function exists, for whoever happens to be calling';
+            'the step_functions trigger no longer checks the definer''s reach -- it is back '
+            'to verifying only that the function exists, for whoever happens to be calling';
     end if;
     if v_def not like '%grant usage on schema%' then
         raise exception 'the refusal no longer says what to grant';
@@ -808,6 +813,113 @@ end $$;
 do $$
 begin
     perform workflow.register_step_function('t_f_ok','t_f_echo','{text}');
+end $$;
+
+-- §a. THE TABLE REFUSES, not just the function that writes it.
+--
+-- Everything above calls register_step_function(). That was the whole gap:
+-- the validation was the rule for CALLING THAT FUNCTION, and step_functions is
+-- the table that decides what a workflow may cause to run, so a plain insert
+-- put an unrunnable row into it and said INSERT 0 1. Found by walking
+-- scenarios/evals/J2 -- reading the table before the documentation produced two
+-- broken registry rows inside a minute, by accident, on the first try.
+--
+-- Asserted BEHAVIOURALLY rather than by reading source: the property is "this
+-- table cannot hold a row naming something that will not run", and a trigger
+-- that exists but is disabled, or attached for the wrong events, satisfies
+-- every source check and none of this.
+-- A NOTE ON THE SHAPE BELOW, because the first version of it was wrong and the
+-- mutation test is what said so. Each case used to raise its own failure
+-- message from INSIDE the `begin ... exception` block, and two of those
+-- messages contained the phrase "does not exist" -- which is the phrase the
+-- following `if v_err not like ...` greps for. So when the guard was removed
+-- and the write SUCCEEDED, the failure raise was caught by the same handler,
+-- its text satisfied the grep, and the case passed. Two of the three cases
+-- could not fail. Found by deleting the trigger and watching only case 5 go
+-- red; the repo's own gate for this is "no assertion passes because its
+-- subject is missing", and this was the same defect one level in.
+--
+-- So the write's SUCCESS is recorded in a flag and judged outside the handler,
+-- where no message can be mistaken for a refusal.
+do $$
+declare v_err text; v_n int; v_allowed boolean;
+begin
+    -- 1. a function that does not exist, straight into the table
+    v_allowed := false;
+    begin
+        insert into workflow.step_functions (name, fn, arg_types)
+        values ('t_f_ghost', 'journey.no_such_function', '{}');
+        v_allowed := true;
+    exception when others then v_err := sqlerrm;
+    end;
+    if v_allowed then
+        raise exception
+            'a bare INSERT put an unrunnable row into step_functions. The registry is '
+            'the answer to "what can a workflow cause to run" and it just accepted a '
+            'function with no such name.';
+    end if;
+    if v_err not like '%does not exist%' then
+        raise exception 'the refusal does not say the function is missing: %', v_err;
+    end if;
+
+    -- 2. the unreachable schema from above, by the same door
+    v_allowed := false;
+    begin
+        insert into workflow.step_functions (name, fn, arg_types)
+        values ('t_f_ghost2', 't_f_unreachable.f', '{}');
+        v_allowed := true;
+    exception when others then v_err := sqlerrm;
+    end;
+    if v_allowed then
+        raise exception
+            'a bare INSERT registered a function the executor cannot reach -- it would '
+            'fail on every invocation with "permission denied for schema ..."';
+    end if;
+    if v_err not like '%t_f_unreachable%' then
+        raise exception 'the refusal does not name the schema: %', v_err;
+    end if;
+
+    -- 3. UPDATE too, which is the half a before-insert-only trigger misses:
+    --    point a good row at a function that does not exist.
+    v_allowed := false;
+    begin
+        update workflow.step_functions set fn = 'journey.no_such_function'
+        where name = 't_f_ok';
+        v_allowed := true;
+    exception when others then v_err := sqlerrm;
+    end;
+    if v_allowed then
+        raise exception
+            'an UPDATE re-pointed a registered name at a function with no such name. '
+            'The row was checked when it was written and never again.';
+    end if;
+    if v_err not like '%does not exist%' then
+        raise exception 'the update refusal does not say the function is missing: %', v_err;
+    end if;
+
+    -- 4. and nothing above left a row behind
+    select count(*) into v_n from workflow.step_functions
+    where name in ('t_f_ghost','t_f_ghost2');
+    if v_n <> 0 then
+        raise exception '% refused row(s) are in the registry anyway', v_n;
+    end if;
+
+    -- 5. the trigger is ENABLED and fires for both events. A disabled trigger
+    --    (tgenabled = 'D') passes every check above only because the raises
+    --    above happen to be doing the work; assert the catalog directly so a
+    --    later ALTER ... DISABLE TRIGGER cannot pass quietly.
+    if not exists (
+        select 1 from pg_trigger
+        where tgrelid = 'workflow.step_functions'::regclass
+          and tgname  = 'step_function_is_runnable'
+          and tgenabled <> 'D'
+          and (tgtype & 4) <> 0    -- INSERT
+          and (tgtype & 16) <> 0   -- UPDATE
+          and (tgtype & 2) <> 0    -- BEFORE
+    ) then
+        raise exception
+            'the step_functions guard is not a live BEFORE INSERT OR UPDATE trigger';
+    end if;
 end $$;
 
 -- The two halves can ship out of step, and the error describes the wrong

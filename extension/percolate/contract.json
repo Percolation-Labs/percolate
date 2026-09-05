@@ -709,7 +709,7 @@
     }
   ],
   "exported_by_role": "p8",
-  "extension": "0.1.4",
+  "extension": "0.1.5",
   "types": [
     {
       "consumed_by": [

@@ -2246,16 +2246,37 @@ create table if not exists workflow.step_functions (
     registered_at timestamptz not null default now()
 );
 
--- Registering is deliberately owner-only (no grant below): it decides what a
--- workflow author is allowed to cause to run.
--- Current form. It reached this shape in section 22b (BUG 2 -- registration checked the wrong role's privileges.), which explains
--- the failure that produced it. Defined here, where it is first needed.
-create or replace function workflow.register_step_function(
-    p_name text, p_fn text, p_arg_types text[] default '{}',
-    p_timeout_ms int default 30000, p_description text default null
-) returns void as $$
+-- ON THE TABLE, NOT IN THE FUNCTION THAT WRITES IT, and the move is the point.
+-- These three checks used to live in the body of register_step_function() --
+-- which meant they were the rules for CALLING THAT FUNCTION rather than the
+-- rules for what this table may hold. A bare insert met none of them:
+--
+--     insert into workflow.step_functions values ('ghost','journey.no_such_fn');
+--     INSERT 0 1
+--     workflow.register_step_function('ghost2','journey.no_such_fn');
+--     ERROR:  function journey.no_such_fn() does not exist
+--
+-- Found by walking scenarios/evals/J2 as a user: the officer read the table
+-- before the documentation and had two unrunnable rows in the registry inside a
+-- minute. The docs do say to use the function, so this was never a
+-- documentation defect -- it is meta/challenge-the-process's PUSH-DOWN
+-- principle unapplied, on the one table that decides what a workflow may cause
+-- to run. A foreign key beats a CHECK beats a trigger beats a validator
+-- somebody has to call, and a validator somebody has to call is what this was.
+--
+-- A trigger and not a CHECK constraint because every question here is asked of
+-- the catalog -- does this function exist, can the executing role reach it --
+-- and a CHECK may not read tables. This is the strongest form available.
+--
+-- MOVED AND NOT COPIED. register_step_function below now just inserts. Two
+-- copies of one rule, checked against each other, is the defect recorded in
+-- meta/postmortems/2026-09-04-docs-examples-nobody-ran.md, where a seat defined
+-- as two format strings eighty lines apart diverged and a gate spent an hour
+-- reporting a defect that was not there.
+create or replace function workflow.step_function_is_runnable()
+returns trigger as $$
 declare
-    v_sig     text := p_fn || '(' || array_to_string(p_arg_types, ',') || ')';
+    v_sig     text := new.fn || '(' || array_to_string(new.arg_types, ',') || ')';
     v_oid     oid;
     v_definer name;
     v_nsp     text;
@@ -2268,6 +2289,19 @@ begin
     -- Whoever owns execute_sql_step is who will run this at dispatch.
     select pg_get_userbyid(proowner) into v_definer
     from pg_proc where oid = to_regprocedure('workflow.execute_sql_step(uuid)');
+
+    -- A NULL definer would make both checks below vanish rather than fail:
+    -- has_schema_privilege(null, ...) is null, `not null` is null, and `if null`
+    -- does not raise -- so a missing execute_sql_step would turn this trigger
+    -- into a row that always passes. That is the same shape as the defect this
+    -- trigger exists to fix (a check that cannot fire), so it is refused loudly
+    -- instead. Reachable only if the schema is loaded out of order; the
+    -- registrations in this tree all follow execute_sql_step's definition.
+    if v_definer is null then
+        raise exception
+            'workflow.execute_sql_step(uuid) does not exist, so there is no role to '
+            'check % against. Registering now would validate nothing.', v_sig;
+    end if;
 
     select n.nspname into v_nsp
     from pg_proc p join pg_namespace n on n.oid = p.pronamespace where p.oid = v_oid;
@@ -2286,6 +2320,33 @@ begin
             'grant execute on function % to %;', v_sig, v_definer, v_sig, quote_ident(v_definer::text);
     end if;
 
+    return new;
+end;
+$$ language plpgsql;
+
+-- `or replace` because this file is replayed against an existing database to
+-- upgrade it, so every statement in it must survive being applied twice. A
+-- plain `create trigger` does not, and `drop ... if exists` followed by
+-- `create` leaves a window in which the table has no guard at all.
+create or replace trigger step_function_is_runnable
+    before insert or update on workflow.step_functions
+    for each row execute function workflow.step_function_is_runnable();
+
+-- Registering is deliberately owner-only (no grant below): it decides what a
+-- workflow author is allowed to cause to run.
+-- Current form. It reached this shape in section 22b (BUG 2 -- registration checked the wrong role's privileges.), which explains
+-- the failure that produced it. Defined here, where it is first needed.
+--
+-- What remains is the insert. The refusals a caller sees are raised by the
+-- trigger above, with the same text they have always had -- so this function's
+-- contract is unchanged and every existing caller and message assertion still
+-- holds. What changed is that they now also fire for a caller who never came
+-- through here.
+create or replace function workflow.register_step_function(
+    p_name text, p_fn text, p_arg_types text[] default '{}',
+    p_timeout_ms int default 30000, p_description text default null
+) returns void as $$
+begin
     insert into workflow.step_functions (name, fn, arg_types, timeout_ms, description)
     values (p_name, p_fn, p_arg_types, p_timeout_ms, p_description)
     on conflict (name) do update set fn = excluded.fn, arg_types = excluded.arg_types,
