@@ -111,6 +111,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.P8_RELEASE_TOKEN }}
           REPO: ${{ vars.CHART_REPO || 'Percolation-Labs/get-percolate' }}
+          SELF: ${{ github.repository }}
         run: |
           # Checked HERE, not after the commit. Discovering a missing token
           # three steps in is how the tree ends up bumped for a release that
@@ -120,6 +121,24 @@ jobs:
             exit 1; }
           gh api "repos/$REPO" --jq .full_name >/dev/null || {
             echo "::error::P8_RELEASE_TOKEN cannot reach $REPO -- nothing has been changed." >&2
+            exit 1; }
+          # The SAME PAT pushes the tag at the end of this workflow, and against
+          # THIS repository rather than $REPO -- so `repos/$REPO` above proved
+          # the wrong half. The tag is deliberately the last thing to move, so a
+          # token that cannot push here fails with the assets and the image
+          # already published; that is the expensive corner this check exists to
+          # keep the run out of.
+          #
+          # Reachability is not enough, because read and write come apart: a
+          # fine-grained PAT can list a repository it cannot push to. Ask for the
+          # capability the tag step actually needs. A repo it cannot see at all
+          # fails the same way, gh exiting non-zero and printing nothing.
+          #
+          # Untested until it mattered: these repositories moved owner, and a
+          # redirect follows a moved repository while a fine-grained PAT's
+          # resource list does not follow it anywhere.
+          gh api "repos/$SELF" --jq .permissions.push | grep -qx true || {
+            echo "::error::P8_RELEASE_TOKEN cannot push to $SELF, which the tag step needs -- nothing has been changed." >&2
             exit 1; }
 
           CUR=$(sed -n "s/^default_version = '\(.*\)'/\1/p" extension/percolate/percolate.control)
