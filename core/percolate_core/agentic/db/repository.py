@@ -76,6 +76,19 @@ class Repository(Protocol):
     async def complete_task(self, task_id: UUID, output: dict[str, Any]) -> None: ...
 
 
+SESSION_COLUMNS = ("id", "owner_id", "agui_thread_id", "title", "created_at")
+"""The columns of ``agentic.sessions`` this client reads back, named once.
+
+It was written out twice -- in ``create_session`` and in ``get_session``, forty
+lines apart -- when the scope work renamed ``user_id`` to ``owner_id``. One copy
+was updated. The other was on the session-RESUME path, which no first turn
+reaches, so every test that opened a conversation passed and
+`X-P8-Session-Id` raised `KeyError: 'user_id'` as a bare 500.
+
+A tuple of column names is exactly the kind of fact that has one home or drifts.
+"""
+
+
 class PgRepository:
     """Repository over real Postgres, through the same surface any client has.
 
@@ -190,7 +203,7 @@ class PgRepository:
     async def create_session(self, session: Session) -> Session:
         async with self.client.as_user(self.user_id) as conn:
             row = await conn.fetchrow("select * from agentic.create_session($1)", session.title)
-        return Session(**{k: row[k] for k in ("id", "owner_id", "agui_thread_id", "title", "created_at")})
+        return Session(**{k: row[k] for k in SESSION_COLUMNS})
 
     async def get_session(self, session_id: UUID) -> Session | None:
         """``select * from agentic.sessions_api where id = $1``.
@@ -198,14 +211,20 @@ class PgRepository:
         RLS does the authorization: another user's session simply is not there,
         so "does not exist" and "is not yours" are one answer — which is the
         answer a caller should get anyway.
+
+        ``owner_id``, NOT ``user_id``. The scope work renamed the column and
+        this line was the one site the rename missed, so resuming a session --
+        `X-P8-Session-Id`, the documented multi-turn path -- raised
+        `KeyError: 'user_id'` and came back as a bare 500. It survived because
+        the sibling `create_session` was fixed and this was not: the same
+        literal tuple, twice, forty lines apart, with only one of them reached
+        by a first turn.
         """
         async with self.client.as_user(self.user_id) as conn:
             row = await conn.fetchrow("select * from agentic.sessions_api where id = $1", session_id)
         if row is None:
             return None
-        return Session(
-            **{k: row[k] for k in ("id", "user_id", "agui_thread_id", "title", "created_at")}
-        )
+        return Session(**{k: row[k] for k in SESSION_COLUMNS})
 
     async def create_run(self, run: Run) -> Run:
         """``agentic.start_run(...)`` — which derives more than it is told.

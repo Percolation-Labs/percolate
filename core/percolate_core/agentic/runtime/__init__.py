@@ -20,7 +20,13 @@ from .delegation import (
 from .engine import AgentEngine, ExecutionResult
 from .injection import build_deps, build_instructions
 from .persistence import PersistenceAdapter
-from .protocol_adapter import EventSink, channel, latest_user_prompt, relay
+from .protocol_adapter import (
+    EventSink,
+    apply_response_format,
+    channel,
+    latest_user_prompt,
+    relay,
+)
 
 __all__ = [
     "AgentEngine",
@@ -35,6 +41,7 @@ __all__ = [
     "derive_citations",
     "fire_chained_action",
     "inbound_delegation",
+    "apply_response_format",
     "latest_user_prompt",
     "outbound_headers",
     "relay",

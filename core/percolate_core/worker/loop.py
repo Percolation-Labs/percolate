@@ -30,10 +30,25 @@ import sys
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+import asyncpg
+
 from ..core import as_service
 from .artifacts import offload
 from .http import http_call
 from .templates import TerminalError, resolve
+
+PERMANENT_DB_ERRORS = (
+    # 23xxx -- unique, foreign key, check, not-null. The row is wrong.
+    asyncpg.exceptions.IntegrityConstraintViolationError,
+    # 22xxx -- bad literal, numeric overflow, invalid json. The value is wrong.
+    asyncpg.exceptions.DataError,
+)
+"""Database errors a retry cannot fix, so the task fails on the first attempt.
+
+Everything NOT here stays retryable, and the omissions are the design: a
+serialization failure, a deadlock and a connection drop are all "the database
+was busy", which is the case the retry budget was bought for.
+"""
 
 Handler = Callable[[dict, dict], Awaitable[Any]]
 HANDLERS: dict[str, Handler] = {"http_call": http_call}
@@ -111,11 +126,32 @@ async def run_once(queue: str, worker_id: str) -> bool:
                 "select workflow.fail_task($1, $2::jsonb, true)",
                 task_id, json.dumps({"error": str(e), "terminal": True}))
     except Exception as e:
-        print(f"[{worker_id}]   retryable: {e}", flush=True)
+        # A CONSTRAINT VIOLATION IS NOT A TRANSIENT FAULT, and treating every
+        # non-TerminalError as one meant the same row was re-inserted against
+        # the same unique index five times, with a backoff between each:
+        #
+        #   retryable: duplicate key value violates unique constraint
+        #   "idx_node_keys_canonical" -- Key (org_id, key, entity_type)=
+        #   (null, rotterdam psc report, document) already exists.
+        #
+        # Nothing about the second attempt differs from the first. The retry
+        # budget exists for the network and for a busy database; spending it on
+        # a deterministic refusal delays the failure without changing it, and
+        # buries the real message under four identical copies.
+        #
+        # Deliberately narrow. Integrity and data errors say "what you sent is
+        # wrong"; serialization failures and deadlocks say "try again" and are
+        # NOT in here, because those are exactly what the retry budget is for.
+        terminal = isinstance(e, PERMANENT_DB_ERRORS)
+        label = "terminal" if terminal else "retryable"
+        print(f"[{worker_id}]   {label}: {e}", flush=True)
+        payload = {"error": str(e)}
+        if terminal:
+            payload["terminal"] = True
         async with as_service() as conn:
             await conn.execute(
-                "select workflow.fail_task($1, $2::jsonb, false)",
-                task_id, json.dumps({"error": str(e)}))
+                "select workflow.fail_task($1, $2::jsonb, $3)",
+                task_id, json.dumps(payload), terminal)
     return True
 
 

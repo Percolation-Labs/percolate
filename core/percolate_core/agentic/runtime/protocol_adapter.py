@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 from uuid import UUID
 
-from ..contracts import AGUIEvent, ChatRequest
+from ..contracts import AgentSpec, AGUIEvent, ChatRequest
 from ..db import PgClient, Repository
 
 
@@ -34,6 +34,37 @@ def latest_user_prompt(request: ChatRequest) -> str:
         if message.role == "user" and message.content:
             return message.content
     return ""
+
+
+def apply_response_format(agent: AgentSpec, request: ChatRequest) -> AgentSpec:
+    """Let one request ask for a shape, without editing the agent row.
+
+    ``response_format`` is OpenAI's own field for this and it is borrowed
+    unchanged, so a stock client asking for structured output gets it. The
+    row's ``structured_output_schema`` stays the default for every caller who
+    does not ask.
+
+    WHY IT HAD TO EXIST. A workflow's ``agent:`` step may declare
+    ``output_schema:``, and that schema was used to VALIDATE the answer and
+    never to ASK for it -- the agent ran against whatever its own row said and
+    was then judged against a shape nobody had mentioned to it. The README's
+    front-page example is exactly that: a `verdict` constrained to
+    ``[SAFETY, FINANCE, OTHER]`` against an agent whose row returns free text,
+    so the step failed on
+
+        verdict: value "Port state control raised deficiency PSC-441 ..." is
+        not one of ["SAFETY", "FINANCE", "OTHER"]
+
+    which is the validator working correctly on a question the model was never
+    asked. A declared shape that only judges is a shape that only fails.
+
+    Returns the agent unchanged when nothing is requested, so this is inert for
+    every existing caller.
+    """
+    schema = (request.response_format or {}).get("json_schema", {}).get("schema")
+    if not schema:
+        return agent
+    return agent.model_copy(update={"structured_output_schema": schema})
 
 
 class EventSink:

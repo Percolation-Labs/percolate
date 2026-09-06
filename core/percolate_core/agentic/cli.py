@@ -148,9 +148,33 @@ async def _demo(prompt: str, tool: str | None, show_events: bool) -> None:
 
 
 def repo_for_cli() -> Any:
-    """The CLI's connection, as the configured user — see ``db.connected``."""
+    """The CLI's connection, as the configured user — see ``db.connected``.
+
+    ``P8_USER_ID`` is checked HERE rather than left to fail later. Without it
+    the runtime connects as nobody, ``rbac.current_user_id()`` returns null,
+    and the first write hits a not-null constraint:
+
+        NotNullViolationError: null value in column "owner_id" of relation
+        "sessions" violates not-null constraint
+
+    printed under forty lines of asyncpg traceback, through a connection pool,
+    for a missing environment variable. The refusal itself is the RLS design
+    working -- there is deliberately no privileged fallback, because a CLI that
+    quietly acted as the owner would be a backdoor around every policy in the
+    collection -- but "you have not said who you are" should read as a
+    sentence. ``agent push`` says it already; every other subcommand shares
+    this helper and said nothing.
+    """
     settings = Settings.from_env()
-    return connected(settings, UUID(settings.user_id) if settings.user_id else None)
+    if not settings.user_id:
+        raise typer.BadParameter(
+            "no user. Set P8_USER_ID to the id this runs as.\n"
+            "  There is no privileged fallback on purpose: the runtime reads and\n"
+            "  writes as an ordinary client, so RLS has to scope it to somebody.\n"
+            "  `percolate auth bootstrap` prints the id it creates, and an\n"
+            "  existing one is `select id from rbac.users where email = '...'`."
+        )
+    return connected(settings, UUID(settings.user_id))
 
 
 @app.command("list")

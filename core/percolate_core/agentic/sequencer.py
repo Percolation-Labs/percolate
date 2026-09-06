@@ -43,6 +43,7 @@ from .runtime import (
     EventSink,
     ExecutionResult,
     PersistenceAdapter,
+    apply_response_format,
     build_deps,
     derive_citations,
     fire_chained_action,
@@ -161,6 +162,7 @@ class TurnSequencer:
         parent: Run | None = None,
     ) -> TurnResult:
         agent = await self.resolve_agent(request.model)
+        agent = apply_response_format(agent, request)
         session = await self.open_session(request, context)
         run = await self.start_run(agent, session, context, parent=parent)
 

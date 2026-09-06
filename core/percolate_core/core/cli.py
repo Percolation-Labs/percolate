@@ -346,6 +346,34 @@ def sample_load(
         )
         raise typer.Exit(1)
 
+    # THE SIGNING SECRET, CHECKED HERE RATHER THAN AT THE UPLOAD.
+    #
+    # The fourth prerequisite discovered one error at a time, and the most
+    # expensive of them, because it is the only one that failed AFTER writing:
+    # `_jwt_secret` is not reached until the documents step, so a load with no
+    # P8_JWT_SECRET ran tenants.sql, schema.sql, the sources, the graph, the
+    # plugin and the workflows -- reporting each one -- and then stopped on
+    # `no signing secret`. Everything before it had landed, so the obvious
+    # response is to set the secret and re-run, which is the path that used to
+    # duplicate the corpus.
+    #
+    # Same shape as the credentials gate above: everything a documents step
+    # needs is checked before the first write, so "this will not work" is
+    # something you learn in the first second rather than the last.
+    if wants_documents and not token and not (secret or os.environ.get("P8_JWT_SECRET")):
+        typer.secho(
+            f"{manifest['name']} needs a signing secret to upload its documents.\n"
+            "  Pass --secret or set P8_JWT_SECRET, and it has to be the SAME secret\n"
+            "  the stack verifies with -- PGRST_JWT_SECRET for PostgREST and\n"
+            "  P8_JWT_SECRET for the services -- or the token will verify nowhere.\n"
+            "  On a compose stack brought up with no .env, that is\n"
+            "  change-me-a-long-random-string-at-least-32-chars\n"
+            "  Or pass --skip-documents to load everything else.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(1)
+
     target_dsn = _admin_dsn(dsn)
     upload_token = token
     if wants_documents and not upload_token and as_email:
@@ -425,12 +453,49 @@ def sample_load(
                         # hand, so this mints the claims it needs and lets them
                         # expire in fifteen minutes.
                         orgs = samples.orgs_in_documents(where, samples._yaml())
+                        # AND MEMBERSHIP, WHICH THE CLAIM ALONE IS NOT.
+                        #
+                        # `rbac.current_org_ids()` INTERSECTS the `orgs` claim
+                        # with real `rbac.org_members` rows, deliberately: a
+                        # token asserting an org nobody is in must resolve to
+                        # nothing, or the claim would be the whole of tenancy.
+                        # Minting the claims was therefore necessary and not
+                        # sufficient. `bootstrap_admin` puts the new admin in no
+                        # org at all, and this sample enrols only its own
+                        # `harbour-reader`, so the documented command on a fresh
+                        # install -- `sample load ... --as-email you@example.com`
+                        # -- uploaded the three shared documents and then died on
+                        # the first org-scoped one with `not authorized to
+                        # register content for that organization`, having already
+                        # written the schema, entities, graph, plugin and
+                        # workflow. A half-loaded sample and a message about
+                        # authorization.
+                        #
+                        # Scoped as narrowly as the fix allows: the loading user
+                        # only, into orgs THIS SAMPLE'S OWN index names -- rows
+                        # it created itself moments earlier in the same run. Not
+                        # the thing tenants.sql argues against, which is a demo
+                        # enrolling every user in the database into its tenants.
+                        if orgs:
+                            await conn.execute(
+                                """
+                                insert into rbac.org_members (org_id, user_id, role)
+                                select o.id, $1::uuid, 'admin' from rbac.orgs o
+                                 where o.id::text = any($2::text[])
+                                    or o.slug = any($2::text[])
+                                on conflict (org_id, user_id) do nothing
+                                """,
+                                uid, orgs,
+                            )
                         upload_token = mint_jwt(
                             uid, signing, ttl_seconds=900,
                             extra={"orgs": orgs} if orgs else None,
                         )
                         if orgs:
-                            typer.echo(f"  upload token covers {len(orgs)} org(s)")
+                            typer.echo(
+                                f"  upload token covers {len(orgs)} org(s), "
+                                f"and {as_email} is a member of each"
+                            )
                     done = await _upload_documents(where, content_url, upload_token, yaml)
                 for line in done:
                     typer.echo(f"  {line}")

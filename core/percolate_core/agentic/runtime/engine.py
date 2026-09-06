@@ -12,8 +12,11 @@ server, or ``workflow-engine``).
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
+
+from pydantic import BaseModel
 
 from ..contracts import AgentDeps, AgentSpec, RequestContext, ToolResult
 from ..settings import Settings
@@ -174,7 +177,40 @@ class AgentEngine:
             deps=deps,
             event_stream_handler=handler,
         )
-        return ExecutionResult(text=str(result.output), output=result.output)
+        return ExecutionResult(text=as_text(result.output), output=result.output)
+
+
+def as_text(output: Any) -> str:
+    """Render one turn's output as the text that gets persisted and returned.
+
+    NOT ``str()``, which is what this was. When an agent declares a
+    ``structured_output_schema`` pydantic-ai hands back a dict or a model, and
+    ``str()`` of a dict is a **Python repr** -- single quotes, `None`, `True` --
+    which is not JSON and cannot be parsed by anything downstream. So the one
+    feature whose entire purpose is a machine-readable answer produced the one
+    encoding no machine reads:
+
+        {'vessel': 'Meridian Dawn', 'verdict': 'pending survey'}
+
+    It reached `agentic.messages.content`, it came back through
+    `choices.0.message.content`, and a workflow `agent:` step carrying the same
+    `output_schema` then failed with `output_schema was declared, but the
+    result is not JSON` -- the engine correctly refusing its own output.
+
+    A plain string stays exactly as it is: an ordinary conversational agent has
+    no schema, its output is already text, and quoting it would be a change to
+    every answer this system has ever given.
+    """
+    if isinstance(output, str):
+        return output
+    if isinstance(output, BaseModel):
+        return output.model_dump_json()
+    if isinstance(output, (dict, list)):
+        # `default=str` so a uuid or a datetime the model produced serialises
+        # rather than raising -- a turn that ran is not thrown away over an
+        # encoder's opinion of a value the caller can read perfectly well.
+        return json.dumps(output, ensure_ascii=False, default=str)
+    return str(output)
 
 
 def map_stream_event(event: Any) -> list[dict[str, Any]]:

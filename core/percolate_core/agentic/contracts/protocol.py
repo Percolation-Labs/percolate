@@ -21,7 +21,7 @@ import json
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # --------------------------------------------------------------------------
 # Inbound — OpenAI chat-completions shape
@@ -32,6 +32,35 @@ class InboundMessage(BaseModel):
     role: Literal["system", "user", "assistant", "tool"]
     content: str | None = None
     tool_call_id: str | None = None
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def _serialise_structured_content(cls, v: Any) -> Any:
+        """Accept an object or a list here and render it as JSON text.
+
+        THE CENTRAL CASE, not a convenience. A workflow's `agent:` step is
+        almost always fed the step before it -- `input:
+        '{{steps.retrieve.result}}'` is the documented idiom and the one the
+        compiler's own error message recommends -- and a p8ql step's result is
+        a JSON *object*: `{"mode": "SEARCH", "rows": [...]}`. Sent as-is that
+        was a 422 on `Input should be a valid string`, so the documented way to
+        hand retrieved passages to an agent could not be written at all.
+
+        The alternative was to make every author serialise it themselves in the
+        template, which pushes a JSON encoder into a YAML document and gets the
+        escaping wrong in a way that only shows up on the row containing a
+        quote. Doing it once, here, at the boundary where the shape is known,
+        is the cheaper half.
+
+        Anything already a string is passed through untouched -- an ordinary
+        chat client is unaffected, and a caller who wants specific formatting
+        still gets exactly what they sent.
+        """
+        if v is None or isinstance(v, str):
+            return v
+        if isinstance(v, (dict, list)):
+            return json.dumps(v, ensure_ascii=False)
+        return v
 
 
 class ChatRequest(BaseModel):
@@ -45,7 +74,18 @@ class ChatRequest(BaseModel):
 
     model: str = Field(description="The agents.name to run.")
     messages: list[InboundMessage]
-    stream: bool = True
+    stream: bool = Field(
+        default=False,
+        description=(
+            "SSE of AG-UI events when true; one OpenAI completion object when "
+            "false. FALSE IS THE DEFAULT BECAUSE IT IS OPENAI'S -- this shape "
+            "is borrowed whole, and a borrowed shape with a different default "
+            "cannot be driven by a stock client. It defaulted to true, and "
+            "rejected false outright, until an `agent:` workflow step -- which "
+            "sets no stream key and reads choices.0.message.content -- turned "
+            "out never to have been able to complete on any deployment."
+        ),
+    )
     session_id: UUID | None = Field(
         default=None,
         description=(
@@ -61,6 +101,19 @@ class ChatRequest(BaseModel):
             "Client-declared tools are accepted by the shape but NOT honoured: "
             "an agent's tool surface is whatever tool_servers its row points "
             "at (brief.md §5.2, zero built-in and zero caller-supplied tools)."
+        ),
+    )
+    response_format: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "OpenAI's own shape -- {'type': 'json_schema', 'json_schema': "
+            "{'name': ..., 'schema': {...}}} -- and UNLIKE `tools` it IS "
+            "honoured, because a shape is a request about this turn's answer "
+            "rather than an attempt to widen what the agent may do. It "
+            "overrides the row's structured_output_schema for one turn and "
+            "changes nothing durable. This is how a workflow `agent:` step's "
+            "`output_schema:` reaches the model instead of only judging it "
+            "afterwards."
         ),
     )
 

@@ -27,12 +27,13 @@ interleaved, correlated by ``run_id``.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from uuid import UUID
 
-from fastapi import APIRouter, FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from .contracts import ChatRequest, RequestContext, RunError, Session, to_sse
 from .db import PgClient, PgRepository
@@ -109,9 +110,17 @@ def router() -> APIRouter:
 
         return {"build": build_fingerprint()}
 
+    # TWO PATHS, ONE HANDLER, and the second one is the OpenAI-shaped claim
+    # made true rather than restated. `/v1/chat/completions` is where every
+    # OpenAI client sends a chat request -- the SDK builds it from `base_url`
+    # and nothing lets a caller override just the path -- so a runtime that
+    # serves only `/chat` cannot be driven by one, whatever the docstring
+    # below says. It 404s, which is also what `agent:` workflow steps got:
+    # the compiler emits `POST {{env.P8_AGENT_URL}}/v1/chat/completions`.
+    @api.post("/v1/chat/completions")
     @api.post("/chat")
-    async def chat(request: Request, body: ChatRequest) -> StreamingResponse:
-        """Run one turn and stream it as AG-UI events.
+    async def chat(request: Request, body: ChatRequest) -> Response:
+        """Run one turn: an OpenAI completion, or AG-UI events over SSE.
 
         ``model`` names an **agent**, not an LLM — which is what lets an
         off-the-shelf OpenAI-shaped client drive this runtime with no bespoke
@@ -119,23 +128,40 @@ def router() -> APIRouter:
         and ignored: an agent's tool surface is whatever ``tool_servers`` its
         row points at.
 
-        ``stream: false`` is not supported and says so, rather than silently
-        buffering: this endpoint exists *because* streaming is the one thing
-        PostgREST cannot do. A caller who wants the finished answer reads
-        ``messages_api``, which is a better answer than a fake non-streaming
-        mode.
+        ``stream`` selects between the two, and defaults to ``false`` because
+        that is what the shape being borrowed defaults to. It used to default
+        to ``true`` and *reject* ``false`` outright, on the reasoning that
+        streaming is the one thing PostgREST cannot do and a caller wanting the
+        finished answer should read ``messages_api``. That is a good argument
+        for why the SSE mode exists and not an argument against the other one,
+        and it cost more than it looks:
+
+        * every stock OpenAI client sends ``stream: false``, so the
+          compatibility this module's own docstring claims was refused with a
+          400 by the line that implemented it;
+        * the workflow compiler emits an ``agent:`` step whose http_call reads
+          ``choices.0.message.content`` and sets no ``stream`` key at all, so
+          **no `agent:` step in any workflow could ever complete** — it got an
+          event stream and failed with `output_schema was declared, but the
+          result is not JSON`, five attempts, the worker logging `ok` each time
+          because the HTTP call genuinely succeeded.
+
+        Buffering here is not a "fake" non-streaming mode: the turn is run to
+        completion and its persisted assistant message is returned, which is
+        exactly the read from ``messages_api`` that callers were being told to
+        do for themselves — one round trip instead of two, and no window in
+        which the answer exists and the caller cannot see it yet.
         """
         client, settings = _state(request)
         user_id, context = _identity(request)
         if user_id is None:
             raise HTTPException(401, "a verified bearer token is required")
-        if not body.stream:
-            raise HTTPException(
-                400, "stream=false is not supported; read messages_api for the finished turn"
-            )
 
         repo = PgRepository(client, user_id)
         session = await _resume_or_open(repo, body, request)
+
+        if not body.stream:
+            return await _completion(repo, settings, body, context, session)
 
         return StreamingResponse(
             _run_and_stream(client, repo, settings, body, context, session),
@@ -223,6 +249,72 @@ async def _resume_or_open(
     if session is None:
         raise HTTPException(404, f"no session {session_id} — it does not exist, or is not yours")
     return session
+
+
+async def _completion(
+    repo: PgRepository,
+    settings: Settings,
+    body: ChatRequest,
+    context: RequestContext,
+    session: Session,
+) -> Response:
+    """Run the turn to completion and answer in the OpenAI envelope.
+
+    No ``LISTEN`` here, deliberately. The streaming path relays events off the
+    NOTIFY channel because a delegated sub-run executing in another task has to
+    appear in the parent's stream; a caller who asked for the finished answer
+    wants the *result*, and the result is the assistant row the sequencer
+    persisted. Reading the return value rather than the channel also means this
+    path has no drain window and cannot truncate.
+
+    A FAILED RUN IS AN HTTP ERROR HERE, which the streaming path cannot do:
+    once a 200 and the first event have gone out, `RUN_ERROR` is something the
+    client has to parse out of the stream. That asymmetry is the reason a
+    missing `OPENAI_API_KEY` read as "the runtime is fine, the answer is
+    strange" for as long as it did.
+    """
+    sequencer = TurnSequencer(repo, settings, sink=EventSink(repo))
+    result = await sequencer.run_turn(
+        body.model_copy(update={"session_id": session.id}), context
+    )
+
+    status = getattr(result.run, "status", None)
+    answer = next(
+        (m.content for m in reversed(result.messages or []) if m.role == "assistant"),
+        None,
+    )
+    if status not in (None, "succeeded") or answer is None:
+        # 502: this process is working and the thing it called did not. The
+        # detail is whatever the run recorded, because "the model refused" and
+        # "no credential was configured" are different problems and a caller
+        # cannot act on either from a bare 500.
+        raise HTTPException(
+            502,
+            f"run {result.run.id} finished {status or 'without an assistant message'}"
+            + (f": {result.run.error}" if getattr(result.run, "error", None) else ""),
+        )
+
+    return JSONResponse(
+        {
+            "id": f"chatcmpl-{result.run.id}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            # The AGENT name, echoed back, because that is what the caller put
+            # in `model`. The LLM actually used is on the agents row and is
+            # deliberately not leaked here: swapping it is an UPDATE, and a
+            # client that learned the real model name would start depending on
+            # a value the deployment considers its own business.
+            "model": body.model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": answer},
+                    "finish_reason": "stop",
+                }
+            ],
+        },
+        headers={"X-P8-Session-Id": str(session.id)},
+    )
 
 
 async def _run_and_stream(
