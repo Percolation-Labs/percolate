@@ -30,7 +30,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-CONTAINER="${CONTAINER:-p8-experiment-pg19}"
+CONTAINER="${CONTAINER:-p8-dev-db}"
 BARE="${BARE:-p8bare_check}"
 SU="${SUPERUSER:-p8}"
 

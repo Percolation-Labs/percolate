@@ -71,7 +71,7 @@ on conflict do nothing;
 -- (calling the equivalent function per row measured 58x slower, and sixteen
 -- hand-copies of a security predicate is how one of them drifts).
 --
--- What changes for this file specifically: `org_id is null` no longer means
+-- What changes for this file specifically: the shared tier no longer means
 -- "everyone may read it". §4b of schema.sql measured that conflation as a real
 -- cross-tenant read -- register_upload() without its optional org argument
 -- wrote a null org and another tenant retrieved the text. A row nobody scoped
@@ -202,7 +202,8 @@ select 'workflow_artifacts', 'file_upload',
        -- which content.register_upload documents as a legitimate choice.
        '{"description": "bytes produced by a workflow step, refd from tasks.output"}'::jsonb
 where not exists (
-    select 1 from content.channels where name = 'workflow_artifacts' and org_id is null);
+    select 1 from content.channels
+     where name = 'workflow_artifacts' and org_id = rbac.shared_org_id());
 
 create or replace function workflow.register_artifact(
     p_task_id      uuid,

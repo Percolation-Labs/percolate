@@ -1144,7 +1144,12 @@ begin
             -- caller gets their own org or themselves -- and `visibility` in
             -- the spec overrides it for somebody who means something else.
             coalesce((p_spec->>'owner_id')::uuid, rbac.current_user_id()),
-            (p_spec->>'org_id')::uuid,
+            -- rbac.org_or_shared(), because org_id is NOT NULL
+            -- (identity/spec.md §4) and a spec with no `org_id` key is a
+            -- genuine absence: the operator did not say. The shared tier is
+            -- what "did not say" has always meant here, so it is now written
+            -- down instead of arriving as a null.
+            rbac.org_or_shared((p_spec->>'org_id')::uuid),
             coalesce(p_spec->>'visibility',
                      rbac.default_visibility((p_spec->>'org_id')::uuid)))
     -- AN OMITTED KEY MEANS "LEAVE IT ALONE", NOT "SET IT TO THE DEFAULT".
@@ -1268,7 +1273,12 @@ begin
             -- default with a null owner writes a row its own author cannot
             -- select. rbac.default_visibility() states the rule once.
             coalesce((p_spec->>'owner_id')::uuid, rbac.current_user_id()),
-            (p_spec->>'org_id')::uuid,
+            -- rbac.org_or_shared(), because org_id is NOT NULL
+            -- (identity/spec.md §4) and a spec with no `org_id` key is a
+            -- genuine absence: the operator did not say. The shared tier is
+            -- what "did not say" has always meant here, so it is now written
+            -- down instead of arriving as a null.
+            rbac.org_or_shared((p_spec->>'org_id')::uuid),
             coalesce(p_spec->>'visibility',
                      rbac.default_visibility((p_spec->>'org_id')::uuid)))
     -- Same rule as upsert_agent, and it reached every column here for the
@@ -1367,7 +1377,12 @@ begin
             -- default with a null owner writes a row its own author cannot
             -- select. rbac.default_visibility() states the rule once.
             coalesce((p_spec->>'owner_id')::uuid, rbac.current_user_id()),
-            (p_spec->>'org_id')::uuid,
+            -- rbac.org_or_shared(), because org_id is NOT NULL
+            -- (identity/spec.md §4) and a spec with no `org_id` key is a
+            -- genuine absence: the operator did not say. The shared tier is
+            -- what "did not say" has always meant here, so it is now written
+            -- down instead of arriving as a null.
+            rbac.org_or_shared((p_spec->>'org_id')::uuid),
             coalesce(p_spec->>'visibility',
                      rbac.default_visibility((p_spec->>'org_id')::uuid)))
     on conflict (name) do update
@@ -1663,7 +1678,7 @@ begin
             -- no request identity and is deployment configuration, which is
             -- the case rbac.default_visibility() answers `public`.
             coalesce((p_manifest->>'owner_id')::uuid, rbac.current_user_id()),
-            (p_manifest->>'org_id')::uuid,
+            rbac.org_or_shared((p_manifest->>'org_id')::uuid),
             coalesce(p_manifest->>'visibility',
                      rbac.default_visibility((p_manifest->>'org_id')::uuid)))
     on conflict (name) do update

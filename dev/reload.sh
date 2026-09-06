@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Reload the schema into the running stack, without building anything.
 #
-#     dev/reload.sh              # into a scratch database, p8reload
-#     dev/reload.sh p8experiment # into the one the stack actually serves
+#     dev/stacks.sh reload       # the dev instance's own database, p8dev
+#     dev/reload.sh p8dev        # the same thing, spelled out
+#     dev/reload.sh scratch_x    # somewhere else in the same container
 #
 # THE INNER LOOP, and the reason it exists is that the other two paths are for
 # other people. Building the image takes minutes and publishing it takes eight;
@@ -35,13 +36,16 @@ set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$(cd .. && pwd)"
 
-DB=${1:-p8reload}
-CONTAINER=${CONTAINER:-p8-experiment-pg19}
+DB=${1:-p8dev}
+CONTAINER=${CONTAINER:-p8-dev-db}
 SUPERUSER=${SUPERUSER:-p8}
-ADMIN_DB=${ADMIN_DB:-p8experiment}
+# `postgres`, not the served database: you cannot DROP the database you are
+# connected to, and this script now recreates the one the dev stack serves
+# rather than a scratch copy beside it. One database, one instance.
+ADMIN_DB=${ADMIN_DB:-postgres}
 
 docker inspect "$CONTAINER" >/dev/null 2>&1 || {
-  echo "no container named $CONTAINER -- start the stack first: (cd dev && docker compose up -d)" >&2
+  echo "no container named $CONTAINER -- start the stack first: dev/stacks.sh up dev" >&2
   exit 1; }
 
 echo "==> regenerating the extension SQL from specs/"
@@ -82,9 +86,23 @@ echo "==> recreating database $DB"
 docker exec -i "$CONTAINER" psql -U "$SUPERUSER" -d "$ADMIN_DB" -q \
   -c "drop database if exists $DB (force);" -c "create database $DB;"
 
-# Same order as init/, minus pg_cron: its background worker is bound to one
-# database by cron.database_name, so a scratch database cannot have it, and
-# nothing below needs it to install.
+# pg_cron IF AND ONLY IF this is the database its worker is pointed at. The
+# worker is bound to exactly one database by cron.database_name, so creating
+# the extension anywhere else gets you a schema nothing ticks -- but leaving it
+# out of the RIGHT database is worse, and used to happen every reload: the
+# stack's own database came out of init/ with pg_cron and out of this script
+# without it, so `tests/workflow/03-cron-tick.sql` skipped after a reload and
+# ran after a recreate. A reload that does not reproduce a fresh install is a
+# reload you have to remember a caveat about.
+CRON_DB=$(docker exec -i "$CONTAINER" psql -U "$SUPERUSER" -d "$ADMIN_DB" -tAc \
+          "show cron.database_name" 2>/dev/null | tr -d ' ')
+if [ "$CRON_DB" = "$DB" ]; then
+  echo "    (this is cron.database_name, so pg_cron goes in too)"
+  docker exec -i "$CONTAINER" psql -U "$SUPERUSER" -d "$DB" -v ON_ERROR_STOP=1 -q \
+    -c "create extension if not exists pg_cron"
+fi
+
+# Same order as init/.
 docker exec -i "$CONTAINER" psql -U "$SUPERUSER" -d "$DB" -v ON_ERROR_STOP=1 -q <<SQL
 create extension if not exists pgcrypto;
 create extension if not exists pg_trgm;
@@ -97,6 +115,23 @@ create extension percolate cascade;
 reset role;
 SQL
 
+# THE CLOCK, if this is the database it ticks in. Dropping the database took
+# the cron.job rows with it -- they live in the cron schema OF the cron
+# database -- and nothing else puts them back, so a reload used to leave a
+# stack whose scheduled workflows, stale-task reaper and timer steps silently
+# never fired again. Same three jobs, same `scheduler` role, as the image's own
+# bootstrap (dev/image-init/00-percolate.sh §5).
+if [ "$CRON_DB" = "$DB" ]; then
+  docker exec -i "$CONTAINER" psql -U "$SUPERUSER" -d "$DB" -v ON_ERROR_STOP=1 -qtA >/dev/null <<'SQL'
+select cron.schedule('workflow-tick',   '* * * * *', 'select workflow.tick()');
+select cron.schedule('workflow-reaper', '* * * * *', 'select workflow.reap_stale_tasks()');
+select cron.schedule('workflow-timers', '* * * * *', 'select workflow.promote_due_timers()');
+update cron.job set username = 'scheduler'
+ where jobname in ('workflow-tick','workflow-reaper','workflow-timers');
+SQL
+  echo "    (clock re-registered: tick, reaper, timers)"
+fi
+
 for f in init/0[2-9]-*.sql; do
   [ -e "$f" ] || continue
   docker cp "$f" "$CONTAINER:/tmp/$(basename "$f")" >/dev/null
@@ -108,11 +143,28 @@ for f in init/0[2-9]-*.sql; do
   # new foreign key and `reload.sh` reported a clean build, with only the
   # surface audit two steps later noticing that the sample entity types were
   # missing. A check that can only pass is not a check.
-  if ! docker exec -i "$CONTAINER" psql -U "$SUPERUSER" -d "$DB" -q \
-       -v ON_ERROR_STOP=1 -f "/tmp/$(basename "$f")" 2>&1 | grep -iE 'ERROR|WARNING'; then
-    :
-  fi
-  if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+  #
+  # AND IT IS NOT A PIPELINE, because both ways of writing it as one are
+  # wrong under `set -euo pipefail`, and the file had already been through the
+  # first:
+  #
+  #   `if ! psql | grep; then : ; fi` -- PIPESTATUS is set by the LAST
+  #   pipeline, and `:` is one, so the next line read the no-op's status. The
+  #   check could only pass. It printed the errors and carried on, and a reload
+  #   over broken fixtures still ended with "p8dev is current".
+  #
+  #   `psql | grep; status=${PIPESTATUS[0]}` -- worse. pipefail makes the
+  #   pipeline's status grep's when psql succeeds, and grep returns 1 when it
+  #   matches nothing, so `set -e` killed the whole script on the first file
+  #   that was CLEAN.
+  #
+  # Run it, keep the output, then decide. `|| status=$?` is what exempts it
+  # from set -e; a bare assignment would not be.
+  status=0
+  out=$(docker exec -i "$CONTAINER" psql -U "$SUPERUSER" -d "$DB" -q \
+        -v ON_ERROR_STOP=1 -f "/tmp/$(basename "$f")" 2>&1) || status=$?
+  printf '%s' "$out" | grep -iE 'ERROR|WARNING' || true
+  if [ "$status" -ne 0 ]; then
     echo "==> FAILED: init/$(basename "$f") -- see the error above" >&2
     exit 1
   fi

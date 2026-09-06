@@ -620,6 +620,110 @@ create table if not exists rbac.orgs (
 create or replace trigger trg_rbac_orgs_touch before update on rbac.orgs
     for each row execute function public.touch_updated_at();
 
+-- ------------------------------------------------------------
+-- 2b(i). THE SHARED TIER IS A ROW, NOT A NULL.
+--
+-- identity/spec.md §4 states the rule this implements: a NULL may only mean
+-- "unknown or not applicable", and `org_id is null` meant "shared across every
+-- tenant", which is a value. Sixteen tables carried that sentinel, five unique
+-- indexes had to be NULLS NOT DISTINCT to survive it, and the three duplicate
+-- bugs §1 of that document lists were all the same shape: a unique index does
+-- not constrain rows whose key is NULL, and that is CORRECT behaviour for an
+-- absence being asked to police a value.
+--
+-- So the shared tier gets a row, `org_id` becomes NOT NULL everywhere, and
+-- every predicate that used to test for NULL compares against this id.
+--
+-- DERIVED, NOT INVENTED. percolate.uuidv5(percolate.id_namespace('org'),
+-- 'shared') is a pure function of two published strings, so the value is the
+-- same in every deployment, reproducible by anybody with the RFC and this
+-- line, and NOT a constant somebody typed once and everybody else has to
+-- trust. It is f2999e5c-bccd-5883-a78a-65e124ca69d1, and that sentence is a
+-- note rather than the definition -- the expression is.
+--
+-- IMMUTABLE and argument-free, which is what makes it free to use in a policy:
+-- the planner constant-folds it before the scan starts, so `org_id =
+-- rbac.shared_org_id()` costs an equality against a literal, not a call per
+-- row. That is the same property §2b's scope_predicate() header measured at
+-- 58x for the wrong shape, so it is stated rather than assumed.
+create or replace function rbac.shared_org_id() returns uuid
+language sql immutable parallel safe as $$
+    select percolate.uuidv5(percolate.id_namespace('org'), 'shared');
+$$;
+
+comment on function rbac.shared_org_id() is
+    'The org_id of the shared tier -- rows visible to every tenant. A derived '
+    'v5 uuid, identical in every deployment. Never NULL: identity/spec.md §4 '
+    'says a NULL may only mean unknown, and "shared" is a value.';
+
+-- The row itself. Its id is stated rather than defaulted, because a
+-- well-known row whose id came from uuidv7() would be well-known only to the
+-- deployment that generated it.
+--
+-- `do update` rather than `do nothing`, so a deployment that had already
+-- created an org with this slug by hand converges on the shipped description
+-- instead of keeping whatever it had.
+insert into rbac.orgs (id, slug, name)
+values (rbac.shared_org_id(), 'shared', 'Shared (every tenant)')
+on conflict (id) do update set slug = excluded.slug, name = excluded.name;
+
+-- COERCE and TEST, named once each, because between them they are every
+-- remaining use of the fact and writing `coalesce(x, rbac.shared_org_id()) =
+-- rbac.shared_org_id()` at nine call sites is nine chances to write one of
+-- them backwards.
+--
+-- The NULL these two absorb is real and is not the sentinel coming back. A
+-- COLUMN is now never null; an ARGUMENT still can be, because every writer in
+-- this collection takes `p_org_id uuid default null` and an omitted argument
+-- is a genuine absence -- exactly the meaning identity/spec.md §4 reserves
+-- NULL for. So the boundary is: a caller who said nothing meant the shared
+-- tier, and that translation happens once, here, rather than in each writer.
+create or replace function rbac.org_or_shared(p_org_id uuid) returns uuid
+language sql immutable parallel safe as $$
+    select coalesce(p_org_id, rbac.shared_org_id());
+$$;
+
+create or replace function rbac.is_shared_org(p_org_id uuid) returns boolean
+language sql immutable parallel safe as $$
+    select rbac.org_or_shared(p_org_id) = rbac.shared_org_id();
+$$;
+
+comment on function rbac.org_or_shared(uuid) is
+    'What an OMITTED org argument means: the shared tier. Use at the boundary '
+    'of any writer whose p_org_id defaults to null, so the NOT NULL column '
+    'never sees one.';
+comment on function rbac.is_shared_org(uuid) is
+    'True for the shared tier, and for a null argument, which means the same '
+    'thing at an API boundary. The replacement for every `org_id is null`.';
+
+-- MAKING A TABLE'S org_id NOT NULL, in one place, for the reason
+-- add_scope_columns() exists in one place: sixteen tables carried this column
+-- and a seventeenth will be added by somebody who has not read this file.
+--
+-- Three statements, in this order, and the order is the migration:
+-- default first so nothing new arrives null, backfill second so the rows that
+-- are already there stop being null, NOT NULL last so it can succeed. Written
+-- the other way round it fails on every database that has data, which is every
+-- database that matters. `create table if not exists` alters nothing on an
+-- existing table, so a `not null` written in the CREATE TABLE would be a fresh
+-- install-only fix -- identity/spec.md §7's fourth lesson, and the reason this
+-- is DDL executed on every apply rather than a column definition.
+--
+-- Idempotent by construction: setting a default that is already set, updating
+-- zero rows, and setting NOT NULL on a column that already has it are all
+-- no-ops, so this runs on the fresh path and the upgrade path identically.
+create or replace function rbac.adopt_shared_org(p_table regclass)
+returns void as $$
+begin
+    execute format(
+        'alter table %s alter column org_id set default rbac.shared_org_id()', p_table);
+    execute format(
+        'update %s set org_id = rbac.shared_org_id() where org_id is null', p_table);
+    execute format(
+        'alter table %s alter column org_id set not null', p_table);
+end;
+$$ language plpgsql;
+
 -- `role` here is the role WITHIN the org (who may administer it), and is
 -- deliberately not rbac.roles: those are deployment-wide capability grants,
 -- and conflating "admin of this org" with "admin of this installation" is how
@@ -632,6 +736,26 @@ create table if not exists rbac.org_members (
     primary key (org_id, user_id)
 );
 create index if not exists idx_org_members_user on rbac.org_members (user_id);
+
+-- NOBODY IS A MEMBER OF THE SHARED TIER, and this is the constraint that makes
+-- the read policy's silence safe.
+--
+-- scope_predicate() reads `visibility = 'org' and org_id in (select
+-- rbac.current_org_ids())` and has no clause about the sentinel. That is only
+-- correct while the sentinel can never appear in current_org_ids() -- add one
+-- rbac.org_members row for the shared org and every `org`-scoped row on the
+-- shared tier becomes readable by that member. There is no such row today, so
+-- the alternative to this constraint is a rule that holds until somebody
+-- inserts one, which is challenge-the-process's definition of a fact living
+-- one layer above where it can be refused.
+--
+-- A CHECK and not a trigger because rbac.shared_org_id() is IMMUTABLE, which
+-- is exactly the property a CHECK requires, so the cheapest layer will take
+-- it. Dropped before added: a constraint has no OR REPLACE.
+alter table rbac.org_members drop constraint if exists org_members_not_shared;
+alter table rbac.org_members add constraint org_members_not_shared
+    check (org_id <> rbac.shared_org_id());
+
 
 -- THE MEMBERSHIP ROWS ARE THE TRUTH; THE TOKEN MAY ONLY NARROW THEM.
 --
@@ -729,11 +853,20 @@ $fn$ language sql immutable;
 -- The first arm is content.may_access_org()'s, kept: a connection with no
 -- request.jwt.claims at all is a service connection, a migration or a psql
 -- session, and is not a caller this is about.
+--
+-- `org_id = rbac.shared_org_id()` is what `org_id is null` used to spell, and
+-- the two mean the same sentence: writing to the shared tier is not writing
+-- into somebody else's tenancy. The column is NOT NULL now (§2b(i)), so the
+-- bare equality is total -- no coalesce, and no `is not distinct from`, which
+-- would say that a null org is acceptable and is the exact ambiguity this
+-- change removes. It is also the only form that stays cheap: shared_org_id()
+-- is immutable and argument-free, so the planner folds it to a literal once.
 create or replace function rbac.scope_write_predicate() returns text as $fn$
     select $q$(nullif(current_setting('request.jwt.claims', true), '') is null
        or ((owner_id is null or owner_id = (select rbac.current_user_id()))
-           and (org_id is null or org_id in (select rbac.current_org_ids()))
-           and (visibility <> 'org' or org_id is not null)))$q$;
+           and (org_id = rbac.shared_org_id()
+                or org_id in (select rbac.current_org_ids()))
+           and (visibility <> 'org' or org_id <> rbac.shared_org_id())))$q$;
 $fn$ language sql immutable;
 
 -- THE SAME TWO RULES AS FUNCTIONS, for the callers that are not policies.
@@ -753,16 +886,23 @@ $fn$ language sql immutable;
 -- null org with `public` is a deliberate global write, and a null org with
 -- `org` is refused by the trigger below rather than guessed about.
 --
--- Not STRICT: owner_id and org_id are legitimately null on the same row (an
--- unowned public reference node), and a strict function would answer null for
--- exactly the row the rule is clearest about.
+-- Not STRICT: owner_id is legitimately null (an unowned public reference
+-- node), and a strict function would answer null for exactly the row the rule
+-- is clearest about. p_org_id is null only when the CALLER omitted it --
+-- rbac.is_shared_org() reads that as the shared tier, which is what an omitted
+-- org has always meant.
+--
+-- These say `is_shared_org` where the policy above says `= shared_org_id()`,
+-- and the difference is deliberate rather than an inconsistency: the policy is
+-- applied to a NOT NULL column and these are applied to ARGUMENTS, which an
+-- optional parameter may still leave null.
 create or replace function rbac.may_read(
     p_owner_id uuid, p_org_id uuid, p_visibility text
 ) returns boolean as $$
     select p_visibility = 'public'
         or p_owner_id = rbac.current_user_id()
         or (p_visibility = 'org'
-            and p_org_id is not null
+            and not rbac.is_shared_org(p_org_id)
             and p_org_id in (select rbac.current_org_ids()));
 $$ language sql stable parallel safe;
 
@@ -771,8 +911,9 @@ create or replace function rbac.may_write(
 ) returns boolean as $$
     select nullif(current_setting('request.jwt.claims', true), '') is null
         or ((p_owner_id is null or p_owner_id = rbac.current_user_id())
-            and (p_org_id is null or p_org_id in (select rbac.current_org_ids()))
-            and (p_visibility <> 'org' or p_org_id is not null));
+            and (rbac.is_shared_org(p_org_id)
+                 or p_org_id in (select rbac.current_org_ids()))
+            and (p_visibility <> 'org' or not rbac.is_shared_org(p_org_id)));
 $$ language sql stable parallel safe;
 
 -- The org half on its own, for callers that have an org and not yet a row --
@@ -788,15 +929,16 @@ $$ language sql stable parallel safe;
 -- an act. It was measured as a real disclosure, through nothing more than
 -- register_upload()'s optional argument defaulting to null.
 --
--- Scope removes the premise rather than the check. A null org is now just a
--- row with no tenancy; whether anyone else reads it is `visibility`, which
--- defaults to `private`. Publishing to everyone is spelled `public` and is a
--- thing somebody chose, so the act that needed refusing cannot be performed by
--- omission any more -- which is the outcome that check was standing in for.
+-- Scope removes the premise rather than the check. The shared tier is now just
+-- a tenancy nobody is a member of; whether anyone else reads a row on it is
+-- `visibility`, which defaults to `private`. Publishing to everyone is spelled
+-- `public` and is a thing somebody chose, so the act that needed refusing
+-- cannot be performed by omission any more -- which is the outcome that check
+-- was standing in for.
 create or replace function rbac.may_access_org(p_org_id uuid)
 returns boolean as $$
     select nullif(current_setting('request.jwt.claims', true), '') is null
-        or p_org_id is null
+        or rbac.is_shared_org(p_org_id)
         or p_org_id in (select rbac.current_org_ids());
 $$ language sql stable parallel safe;
 
@@ -837,7 +979,7 @@ returns text as $$
         -- was reported in, reached from the opposite direction. Naming an org
         -- is a statement about scope in any reading; nothing should override
         -- it.
-        when p_org_id is not null then 'org'
+        when not rbac.is_shared_org(p_org_id) then 'org'
         -- No org and no request identity: an operator installing deployment
         -- configuration -- the seeded agents, the sample corpus, a migration.
         -- These are for everyone by construction, and it is the only case
@@ -867,12 +1009,20 @@ declare v_requires_org boolean;
 begin
     select requires_org into v_requires_org
       from rbac.visibilities where scope = new.visibility;
-    if v_requires_org and new.org_id is null then
+    -- rbac.is_shared_org() rather than `new.org_id is null`, and it covers
+    -- both: the column is NOT NULL, so the row this refuses now carries the
+    -- SHARED org rather than no org -- which is the same mistake wearing the
+    -- new spelling, and is what an omitted p_org_id produces through the
+    -- column default. An explicit null still reaches here (NOT NULL is checked
+    -- after BEFORE triggers), and is_shared_org() reads it the same way, so
+    -- this branch reports the useful error instead of leaving it to a
+    -- constraint that names only the column.
+    if v_requires_org and rbac.is_shared_org(new.org_id) then
         raise exception
-            'visibility ''%'' requires an org_id, and this row has none',
+            'visibility ''%'' requires an org_id, and this row is on the shared tier',
             new.visibility
-            using hint = 'set org_id, or use a visibility that does not '
-                         'require one (see rbac.visibilities.requires_org)';
+            using hint = 'set org_id to a real org, or use a visibility that '
+                         'does not require one (see rbac.visibilities.requires_org)';
     end if;
     return new;
 end;
@@ -950,6 +1100,13 @@ begin
         'alter table %s add column if not exists owner_id uuid references rbac.users(id)', p_table);
     execute format(
         'alter table %s add column if not exists org_id uuid', p_table);
+    -- AND IT IS NOT NULL, defaulted to the shared tier. One call, because the
+    -- three statements it stands for have to happen in one order and this is
+    -- the only place sixteen tables agree to be changed at once -- see
+    -- rbac.adopt_shared_org(). Before the foreign key rather than after, so
+    -- that the key validates the backfilled rows in the same pass instead of
+    -- being added over a column that is about to be rewritten.
+    perform rbac.adopt_shared_org(p_table);
     -- The org foreign key is stated separately rather than inline, because
     -- `add column if not exists` is a NO-OP on a table that already has the
     -- column -- and most of the tables adopting scope already have an org_id
@@ -968,8 +1125,14 @@ begin
     execute format(
         'alter table %s add column if not exists visibility text', p_table);
     if v_added then
+        -- rbac.is_shared_org(org_id) and not `org_id is null`: by the time
+        -- this runs the column has been backfilled to the sentinel, so the
+        -- rows this is about no longer answer to a null test. The two spell
+        -- the same set, and writing it this way makes the statement true
+        -- whichever order the two migrations land in.
         execute format(
-            'update %s set visibility = case when org_id is null then %L else ''org'' end',
+            'update %s set visibility = case when rbac.is_shared_org(org_id) '
+            'then %L else ''org'' end',
             p_table, p_backfill_visibility);
     end if;
     execute format(
@@ -994,10 +1157,33 @@ begin
         'alter table %s add constraint %I foreign key (visibility) references rbac.visibilities(scope)',
         p_table, v_tbl || '_visibility_fkey');
 
+    -- THE ORG INDEX WAS PARTIAL AND IS NOT ANY MORE, and the drop is what makes
+    -- an upgraded database agree with a fresh one.
+    --
+    -- It was `where org_id is not null`, which excluded the shared tier back
+    -- when that tier WAS the null. On a NOT NULL column that predicate selects
+    -- every row: a partial index that is not partial, carrying a condition the
+    -- planner has to prove against every query that hopes to use it. A fresh
+    -- install would build the plain index and an existing database would keep
+    -- the partial one, because `create index if not exists` matches on the
+    -- NAME -- which is exactly the divergence dev/upgrade-converges.sh
+    -- compares indexdef for. So it is dropped by hand, and only when it is the
+    -- partial one: aiq.nodes and workflow.schedules declare their own plain
+    -- idx_<t>_org in their own schema files and must not lose it.
+    if exists (select 1 from pg_index i
+                join pg_class ic on ic.oid = i.indexrelid
+               where i.indrelid = p_table and i.indpred is not null
+                 and ic.relname = 'idx_' || v_tbl || '_org') then
+        execute format('drop index %I.%I',
+                       (select n.nspname from pg_class c
+                          join pg_namespace n on n.oid = c.relnamespace
+                         where c.oid = p_table),
+                       'idx_' || v_tbl || '_org');
+    end if;
     if not exists (select 1 from pg_index i
                    join pg_attribute a on a.attrelid = i.indrelid and a.attnum = i.indkey[0]
                    where i.indrelid = p_table and a.attname = 'org_id') then
-        execute format('create index %I on %s (org_id) where org_id is not null',
+        execute format('create index %I on %s (org_id)',
                        'idx_' || v_tbl || '_org', p_table);
     end if;
     if not exists (select 1 from pg_index i
@@ -1916,6 +2102,23 @@ grant execute on function rbac.current_org_ids() to web_anon, authenticated, api
 grant execute on function rbac.may_read(uuid, uuid, text) to web_anon, authenticated, api_viewer, worker;
 grant execute on function rbac.may_write(uuid, uuid, text) to web_anon, authenticated, api_viewer, worker;
 grant execute on function rbac.may_access_org(uuid) to web_anon, authenticated, api_viewer, worker;
+-- THE SENTINEL TRIO, and they are on this list for a reason that only shows up
+-- from the caller's seat.
+--
+-- shared_org_id() is written into the text of every generated write policy and
+-- into orgs_member_visible, and a policy is evaluated as the CALLER, not as
+-- the owner. Without the grant the expression raises `permission denied for
+-- function shared_org_id` inside the WITH CHECK, and dev/tests/rbac/11 reports
+-- it as the read rule and the write rule disagreeing about a row -- which is
+-- true, and names the wrong cause. Verified by running the check as
+-- `authenticated` and watching it fail before the grant existed.
+--
+-- is_shared_org() and org_or_shared() ride the same path: may_read/may_write
+-- call the first, and the aiq projection triggers -- which run as whoever
+-- INSERTED into the application table, not as app_owner -- call the second.
+grant execute on function rbac.shared_org_id() to web_anon, authenticated, api_viewer, worker;
+grant execute on function rbac.is_shared_org(uuid) to web_anon, authenticated, api_viewer, worker;
+grant execute on function rbac.org_or_shared(uuid) to web_anon, authenticated, api_viewer, worker;
 -- scope_predicate/scope_write_predicate/default_visibility are NOT granted,
 -- and surface.sql's reverse check is what settled it: they were, and it
 -- reported them as reachable-but-undeclared, which is the right complaint.
@@ -2046,9 +2249,19 @@ create policy user_roles_self_or_admin on rbac.user_roles for select
 -- deployment is the customer list, and `select * from orgs` answering it for
 -- any authenticated caller is the same disclosure request_password_reset
 -- refuses to answer for addresses.
+--
+-- THE SHARED TIER IS THE EXCEPTION, and it has to be. §2b(i) made org_id NOT
+-- NULL by pointing every shared row at rbac.shared_org_id(), so that id now
+-- appears in rows any caller may read -- and without this arm the caller can
+-- read the row, read the org_id on it, and get nothing back when they ask what
+-- it is. It discloses nothing: the id is a published constant derived from two
+-- fixed strings, identical in every deployment, and nobody is a member of it
+-- (org_members_not_shared). A well-known row that cannot be looked up is a
+-- foreign key pointing into the dark.
 drop policy if exists orgs_member_visible on rbac.orgs;
 create policy orgs_member_visible on rbac.orgs for select
-  using (id in (select rbac.current_org_ids())
+  using (id = rbac.shared_org_id()
+         or id in (select rbac.current_org_ids())
          or (select rbac.has_permission(rbac.current_user_id(), 'orgs', 'select')));
 -- Membership is visible for the orgs you are in -- "who else is here" is a
 -- question a member of a tenant may ask, and one nobody else may. This is the

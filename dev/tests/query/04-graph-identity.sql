@@ -164,13 +164,22 @@ end $$;
 -- ---------------------------------------------------------------------
 -- 4. A CANONICAL KEY IS UNIQUE PER (ORG, TYPE) -- INCLUDING THE SHARED TIER.
 --
--- The index was `unique (org_id, key, entity_type) where kind = 'canonical'`,
--- with Postgres's default NULLS DISTINCT. `org_id is null` means shared
--- reference data, which integration-rbac.sql §1 calls "a real category here,
--- not a loophole" and which every public entity in a deployment will be. Two
--- NULLs never conflict, so the guarantee held for tenants and was absent for
--- exactly the tier that is shared -- and LOOKUP, documented as an exact match,
--- returned two different nodes for one canonical key.
+-- The index was `unique (org_id, key, entity_type) where kind = 'canonical'`
+-- with Postgres's default NULLS DISTINCT, back when org_id was nullable and a
+-- NULL meant shared reference data -- which integration-rbac.sql §1 calls "a
+-- real category here, not a loophole" and which every public entity in a
+-- deployment will be. Two NULLs never conflict, so the guarantee held for
+-- tenants and was absent for exactly the tier that is shared, and LOOKUP,
+-- documented as an exact match, returned two different nodes for one canonical
+-- key.
+--
+-- org_id is NOT NULL now and the shared tier is rbac.shared_org_id()
+-- (specs/identity/spec.md §4), so the index constrains it by the same equality
+-- as every tenant and the NULLS NOT DISTINCT flag is a documented no-op. WHAT
+-- THIS BLOCK ASSERTS IS UNCHANGED, and deliberately so: the guarantee was
+-- never the flag, it was that one canonical key names one node per tier. If
+-- this still passes after the column stopped being nullable, that is evidence
+-- the migration preserved the guarantee rather than deleted the case.
 --
 -- Asserted through the PROJECTION rather than by hand-inserting a key, because
 -- that is how the duplicate actually arrived: two source rows whose key_expr

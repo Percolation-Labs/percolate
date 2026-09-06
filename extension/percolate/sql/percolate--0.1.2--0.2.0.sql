@@ -1,5 +1,5 @@
 -- ============================================================
--- percolate 0.1.6 -- the whole schema, as one extension script.
+-- percolate 0.2.0 -- the whole schema, as one extension script.
 --
 -- GENERATED from specs/ by extension/percolate/build-sql.py. Do not edit.
 --
@@ -3399,6 +3399,13 @@ create table if not exists workflow.schedules (
     -- minute forever (RELEASE-0.1.md §5, "honest failure modes").
     last_error     text,
     last_error_at  timestamptz,
+    -- NOT NULL, defaulted to the shared tier -- but said in
+    -- integration-rbac.sql's rbac.add_scope_columns() call rather than here.
+    -- Two reasons, and both are structural: rbac.shared_org_id() does not
+    -- exist yet at this point in the install (user-rbac is the NEXT file), and
+    -- `create table if not exists` alters nothing on a database that already
+    -- has this table, so a constraint written here would reach fresh installs
+    -- only. identity/spec.md §7's fourth lesson.
     org_id         uuid,
     created_at     timestamptz not null default now(),
     updated_at     timestamptz not null default now()
@@ -8725,6 +8732,110 @@ create table if not exists rbac.orgs (
 create or replace trigger trg_rbac_orgs_touch before update on rbac.orgs
     for each row execute function public.touch_updated_at();
 
+-- ------------------------------------------------------------
+-- 2b(i). THE SHARED TIER IS A ROW, NOT A NULL.
+--
+-- identity/spec.md §4 states the rule this implements: a NULL may only mean
+-- "unknown or not applicable", and `org_id is null` meant "shared across every
+-- tenant", which is a value. Sixteen tables carried that sentinel, five unique
+-- indexes had to be NULLS NOT DISTINCT to survive it, and the three duplicate
+-- bugs §1 of that document lists were all the same shape: a unique index does
+-- not constrain rows whose key is NULL, and that is CORRECT behaviour for an
+-- absence being asked to police a value.
+--
+-- So the shared tier gets a row, `org_id` becomes NOT NULL everywhere, and
+-- every predicate that used to test for NULL compares against this id.
+--
+-- DERIVED, NOT INVENTED. percolate.uuidv5(percolate.id_namespace('org'),
+-- 'shared') is a pure function of two published strings, so the value is the
+-- same in every deployment, reproducible by anybody with the RFC and this
+-- line, and NOT a constant somebody typed once and everybody else has to
+-- trust. It is f2999e5c-bccd-5883-a78a-65e124ca69d1, and that sentence is a
+-- note rather than the definition -- the expression is.
+--
+-- IMMUTABLE and argument-free, which is what makes it free to use in a policy:
+-- the planner constant-folds it before the scan starts, so `org_id =
+-- rbac.shared_org_id()` costs an equality against a literal, not a call per
+-- row. That is the same property §2b's scope_predicate() header measured at
+-- 58x for the wrong shape, so it is stated rather than assumed.
+create or replace function rbac.shared_org_id() returns uuid
+language sql immutable parallel safe as $$
+    select percolate.uuidv5(percolate.id_namespace('org'), 'shared');
+$$;
+
+comment on function rbac.shared_org_id() is
+    'The org_id of the shared tier -- rows visible to every tenant. A derived '
+    'v5 uuid, identical in every deployment. Never NULL: identity/spec.md §4 '
+    'says a NULL may only mean unknown, and "shared" is a value.';
+
+-- The row itself. Its id is stated rather than defaulted, because a
+-- well-known row whose id came from uuidv7() would be well-known only to the
+-- deployment that generated it.
+--
+-- `do update` rather than `do nothing`, so a deployment that had already
+-- created an org with this slug by hand converges on the shipped description
+-- instead of keeping whatever it had.
+insert into rbac.orgs (id, slug, name)
+values (rbac.shared_org_id(), 'shared', 'Shared (every tenant)')
+on conflict (id) do update set slug = excluded.slug, name = excluded.name;
+
+-- COERCE and TEST, named once each, because between them they are every
+-- remaining use of the fact and writing `coalesce(x, rbac.shared_org_id()) =
+-- rbac.shared_org_id()` at nine call sites is nine chances to write one of
+-- them backwards.
+--
+-- The NULL these two absorb is real and is not the sentinel coming back. A
+-- COLUMN is now never null; an ARGUMENT still can be, because every writer in
+-- this collection takes `p_org_id uuid default null` and an omitted argument
+-- is a genuine absence -- exactly the meaning identity/spec.md §4 reserves
+-- NULL for. So the boundary is: a caller who said nothing meant the shared
+-- tier, and that translation happens once, here, rather than in each writer.
+create or replace function rbac.org_or_shared(p_org_id uuid) returns uuid
+language sql immutable parallel safe as $$
+    select coalesce(p_org_id, rbac.shared_org_id());
+$$;
+
+create or replace function rbac.is_shared_org(p_org_id uuid) returns boolean
+language sql immutable parallel safe as $$
+    select rbac.org_or_shared(p_org_id) = rbac.shared_org_id();
+$$;
+
+comment on function rbac.org_or_shared(uuid) is
+    'What an OMITTED org argument means: the shared tier. Use at the boundary '
+    'of any writer whose p_org_id defaults to null, so the NOT NULL column '
+    'never sees one.';
+comment on function rbac.is_shared_org(uuid) is
+    'True for the shared tier, and for a null argument, which means the same '
+    'thing at an API boundary. The replacement for every `org_id is null`.';
+
+-- MAKING A TABLE'S org_id NOT NULL, in one place, for the reason
+-- add_scope_columns() exists in one place: sixteen tables carried this column
+-- and a seventeenth will be added by somebody who has not read this file.
+--
+-- Three statements, in this order, and the order is the migration:
+-- default first so nothing new arrives null, backfill second so the rows that
+-- are already there stop being null, NOT NULL last so it can succeed. Written
+-- the other way round it fails on every database that has data, which is every
+-- database that matters. `create table if not exists` alters nothing on an
+-- existing table, so a `not null` written in the CREATE TABLE would be a fresh
+-- install-only fix -- identity/spec.md §7's fourth lesson, and the reason this
+-- is DDL executed on every apply rather than a column definition.
+--
+-- Idempotent by construction: setting a default that is already set, updating
+-- zero rows, and setting NOT NULL on a column that already has it are all
+-- no-ops, so this runs on the fresh path and the upgrade path identically.
+create or replace function rbac.adopt_shared_org(p_table regclass)
+returns void as $$
+begin
+    execute format(
+        'alter table %s alter column org_id set default rbac.shared_org_id()', p_table);
+    execute format(
+        'update %s set org_id = rbac.shared_org_id() where org_id is null', p_table);
+    execute format(
+        'alter table %s alter column org_id set not null', p_table);
+end;
+$$ language plpgsql;
+
 -- `role` here is the role WITHIN the org (who may administer it), and is
 -- deliberately not rbac.roles: those are deployment-wide capability grants,
 -- and conflating "admin of this org" with "admin of this installation" is how
@@ -8737,6 +8848,26 @@ create table if not exists rbac.org_members (
     primary key (org_id, user_id)
 );
 create index if not exists idx_org_members_user on rbac.org_members (user_id);
+
+-- NOBODY IS A MEMBER OF THE SHARED TIER, and this is the constraint that makes
+-- the read policy's silence safe.
+--
+-- scope_predicate() reads `visibility = 'org' and org_id in (select
+-- rbac.current_org_ids())` and has no clause about the sentinel. That is only
+-- correct while the sentinel can never appear in current_org_ids() -- add one
+-- rbac.org_members row for the shared org and every `org`-scoped row on the
+-- shared tier becomes readable by that member. There is no such row today, so
+-- the alternative to this constraint is a rule that holds until somebody
+-- inserts one, which is challenge-the-process's definition of a fact living
+-- one layer above where it can be refused.
+--
+-- A CHECK and not a trigger because rbac.shared_org_id() is IMMUTABLE, which
+-- is exactly the property a CHECK requires, so the cheapest layer will take
+-- it. Dropped before added: a constraint has no OR REPLACE.
+alter table rbac.org_members drop constraint if exists org_members_not_shared;
+alter table rbac.org_members add constraint org_members_not_shared
+    check (org_id <> rbac.shared_org_id());
+
 
 -- THE MEMBERSHIP ROWS ARE THE TRUTH; THE TOKEN MAY ONLY NARROW THEM.
 --
@@ -8834,11 +8965,20 @@ $fn$ language sql immutable;
 -- The first arm is content.may_access_org()'s, kept: a connection with no
 -- request.jwt.claims at all is a service connection, a migration or a psql
 -- session, and is not a caller this is about.
+--
+-- `org_id = rbac.shared_org_id()` is what `org_id is null` used to spell, and
+-- the two mean the same sentence: writing to the shared tier is not writing
+-- into somebody else's tenancy. The column is NOT NULL now (§2b(i)), so the
+-- bare equality is total -- no coalesce, and no `is not distinct from`, which
+-- would say that a null org is acceptable and is the exact ambiguity this
+-- change removes. It is also the only form that stays cheap: shared_org_id()
+-- is immutable and argument-free, so the planner folds it to a literal once.
 create or replace function rbac.scope_write_predicate() returns text as $fn$
     select $q$(nullif(current_setting('request.jwt.claims', true), '') is null
        or ((owner_id is null or owner_id = (select rbac.current_user_id()))
-           and (org_id is null or org_id in (select rbac.current_org_ids()))
-           and (visibility <> 'org' or org_id is not null)))$q$;
+           and (org_id = rbac.shared_org_id()
+                or org_id in (select rbac.current_org_ids()))
+           and (visibility <> 'org' or org_id <> rbac.shared_org_id())))$q$;
 $fn$ language sql immutable;
 
 -- THE SAME TWO RULES AS FUNCTIONS, for the callers that are not policies.
@@ -8858,16 +8998,23 @@ $fn$ language sql immutable;
 -- null org with `public` is a deliberate global write, and a null org with
 -- `org` is refused by the trigger below rather than guessed about.
 --
--- Not STRICT: owner_id and org_id are legitimately null on the same row (an
--- unowned public reference node), and a strict function would answer null for
--- exactly the row the rule is clearest about.
+-- Not STRICT: owner_id is legitimately null (an unowned public reference
+-- node), and a strict function would answer null for exactly the row the rule
+-- is clearest about. p_org_id is null only when the CALLER omitted it --
+-- rbac.is_shared_org() reads that as the shared tier, which is what an omitted
+-- org has always meant.
+--
+-- These say `is_shared_org` where the policy above says `= shared_org_id()`,
+-- and the difference is deliberate rather than an inconsistency: the policy is
+-- applied to a NOT NULL column and these are applied to ARGUMENTS, which an
+-- optional parameter may still leave null.
 create or replace function rbac.may_read(
     p_owner_id uuid, p_org_id uuid, p_visibility text
 ) returns boolean as $$
     select p_visibility = 'public'
         or p_owner_id = rbac.current_user_id()
         or (p_visibility = 'org'
-            and p_org_id is not null
+            and not rbac.is_shared_org(p_org_id)
             and p_org_id in (select rbac.current_org_ids()));
 $$ language sql stable parallel safe;
 
@@ -8876,8 +9023,9 @@ create or replace function rbac.may_write(
 ) returns boolean as $$
     select nullif(current_setting('request.jwt.claims', true), '') is null
         or ((p_owner_id is null or p_owner_id = rbac.current_user_id())
-            and (p_org_id is null or p_org_id in (select rbac.current_org_ids()))
-            and (p_visibility <> 'org' or p_org_id is not null));
+            and (rbac.is_shared_org(p_org_id)
+                 or p_org_id in (select rbac.current_org_ids()))
+            and (p_visibility <> 'org' or not rbac.is_shared_org(p_org_id)));
 $$ language sql stable parallel safe;
 
 -- The org half on its own, for callers that have an org and not yet a row --
@@ -8893,15 +9041,16 @@ $$ language sql stable parallel safe;
 -- an act. It was measured as a real disclosure, through nothing more than
 -- register_upload()'s optional argument defaulting to null.
 --
--- Scope removes the premise rather than the check. A null org is now just a
--- row with no tenancy; whether anyone else reads it is `visibility`, which
--- defaults to `private`. Publishing to everyone is spelled `public` and is a
--- thing somebody chose, so the act that needed refusing cannot be performed by
--- omission any more -- which is the outcome that check was standing in for.
+-- Scope removes the premise rather than the check. The shared tier is now just
+-- a tenancy nobody is a member of; whether anyone else reads a row on it is
+-- `visibility`, which defaults to `private`. Publishing to everyone is spelled
+-- `public` and is a thing somebody chose, so the act that needed refusing
+-- cannot be performed by omission any more -- which is the outcome that check
+-- was standing in for.
 create or replace function rbac.may_access_org(p_org_id uuid)
 returns boolean as $$
     select nullif(current_setting('request.jwt.claims', true), '') is null
-        or p_org_id is null
+        or rbac.is_shared_org(p_org_id)
         or p_org_id in (select rbac.current_org_ids());
 $$ language sql stable parallel safe;
 
@@ -8942,7 +9091,7 @@ returns text as $$
         -- was reported in, reached from the opposite direction. Naming an org
         -- is a statement about scope in any reading; nothing should override
         -- it.
-        when p_org_id is not null then 'org'
+        when not rbac.is_shared_org(p_org_id) then 'org'
         -- No org and no request identity: an operator installing deployment
         -- configuration -- the seeded agents, the sample corpus, a migration.
         -- These are for everyone by construction, and it is the only case
@@ -8972,12 +9121,20 @@ declare v_requires_org boolean;
 begin
     select requires_org into v_requires_org
       from rbac.visibilities where scope = new.visibility;
-    if v_requires_org and new.org_id is null then
+    -- rbac.is_shared_org() rather than `new.org_id is null`, and it covers
+    -- both: the column is NOT NULL, so the row this refuses now carries the
+    -- SHARED org rather than no org -- which is the same mistake wearing the
+    -- new spelling, and is what an omitted p_org_id produces through the
+    -- column default. An explicit null still reaches here (NOT NULL is checked
+    -- after BEFORE triggers), and is_shared_org() reads it the same way, so
+    -- this branch reports the useful error instead of leaving it to a
+    -- constraint that names only the column.
+    if v_requires_org and rbac.is_shared_org(new.org_id) then
         raise exception
-            'visibility ''%'' requires an org_id, and this row has none',
+            'visibility ''%'' requires an org_id, and this row is on the shared tier',
             new.visibility
-            using hint = 'set org_id, or use a visibility that does not '
-                         'require one (see rbac.visibilities.requires_org)';
+            using hint = 'set org_id to a real org, or use a visibility that '
+                         'does not require one (see rbac.visibilities.requires_org)';
     end if;
     return new;
 end;
@@ -9055,6 +9212,13 @@ begin
         'alter table %s add column if not exists owner_id uuid references rbac.users(id)', p_table);
     execute format(
         'alter table %s add column if not exists org_id uuid', p_table);
+    -- AND IT IS NOT NULL, defaulted to the shared tier. One call, because the
+    -- three statements it stands for have to happen in one order and this is
+    -- the only place sixteen tables agree to be changed at once -- see
+    -- rbac.adopt_shared_org(). Before the foreign key rather than after, so
+    -- that the key validates the backfilled rows in the same pass instead of
+    -- being added over a column that is about to be rewritten.
+    perform rbac.adopt_shared_org(p_table);
     -- The org foreign key is stated separately rather than inline, because
     -- `add column if not exists` is a NO-OP on a table that already has the
     -- column -- and most of the tables adopting scope already have an org_id
@@ -9073,8 +9237,14 @@ begin
     execute format(
         'alter table %s add column if not exists visibility text', p_table);
     if v_added then
+        -- rbac.is_shared_org(org_id) and not `org_id is null`: by the time
+        -- this runs the column has been backfilled to the sentinel, so the
+        -- rows this is about no longer answer to a null test. The two spell
+        -- the same set, and writing it this way makes the statement true
+        -- whichever order the two migrations land in.
         execute format(
-            'update %s set visibility = case when org_id is null then %L else ''org'' end',
+            'update %s set visibility = case when rbac.is_shared_org(org_id) '
+            'then %L else ''org'' end',
             p_table, p_backfill_visibility);
     end if;
     execute format(
@@ -9099,10 +9269,33 @@ begin
         'alter table %s add constraint %I foreign key (visibility) references rbac.visibilities(scope)',
         p_table, v_tbl || '_visibility_fkey');
 
+    -- THE ORG INDEX WAS PARTIAL AND IS NOT ANY MORE, and the drop is what makes
+    -- an upgraded database agree with a fresh one.
+    --
+    -- It was `where org_id is not null`, which excluded the shared tier back
+    -- when that tier WAS the null. On a NOT NULL column that predicate selects
+    -- every row: a partial index that is not partial, carrying a condition the
+    -- planner has to prove against every query that hopes to use it. A fresh
+    -- install would build the plain index and an existing database would keep
+    -- the partial one, because `create index if not exists` matches on the
+    -- NAME -- which is exactly the divergence dev/upgrade-converges.sh
+    -- compares indexdef for. So it is dropped by hand, and only when it is the
+    -- partial one: aiq.nodes and workflow.schedules declare their own plain
+    -- idx_<t>_org in their own schema files and must not lose it.
+    if exists (select 1 from pg_index i
+                join pg_class ic on ic.oid = i.indexrelid
+               where i.indrelid = p_table and i.indpred is not null
+                 and ic.relname = 'idx_' || v_tbl || '_org') then
+        execute format('drop index %I.%I',
+                       (select n.nspname from pg_class c
+                          join pg_namespace n on n.oid = c.relnamespace
+                         where c.oid = p_table),
+                       'idx_' || v_tbl || '_org');
+    end if;
     if not exists (select 1 from pg_index i
                    join pg_attribute a on a.attrelid = i.indrelid and a.attnum = i.indkey[0]
                    where i.indrelid = p_table and a.attname = 'org_id') then
-        execute format('create index %I on %s (org_id) where org_id is not null',
+        execute format('create index %I on %s (org_id)',
                        'idx_' || v_tbl || '_org', p_table);
     end if;
     if not exists (select 1 from pg_index i
@@ -10021,6 +10214,23 @@ grant execute on function rbac.current_org_ids() to web_anon, authenticated, api
 grant execute on function rbac.may_read(uuid, uuid, text) to web_anon, authenticated, api_viewer, worker;
 grant execute on function rbac.may_write(uuid, uuid, text) to web_anon, authenticated, api_viewer, worker;
 grant execute on function rbac.may_access_org(uuid) to web_anon, authenticated, api_viewer, worker;
+-- THE SENTINEL TRIO, and they are on this list for a reason that only shows up
+-- from the caller's seat.
+--
+-- shared_org_id() is written into the text of every generated write policy and
+-- into orgs_member_visible, and a policy is evaluated as the CALLER, not as
+-- the owner. Without the grant the expression raises `permission denied for
+-- function shared_org_id` inside the WITH CHECK, and dev/tests/rbac/11 reports
+-- it as the read rule and the write rule disagreeing about a row -- which is
+-- true, and names the wrong cause. Verified by running the check as
+-- `authenticated` and watching it fail before the grant existed.
+--
+-- is_shared_org() and org_or_shared() ride the same path: may_read/may_write
+-- call the first, and the aiq projection triggers -- which run as whoever
+-- INSERTED into the application table, not as app_owner -- call the second.
+grant execute on function rbac.shared_org_id() to web_anon, authenticated, api_viewer, worker;
+grant execute on function rbac.is_shared_org(uuid) to web_anon, authenticated, api_viewer, worker;
+grant execute on function rbac.org_or_shared(uuid) to web_anon, authenticated, api_viewer, worker;
 -- scope_predicate/scope_write_predicate/default_visibility are NOT granted,
 -- and surface.sql's reverse check is what settled it: they were, and it
 -- reported them as reachable-but-undeclared, which is the right complaint.
@@ -10151,9 +10361,19 @@ create policy user_roles_self_or_admin on rbac.user_roles for select
 -- deployment is the customer list, and `select * from orgs` answering it for
 -- any authenticated caller is the same disclosure request_password_reset
 -- refuses to answer for addresses.
+--
+-- THE SHARED TIER IS THE EXCEPTION, and it has to be. §2b(i) made org_id NOT
+-- NULL by pointing every shared row at rbac.shared_org_id(), so that id now
+-- appears in rows any caller may read -- and without this arm the caller can
+-- read the row, read the org_id on it, and get nothing back when they ask what
+-- it is. It discloses nothing: the id is a published constant derived from two
+-- fixed strings, identical in every deployment, and nobody is a member of it
+-- (org_members_not_shared). A well-known row that cannot be looked up is a
+-- foreign key pointing into the dark.
 drop policy if exists orgs_member_visible on rbac.orgs;
 create policy orgs_member_visible on rbac.orgs for select
-  using (id in (select rbac.current_org_ids())
+  using (id = rbac.shared_org_id()
+         or id in (select rbac.current_org_ids())
          or (select rbac.has_permission(rbac.current_user_id(), 'orgs', 'select')));
 -- Membership is visible for the orgs you are in -- "who else is here" is a
 -- question a member of a tenant may ask, and one nobody else may. This is the
@@ -11012,7 +11232,13 @@ create table if not exists aiq.nodes (
     id           uuid primary key default uuidv7(),
     entity_type  text not null,          -- owning table, e.g. 'company'
     entity_id    uuid not null,          -- PK in that table
-    org_id       uuid,                   -- tenant; null = shared reference data
+    -- The tenant. NOT NULL, defaulted to rbac.shared_org_id() by
+    -- rbac.adopt_shared_org() in integration-rbac.sql -- said there rather
+    -- than here because that function lives in user-rbac, which is installed
+    -- after this file. `null = shared reference data` is what this column used
+    -- to mean and identity/spec.md §4 is why it stopped: a NULL may only mean
+    -- unknown, and the shared tier is a value.
+    org_id       uuid,
     summary      text,                   -- cheap human/agent-readable label
     created_at   timestamptz not null default now(),
     updated_at   timestamptz not null default now(),
@@ -11033,6 +11259,11 @@ create table if not exists aiq.node_keys (
     entity_type  text not null,
     key          text not null,          -- normalized (lowercased, trimmed)
     kind         text not null check (kind in ('canonical','short','alias')),
+    -- Copied from the node, and NOT NULL for the same reason nodes.org_id is
+    -- -- see integration-rbac.sql §2, where this table's adopt_shared_org()
+    -- call lives. It is not declared `not null` here because a `create table
+    -- if not exists` does nothing to a database that already has the table,
+    -- so the constraint would reach fresh installs only.
     org_id       uuid,
     primary key (node_id, key, kind)
 );
@@ -11057,15 +11288,26 @@ comment on column aiq.nodes.entity_type is
 -- deliberately NOT unique -- 'bakhmut' may be canonical for a place and an
 -- event, and short-key lookup may legitimately return several nodes.
 --
--- NULLS NOT DISTINCT, and it is the whole guarantee rather than a detail.
--- org_id IS NULL means shared reference data, which integration-rbac.sql §1
--- calls "a real category here, not a loophole" and which every public company
--- in a deployment will be. Under the default NULLS DISTINCT, two NULLs never
--- conflict -- so this index enforced canonical-key uniqueness for exactly the
--- tenants that have one and not at all for the shared tier. Measured: two
--- companies both took the canonical key 'acme', and LOOKUP "ACME" -- the
--- dialect's most common call, documented as an exact match -- returned two
--- different nodes with no way to tell which was meant.
+-- NULLS NOT DISTINCT IS NOW A NO-OP, AND IT IS KEPT DELIBERATELY.
+--
+-- It was the whole guarantee. org_id IS NULL meant shared reference data,
+-- which integration-rbac.sql §1 calls "a real category here, not a loophole"
+-- and which every public company in a deployment will be. Under the default
+-- NULLS DISTINCT two NULLs never conflict -- so this index enforced
+-- canonical-key uniqueness for exactly the tenants that have one and not at
+-- all for the shared tier. Measured: two companies both took the canonical key
+-- 'acme', and LOOKUP "ACME" -- the dialect's most common call, documented as
+-- an exact match -- returned two different nodes with no way to tell which was
+-- meant.
+--
+-- org_id is NOT NULL now (identity/spec.md §4, rbac.adopt_shared_org), so the
+-- flag decides nothing: there are no NULLs left for it to be distinct or not
+-- distinct about, and the shared tier is constrained by the same equality as
+-- every other org. It stays because dropping it would be a rewrite of a unique
+-- index on every deployment to change nothing, and because a reader arriving
+-- at NULLS NOT DISTINCT with no note has to work out for themselves whether it
+-- is load-bearing. It is not. Anything that makes org_id nullable again makes
+-- it load-bearing again.
 create unique index if not exists idx_node_keys_canonical
     on aiq.node_keys (org_id, key, entity_type) nulls not distinct
     where kind = 'canonical';
@@ -11241,6 +11483,8 @@ create table if not exists aiq.edges (
     valid_from  timestamptz,
     valid_to    timestamptz,
     provenance  jsonb not null default '{}'::jsonb,
+    -- Authoring provenance, not read gating (integration-rbac.sql §3). NOT
+    -- NULL and defaulted to the shared tier by adopt_shared_org() there.
     org_id      uuid,
     created_at  timestamptz not null default now(),
     unique (src_id, dst_id, relation)
@@ -11431,8 +11675,18 @@ declare
     -- exactly what this layer meant by org_id before rbac.visibilities existed,
     -- so a registration that says nothing about visibility keeps the behaviour
     -- it had rather than projecting every node private and going dark.
+    --
+    -- rbac.is_shared_org() rather than `is null`, and this is the one place the
+    -- sentinel has to absorb a NULL it did not create. p_org_expr is an
+    -- expression over a table THIS COLLECTION DOES NOT OWN -- a customer's
+    -- `calder.products.org_id`, nullable, meaning whatever they meant by it --
+    -- so the NOT NULL guarantee stops at the registry boundary and the
+    -- translation has to happen on the way in. is_shared_org(null) is true, so
+    -- an application column that says nothing still projects as `public`,
+    -- which is the behaviour this default has always had.
     v_vis text := coalesce(p_visibility_expr,
-                           format('case when %s is null then ''public'' else ''org'' end',
+                           format('case when rbac.is_shared_org(%s) '
+                                  'then ''public'' else ''org'' end',
                                   p_org_expr));
 begin
     -- One table, one entity type. Two types over one table cannot both work
@@ -11480,8 +11734,15 @@ begin
         create or replace function aiq.%1$s() returns trigger as $b$
         begin
             -- 1. Rows that belong: upsert identity.
+            -- rbac.org_or_shared() wraps the org expression at every one of
+            -- the four sites that writes it, and the wrap is not decoration.
+            -- aiq.nodes.org_id is NOT NULL; %3$s is an expression over a table
+            -- somebody else owns, whose org column is nullable and whose null
+            -- has always meant "shared". Unwrapped, the first shared row a
+            -- customer projects fails the not-null constraint and the failure
+            -- names our column rather than their data.
             insert into aiq.nodes (entity_type, entity_id, org_id, summary, visibility)
-            select %2$L, n.id, %3$s, %4$s, %7$s from new_rows n where %5$s
+            select %2$L, n.id, rbac.org_or_shared(%3$s), %4$s, %7$s from new_rows n where %5$s
             on conflict (entity_type, entity_id) do update
                 -- visibility is projected on UPDATE for org_id's reason: the
                 -- source row is the truth, and a node left at the scope it had
@@ -11501,7 +11762,7 @@ begin
 
             -- 3. The canonical key.
             insert into aiq.node_keys (node_id, entity_type, key, kind, org_id)
-            select nd.id, %2$L, lower(trim(%6$s)), 'canonical', %3$s
+            select nd.id, %2$L, lower(trim(%6$s)), 'canonical', rbac.org_or_shared(%3$s)
             from new_rows n
             join aiq.nodes nd on nd.entity_type = %2$L and nd.entity_id = n.id
             where %5$s
@@ -11617,7 +11878,7 @@ begin
     -- nothing forcing them to.
     execute format($q$
         insert into aiq.nodes (entity_type, entity_id, org_id, summary, visibility)
-        select %1$L, n.id, %2$s, %3$s, %6$s from %4$s n where %5$s
+        select %1$L, n.id, rbac.org_or_shared(%2$s), %3$s, %6$s from %4$s n where %5$s
         on conflict (entity_type, entity_id) do update
             set summary = excluded.summary, org_id = excluded.org_id,
                 visibility = excluded.visibility, updated_at = now()
@@ -11626,7 +11887,7 @@ begin
 
     execute format($q$
         insert into aiq.node_keys (node_id, entity_type, key, kind, org_id)
-        select nd.id, %1$L, lower(trim(%2$s)), 'canonical', %3$s
+        select nd.id, %1$L, lower(trim(%2$s)), 'canonical', rbac.org_or_shared(%3$s)
         from %4$s n
         join aiq.nodes nd on nd.entity_type = %1$L and nd.entity_id = n.id
         where %5$s
@@ -12142,7 +12403,7 @@ drop function if exists aiq.semantic(text, vector, int);
 --    only inserts.
 --
 --  * The canonical-key unique index was NULLS DISTINCT, so it enforced nothing
---    at all for shared reference data (org_id is null), which is most of a
+--    at all for shared reference data (org_id = rbac.shared_org_id()), which is most of a
 --    real deployment. Two rows took the key 'acme' and LOOKUP returned both.
 --
 --  * Generated projection functions were named after the source table's SHORT
@@ -14300,7 +14561,7 @@ returns jsonb as $$
                                 join aiq.nodes n on n.id = nk.node_id
                                where n.entity_type = r.entity_type
                                  and nk.kind = 'canonical'
-                                 and (n.org_id is null
+                                 and (n.org_id = rbac.shared_org_id()
                                       or n.org_id in (select rbac.current_org_ids()))
                                order by nk.key
                                limit 3) k), '[]'::jsonb))
@@ -14578,10 +14839,17 @@ revoke execute on function aiq.register_schema_example(text, text, text, text, t
 -- being load-bearing: a shared SEC filing is `public` because somebody chose
 -- it, and a row nobody scoped is `private` because that is the default.
 --
+-- AND THE NULL ITSELF IS GONE. identity/spec.md §4 finished the argument: a
+-- NULL may only mean unknown, so the shared tier is a ROW -- user-rbac
+-- §2b(i)'s rbac.shared_org_id() -- and org_id is NOT NULL on all sixteen
+-- tables that carry it. "org_id IS NULL -> shared" is now "org_id =
+-- rbac.shared_org_id() -> shared", which is the same sentence with nothing
+-- left for a reader to guess and nothing left for a unique index to skip.
+--
 -- "Shared reference data" is still a real category and not a loophole -- a
 -- public filing or a well-known company is legitimately global, and forcing it
 -- to be duplicated per tenant would defeat the whole point of one identity
--- registry. It is now spelled `public`.
+-- registry. It is now spelled `public`, on the shared org.
 --
 -- Membership lives in rbac, as it always claimed to. What has changed is that
 -- there is now something there to ask: rbac.org_members rather than an array
@@ -14601,6 +14869,21 @@ select rbac.add_scope_policy ('aiq.nodes');
 
 alter table aiq.node_keys enable row level security;
 alter table aiq.edges     enable row level security;
+
+-- THE TWO TABLES THAT CARRY org_id AND DO NOT TAKE add_scope_columns.
+--
+-- Both keep their own org_id -- node_keys because the canonical-key unique
+-- index is scoped by it, edges for authoring provenance -- and neither takes
+-- the scope columns, for the reasons written out below. That makes them the
+-- only two of the sixteen where the NOT NULL does not arrive with
+-- add_scope_columns(), so it is asked for explicitly. Two lines rather than a
+-- rule, and stated where the exception itself is stated: a catalogue sweep
+-- that quietly fixed them would hide the fact that they are exceptions.
+--
+-- identity/checks.sql asserts nobody adds a seventeenth org_id column and
+-- forgets both routes.
+select rbac.adopt_shared_org('aiq.node_keys');
+select rbac.adopt_shared_org('aiq.edges');
 
 -- node_keys INHERITS its node's visibility rather than re-deriving it from
 -- its own org_id copy. That copy exists for the canonical-key unique index
@@ -16072,6 +16355,17 @@ create table if not exists content.channels (
 --
 -- Drop-then-add rather than inline, so an installation that already created
 -- this table picks the change up on the next apply.
+-- NULLS NOT DISTINCT IS A NO-OP NOW, AND IS KEPT DELIBERATELY.
+--
+-- It was the whole constraint while `org_id is null` meant the shared tier:
+-- under the default NULLS DISTINCT this unique index would have policed every
+-- tenant's channel names and none of the shared ones -- the tier more than one
+-- writer touches. identity/spec.md §4 removed the premise: org_id is NOT NULL
+-- (rbac.adopt_shared_org), the shared tier is rbac.shared_org_id(), and the
+-- flag now decides nothing because there are no NULLs in this index. Left in
+-- place because dropping it rebuilds a unique index on every deployment to
+-- change nothing; written down because a reader who finds it with no note
+-- cannot tell that it stopped mattering.
 alter table content.channels drop constraint if exists channels_org_id_name_key;
 alter table content.channels add constraint channels_org_id_name_key
     unique nulls not distinct (org_id, name);
@@ -16317,9 +16611,10 @@ create or replace function content.register_upload(
     -- Defaulted through rbac.default_visibility() rather than to a constant,
     -- and the choice is the whole of §4b's fix rather than a convenience. An
     -- upload named an org and got a row every OTHER org could read, because
-    -- `org_id is null` was the everyone tier and this argument defaulted into
-    -- it. Now: name an org and the row is that org's; name none and the row is
-    -- yours. Neither default publishes anything to another tenant, and
+    -- the shared tier was spelled `org_id is null` and this argument defaulted
+    -- into it. Now: name an org and the row is that org's; name none and the
+    -- row is yours -- on the shared tier, but `private`, which is a different
+    -- statement from the one that leaked. Neither default publishes anything to another tenant, and
     -- publishing is `public`, spelled out by whoever meant it.
     p_visibility  text default null
 ) returns uuid as $$
@@ -16338,9 +16633,18 @@ begin
     -- `select into` with no order takes whichever the plan produced. The
     -- org-specific channel wins; the public one is the fallback it was meant
     -- to be.
+    --
+    -- Written as an IN over two values rather than `(org_id is not distinct
+    -- from p_org_id or org_id is null)`, which said the same thing in
+    -- three-valued logic. p_org_id is still nullable -- it is an omitted
+    -- argument, a genuine absence -- so rbac.org_or_shared() reads that
+    -- omission as the shared tier, and both elements of the IN collapse to
+    -- rbac.shared_org_id(): an unscoped caller matches the shared channel and
+    -- nothing else, which is what the old form did too.
     select id into v_channel from content.channels
-    where name = p_channel and (org_id is not distinct from p_org_id or org_id is null)
-    order by (org_id is not distinct from p_org_id) desc
+    where name = p_channel
+      and org_id in (rbac.org_or_shared(p_org_id), rbac.shared_org_id())
+    order by (org_id = rbac.org_or_shared(p_org_id)) desc
     limit 1;
     if v_channel is null then
         raise exception 'no channel named % for this org -- create one first', p_channel;
@@ -16360,9 +16664,16 @@ begin
     -- a service connection with no request identity leaves it null, and such a
     -- row is reachable only through its org or by being public, which is the
     -- correct reading of "nobody in particular uploaded this".
+    --
+    -- rbac.org_or_shared(p_org_id), because org_id is NOT NULL on this table
+    -- and p_org_id is an OPTIONAL ARGUMENT: an upload that names no org is the
+    -- caller saying nothing, and the row that used to carry a NULL now carries
+    -- the shared org. Nothing about who may read it changes -- that is
+    -- v_vis's job, and it is `private` for a caller with an identity, exactly
+    -- as it was before.
     insert into content.resources (channel_id, file_id, uri, title, org_id,
                                    owner_id, visibility, metadata, external_id)
-    values (v_channel, v_file, p_uri, p_title, p_org_id,
+    values (v_channel, v_file, p_uri, p_title, rbac.org_or_shared(p_org_id),
             rbac.current_user_id(), v_vis, p_metadata, p_external_id)
     on conflict (channel_id, external_id) do update set updated_at = now()
     returning id into v_res;
@@ -16411,15 +16722,17 @@ begin
     perform content.assert_org_write(p_org_id, 'register content');
 
     select id into v_channel from content.channels
-    where name = p_channel and (org_id is not distinct from p_org_id or org_id is null)
-    order by (org_id is not distinct from p_org_id) desc
+    where name = p_channel
+      and org_id in (rbac.org_or_shared(p_org_id), rbac.shared_org_id())
+    order by (org_id = rbac.org_or_shared(p_org_id)) desc
     limit 1;
     if v_channel is null then
         raise exception 'no channel named % for this org', p_channel;
     end if;
 
     insert into content.resources (channel_id, external_id, uri, title, org_id, metadata)
-    values (v_channel, p_external_id, p_uri, p_title, p_org_id, p_metadata)
+    values (v_channel, p_external_id, p_uri, p_title,
+            rbac.org_or_shared(p_org_id), p_metadata)
     on conflict (channel_id, external_id) do nothing
     returning id into v_res;
 
@@ -16853,6 +17166,8 @@ create table if not exists content.datasets (
 -- Drop-then-add rather than inline, so an installation that already created
 -- this table picks the change up on the next apply -- the same discipline
 -- resources_status_check above is written with.
+-- NULLS NOT DISTINCT: a no-op on a NOT NULL column, kept for the reason
+-- channels_org_id_name_key above states in full.
 alter table content.datasets drop constraint if exists datasets_org_name_key;
 alter table content.datasets add constraint datasets_org_name_key
     unique nulls not distinct (org_id, name);
@@ -16968,7 +17283,11 @@ returns text as $$
     from content.datasets d
     where d.name = p_name
       and rbac.may_read(d.owner_id, d.org_id, d.visibility)
-    order by d.org_id nulls last
+    -- The tenant's own dataset beats the shared one of the same name, which is
+    -- what `nulls last` meant while the shared tier was a NULL. On a NOT NULL
+    -- column that ordering is meaningless -- it would sort by the raw uuid --
+    -- so the rule is stated as what it always was: shared last.
+    order by (d.org_id = rbac.shared_org_id())
     limit 1;
 $$ language sql stable;
 
@@ -17051,7 +17370,7 @@ on conflict do nothing;
 -- (calling the equivalent function per row measured 58x slower, and sixteen
 -- hand-copies of a security predicate is how one of them drifts).
 --
--- What changes for this file specifically: `org_id is null` no longer means
+-- What changes for this file specifically: the shared tier no longer means
 -- "everyone may read it". §4b of schema.sql measured that conflation as a real
 -- cross-tenant read -- register_upload() without its optional org argument
 -- wrote a null org and another tenant retrieved the text. A row nobody scoped
@@ -17182,7 +17501,8 @@ select 'workflow_artifacts', 'file_upload',
        -- which content.register_upload documents as a legitimate choice.
        '{"description": "bytes produced by a workflow step, refd from tasks.output"}'::jsonb
 where not exists (
-    select 1 from content.channels where name = 'workflow_artifacts' and org_id is null);
+    select 1 from content.channels
+     where name = 'workflow_artifacts' and org_id = rbac.shared_org_id());
 
 create or replace function workflow.register_artifact(
     p_task_id      uuid,
@@ -18563,7 +18883,12 @@ begin
             -- caller gets their own org or themselves -- and `visibility` in
             -- the spec overrides it for somebody who means something else.
             coalesce((p_spec->>'owner_id')::uuid, rbac.current_user_id()),
-            (p_spec->>'org_id')::uuid,
+            -- rbac.org_or_shared(), because org_id is NOT NULL
+            -- (identity/spec.md §4) and a spec with no `org_id` key is a
+            -- genuine absence: the operator did not say. The shared tier is
+            -- what "did not say" has always meant here, so it is now written
+            -- down instead of arriving as a null.
+            rbac.org_or_shared((p_spec->>'org_id')::uuid),
             coalesce(p_spec->>'visibility',
                      rbac.default_visibility((p_spec->>'org_id')::uuid)))
     -- AN OMITTED KEY MEANS "LEAVE IT ALONE", NOT "SET IT TO THE DEFAULT".
@@ -18687,7 +19012,12 @@ begin
             -- default with a null owner writes a row its own author cannot
             -- select. rbac.default_visibility() states the rule once.
             coalesce((p_spec->>'owner_id')::uuid, rbac.current_user_id()),
-            (p_spec->>'org_id')::uuid,
+            -- rbac.org_or_shared(), because org_id is NOT NULL
+            -- (identity/spec.md §4) and a spec with no `org_id` key is a
+            -- genuine absence: the operator did not say. The shared tier is
+            -- what "did not say" has always meant here, so it is now written
+            -- down instead of arriving as a null.
+            rbac.org_or_shared((p_spec->>'org_id')::uuid),
             coalesce(p_spec->>'visibility',
                      rbac.default_visibility((p_spec->>'org_id')::uuid)))
     -- Same rule as upsert_agent, and it reached every column here for the
@@ -18786,7 +19116,12 @@ begin
             -- default with a null owner writes a row its own author cannot
             -- select. rbac.default_visibility() states the rule once.
             coalesce((p_spec->>'owner_id')::uuid, rbac.current_user_id()),
-            (p_spec->>'org_id')::uuid,
+            -- rbac.org_or_shared(), because org_id is NOT NULL
+            -- (identity/spec.md §4) and a spec with no `org_id` key is a
+            -- genuine absence: the operator did not say. The shared tier is
+            -- what "did not say" has always meant here, so it is now written
+            -- down instead of arriving as a null.
+            rbac.org_or_shared((p_spec->>'org_id')::uuid),
             coalesce(p_spec->>'visibility',
                      rbac.default_visibility((p_spec->>'org_id')::uuid)))
     on conflict (name) do update
@@ -19082,7 +19417,7 @@ begin
             -- no request identity and is deployment configuration, which is
             -- the case rbac.default_visibility() answers `public`.
             coalesce((p_manifest->>'owner_id')::uuid, rbac.current_user_id()),
-            (p_manifest->>'org_id')::uuid,
+            rbac.org_or_shared((p_manifest->>'org_id')::uuid),
             coalesce(p_manifest->>'visibility',
                      rbac.default_visibility((p_manifest->>'org_id')::uuid)))
     on conflict (name) do update
@@ -19974,6 +20309,15 @@ end $$;
 -- what makes the column exist under this name, and `create index if not exists`
 -- is matched on the index NAME, so it would neither fail nor fix an index built
 -- over the old column. (It does not have to: a rename carries its indexes.)
+-- NULLS NOT DISTINCT IS A NO-OP HERE AND IS KEPT DELIBERATELY. It was
+-- load-bearing while `org_id is null` meant the shared tier: without it this
+-- index constrained every tenant except the shared one. org_id is NOT NULL now
+-- (identity/spec.md §4, rbac.adopt_shared_org), so there are no NULLs for the
+-- flag to rule on. Left in place rather than dropped because removing it means
+-- rebuilding a unique index on every deployment to change nothing -- and
+-- written down rather than left silent, because a reader who finds the flag
+-- with no note has to derive for themselves whether it still matters. It does
+-- not, unless somebody makes org_id nullable again.
 create unique index if not exists idx_soft_nodes_key
     on aiq.soft_nodes (org_id, claimed_kind, key) nulls not distinct;
 create index if not exists idx_soft_nodes_unresolved
@@ -20003,6 +20347,8 @@ create table if not exists aiq.lake_nodes (
     first_seen_at timestamptz not null default now(),
     last_seen_at  timestamptz not null default now()
 );
+-- NULLS NOT DISTINCT: a no-op on a NOT NULL column, kept for the reason
+-- idx_soft_nodes_key above states in full.
 create unique index if not exists idx_lake_nodes_key
     on aiq.lake_nodes (org_id, dataset, row_key) nulls not distinct;
 
@@ -20127,8 +20473,9 @@ $$ language sql immutable;
 --
 -- Found by dev/tests/query/06-graph-tenancy.sql §5 rejecting these functions
 -- as definer-and-user-reachable; the grant was the surface bug, and this was
--- the one underneath it. `org_id is null` is the shared reference tier, which
--- integration-rbac.sql calls "a real category here, not a loophole."
+-- the one underneath it. `org_id = rbac.shared_org_id()` is the shared
+-- reference tier, which integration-rbac.sql calls "a real category here, not
+-- a loophole."
 create or replace function aiq.resolve_ref(
     p_entity_type text, p_name text, p_fuzzy boolean default false,
     p_threshold real default 0.45, p_org_id uuid default null
@@ -20138,10 +20485,18 @@ declare
     v_ids  uuid[];
 begin
     -- 1. exact canonical, scoped to the type AND the caller's tenancy.
+    --
+    -- `n.org_id in (rbac.shared_org_id(), rbac.org_or_shared(p_org_id))` is
+    -- what `(org_id is null or org_id is not distinct from p_org_id)` used to
+    -- say: the shared tier, plus the caller's own org. It is now an ordinary
+    -- IN over a NOT NULL column -- no three-valued logic, no `is not distinct
+    -- from` to read twice -- and when p_org_id is itself omitted the two
+    -- elements collapse to the same value and the predicate is the shared tier
+    -- alone, which is exactly what an unscoped call should resolve against.
     select array_agg(distinct n.id) into v_ids
     from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
     where k.key = v_norm and k.kind = 'canonical' and n.entity_type = p_entity_type
-      and (n.org_id is null or n.org_id is not distinct from p_org_id);
+      and n.org_id in (rbac.shared_org_id(), rbac.org_or_shared(p_org_id));
     if array_length(v_ids,1) = 1 then return v_ids[1]; end if;
     if array_length(v_ids,1) > 1 then return null; end if;  -- ambiguous: a miss
 
@@ -20149,7 +20504,7 @@ begin
     select array_agg(distinct n.id) into v_ids
     from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
     where k.key = v_norm and k.kind in ('short','alias') and n.entity_type = p_entity_type
-      and (n.org_id is null or n.org_id is not distinct from p_org_id);
+      and n.org_id in (rbac.shared_org_id(), rbac.org_or_shared(p_org_id));
     if array_length(v_ids,1) = 1 then return v_ids[1]; end if;
     if array_length(v_ids,1) > 1 then return null; end if;
 
@@ -20159,7 +20514,7 @@ begin
             select n.id, max(similarity(k.key, v_norm)) as sim
             from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
             where n.entity_type = p_entity_type and k.key % v_norm
-              and (n.org_id is null or n.org_id is not distinct from p_org_id)
+              and n.org_id in (rbac.shared_org_id(), rbac.org_or_shared(p_org_id))
             group by n.id having max(similarity(k.key, v_norm)) >= p_threshold
             order by 2 desc limit 2) d;
         -- Exactly one candidate above threshold, or it is a miss. AN AMBIGUOUS
@@ -20191,7 +20546,14 @@ declare
     v_n       int;
     v_ids     uuid[] := '{}';          -- ordinal -> node id
     v_res     text[] := '{}';          -- ordinal -> residence, for the receipt
-    v_org     uuid   := (p_context->>'org_id')::uuid;
+    -- COALESCED AT THE BOUNDARY, once, rather than at the four sites that
+    -- write it. p_context is caller-supplied jsonb: a context with no `org_id`
+    -- key means the extraction was not on any tenant's behalf, which is the
+    -- shared tier -- and aiq.nodes/soft_nodes/lake_nodes/edges.org_id is NOT
+    -- NULL (identity/spec.md §4). This is the seam where an ABSENCE (a key
+    -- nobody set) legitimately becomes a VALUE (the shared org), and it is a
+    -- single line precisely so that it is one decision rather than four.
+    v_org     uuid   := rbac.org_or_shared((p_context->>'org_id')::uuid);
     -- FUZZY IS OFF BY DEFAULT, and that default was inverted after running it.
     --
     -- The obvious reading -- "resolve_ref implements the cascade, and the
@@ -20813,9 +21175,9 @@ grant select on aiq.soft_nodes, aiq.lake_nodes, aiq.graph_vocabulary to authenti
 -- entity NAMES before resolution, which is the most identifying thing in the
 -- pipeline.
 --
--- Same predicate as aiq.nodes' own policy, and the same reason for the null
--- branch: `org_id is null` is shared reference data, which §4.4 says is the
--- normal state. `graph_vocabulary` stays policy-free deliberately -- it is the
+-- Same predicate as aiq.nodes' own policy, and the same reason for the shared
+-- branch: `org_id = rbac.shared_org_id()` is shared reference data, which §4.4
+-- says is the normal state. `graph_vocabulary` stays policy-free deliberately -- it is the
 -- relation catalogue, the same shared-config tier as aiq.relation_types.
 --
 -- Nothing on the write path changes: the worker reaches these through
@@ -21441,7 +21803,8 @@ begin
                'description', 'the default channel for POST /files',
                'ingest_workflow', 'ingest_file')
     where not exists (
-        select 1 from content.channels where name = 'uploads' and org_id is null);
+        select 1 from content.channels
+         where name = 'uploads' and org_id = rbac.shared_org_id());
 end $$;
 
 
@@ -22062,21 +22425,28 @@ grant execute on function percolate.contract() to web_anon, authenticated, api_v
 --    the sentence is the product, the same way a surface.sql row's `why` is.
 -- ------------------------------------------------------------
 
--- org_id NULL is a VALUE: the shared tier, visible to every tenant. A publicly
--- listed company is legitimately global and duplicating it per tenant defeats
--- the point of one registry (integration-rbac.sql §1). Because it is a value,
--- a unique index over it MUST be `nulls not distinct` or it constrains
--- everything except the shared tier -- which is the one thing more than one
--- writer touches.
+-- THE FIVE org_id DECLARATIONS ARE GONE, AND THEIR ABSENCE IS THE POINT.
 --
--- spec.md §4 argues this should stop being a NULL at all. Until it does, this
--- is the honest declaration of what it currently means.
-insert into percolate.null_means (schema_name, table_name, column_name, means, why) values
- ('aiq','lake_nodes','org_id','value','the shared tier -- a lake row visible to every tenant'),
- ('aiq','node_keys','org_id','value','the shared tier -- a key resolvable by every tenant'),
- ('aiq','soft_nodes','org_id','value','the shared tier -- an unpromoted candidate visible to all'),
- ('content','channels','org_id','value','a shared source, e.g. a public feed every tenant reads'),
- ('content','datasets','org_id','value','a shared dataset; the same argument as channels'),
+-- They read `org_id NULL is a VALUE: the shared tier, visible to every
+-- tenant`, and spec.md §4 called that an honest declaration of a dishonest
+-- column: a value wearing an absence's clothes, which forced five unique
+-- indexes to be NULLS NOT DISTINCT and caused all three of the duplicate bugs
+-- §1 lists.
+--
+-- The column is NOT NULL now. The shared tier is rbac.shared_org_id(), a row
+-- in rbac.orgs with a derived, deployment-independent uuid, and org_id cannot
+-- be NULL on any of the sixteen tables that carry it. So there is no NULL left
+-- to declare a meaning for, and a row here saying otherwise would be a
+-- statement about the schema that the schema contradicts -- which is the
+-- failure mode this whole registry exists to prevent, arriving inside the
+-- registry.
+--
+-- DELETED RATHER THAN OMITTED. Dropping the five rows from the INSERT below
+-- fixes a fresh install and does nothing to a database that already ran the
+-- old version: this file is replayed on upgrade and an absent row is not a
+-- retracted one. identity/spec.md §7's fourth lesson, applied to data instead
+-- of to a default. A no-op on the fresh path.
+delete from percolate.null_means where column_name = 'org_id';
 
 -- external_id NULL is an ABSENCE: no external identity was supplied. Several
 -- rows may legitimately have none, so `nulls distinct` is correct here and
@@ -22086,6 +22456,7 @@ insert into percolate.null_means (schema_name, table_name, column_name, means, w
 -- The trap this leaves is in spec.md §6: register_fetched's idempotence is
 -- `on conflict (channel_id, external_id)`, which never fires for a null. The
 -- constraint is right and the FUNCTION should refuse the call.
+insert into percolate.null_means (schema_name, table_name, column_name, means, why) values
  ('content','resources','external_id','absence','no upstream identity; many resources legitimately have none'),
  ('workflow','runs','external_id','absence','no idempotency key was supplied by the caller'),
 

@@ -347,7 +347,10 @@ end $$;
 -- by everyone ... so writing it is not a cross-tenant act". The policy was
 -- `org_id is null or org_id in (...)`, so a null org was not unscoped -- it was
 -- scoped to EVERY tenant, and writing one was the widest cross-tenant act
--- available, not the absence of one. It took no missing check and no guessed
+-- available, not the absence of one. (That predicate is spelled `org_id =
+-- rbac.shared_org_id() or org_id in (...)` today, and the shared tier is a row
+-- rather than a NULL -- which changes nothing about this argument and
+-- everything about whether a reader can see it being made.) It took no missing check and no guessed
 -- argument to reach: `p_org_id` DEFAULTS to null and the extension ships three
 -- null-org channels, so an ordinary user of one org planted a document that
 -- another org's TEXT search over the shipped corpus returned.
@@ -403,13 +406,22 @@ begin
     --    replaces "the write is refused", and it is the one that actually
     --    matters: the old failure was a READ by another tenant, and refusing
     --    the write was one way to prevent it rather than the guarantee itself.
+    --
+    -- `org_id = rbac.shared_org_id()` and not `org_id is null`: org_id is NOT
+    -- NULL now (specs/identity/spec.md §4), so an upload that named no org
+    -- lands on the shared TIER rather than carrying no tier at all. The
+    -- assertion below is deliberately unchanged in what it means -- the row
+    -- must not be scoped to any tenant, and `private` is what keeps it out of
+    -- everyone's reach. Being on the shared org buys the row nothing; only
+    -- `visibility` does, and the read probe two statements down is what
+    -- actually proves it.
     select visibility, org_id into v_vis, v_org
       from content.resources where id = v_res;
-    if v_vis is distinct from 'private' or v_org is not null then
+    if v_vis is distinct from 'private' or v_org is distinct from rbac.shared_org_id() then
         raise exception
             'a resource registered with no org came out as (%, %), not a private '
-            'row owned by its uploader -- which is what stops another tenant '
-            'reading it', v_vis, v_org;
+            'row on the shared tier owned by its uploader -- which is what stops '
+            'another tenant reading it', v_vis, v_org;
     end if;
     -- and prove it by reading, as org A, rather than by trusting the column
     set local role authenticated;

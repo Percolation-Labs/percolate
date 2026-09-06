@@ -59,16 +59,20 @@ begin
     end if;
 end $$;
 
+-- rbac.shared_org_id() where the rows below used to say null: org_id is NOT
+-- NULL (specs/identity/spec.md §4) and "on no tenant in particular" is the
+-- shared tier, which is a row. owner_id keeps its nulls -- an unowned row is a
+-- genuine absence, and the two columns no longer look alike.
 insert into public.scope_homes_probe (id, label, owner_id, org_id, visibility) values
-    (1,  'mine, private',            :'member_id',   null,             'private'),
+    (1,  'mine, private',            :'member_id',   rbac.shared_org_id(), 'private'),
     (2,  'mine, in my org',          :'member_id',   :'org_id',        'org'),
-    (3,  'mine, public',             :'member_id',   null,             'public'),
-    (4,  'theirs, private',          :'outsider_id', null,             'private'),
+    (3,  'mine, public',             :'member_id',   rbac.shared_org_id(), 'public'),
+    (4,  'theirs, private',          :'outsider_id', rbac.shared_org_id(), 'private'),
     (5,  'theirs, in my org',        :'outsider_id', :'org_id',        'org'),
-    (6,  'theirs, public',           :'outsider_id', null,             'public'),
+    (6,  'theirs, public',           :'outsider_id', rbac.shared_org_id(), 'public'),
     (7,  'theirs, in another org',   :'outsider_id', :'other_org_id',  'org'),
-    (8,  'unowned, public',          null,           null,             'public'),
-    (9,  'unowned, private',         null,           null,             'private'),
+    (8,  'unowned, public',          null,           rbac.shared_org_id(), 'public'),
+    (9,  'unowned, private',         null,           rbac.shared_org_id(), 'private'),
     (10, 'unowned, in my org',       null,           :'org_id',        'org'),
     (11, 'unowned, in another org',  null,           :'other_org_id',  'org'),
     -- An owned row carrying an org it is not scoped to: `private` wins, and
@@ -181,7 +185,8 @@ begin
             ('unowned, public',        null,       null,      'public'),
             ('unowned, my org',        null,       'mine',    'org'),
             ('unowned, another org',   null,       'other',   'org'),
-            -- `org` with no org. The refusal arrives from
+            -- `org` with no org -- which is now `org` on the SHARED org,
+            -- because that is what "no org" became. The refusal arrives from
             -- rbac.enforce_visibility() rather than from the policy -- a BEFORE
             -- trigger runs first -- and that is the point rather than a
             -- blurring of two layers: what must agree is may_write() and what
@@ -197,10 +202,24 @@ begin
                               when 'outsider' then (select id from rbac.users
                                                      where email = 'homes-outsider@test.com')
                               else null end;
+            -- The fallthrough is rbac.shared_org_id() and not null, and the
+            -- difference is what this block exists to catch. org_id is NOT
+            -- NULL (specs/identity/spec.md §4), so an INSERT of null is
+            -- refused by the constraint before any policy is consulted --
+            -- while rbac.may_write(owner, null, ...) reads a null ARGUMENT as
+            -- "the caller did not say", which is the shared tier, and answers
+            -- true. Left as null the two homes disagree on four of the eleven
+            -- rows, and they disagree for a reason that is about the fixture
+            -- rather than about the rule: `no org` is now a value, so the
+            -- fixture has to name it.
+            --
+            -- Every SECURITY DEFINER writer resolves the same way, through
+            -- rbac.org_or_shared() at its boundary, so this is the comparison
+            -- that matches what those writers actually do.
             v_org uuid := case r.org
                             when 'mine'  then (select id from rbac.orgs where slug = 'homes-org')
                             when 'other' then (select id from rbac.orgs where slug = 'homes-other')
-                            else null end;
+                            else rbac.shared_org_id() end;
         begin
             v_fn := rbac.may_write(v_owner, v_org, r.visibility);
 

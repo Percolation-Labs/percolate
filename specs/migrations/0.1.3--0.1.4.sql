@@ -53,7 +53,7 @@ drop view if exists agentic.sessions_api;
 -- `using (org_id is null or org_id in (select aiq.current_org_ids()))` does not
 -- sit there inertly next to the new predicate: it ADDS BACK every row the new
 -- one was written to withhold. On an upgraded database the whole change would
--- have been a no-op in the permissive direction -- `org_id is null` would still
+-- have been a no-op in the permissive direction -- a null org would still
 -- mean "every tenant reads this", which is the conflation this release exists
 -- to end, and `agents_are_shared_config` would still be a literal `true`.
 --

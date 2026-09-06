@@ -462,7 +462,7 @@ def main() -> int:
                     help="exit non-zero if any two copies of one vocabulary disagree")
     ap.add_argument("--psql",
                     help="a psql command to also read a live catalog through, e.g. "
-                         "'docker exec p8-experiment-pg19 psql -U p8 -d p8reload'")
+                         "'docker exec p8-dev-db psql -U p8 -d p8dev'")
     ap.add_argument("--unpaired", action="store_true",
                     help="also list vocabularies written down exactly once")
     a = ap.parse_args()

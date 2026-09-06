@@ -14,12 +14,12 @@
 # order-independent and the fixture survives. `set local role` needs the
 # transaction anyway.
 set -euo pipefail
-CONTAINER="${CONTAINER:-p8-experiment-pg19}"
+CONTAINER="${CONTAINER:-p8-dev-db}"
 # The database, because `11-graph` needs the compiled graph algorithms and a
 # stack still running the published image does not have them until
 # dev/build-image.sh has been run. Pointing at a database made by
 # dev/reload.sh is the fast way to see them work.
-DB="${DB:-p8experiment}"
+DB="${DB:-p8dev}"
 DSN="${DSN:-}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

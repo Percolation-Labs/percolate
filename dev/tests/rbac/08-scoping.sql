@@ -59,12 +59,17 @@ select rbac.add_scope_policy ('public.scope_probe');
 grant select, insert on scope_probe to authenticated;
 
 -- alice (org A) owns all four. bob (org B) owns none, and is the outsider.
+-- rbac.shared_org_id() where this fixture used to write null. org_id is NOT
+-- NULL (specs/identity/spec.md §4) and the shared tier is a row, so "no
+-- tenancy" is now a value the fixture names. owner_id stays nullable and stays
+-- null on the last row, which is the contrast worth keeping: `unowned` really
+-- is an absence, and it is the only one of the two that ever was.
 insert into scope_probe (label, owner_id, org_id, visibility) values
-  ('a-private', '11111111-1111-1111-1111-111111111111', null, 'private'),
+  ('a-private', '11111111-1111-1111-1111-111111111111', rbac.shared_org_id(), 'private'),
   ('a-org',     '11111111-1111-1111-1111-111111111111',
                 'a0000000-0000-0000-0000-00000000000a', 'org'),
-  ('a-public',  '11111111-1111-1111-1111-111111111111', null, 'public'),
-  ('unowned',   null, null, 'public');
+  ('a-public',  '11111111-1111-1111-1111-111111111111', rbac.shared_org_id(), 'public'),
+  ('unowned',   null, rbac.shared_org_id(), 'public');
 
 -- ---------------------------------------------------------------------
 -- 1. THE MATRIX. Four readers, one table, asserted as what each one sees.
@@ -245,8 +250,16 @@ declare v_ok boolean := false;
 begin
     -- as app_owner: no RLS at all, so only the trigger can refuse this
     begin
+        -- rbac.shared_org_id() and not null, and the swap makes the test
+        -- stronger rather than merely compatible. A null org_id is refused by
+        -- the NOT NULL constraint now, so this block would go on passing with
+        -- rbac.enforce_visibility() deleted -- for the wrong reason, and with
+        -- a message that names a column instead of the rule. The SHARED org is
+        -- the case only the trigger can catch: it is a real org, the foreign
+        -- key is satisfied, the column is populated, and `visibility = 'org'`
+        -- on it is still a row nobody can read.
         insert into scope_probe (label, org_id, visibility)
-        values ('orgless', null, 'org');
+        values ('orgless', rbac.shared_org_id(), 'org');
         v_ok := true;
     exception when others then
         if position('requires an org_id' in sqlerrm) = 0 then raise; end if;

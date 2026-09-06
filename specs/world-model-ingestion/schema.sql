@@ -65,6 +65,17 @@ create table if not exists content.channels (
 --
 -- Drop-then-add rather than inline, so an installation that already created
 -- this table picks the change up on the next apply.
+-- NULLS NOT DISTINCT IS A NO-OP NOW, AND IS KEPT DELIBERATELY.
+--
+-- It was the whole constraint while `org_id is null` meant the shared tier:
+-- under the default NULLS DISTINCT this unique index would have policed every
+-- tenant's channel names and none of the shared ones -- the tier more than one
+-- writer touches. identity/spec.md §4 removed the premise: org_id is NOT NULL
+-- (rbac.adopt_shared_org), the shared tier is rbac.shared_org_id(), and the
+-- flag now decides nothing because there are no NULLs in this index. Left in
+-- place because dropping it rebuilds a unique index on every deployment to
+-- change nothing; written down because a reader who finds it with no note
+-- cannot tell that it stopped mattering.
 alter table content.channels drop constraint if exists channels_org_id_name_key;
 alter table content.channels add constraint channels_org_id_name_key
     unique nulls not distinct (org_id, name);
@@ -310,9 +321,10 @@ create or replace function content.register_upload(
     -- Defaulted through rbac.default_visibility() rather than to a constant,
     -- and the choice is the whole of §4b's fix rather than a convenience. An
     -- upload named an org and got a row every OTHER org could read, because
-    -- `org_id is null` was the everyone tier and this argument defaulted into
-    -- it. Now: name an org and the row is that org's; name none and the row is
-    -- yours. Neither default publishes anything to another tenant, and
+    -- the shared tier was spelled `org_id is null` and this argument defaulted
+    -- into it. Now: name an org and the row is that org's; name none and the
+    -- row is yours -- on the shared tier, but `private`, which is a different
+    -- statement from the one that leaked. Neither default publishes anything to another tenant, and
     -- publishing is `public`, spelled out by whoever meant it.
     p_visibility  text default null
 ) returns uuid as $$
@@ -331,9 +343,18 @@ begin
     -- `select into` with no order takes whichever the plan produced. The
     -- org-specific channel wins; the public one is the fallback it was meant
     -- to be.
+    --
+    -- Written as an IN over two values rather than `(org_id is not distinct
+    -- from p_org_id or org_id is null)`, which said the same thing in
+    -- three-valued logic. p_org_id is still nullable -- it is an omitted
+    -- argument, a genuine absence -- so rbac.org_or_shared() reads that
+    -- omission as the shared tier, and both elements of the IN collapse to
+    -- rbac.shared_org_id(): an unscoped caller matches the shared channel and
+    -- nothing else, which is what the old form did too.
     select id into v_channel from content.channels
-    where name = p_channel and (org_id is not distinct from p_org_id or org_id is null)
-    order by (org_id is not distinct from p_org_id) desc
+    where name = p_channel
+      and org_id in (rbac.org_or_shared(p_org_id), rbac.shared_org_id())
+    order by (org_id = rbac.org_or_shared(p_org_id)) desc
     limit 1;
     if v_channel is null then
         raise exception 'no channel named % for this org -- create one first', p_channel;
@@ -353,9 +374,16 @@ begin
     -- a service connection with no request identity leaves it null, and such a
     -- row is reachable only through its org or by being public, which is the
     -- correct reading of "nobody in particular uploaded this".
+    --
+    -- rbac.org_or_shared(p_org_id), because org_id is NOT NULL on this table
+    -- and p_org_id is an OPTIONAL ARGUMENT: an upload that names no org is the
+    -- caller saying nothing, and the row that used to carry a NULL now carries
+    -- the shared org. Nothing about who may read it changes -- that is
+    -- v_vis's job, and it is `private` for a caller with an identity, exactly
+    -- as it was before.
     insert into content.resources (channel_id, file_id, uri, title, org_id,
                                    owner_id, visibility, metadata, external_id)
-    values (v_channel, v_file, p_uri, p_title, p_org_id,
+    values (v_channel, v_file, p_uri, p_title, rbac.org_or_shared(p_org_id),
             rbac.current_user_id(), v_vis, p_metadata, p_external_id)
     on conflict (channel_id, external_id) do update set updated_at = now()
     returning id into v_res;
@@ -404,15 +432,17 @@ begin
     perform content.assert_org_write(p_org_id, 'register content');
 
     select id into v_channel from content.channels
-    where name = p_channel and (org_id is not distinct from p_org_id or org_id is null)
-    order by (org_id is not distinct from p_org_id) desc
+    where name = p_channel
+      and org_id in (rbac.org_or_shared(p_org_id), rbac.shared_org_id())
+    order by (org_id = rbac.org_or_shared(p_org_id)) desc
     limit 1;
     if v_channel is null then
         raise exception 'no channel named % for this org', p_channel;
     end if;
 
     insert into content.resources (channel_id, external_id, uri, title, org_id, metadata)
-    values (v_channel, p_external_id, p_uri, p_title, p_org_id, p_metadata)
+    values (v_channel, p_external_id, p_uri, p_title,
+            rbac.org_or_shared(p_org_id), p_metadata)
     on conflict (channel_id, external_id) do nothing
     returning id into v_res;
 
@@ -846,6 +876,8 @@ create table if not exists content.datasets (
 -- Drop-then-add rather than inline, so an installation that already created
 -- this table picks the change up on the next apply -- the same discipline
 -- resources_status_check above is written with.
+-- NULLS NOT DISTINCT: a no-op on a NOT NULL column, kept for the reason
+-- channels_org_id_name_key above states in full.
 alter table content.datasets drop constraint if exists datasets_org_name_key;
 alter table content.datasets add constraint datasets_org_name_key
     unique nulls not distinct (org_id, name);
@@ -961,6 +993,10 @@ returns text as $$
     from content.datasets d
     where d.name = p_name
       and rbac.may_read(d.owner_id, d.org_id, d.visibility)
-    order by d.org_id nulls last
+    -- The tenant's own dataset beats the shared one of the same name, which is
+    -- what `nulls last` meant while the shared tier was a NULL. On a NOT NULL
+    -- column that ordering is meaningless -- it would sort by the raw uuid --
+    -- so the rule is stated as what it always was: shared last.
+    order by (d.org_id = rbac.shared_org_id())
     limit 1;
 $$ language sql stable;

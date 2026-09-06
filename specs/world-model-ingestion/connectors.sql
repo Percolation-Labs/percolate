@@ -87,6 +87,11 @@ create table if not exists content.connectors (
     health      text not null default 'unknown'
                     check (health in ('unknown','ok','degraded','needs_credential','blocked','gone')),
     health_since timestamptz,
+    -- NOT NULL and defaulted to rbac.shared_org_id() the day this file ships
+    -- (identity/spec.md §4 and its check 5, which scans the live catalogue).
+    -- Left bare while the file is held out of ORDER: it takes neither
+    -- rbac.add_scope_columns() nor rbac.adopt_shared_org(), so a hand-load
+    -- into a live database would fail that check and name this table.
     org_id      uuid,
     created_at  timestamptz not null default now(),
     updated_at  timestamptz not null default now()

@@ -2,12 +2,16 @@
 --
 --     psql "$DSN" -f specs/identity/checks.sql
 --
--- Four assertions over the catalogue. Exits nonzero, so it is a gate rather
+-- Five assertions over the catalogue. Exits nonzero, so it is a gate rather
 -- than a report. Like surface.sql, each failure names the promise it breaks
 -- rather than only the object.
 --
 -- Check 3 is the one that carries the policy. It does not decide what a NULL
 -- means -- it refuses to let the schema stay silent about it.
+--
+-- Check 5 is the one case where the policy DID decide, so the check is an
+-- equality rather than a question: spec.md §4 ruled that the shared tier is a
+-- row, so no org_id anywhere may be nullable.
 \set ON_ERROR_STOP on
 \pset pager off
 
@@ -112,8 +116,36 @@ where n.nspname in ('aiq','rbac','workflow','content','agentic','percolate','sel
   and regexp_replace(p.prosrc, '--[^\n]*', '', 'g') ~ 'md5\s*\([^)]*\)\s*::\s*uuid'
 order by 1;
 
+\echo ''
+\echo '=== 5. NO org_id IS NULLABLE, AND EVERY ONE DEFAULTS TO THE SHARED ORG ==='
+\echo '    spec.md §4: the shared tier is a ROW (rbac.shared_org_id()), not a'
+\echo '    NULL. This is the check that makes a seventeenth org_id column'
+\echo '    impossible to add and forget -- fourteen of them get it from'
+\echo '    rbac.add_scope_columns(), two ask for it by hand, and a new one'
+\echo '    that does neither shows up here rather than in a duplicate row.'
+\echo '    Fix: select rbac.adopt_shared_org(''<schema>.<table>'');'
+select n.nspname as sch, c.relname as tbl,
+       case when not a.attnotnull then 'nullable'
+            else 'default is ' || coalesce(pg_get_expr(d.adbin, d.adrelid), 'absent')
+       end as finding
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+join pg_attribute a on a.attrelid = c.oid and a.attname = 'org_id'
+                   and not a.attisdropped
+left join pg_attrdef d on d.adrelid = c.oid and d.adnum = a.attnum
+where c.relkind in ('r','p')
+  and n.nspname in ('aiq','rbac','workflow','content','agentic','percolate')
+  -- rbac.org_members is the one table whose org_id is the tenancy itself
+  -- rather than a scope on a row: it has always been NOT NULL, it must NOT
+  -- default to the shared org (org_members_not_shared forbids that row), and a
+  -- membership with no org is not a thing.
+  and not (n.nspname = 'rbac' and c.relname = 'org_members')
+  and (not a.attnotnull
+       or coalesce(pg_get_expr(d.adbin, d.adrelid), '') !~ 'shared_org_id')
+order by 1, 2;
+
 do $$
-declare v1 int; v2 int; v3 int; v4 int;
+declare v1 int; v2 int; v3 int; v4 int; v5 int;
 begin
     select count(*) into v1 from p8_tables t
      left join percolate.table_kinds k on k.schema_name = t.sch and k.table_name = t.tbl
@@ -158,15 +190,27 @@ begin
        and regexp_replace(p.prosrc, '--[^\n]*', '', 'g')
            ~ 'md5\s*\([^)]*\)\s*::\s*uuid';
 
-    raise notice '';
-    raise notice 'IDENTITY: % tables undeclared, % keys disagreeing with their kind, % undeclared/disagreeing nulls, % hash casts',
-        v1, v2, v3, v4;
+    select count(*) into v5
+      from pg_class c
+      join pg_namespace n on n.oid = c.relnamespace
+      join pg_attribute a on a.attrelid = c.oid and a.attname = 'org_id'
+                         and not a.attisdropped
+      left join pg_attrdef d on d.adrelid = c.oid and d.adnum = a.attnum
+     where c.relkind in ('r','p')
+       and n.nspname in ('aiq','rbac','workflow','content','agentic','percolate')
+       and not (n.nspname = 'rbac' and c.relname = 'org_members')
+       and (not a.attnotnull
+            or coalesce(pg_get_expr(d.adbin, d.adrelid), '') !~ 'shared_org_id');
 
-    if v1 + v2 + v3 + v4 > 0 then
+    raise notice '';
+    raise notice 'IDENTITY: % tables undeclared, % keys disagreeing with their kind, % undeclared/disagreeing nulls, % hash casts, % org_id columns still nullable or undefaulted',
+        v1, v2, v3, v4, v5;
+
+    if v1 + v2 + v3 + v4 + v5 > 0 then
         raise exception
             'IDENTITY POLICY NOT MET: % findings. specs/identity/spec.md says '
             'why each one costs something, and §8 says the order to fix them in.',
-            v1 + v2 + v3 + v4;
+            v1 + v2 + v3 + v4 + v5;
     end if;
     raise notice 'IDENTITY POLICY MET';
 end $$;

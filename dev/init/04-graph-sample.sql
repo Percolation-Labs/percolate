@@ -16,7 +16,7 @@
 --
 --   * three entity types, three different key expressions, one inclusion
 --     predicate that actually excludes rows;
---   * tenancy in all three states -- shared (org_id null), org A, org B --
+--   * tenancy in all three states -- shared (rbac.shared_org_id()), org A, org B --
 --     including one edge whose endpoints sit in DIFFERENT orgs, which must be
 --     visible to neither;
 --   * a cycle, a hub, a node reachable at two different depths by two
@@ -55,9 +55,13 @@ create schema if not exists demo;
 -- 1. The typed tables. Attributes live here and only here; the registry
 --    stores identity, never the payload (graph-identity.md "Node registry").
 --
--- Two tenants and a shared tier. `org_id is null` is not a loophole -- a
--- publicly listed company is legitimately global, and duplicating it per
--- tenant defeats the point of one identity registry (integration-rbac.sql §1).
+-- Two tenants and a shared tier. The shared tier is a real category and not a
+-- loophole -- a publicly listed company is legitimately global, and
+-- duplicating it per tenant defeats the point of one identity registry
+-- (integration-rbac.sql §1). These are APPLICATION tables, so their org_id
+-- stays nullable and a null here means "no tenant in particular"; the
+-- projection reads that through rbac.org_or_shared() and the node it creates
+-- carries rbac.shared_org_id(), which is where the NOT NULL rule starts.
 -- ------------------------------------------------------------
 create table if not exists demo.companies (
     id        uuid primary key,
@@ -297,8 +301,15 @@ on conflict (src_type, relation, dst_type) do update
 -- 0.35 next to a 0.95 -- rather than nine copies of the default 1.0 that no
 -- ordering assertion could tell apart.
 -- ------------------------------------------------------------
+-- rbac.org_or_shared() on the way in: the `null` each row below carries is
+-- this fixture saying "no tenant in particular", and aiq.edges.org_id is NOT
+-- NULL (specs/identity/spec.md §4). The literal stays `null` because that is
+-- what the fixture MEANS -- an omission -- and the coercion to the shared org
+-- happens at the boundary, exactly as it does for every writer in the
+-- collection. Edges are not read-gated by org_id anyway; both endpoints are.
 insert into aiq.edges (src_id, dst_id, relation, weight, provenance, org_id)
-select s.id, d.id, v.relation, v.weight::real, v.provenance::jsonb, v.org_id::uuid
+select s.id, d.id, v.relation, v.weight::real, v.provenance::jsonb,
+       rbac.org_or_shared(v.org_id::uuid)
 from (values
     -- A three-cycle. Every walk has to survive returning to where it started.
     ('company','c0000000-0000-0000-0000-000000000001','competes_with','company','c0000000-0000-0000-0000-000000000002',0.90,'{"source":"analyst"}',null),

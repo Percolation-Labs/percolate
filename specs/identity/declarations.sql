@@ -17,21 +17,28 @@
 --    the sentence is the product, the same way a surface.sql row's `why` is.
 -- ------------------------------------------------------------
 
--- org_id NULL is a VALUE: the shared tier, visible to every tenant. A publicly
--- listed company is legitimately global and duplicating it per tenant defeats
--- the point of one registry (integration-rbac.sql §1). Because it is a value,
--- a unique index over it MUST be `nulls not distinct` or it constrains
--- everything except the shared tier -- which is the one thing more than one
--- writer touches.
+-- THE FIVE org_id DECLARATIONS ARE GONE, AND THEIR ABSENCE IS THE POINT.
 --
--- spec.md §4 argues this should stop being a NULL at all. Until it does, this
--- is the honest declaration of what it currently means.
-insert into percolate.null_means (schema_name, table_name, column_name, means, why) values
- ('aiq','lake_nodes','org_id','value','the shared tier -- a lake row visible to every tenant'),
- ('aiq','node_keys','org_id','value','the shared tier -- a key resolvable by every tenant'),
- ('aiq','soft_nodes','org_id','value','the shared tier -- an unpromoted candidate visible to all'),
- ('content','channels','org_id','value','a shared source, e.g. a public feed every tenant reads'),
- ('content','datasets','org_id','value','a shared dataset; the same argument as channels'),
+-- They read `org_id NULL is a VALUE: the shared tier, visible to every
+-- tenant`, and spec.md §4 called that an honest declaration of a dishonest
+-- column: a value wearing an absence's clothes, which forced five unique
+-- indexes to be NULLS NOT DISTINCT and caused all three of the duplicate bugs
+-- §1 lists.
+--
+-- The column is NOT NULL now. The shared tier is rbac.shared_org_id(), a row
+-- in rbac.orgs with a derived, deployment-independent uuid, and org_id cannot
+-- be NULL on any of the sixteen tables that carry it. So there is no NULL left
+-- to declare a meaning for, and a row here saying otherwise would be a
+-- statement about the schema that the schema contradicts -- which is the
+-- failure mode this whole registry exists to prevent, arriving inside the
+-- registry.
+--
+-- DELETED RATHER THAN OMITTED. Dropping the five rows from the INSERT below
+-- fixes a fresh install and does nothing to a database that already ran the
+-- old version: this file is replayed on upgrade and an absent row is not a
+-- retracted one. identity/spec.md §7's fourth lesson, applied to data instead
+-- of to a default. A no-op on the fresh path.
+delete from percolate.null_means where column_name = 'org_id';
 
 -- external_id NULL is an ABSENCE: no external identity was supplied. Several
 -- rows may legitimately have none, so `nulls distinct` is correct here and
@@ -41,6 +48,7 @@ insert into percolate.null_means (schema_name, table_name, column_name, means, w
 -- The trap this leaves is in spec.md §6: register_fetched's idempotence is
 -- `on conflict (channel_id, external_id)`, which never fires for a null. The
 -- constraint is right and the FUNCTION should refuse the call.
+insert into percolate.null_means (schema_name, table_name, column_name, means, why) values
  ('content','resources','external_id','absence','no upstream identity; many resources legitimately have none'),
  ('workflow','runs','external_id','absence','no idempotency key was supplied by the caller'),
 

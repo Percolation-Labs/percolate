@@ -3139,6 +3139,13 @@ create table if not exists workflow.schedules (
     -- minute forever (RELEASE-0.1.md §5, "honest failure modes").
     last_error     text,
     last_error_at  timestamptz,
+    -- NOT NULL, defaulted to the shared tier -- but said in
+    -- integration-rbac.sql's rbac.add_scope_columns() call rather than here.
+    -- Two reasons, and both are structural: rbac.shared_org_id() does not
+    -- exist yet at this point in the install (user-rbac is the NEXT file), and
+    -- `create table if not exists` alters nothing on a database that already
+    -- has this table, so a constraint written here would reach fresh installs
+    -- only. identity/spec.md §7's fourth lesson.
     org_id         uuid,
     created_at     timestamptz not null default now(),
     updated_at     timestamptz not null default now()
