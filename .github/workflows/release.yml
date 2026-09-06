@@ -157,9 +157,13 @@ jobs:
       - name: Bump the extension version
         id: bump
         if: steps.pre.outputs.mode == 'bump' || inputs.force_bump
-        # Four files -- two control files, Cargo.toml, and the generated script
-        # whose NAME is the version. The script refuses to bump if the two
-        # extensions have drifted apart, rather than silently reuniting them.
+        # FIVE files -- two control files, Cargo.toml, the generated script
+        # whose NAME is the version, and the kind manifest that mounts it by
+        # that name. The script refuses to bump if the two extensions have
+        # drifted apart, rather than silently reuniting them.
+        #
+        # It said "four" while the script had written five since the manifest
+        # was added, which is the same off-by-one the commit step below had.
         run: python .github/scripts/bump_extension_version.py "${{ inputs.bump }}"
 
       - name: The version this run publishes
@@ -178,6 +182,24 @@ jobs:
         # existing databases an upgrade to the wrong schema.
         run: python3 extension/percolate/build-sql.py --check
 
+      # AND EVERY NAME THE TREE WRITES DOWN STILL RESOLVES, which is the same
+      # question one step wider: the check above proves the generated SQL
+      # matches its specs, and this proves nothing else in the repository is
+      # still naming the file it replaced.
+      #
+      # It runs HERE, after the bump, because before it the tree is at the old
+      # version and consistent -- the whole class of defect this catches is
+      # created BY the bump. `dev/references.sh` already existed and already
+      # runs on push; it simply was not on this path, so 0.1.6 published with
+      # `k8s/kind/manifests/postgres.yaml` still mounting `percolate--0.1.5.sql`
+      # -- a kind cluster from that tree binds a path the image does not carry
+      # -- and main went red one commit after the release went green.
+      #
+      # A gate that exists and is not on the release path is a gate the release
+      # does not have.
+      - name: Every name the tree writes down still resolves
+        run: dev/references.sh
+
       # The bump lands on main WITHOUT a tag. That is a state the collection
       # already understands -- dev/check-version.sh calls it "unreleased" and
       # passes -- so a failure after this point leaves the tree in a shape that
@@ -187,7 +209,22 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A extension/
+          # `extension/` AND the kind manifest, because the bump script writes
+          # five files and this used to stage four. `bump_extension_version.py`
+          # calls the manifest "the FIFTH file carrying the number, and the one
+          # that drifted", updates it, and prints
+          # `k8s/kind/manifests/postgres.yaml: 2 mount reference(s) -> <v>` --
+          # and that write was then thrown away with the runner, because it
+          # lives outside `extension/`. So 0.1.6 published with the manifest
+          # still mounting `percolate--0.1.5.sql`: a kind cluster brought up
+          # from this tree would bind a path the image no longer contains.
+          #
+          # Caught by `dev/references.sh`, a gate that ran on push and not on
+          # this path -- so the release went green and main went red one commit
+          # later. That gate now runs above, immediately after the bump, which
+          # is the half that generalises: staging one more path fixes the file
+          # that drifted, and running the check fixes the next one.
+          git add -A extension/ k8s/kind/manifests/postgres.yaml
           git diff --cached --quiet || git commit -m "extension ${{ steps.v.outputs.version }}: bump"
           git push origin HEAD:"${{ github.ref_name }}"
 
