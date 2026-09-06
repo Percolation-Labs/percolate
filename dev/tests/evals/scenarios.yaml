@@ -3538,3 +3538,136 @@ scenarios:
         sql: "select status from workflow.runs where id=(select run_id from ctx)"
         is: "cancelled"
         because: "the run's status is what every dashboard reads; a graph half-resurrected under a cancelled run is invisible there"
+
+# =============================================================================
+# AGENT STEPS, PAST THE COMPILE -- the half `delegation` above stops one call
+# short of.
+#
+# `deleg-01` asserts the compiled url CONTAINS `P8_AGENT_URL` and the
+# credential is named rather than inlined. Both hold. Neither says whether the
+# thing at the other end serves that path, answers in the shape the step
+# declared it would read, or was asked anything at all -- and on a stack
+# brought up from the published `compose/docker-compose.yml`, all three of
+# those are no.
+#
+# Found by walking get-percolate's own README on a cold stack: the front-page
+# workflow -- retrieve, then triage with an `agent:` step -- reaches `failed`
+# with the retrieval done and the agent never usefully called.
+# =============================================================================
+
+  - id: agentstep-01
+    category: delegation
+    title: An agent step that would ask nothing is refused at define time
+    asks: "I put an agent after a retrieval step. Does it get the passages?"
+    mechanism: "YAML.md § Agent steps -- `input:` is what becomes messages[0].content"
+    catches: [silent-template, empty-success, unstated-contract]
+    status: pass
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_agentstep01b
+      steps:
+        - id: retrieve
+          p8ql: 'LOOKUP "SIG-114"'
+        - id: triage
+          needs: [retrieve]
+          agent: pv_triage
+          input: '{{steps.retrieve.result}}'
+      $y$);
+    check:
+      - name: an `agent:` step with no `input:` does not compile
+        sql: |
+          select workflow.define_yaml($y$
+          name: ev_agentstep01
+          steps:
+            - id: retrieve
+              p8ql: 'LOOKUP "SIG-114"'
+            - id: triage
+              needs: [retrieve]
+              agent: pv_triage
+          $y$)::text
+        raises: "needs an `input:`"
+        because: >-
+          WAS THE FINDING. This compiled, and emitted
+          `messages: [{"role":"user","content":null}]` -- the step wired, its
+          `needs:` honoured, the retrieval run, and the model handed nothing.
+          Nothing refused it at define time and nothing noticed at run time; the
+          task failed much later for an unrelated-looking reason, or, with no
+          output_schema to fail the shape, came back with a plausible answer to
+          no question. get-percolate's README front page printed exactly this
+          shape as "a complete workflow", so the first thing a reader ran was
+          the defect. `deleg-01` never caught it because every scenario there
+          writes `input:` by hand.
+          NOT fixed by defaulting the prompt to the upstream result: a step may
+          declare several `needs:` and there is no honest way to pick one, and a
+          default that guesses right most of the time is how a pipeline's prompt
+          changes silently when somebody adds a dependency.
+      - name: and the same document with `input:` compiles and carries it
+        sql: |
+          select s->'input'->'body'->'messages'->0->>'content'
+            from workflow.definitions f, jsonb_array_elements(f.spec->'steps') s
+           where f.name = 'ev_agentstep01b' and s->>'key' = 'triage'
+        is: "{{steps.retrieve.result}}"
+        because: >-
+          The refusal is only correct if the documented alternative works, and
+          this is the half that says so. It also pins the template through to
+          the wire: `{{steps.<id>.result}}` resolves to a p8ql step's result
+          OBJECT, and messages[0].content is typed as a string, so the runtime
+          has to accept an object here and render it -- which it did not, and
+          the documented idiom returned 422 until it did.
+
+  - id: agentstep-02
+    category: delegation
+    title: The response contract an agent step declares stays the OpenAI one
+    asks: "The step says it will read choices.0.message.content. Will there be one?"
+    mechanism: "YAML.md § Agent steps -- the compiled http_call carries jsonpath + output_schema"
+    catches: [unstated-contract, version-skew, silent-success]
+    status: pass
+    setup: |
+      select workflow.define_yaml($y$
+      name: ev_agentstep02
+      steps:
+        - id: triage
+          agent: pv_triage
+          input: 'Classify SIG-114'
+          output_schema:
+            type: object
+            required: [verdict]
+            properties: {verdict: {type: string}}
+      $y$);
+      create temp table ctx as
+        select workflow.start_workflow('ev_agentstep02','{}'::jsonb) as run_id;
+    check:
+      - name: the compiler asks for an OpenAI completion envelope
+        sql: "select input->>'jsonpath' from workflow.tasks where run_id=(select run_id from ctx) and step_key='triage'"
+        is: "choices.0.message.content"
+        because: >-
+          PINNED, NOT FAILING, and the distinction is the point -- this scenario
+          was first written `open-defect` and `run.py` refused it, correctly,
+          as a check that had stopped checking. The compiler half is right.
+          What is missing is at the other end, where no SQL assertion can
+          reach, so it is recorded here rather than dressed up as a red line. The compiler emits `POST {{env.P8_AGENT_URL}}/v1/chat/completions`
+          with an OpenAI-shaped body and reads the answer out of an OpenAI
+          completion envelope. The Agent Runtime in percolate-core 0.1.7 serves
+          `POST /chat` and `GET /sessions/{id}/events` and nothing else, and
+          `/chat` answers `text/event-stream` whether or not `stream` was asked
+          for -- there is no non-streaming JSON mode at all.
+          So the step 404s; alias the path and it then fails with
+          `output_schema was declared, but the result is not JSON`, having got
+          `event: RUN_STARTED\ndata: {...}`. Measured on a stack from the
+          published compose file, five attempts, worker logging `ok` each time
+          because the HTTP call genuinely succeeded.
+          If this check ever goes red, the compiler moved -- and the question it
+          exists to force is whether the runtime moved to meet it. The fix that
+          closes both this and the documented "an off-the-shelf OpenAI-shaped
+          client can drive this runtime" claim (agents.md) is one route: serve
+          `/v1/chat/completions`, returning a JSON completion when `stream` is
+          not set. A stock `openai` SDK pointed at P8_AGENT_URL gets 404 today.
+      - name: and names the credential rather than carrying it
+        sql: "select input->>'credential_ref' from workflow.tasks where run_id=(select run_id from ctx) and step_key='triage'"
+        is: "P8_API_KEY"
+        because: >-
+          Holds, and is here because the published compose file sets neither
+          `P8_AGENT_URL` nor `P8_API_KEY` on the worker, so both resolve to
+          nothing and the step dies before reaching the contract above. The name
+          being right in the database is not the same as the deployment
+          supplying it, and only one of those two is tested anywhere.

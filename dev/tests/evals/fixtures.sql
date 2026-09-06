@@ -148,6 +148,44 @@ create table if not exists calder.escalations (
 --   case reports 57…  chunks 58…  orgs aa…/bb…  users 55…
 -- ============================================================================
 
+-- THE TWO TENANTS THEMSELVES, before anything points at them.
+--
+-- Added after the eval suite stopped loading against
+-- `percolationlabs/percolate-postgres:19-0.1.5` -- the image the published
+-- compose file pins -- with
+--
+--     insert or update on table "nodes" violates foreign key constraint
+--     "nodes_org_id_fkey" -- Key (org_id)=(aa000000-...-00a1) is not present
+--
+-- which is the SAME defect, in the same shape, that `samples/harbour/tenants.sql`
+-- was written to fix and records at length: every row below carries an org id,
+-- 0.1.4's scope work made `aiq.nodes.org_id` a real foreign key, and nothing
+-- had ever created the orgs. The sample was fixed; this file has the same bug
+-- and was not, so the fix landed at the site that hurt and the other place
+-- performing the same transition was left behind -- failure-modes.md §5's
+-- shape exactly, which that postmortem says has now reopened three times.
+--
+-- The consequence was worse here than there, because this is the suite: with
+-- the fixture unloadable, EVERY scenario in `scenarios.yaml` was unrunnable
+-- against a stack built from the published images, and nothing said so -- the
+-- suite is normally pointed at `p8-experiment-pg19`, a long-lived dev container
+-- whose orgs predate the foreign key.
+--
+-- GUARDED and IDEMPOTENT for the reason tenants.sql gives: `rbac.orgs` does not
+-- exist before 0.1.4, and a fixture is loaded into whatever version the reader
+-- installed.
+do $$
+begin
+    if to_regclass('rbac.orgs') is null then
+        return;
+    end if;
+    insert into rbac.orgs (id, slug, name) values
+        ('aa000000-0000-0000-0000-0000000000a1','calder-org-a','Calder Tenant A'),
+        ('bb000000-0000-0000-0000-0000000000b1','calder-org-b','Calder Tenant B')
+    on conflict (id) do update
+        set slug = excluded.slug, name = excluded.name;
+end $$;
+
 -- Two tenants and a shared tier. `org_id is null` is reference data every
 -- tenant legitimately sees -- a marketed drug is not one customer's secret.
 insert into calder.sponsors (id, name, code, parent_id, is_active, org_id, blurb) values

@@ -5946,7 +5946,14 @@ begin
             ('rest',         E'name: c\nsteps:\n  - id: s\n    rest: {url: http://x}'),
             ('embed',        E'name: c\nsteps:\n  - id: s\n    embed: hello'),
             ('rate_key',     E'name: c\nsteps:\n  - id: s\n    rest: {url: http://x}\n    rate_key: k'),
-            ('agent',        E'name: c\nsteps:\n  - id: s\n    agent: a'),
+            -- `input:` IS PART OF THE PROBE, not decoration. An agent step
+            -- without one is now refused by the compiler (it would have sent
+            -- the model an empty message), so a probe omitting it reports the
+            -- whole `agent` CAPABILITY as missing -- and then the skew check
+            -- below tells an author with a perfectly good document to rebuild
+            -- their extension. A probe must exercise the feature the way it is
+            -- meant to be used, or it measures its own shortcut.
+            ('agent',        E'name: c\nsteps:\n  - id: s\n    agent: a\n    input: hi'),
             ('work',         E'name: c\nsteps:\n  - id: s\n    work: true'),
             ('matrix',       E'name: c\nsteps:\n  - id: s\n    matrix:\n      items: []\n      max_fanout: 1\n      template: {work: true}'),
             ('signal',       E'name: c\nsteps:\n  - id: s\n    signal: true'),

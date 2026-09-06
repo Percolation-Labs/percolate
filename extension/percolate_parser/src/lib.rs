@@ -1440,6 +1440,34 @@ fn resolve_action(what: &str, a: &Action) -> Result<(&'static str, String, serde
                 (None, Some(_)) => Some("{{run.$session}}".to_string()),
                 _ => None,
             };
+            // AN AGENT STEP WITH NO `input:` IS REFUSED, rather than compiled
+            // into a call that asks nothing. It used to emit
+            // `"content": null`: the step was wired, its `needs:` honoured and
+            // its dependencies run, and the model handed nothing at all. The
+            // run then failed much later for an unrelated-looking reason, or --
+            // with no output_schema to fail the shape -- came back with a
+            // plausible answer to no question, which is worse.
+            //
+            // NOT defaulted to the upstream result, tempting as that is. A step
+            // may declare several `needs:` and there is no honest way to pick
+            // one; a default that guesses right most of the time is how you get
+            // a pipeline whose prompt silently changes when somebody adds a
+            // dependency. The author writes `input: '{{steps.retrieve.result}}'`
+            // and the document then says what the agent is being asked.
+            //
+            // Found by walking get-percolate's own front page, which printed
+            // this exact shape -- a retrieve step, then `agent:` with `needs:`
+            // and no `input:` -- as "a complete workflow".
+            let content = match a.input.as_ref() {
+                Some(v) => y2j(v),
+                None => return Err(format!(
+                    "{}: an `agent:` step needs an `input:` -- it is what the \
+                     agent is asked, and without it the call carries an empty \
+                     message. To pass a previous step's output, write \
+                     `input: '{{{{steps.<id>.result}}}}'`",
+                    what
+                )),
+            };
             let mut input = serde_json::json!({
                 "url": "{{env.P8_AGENT_URL}}/v1/chat/completions",
                 "method": "POST",
@@ -1448,9 +1476,7 @@ fn resolve_action(what: &str, a: &Action) -> Result<(&'static str, String, serde
                 "body": {
                     "model": a.agent.clone().unwrap(),
                     "session": session,
-                    "messages": [{"role": "user",
-                                  "content": a.input.as_ref().map(y2j)
-                                      .unwrap_or(serde_json::Value::Null)}]
+                    "messages": [{"role": "user", "content": content}]
                 },
                 // The assistant text is what almost every step wants, so it
                 // stays the default. Override to capture the whole envelope --
@@ -1806,6 +1832,27 @@ pub fn compile_workflow(yaml: &str) -> Result<serde_json::Value, String> {
                     s.id, kind));
             }
             step["input"]["output_schema"] = y2j(sc);
+            // AND, ON AN AGENT STEP, ASK FOR IT AS WELL AS CHECKING IT.
+            //
+            // `output_schema` was a validator and nothing else: the agent ran
+            // against whatever its own row declared, and the answer was then
+            // judged against a shape nobody had mentioned to the model. On the
+            // README's front-page example -- a `verdict` restricted to
+            // [SAFETY, FINANCE, OTHER] against an agent whose row returns free
+            // text -- that is a step which cannot pass however good the model
+            // is, failing with `value "..." is not one of [...]`.
+            //
+            // `response_format` is OpenAI's own field for this, so the runtime
+            // needs no bespoke key and a step's declared shape becomes the
+            // shape requested for that turn. It does not touch the agents row:
+            // one workflow constraining an answer must not change what every
+            // other caller of that agent gets back.
+            if kind == "http_call" && s.agent.is_some() {
+                step["input"]["body"]["response_format"] = serde_json::json!({
+                    "type": "json_schema",
+                    "json_schema": {"name": format!("{}_output", s.id), "schema": y2j(sc)}
+                });
+            }
         }
         if !s.needs.is_empty() || extra_dep.is_some() {
             let mut deps = s.needs.clone();
