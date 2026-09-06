@@ -1,5 +1,5 @@
 -- ============================================================
--- percolate 0.1.5 -- the whole schema, as one extension script.
+-- percolate 0.1.6 -- the whole schema, as one extension script.
 --
 -- GENERATED from specs/ by extension/percolate/build-sql.py. Do not edit.
 --
