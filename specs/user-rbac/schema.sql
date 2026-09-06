@@ -52,7 +52,7 @@ create schema if not exists rbac;
 -- 1. Users
 -- ------------------------------------------------------------
 create table if not exists rbac.users (
-    id            uuid primary key default gen_random_uuid(),
+    id            uuid primary key default uuidv7(),
     email         text not null unique,
     password_hash text,                 -- null for API-key-only / SSO-only accounts
     -- DEFAULT 'pending_verification', because 1a's whole argument is that
@@ -611,7 +611,7 @@ on conflict (scope) do update
 -- somebody from an org took effect when their token expired, which is the one
 -- moment it must not wait for.
 create table if not exists rbac.orgs (
-    id          uuid primary key default gen_random_uuid(),
+    id          uuid primary key default uuidv7(),
     slug        text not null unique,
     name        text not null,
     created_at  timestamptz not null default now(),
@@ -1138,7 +1138,7 @@ $$ language plpgsql;
 --    valid refresh token.
 -- ------------------------------------------------------------
 create table if not exists rbac.refresh_tokens (
-    id           uuid primary key default gen_random_uuid(),
+    id           uuid primary key default uuidv7(),
     user_id      uuid not null references rbac.users(id) on delete cascade,
     token_hash   text not null unique,     -- sha256 of the raw token; raw never stored
     device_label text,                     -- "Chrome on Mac", shown in session list
@@ -1287,7 +1287,7 @@ $$ language sql security definer set search_path = pg_catalog, public;
 -- lived, because the two are doing different jobs -- a refresh token proves a
 -- session is still alive, a reset token proves control of an inbox once.
 create table if not exists rbac.password_reset_tokens (
-    id         uuid primary key default gen_random_uuid(),
+    id         uuid primary key default uuidv7(),
     user_id    uuid not null references rbac.users(id) on delete cascade,
     token_hash text not null unique,     -- sha256 of the raw token; raw never stored
     issued_at  timestamptz not null default now(),
@@ -1434,7 +1434,7 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 --    it's a DB row, not a stateless token.
 -- ------------------------------------------------------------
 create table if not exists rbac.api_keys (
-    id          uuid primary key default gen_random_uuid(),
+    id          uuid primary key default uuidv7(),
     user_id     uuid references rbac.users(id) on delete cascade,  -- null = service account
     label       text not null,
     key_hash    text not null unique,      -- sha256 of raw key; raw shown once at creation

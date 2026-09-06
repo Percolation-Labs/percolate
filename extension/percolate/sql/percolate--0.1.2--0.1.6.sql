@@ -74,6 +74,186 @@ $fn$;
 
 
 -- ============================================================
+-- identity/schema.sql
+--   percolate.uuidv5() and the two registries (what a NULL means, what kind of thing a table is). FIRST, because shipped code calls uuidv5 -- workflow.run_meta derives a session id and a `language sql` body resolves its references at create time. It creates the `percolate` schema itself; contract/schema.sql's `create schema if not exists` is idempotent behind it. An earlier draft put this last, on a rationale about vocabularies that was invented rather than checked, and the install died on `schema percolate does not exist`
+-- ============================================================
+
+-- Identity and nullability: the mechanism. See spec.md for the reasoning.
+--
+-- Two objects and nothing else. The policy is mostly a set of assertions
+-- (checks.sql); what has to SHIP is the deterministic id function and the
+-- registry that makes a NULL's meaning declarable.
+
+-- This file is FIRST in the extension, so it creates the schema it lives in.
+-- contract/schema.sql does the same, idempotently, for whichever of the two
+-- someone reads first.
+create schema if not exists percolate;
+
+-- ------------------------------------------------------------
+-- 1. A deterministic UUID, so a derived row has the same id every time.
+--
+-- RFC 4122 §4.3 v5: SHA-1 over (namespace || name), first 16 octets, version
+-- nibble set to 5, variant bits to RFC 4122. Verified against the published
+-- vector: uuidv5(DNS, 'python.org') = 886313e1-3b8a-5372-9b90-0c9aee199e5d.
+--
+-- In the extension rather than in a client, because a worker written in
+-- another language must be able to compute the same id -- that is
+-- challenge-the-process §9's test: can a client that has never heard of
+-- percolate-core discover it.
+--
+-- NOT uuid-ossp. pgcrypto is already required and postgres-manifest.md's rule
+-- is that an extension is named when something needs it; one function is not
+-- something.
+-- ------------------------------------------------------------
+create or replace function percolate.uuidv5(p_namespace uuid, p_name text)
+returns uuid language sql immutable strict parallel safe as $$
+    with h as (
+        select substring(
+                   digest(decode(replace(p_namespace::text, '-', ''), 'hex')
+                          || convert_to(p_name, 'UTF8'), 'sha1')
+                   from 1 for 16) as b)
+    select encode(set_byte(set_byte(b, 6, (get_byte(b, 6) & 15) | 80),
+                           8, (get_byte(b, 8) & 63) | 128), 'hex')::uuid
+    from h;
+$$;
+
+comment on function percolate.uuidv5(uuid, text) is
+    'RFC 4122 v5. Use for the id of a row derived from something that already '
+    'has an identity, so re-deriving converges. Never md5(x)::uuid -- that '
+    'produces version 0, which is not a UUID and compares unequal to a '
+    'correctly generated one.';
+
+-- Namespaces for the kinds of thing this collection derives ids for. A
+-- namespace is itself a v5 under the RFC's DNS namespace, so it is
+-- reproducible by anyone rather than a magic constant somebody invented.
+create or replace function percolate.id_namespace(p_kind text)
+returns uuid language sql immutable strict parallel safe as $$
+    select percolate.uuidv5('6ba7b810-9dad-11d1-80b4-00c04fd430c8'::uuid,
+                            'percolationlabs.ai/' || p_kind);
+$$;
+
+-- ------------------------------------------------------------
+-- 2. What a NULL means, declared rather than guessed.
+--
+-- This collection uses NULL two incompatible ways inside unique constraints:
+-- `org_id is null` means SHARED ACROSS EVERY TENANT (a value), and
+-- `external_id is null` means NO EXTERNAL IDENTITY WAS SUPPLIED (an absence).
+-- A unique index does not constrain rows whose key is NULL, which is correct
+-- for an absence and catastrophic for a value -- and nothing in the schema
+-- distinguishes them, so every reader and every agent has to guess.
+--
+-- This table is the declaration. checks.sql refuses a unique index over a
+-- nullable column that has not made one.
+-- ------------------------------------------------------------
+create table if not exists percolate.null_means (
+    schema_name text not null,
+    table_name  text not null,
+    column_name text not null,
+    means       text not null check (means in ('value', 'absence')),
+    why         text not null,
+    primary key (schema_name, table_name, column_name)
+);
+
+comment on table percolate.null_means is
+    'Declares whether a nullable column''s NULL is a VALUE (a real state, so a '
+    'unique index over it must be NULLS NOT DISTINCT) or an ABSENCE (unknown '
+    'or not applicable, so NULLS DISTINCT is correct). Shipped vocabulary: '
+    'the meaning of a column is a property of the schema, not of a deployment.';
+
+-- ------------------------------------------------------------
+-- 3. What KIND of table this is, because "every table has a uuid id" is
+--    wrong and the first draft of checks.sql proved it.
+--
+-- That check fired 28 times and every one of the first twenty was correct
+-- design:
+--
+--   vocabulary  rbac.roles(name), workflow.lifecycle_states(state),
+--               aiq.relation_types(src_type, relation, dst_type)
+--               -- the term IS the identity. A surrogate here is ceremony,
+--               and referencing the VALUE is the whole point of
+--               challenge-the-process §9.
+--   junction    rbac.org_members(org_id, user_id),
+--               workflow.task_dependencies(task_id, depends_on_task_id)
+--               -- a composite of two foreign keys. A surrogate adds a column
+--               nothing will ever reference.
+--   log         rbac.auth_events(id bigint), workflow.task_events(id bigint)
+--               -- append-only. A monotonic bigint is smaller, ordered, and
+--               strictly better than a uuid where nothing is generated
+--               anywhere but here.
+--
+--   natural     aiq.node_keys(node_id, key, kind),
+--               aiq.schema_revisions(facet, revision)
+--               -- a composite that IS the identity and is not made only of
+--               foreign keys. Nothing references it by surrogate, so adding
+--               one would create a column with no readers. Distinct from
+--               junction, which is all-FK, and from vocabulary, which is a
+--               single term.
+--
+-- Only an ENTITY -- a thing other rows reference, created by the system,
+-- whose natural key may change -- needs a surrogate uuid. So the policy is
+-- per kind, and the kind is DECLARED.
+--
+-- Declared rather than derived, deliberately. The last time this collection
+-- tried to derive a per-table property (which tables hold deployment data)
+-- the derivation disagreed with a live install on nine of fifty-two, because
+-- whose rows these are is a design decision rather than a property of the
+-- text. So is this.
+-- ------------------------------------------------------------
+create table if not exists percolate.table_kinds (
+    schema_name text not null,
+    table_name  text not null,
+    kind        text not null check (kind in ('entity','vocabulary','junction','log','natural')),
+    why         text not null,
+    primary key (schema_name, table_name)
+);
+
+comment on table percolate.table_kinds is
+    'What a table IS, which decides what its primary key must be. entity: a '
+    'surrogate uuid id, because other rows reference it and its natural key '
+    'may change. vocabulary: the term is the key, and referencing the value '
+    'is the point. junction: a composite of foreign keys. log: append-only, '
+    'a monotonic bigint. Declared, not derived -- the kind is a design '
+    'decision and a text scan cannot see one.';
+
+-- A PROPOSAL, to make declaring cheap rather than to replace it. Read it,
+-- disagree with it, then write the row.
+create or replace view percolate.table_kind_proposal as
+with t as (
+    select n.nspname as sch, c.relname as tbl, c.oid
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace
+    where c.relkind in ('r','p')
+      and n.nspname in ('aiq','rbac','workflow','content','agentic','percolate')),
+pk as (
+    select t.sch, t.tbl, t.oid,
+           -- ::text because array_agg over attname gives name[], and name[] has
+           -- no equality operator against text[] -- the error names the operator
+           -- rather than the column, which is a minute of confusion each time.
+           array_agg(a.attname::text order by a.attnum) as cols,
+           array_agg(format_type(a.atttypid, null) order by a.attnum) as types,
+           bool_and(exists (select 1 from pg_constraint fk
+                            where fk.conrelid = t.oid and fk.contype = 'f'
+                              and a.attnum = any(fk.conkey))) as all_fk
+    from t
+    join pg_index x on x.indrelid = t.oid and x.indisprimary
+    join pg_attribute a on a.attrelid = t.oid and a.attnum = any(x.indkey::int[])
+    group by t.sch, t.tbl, t.oid)
+select sch as schema_name, tbl as table_name, cols as pk_columns, types as pk_types,
+       case
+         when cols = array['id']::text[] and types = array['uuid']::text[] then 'entity'
+         when cols = array['id']::text[] and types[1] like '%int%'  then 'log'
+         when array_length(cols,1) > 1 and all_fk                   then 'junction'
+         when types <@ array['text']::text[]                        then 'vocabulary'
+         when array_length(cols,1) > 1                              then 'natural'
+         -- NOT a fallthrough to 'entity'. The first version guessed 'entity'
+         -- for anything it did not recognise and mis-proposed node_keys and
+         -- schema_revisions, which a reviewer then accepted in bulk. A
+         -- proposal that is confident about the cases it does not understand
+         -- is worse than one that abstains.
+         else null end as proposed_kind
+from pk;
+
+
+-- ============================================================
 -- workflow-engine/schema.sql
 --   the engine: definitions, runs, tasks, saga, sql steps, YAML
 -- ============================================================
@@ -194,7 +374,7 @@ on conflict (state) do nothing;
 grant select on workflow.lifecycle_states to authenticated, api_viewer;
 
 create table if not exists workflow.definitions (
-    id          uuid primary key default gen_random_uuid(),
+    id          uuid primary key default uuidv7(),
     name        text not null,
     version     int not null default 1,
     spec        jsonb not null,   -- {"steps": [{"key","queue","kind","depends_on":[keys]}]}
@@ -335,7 +515,7 @@ create or replace trigger trg_check_spec_before_insert
 -- 2. Workflow runs
 -- ------------------------------------------------------------
 create table if not exists workflow.runs (
-    id               uuid primary key default gen_random_uuid(),
+    id               uuid primary key default uuidv7(),
     workflow_def_id  uuid not null references workflow.definitions(id),
     parent_task_id   uuid,
     external_id      text unique,     -- caller-supplied idempotency key for workflow.start_workflow
@@ -361,7 +541,7 @@ create table if not exists workflow.runs (
 -- 3. Tasks
 -- ------------------------------------------------------------
 create table if not exists workflow.tasks (
-    id               uuid primary key default gen_random_uuid(),
+    id               uuid primary key default uuidv7(),
     run_id           uuid not null references workflow.runs(id) on delete cascade,
     step_key         text not null,
     -- http_call: a durable outbound HTTP dispatch, claimed and executed by a
@@ -3183,7 +3363,7 @@ grant execute on function workflow.define_yaml(text) to authenticated;
 -- apply unchanged. Nothing here is a second execution engine.
 -- ------------------------------------------------------------
 create table if not exists workflow.schedules (
-    id             uuid primary key default gen_random_uuid(),
+    id             uuid primary key default uuidv7(),
     name           text not null unique,
     -- The definition NAME, not its id: start_workflow() resolves the latest
     -- version at fire time, so publishing v2 of a workflow changes what the
@@ -5938,7 +6118,12 @@ returns jsonb as $$
         -- stateless by omitting it. Derived rather than stored: the same run
         -- yields the same id on every resolution, including a replay, without a
         -- column that could drift from the run it belongs to.
-        '$session',     md5(r.id::text || ':')::uuid::text)
+        -- percolate.uuidv5, not md5(...)::uuid: the requirement stated above
+        -- is exactly what a v5 is for, and the hand-rolled version produces a
+        -- value whose version nibble is 0 -- not a UUID at all, and unequal to
+        -- a correctly derived one computed anywhere else. specs/identity.
+        '$session',     percolate.uuidv5(percolate.id_namespace('session'),
+                                         r.id::text)::text)
     from workflow.runs r
     join workflow.definitions d on d.id = r.workflow_def_id
     where r.id = p_run_id;
@@ -7972,7 +8157,7 @@ create schema if not exists rbac;
 -- 1. Users
 -- ------------------------------------------------------------
 create table if not exists rbac.users (
-    id            uuid primary key default gen_random_uuid(),
+    id            uuid primary key default uuidv7(),
     email         text not null unique,
     password_hash text,                 -- null for API-key-only / SSO-only accounts
     -- DEFAULT 'pending_verification', because 1a's whole argument is that
@@ -8531,7 +8716,7 @@ on conflict (scope) do update
 -- somebody from an org took effect when their token expired, which is the one
 -- moment it must not wait for.
 create table if not exists rbac.orgs (
-    id          uuid primary key default gen_random_uuid(),
+    id          uuid primary key default uuidv7(),
     slug        text not null unique,
     name        text not null,
     created_at  timestamptz not null default now(),
@@ -9058,7 +9243,7 @@ $$ language plpgsql;
 --    valid refresh token.
 -- ------------------------------------------------------------
 create table if not exists rbac.refresh_tokens (
-    id           uuid primary key default gen_random_uuid(),
+    id           uuid primary key default uuidv7(),
     user_id      uuid not null references rbac.users(id) on delete cascade,
     token_hash   text not null unique,     -- sha256 of the raw token; raw never stored
     device_label text,                     -- "Chrome on Mac", shown in session list
@@ -9207,7 +9392,7 @@ $$ language sql security definer set search_path = pg_catalog, public;
 -- lived, because the two are doing different jobs -- a refresh token proves a
 -- session is still alive, a reset token proves control of an inbox once.
 create table if not exists rbac.password_reset_tokens (
-    id         uuid primary key default gen_random_uuid(),
+    id         uuid primary key default uuidv7(),
     user_id    uuid not null references rbac.users(id) on delete cascade,
     token_hash text not null unique,     -- sha256 of the raw token; raw never stored
     issued_at  timestamptz not null default now(),
@@ -9354,7 +9539,7 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 --    it's a DB row, not a stateless token.
 -- ------------------------------------------------------------
 create table if not exists rbac.api_keys (
-    id          uuid primary key default gen_random_uuid(),
+    id          uuid primary key default uuidv7(),
     user_id     uuid references rbac.users(id) on delete cascade,  -- null = service account
     label       text not null,
     key_hash    text not null unique,      -- sha256 of raw key; raw shown once at creation
@@ -10824,7 +11009,7 @@ create schema if not exists aiq;
 --    Does NOT store the payload; payload stays on the typed table.
 -- ------------------------------------------------------------
 create table if not exists aiq.nodes (
-    id           uuid primary key default gen_random_uuid(),
+    id           uuid primary key default uuidv7(),
     entity_type  text not null,          -- owning table, e.g. 'company'
     entity_id    uuid not null,          -- PK in that table
     org_id       uuid,                   -- tenant; null = shared reference data
@@ -11048,7 +11233,7 @@ create or replace trigger relation_types_term_consistent_upd
 --    Hard FK/junction relationships are NEVER copied here (D4).
 -- ------------------------------------------------------------
 create table if not exists aiq.edges (
-    id          uuid primary key default gen_random_uuid(),
+    id          uuid primary key default uuidv7(),
     src_id      uuid not null references aiq.nodes(id) on delete cascade,
     dst_id      uuid not null references aiq.nodes(id) on delete cascade,
     relation    text not null,
@@ -12729,6 +12914,18 @@ begin
         using hnsw (embedding %3$s)$q$,
         'idx_' || replace(m.name,'-','_') || '_hnsw',
         'emb_' || replace(m.name, '-', '_'), m.distance_op);
+
+    -- DECLARE WHAT THIS TABLE IS, here, because nothing else can. A space is
+    -- created at REGISTRATION, not at install, so specs/identity's
+    -- declarations -- which run once, when the extension is created -- cannot
+    -- name it. A table created by a function is declared by that function or
+    -- it stays undeclared forever, and specs/identity/checks.sql will say so.
+    insert into percolate.table_kinds (schema_name, table_name, kind, why)
+    values ('aiq', 'emb_' || replace(p_model, '-', '_'), 'natural',
+            'an embedding space: chunk_id is the identity and nothing '
+            'references it by surrogate; created per registered model')
+    on conflict (schema_name, table_name) do nothing;
+
 end;
 $$ language plpgsql;
 
@@ -15840,7 +16037,7 @@ create schema if not exists content;
 -- differs between them -- a push arrives as an upload, a pull is polled.
 -- ------------------------------------------------------------
 create table if not exists content.channels (
-    id            uuid primary key default gen_random_uuid(),
+    id            uuid primary key default uuidv7(),
     name          text not null,
     kind          text not null check (kind in
                       ('file_upload','http_pull','ftp_pull','feed','telegram','manual')),
@@ -15857,6 +16054,28 @@ create table if not exists content.channels (
     updated_at    timestamptz not null default now(),
     unique (org_id, name)
 );
+
+-- NULLS NOT DISTINCT, for the reason content.datasets already carries below.
+--
+-- A plain `unique (org_id, name)` does not constrain a SHARED channel at all:
+-- NULLs are distinct in a unique index unless it says otherwise, so
+-- `(null, 'rss')` can repeat without limit and `register_fetched` resolves the
+-- name with `limit 1` -- picking one of N, silently.
+--
+-- This file used to say the sibling "answers it differently (WHERE NOT EXISTS
+-- at each insert site)". That was a real decision and it put the guarantee one
+-- layer above where it can be refused. It held for as long as every insert
+-- site remembered: the first NEW caller (applications/percolate-self-model)
+-- used `on conflict do nothing`, which is the ordinary idiom and finds no
+-- conflict here, and created FIVE identical channels in one session before
+-- anything noticed.
+--
+-- Drop-then-add rather than inline, so an installation that already created
+-- this table picks the change up on the next apply.
+alter table content.channels drop constraint if exists channels_org_id_name_key;
+alter table content.channels add constraint channels_org_id_name_key
+    unique nulls not distinct (org_id, name);
+
 create index if not exists idx_channels_pollable on content.channels (last_polled_at)
     where enabled and poll_interval is not null;
 
@@ -15876,7 +16095,7 @@ create or replace trigger trg_channels_touch before update on content.channels
 -- through a resource, which is scoped. See integration.sql.
 -- ------------------------------------------------------------
 create table if not exists content.files (
-    id           uuid primary key default gen_random_uuid(),
+    id           uuid primary key default uuidv7(),
     checksum     text not null unique,      -- sha256 of the content; the dedup key
     bucket       text not null,
     object_key   text not null,
@@ -15894,7 +16113,7 @@ create table if not exists content.files (
 -- and optionally a file (if it has bytes -- a scraped JSON record may not).
 -- ------------------------------------------------------------
 create table if not exists content.resources (
-    id           uuid primary key default gen_random_uuid(),
+    id           uuid primary key default uuidv7(),
     channel_id   uuid not null references content.channels(id),
     file_id      uuid references content.files(id),
     -- Provider's own identifier, used to avoid re-ingesting the same item on
@@ -15964,7 +16183,7 @@ create or replace trigger trg_resources_touch before update on content.resources
 -- this schema; integration.sql adds the reconciliation instead.
 -- ------------------------------------------------------------
 create table if not exists content.resource_chunks (
-    id           uuid primary key default gen_random_uuid(),
+    id           uuid primary key default uuidv7(),
     resource_id  uuid not null references content.resources(id) on delete cascade,
     ordinal      int not null,
     content      text not null,
@@ -16593,7 +16812,7 @@ $$ language sql stable security definer set search_path = pg_catalog, public;
 -- glob, and a row saying what the columns were. That is enough to query and
 -- honest about what it is not (ingestion.md §6 names what breaks first).
 create table if not exists content.datasets (
-    id           uuid primary key default gen_random_uuid(),
+    id           uuid primary key default uuidv7(),
     -- The logical table. Unique per org, so two tenants may both have `sales`.
     name         text not null,
     org_id       uuid,
@@ -16623,10 +16842,13 @@ create table if not exists content.datasets (
 -- caught by 02-ingestion.sql §5 with "more than one row returned by a subquery",
 -- which is a better error than the silent one it would have been in production.
 --
--- content.channels has the same shape and answers it differently (WHERE NOT
--- EXISTS at each insert site, §5b of integration.sql). Here the constraint is
--- the right place, because the upsert is the API: a caller appending to a
--- dataset must not have to know whether it already exists.
+-- content.channels had the same shape and answered it differently (WHERE NOT
+-- EXISTS at each insert site, §5b of integration.sql). It now carries the same
+-- constraint, because the guard held only for as long as every insert site
+-- remembered it and the first new caller did not -- see the note beside that
+-- table. Here the constraint was always the right place, because the upsert is
+-- the API: a caller appending to a dataset must not have to know whether it
+-- already exists.
 --
 -- Drop-then-add rather than inline, so an installation that already created
 -- this table picks the change up on the next apply -- the same discipline
@@ -17240,7 +17462,7 @@ create schema if not exists agentic;
 -- surface is this table plus agents.tools; there is no built-in tool, ever.
 -- ------------------------------------------------------------
 create table if not exists agentic.tool_servers (
-    id              uuid primary key default gen_random_uuid(),
+    id              uuid primary key default uuidv7(),
     name            text not null unique,
     kind            text not null check (kind in ('mcp', 'openapi')),
     url             text not null,
@@ -17313,7 +17535,7 @@ create or replace trigger trg_tool_servers_updated
 -- 2. Agents -- config rows; adding one is an insert (brief §2, §6)
 -- ------------------------------------------------------------
 create table if not exists agentic.agents (
-    id                       uuid primary key default gen_random_uuid(),
+    id                       uuid primary key default uuidv7(),
     name                     text not null unique,
     system_prompt            text not null default '',
     model                    text,
@@ -17436,7 +17658,7 @@ create or replace trigger trg_agents_updated
 -- carry ten copies that drift.
 -- ------------------------------------------------------------
 create table if not exists agentic.skills (
-    id              uuid primary key default gen_random_uuid(),
+    id              uuid primary key default uuidv7(),
     -- The key an agent lists and the model names. Constrained to the shape the
     -- Agent Skills spec uses, because this name is also a TOOL name on the
     -- skill gateway (plugins.md §4), and a tool name with a space in it is a
@@ -17631,7 +17853,7 @@ create index if not exists idx_skills_plugin on agentic.skills (plugin)
 -- 3. Sessions -- one AG-UI thread; the unit a conversation is owned by
 -- ------------------------------------------------------------
 create table if not exists agentic.sessions (
-    id             uuid primary key default gen_random_uuid(),
+    id             uuid primary key default uuidv7(),
     -- RENAMED from user_id, and the rename is the point rather than tidying.
     -- Every other owned table in the collection spells this owner_id, and
     -- rbac.scope_predicate() -- the single home of the read expression every
@@ -17683,7 +17905,7 @@ create or replace trigger trg_sessions_updated
 -- runs outside tenant isolation entirely.
 -- ------------------------------------------------------------
 create table if not exists agentic.runs (
-    id                      uuid primary key default gen_random_uuid(),
+    id                      uuid primary key default uuidv7(),
     session_id              uuid references agentic.sessions(id) on delete cascade,
     agent_id                uuid not null references agentic.agents(id),
     owner_id                uuid not null default rbac.current_user_id(),
@@ -17734,7 +17956,7 @@ create or replace trigger trg_runs_updated
 -- row per session, superseded rather than appended to (§3).
 -- ------------------------------------------------------------
 create table if not exists agentic.messages (
-    id           uuid primary key default gen_random_uuid(),
+    id           uuid primary key default uuidv7(),
     run_id       uuid references agentic.runs(id) on delete cascade,
     session_id   uuid references agentic.sessions(id) on delete cascade,
     role         text not null check (role in ('system','user','assistant',
@@ -19670,7 +19892,7 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 
 -- 3a. Candidates: an entity the extractor named that resolved to nothing.
 create table if not exists aiq.soft_nodes (
-    id               uuid primary key default gen_random_uuid(),
+    id               uuid primary key default uuidv7(),
     -- RENAMED from `kind`, and the rename is the point rather than tidying.
     -- graph-index.md §4.3(c) and (d) have called this `claimed_kind` in prose
     -- since it was designed, and the column did not -- while the ADJACENT table
@@ -19765,7 +19987,7 @@ create index if not exists idx_soft_nodes_unresolved
 -- thing to be a Postgres table. A dataset row is hydrated by a different fetch
 -- (DuckDB over content.dataset_uri) and is otherwise an ordinary vertex.
 create table if not exists aiq.lake_nodes (
-    id            uuid primary key default gen_random_uuid(),
+    id            uuid primary key default uuidv7(),
     dataset       text not null,        -- content.datasets.name
     row_key       text not null,        -- the dataset's business key for the row
     label         text,
@@ -21814,6 +22036,113 @@ grant usage on schema percolate to web_anon, authenticated, api_viewer;
 grant select on percolate.types to web_anon, authenticated, api_viewer;
 grant execute on function percolate.enums() to web_anon, authenticated, api_viewer;
 grant execute on function percolate.contract() to web_anon, authenticated, api_viewer;
+
+
+-- ============================================================
+-- identity/declarations.sql
+--   what each table IS and what each nullable column's NULL MEANS -- statements about every schema above, so they can only be made after those tables exist. The mechanism they use ships first; see identity/schema.sql
+-- ============================================================
+
+-- Identity and nullability: the declarations.
+--
+-- SEPARATE FROM schema.sql, and the split is a dependency rather than taste.
+-- The mechanism (percolate.uuidv5, the two registries) ships FIRST, because
+-- shipped code in workflow-engine calls uuidv5 and a `language sql` body
+-- resolves its references when it is created. The declarations are statements
+-- ABOUT other modules' tables, so they can only be made once those tables
+-- exist -- which is last.
+--
+-- The first version had both halves in one file at the front, and seeded
+-- nothing: the proposal view it reads from was querying a catalogue in which
+-- none of the 53 tables had been created yet. It reported 54 undeclared
+-- tables and looked exactly like a policy nobody had applied.
+
+-- ------------------------------------------------------------
+-- 4. The declarations. Each one is a decision, so each carries its reason --
+--    the sentence is the product, the same way a surface.sql row's `why` is.
+-- ------------------------------------------------------------
+
+-- org_id NULL is a VALUE: the shared tier, visible to every tenant. A publicly
+-- listed company is legitimately global and duplicating it per tenant defeats
+-- the point of one registry (integration-rbac.sql §1). Because it is a value,
+-- a unique index over it MUST be `nulls not distinct` or it constrains
+-- everything except the shared tier -- which is the one thing more than one
+-- writer touches.
+--
+-- spec.md §4 argues this should stop being a NULL at all. Until it does, this
+-- is the honest declaration of what it currently means.
+insert into percolate.null_means (schema_name, table_name, column_name, means, why) values
+ ('aiq','lake_nodes','org_id','value','the shared tier -- a lake row visible to every tenant'),
+ ('aiq','node_keys','org_id','value','the shared tier -- a key resolvable by every tenant'),
+ ('aiq','soft_nodes','org_id','value','the shared tier -- an unpromoted candidate visible to all'),
+ ('content','channels','org_id','value','a shared source, e.g. a public feed every tenant reads'),
+ ('content','datasets','org_id','value','a shared dataset; the same argument as channels'),
+
+-- external_id NULL is an ABSENCE: no external identity was supplied. Several
+-- rows may legitimately have none, so `nulls distinct` is correct here and
+-- `nulls not distinct` would be the bug -- two unrelated resources that merely
+-- both lack an upstream id are not the same resource.
+--
+-- The trap this leaves is in spec.md §6: register_fetched's idempotence is
+-- `on conflict (channel_id, external_id)`, which never fires for a null. The
+-- constraint is right and the FUNCTION should refuse the call.
+ ('content','resources','external_id','absence','no upstream identity; many resources legitimately have none'),
+ ('workflow','runs','external_id','absence','no idempotency key was supplied by the caller'),
+
+-- Two partial indexes on agentic, both absences, and both worth a second look
+-- by whoever owns that subsystem: a null here reads as "not configured yet"
+-- rather than as a state, which is the definition of an absence, but the
+-- indexes are partial and the interaction is subtle.
+ ('agentic','agents','extracts_source','absence','an extractor with no source configured yet'),
+ ('agentic','agents','extracts_doctype','absence','an extractor with no doctype configured yet'),
+ ('agentic','messages','session_id','absence','a summary not attached to a session')
+on conflict (schema_name, table_name, column_name) do update
+  set means = excluded.means, why = excluded.why;
+
+-- Table kinds, taken from the proposal after reading all 53. The proposal was
+-- right everywhere; it is still written down rather than trusted, because the
+-- kind is a design decision and the next table's proposal may not be.
+insert into percolate.table_kinds (schema_name, table_name, kind, why)
+select schema_name, table_name, proposed_kind,
+       'reviewed against percolate.table_kind_proposal, 2026-09-06'
+from percolate.table_kind_proposal
+on conflict (schema_name, table_name) do nothing;
+
+-- ------------------------------------------------------------
+-- 5. ENFORCE THE KEY DEFAULT, on upgrades as well as fresh installs.
+--
+-- Writing `default uuidv7()` in the CREATE TABLE fixes a fresh install and
+-- does NOTHING to a database that already exists: the generated upgrade is
+-- idempotent DDL, and `create table if not exists` does not alter an existing
+-- column's default. `dev/upgrade-converges.sh` caught it -- a fresh install
+-- and an upgraded one disagreed on 25 column defaults, which is precisely the
+-- class of defect that gate exists for and precisely the class the specs
+-- alone cannot see.
+--
+-- So the fact is stated once, as a rule over the catalogue, rather than as 25
+-- ALTER statements that a 26th table would silently not join. Runs on both
+-- paths; a no-op on the one that was already right.
+do $$
+declare r record;
+begin
+    for r in
+        select k.schema_name, k.table_name
+        from percolate.table_kinds k
+        join pg_class c on c.relname = k.table_name
+        join pg_namespace n on n.oid = c.relnamespace and n.nspname = k.schema_name
+        join pg_index x on x.indrelid = c.oid and x.indisprimary
+        join pg_attribute a on a.attrelid = c.oid and a.attnum = any(x.indkey::int[])
+                           and a.attname = 'id' and a.atttypid = 'uuid'::regtype
+        join pg_attrdef d on d.adrelid = c.oid and d.adnum = a.attnum
+        where k.kind = 'entity'
+          and pg_get_expr(d.adbin, d.adrelid) ~ 'gen_random_uuid|uuidv4'
+    loop
+        execute format('alter table %I.%I alter column id set default uuidv7()',
+                       r.schema_name, r.table_name);
+        raise notice 'identity: % .% id default moved to uuidv7()',
+                     r.schema_name, r.table_name;
+    end loop;
+end $$;
 
 
 -- ============================================================

@@ -501,6 +501,33 @@
     },
     {
       "admits": [
+        "value",
+        "absence"
+      ],
+      "column": "means",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "percolate",
+      "table": "null_means",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "entity",
+        "vocabulary",
+        "junction",
+        "log",
+        "natural"
+      ],
+      "column": "kind",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "percolate",
+      "table": "table_kinds",
+      "vocabulary": null
+    },
+    {
+      "admits": [
         "member",
         "admin"
       ],
@@ -709,7 +736,7 @@
     }
   ],
   "exported_by_role": "p8",
-  "extension": "0.1.5",
+  "extension": "0.1.6",
   "types": [
     {
       "consumed_by": [

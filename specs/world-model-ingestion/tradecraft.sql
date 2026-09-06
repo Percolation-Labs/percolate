@@ -113,7 +113,7 @@ comment on column tradecraft.source_reliability.grade is
 -- this history, so a track record is impossible without it.
 -- ----------------------------------------------------------------------------
 create table if not exists tradecraft.assessments (
-    id             uuid primary key default gen_random_uuid(),
+    id             uuid primary key default uuidv7(),
     -- the stable thing being assessed across time; changes to the STATEMENT
     -- make a new row, changes of MIND make a new row with the same subject_key
     subject_key    text not null,

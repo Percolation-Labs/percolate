@@ -39,7 +39,7 @@ create schema if not exists aiq;
 --    Does NOT store the payload; payload stays on the typed table.
 -- ------------------------------------------------------------
 create table if not exists aiq.nodes (
-    id           uuid primary key default gen_random_uuid(),
+    id           uuid primary key default uuidv7(),
     entity_type  text not null,          -- owning table, e.g. 'company'
     entity_id    uuid not null,          -- PK in that table
     org_id       uuid,                   -- tenant; null = shared reference data
@@ -263,7 +263,7 @@ create or replace trigger relation_types_term_consistent_upd
 --    Hard FK/junction relationships are NEVER copied here (D4).
 -- ------------------------------------------------------------
 create table if not exists aiq.edges (
-    id          uuid primary key default gen_random_uuid(),
+    id          uuid primary key default uuidv7(),
     src_id      uuid not null references aiq.nodes(id) on delete cascade,
     dst_id      uuid not null references aiq.nodes(id) on delete cascade,
     relation    text not null,
@@ -1944,6 +1944,18 @@ begin
         using hnsw (embedding %3$s)$q$,
         'idx_' || replace(m.name,'-','_') || '_hnsw',
         'emb_' || replace(m.name, '-', '_'), m.distance_op);
+
+    -- DECLARE WHAT THIS TABLE IS, here, because nothing else can. A space is
+    -- created at REGISTRATION, not at install, so specs/identity's
+    -- declarations -- which run once, when the extension is created -- cannot
+    -- name it. A table created by a function is declared by that function or
+    -- it stays undeclared forever, and specs/identity/checks.sql will say so.
+    insert into percolate.table_kinds (schema_name, table_name, kind, why)
+    values ('aiq', 'emb_' || replace(p_model, '-', '_'), 'natural',
+            'an embedding space: chunk_id is the identity and nothing '
+            'references it by surrogate; created per registered model')
+    on conflict (schema_name, table_name) do nothing;
+
 end;
 $$ language plpgsql;
 

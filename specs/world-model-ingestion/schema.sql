@@ -30,7 +30,7 @@ create schema if not exists content;
 -- differs between them -- a push arrives as an upload, a pull is polled.
 -- ------------------------------------------------------------
 create table if not exists content.channels (
-    id            uuid primary key default gen_random_uuid(),
+    id            uuid primary key default uuidv7(),
     name          text not null,
     kind          text not null check (kind in
                       ('file_upload','http_pull','ftp_pull','feed','telegram','manual')),
@@ -47,6 +47,28 @@ create table if not exists content.channels (
     updated_at    timestamptz not null default now(),
     unique (org_id, name)
 );
+
+-- NULLS NOT DISTINCT, for the reason content.datasets already carries below.
+--
+-- A plain `unique (org_id, name)` does not constrain a SHARED channel at all:
+-- NULLs are distinct in a unique index unless it says otherwise, so
+-- `(null, 'rss')` can repeat without limit and `register_fetched` resolves the
+-- name with `limit 1` -- picking one of N, silently.
+--
+-- This file used to say the sibling "answers it differently (WHERE NOT EXISTS
+-- at each insert site)". That was a real decision and it put the guarantee one
+-- layer above where it can be refused. It held for as long as every insert
+-- site remembered: the first NEW caller (applications/percolate-self-model)
+-- used `on conflict do nothing`, which is the ordinary idiom and finds no
+-- conflict here, and created FIVE identical channels in one session before
+-- anything noticed.
+--
+-- Drop-then-add rather than inline, so an installation that already created
+-- this table picks the change up on the next apply.
+alter table content.channels drop constraint if exists channels_org_id_name_key;
+alter table content.channels add constraint channels_org_id_name_key
+    unique nulls not distinct (org_id, name);
+
 create index if not exists idx_channels_pollable on content.channels (last_polled_at)
     where enabled and poll_interval is not null;
 
@@ -66,7 +88,7 @@ create or replace trigger trg_channels_touch before update on content.channels
 -- through a resource, which is scoped. See integration.sql.
 -- ------------------------------------------------------------
 create table if not exists content.files (
-    id           uuid primary key default gen_random_uuid(),
+    id           uuid primary key default uuidv7(),
     checksum     text not null unique,      -- sha256 of the content; the dedup key
     bucket       text not null,
     object_key   text not null,
@@ -84,7 +106,7 @@ create table if not exists content.files (
 -- and optionally a file (if it has bytes -- a scraped JSON record may not).
 -- ------------------------------------------------------------
 create table if not exists content.resources (
-    id           uuid primary key default gen_random_uuid(),
+    id           uuid primary key default uuidv7(),
     channel_id   uuid not null references content.channels(id),
     file_id      uuid references content.files(id),
     -- Provider's own identifier, used to avoid re-ingesting the same item on
@@ -154,7 +176,7 @@ create or replace trigger trg_resources_touch before update on content.resources
 -- this schema; integration.sql adds the reconciliation instead.
 -- ------------------------------------------------------------
 create table if not exists content.resource_chunks (
-    id           uuid primary key default gen_random_uuid(),
+    id           uuid primary key default uuidv7(),
     resource_id  uuid not null references content.resources(id) on delete cascade,
     ordinal      int not null,
     content      text not null,
@@ -783,7 +805,7 @@ $$ language sql stable security definer set search_path = pg_catalog, public;
 -- glob, and a row saying what the columns were. That is enough to query and
 -- honest about what it is not (ingestion.md §6 names what breaks first).
 create table if not exists content.datasets (
-    id           uuid primary key default gen_random_uuid(),
+    id           uuid primary key default uuidv7(),
     -- The logical table. Unique per org, so two tenants may both have `sales`.
     name         text not null,
     org_id       uuid,
@@ -813,10 +835,13 @@ create table if not exists content.datasets (
 -- caught by 02-ingestion.sql §5 with "more than one row returned by a subquery",
 -- which is a better error than the silent one it would have been in production.
 --
--- content.channels has the same shape and answers it differently (WHERE NOT
--- EXISTS at each insert site, §5b of integration.sql). Here the constraint is
--- the right place, because the upsert is the API: a caller appending to a
--- dataset must not have to know whether it already exists.
+-- content.channels had the same shape and answered it differently (WHERE NOT
+-- EXISTS at each insert site, §5b of integration.sql). It now carries the same
+-- constraint, because the guard held only for as long as every insert site
+-- remembered it and the first new caller did not -- see the note beside that
+-- table. Here the constraint was always the right place, because the upsert is
+-- the API: a caller appending to a dataset must not have to know whether it
+-- already exists.
 --
 -- Drop-then-add rather than inline, so an installation that already created
 -- this table picks the change up on the next apply -- the same discipline

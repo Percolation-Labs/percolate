@@ -205,7 +205,7 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 
 -- 3a. Candidates: an entity the extractor named that resolved to nothing.
 create table if not exists aiq.soft_nodes (
-    id               uuid primary key default gen_random_uuid(),
+    id               uuid primary key default uuidv7(),
     -- RENAMED from `kind`, and the rename is the point rather than tidying.
     -- graph-index.md §4.3(c) and (d) have called this `claimed_kind` in prose
     -- since it was designed, and the column did not -- while the ADJACENT table
@@ -300,7 +300,7 @@ create index if not exists idx_soft_nodes_unresolved
 -- thing to be a Postgres table. A dataset row is hydrated by a different fetch
 -- (DuckDB over content.dataset_uri) and is otherwise an ordinary vertex.
 create table if not exists aiq.lake_nodes (
-    id            uuid primary key default gen_random_uuid(),
+    id            uuid primary key default uuidv7(),
     dataset       text not null,        -- content.datasets.name
     row_key       text not null,        -- the dataset's business key for the row
     label         text,
