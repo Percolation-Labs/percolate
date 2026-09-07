@@ -81,9 +81,54 @@ jobs:
           key: parser-tests-${{ hashFiles('dev/Dockerfile.pgrx-builder', 'extension/percolate_parser/Cargo.lock') }}
           restore-keys: parser-tests-
 
+      # THE 343 SECONDS THIS JOB SPENT BEFORE IT RAN A SINGLE TEST -- 72% of
+      # it -- measured on run 34028283280:
+      #
+      #     FROM postgres:19beta3-bookworm       9.3s
+      #     apt-get install ...                 28.9s
+      #     rustup                              19.1s
+      #     cargo install --locked cargo-pgrx  257.3s   <- three quarters of it
+      #     export to the daemon                25.6s
+      #
+      # cargo-pgrx is COMPILED FROM SOURCE or it is not obtained at all. pgrx
+      # ships no binaries -- the v0.19.2 release carries no assets, so there is
+      # nothing for cargo-binstall to fetch -- and the pin is not negotiable,
+      # because the ABI it targets is the ABI the shipped .so is built against.
+      # So the only move left is to compile it ONCE and keep what came out.
+      #
+      # NOT buildx layer caching, and that is somebody else's measurement rather
+      # than a guess: get-percolate's parser.yml tried exactly that on exactly
+      # this Dockerfile and wrote down 280s cold -> 256s warm on the default
+      # driver against 358s -> 350s on the container driver, because `--load`
+      # from a container driver exports the whole image back into the daemon and
+      # costs more than the layers save. What is cached here is the BUILT IMAGE
+      # as a tarball, which has no build graph to walk and no export to pay:
+      # `docker load` below IS the 25.6s the build was already spending.
+      #
+      # KEYED ON THE DOCKERFILE AND NOTHING ELSE, and deliberately with NO
+      # restore-keys. The crate cache above wants a near miss; this one must
+      # never have one. An image restored under a changed Dockerfile is the
+      # wrong toolchain, and it would surface as a red test rather than as a
+      # cache miss.
+      - name: Cache the pgrx toolchain image
+        id: toolchain
+        uses: actions/cache@v4
+        with:
+          path: /tmp/pgrx-builder.tar
+          key: pgrx-builder-image-${{ hashFiles('dev/Dockerfile.pgrx-builder') }}
+
       - name: Build the pgrx toolchain image
+        if: steps.toolchain.outputs.cache-hit != 'true'
         working-directory: dev
-        run: docker build -f Dockerfile.pgrx-builder -t pgrx-builder .
+        run: |
+          docker build -f Dockerfile.pgrx-builder -t pgrx-builder .
+          # Saved UNCOMPRESSED on purpose: actions/cache zstds it on the way up,
+          # and compressing twice spends a minute to save nothing.
+          docker save pgrx-builder -o /tmp/pgrx-builder.tar
+
+      - name: Load the pgrx toolchain image
+        if: steps.toolchain.outputs.cache-hit == 'true'
+        run: docker load -i /tmp/pgrx-builder.tar
 
       - name: cargo pgrx test
         run: |
