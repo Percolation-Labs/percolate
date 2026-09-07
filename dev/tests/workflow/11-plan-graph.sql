@@ -471,4 +471,43 @@ begin
     raise notice 'workflow/11: plan_status reports the shape of what each step actually returned';
 end $$;
 
+-- ---------------------------------------------------------------------
+-- PLAN_FACET IS NOT REACHABLE ANONYMOUSLY.
+--
+-- It is defined in specs/agentic/schema.sql AFTER that file's blanket
+-- `revoke execute on all functions in schema agentic from public`, so it was
+-- born with the PUBLIC default and kept it. 087ecd6 fixed that by re-stating
+-- the revoke below the definition. Nothing asserted it, and this file -- the
+-- one that exercises plan_facet -- was last touched two days before the fix.
+--
+-- Not a live leak when it was found: plan_facet is SECURITY INVOKER and
+-- web_anon holds no table grant in agentic, so the reads behind it fail on
+-- privileges rather than answering. That is exactly why it needs an
+-- assertion. The protection is an accident of a second, unrelated grant, and
+-- the day somebody grants web_anon a select in this schema for a good reason,
+-- the accident stops holding and nothing says so.
+--
+-- Found by asking which claims have a definition committed after the last
+-- commit to the file that checks them.
+-- ---------------------------------------------------------------------
+do $$
+declare r text;
+begin
+    foreach r in array array['web_anon', 'api_viewer'] loop
+        if has_function_privilege(r, 'agentic.plan_facet()', 'execute') then
+            raise exception
+                'agentic.plan_facet() is executable by % -- a function defined after '
+                'a blanket revoke carries the PUBLIC default it was born with, and '
+                'only a re-stated revoke below the definition takes it away', r;
+        end if;
+    end loop;
+
+    -- The revoke has to stop at PUBLIC, not remove the grant the feature needs.
+    if not has_function_privilege('authenticated', 'agentic.plan_facet()', 'execute') then
+        raise exception 'agentic.plan_facet() is not executable by authenticated: '
+                        'the revoke took the real grant with it';
+    end if;
+    raise notice 'workflow/11: plan_facet is granted to authenticated and to nobody anonymous';
+end $$;
+
 rollback;

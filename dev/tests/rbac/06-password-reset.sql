@@ -267,4 +267,58 @@ begin
                  'is spent before the address is looked up';
 end $$;
 
+-- ---------------------------------------------------------------------
+-- THE THROTTLE IS KEYED ON THE ADDRESS THIS FUNCTION LOOKS UP.
+--
+-- `request_password_reset` used to build its rate-limit key from
+-- `lower(p_email)` while the lookup underneath is an exact match on a
+-- case-sensitive column compared with `=`. Two addresses differing only in
+-- case are two accounts everywhere else in this file, and they shared one
+-- bucket here, so either could spend the other's allowance -- a denial of the
+-- reset link, aimed at a specific account, by someone who only has to know a
+-- different capitalisation of the address.
+--
+-- 67ef695 fixed it. Nothing tested it, and this file could not have: every
+-- address in it is already lowercase, so `lower(p_email)` and `p_email` are
+-- the same string and the test passes identically on the broken code.
+--
+-- Found by asking which claims have a definition that was committed after the
+-- last commit to the file that checks them -- not by reading the diff, which
+-- nobody had.
+-- ---------------------------------------------------------------------
+do $$
+declare v_a text := 'Case-Me@example.com';
+        v_b text := 'case-me@example.com';
+        v_throttled boolean := false;
+begin
+    delete from workflow.rate_limits where key like 'reset:%ase-%e@example.com';
+
+    -- Exhaust the bucket for the mixed-case spelling.
+    for i in 1..8 loop
+        begin
+            perform rbac.request_password_reset(v_a, 'tok-a-' || i);
+        exception when others then
+            exit when sqlerrm like '%too many password reset requests%';
+            raise;
+        end;
+    end loop;
+
+    -- The other spelling must still have its own allowance. If the key folds
+    -- case, this raises immediately and the account is unreachable.
+    begin
+        perform rbac.request_password_reset(v_b, 'tok-b');
+    exception when others then
+        v_throttled := sqlerrm like '%too many password reset requests%';
+    end;
+
+    if v_throttled then
+        raise exception
+            'exhausting the throttle for % also throttled %, so the rate-limit key '
+            'folds case while the user lookup does not -- one address can lock '
+            'another out of password reset', v_a, v_b;
+    end if;
+    raise notice 'rbac/06: the throttle key matches the lookup, so case-distinct '
+                 'addresses hold separate allowances';
+end $$;
+
 rollback;
