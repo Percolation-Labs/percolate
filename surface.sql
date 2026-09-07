@@ -228,6 +228,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','table','aiq.nodes',null,'graph-identity.md: write-time node registry'),
 ('ai-query-layer','table','aiq.node_keys',null,'graph-identity.md: lookup index'),
 ('ai-query-layer','table','aiq.edges',null,'graph-identity.md: authored soft links'),
+('ai-query-layer','view','aiq.edges_current',null,'schema.sql: edges that hold NOW -- valid_to null or future. Read this rather than aiq.edges unless you want retracted history, because a derivation retracts by setting valid_to and never deletes'),
 ('ai-query-layer','table','aiq.embedding_models',null,'schema.sql §10: one space per MODEL'),
 ('ai-query-layer','table','aiq.embedding_providers',null,'schema.sql §10a: what an embedding CALL looks like is data, not code'),
 ('ai-query-layer','column','aiq.embedding_models.credential_ref',null,'schema.sql §10: the env var name, never the token'),

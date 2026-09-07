@@ -51,8 +51,13 @@ begin
         raise exception 'compaction accumulated: % summary rows for one session, expected 1', n;
     end if;
 
+    -- `is distinct from`, not `<>`. With no summary row the subquery is NULL,
+    -- `NULL <> 'x'` is NULL, and `if NULL then` does not fire -- so the
+    -- assertion would pass precisely when the row it checks is absent.
+    -- dev/assertion-audit.py caught all three of these, which is the gate
+    -- this collection built for exactly this shape.
     if (select content from agentic.messages
-         where session_id = c.s1 and role = 'summary') <> 'second summary' then
+         where session_id = c.s1 and role = 'summary') is distinct from 'second summary' then
         raise exception 'the rolling summary did not roll: the first write survived';
     end if;
 end $$;
@@ -114,8 +119,13 @@ begin
     if r->>'skipped' is null then
         raise exception 'agentic.apply_summary wrote on a non-scheduled run: %', r;
     end if;
+    -- `is distinct from`, not `<>`. With no summary row the subquery is NULL,
+    -- `NULL <> 'x'` is NULL, and `if NULL then` does not fire -- so the
+    -- assertion would pass precisely when the row it checks is absent.
+    -- dev/assertion-audit.py caught all three of these, which is the gate
+    -- this collection built for exactly this shape.
     if (select content from agentic.messages
-         where session_id = c.s1 and role = 'summary') <> 'the real rolling summary' then
+         where session_id = c.s1 and role = 'summary') is distinct from 'the real rolling summary' then
         raise exception 'a delegated run overwrote the rolling summary';
     end if;
 
@@ -127,8 +137,13 @@ begin
     if r->>'skipped' is not null then
         raise exception 'agentic.apply_summary skipped a scheduled run: %', r;
     end if;
+    -- `is distinct from`, not `<>`. With no summary row the subquery is NULL,
+    -- `NULL <> 'x'` is NULL, and `if NULL then` does not fire -- so the
+    -- assertion would pass precisely when the row it checks is absent.
+    -- dev/assertion-audit.py caught all three of these, which is the gate
+    -- this collection built for exactly this shape.
     if (select content from agentic.messages
-         where session_id = c.s1 and role = 'summary') <> 'compacted' then
+         where session_id = c.s1 and role = 'summary') is distinct from 'compacted' then
         raise exception 'a scheduled run did not write the summary';
     end if;
 end $$;
