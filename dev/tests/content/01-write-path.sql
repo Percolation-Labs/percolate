@@ -60,6 +60,22 @@ declare
     a uuid; v_res uuid; v_n int; r record;
 begin
     select org_a into a from t_ctx;
+
+    -- A CALLER IDENTITY, because a real upload has one. This block used to run
+    -- with no claims at all, so register_upload stamped owner_id = null (there
+    -- is no current user) and visibility = 'private' -- a resource owned by
+    -- nobody that nobody may read, which is the correct answer to a question
+    -- the fixture did not mean to ask.
+    --
+    -- It went unnoticed while resolve_file() gated on the ORG alone: a null
+    -- owner is invisible to a rule that never looks at the owner. Tightening
+    -- that gate to rbac.may_read(owner, org, visibility) made the fixture's
+    -- own unreality fail, which is the test doing its job on itself. The file
+    -- header already said the deployment sets a JWT per request; this block
+    -- was the one place that did not.
+    perform set_config('request.jwt.claims',
+        json_build_object('sub', '11111111-1111-1111-1111-111111111111')::text, true);
+
     v_res := content.register_upload('t-uploads', 't-sum-1', 'bucket', 'keys/one',
                                      4096, 'text/plain', 'Outage postmortem', null, a);
     update t_ctx set res_a = v_res;

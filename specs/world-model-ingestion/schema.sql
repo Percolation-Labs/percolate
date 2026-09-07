@@ -471,14 +471,17 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- Returns nothing when the caller may not see it, rather than raising:
 -- distinguishing "not yours" from "does not exist" tells an unauthorized
 -- caller that the resource exists.
-create or replace function content.resolve_file(p_resource_id uuid)
-returns table(bucket text, object_key text, content_type text, size_bytes bigint) as $$
-    select f.bucket, f.object_key, f.content_type, f.size_bytes
-    from content.resources r
-    join content.files f on f.id = r.file_id
-    where r.id = p_resource_id
-      and rbac.may_access_org(r.org_id);
-$$ language sql stable security definer set search_path = pg_catalog, public;
+-- content.resolve_file() IS DEFINED IN integration.sql, NOT HERE.
+--
+-- It gates on rbac.may_read(owner_id, org_id, visibility), and those three
+-- columns do not exist on content.resources until rbac.add_scope_columns()
+-- adds them -- which happens in integration.sql. A `language sql` body
+-- resolves its column references when it is CREATED, so defining it here
+-- fails the install outright with `column r.owner_id does not exist`, from
+-- inside a 22,000-line generated script.
+--
+-- Moved rather than duplicated: two definitions of one function is the
+-- one-home-per-fact violation this collection keeps paying for.
 
 -- Record chunks produced by the ingestion workflow, and flip the resource
 -- ready. One call rather than N inserts plus an update, so a resource is never
