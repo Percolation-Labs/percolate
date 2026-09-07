@@ -95,7 +95,38 @@ insert into expected (subsystem, kind, name, detail, why) values
 
 -- ---------- user-rbac --------------------------------------------------
 ('user-rbac','schema','rbac',null,'spec.md: identity lives in Postgres'),
+-- ---------- identity and nullability -----------------------------------
+('identity','schema','percolate',null,
+ 'spec.md: the cross-cutting namespace -- also created by contract/schema.sql, idempotently'),
+('identity','function','percolate.uuidv5','uuid,text',
+ 'spec.md §3: a deterministic id, so a derived row has the same id every time. RFC 4122 v5, verified against the published vector for DNS/python.org'),
+('identity','function','percolate.id_namespace','text',
+ 'spec.md §3: the namespace for a kind of derived id, itself a v5 under the RFC DNS namespace so it is reproducible rather than a magic constant'),
+('identity','table','percolate.null_means',null,
+ 'spec.md §4: whether a nullable column''s NULL is a VALUE or an ABSENCE. A unique index over an absence is correctly NULLS DISTINCT and over a value is not, and nothing else in the schema distinguishes them'),
+('identity','table','percolate.table_kinds',null,
+ 'spec.md §7: what a table IS -- entity, vocabulary, junction, log, natural -- which decides what its primary key must be'),
+('identity','view','percolate.table_kind_proposal',null,
+ 'spec.md §7: a proposal to make declaring cheap, which abstains rather than guessing on shapes it does not recognise'),
+
 ('user-rbac','table','rbac.users',null,'spec.md §1'),
+
+-- DECLARED BECAUSE A CALLER CAN READ THEM, which the widened `reachable` view
+-- above now asks about. Each line is the sentence surface.sql exists to force:
+-- an exposed surface nobody can justify in a sentence is one that should not
+-- be granted.
+('user-rbac','table','rbac.roles',null,
+ 'spec.md §2: the role vocabulary is readable by a caller so a client can render what a role means; it holds no user data and has no RLS because there is nothing to scope'),
+('user-rbac','table','rbac.role_permissions',null,
+ 'spec.md §2: the (role, resource, action) vocabulary, readable for the same reason as rbac.roles -- a client showing why an action is refused needs it'),
+('user-rbac','table','rbac.user_roles',null,
+ 'spec.md §2: WHO holds a role, readable but RLS-scoped by user_roles_self_or_admin -- a caller sees their own assignments and an admin sees all; verified as returning zero rows to a stranger'),
+('ai-query-layer','table','aiq.graph_vocabulary',null,
+ 'graph-index.md §5.3: the closed relation vocabulary, readable because SCHEMA mode publishes it deliberately -- an agent has to know which relations exist before it can walk one'),
+('ai-query-layer','table','aiq.lexical_sources',null,
+ 'USAGE.md: the registered TEXT sources, readable so a caller can discover what FROM accepts rather than guessing'),
+('ai-query-layer','table','aiq.semantic_sources',null,
+ 'USAGE.md: the registered SEMANTIC sources and their model, readable for the same reason -- and it is the pairing that makes a model mismatch refusable'),
 ('user-rbac','table','rbac.api_keys',null,'spec.md §4: agents authenticate without a password'),
 ('user-rbac','table','rbac.refresh_tokens',null,'spec.md §3: revocable credential'),
 ('user-rbac','table','rbac.auth_events',null,'spec.md §6: append-only audit'),
@@ -197,6 +228,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','table','aiq.nodes',null,'graph-identity.md: write-time node registry'),
 ('ai-query-layer','table','aiq.node_keys',null,'graph-identity.md: lookup index'),
 ('ai-query-layer','table','aiq.edges',null,'graph-identity.md: authored soft links'),
+('ai-query-layer','view','aiq.edges_current',null,'schema.sql: edges that hold NOW -- valid_to null or future. Read this rather than aiq.edges unless you want retracted history, because a derivation retracts by setting valid_to and never deletes'),
 ('ai-query-layer','table','aiq.embedding_models',null,'schema.sql §10: one space per MODEL'),
 ('ai-query-layer','table','aiq.embedding_providers',null,'schema.sql §10a: what an embedding CALL looks like is data, not code'),
 ('ai-query-layer','column','aiq.embedding_models.credential_ref',null,'schema.sql §10: the env var name, never the token'),
@@ -436,6 +468,10 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('user-rbac','table','rbac.orgs',null,'spec.md §2b: the tenant, which had no table at all until scope landed'),
 ('user-rbac','table','rbac.org_members',null,'spec.md §2b: who belongs to a tenant -- the fact the JWT orgs claim used to assert with nothing behind it'),
 ('user-rbac','table','rbac.visibilities',null,'spec.md §2b: private/org/public as rows, so p8.enums() publishes the vocabulary and a foreign key enforces it'),
+('user-rbac','function','rbac.shared_org_id','','identity spec.md §4: the org_id of the shared tier, as a derived v5 uuid rather than a NULL -- the same value in every deployment'),
+('user-rbac','function','rbac.org_or_shared','uuid','what an OMITTED org argument means: a null at an API boundary is the shared tier, coerced once so the NOT NULL column never sees one'),
+('user-rbac','function','rbac.is_shared_org','uuid','the replacement for every `org_id is null` -- true for the shared tier and for an argument nobody supplied'),
+('user-rbac','function','rbac.adopt_shared_org','regclass','makes one table''s org_id NOT NULL, defaulted and backfilled -- the one home for the migration, called by add_scope_columns and by the two tables that do not take it'),
 ('user-rbac','function','rbac.may_read','uuid,uuid,text','the scope rule as a function, for SECURITY DEFINER callers that check one row rather than filter a table'),
 ('user-rbac','function','rbac.may_write','uuid,uuid,text','the WITH CHECK half: own the row, belong to the org, and do not say org without one'),
 ('user-rbac','function','rbac.scope_predicate','','the single home of the read expression every scoped policy is generated from'),
@@ -845,10 +881,23 @@ end $$;
 
 create temporary view reachable as
 with caller as (select unnest(array['authenticated','web_anon']) as r)
-select 'view' as kind, n.nspname || '.' || c.relname as name
+-- RELATIONS: every table, view and materialised view an application role can
+-- SELECT, not only the ones named `%_api`.
+--
+-- That name filter was this check's own blind spot, and it is the recurring
+-- class meta/postmortems/README.md calls "a check that walks only the
+-- configured cases has a hole shaped like the thing it is for". Adding a view
+-- called `<x>_api` is how a surface gets published, so the filter described
+-- how surfaces were EXPECTED to appear rather than what a caller can reach --
+-- and six tables sat outside it, among them rbac.roles and
+-- rbac.role_permissions, readable by every authenticated user with no RLS.
+-- None of them was a breach. The gate not being able to SEE them was, because
+-- the next one might be.
+select case c.relkind when 'v' then 'view' when 'm' then 'view' else 'table' end as kind,
+       n.nspname || '.' || c.relname as name
   from pg_class c join pg_namespace n on n.oid = c.relnamespace
- where c.relkind = 'v'
-   and c.relname like '%\_api'
+ where c.relkind in ('r','p','v','m')
+   and n.nspname in ('agentic','workflow','content','aiq','rbac','trace','percolate')
    and exists (select 1 from caller where has_table_privilege(caller.r, c.oid, 'select'))
 union
 select 'function', n.nspname || '.' || p.proname
@@ -858,9 +907,29 @@ select 'function', n.nspname || '.' || p.proname
 
 \echo
 \echo '=== REACHABLE BUT UNDECLARED (a stranger can call it and this file does not say why) ==='
+-- A DECLARED FAMILY, for surfaces that are created at RUNTIME and therefore
+-- cannot appear in a static list. `aiq.emb_<model>` is built by
+-- register_embedding_space when somebody registers a model, so the set is not
+-- knowable when this file is written -- and a static inventory that cannot
+-- express that has a permanent blind spot rather than a gap.
+--
+-- A pattern still has to carry its reason, which is the whole discipline: the
+-- sentence is the product. What it does NOT settle is whether the grant is
+-- right, and for this family that is an open question worth asking out loud:
+-- these tables hold raw vectors derived from content the caller may not be
+-- entitled to read, and retrieval goes through aiq.semantic_in (SECURITY
+-- DEFINER) rather than through the table. If nothing needs the direct grant,
+-- the better fix is to revoke it and delete this row.
+create temporary table reachable_families (pattern text, kind text, why text);
+insert into reachable_families values
+ ('^aiq\.emb_', 'table',
+  'an embedding space, created per registered model by aiq.register_embedding_space -- a runtime surface a static list cannot name. OPEN: whether authenticated should hold SELECT on raw vectors at all, given retrieval goes through aiq.semantic_in');
+
 select r.kind, r.name
   from reachable r
  where not exists (select 1 from expected e where lower(e.name) = r.name and e.kind = r.kind)
+   and not exists (select 1 from reachable_families f
+                    where f.kind = r.kind and r.name ~ f.pattern)
  order by r.kind, r.name;
 
 do $$
@@ -868,7 +937,9 @@ declare v_undeclared int; v_reachable int;
 begin
     select count(*) into v_undeclared
       from reachable r
-     where not exists (select 1 from expected e where lower(e.name) = r.name and e.kind = r.kind);
+     where not exists (select 1 from expected e where lower(e.name) = r.name and e.kind = r.kind)
+       and not exists (select 1 from reachable_families f
+                        where f.kind = r.kind and r.name ~ f.pattern);
     select count(*) into v_reachable from reachable;
 
     if v_undeclared > 0 then

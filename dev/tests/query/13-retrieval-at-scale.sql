@@ -78,10 +78,12 @@ insert into rbac.org_members (org_id, user_id, role)
     values ('cccc0000-0000-0000-0000-00000000000a',
             '22222222-2222-2222-2222-222222222222','member');
 insert into content.channels (id, name, kind, org_id, visibility)
-    values ('11110000-0000-0000-0000-0000000000aa','scaletest','manual',null,'public');
+    values ('11110000-0000-0000-0000-0000000000aa','scaletest','manual',
+            rbac.shared_org_id(),'public');
 insert into content.resources (id, channel_id, external_id, uri, title, status, org_id, visibility) values
     ('33330000-0000-0000-0000-00000000aa01','11110000-0000-0000-0000-0000000000aa',
-     'st-crowd','memo://scaletest/crowd','the crowd','ready',null,'private'),
+     'st-crowd','memo://scaletest/crowd','the crowd','ready',
+     rbac.shared_org_id(),'private'),
     ('33330000-0000-0000-0000-00000000aa02','11110000-0000-0000-0000-0000000000aa',
      'st-mine','memo://scaletest/mine','the tenant''s own','ready',
      'cccc0000-0000-0000-0000-00000000000a','org');

@@ -219,6 +219,7 @@ VERSION = _version()
 # cycle -- so the acyclic cores come first in either order, and everything
 # crossing a boundary follows.
 ORDER = [
+    ("identity/schema.sql",                     "percolate.uuidv5() and the two registries (what a NULL means, what kind of thing a table is). FIRST, because shipped code calls uuidv5 -- workflow.run_meta derives a session id and a `language sql` body resolves its references at create time. It creates the `percolate` schema itself; contract/schema.sql's `create schema if not exists` is idempotent behind it. An earlier draft put this last, on a rationale about vocabularies that was invented rather than checked, and the install died on `schema percolate does not exist`"),
     ("workflow-engine/schema.sql",              "the engine: definitions, runs, tasks, saga, sql steps, YAML"),
     ("user-rbac/schema.sql",                    "identity: users, roles, API keys, sessions, the role model"),
     ("workflow-engine/integration-rbac.sql",    "ownership and authorization on run-scoped entry points"),
@@ -232,6 +233,8 @@ ORDER = [
     ("world-model-ingestion/graph.sql",         "graph indexing: the soft/lake reference tables and upsert_graph -- after agentic, because it registers an extractor agent"),
     ("world-model-ingestion/ingestion.sql",     "the default ingestion pipeline -- LAST: it installs a workflow, so it needs the lint (agentic), the embedding registry and the graph indexer to already exist"),
     ("contract/schema.sql",                     "the published contract: percolate.enums() reads what every schema above enforces, so it goes after all of them"),
+    ("packages/schema.sql",                     "percolate.apply_package(): a domain installed as one document. AFTER agentic (it delegates the servers/skills/agents half to agentic.apply_plugin), after world-model-ingestion (it inserts channels) and after workflow-engine (it defines and schedules workflows) -- it names all three and a `language plpgsql` body is not checked at create time, so the ordering is about the RUNTIME dependency rather than the parse"),
+    ("identity/declarations.sql",               "what each table IS and what each nullable column's NULL MEANS -- statements about every schema above, so they can only be made after those tables exist. The mechanism they use ships first; see identity/schema.sql"),
 ]
 
 # Every specs/*/*.sql file is either in ORDER above or named here, with the
@@ -244,6 +247,12 @@ ORDER = [
 # in the product at all. A file being missing from ORDER looked identical to a
 # file being deliberately excluded, so neither was a decision.
 NOT_SHIPPED = {
+    "identity/checks.sql":
+        "a gate, not a schema: four catalogue assertions over whatever "
+        "database it is pointed at, in the same shape as surface.sql. It "
+        "exits nonzero and ships with the repository rather than with the "
+        "extension -- a deployment does not need the checker, it needs to "
+        "pass it.",
     "world-model-ingestion/graph-demo.sql":
         "a demonstration, not a schema: it uploads two contracts, lands their "
         "extracted graphs and runs the traversal, inside a transaction it rolls "

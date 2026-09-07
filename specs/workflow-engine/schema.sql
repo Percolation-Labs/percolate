@@ -114,7 +114,7 @@ on conflict (state) do nothing;
 grant select on workflow.lifecycle_states to authenticated, api_viewer;
 
 create table if not exists workflow.definitions (
-    id          uuid primary key default gen_random_uuid(),
+    id          uuid primary key default uuidv7(),
     name        text not null,
     version     int not null default 1,
     spec        jsonb not null,   -- {"steps": [{"key","queue","kind","depends_on":[keys]}]}
@@ -255,7 +255,7 @@ create or replace trigger trg_check_spec_before_insert
 -- 2. Workflow runs
 -- ------------------------------------------------------------
 create table if not exists workflow.runs (
-    id               uuid primary key default gen_random_uuid(),
+    id               uuid primary key default uuidv7(),
     workflow_def_id  uuid not null references workflow.definitions(id),
     parent_task_id   uuid,
     external_id      text unique,     -- caller-supplied idempotency key for workflow.start_workflow
@@ -281,7 +281,7 @@ create table if not exists workflow.runs (
 -- 3. Tasks
 -- ------------------------------------------------------------
 create table if not exists workflow.tasks (
-    id               uuid primary key default gen_random_uuid(),
+    id               uuid primary key default uuidv7(),
     run_id           uuid not null references workflow.runs(id) on delete cascade,
     step_key         text not null,
     -- http_call: a durable outbound HTTP dispatch, claimed and executed by a
@@ -3103,7 +3103,7 @@ grant execute on function workflow.define_yaml(text) to authenticated;
 -- apply unchanged. Nothing here is a second execution engine.
 -- ------------------------------------------------------------
 create table if not exists workflow.schedules (
-    id             uuid primary key default gen_random_uuid(),
+    id             uuid primary key default uuidv7(),
     name           text not null unique,
     -- The definition NAME, not its id: start_workflow() resolves the latest
     -- version at fire time, so publishing v2 of a workflow changes what the
@@ -3139,6 +3139,13 @@ create table if not exists workflow.schedules (
     -- minute forever (RELEASE-0.1.md §5, "honest failure modes").
     last_error     text,
     last_error_at  timestamptz,
+    -- NOT NULL, defaulted to the shared tier -- but said in
+    -- integration-rbac.sql's rbac.add_scope_columns() call rather than here.
+    -- Two reasons, and both are structural: rbac.shared_org_id() does not
+    -- exist yet at this point in the install (user-rbac is the NEXT file), and
+    -- `create table if not exists` alters nothing on a database that already
+    -- has this table, so a constraint written here would reach fresh installs
+    -- only. identity/spec.md §7's fourth lesson.
     org_id         uuid,
     created_at     timestamptz not null default now(),
     updated_at     timestamptz not null default now()
@@ -5858,7 +5865,12 @@ returns jsonb as $$
         -- stateless by omitting it. Derived rather than stored: the same run
         -- yields the same id on every resolution, including a replay, without a
         -- column that could drift from the run it belongs to.
-        '$session',     md5(r.id::text || ':')::uuid::text)
+        -- percolate.uuidv5, not md5(...)::uuid: the requirement stated above
+        -- is exactly what a v5 is for, and the hand-rolled version produces a
+        -- value whose version nibble is 0 -- not a UUID at all, and unequal to
+        -- a correctly derived one computed anywhere else. specs/identity.
+        '$session',     percolate.uuidv5(percolate.id_namespace('session'),
+                                         r.id::text)::text)
     from workflow.runs r
     join workflow.definitions d on d.id = r.workflow_def_id
     where r.id = p_run_id;

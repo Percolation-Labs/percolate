@@ -66,17 +66,23 @@ end $$;
 -- nobody filled it in -- and world-model-ingestion/schema.sql measured a real
 -- cross-tenant read through the second. Now the shared rows say `public`
 -- because they are shared on purpose, and a row that says nothing is private.
+--
+-- And the null tier itself is gone: org_id is NOT NULL and the shared tier is
+-- rbac.shared_org_id() (specs/identity/spec.md §4). The rows below name it,
+-- which is the whole difference -- a reader can no longer mistake "shared" for
+-- "nobody filled it in", because there is nothing left to fill in.
 insert into content.channels (id, name, kind, org_id, visibility) values
-    ('11110000-0000-0000-0000-000000000001','sample-corpus','manual',null,'public')
+    ('11110000-0000-0000-0000-000000000001','sample-corpus','manual',
+     rbac.shared_org_id(),'public')
 on conflict (id) do update set name = excluded.name, visibility = excluded.visibility;
 
 insert into content.resources (id, channel_id, external_id, uri, title, status, org_id, visibility) values
     ('22220000-0000-0000-0000-000000000001','11110000-0000-0000-0000-000000000001',
-     'rec-r7','memo://recall/r7','R7 recall notice','ready',null,'public'),
+     'rec-r7','memo://recall/r7','R7 recall notice','ready',rbac.shared_org_id(),'public'),
     ('22220000-0000-0000-0000-000000000002','11110000-0000-0000-0000-000000000001',
-     'rec-eng','memo://engineering/actuators','Actuator failure analysis','ready',null,'public'),
+     'rec-eng','memo://engineering/actuators','Actuator failure analysis','ready',rbac.shared_org_id(),'public'),
     ('22220000-0000-0000-0000-000000000003','11110000-0000-0000-0000-000000000001',
-     'rec-fin','memo://finance/q3','Q3 revenue commentary','ready',null,'public'),
+     'rec-fin','memo://finance/q3','Q3 revenue commentary','ready',rbac.shared_org_id(),'public'),
     -- Org-scoped, and it MENTIONS THE SAME RARE TOKEN as the shared one. That
     -- is what makes the tenancy assertions sharp: a leak shows up as an extra
     -- hit for a query the other tenant is entitled to run.
@@ -217,9 +223,11 @@ begin
     raise notice 'corpus sample: % chunks (% shared, % org-scoped), % in space A, % in space B',
         (select count(*) from content.resource_chunks),
         (select count(*) from content.resource_chunks c
-          join content.resources r on r.id = c.resource_id where r.org_id is null),
+          join content.resources r on r.id = c.resource_id
+          where r.org_id = rbac.shared_org_id()),
         (select count(*) from content.resource_chunks c
-          join content.resources r on r.id = c.resource_id where r.org_id is not null),
+          join content.resources r on r.id = c.resource_id
+          where r.org_id <> rbac.shared_org_id()),
         (select count(*) from aiq.emb_demo_quad_a),
         (select count(*) from aiq.emb_demo_quad_b);
 end $$;

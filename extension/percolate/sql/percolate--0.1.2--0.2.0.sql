@@ -1,5 +1,5 @@
 -- ============================================================
--- percolate 0.1.6 -- the whole schema, as one extension script.
+-- percolate 0.2.0 -- the whole schema, as one extension script.
 --
 -- GENERATED from specs/ by extension/percolate/build-sql.py. Do not edit.
 --
@@ -71,6 +71,186 @@ language sql stable as $fn$
       from public.percolate_build b
      order by b.component;
 $fn$;
+
+
+-- ============================================================
+-- identity/schema.sql
+--   percolate.uuidv5() and the two registries (what a NULL means, what kind of thing a table is). FIRST, because shipped code calls uuidv5 -- workflow.run_meta derives a session id and a `language sql` body resolves its references at create time. It creates the `percolate` schema itself; contract/schema.sql's `create schema if not exists` is idempotent behind it. An earlier draft put this last, on a rationale about vocabularies that was invented rather than checked, and the install died on `schema percolate does not exist`
+-- ============================================================
+
+-- Identity and nullability: the mechanism. See spec.md for the reasoning.
+--
+-- Two objects and nothing else. The policy is mostly a set of assertions
+-- (checks.sql); what has to SHIP is the deterministic id function and the
+-- registry that makes a NULL's meaning declarable.
+
+-- This file is FIRST in the extension, so it creates the schema it lives in.
+-- contract/schema.sql does the same, idempotently, for whichever of the two
+-- someone reads first.
+create schema if not exists percolate;
+
+-- ------------------------------------------------------------
+-- 1. A deterministic UUID, so a derived row has the same id every time.
+--
+-- RFC 4122 §4.3 v5: SHA-1 over (namespace || name), first 16 octets, version
+-- nibble set to 5, variant bits to RFC 4122. Verified against the published
+-- vector: uuidv5(DNS, 'python.org') = 886313e1-3b8a-5372-9b90-0c9aee199e5d.
+--
+-- In the extension rather than in a client, because a worker written in
+-- another language must be able to compute the same id -- that is
+-- challenge-the-process §9's test: can a client that has never heard of
+-- percolate-core discover it.
+--
+-- NOT uuid-ossp. pgcrypto is already required and postgres-manifest.md's rule
+-- is that an extension is named when something needs it; one function is not
+-- something.
+-- ------------------------------------------------------------
+create or replace function percolate.uuidv5(p_namespace uuid, p_name text)
+returns uuid language sql immutable strict parallel safe as $$
+    with h as (
+        select substring(
+                   digest(decode(replace(p_namespace::text, '-', ''), 'hex')
+                          || convert_to(p_name, 'UTF8'), 'sha1')
+                   from 1 for 16) as b)
+    select encode(set_byte(set_byte(b, 6, (get_byte(b, 6) & 15) | 80),
+                           8, (get_byte(b, 8) & 63) | 128), 'hex')::uuid
+    from h;
+$$;
+
+comment on function percolate.uuidv5(uuid, text) is
+    'RFC 4122 v5. Use for the id of a row derived from something that already '
+    'has an identity, so re-deriving converges. Never md5(x)::uuid -- that '
+    'produces version 0, which is not a UUID and compares unequal to a '
+    'correctly generated one.';
+
+-- Namespaces for the kinds of thing this collection derives ids for. A
+-- namespace is itself a v5 under the RFC's DNS namespace, so it is
+-- reproducible by anyone rather than a magic constant somebody invented.
+create or replace function percolate.id_namespace(p_kind text)
+returns uuid language sql immutable strict parallel safe as $$
+    select percolate.uuidv5('6ba7b810-9dad-11d1-80b4-00c04fd430c8'::uuid,
+                            'percolationlabs.ai/' || p_kind);
+$$;
+
+-- ------------------------------------------------------------
+-- 2. What a NULL means, declared rather than guessed.
+--
+-- This collection uses NULL two incompatible ways inside unique constraints:
+-- `org_id is null` means SHARED ACROSS EVERY TENANT (a value), and
+-- `external_id is null` means NO EXTERNAL IDENTITY WAS SUPPLIED (an absence).
+-- A unique index does not constrain rows whose key is NULL, which is correct
+-- for an absence and catastrophic for a value -- and nothing in the schema
+-- distinguishes them, so every reader and every agent has to guess.
+--
+-- This table is the declaration. checks.sql refuses a unique index over a
+-- nullable column that has not made one.
+-- ------------------------------------------------------------
+create table if not exists percolate.null_means (
+    schema_name text not null,
+    table_name  text not null,
+    column_name text not null,
+    means       text not null check (means in ('value', 'absence')),
+    why         text not null,
+    primary key (schema_name, table_name, column_name)
+);
+
+comment on table percolate.null_means is
+    'Declares whether a nullable column''s NULL is a VALUE (a real state, so a '
+    'unique index over it must be NULLS NOT DISTINCT) or an ABSENCE (unknown '
+    'or not applicable, so NULLS DISTINCT is correct). Shipped vocabulary: '
+    'the meaning of a column is a property of the schema, not of a deployment.';
+
+-- ------------------------------------------------------------
+-- 3. What KIND of table this is, because "every table has a uuid id" is
+--    wrong and the first draft of checks.sql proved it.
+--
+-- That check fired 28 times and every one of the first twenty was correct
+-- design:
+--
+--   vocabulary  rbac.roles(name), workflow.lifecycle_states(state),
+--               aiq.relation_types(src_type, relation, dst_type)
+--               -- the term IS the identity. A surrogate here is ceremony,
+--               and referencing the VALUE is the whole point of
+--               challenge-the-process §9.
+--   junction    rbac.org_members(org_id, user_id),
+--               workflow.task_dependencies(task_id, depends_on_task_id)
+--               -- a composite of two foreign keys. A surrogate adds a column
+--               nothing will ever reference.
+--   log         rbac.auth_events(id bigint), workflow.task_events(id bigint)
+--               -- append-only. A monotonic bigint is smaller, ordered, and
+--               strictly better than a uuid where nothing is generated
+--               anywhere but here.
+--
+--   natural     aiq.node_keys(node_id, key, kind),
+--               aiq.schema_revisions(facet, revision)
+--               -- a composite that IS the identity and is not made only of
+--               foreign keys. Nothing references it by surrogate, so adding
+--               one would create a column with no readers. Distinct from
+--               junction, which is all-FK, and from vocabulary, which is a
+--               single term.
+--
+-- Only an ENTITY -- a thing other rows reference, created by the system,
+-- whose natural key may change -- needs a surrogate uuid. So the policy is
+-- per kind, and the kind is DECLARED.
+--
+-- Declared rather than derived, deliberately. The last time this collection
+-- tried to derive a per-table property (which tables hold deployment data)
+-- the derivation disagreed with a live install on nine of fifty-two, because
+-- whose rows these are is a design decision rather than a property of the
+-- text. So is this.
+-- ------------------------------------------------------------
+create table if not exists percolate.table_kinds (
+    schema_name text not null,
+    table_name  text not null,
+    kind        text not null check (kind in ('entity','vocabulary','junction','log','natural')),
+    why         text not null,
+    primary key (schema_name, table_name)
+);
+
+comment on table percolate.table_kinds is
+    'What a table IS, which decides what its primary key must be. entity: a '
+    'surrogate uuid id, because other rows reference it and its natural key '
+    'may change. vocabulary: the term is the key, and referencing the value '
+    'is the point. junction: a composite of foreign keys. log: append-only, '
+    'a monotonic bigint. Declared, not derived -- the kind is a design '
+    'decision and a text scan cannot see one.';
+
+-- A PROPOSAL, to make declaring cheap rather than to replace it. Read it,
+-- disagree with it, then write the row.
+create or replace view percolate.table_kind_proposal as
+with t as (
+    select n.nspname as sch, c.relname as tbl, c.oid
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace
+    where c.relkind in ('r','p')
+      and n.nspname in ('aiq','rbac','workflow','content','agentic','percolate')),
+pk as (
+    select t.sch, t.tbl, t.oid,
+           -- ::text because array_agg over attname gives name[], and name[] has
+           -- no equality operator against text[] -- the error names the operator
+           -- rather than the column, which is a minute of confusion each time.
+           array_agg(a.attname::text order by a.attnum) as cols,
+           array_agg(format_type(a.atttypid, null) order by a.attnum) as types,
+           bool_and(exists (select 1 from pg_constraint fk
+                            where fk.conrelid = t.oid and fk.contype = 'f'
+                              and a.attnum = any(fk.conkey))) as all_fk
+    from t
+    join pg_index x on x.indrelid = t.oid and x.indisprimary
+    join pg_attribute a on a.attrelid = t.oid and a.attnum = any(x.indkey::int[])
+    group by t.sch, t.tbl, t.oid)
+select sch as schema_name, tbl as table_name, cols as pk_columns, types as pk_types,
+       case
+         when cols = array['id']::text[] and types = array['uuid']::text[] then 'entity'
+         when cols = array['id']::text[] and types[1] like '%int%'  then 'log'
+         when array_length(cols,1) > 1 and all_fk                   then 'junction'
+         when types <@ array['text']::text[]                        then 'vocabulary'
+         when array_length(cols,1) > 1                              then 'natural'
+         -- NOT a fallthrough to 'entity'. The first version guessed 'entity'
+         -- for anything it did not recognise and mis-proposed node_keys and
+         -- schema_revisions, which a reviewer then accepted in bulk. A
+         -- proposal that is confident about the cases it does not understand
+         -- is worse than one that abstains.
+         else null end as proposed_kind
+from pk;
 
 
 -- ============================================================
@@ -194,7 +374,7 @@ on conflict (state) do nothing;
 grant select on workflow.lifecycle_states to authenticated, api_viewer;
 
 create table if not exists workflow.definitions (
-    id          uuid primary key default gen_random_uuid(),
+    id          uuid primary key default uuidv7(),
     name        text not null,
     version     int not null default 1,
     spec        jsonb not null,   -- {"steps": [{"key","queue","kind","depends_on":[keys]}]}
@@ -335,7 +515,7 @@ create or replace trigger trg_check_spec_before_insert
 -- 2. Workflow runs
 -- ------------------------------------------------------------
 create table if not exists workflow.runs (
-    id               uuid primary key default gen_random_uuid(),
+    id               uuid primary key default uuidv7(),
     workflow_def_id  uuid not null references workflow.definitions(id),
     parent_task_id   uuid,
     external_id      text unique,     -- caller-supplied idempotency key for workflow.start_workflow
@@ -361,7 +541,7 @@ create table if not exists workflow.runs (
 -- 3. Tasks
 -- ------------------------------------------------------------
 create table if not exists workflow.tasks (
-    id               uuid primary key default gen_random_uuid(),
+    id               uuid primary key default uuidv7(),
     run_id           uuid not null references workflow.runs(id) on delete cascade,
     step_key         text not null,
     -- http_call: a durable outbound HTTP dispatch, claimed and executed by a
@@ -3183,7 +3363,7 @@ grant execute on function workflow.define_yaml(text) to authenticated;
 -- apply unchanged. Nothing here is a second execution engine.
 -- ------------------------------------------------------------
 create table if not exists workflow.schedules (
-    id             uuid primary key default gen_random_uuid(),
+    id             uuid primary key default uuidv7(),
     name           text not null unique,
     -- The definition NAME, not its id: start_workflow() resolves the latest
     -- version at fire time, so publishing v2 of a workflow changes what the
@@ -3219,6 +3399,13 @@ create table if not exists workflow.schedules (
     -- minute forever (RELEASE-0.1.md §5, "honest failure modes").
     last_error     text,
     last_error_at  timestamptz,
+    -- NOT NULL, defaulted to the shared tier -- but said in
+    -- integration-rbac.sql's rbac.add_scope_columns() call rather than here.
+    -- Two reasons, and both are structural: rbac.shared_org_id() does not
+    -- exist yet at this point in the install (user-rbac is the NEXT file), and
+    -- `create table if not exists` alters nothing on a database that already
+    -- has this table, so a constraint written here would reach fresh installs
+    -- only. identity/spec.md §7's fourth lesson.
     org_id         uuid,
     created_at     timestamptz not null default now(),
     updated_at     timestamptz not null default now()
@@ -5938,7 +6125,12 @@ returns jsonb as $$
         -- stateless by omitting it. Derived rather than stored: the same run
         -- yields the same id on every resolution, including a replay, without a
         -- column that could drift from the run it belongs to.
-        '$session',     md5(r.id::text || ':')::uuid::text)
+        -- percolate.uuidv5, not md5(...)::uuid: the requirement stated above
+        -- is exactly what a v5 is for, and the hand-rolled version produces a
+        -- value whose version nibble is 0 -- not a UUID at all, and unequal to
+        -- a correctly derived one computed anywhere else. specs/identity.
+        '$session',     percolate.uuidv5(percolate.id_namespace('session'),
+                                         r.id::text)::text)
     from workflow.runs r
     join workflow.definitions d on d.id = r.workflow_def_id
     where r.id = p_run_id;
@@ -7972,7 +8164,7 @@ create schema if not exists rbac;
 -- 1. Users
 -- ------------------------------------------------------------
 create table if not exists rbac.users (
-    id            uuid primary key default gen_random_uuid(),
+    id            uuid primary key default uuidv7(),
     email         text not null unique,
     password_hash text,                 -- null for API-key-only / SSO-only accounts
     -- DEFAULT 'pending_verification', because 1a's whole argument is that
@@ -8531,7 +8723,7 @@ on conflict (scope) do update
 -- somebody from an org took effect when their token expired, which is the one
 -- moment it must not wait for.
 create table if not exists rbac.orgs (
-    id          uuid primary key default gen_random_uuid(),
+    id          uuid primary key default uuidv7(),
     slug        text not null unique,
     name        text not null,
     created_at  timestamptz not null default now(),
@@ -8539,6 +8731,110 @@ create table if not exists rbac.orgs (
 );
 create or replace trigger trg_rbac_orgs_touch before update on rbac.orgs
     for each row execute function public.touch_updated_at();
+
+-- ------------------------------------------------------------
+-- 2b(i). THE SHARED TIER IS A ROW, NOT A NULL.
+--
+-- identity/spec.md §4 states the rule this implements: a NULL may only mean
+-- "unknown or not applicable", and `org_id is null` meant "shared across every
+-- tenant", which is a value. Sixteen tables carried that sentinel, five unique
+-- indexes had to be NULLS NOT DISTINCT to survive it, and the three duplicate
+-- bugs §1 of that document lists were all the same shape: a unique index does
+-- not constrain rows whose key is NULL, and that is CORRECT behaviour for an
+-- absence being asked to police a value.
+--
+-- So the shared tier gets a row, `org_id` becomes NOT NULL everywhere, and
+-- every predicate that used to test for NULL compares against this id.
+--
+-- DERIVED, NOT INVENTED. percolate.uuidv5(percolate.id_namespace('org'),
+-- 'shared') is a pure function of two published strings, so the value is the
+-- same in every deployment, reproducible by anybody with the RFC and this
+-- line, and NOT a constant somebody typed once and everybody else has to
+-- trust. It is f2999e5c-bccd-5883-a78a-65e124ca69d1, and that sentence is a
+-- note rather than the definition -- the expression is.
+--
+-- IMMUTABLE and argument-free, which is what makes it free to use in a policy:
+-- the planner constant-folds it before the scan starts, so `org_id =
+-- rbac.shared_org_id()` costs an equality against a literal, not a call per
+-- row. That is the same property §2b's scope_predicate() header measured at
+-- 58x for the wrong shape, so it is stated rather than assumed.
+create or replace function rbac.shared_org_id() returns uuid
+language sql immutable parallel safe as $$
+    select percolate.uuidv5(percolate.id_namespace('org'), 'shared');
+$$;
+
+comment on function rbac.shared_org_id() is
+    'The org_id of the shared tier -- rows visible to every tenant. A derived '
+    'v5 uuid, identical in every deployment. Never NULL: identity/spec.md §4 '
+    'says a NULL may only mean unknown, and "shared" is a value.';
+
+-- The row itself. Its id is stated rather than defaulted, because a
+-- well-known row whose id came from uuidv7() would be well-known only to the
+-- deployment that generated it.
+--
+-- `do update` rather than `do nothing`, so a deployment that had already
+-- created an org with this slug by hand converges on the shipped description
+-- instead of keeping whatever it had.
+insert into rbac.orgs (id, slug, name)
+values (rbac.shared_org_id(), 'shared', 'Shared (every tenant)')
+on conflict (id) do update set slug = excluded.slug, name = excluded.name;
+
+-- COERCE and TEST, named once each, because between them they are every
+-- remaining use of the fact and writing `coalesce(x, rbac.shared_org_id()) =
+-- rbac.shared_org_id()` at nine call sites is nine chances to write one of
+-- them backwards.
+--
+-- The NULL these two absorb is real and is not the sentinel coming back. A
+-- COLUMN is now never null; an ARGUMENT still can be, because every writer in
+-- this collection takes `p_org_id uuid default null` and an omitted argument
+-- is a genuine absence -- exactly the meaning identity/spec.md §4 reserves
+-- NULL for. So the boundary is: a caller who said nothing meant the shared
+-- tier, and that translation happens once, here, rather than in each writer.
+create or replace function rbac.org_or_shared(p_org_id uuid) returns uuid
+language sql immutable parallel safe as $$
+    select coalesce(p_org_id, rbac.shared_org_id());
+$$;
+
+create or replace function rbac.is_shared_org(p_org_id uuid) returns boolean
+language sql immutable parallel safe as $$
+    select rbac.org_or_shared(p_org_id) = rbac.shared_org_id();
+$$;
+
+comment on function rbac.org_or_shared(uuid) is
+    'What an OMITTED org argument means: the shared tier. Use at the boundary '
+    'of any writer whose p_org_id defaults to null, so the NOT NULL column '
+    'never sees one.';
+comment on function rbac.is_shared_org(uuid) is
+    'True for the shared tier, and for a null argument, which means the same '
+    'thing at an API boundary. The replacement for every `org_id is null`.';
+
+-- MAKING A TABLE'S org_id NOT NULL, in one place, for the reason
+-- add_scope_columns() exists in one place: sixteen tables carried this column
+-- and a seventeenth will be added by somebody who has not read this file.
+--
+-- Three statements, in this order, and the order is the migration:
+-- default first so nothing new arrives null, backfill second so the rows that
+-- are already there stop being null, NOT NULL last so it can succeed. Written
+-- the other way round it fails on every database that has data, which is every
+-- database that matters. `create table if not exists` alters nothing on an
+-- existing table, so a `not null` written in the CREATE TABLE would be a fresh
+-- install-only fix -- identity/spec.md §7's fourth lesson, and the reason this
+-- is DDL executed on every apply rather than a column definition.
+--
+-- Idempotent by construction: setting a default that is already set, updating
+-- zero rows, and setting NOT NULL on a column that already has it are all
+-- no-ops, so this runs on the fresh path and the upgrade path identically.
+create or replace function rbac.adopt_shared_org(p_table regclass)
+returns void as $$
+begin
+    execute format(
+        'alter table %s alter column org_id set default rbac.shared_org_id()', p_table);
+    execute format(
+        'update %s set org_id = rbac.shared_org_id() where org_id is null', p_table);
+    execute format(
+        'alter table %s alter column org_id set not null', p_table);
+end;
+$$ language plpgsql;
 
 -- `role` here is the role WITHIN the org (who may administer it), and is
 -- deliberately not rbac.roles: those are deployment-wide capability grants,
@@ -8552,6 +8848,26 @@ create table if not exists rbac.org_members (
     primary key (org_id, user_id)
 );
 create index if not exists idx_org_members_user on rbac.org_members (user_id);
+
+-- NOBODY IS A MEMBER OF THE SHARED TIER, and this is the constraint that makes
+-- the read policy's silence safe.
+--
+-- scope_predicate() reads `visibility = 'org' and org_id in (select
+-- rbac.current_org_ids())` and has no clause about the sentinel. That is only
+-- correct while the sentinel can never appear in current_org_ids() -- add one
+-- rbac.org_members row for the shared org and every `org`-scoped row on the
+-- shared tier becomes readable by that member. There is no such row today, so
+-- the alternative to this constraint is a rule that holds until somebody
+-- inserts one, which is challenge-the-process's definition of a fact living
+-- one layer above where it can be refused.
+--
+-- A CHECK and not a trigger because rbac.shared_org_id() is IMMUTABLE, which
+-- is exactly the property a CHECK requires, so the cheapest layer will take
+-- it. Dropped before added: a constraint has no OR REPLACE.
+alter table rbac.org_members drop constraint if exists org_members_not_shared;
+alter table rbac.org_members add constraint org_members_not_shared
+    check (org_id <> rbac.shared_org_id());
+
 
 -- THE MEMBERSHIP ROWS ARE THE TRUTH; THE TOKEN MAY ONLY NARROW THEM.
 --
@@ -8649,11 +8965,20 @@ $fn$ language sql immutable;
 -- The first arm is content.may_access_org()'s, kept: a connection with no
 -- request.jwt.claims at all is a service connection, a migration or a psql
 -- session, and is not a caller this is about.
+--
+-- `org_id = rbac.shared_org_id()` is what `org_id is null` used to spell, and
+-- the two mean the same sentence: writing to the shared tier is not writing
+-- into somebody else's tenancy. The column is NOT NULL now (§2b(i)), so the
+-- bare equality is total -- no coalesce, and no `is not distinct from`, which
+-- would say that a null org is acceptable and is the exact ambiguity this
+-- change removes. It is also the only form that stays cheap: shared_org_id()
+-- is immutable and argument-free, so the planner folds it to a literal once.
 create or replace function rbac.scope_write_predicate() returns text as $fn$
     select $q$(nullif(current_setting('request.jwt.claims', true), '') is null
        or ((owner_id is null or owner_id = (select rbac.current_user_id()))
-           and (org_id is null or org_id in (select rbac.current_org_ids()))
-           and (visibility <> 'org' or org_id is not null)))$q$;
+           and (org_id = rbac.shared_org_id()
+                or org_id in (select rbac.current_org_ids()))
+           and (visibility <> 'org' or org_id <> rbac.shared_org_id())))$q$;
 $fn$ language sql immutable;
 
 -- THE SAME TWO RULES AS FUNCTIONS, for the callers that are not policies.
@@ -8673,16 +8998,23 @@ $fn$ language sql immutable;
 -- null org with `public` is a deliberate global write, and a null org with
 -- `org` is refused by the trigger below rather than guessed about.
 --
--- Not STRICT: owner_id and org_id are legitimately null on the same row (an
--- unowned public reference node), and a strict function would answer null for
--- exactly the row the rule is clearest about.
+-- Not STRICT: owner_id is legitimately null (an unowned public reference
+-- node), and a strict function would answer null for exactly the row the rule
+-- is clearest about. p_org_id is null only when the CALLER omitted it --
+-- rbac.is_shared_org() reads that as the shared tier, which is what an omitted
+-- org has always meant.
+--
+-- These say `is_shared_org` where the policy above says `= shared_org_id()`,
+-- and the difference is deliberate rather than an inconsistency: the policy is
+-- applied to a NOT NULL column and these are applied to ARGUMENTS, which an
+-- optional parameter may still leave null.
 create or replace function rbac.may_read(
     p_owner_id uuid, p_org_id uuid, p_visibility text
 ) returns boolean as $$
     select p_visibility = 'public'
         or p_owner_id = rbac.current_user_id()
         or (p_visibility = 'org'
-            and p_org_id is not null
+            and not rbac.is_shared_org(p_org_id)
             and p_org_id in (select rbac.current_org_ids()));
 $$ language sql stable parallel safe;
 
@@ -8691,8 +9023,9 @@ create or replace function rbac.may_write(
 ) returns boolean as $$
     select nullif(current_setting('request.jwt.claims', true), '') is null
         or ((p_owner_id is null or p_owner_id = rbac.current_user_id())
-            and (p_org_id is null or p_org_id in (select rbac.current_org_ids()))
-            and (p_visibility <> 'org' or p_org_id is not null));
+            and (rbac.is_shared_org(p_org_id)
+                 or p_org_id in (select rbac.current_org_ids()))
+            and (p_visibility <> 'org' or not rbac.is_shared_org(p_org_id)));
 $$ language sql stable parallel safe;
 
 -- The org half on its own, for callers that have an org and not yet a row --
@@ -8708,15 +9041,16 @@ $$ language sql stable parallel safe;
 -- an act. It was measured as a real disclosure, through nothing more than
 -- register_upload()'s optional argument defaulting to null.
 --
--- Scope removes the premise rather than the check. A null org is now just a
--- row with no tenancy; whether anyone else reads it is `visibility`, which
--- defaults to `private`. Publishing to everyone is spelled `public` and is a
--- thing somebody chose, so the act that needed refusing cannot be performed by
--- omission any more -- which is the outcome that check was standing in for.
+-- Scope removes the premise rather than the check. The shared tier is now just
+-- a tenancy nobody is a member of; whether anyone else reads a row on it is
+-- `visibility`, which defaults to `private`. Publishing to everyone is spelled
+-- `public` and is a thing somebody chose, so the act that needed refusing
+-- cannot be performed by omission any more -- which is the outcome that check
+-- was standing in for.
 create or replace function rbac.may_access_org(p_org_id uuid)
 returns boolean as $$
     select nullif(current_setting('request.jwt.claims', true), '') is null
-        or p_org_id is null
+        or rbac.is_shared_org(p_org_id)
         or p_org_id in (select rbac.current_org_ids());
 $$ language sql stable parallel safe;
 
@@ -8757,7 +9091,7 @@ returns text as $$
         -- was reported in, reached from the opposite direction. Naming an org
         -- is a statement about scope in any reading; nothing should override
         -- it.
-        when p_org_id is not null then 'org'
+        when not rbac.is_shared_org(p_org_id) then 'org'
         -- No org and no request identity: an operator installing deployment
         -- configuration -- the seeded agents, the sample corpus, a migration.
         -- These are for everyone by construction, and it is the only case
@@ -8787,12 +9121,20 @@ declare v_requires_org boolean;
 begin
     select requires_org into v_requires_org
       from rbac.visibilities where scope = new.visibility;
-    if v_requires_org and new.org_id is null then
+    -- rbac.is_shared_org() rather than `new.org_id is null`, and it covers
+    -- both: the column is NOT NULL, so the row this refuses now carries the
+    -- SHARED org rather than no org -- which is the same mistake wearing the
+    -- new spelling, and is what an omitted p_org_id produces through the
+    -- column default. An explicit null still reaches here (NOT NULL is checked
+    -- after BEFORE triggers), and is_shared_org() reads it the same way, so
+    -- this branch reports the useful error instead of leaving it to a
+    -- constraint that names only the column.
+    if v_requires_org and rbac.is_shared_org(new.org_id) then
         raise exception
-            'visibility ''%'' requires an org_id, and this row has none',
+            'visibility ''%'' requires an org_id, and this row is on the shared tier',
             new.visibility
-            using hint = 'set org_id, or use a visibility that does not '
-                         'require one (see rbac.visibilities.requires_org)';
+            using hint = 'set org_id to a real org, or use a visibility that '
+                         'does not require one (see rbac.visibilities.requires_org)';
     end if;
     return new;
 end;
@@ -8870,6 +9212,13 @@ begin
         'alter table %s add column if not exists owner_id uuid references rbac.users(id)', p_table);
     execute format(
         'alter table %s add column if not exists org_id uuid', p_table);
+    -- AND IT IS NOT NULL, defaulted to the shared tier. One call, because the
+    -- three statements it stands for have to happen in one order and this is
+    -- the only place sixteen tables agree to be changed at once -- see
+    -- rbac.adopt_shared_org(). Before the foreign key rather than after, so
+    -- that the key validates the backfilled rows in the same pass instead of
+    -- being added over a column that is about to be rewritten.
+    perform rbac.adopt_shared_org(p_table);
     -- The org foreign key is stated separately rather than inline, because
     -- `add column if not exists` is a NO-OP on a table that already has the
     -- column -- and most of the tables adopting scope already have an org_id
@@ -8888,8 +9237,14 @@ begin
     execute format(
         'alter table %s add column if not exists visibility text', p_table);
     if v_added then
+        -- rbac.is_shared_org(org_id) and not `org_id is null`: by the time
+        -- this runs the column has been backfilled to the sentinel, so the
+        -- rows this is about no longer answer to a null test. The two spell
+        -- the same set, and writing it this way makes the statement true
+        -- whichever order the two migrations land in.
         execute format(
-            'update %s set visibility = case when org_id is null then %L else ''org'' end',
+            'update %s set visibility = case when rbac.is_shared_org(org_id) '
+            'then %L else ''org'' end',
             p_table, p_backfill_visibility);
     end if;
     execute format(
@@ -8914,10 +9269,33 @@ begin
         'alter table %s add constraint %I foreign key (visibility) references rbac.visibilities(scope)',
         p_table, v_tbl || '_visibility_fkey');
 
+    -- THE ORG INDEX WAS PARTIAL AND IS NOT ANY MORE, and the drop is what makes
+    -- an upgraded database agree with a fresh one.
+    --
+    -- It was `where org_id is not null`, which excluded the shared tier back
+    -- when that tier WAS the null. On a NOT NULL column that predicate selects
+    -- every row: a partial index that is not partial, carrying a condition the
+    -- planner has to prove against every query that hopes to use it. A fresh
+    -- install would build the plain index and an existing database would keep
+    -- the partial one, because `create index if not exists` matches on the
+    -- NAME -- which is exactly the divergence dev/upgrade-converges.sh
+    -- compares indexdef for. So it is dropped by hand, and only when it is the
+    -- partial one: aiq.nodes and workflow.schedules declare their own plain
+    -- idx_<t>_org in their own schema files and must not lose it.
+    if exists (select 1 from pg_index i
+                join pg_class ic on ic.oid = i.indexrelid
+               where i.indrelid = p_table and i.indpred is not null
+                 and ic.relname = 'idx_' || v_tbl || '_org') then
+        execute format('drop index %I.%I',
+                       (select n.nspname from pg_class c
+                          join pg_namespace n on n.oid = c.relnamespace
+                         where c.oid = p_table),
+                       'idx_' || v_tbl || '_org');
+    end if;
     if not exists (select 1 from pg_index i
                    join pg_attribute a on a.attrelid = i.indrelid and a.attnum = i.indkey[0]
                    where i.indrelid = p_table and a.attname = 'org_id') then
-        execute format('create index %I on %s (org_id) where org_id is not null',
+        execute format('create index %I on %s (org_id)',
                        'idx_' || v_tbl || '_org', p_table);
     end if;
     if not exists (select 1 from pg_index i
@@ -9058,7 +9436,7 @@ $$ language plpgsql;
 --    valid refresh token.
 -- ------------------------------------------------------------
 create table if not exists rbac.refresh_tokens (
-    id           uuid primary key default gen_random_uuid(),
+    id           uuid primary key default uuidv7(),
     user_id      uuid not null references rbac.users(id) on delete cascade,
     token_hash   text not null unique,     -- sha256 of the raw token; raw never stored
     device_label text,                     -- "Chrome on Mac", shown in session list
@@ -9207,7 +9585,7 @@ $$ language sql security definer set search_path = pg_catalog, public;
 -- lived, because the two are doing different jobs -- a refresh token proves a
 -- session is still alive, a reset token proves control of an inbox once.
 create table if not exists rbac.password_reset_tokens (
-    id         uuid primary key default gen_random_uuid(),
+    id         uuid primary key default uuidv7(),
     user_id    uuid not null references rbac.users(id) on delete cascade,
     token_hash text not null unique,     -- sha256 of the raw token; raw never stored
     issued_at  timestamptz not null default now(),
@@ -9354,7 +9732,7 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 --    it's a DB row, not a stateless token.
 -- ------------------------------------------------------------
 create table if not exists rbac.api_keys (
-    id          uuid primary key default gen_random_uuid(),
+    id          uuid primary key default uuidv7(),
     user_id     uuid references rbac.users(id) on delete cascade,  -- null = service account
     label       text not null,
     key_hash    text not null unique,      -- sha256 of raw key; raw shown once at creation
@@ -9836,6 +10214,23 @@ grant execute on function rbac.current_org_ids() to web_anon, authenticated, api
 grant execute on function rbac.may_read(uuid, uuid, text) to web_anon, authenticated, api_viewer, worker;
 grant execute on function rbac.may_write(uuid, uuid, text) to web_anon, authenticated, api_viewer, worker;
 grant execute on function rbac.may_access_org(uuid) to web_anon, authenticated, api_viewer, worker;
+-- THE SENTINEL TRIO, and they are on this list for a reason that only shows up
+-- from the caller's seat.
+--
+-- shared_org_id() is written into the text of every generated write policy and
+-- into orgs_member_visible, and a policy is evaluated as the CALLER, not as
+-- the owner. Without the grant the expression raises `permission denied for
+-- function shared_org_id` inside the WITH CHECK, and dev/tests/rbac/11 reports
+-- it as the read rule and the write rule disagreeing about a row -- which is
+-- true, and names the wrong cause. Verified by running the check as
+-- `authenticated` and watching it fail before the grant existed.
+--
+-- is_shared_org() and org_or_shared() ride the same path: may_read/may_write
+-- call the first, and the aiq projection triggers -- which run as whoever
+-- INSERTED into the application table, not as app_owner -- call the second.
+grant execute on function rbac.shared_org_id() to web_anon, authenticated, api_viewer, worker;
+grant execute on function rbac.is_shared_org(uuid) to web_anon, authenticated, api_viewer, worker;
+grant execute on function rbac.org_or_shared(uuid) to web_anon, authenticated, api_viewer, worker;
 -- scope_predicate/scope_write_predicate/default_visibility are NOT granted,
 -- and surface.sql's reverse check is what settled it: they were, and it
 -- reported them as reachable-but-undeclared, which is the right complaint.
@@ -9966,9 +10361,19 @@ create policy user_roles_self_or_admin on rbac.user_roles for select
 -- deployment is the customer list, and `select * from orgs` answering it for
 -- any authenticated caller is the same disclosure request_password_reset
 -- refuses to answer for addresses.
+--
+-- THE SHARED TIER IS THE EXCEPTION, and it has to be. §2b(i) made org_id NOT
+-- NULL by pointing every shared row at rbac.shared_org_id(), so that id now
+-- appears in rows any caller may read -- and without this arm the caller can
+-- read the row, read the org_id on it, and get nothing back when they ask what
+-- it is. It discloses nothing: the id is a published constant derived from two
+-- fixed strings, identical in every deployment, and nobody is a member of it
+-- (org_members_not_shared). A well-known row that cannot be looked up is a
+-- foreign key pointing into the dark.
 drop policy if exists orgs_member_visible on rbac.orgs;
 create policy orgs_member_visible on rbac.orgs for select
-  using (id in (select rbac.current_org_ids())
+  using (id = rbac.shared_org_id()
+         or id in (select rbac.current_org_ids())
          or (select rbac.has_permission(rbac.current_user_id(), 'orgs', 'select')));
 -- Membership is visible for the orgs you are in -- "who else is here" is a
 -- question a member of a tenant may ask, and one nobody else may. This is the
@@ -10824,10 +11229,16 @@ create schema if not exists aiq;
 --    Does NOT store the payload; payload stays on the typed table.
 -- ------------------------------------------------------------
 create table if not exists aiq.nodes (
-    id           uuid primary key default gen_random_uuid(),
+    id           uuid primary key default uuidv7(),
     entity_type  text not null,          -- owning table, e.g. 'company'
     entity_id    uuid not null,          -- PK in that table
-    org_id       uuid,                   -- tenant; null = shared reference data
+    -- The tenant. NOT NULL, defaulted to rbac.shared_org_id() by
+    -- rbac.adopt_shared_org() in integration-rbac.sql -- said there rather
+    -- than here because that function lives in user-rbac, which is installed
+    -- after this file. `null = shared reference data` is what this column used
+    -- to mean and identity/spec.md §4 is why it stopped: a NULL may only mean
+    -- unknown, and the shared tier is a value.
+    org_id       uuid,
     summary      text,                   -- cheap human/agent-readable label
     created_at   timestamptz not null default now(),
     updated_at   timestamptz not null default now(),
@@ -10848,6 +11259,11 @@ create table if not exists aiq.node_keys (
     entity_type  text not null,
     key          text not null,          -- normalized (lowercased, trimmed)
     kind         text not null check (kind in ('canonical','short','alias')),
+    -- Copied from the node, and NOT NULL for the same reason nodes.org_id is
+    -- -- see integration-rbac.sql §2, where this table's adopt_shared_org()
+    -- call lives. It is not declared `not null` here because a `create table
+    -- if not exists` does nothing to a database that already has the table,
+    -- so the constraint would reach fresh installs only.
     org_id       uuid,
     primary key (node_id, key, kind)
 );
@@ -10872,15 +11288,26 @@ comment on column aiq.nodes.entity_type is
 -- deliberately NOT unique -- 'bakhmut' may be canonical for a place and an
 -- event, and short-key lookup may legitimately return several nodes.
 --
--- NULLS NOT DISTINCT, and it is the whole guarantee rather than a detail.
--- org_id IS NULL means shared reference data, which integration-rbac.sql §1
--- calls "a real category here, not a loophole" and which every public company
--- in a deployment will be. Under the default NULLS DISTINCT, two NULLs never
--- conflict -- so this index enforced canonical-key uniqueness for exactly the
--- tenants that have one and not at all for the shared tier. Measured: two
--- companies both took the canonical key 'acme', and LOOKUP "ACME" -- the
--- dialect's most common call, documented as an exact match -- returned two
--- different nodes with no way to tell which was meant.
+-- NULLS NOT DISTINCT IS NOW A NO-OP, AND IT IS KEPT DELIBERATELY.
+--
+-- It was the whole guarantee. org_id IS NULL meant shared reference data,
+-- which integration-rbac.sql §1 calls "a real category here, not a loophole"
+-- and which every public company in a deployment will be. Under the default
+-- NULLS DISTINCT two NULLs never conflict -- so this index enforced
+-- canonical-key uniqueness for exactly the tenants that have one and not at
+-- all for the shared tier. Measured: two companies both took the canonical key
+-- 'acme', and LOOKUP "ACME" -- the dialect's most common call, documented as
+-- an exact match -- returned two different nodes with no way to tell which was
+-- meant.
+--
+-- org_id is NOT NULL now (identity/spec.md §4, rbac.adopt_shared_org), so the
+-- flag decides nothing: there are no NULLs left for it to be distinct or not
+-- distinct about, and the shared tier is constrained by the same equality as
+-- every other org. It stays because dropping it would be a rewrite of a unique
+-- index on every deployment to change nothing, and because a reader arriving
+-- at NULLS NOT DISTINCT with no note has to work out for themselves whether it
+-- is load-bearing. It is not. Anything that makes org_id nullable again makes
+-- it load-bearing again.
 create unique index if not exists idx_node_keys_canonical
     on aiq.node_keys (org_id, key, entity_type) nulls not distinct
     where kind = 'canonical';
@@ -11048,14 +11475,27 @@ create or replace trigger relation_types_term_consistent_upd
 --    Hard FK/junction relationships are NEVER copied here (D4).
 -- ------------------------------------------------------------
 create table if not exists aiq.edges (
-    id          uuid primary key default gen_random_uuid(),
+    id          uuid primary key default uuidv7(),
     src_id      uuid not null references aiq.nodes(id) on delete cascade,
     dst_id      uuid not null references aiq.nodes(id) on delete cascade,
     relation    text not null,
     weight      real not null default 1.0,
-    valid_from  timestamptz,
+    -- BITEMPORAL, and `valid_from` defaults so that it is actually populated.
+    -- It did not, and the consequence was that the pair was half built: every
+    -- one of 9,502 edges carried a null `valid_from`, so a retraction could be
+    -- dated against nothing and "when was this first asserted" had no answer.
+    -- An edge inserted now holds from now; anything else is the writer's job
+    -- to state explicitly, which is what a default is for.
+    valid_from  timestamptz not null default now(),
+    -- Null means "still holds". Set it to retract rather than deleting the
+    -- row: a derivation that DELETEs what it can no longer derive leaves
+    -- nothing to audit, and an append-only graph with no retraction path is
+    -- the regime research-notes/build-knit-dream-theory.pdf §10 warns about.
+    -- Read through `aiq.edges_current` unless you want retracted history.
     valid_to    timestamptz,
     provenance  jsonb not null default '{}'::jsonb,
+    -- Authoring provenance, not read gating (integration-rbac.sql §3). NOT
+    -- NULL and defaulted to the shared tier by adopt_shared_org() there.
     org_id      uuid,
     created_at  timestamptz not null default now(),
     unique (src_id, dst_id, relation)
@@ -11065,6 +11505,38 @@ create table if not exists aiq.edges (
 create index if not exists idx_edges_src on aiq.edges (src_id);
 create index if not exists idx_edges_dst on aiq.edges (dst_id);
 create index if not exists idx_edges_relation on aiq.edges (relation);
+
+-- EDGES THAT HOLD NOW. One named place for "currently asserted", because the
+-- alternative is every caller remembering a predicate and most of them not
+-- remembering it.
+--
+-- This table has been bitemporal since it was written and, for months,
+-- decoratively so: `valid_to` was never set on any edge, and the derivations
+-- that maintain the graph DELETEd what they could no longer derive. A graph
+-- that forgets by deletion does not forget slowly. It forgets completely,
+-- leaving nothing to audit and nothing able to answer "was this ever true".
+--
+-- Two consequences that are now contract rather than convention:
+--
+--   A derivation RETRACTS by setting `valid_to`. It does not delete. Deleting
+--   is for a row that should never have existed; retraction is for one that
+--   held and no longer does, and those are different facts.
+--
+--   A reader that means "now" reads this view. `aiq.edges` is the full
+--   history including retracted intervals, and reading it raw while meaning
+--   "now" is the bug this view exists to make hard.
+--
+-- Measured consequence, recorded because it is the argument: consolidation
+-- cannot be evaluated at all without dated edges. "Does this consolidation
+-- anticipate what happened next" needs a `next`, and a graph rebuilt by
+-- delete-and-reinsert has no history to hold one out of.
+create or replace view aiq.edges_current as
+    select * from aiq.edges
+     where valid_to is null or valid_to > now();
+
+comment on view aiq.edges_current is
+    'Edges currently asserted. Read this rather than aiq.edges unless you '
+    'specifically want retracted history.';
 
 -- Enforce the catalogue, and enforce that both endpoints are real nodes
 -- (the FKs already do the latter; this makes the type-pair check real).
@@ -11246,8 +11718,18 @@ declare
     -- exactly what this layer meant by org_id before rbac.visibilities existed,
     -- so a registration that says nothing about visibility keeps the behaviour
     -- it had rather than projecting every node private and going dark.
+    --
+    -- rbac.is_shared_org() rather than `is null`, and this is the one place the
+    -- sentinel has to absorb a NULL it did not create. p_org_expr is an
+    -- expression over a table THIS COLLECTION DOES NOT OWN -- a customer's
+    -- `calder.products.org_id`, nullable, meaning whatever they meant by it --
+    -- so the NOT NULL guarantee stops at the registry boundary and the
+    -- translation has to happen on the way in. is_shared_org(null) is true, so
+    -- an application column that says nothing still projects as `public`,
+    -- which is the behaviour this default has always had.
     v_vis text := coalesce(p_visibility_expr,
-                           format('case when %s is null then ''public'' else ''org'' end',
+                           format('case when rbac.is_shared_org(%s) '
+                                  'then ''public'' else ''org'' end',
                                   p_org_expr));
 begin
     -- One table, one entity type. Two types over one table cannot both work
@@ -11295,8 +11777,15 @@ begin
         create or replace function aiq.%1$s() returns trigger as $b$
         begin
             -- 1. Rows that belong: upsert identity.
+            -- rbac.org_or_shared() wraps the org expression at every one of
+            -- the four sites that writes it, and the wrap is not decoration.
+            -- aiq.nodes.org_id is NOT NULL; %3$s is an expression over a table
+            -- somebody else owns, whose org column is nullable and whose null
+            -- has always meant "shared". Unwrapped, the first shared row a
+            -- customer projects fails the not-null constraint and the failure
+            -- names our column rather than their data.
             insert into aiq.nodes (entity_type, entity_id, org_id, summary, visibility)
-            select %2$L, n.id, %3$s, %4$s, %7$s from new_rows n where %5$s
+            select %2$L, n.id, rbac.org_or_shared(%3$s), %4$s, %7$s from new_rows n where %5$s
             on conflict (entity_type, entity_id) do update
                 -- visibility is projected on UPDATE for org_id's reason: the
                 -- source row is the truth, and a node left at the scope it had
@@ -11316,7 +11805,7 @@ begin
 
             -- 3. The canonical key.
             insert into aiq.node_keys (node_id, entity_type, key, kind, org_id)
-            select nd.id, %2$L, lower(trim(%6$s)), 'canonical', %3$s
+            select nd.id, %2$L, lower(trim(%6$s)), 'canonical', rbac.org_or_shared(%3$s)
             from new_rows n
             join aiq.nodes nd on nd.entity_type = %2$L and nd.entity_id = n.id
             where %5$s
@@ -11432,7 +11921,7 @@ begin
     -- nothing forcing them to.
     execute format($q$
         insert into aiq.nodes (entity_type, entity_id, org_id, summary, visibility)
-        select %1$L, n.id, %2$s, %3$s, %6$s from %4$s n where %5$s
+        select %1$L, n.id, rbac.org_or_shared(%2$s), %3$s, %6$s from %4$s n where %5$s
         on conflict (entity_type, entity_id) do update
             set summary = excluded.summary, org_id = excluded.org_id,
                 visibility = excluded.visibility, updated_at = now()
@@ -11441,7 +11930,7 @@ begin
 
     execute format($q$
         insert into aiq.node_keys (node_id, entity_type, key, kind, org_id)
-        select nd.id, %1$L, lower(trim(%2$s)), 'canonical', %3$s
+        select nd.id, %1$L, lower(trim(%2$s)), 'canonical', rbac.org_or_shared(%3$s)
         from %4$s n
         join aiq.nodes nd on nd.entity_type = %1$L and nd.entity_id = n.id
         where %5$s
@@ -11957,7 +12446,7 @@ drop function if exists aiq.semantic(text, vector, int);
 --    only inserts.
 --
 --  * The canonical-key unique index was NULLS DISTINCT, so it enforced nothing
---    at all for shared reference data (org_id is null), which is most of a
+--    at all for shared reference data (org_id = rbac.shared_org_id()), which is most of a
 --    real deployment. Two rows took the key 'acme' and LOOKUP returned both.
 --
 --  * Generated projection functions were named after the source table's SHORT
@@ -12729,6 +13218,18 @@ begin
         using hnsw (embedding %3$s)$q$,
         'idx_' || replace(m.name,'-','_') || '_hnsw',
         'emb_' || replace(m.name, '-', '_'), m.distance_op);
+
+    -- DECLARE WHAT THIS TABLE IS, here, because nothing else can. A space is
+    -- created at REGISTRATION, not at install, so specs/identity's
+    -- declarations -- which run once, when the extension is created -- cannot
+    -- name it. A table created by a function is declared by that function or
+    -- it stays undeclared forever, and specs/identity/checks.sql will say so.
+    insert into percolate.table_kinds (schema_name, table_name, kind, why)
+    values ('aiq', 'emb_' || replace(p_model, '-', '_'), 'natural',
+            'an embedding space: chunk_id is the identity and nothing '
+            'references it by surrogate; created per registered model')
+    on conflict (schema_name, table_name) do nothing;
+
 end;
 $$ language plpgsql;
 
@@ -14103,7 +14604,7 @@ returns jsonb as $$
                                 join aiq.nodes n on n.id = nk.node_id
                                where n.entity_type = r.entity_type
                                  and nk.kind = 'canonical'
-                                 and (n.org_id is null
+                                 and (n.org_id = rbac.shared_org_id()
                                       or n.org_id in (select rbac.current_org_ids()))
                                order by nk.key
                                limit 3) k), '[]'::jsonb))
@@ -14381,10 +14882,17 @@ revoke execute on function aiq.register_schema_example(text, text, text, text, t
 -- being load-bearing: a shared SEC filing is `public` because somebody chose
 -- it, and a row nobody scoped is `private` because that is the default.
 --
+-- AND THE NULL ITSELF IS GONE. identity/spec.md §4 finished the argument: a
+-- NULL may only mean unknown, so the shared tier is a ROW -- user-rbac
+-- §2b(i)'s rbac.shared_org_id() -- and org_id is NOT NULL on all sixteen
+-- tables that carry it. "org_id IS NULL -> shared" is now "org_id =
+-- rbac.shared_org_id() -> shared", which is the same sentence with nothing
+-- left for a reader to guess and nothing left for a unique index to skip.
+--
 -- "Shared reference data" is still a real category and not a loophole -- a
 -- public filing or a well-known company is legitimately global, and forcing it
 -- to be duplicated per tenant would defeat the whole point of one identity
--- registry. It is now spelled `public`.
+-- registry. It is now spelled `public`, on the shared org.
 --
 -- Membership lives in rbac, as it always claimed to. What has changed is that
 -- there is now something there to ask: rbac.org_members rather than an array
@@ -14404,6 +14912,21 @@ select rbac.add_scope_policy ('aiq.nodes');
 
 alter table aiq.node_keys enable row level security;
 alter table aiq.edges     enable row level security;
+
+-- THE TWO TABLES THAT CARRY org_id AND DO NOT TAKE add_scope_columns.
+--
+-- Both keep their own org_id -- node_keys because the canonical-key unique
+-- index is scoped by it, edges for authoring provenance -- and neither takes
+-- the scope columns, for the reasons written out below. That makes them the
+-- only two of the sixteen where the NOT NULL does not arrive with
+-- add_scope_columns(), so it is asked for explicitly. Two lines rather than a
+-- rule, and stated where the exception itself is stated: a catalogue sweep
+-- that quietly fixed them would hide the fact that they are exceptions.
+--
+-- identity/checks.sql asserts nobody adds a seventeenth org_id column and
+-- forgets both routes.
+select rbac.adopt_shared_org('aiq.node_keys');
+select rbac.adopt_shared_org('aiq.edges');
 
 -- node_keys INHERITS its node's visibility rather than re-deriving it from
 -- its own org_id copy. That copy exists for the canonical-key unique index
@@ -14456,7 +14979,7 @@ create or replace view aiq.edges_api as
   from aiq.edges;
 
 grant usage on schema aiq to api_viewer, authenticated;
-grant select on aiq.nodes, aiq.node_keys, aiq.edges to api_viewer;
+grant select on aiq.nodes, aiq.node_keys, aiq.edges, aiq.edges_current to api_viewer;
 -- rbac.current_org_ids() and the scope predicates are granted in user-rbac
 -- §9, to api_viewer and authenticated among others -- the policies above are
 -- evaluated as the view owner, so api_viewer is who must be able to run them.
@@ -14486,7 +15009,7 @@ grant select on aiq.nodes_api, aiq.edges_api to authenticated;
 -- The rule, generalised: views for COLUMN secrecy, RLS for ROW visibility.
 -- Reaching for a view when the problem is row-level buys nothing and costs a
 -- layer of indirection.
-grant select on aiq.nodes, aiq.node_keys, aiq.edges to authenticated;
+grant select on aiq.nodes, aiq.node_keys, aiq.edges, aiq.edges_current to authenticated;
 
 -- A PROPERTY GRAPH is its own privilege object in PG19, separate from the
 -- tables it is defined over. Granting SELECT on nodes and edges is NOT
@@ -15840,7 +16363,7 @@ create schema if not exists content;
 -- differs between them -- a push arrives as an upload, a pull is polled.
 -- ------------------------------------------------------------
 create table if not exists content.channels (
-    id            uuid primary key default gen_random_uuid(),
+    id            uuid primary key default uuidv7(),
     name          text not null,
     kind          text not null check (kind in
                       ('file_upload','http_pull','ftp_pull','feed','telegram','manual')),
@@ -15857,6 +16380,39 @@ create table if not exists content.channels (
     updated_at    timestamptz not null default now(),
     unique (org_id, name)
 );
+
+-- NULLS NOT DISTINCT, for the reason content.datasets already carries below.
+--
+-- A plain `unique (org_id, name)` does not constrain a SHARED channel at all:
+-- NULLs are distinct in a unique index unless it says otherwise, so
+-- `(null, 'rss')` can repeat without limit and `register_fetched` resolves the
+-- name with `limit 1` -- picking one of N, silently.
+--
+-- This file used to say the sibling "answers it differently (WHERE NOT EXISTS
+-- at each insert site)". That was a real decision and it put the guarantee one
+-- layer above where it can be refused. It held for as long as every insert
+-- site remembered: the first NEW caller (applications/percolate-self-model)
+-- used `on conflict do nothing`, which is the ordinary idiom and finds no
+-- conflict here, and created FIVE identical channels in one session before
+-- anything noticed.
+--
+-- Drop-then-add rather than inline, so an installation that already created
+-- this table picks the change up on the next apply.
+-- NULLS NOT DISTINCT IS A NO-OP NOW, AND IS KEPT DELIBERATELY.
+--
+-- It was the whole constraint while `org_id is null` meant the shared tier:
+-- under the default NULLS DISTINCT this unique index would have policed every
+-- tenant's channel names and none of the shared ones -- the tier more than one
+-- writer touches. identity/spec.md §4 removed the premise: org_id is NOT NULL
+-- (rbac.adopt_shared_org), the shared tier is rbac.shared_org_id(), and the
+-- flag now decides nothing because there are no NULLs in this index. Left in
+-- place because dropping it rebuilds a unique index on every deployment to
+-- change nothing; written down because a reader who finds it with no note
+-- cannot tell that it stopped mattering.
+alter table content.channels drop constraint if exists channels_org_id_name_key;
+alter table content.channels add constraint channels_org_id_name_key
+    unique nulls not distinct (org_id, name);
+
 create index if not exists idx_channels_pollable on content.channels (last_polled_at)
     where enabled and poll_interval is not null;
 
@@ -15876,7 +16432,7 @@ create or replace trigger trg_channels_touch before update on content.channels
 -- through a resource, which is scoped. See integration.sql.
 -- ------------------------------------------------------------
 create table if not exists content.files (
-    id           uuid primary key default gen_random_uuid(),
+    id           uuid primary key default uuidv7(),
     checksum     text not null unique,      -- sha256 of the content; the dedup key
     bucket       text not null,
     object_key   text not null,
@@ -15894,7 +16450,7 @@ create table if not exists content.files (
 -- and optionally a file (if it has bytes -- a scraped JSON record may not).
 -- ------------------------------------------------------------
 create table if not exists content.resources (
-    id           uuid primary key default gen_random_uuid(),
+    id           uuid primary key default uuidv7(),
     channel_id   uuid not null references content.channels(id),
     file_id      uuid references content.files(id),
     -- Provider's own identifier, used to avoid re-ingesting the same item on
@@ -15964,7 +16520,7 @@ create or replace trigger trg_resources_touch before update on content.resources
 -- this schema; integration.sql adds the reconciliation instead.
 -- ------------------------------------------------------------
 create table if not exists content.resource_chunks (
-    id           uuid primary key default gen_random_uuid(),
+    id           uuid primary key default uuidv7(),
     resource_id  uuid not null references content.resources(id) on delete cascade,
     ordinal      int not null,
     content      text not null,
@@ -16098,9 +16654,10 @@ create or replace function content.register_upload(
     -- Defaulted through rbac.default_visibility() rather than to a constant,
     -- and the choice is the whole of §4b's fix rather than a convenience. An
     -- upload named an org and got a row every OTHER org could read, because
-    -- `org_id is null` was the everyone tier and this argument defaulted into
-    -- it. Now: name an org and the row is that org's; name none and the row is
-    -- yours. Neither default publishes anything to another tenant, and
+    -- the shared tier was spelled `org_id is null` and this argument defaulted
+    -- into it. Now: name an org and the row is that org's; name none and the
+    -- row is yours -- on the shared tier, but `private`, which is a different
+    -- statement from the one that leaked. Neither default publishes anything to another tenant, and
     -- publishing is `public`, spelled out by whoever meant it.
     p_visibility  text default null
 ) returns uuid as $$
@@ -16119,9 +16676,18 @@ begin
     -- `select into` with no order takes whichever the plan produced. The
     -- org-specific channel wins; the public one is the fallback it was meant
     -- to be.
+    --
+    -- Written as an IN over two values rather than `(org_id is not distinct
+    -- from p_org_id or org_id is null)`, which said the same thing in
+    -- three-valued logic. p_org_id is still nullable -- it is an omitted
+    -- argument, a genuine absence -- so rbac.org_or_shared() reads that
+    -- omission as the shared tier, and both elements of the IN collapse to
+    -- rbac.shared_org_id(): an unscoped caller matches the shared channel and
+    -- nothing else, which is what the old form did too.
     select id into v_channel from content.channels
-    where name = p_channel and (org_id is not distinct from p_org_id or org_id is null)
-    order by (org_id is not distinct from p_org_id) desc
+    where name = p_channel
+      and org_id in (rbac.org_or_shared(p_org_id), rbac.shared_org_id())
+    order by (org_id = rbac.org_or_shared(p_org_id)) desc
     limit 1;
     if v_channel is null then
         raise exception 'no channel named % for this org -- create one first', p_channel;
@@ -16141,9 +16707,16 @@ begin
     -- a service connection with no request identity leaves it null, and such a
     -- row is reachable only through its org or by being public, which is the
     -- correct reading of "nobody in particular uploaded this".
+    --
+    -- rbac.org_or_shared(p_org_id), because org_id is NOT NULL on this table
+    -- and p_org_id is an OPTIONAL ARGUMENT: an upload that names no org is the
+    -- caller saying nothing, and the row that used to carry a NULL now carries
+    -- the shared org. Nothing about who may read it changes -- that is
+    -- v_vis's job, and it is `private` for a caller with an identity, exactly
+    -- as it was before.
     insert into content.resources (channel_id, file_id, uri, title, org_id,
                                    owner_id, visibility, metadata, external_id)
-    values (v_channel, v_file, p_uri, p_title, p_org_id,
+    values (v_channel, v_file, p_uri, p_title, rbac.org_or_shared(p_org_id),
             rbac.current_user_id(), v_vis, p_metadata, p_external_id)
     on conflict (channel_id, external_id) do update set updated_at = now()
     returning id into v_res;
@@ -16192,15 +16765,17 @@ begin
     perform content.assert_org_write(p_org_id, 'register content');
 
     select id into v_channel from content.channels
-    where name = p_channel and (org_id is not distinct from p_org_id or org_id is null)
-    order by (org_id is not distinct from p_org_id) desc
+    where name = p_channel
+      and org_id in (rbac.org_or_shared(p_org_id), rbac.shared_org_id())
+    order by (org_id = rbac.org_or_shared(p_org_id)) desc
     limit 1;
     if v_channel is null then
         raise exception 'no channel named % for this org', p_channel;
     end if;
 
     insert into content.resources (channel_id, external_id, uri, title, org_id, metadata)
-    values (v_channel, p_external_id, p_uri, p_title, p_org_id, p_metadata)
+    values (v_channel, p_external_id, p_uri, p_title,
+            rbac.org_or_shared(p_org_id), p_metadata)
     on conflict (channel_id, external_id) do nothing
     returning id into v_res;
 
@@ -16229,14 +16804,17 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- Returns nothing when the caller may not see it, rather than raising:
 -- distinguishing "not yours" from "does not exist" tells an unauthorized
 -- caller that the resource exists.
-create or replace function content.resolve_file(p_resource_id uuid)
-returns table(bucket text, object_key text, content_type text, size_bytes bigint) as $$
-    select f.bucket, f.object_key, f.content_type, f.size_bytes
-    from content.resources r
-    join content.files f on f.id = r.file_id
-    where r.id = p_resource_id
-      and rbac.may_access_org(r.org_id);
-$$ language sql stable security definer set search_path = pg_catalog, public;
+-- content.resolve_file() IS DEFINED IN integration.sql, NOT HERE.
+--
+-- It gates on rbac.may_read(owner_id, org_id, visibility), and those three
+-- columns do not exist on content.resources until rbac.add_scope_columns()
+-- adds them -- which happens in integration.sql. A `language sql` body
+-- resolves its column references when it is CREATED, so defining it here
+-- fails the install outright with `column r.owner_id does not exist`, from
+-- inside a 22,000-line generated script.
+--
+-- Moved rather than duplicated: two definitions of one function is the
+-- one-home-per-fact violation this collection keeps paying for.
 
 -- Record chunks produced by the ingestion workflow, and flip the resource
 -- ready. One call rather than N inserts plus an update, so a resource is never
@@ -16593,7 +17171,7 @@ $$ language sql stable security definer set search_path = pg_catalog, public;
 -- glob, and a row saying what the columns were. That is enough to query and
 -- honest about what it is not (ingestion.md §6 names what breaks first).
 create table if not exists content.datasets (
-    id           uuid primary key default gen_random_uuid(),
+    id           uuid primary key default uuidv7(),
     -- The logical table. Unique per org, so two tenants may both have `sales`.
     name         text not null,
     org_id       uuid,
@@ -16623,14 +17201,19 @@ create table if not exists content.datasets (
 -- caught by 02-ingestion.sql §5 with "more than one row returned by a subquery",
 -- which is a better error than the silent one it would have been in production.
 --
--- content.channels has the same shape and answers it differently (WHERE NOT
--- EXISTS at each insert site, §5b of integration.sql). Here the constraint is
--- the right place, because the upsert is the API: a caller appending to a
--- dataset must not have to know whether it already exists.
+-- content.channels had the same shape and answered it differently (WHERE NOT
+-- EXISTS at each insert site, §5b of integration.sql). It now carries the same
+-- constraint, because the guard held only for as long as every insert site
+-- remembered it and the first new caller did not -- see the note beside that
+-- table. Here the constraint was always the right place, because the upsert is
+-- the API: a caller appending to a dataset must not have to know whether it
+-- already exists.
 --
 -- Drop-then-add rather than inline, so an installation that already created
 -- this table picks the change up on the next apply -- the same discipline
 -- resources_status_check above is written with.
+-- NULLS NOT DISTINCT: a no-op on a NOT NULL column, kept for the reason
+-- channels_org_id_name_key above states in full.
 alter table content.datasets drop constraint if exists datasets_org_name_key;
 alter table content.datasets add constraint datasets_org_name_key
     unique nulls not distinct (org_id, name);
@@ -16746,7 +17329,11 @@ returns text as $$
     from content.datasets d
     where d.name = p_name
       and rbac.may_read(d.owner_id, d.org_id, d.visibility)
-    order by d.org_id nulls last
+    -- The tenant's own dataset beats the shared one of the same name, which is
+    -- what `nulls last` meant while the shared tier was a NULL. On a NOT NULL
+    -- column that ordering is meaningless -- it would sort by the raw uuid --
+    -- so the rule is stated as what it always was: shared last.
+    order by (d.org_id = rbac.shared_org_id())
     limit 1;
 $$ language sql stable;
 
@@ -16797,8 +17384,19 @@ on conflict (name) do update set source_table = excluded.source_table;
 select aiq.register_entity_table(
     'document',
     'content.resources',
-    'coalesce(n.title, n.uri, n.id::text)',   -- canonical key
-    'coalesce(n.title, n.uri)',               -- summary
+    -- A LABEL IS NEVER AN IDENTITY (specs/identity/spec.md §5). `title` was
+    -- first here, and a canonical key is UNIQUE -- so two documents that
+    -- merely share a heading collided, and the second one FAILED TO INGEST
+    -- with a duplicate-key error raised inside a projection trigger, naming
+    -- neither document. Measured while loading this repository's own prose:
+    -- two spec sections both headed "run it" stopped an ingest of 797.
+    --
+    -- `uri` first because it is what a person types to find a document and is
+    -- unique in practice; `external_id` next because it is what a puller
+    -- controls and guarantees. Title stays as the SUMMARY, which is what a
+    -- label is for.
+    'coalesce(n.uri, n.external_id, n.id::text)',   -- canonical key
+    'coalesce(n.title, n.uri)',                     -- summary
     'n.org_id',
     $$n.status = 'ready'$$
 );
@@ -16829,7 +17427,7 @@ on conflict do nothing;
 -- (calling the equivalent function per row measured 58x slower, and sixteen
 -- hand-copies of a security predicate is how one of them drifts).
 --
--- What changes for this file specifically: `org_id is null` no longer means
+-- What changes for this file specifically: the shared tier no longer means
 -- "everyone may read it". §4b of schema.sql measured that conflation as a real
 -- cross-tenant read -- register_upload() without its optional org argument
 -- wrote a null org and another tenant retrieved the text. A row nobody scoped
@@ -16837,6 +17435,28 @@ on conflict do nothing;
 select rbac.add_scope_columns('content.channels', 'public');
 select rbac.add_scope_policy ('content.channels');
 select rbac.add_scope_columns('content.resources', 'public');
+
+-- AND NOW resolve_file, which needs the three columns the line above adds.
+-- Its home is here for that reason; schema.sql carries the pointer.
+create or replace function content.resolve_file(p_resource_id uuid)
+returns table(bucket text, object_key text, content_type text, size_bytes bigint) as $$
+    -- may_read, NOT may_access_org. The org rule answers "may this person
+    -- touch this tenant"; it says nothing about the ROW, so a resource marked
+    -- `private` was served to anybody who could reach its org -- and on the
+    -- shared tier that is everybody. `rbac.may_read(owner, org, visibility)`
+    -- is the single home of the read rule and content.resources carries all
+    -- three columns, so this is the same decision the `_scoped` policy on the
+    -- table already makes; resolve_file was the one path that did not ask it.
+    --
+    -- Found by the self-model: content.resources is central (16 dependants),
+    -- has broken twice, and this is the gap the graph pointed at.
+    select f.bucket, f.object_key, f.content_type, f.size_bytes
+    from content.resources r
+    join content.files f on f.id = r.file_id
+    where r.id = p_resource_id
+      and rbac.may_read(r.owner_id, r.org_id, r.visibility);
+$$ language sql stable security definer set search_path = pg_catalog, public;
+
 select rbac.add_scope_policy ('content.resources');
 
 alter table content.resource_chunks enable row level security;
@@ -16960,7 +17580,8 @@ select 'workflow_artifacts', 'file_upload',
        -- which content.register_upload documents as a legitimate choice.
        '{"description": "bytes produced by a workflow step, refd from tasks.output"}'::jsonb
 where not exists (
-    select 1 from content.channels where name = 'workflow_artifacts' and org_id is null);
+    select 1 from content.channels
+     where name = 'workflow_artifacts' and org_id = rbac.shared_org_id());
 
 create or replace function workflow.register_artifact(
     p_task_id      uuid,
@@ -17240,7 +17861,7 @@ create schema if not exists agentic;
 -- surface is this table plus agents.tools; there is no built-in tool, ever.
 -- ------------------------------------------------------------
 create table if not exists agentic.tool_servers (
-    id              uuid primary key default gen_random_uuid(),
+    id              uuid primary key default uuidv7(),
     name            text not null unique,
     kind            text not null check (kind in ('mcp', 'openapi')),
     url             text not null,
@@ -17313,7 +17934,7 @@ create or replace trigger trg_tool_servers_updated
 -- 2. Agents -- config rows; adding one is an insert (brief §2, §6)
 -- ------------------------------------------------------------
 create table if not exists agentic.agents (
-    id                       uuid primary key default gen_random_uuid(),
+    id                       uuid primary key default uuidv7(),
     name                     text not null unique,
     system_prompt            text not null default '',
     model                    text,
@@ -17436,7 +18057,7 @@ create or replace trigger trg_agents_updated
 -- carry ten copies that drift.
 -- ------------------------------------------------------------
 create table if not exists agentic.skills (
-    id              uuid primary key default gen_random_uuid(),
+    id              uuid primary key default uuidv7(),
     -- The key an agent lists and the model names. Constrained to the shape the
     -- Agent Skills spec uses, because this name is also a TOOL name on the
     -- skill gateway (plugins.md §4), and a tool name with a space in it is a
@@ -17631,7 +18252,7 @@ create index if not exists idx_skills_plugin on agentic.skills (plugin)
 -- 3. Sessions -- one AG-UI thread; the unit a conversation is owned by
 -- ------------------------------------------------------------
 create table if not exists agentic.sessions (
-    id             uuid primary key default gen_random_uuid(),
+    id             uuid primary key default uuidv7(),
     -- RENAMED from user_id, and the rename is the point rather than tidying.
     -- Every other owned table in the collection spells this owner_id, and
     -- rbac.scope_predicate() -- the single home of the read expression every
@@ -17683,7 +18304,7 @@ create or replace trigger trg_sessions_updated
 -- runs outside tenant isolation entirely.
 -- ------------------------------------------------------------
 create table if not exists agentic.runs (
-    id                      uuid primary key default gen_random_uuid(),
+    id                      uuid primary key default uuidv7(),
     session_id              uuid references agentic.sessions(id) on delete cascade,
     agent_id                uuid not null references agentic.agents(id),
     owner_id                uuid not null default rbac.current_user_id(),
@@ -17734,7 +18355,7 @@ create or replace trigger trg_runs_updated
 -- row per session, superseded rather than appended to (§3).
 -- ------------------------------------------------------------
 create table if not exists agentic.messages (
-    id           uuid primary key default gen_random_uuid(),
+    id           uuid primary key default uuidv7(),
     run_id       uuid references agentic.runs(id) on delete cascade,
     session_id   uuid references agentic.sessions(id) on delete cascade,
     role         text not null check (role in ('system','user','assistant',
@@ -18341,7 +18962,12 @@ begin
             -- caller gets their own org or themselves -- and `visibility` in
             -- the spec overrides it for somebody who means something else.
             coalesce((p_spec->>'owner_id')::uuid, rbac.current_user_id()),
-            (p_spec->>'org_id')::uuid,
+            -- rbac.org_or_shared(), because org_id is NOT NULL
+            -- (identity/spec.md §4) and a spec with no `org_id` key is a
+            -- genuine absence: the operator did not say. The shared tier is
+            -- what "did not say" has always meant here, so it is now written
+            -- down instead of arriving as a null.
+            rbac.org_or_shared((p_spec->>'org_id')::uuid),
             coalesce(p_spec->>'visibility',
                      rbac.default_visibility((p_spec->>'org_id')::uuid)))
     -- AN OMITTED KEY MEANS "LEAVE IT ALONE", NOT "SET IT TO THE DEFAULT".
@@ -18465,7 +19091,12 @@ begin
             -- default with a null owner writes a row its own author cannot
             -- select. rbac.default_visibility() states the rule once.
             coalesce((p_spec->>'owner_id')::uuid, rbac.current_user_id()),
-            (p_spec->>'org_id')::uuid,
+            -- rbac.org_or_shared(), because org_id is NOT NULL
+            -- (identity/spec.md §4) and a spec with no `org_id` key is a
+            -- genuine absence: the operator did not say. The shared tier is
+            -- what "did not say" has always meant here, so it is now written
+            -- down instead of arriving as a null.
+            rbac.org_or_shared((p_spec->>'org_id')::uuid),
             coalesce(p_spec->>'visibility',
                      rbac.default_visibility((p_spec->>'org_id')::uuid)))
     -- Same rule as upsert_agent, and it reached every column here for the
@@ -18564,7 +19195,12 @@ begin
             -- default with a null owner writes a row its own author cannot
             -- select. rbac.default_visibility() states the rule once.
             coalesce((p_spec->>'owner_id')::uuid, rbac.current_user_id()),
-            (p_spec->>'org_id')::uuid,
+            -- rbac.org_or_shared(), because org_id is NOT NULL
+            -- (identity/spec.md §4) and a spec with no `org_id` key is a
+            -- genuine absence: the operator did not say. The shared tier is
+            -- what "did not say" has always meant here, so it is now written
+            -- down instead of arriving as a null.
+            rbac.org_or_shared((p_spec->>'org_id')::uuid),
             coalesce(p_spec->>'visibility',
                      rbac.default_visibility((p_spec->>'org_id')::uuid)))
     on conflict (name) do update
@@ -18860,7 +19496,7 @@ begin
             -- no request identity and is deployment configuration, which is
             -- the case rbac.default_visibility() answers `public`.
             coalesce((p_manifest->>'owner_id')::uuid, rbac.current_user_id()),
-            (p_manifest->>'org_id')::uuid,
+            rbac.org_or_shared((p_manifest->>'org_id')::uuid),
             coalesce(p_manifest->>'visibility',
                      rbac.default_visibility((p_manifest->>'org_id')::uuid)))
     on conflict (name) do update
@@ -19670,7 +20306,7 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 
 -- 3a. Candidates: an entity the extractor named that resolved to nothing.
 create table if not exists aiq.soft_nodes (
-    id               uuid primary key default gen_random_uuid(),
+    id               uuid primary key default uuidv7(),
     -- RENAMED from `kind`, and the rename is the point rather than tidying.
     -- graph-index.md §4.3(c) and (d) have called this `claimed_kind` in prose
     -- since it was designed, and the column did not -- while the ADJACENT table
@@ -19752,6 +20388,15 @@ end $$;
 -- what makes the column exist under this name, and `create index if not exists`
 -- is matched on the index NAME, so it would neither fail nor fix an index built
 -- over the old column. (It does not have to: a rename carries its indexes.)
+-- NULLS NOT DISTINCT IS A NO-OP HERE AND IS KEPT DELIBERATELY. It was
+-- load-bearing while `org_id is null` meant the shared tier: without it this
+-- index constrained every tenant except the shared one. org_id is NOT NULL now
+-- (identity/spec.md §4, rbac.adopt_shared_org), so there are no NULLs for the
+-- flag to rule on. Left in place rather than dropped because removing it means
+-- rebuilding a unique index on every deployment to change nothing -- and
+-- written down rather than left silent, because a reader who finds the flag
+-- with no note has to derive for themselves whether it still matters. It does
+-- not, unless somebody makes org_id nullable again.
 create unique index if not exists idx_soft_nodes_key
     on aiq.soft_nodes (org_id, claimed_kind, key) nulls not distinct;
 create index if not exists idx_soft_nodes_unresolved
@@ -19765,7 +20410,7 @@ create index if not exists idx_soft_nodes_unresolved
 -- thing to be a Postgres table. A dataset row is hydrated by a different fetch
 -- (DuckDB over content.dataset_uri) and is otherwise an ordinary vertex.
 create table if not exists aiq.lake_nodes (
-    id            uuid primary key default gen_random_uuid(),
+    id            uuid primary key default uuidv7(),
     dataset       text not null,        -- content.datasets.name
     row_key       text not null,        -- the dataset's business key for the row
     label         text,
@@ -19781,6 +20426,8 @@ create table if not exists aiq.lake_nodes (
     first_seen_at timestamptz not null default now(),
     last_seen_at  timestamptz not null default now()
 );
+-- NULLS NOT DISTINCT: a no-op on a NOT NULL column, kept for the reason
+-- idx_soft_nodes_key above states in full.
 create unique index if not exists idx_lake_nodes_key
     on aiq.lake_nodes (org_id, dataset, row_key) nulls not distinct;
 
@@ -19905,8 +20552,9 @@ $$ language sql immutable;
 --
 -- Found by dev/tests/query/06-graph-tenancy.sql §5 rejecting these functions
 -- as definer-and-user-reachable; the grant was the surface bug, and this was
--- the one underneath it. `org_id is null` is the shared reference tier, which
--- integration-rbac.sql calls "a real category here, not a loophole."
+-- the one underneath it. `org_id = rbac.shared_org_id()` is the shared
+-- reference tier, which integration-rbac.sql calls "a real category here, not
+-- a loophole."
 create or replace function aiq.resolve_ref(
     p_entity_type text, p_name text, p_fuzzy boolean default false,
     p_threshold real default 0.45, p_org_id uuid default null
@@ -19916,10 +20564,18 @@ declare
     v_ids  uuid[];
 begin
     -- 1. exact canonical, scoped to the type AND the caller's tenancy.
+    --
+    -- `n.org_id in (rbac.shared_org_id(), rbac.org_or_shared(p_org_id))` is
+    -- what `(org_id is null or org_id is not distinct from p_org_id)` used to
+    -- say: the shared tier, plus the caller's own org. It is now an ordinary
+    -- IN over a NOT NULL column -- no three-valued logic, no `is not distinct
+    -- from` to read twice -- and when p_org_id is itself omitted the two
+    -- elements collapse to the same value and the predicate is the shared tier
+    -- alone, which is exactly what an unscoped call should resolve against.
     select array_agg(distinct n.id) into v_ids
     from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
     where k.key = v_norm and k.kind = 'canonical' and n.entity_type = p_entity_type
-      and (n.org_id is null or n.org_id is not distinct from p_org_id);
+      and n.org_id in (rbac.shared_org_id(), rbac.org_or_shared(p_org_id));
     if array_length(v_ids,1) = 1 then return v_ids[1]; end if;
     if array_length(v_ids,1) > 1 then return null; end if;  -- ambiguous: a miss
 
@@ -19927,7 +20583,7 @@ begin
     select array_agg(distinct n.id) into v_ids
     from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
     where k.key = v_norm and k.kind in ('short','alias') and n.entity_type = p_entity_type
-      and (n.org_id is null or n.org_id is not distinct from p_org_id);
+      and n.org_id in (rbac.shared_org_id(), rbac.org_or_shared(p_org_id));
     if array_length(v_ids,1) = 1 then return v_ids[1]; end if;
     if array_length(v_ids,1) > 1 then return null; end if;
 
@@ -19937,7 +20593,7 @@ begin
             select n.id, max(similarity(k.key, v_norm)) as sim
             from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
             where n.entity_type = p_entity_type and k.key % v_norm
-              and (n.org_id is null or n.org_id is not distinct from p_org_id)
+              and n.org_id in (rbac.shared_org_id(), rbac.org_or_shared(p_org_id))
             group by n.id having max(similarity(k.key, v_norm)) >= p_threshold
             order by 2 desc limit 2) d;
         -- Exactly one candidate above threshold, or it is a miss. AN AMBIGUOUS
@@ -19969,7 +20625,14 @@ declare
     v_n       int;
     v_ids     uuid[] := '{}';          -- ordinal -> node id
     v_res     text[] := '{}';          -- ordinal -> residence, for the receipt
-    v_org     uuid   := (p_context->>'org_id')::uuid;
+    -- COALESCED AT THE BOUNDARY, once, rather than at the four sites that
+    -- write it. p_context is caller-supplied jsonb: a context with no `org_id`
+    -- key means the extraction was not on any tenant's behalf, which is the
+    -- shared tier -- and aiq.nodes/soft_nodes/lake_nodes/edges.org_id is NOT
+    -- NULL (identity/spec.md §4). This is the seam where an ABSENCE (a key
+    -- nobody set) legitimately becomes a VALUE (the shared org), and it is a
+    -- single line precisely so that it is one decision rather than four.
+    v_org     uuid   := rbac.org_or_shared((p_context->>'org_id')::uuid);
     -- FUZZY IS OFF BY DEFAULT, and that default was inverted after running it.
     --
     -- The obvious reading -- "resolve_ref implements the cascade, and the
@@ -20447,6 +21110,13 @@ begin
            and x.dst_id = e.dst_id and x.relation = e.relation
         returning 1)
     select count(*) into v_c from merged;  v_merged := v_merged + v_c;
+    -- DELETED, not retracted, and the distinction matters now that
+    -- `ai-query-layer/schema.sql` makes retraction the contract for removal.
+    -- A merge is the one legitimate reason to delete an edge: the fact is not
+    -- ceasing to hold, it is moving to the node that now carries the identity,
+    -- and the surviving edge on the target keeps the merged provenance. A
+    -- retracted duplicate would assert that the relationship stopped being
+    -- true, which is exactly what did not happen.
     delete from aiq.edges where src_id = v_cand;
 
     with moved as (
@@ -20591,9 +21261,9 @@ grant select on aiq.soft_nodes, aiq.lake_nodes, aiq.graph_vocabulary to authenti
 -- entity NAMES before resolution, which is the most identifying thing in the
 -- pipeline.
 --
--- Same predicate as aiq.nodes' own policy, and the same reason for the null
--- branch: `org_id is null` is shared reference data, which §4.4 says is the
--- normal state. `graph_vocabulary` stays policy-free deliberately -- it is the
+-- Same predicate as aiq.nodes' own policy, and the same reason for the shared
+-- branch: `org_id = rbac.shared_org_id()` is shared reference data, which §4.4
+-- says is the normal state. `graph_vocabulary` stays policy-free deliberately -- it is the
 -- relation catalogue, the same shared-config tier as aiq.relation_types.
 --
 -- Nothing on the write path changes: the worker reaches these through
@@ -21219,7 +21889,8 @@ begin
                'description', 'the default channel for POST /files',
                'ingest_workflow', 'ingest_file')
     where not exists (
-        select 1 from content.channels where name = 'uploads' and org_id is null);
+        select 1 from content.channels
+         where name = 'uploads' and org_id = rbac.shared_org_id());
 end $$;
 
 
@@ -21814,6 +22485,301 @@ grant usage on schema percolate to web_anon, authenticated, api_viewer;
 grant select on percolate.types to web_anon, authenticated, api_viewer;
 grant execute on function percolate.enums() to web_anon, authenticated, api_viewer;
 grant execute on function percolate.contract() to web_anon, authenticated, api_viewer;
+
+
+-- ============================================================
+-- packages/schema.sql
+--   percolate.apply_package(): a domain installed as one document. AFTER agentic (it delegates the servers/skills/agents half to agentic.apply_plugin), after world-model-ingestion (it inserts channels) and after workflow-engine (it defines and schedules workflows) -- it names all three and a `language plpgsql` body is not checked at create time, so the ordering is about the RUNTIME dependency rather than the parse
+-- ============================================================
+
+-- Packages: a domain installed as a document. See brief.md for the argument.
+--
+-- `percolate.apply_package(jsonb)` ORCHESTRATES rather than replaces:
+-- `agentic.apply_plugin` still owns servers, skills and agents, keeps its
+-- prune and keeps its unknown-key guard unchanged. This function owns the four
+-- new sections and hands the three old ones straight through.
+--
+-- Not folded into one function, and the reason is that guard. apply_plugin
+-- refuses a key it does not read, BECAUSE a manifest prunes what it does not
+-- declare -- so a misspelt section is not a no-op, it is a removal. Widening
+-- that function means widening the set of keys it will accept, and every key
+-- added is a key a typo can hide in. Two functions, each strict about its own
+-- half, is the smaller blast radius. Folding them is a later decision that
+-- needs a reason.
+
+create schema if not exists percolate;
+
+create or replace function percolate.apply_package(p_manifest jsonb)
+returns jsonb language plpgsql security definer
+set search_path = pg_catalog, public as $$
+declare
+    v_name    text := p_manifest->>'name';
+    v_known   text[] := array['name','version','description','requires',
+                              'entity_types','relations','sources',
+                              'servers','skills','agents','workflows','extractors'];
+    v_unknown text;
+    v_e       jsonb;
+    v_plugin  jsonb;
+    v_out     jsonb := '{}'::jsonb;
+    v_n       int;
+    v_req     text;
+begin
+    if v_name is null or v_name = '' then
+        raise exception 'a package manifest needs a name';
+    end if;
+
+    -- THE SAME GUARD, for the same reason. A key this function does not read
+    -- is a mistake rather than an extension, and on a function that prunes it
+    -- is a dangerous one.
+    select string_agg(k, ', ') into v_unknown
+      from jsonb_object_keys(p_manifest) k
+     where k <> all(v_known);
+    if v_unknown is not null then
+        raise exception 'package %: unknown manifest key(s): %', v_name, v_unknown
+        using hint = 'A manifest PRUNES what it does not declare, so a misspelt '
+                     'key removes what the correct one installed. Known keys: '
+                     || array_to_string(v_known, ', ');
+    end if;
+
+    -- REQUIRES, checked before anything opens. brief.md §7: without this a
+    -- manifest applied to an older database fails at the first missing
+    -- function, with an error naming the function rather than the requirement.
+    v_req := p_manifest->>'requires';
+    if v_req is not null then
+        declare v_min text := regexp_replace(v_req, '^[^0-9]*', '');
+               v_have text := (select extversion from pg_extension where extname='percolate');
+        begin
+            if string_to_array(v_have,'.')::int[] < string_to_array(v_min,'.')::int[] then
+                raise exception 'package % requires percolate >= %, this database is %',
+                    v_name, v_min, v_have;
+            end if;
+        end;
+    end if;
+
+    -- 1. VOCABULARY FIRST. A source cannot write a node before its entity type
+    --    exists, and aiq.relation_types refuses an unlisted triple at write.
+    v_n := 0;
+    for v_e in select * from jsonb_array_elements(coalesce(p_manifest->'entity_types','[]'::jsonb))
+    loop
+        -- THE TABLE HAS TO EXIST, and saying so here is the difference between
+        -- a requirement and a stack trace. A manifest declares entity types
+        -- over tables it does not create -- storage belongs to whatever
+        -- produces the rows, which for now is the package's worker image --
+        -- and without this check the first missing one dies inside a generated
+        -- trigger with `schema "pkg_dev" does not exist`, four frames down and
+        -- naming neither the package nor the section.
+        if to_regclass(v_e->>'table') is null then
+            raise exception 'package %: entity type % declares table %, which does not exist',
+                v_name, v_e->>'name', v_e->>'table'
+            using hint = 'A package does not create its own storage: the worker '
+                         'image that produces the rows owns the DDL, and it runs '
+                         'before the manifest is applied. See specs/packages §3.';
+        end if;
+        perform aiq.register_entity_table(
+            p_entity_type  => v_e->>'name',
+            p_source_table => v_e->>'table',
+            p_key_expr     => v_e->>'key',
+            p_summary_expr => coalesce(v_e->>'summary', 'null'),
+            p_org_expr     => coalesce(v_e->>'org', 'null'),
+            p_include_where=> coalesce(v_e->>'where', 'true'));
+        v_n := v_n + 1;
+    end loop;
+    v_out := v_out || jsonb_build_object('entity_types', v_n);
+
+    v_n := 0;
+    for v_e in select * from jsonb_array_elements(coalesce(p_manifest->'relations','[]'::jsonb))
+    loop
+        insert into aiq.relation_types (src_type, relation, dst_type, inverse_label, description)
+        values (v_e->>0, v_e->>1, v_e->>2, v_e->>3,
+                coalesce(v_e->>4, 'declared by package ' || v_name))
+        on conflict (src_type, relation, dst_type) do update
+            set inverse_label = excluded.inverse_label;
+        v_n := v_n + 1;
+    end loop;
+    if v_n > 0 then perform aiq.register_graph_vocabulary(); end if;
+    v_out := v_out || jsonb_build_object('relations', v_n);
+
+    -- 2. SOURCES.
+    v_n := 0;
+    for v_e in select * from jsonb_array_elements(coalesce(p_manifest->'sources','[]'::jsonb))
+    loop
+        -- WHERE NOT EXISTS rather than ON CONFLICT: content.channels is unique
+        -- on (org_id, name) and a shared channel's org_id is the sentinel, so
+        -- the conflict target is real -- but the insert site convention in
+        -- world-model-ingestion is the guard, and a package should not be the
+        -- one caller that does it differently.
+        insert into content.channels (name, kind, config)
+        select v_e->>'name', coalesce(v_e->>'kind','manual'),
+               coalesce(v_e->'config','{}'::jsonb)
+        where not exists (select 1 from content.channels c
+                           where c.name = v_e->>'name'
+                             and c.org_id = rbac.shared_org_id());
+        v_n := v_n + 1;
+    end loop;
+    v_out := v_out || jsonb_build_object('sources', v_n);
+
+    -- 3. THE PLUGIN HALF, handed straight through with its own guard intact.
+    v_plugin := jsonb_build_object('name', v_name)
+             || coalesce(jsonb_build_object('version', p_manifest->>'version'), '{}'::jsonb)
+             || (case when p_manifest ? 'servers' then jsonb_build_object('tool_servers', p_manifest->'servers') else '{}'::jsonb end)
+             || (case when p_manifest ? 'skills'  then jsonb_build_object('skills',  p_manifest->'skills')  else '{}'::jsonb end)
+             || (case when p_manifest ? 'agents'  then jsonb_build_object('agents',  p_manifest->'agents')  else '{}'::jsonb end);
+    if p_manifest ? 'servers' or p_manifest ? 'skills' or p_manifest ? 'agents' then
+        v_out := v_out || jsonb_build_object('plugin', agentic.apply_plugin(v_plugin));
+    end if;
+
+    -- 4. WORKFLOWS LAST. A sql: step names a registered function and an agent:
+    --    step names an agent; the compiler lints both, so everything they name
+    --    has to exist by now.
+    v_n := 0;
+    for v_e in select * from jsonb_array_elements(coalesce(p_manifest->'workflows','[]'::jsonb))
+    loop
+        perform workflow.define_yaml(v_e->>'yaml');
+        if v_e ? 'schedule' then
+            perform workflow.schedule_workflow(
+                p_name     => (v_e->>'name') || '_sched',
+                p_workflow => v_e->>'name',
+                p_cron     => v_e->>'schedule',
+                p_overlap  => 'skip');
+        end if;
+        v_n := v_n + 1;
+    end loop;
+    v_out := v_out || jsonb_build_object('workflows', v_n);
+
+    -- EXTRACTORS ARE RECORDED, NOT RUN. brief.md §6: the image is the interim
+    -- and the section is meant to empty. Storing what a package CLAIMS to
+    -- provide is what makes "which extractors have earned promotion" a query
+    -- rather than an argument.
+    insert into agentic.plugins (name, version, description, manifest)
+    values (v_name, coalesce(p_manifest->>'version','0.0.0'),
+            p_manifest->>'description', p_manifest)
+    on conflict (name) do update
+        set version = excluded.version, description = excluded.description,
+            manifest = excluded.manifest, updated_at = now();
+
+    return v_out || jsonb_build_object('package', v_name,
+                                       'extractors', jsonb_array_length(
+                                          coalesce(p_manifest->'extractors'->'provides','[]'::jsonb)));
+end $$;
+
+comment on function percolate.apply_package(jsonb) is
+    'Install a package: vocabulary, sources, the plugin half, then workflows. '
+    'Order is forced by existing constraints, not chosen. See specs/packages.';
+
+
+-- ============================================================
+-- identity/declarations.sql
+--   what each table IS and what each nullable column's NULL MEANS -- statements about every schema above, so they can only be made after those tables exist. The mechanism they use ships first; see identity/schema.sql
+-- ============================================================
+
+-- Identity and nullability: the declarations.
+--
+-- SEPARATE FROM schema.sql, and the split is a dependency rather than taste.
+-- The mechanism (percolate.uuidv5, the two registries) ships FIRST, because
+-- shipped code in workflow-engine calls uuidv5 and a `language sql` body
+-- resolves its references when it is created. The declarations are statements
+-- ABOUT other modules' tables, so they can only be made once those tables
+-- exist -- which is last.
+--
+-- The first version had both halves in one file at the front, and seeded
+-- nothing: the proposal view it reads from was querying a catalogue in which
+-- none of the 53 tables had been created yet. It reported 54 undeclared
+-- tables and looked exactly like a policy nobody had applied.
+
+-- ------------------------------------------------------------
+-- 4. The declarations. Each one is a decision, so each carries its reason --
+--    the sentence is the product, the same way a surface.sql row's `why` is.
+-- ------------------------------------------------------------
+
+-- THE FIVE org_id DECLARATIONS ARE GONE, AND THEIR ABSENCE IS THE POINT.
+--
+-- They read `org_id NULL is a VALUE: the shared tier, visible to every
+-- tenant`, and spec.md §4 called that an honest declaration of a dishonest
+-- column: a value wearing an absence's clothes, which forced five unique
+-- indexes to be NULLS NOT DISTINCT and caused all three of the duplicate bugs
+-- §1 lists.
+--
+-- The column is NOT NULL now. The shared tier is rbac.shared_org_id(), a row
+-- in rbac.orgs with a derived, deployment-independent uuid, and org_id cannot
+-- be NULL on any of the sixteen tables that carry it. So there is no NULL left
+-- to declare a meaning for, and a row here saying otherwise would be a
+-- statement about the schema that the schema contradicts -- which is the
+-- failure mode this whole registry exists to prevent, arriving inside the
+-- registry.
+--
+-- DELETED RATHER THAN OMITTED. Dropping the five rows from the INSERT below
+-- fixes a fresh install and does nothing to a database that already ran the
+-- old version: this file is replayed on upgrade and an absent row is not a
+-- retracted one. identity/spec.md §7's fourth lesson, applied to data instead
+-- of to a default. A no-op on the fresh path.
+delete from percolate.null_means where column_name = 'org_id';
+
+-- external_id NULL is an ABSENCE: no external identity was supplied. Several
+-- rows may legitimately have none, so `nulls distinct` is correct here and
+-- `nulls not distinct` would be the bug -- two unrelated resources that merely
+-- both lack an upstream id are not the same resource.
+--
+-- The trap this leaves is in spec.md §6: register_fetched's idempotence is
+-- `on conflict (channel_id, external_id)`, which never fires for a null. The
+-- constraint is right and the FUNCTION should refuse the call.
+insert into percolate.null_means (schema_name, table_name, column_name, means, why) values
+ ('content','resources','external_id','absence','no upstream identity; many resources legitimately have none'),
+ ('workflow','runs','external_id','absence','no idempotency key was supplied by the caller'),
+
+-- Two partial indexes on agentic, both absences, and both worth a second look
+-- by whoever owns that subsystem: a null here reads as "not configured yet"
+-- rather than as a state, which is the definition of an absence, but the
+-- indexes are partial and the interaction is subtle.
+ ('agentic','agents','extracts_source','absence','an extractor with no source configured yet'),
+ ('agentic','agents','extracts_doctype','absence','an extractor with no doctype configured yet'),
+ ('agentic','messages','session_id','absence','a summary not attached to a session')
+on conflict (schema_name, table_name, column_name) do update
+  set means = excluded.means, why = excluded.why;
+
+-- Table kinds, taken from the proposal after reading all 53. The proposal was
+-- right everywhere; it is still written down rather than trusted, because the
+-- kind is a design decision and the next table's proposal may not be.
+insert into percolate.table_kinds (schema_name, table_name, kind, why)
+select schema_name, table_name, proposed_kind,
+       'reviewed against percolate.table_kind_proposal, 2026-09-06'
+from percolate.table_kind_proposal
+on conflict (schema_name, table_name) do nothing;
+
+-- ------------------------------------------------------------
+-- 5. ENFORCE THE KEY DEFAULT, on upgrades as well as fresh installs.
+--
+-- Writing `default uuidv7()` in the CREATE TABLE fixes a fresh install and
+-- does NOTHING to a database that already exists: the generated upgrade is
+-- idempotent DDL, and `create table if not exists` does not alter an existing
+-- column's default. `dev/upgrade-converges.sh` caught it -- a fresh install
+-- and an upgraded one disagreed on 25 column defaults, which is precisely the
+-- class of defect that gate exists for and precisely the class the specs
+-- alone cannot see.
+--
+-- So the fact is stated once, as a rule over the catalogue, rather than as 25
+-- ALTER statements that a 26th table would silently not join. Runs on both
+-- paths; a no-op on the one that was already right.
+do $$
+declare r record;
+begin
+    for r in
+        select k.schema_name, k.table_name
+        from percolate.table_kinds k
+        join pg_class c on c.relname = k.table_name
+        join pg_namespace n on n.oid = c.relnamespace and n.nspname = k.schema_name
+        join pg_index x on x.indrelid = c.oid and x.indisprimary
+        join pg_attribute a on a.attrelid = c.oid and a.attnum = any(x.indkey::int[])
+                           and a.attname = 'id' and a.atttypid = 'uuid'::regtype
+        join pg_attrdef d on d.adrelid = c.oid and d.adnum = a.attnum
+        where k.kind = 'entity'
+          and pg_get_expr(d.adbin, d.adrelid) ~ 'gen_random_uuid|uuidv4'
+    loop
+        execute format('alter table %I.%I alter column id set default uuidv7()',
+                       r.schema_name, r.table_name);
+        raise notice 'identity: % .% id default moved to uuidv7()',
+                     r.schema_name, r.table_name;
+    end loop;
+end $$;
 
 
 -- ============================================================

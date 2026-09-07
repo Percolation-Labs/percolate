@@ -43,7 +43,7 @@ create schema if not exists agentic;
 -- surface is this table plus agents.tools; there is no built-in tool, ever.
 -- ------------------------------------------------------------
 create table if not exists agentic.tool_servers (
-    id              uuid primary key default gen_random_uuid(),
+    id              uuid primary key default uuidv7(),
     name            text not null unique,
     kind            text not null check (kind in ('mcp', 'openapi')),
     url             text not null,
@@ -116,7 +116,7 @@ create or replace trigger trg_tool_servers_updated
 -- 2. Agents -- config rows; adding one is an insert (brief §2, §6)
 -- ------------------------------------------------------------
 create table if not exists agentic.agents (
-    id                       uuid primary key default gen_random_uuid(),
+    id                       uuid primary key default uuidv7(),
     name                     text not null unique,
     system_prompt            text not null default '',
     model                    text,
@@ -239,7 +239,7 @@ create or replace trigger trg_agents_updated
 -- carry ten copies that drift.
 -- ------------------------------------------------------------
 create table if not exists agentic.skills (
-    id              uuid primary key default gen_random_uuid(),
+    id              uuid primary key default uuidv7(),
     -- The key an agent lists and the model names. Constrained to the shape the
     -- Agent Skills spec uses, because this name is also a TOOL name on the
     -- skill gateway (plugins.md §4), and a tool name with a space in it is a
@@ -434,7 +434,7 @@ create index if not exists idx_skills_plugin on agentic.skills (plugin)
 -- 3. Sessions -- one AG-UI thread; the unit a conversation is owned by
 -- ------------------------------------------------------------
 create table if not exists agentic.sessions (
-    id             uuid primary key default gen_random_uuid(),
+    id             uuid primary key default uuidv7(),
     -- RENAMED from user_id, and the rename is the point rather than tidying.
     -- Every other owned table in the collection spells this owner_id, and
     -- rbac.scope_predicate() -- the single home of the read expression every
@@ -486,7 +486,7 @@ create or replace trigger trg_sessions_updated
 -- runs outside tenant isolation entirely.
 -- ------------------------------------------------------------
 create table if not exists agentic.runs (
-    id                      uuid primary key default gen_random_uuid(),
+    id                      uuid primary key default uuidv7(),
     session_id              uuid references agentic.sessions(id) on delete cascade,
     agent_id                uuid not null references agentic.agents(id),
     owner_id                uuid not null default rbac.current_user_id(),
@@ -537,7 +537,7 @@ create or replace trigger trg_runs_updated
 -- row per session, superseded rather than appended to (§3).
 -- ------------------------------------------------------------
 create table if not exists agentic.messages (
-    id           uuid primary key default gen_random_uuid(),
+    id           uuid primary key default uuidv7(),
     run_id       uuid references agentic.runs(id) on delete cascade,
     session_id   uuid references agentic.sessions(id) on delete cascade,
     role         text not null check (role in ('system','user','assistant',
@@ -1144,7 +1144,12 @@ begin
             -- caller gets their own org or themselves -- and `visibility` in
             -- the spec overrides it for somebody who means something else.
             coalesce((p_spec->>'owner_id')::uuid, rbac.current_user_id()),
-            (p_spec->>'org_id')::uuid,
+            -- rbac.org_or_shared(), because org_id is NOT NULL
+            -- (identity/spec.md §4) and a spec with no `org_id` key is a
+            -- genuine absence: the operator did not say. The shared tier is
+            -- what "did not say" has always meant here, so it is now written
+            -- down instead of arriving as a null.
+            rbac.org_or_shared((p_spec->>'org_id')::uuid),
             coalesce(p_spec->>'visibility',
                      rbac.default_visibility((p_spec->>'org_id')::uuid)))
     -- AN OMITTED KEY MEANS "LEAVE IT ALONE", NOT "SET IT TO THE DEFAULT".
@@ -1268,7 +1273,12 @@ begin
             -- default with a null owner writes a row its own author cannot
             -- select. rbac.default_visibility() states the rule once.
             coalesce((p_spec->>'owner_id')::uuid, rbac.current_user_id()),
-            (p_spec->>'org_id')::uuid,
+            -- rbac.org_or_shared(), because org_id is NOT NULL
+            -- (identity/spec.md §4) and a spec with no `org_id` key is a
+            -- genuine absence: the operator did not say. The shared tier is
+            -- what "did not say" has always meant here, so it is now written
+            -- down instead of arriving as a null.
+            rbac.org_or_shared((p_spec->>'org_id')::uuid),
             coalesce(p_spec->>'visibility',
                      rbac.default_visibility((p_spec->>'org_id')::uuid)))
     -- Same rule as upsert_agent, and it reached every column here for the
@@ -1367,7 +1377,12 @@ begin
             -- default with a null owner writes a row its own author cannot
             -- select. rbac.default_visibility() states the rule once.
             coalesce((p_spec->>'owner_id')::uuid, rbac.current_user_id()),
-            (p_spec->>'org_id')::uuid,
+            -- rbac.org_or_shared(), because org_id is NOT NULL
+            -- (identity/spec.md §4) and a spec with no `org_id` key is a
+            -- genuine absence: the operator did not say. The shared tier is
+            -- what "did not say" has always meant here, so it is now written
+            -- down instead of arriving as a null.
+            rbac.org_or_shared((p_spec->>'org_id')::uuid),
             coalesce(p_spec->>'visibility',
                      rbac.default_visibility((p_spec->>'org_id')::uuid)))
     on conflict (name) do update
@@ -1663,7 +1678,7 @@ begin
             -- no request identity and is deployment configuration, which is
             -- the case rbac.default_visibility() answers `public`.
             coalesce((p_manifest->>'owner_id')::uuid, rbac.current_user_id()),
-            (p_manifest->>'org_id')::uuid,
+            rbac.org_or_shared((p_manifest->>'org_id')::uuid),
             coalesce(p_manifest->>'visibility',
                      rbac.default_visibility((p_manifest->>'org_id')::uuid)))
     on conflict (name) do update

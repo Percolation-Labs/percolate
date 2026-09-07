@@ -53,7 +53,7 @@ begin
     end if;
     -- ...and the shared tier, which is a real category and not a loophole
     if (select count(*) from aiq.lookup('ACME')) <> 1 then
-        raise exception 'shared reference data (org_id is null) is not visible, '
+        raise exception 'shared reference data (org_id = rbac.shared_org_id()) is not visible, '
                         'so every tenant would need its own copy of every public '
                         'company -- which is what one identity registry is for';
     end if;

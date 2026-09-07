@@ -397,7 +397,7 @@ end $$;
 -- private company would hang a real edge on B's vertex, silently, from a
 -- process that is supposed to be handling A's upload.
 --
--- The shared tier (org_id is null) stays resolvable by everyone, because
+-- The shared tier (org_id = rbac.shared_org_id()) stays resolvable by everyone, because
 -- integration-rbac.sql calls that "a real category here, not a loophole."
 -- ---------------------------------------------------------------------
 insert into demo_t_org (name, org_id)
@@ -433,7 +433,7 @@ begin
       '{"agent":"t","org_id":"a0000000-0000-0000-0000-00000000000a"}'::jsonb);
     if (v_r->'residence'->>'pg')::int <> 1 then
         raise exception 'shared reference data stopped resolving for a tenant -- the '
-                        'org filter must admit org_id is null';
+                        'org filter must admit the shared tier (rbac.shared_org_id())';
     end if;
 end $$;
 

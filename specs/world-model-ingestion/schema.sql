@@ -30,7 +30,7 @@ create schema if not exists content;
 -- differs between them -- a push arrives as an upload, a pull is polled.
 -- ------------------------------------------------------------
 create table if not exists content.channels (
-    id            uuid primary key default gen_random_uuid(),
+    id            uuid primary key default uuidv7(),
     name          text not null,
     kind          text not null check (kind in
                       ('file_upload','http_pull','ftp_pull','feed','telegram','manual')),
@@ -47,6 +47,39 @@ create table if not exists content.channels (
     updated_at    timestamptz not null default now(),
     unique (org_id, name)
 );
+
+-- NULLS NOT DISTINCT, for the reason content.datasets already carries below.
+--
+-- A plain `unique (org_id, name)` does not constrain a SHARED channel at all:
+-- NULLs are distinct in a unique index unless it says otherwise, so
+-- `(null, 'rss')` can repeat without limit and `register_fetched` resolves the
+-- name with `limit 1` -- picking one of N, silently.
+--
+-- This file used to say the sibling "answers it differently (WHERE NOT EXISTS
+-- at each insert site)". That was a real decision and it put the guarantee one
+-- layer above where it can be refused. It held for as long as every insert
+-- site remembered: the first NEW caller (applications/percolate-self-model)
+-- used `on conflict do nothing`, which is the ordinary idiom and finds no
+-- conflict here, and created FIVE identical channels in one session before
+-- anything noticed.
+--
+-- Drop-then-add rather than inline, so an installation that already created
+-- this table picks the change up on the next apply.
+-- NULLS NOT DISTINCT IS A NO-OP NOW, AND IS KEPT DELIBERATELY.
+--
+-- It was the whole constraint while `org_id is null` meant the shared tier:
+-- under the default NULLS DISTINCT this unique index would have policed every
+-- tenant's channel names and none of the shared ones -- the tier more than one
+-- writer touches. identity/spec.md §4 removed the premise: org_id is NOT NULL
+-- (rbac.adopt_shared_org), the shared tier is rbac.shared_org_id(), and the
+-- flag now decides nothing because there are no NULLs in this index. Left in
+-- place because dropping it rebuilds a unique index on every deployment to
+-- change nothing; written down because a reader who finds it with no note
+-- cannot tell that it stopped mattering.
+alter table content.channels drop constraint if exists channels_org_id_name_key;
+alter table content.channels add constraint channels_org_id_name_key
+    unique nulls not distinct (org_id, name);
+
 create index if not exists idx_channels_pollable on content.channels (last_polled_at)
     where enabled and poll_interval is not null;
 
@@ -66,7 +99,7 @@ create or replace trigger trg_channels_touch before update on content.channels
 -- through a resource, which is scoped. See integration.sql.
 -- ------------------------------------------------------------
 create table if not exists content.files (
-    id           uuid primary key default gen_random_uuid(),
+    id           uuid primary key default uuidv7(),
     checksum     text not null unique,      -- sha256 of the content; the dedup key
     bucket       text not null,
     object_key   text not null,
@@ -84,7 +117,7 @@ create table if not exists content.files (
 -- and optionally a file (if it has bytes -- a scraped JSON record may not).
 -- ------------------------------------------------------------
 create table if not exists content.resources (
-    id           uuid primary key default gen_random_uuid(),
+    id           uuid primary key default uuidv7(),
     channel_id   uuid not null references content.channels(id),
     file_id      uuid references content.files(id),
     -- Provider's own identifier, used to avoid re-ingesting the same item on
@@ -154,7 +187,7 @@ create or replace trigger trg_resources_touch before update on content.resources
 -- this schema; integration.sql adds the reconciliation instead.
 -- ------------------------------------------------------------
 create table if not exists content.resource_chunks (
-    id           uuid primary key default gen_random_uuid(),
+    id           uuid primary key default uuidv7(),
     resource_id  uuid not null references content.resources(id) on delete cascade,
     ordinal      int not null,
     content      text not null,
@@ -288,9 +321,10 @@ create or replace function content.register_upload(
     -- Defaulted through rbac.default_visibility() rather than to a constant,
     -- and the choice is the whole of §4b's fix rather than a convenience. An
     -- upload named an org and got a row every OTHER org could read, because
-    -- `org_id is null` was the everyone tier and this argument defaulted into
-    -- it. Now: name an org and the row is that org's; name none and the row is
-    -- yours. Neither default publishes anything to another tenant, and
+    -- the shared tier was spelled `org_id is null` and this argument defaulted
+    -- into it. Now: name an org and the row is that org's; name none and the
+    -- row is yours -- on the shared tier, but `private`, which is a different
+    -- statement from the one that leaked. Neither default publishes anything to another tenant, and
     -- publishing is `public`, spelled out by whoever meant it.
     p_visibility  text default null
 ) returns uuid as $$
@@ -309,9 +343,18 @@ begin
     -- `select into` with no order takes whichever the plan produced. The
     -- org-specific channel wins; the public one is the fallback it was meant
     -- to be.
+    --
+    -- Written as an IN over two values rather than `(org_id is not distinct
+    -- from p_org_id or org_id is null)`, which said the same thing in
+    -- three-valued logic. p_org_id is still nullable -- it is an omitted
+    -- argument, a genuine absence -- so rbac.org_or_shared() reads that
+    -- omission as the shared tier, and both elements of the IN collapse to
+    -- rbac.shared_org_id(): an unscoped caller matches the shared channel and
+    -- nothing else, which is what the old form did too.
     select id into v_channel from content.channels
-    where name = p_channel and (org_id is not distinct from p_org_id or org_id is null)
-    order by (org_id is not distinct from p_org_id) desc
+    where name = p_channel
+      and org_id in (rbac.org_or_shared(p_org_id), rbac.shared_org_id())
+    order by (org_id = rbac.org_or_shared(p_org_id)) desc
     limit 1;
     if v_channel is null then
         raise exception 'no channel named % for this org -- create one first', p_channel;
@@ -331,9 +374,16 @@ begin
     -- a service connection with no request identity leaves it null, and such a
     -- row is reachable only through its org or by being public, which is the
     -- correct reading of "nobody in particular uploaded this".
+    --
+    -- rbac.org_or_shared(p_org_id), because org_id is NOT NULL on this table
+    -- and p_org_id is an OPTIONAL ARGUMENT: an upload that names no org is the
+    -- caller saying nothing, and the row that used to carry a NULL now carries
+    -- the shared org. Nothing about who may read it changes -- that is
+    -- v_vis's job, and it is `private` for a caller with an identity, exactly
+    -- as it was before.
     insert into content.resources (channel_id, file_id, uri, title, org_id,
                                    owner_id, visibility, metadata, external_id)
-    values (v_channel, v_file, p_uri, p_title, p_org_id,
+    values (v_channel, v_file, p_uri, p_title, rbac.org_or_shared(p_org_id),
             rbac.current_user_id(), v_vis, p_metadata, p_external_id)
     on conflict (channel_id, external_id) do update set updated_at = now()
     returning id into v_res;
@@ -382,15 +432,17 @@ begin
     perform content.assert_org_write(p_org_id, 'register content');
 
     select id into v_channel from content.channels
-    where name = p_channel and (org_id is not distinct from p_org_id or org_id is null)
-    order by (org_id is not distinct from p_org_id) desc
+    where name = p_channel
+      and org_id in (rbac.org_or_shared(p_org_id), rbac.shared_org_id())
+    order by (org_id = rbac.org_or_shared(p_org_id)) desc
     limit 1;
     if v_channel is null then
         raise exception 'no channel named % for this org', p_channel;
     end if;
 
     insert into content.resources (channel_id, external_id, uri, title, org_id, metadata)
-    values (v_channel, p_external_id, p_uri, p_title, p_org_id, p_metadata)
+    values (v_channel, p_external_id, p_uri, p_title,
+            rbac.org_or_shared(p_org_id), p_metadata)
     on conflict (channel_id, external_id) do nothing
     returning id into v_res;
 
@@ -419,14 +471,17 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- Returns nothing when the caller may not see it, rather than raising:
 -- distinguishing "not yours" from "does not exist" tells an unauthorized
 -- caller that the resource exists.
-create or replace function content.resolve_file(p_resource_id uuid)
-returns table(bucket text, object_key text, content_type text, size_bytes bigint) as $$
-    select f.bucket, f.object_key, f.content_type, f.size_bytes
-    from content.resources r
-    join content.files f on f.id = r.file_id
-    where r.id = p_resource_id
-      and rbac.may_access_org(r.org_id);
-$$ language sql stable security definer set search_path = pg_catalog, public;
+-- content.resolve_file() IS DEFINED IN integration.sql, NOT HERE.
+--
+-- It gates on rbac.may_read(owner_id, org_id, visibility), and those three
+-- columns do not exist on content.resources until rbac.add_scope_columns()
+-- adds them -- which happens in integration.sql. A `language sql` body
+-- resolves its column references when it is CREATED, so defining it here
+-- fails the install outright with `column r.owner_id does not exist`, from
+-- inside a 22,000-line generated script.
+--
+-- Moved rather than duplicated: two definitions of one function is the
+-- one-home-per-fact violation this collection keeps paying for.
 
 -- Record chunks produced by the ingestion workflow, and flip the resource
 -- ready. One call rather than N inserts plus an update, so a resource is never
@@ -783,7 +838,7 @@ $$ language sql stable security definer set search_path = pg_catalog, public;
 -- glob, and a row saying what the columns were. That is enough to query and
 -- honest about what it is not (ingestion.md §6 names what breaks first).
 create table if not exists content.datasets (
-    id           uuid primary key default gen_random_uuid(),
+    id           uuid primary key default uuidv7(),
     -- The logical table. Unique per org, so two tenants may both have `sales`.
     name         text not null,
     org_id       uuid,
@@ -813,14 +868,19 @@ create table if not exists content.datasets (
 -- caught by 02-ingestion.sql §5 with "more than one row returned by a subquery",
 -- which is a better error than the silent one it would have been in production.
 --
--- content.channels has the same shape and answers it differently (WHERE NOT
--- EXISTS at each insert site, §5b of integration.sql). Here the constraint is
--- the right place, because the upsert is the API: a caller appending to a
--- dataset must not have to know whether it already exists.
+-- content.channels had the same shape and answered it differently (WHERE NOT
+-- EXISTS at each insert site, §5b of integration.sql). It now carries the same
+-- constraint, because the guard held only for as long as every insert site
+-- remembered it and the first new caller did not -- see the note beside that
+-- table. Here the constraint was always the right place, because the upsert is
+-- the API: a caller appending to a dataset must not have to know whether it
+-- already exists.
 --
 -- Drop-then-add rather than inline, so an installation that already created
 -- this table picks the change up on the next apply -- the same discipline
 -- resources_status_check above is written with.
+-- NULLS NOT DISTINCT: a no-op on a NOT NULL column, kept for the reason
+-- channels_org_id_name_key above states in full.
 alter table content.datasets drop constraint if exists datasets_org_name_key;
 alter table content.datasets add constraint datasets_org_name_key
     unique nulls not distinct (org_id, name);
@@ -936,6 +996,10 @@ returns text as $$
     from content.datasets d
     where d.name = p_name
       and rbac.may_read(d.owner_id, d.org_id, d.visibility)
-    order by d.org_id nulls last
+    -- The tenant's own dataset beats the shared one of the same name, which is
+    -- what `nulls last` meant while the shared tier was a NULL. On a NOT NULL
+    -- column that ordering is meaningless -- it would sort by the raw uuid --
+    -- so the rule is stated as what it always was: shared last.
+    order by (d.org_id = rbac.shared_org_id())
     limit 1;
 $$ language sql stable;

@@ -205,7 +205,7 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 
 -- 3a. Candidates: an entity the extractor named that resolved to nothing.
 create table if not exists aiq.soft_nodes (
-    id               uuid primary key default gen_random_uuid(),
+    id               uuid primary key default uuidv7(),
     -- RENAMED from `kind`, and the rename is the point rather than tidying.
     -- graph-index.md §4.3(c) and (d) have called this `claimed_kind` in prose
     -- since it was designed, and the column did not -- while the ADJACENT table
@@ -287,6 +287,15 @@ end $$;
 -- what makes the column exist under this name, and `create index if not exists`
 -- is matched on the index NAME, so it would neither fail nor fix an index built
 -- over the old column. (It does not have to: a rename carries its indexes.)
+-- NULLS NOT DISTINCT IS A NO-OP HERE AND IS KEPT DELIBERATELY. It was
+-- load-bearing while `org_id is null` meant the shared tier: without it this
+-- index constrained every tenant except the shared one. org_id is NOT NULL now
+-- (identity/spec.md §4, rbac.adopt_shared_org), so there are no NULLs for the
+-- flag to rule on. Left in place rather than dropped because removing it means
+-- rebuilding a unique index on every deployment to change nothing -- and
+-- written down rather than left silent, because a reader who finds the flag
+-- with no note has to derive for themselves whether it still matters. It does
+-- not, unless somebody makes org_id nullable again.
 create unique index if not exists idx_soft_nodes_key
     on aiq.soft_nodes (org_id, claimed_kind, key) nulls not distinct;
 create index if not exists idx_soft_nodes_unresolved
@@ -300,7 +309,7 @@ create index if not exists idx_soft_nodes_unresolved
 -- thing to be a Postgres table. A dataset row is hydrated by a different fetch
 -- (DuckDB over content.dataset_uri) and is otherwise an ordinary vertex.
 create table if not exists aiq.lake_nodes (
-    id            uuid primary key default gen_random_uuid(),
+    id            uuid primary key default uuidv7(),
     dataset       text not null,        -- content.datasets.name
     row_key       text not null,        -- the dataset's business key for the row
     label         text,
@@ -316,6 +325,8 @@ create table if not exists aiq.lake_nodes (
     first_seen_at timestamptz not null default now(),
     last_seen_at  timestamptz not null default now()
 );
+-- NULLS NOT DISTINCT: a no-op on a NOT NULL column, kept for the reason
+-- idx_soft_nodes_key above states in full.
 create unique index if not exists idx_lake_nodes_key
     on aiq.lake_nodes (org_id, dataset, row_key) nulls not distinct;
 
@@ -440,8 +451,9 @@ $$ language sql immutable;
 --
 -- Found by dev/tests/query/06-graph-tenancy.sql §5 rejecting these functions
 -- as definer-and-user-reachable; the grant was the surface bug, and this was
--- the one underneath it. `org_id is null` is the shared reference tier, which
--- integration-rbac.sql calls "a real category here, not a loophole."
+-- the one underneath it. `org_id = rbac.shared_org_id()` is the shared
+-- reference tier, which integration-rbac.sql calls "a real category here, not
+-- a loophole."
 create or replace function aiq.resolve_ref(
     p_entity_type text, p_name text, p_fuzzy boolean default false,
     p_threshold real default 0.45, p_org_id uuid default null
@@ -451,10 +463,18 @@ declare
     v_ids  uuid[];
 begin
     -- 1. exact canonical, scoped to the type AND the caller's tenancy.
+    --
+    -- `n.org_id in (rbac.shared_org_id(), rbac.org_or_shared(p_org_id))` is
+    -- what `(org_id is null or org_id is not distinct from p_org_id)` used to
+    -- say: the shared tier, plus the caller's own org. It is now an ordinary
+    -- IN over a NOT NULL column -- no three-valued logic, no `is not distinct
+    -- from` to read twice -- and when p_org_id is itself omitted the two
+    -- elements collapse to the same value and the predicate is the shared tier
+    -- alone, which is exactly what an unscoped call should resolve against.
     select array_agg(distinct n.id) into v_ids
     from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
     where k.key = v_norm and k.kind = 'canonical' and n.entity_type = p_entity_type
-      and (n.org_id is null or n.org_id is not distinct from p_org_id);
+      and n.org_id in (rbac.shared_org_id(), rbac.org_or_shared(p_org_id));
     if array_length(v_ids,1) = 1 then return v_ids[1]; end if;
     if array_length(v_ids,1) > 1 then return null; end if;  -- ambiguous: a miss
 
@@ -462,7 +482,7 @@ begin
     select array_agg(distinct n.id) into v_ids
     from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
     where k.key = v_norm and k.kind in ('short','alias') and n.entity_type = p_entity_type
-      and (n.org_id is null or n.org_id is not distinct from p_org_id);
+      and n.org_id in (rbac.shared_org_id(), rbac.org_or_shared(p_org_id));
     if array_length(v_ids,1) = 1 then return v_ids[1]; end if;
     if array_length(v_ids,1) > 1 then return null; end if;
 
@@ -472,7 +492,7 @@ begin
             select n.id, max(similarity(k.key, v_norm)) as sim
             from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
             where n.entity_type = p_entity_type and k.key % v_norm
-              and (n.org_id is null or n.org_id is not distinct from p_org_id)
+              and n.org_id in (rbac.shared_org_id(), rbac.org_or_shared(p_org_id))
             group by n.id having max(similarity(k.key, v_norm)) >= p_threshold
             order by 2 desc limit 2) d;
         -- Exactly one candidate above threshold, or it is a miss. AN AMBIGUOUS
@@ -504,7 +524,14 @@ declare
     v_n       int;
     v_ids     uuid[] := '{}';          -- ordinal -> node id
     v_res     text[] := '{}';          -- ordinal -> residence, for the receipt
-    v_org     uuid   := (p_context->>'org_id')::uuid;
+    -- COALESCED AT THE BOUNDARY, once, rather than at the four sites that
+    -- write it. p_context is caller-supplied jsonb: a context with no `org_id`
+    -- key means the extraction was not on any tenant's behalf, which is the
+    -- shared tier -- and aiq.nodes/soft_nodes/lake_nodes/edges.org_id is NOT
+    -- NULL (identity/spec.md §4). This is the seam where an ABSENCE (a key
+    -- nobody set) legitimately becomes a VALUE (the shared org), and it is a
+    -- single line precisely so that it is one decision rather than four.
+    v_org     uuid   := rbac.org_or_shared((p_context->>'org_id')::uuid);
     -- FUZZY IS OFF BY DEFAULT, and that default was inverted after running it.
     --
     -- The obvious reading -- "resolve_ref implements the cascade, and the
@@ -982,6 +1009,13 @@ begin
            and x.dst_id = e.dst_id and x.relation = e.relation
         returning 1)
     select count(*) into v_c from merged;  v_merged := v_merged + v_c;
+    -- DELETED, not retracted, and the distinction matters now that
+    -- `ai-query-layer/schema.sql` makes retraction the contract for removal.
+    -- A merge is the one legitimate reason to delete an edge: the fact is not
+    -- ceasing to hold, it is moving to the node that now carries the identity,
+    -- and the surviving edge on the target keeps the merged provenance. A
+    -- retracted duplicate would assert that the relationship stopped being
+    -- true, which is exactly what did not happen.
     delete from aiq.edges where src_id = v_cand;
 
     with moved as (
@@ -1126,9 +1160,9 @@ grant select on aiq.soft_nodes, aiq.lake_nodes, aiq.graph_vocabulary to authenti
 -- entity NAMES before resolution, which is the most identifying thing in the
 -- pipeline.
 --
--- Same predicate as aiq.nodes' own policy, and the same reason for the null
--- branch: `org_id is null` is shared reference data, which §4.4 says is the
--- normal state. `graph_vocabulary` stays policy-free deliberately -- it is the
+-- Same predicate as aiq.nodes' own policy, and the same reason for the shared
+-- branch: `org_id = rbac.shared_org_id()` is shared reference data, which §4.4
+-- says is the normal state. `graph_vocabulary` stays policy-free deliberately -- it is the
 -- relation catalogue, the same shared-config tier as aiq.relation_types.
 --
 -- Nothing on the write path changes: the worker reaches these through

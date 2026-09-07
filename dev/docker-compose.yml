@@ -1,21 +1,51 @@
+# The stack this TREE builds. Two of them run from this one file -- `dev` and
+# `test` -- and they differ only in the variables `dev/stacks.sh` exports:
+# project name, container prefix, database name and a block of eight ports.
+# Nothing here is shared between them, which is the whole point: a peer
+# restarting dev must not be able to reach into test.
+#
+#     dev/stacks.sh up dev       # this file, as p8-dev,  on 5610-5617
+#     dev/stacks.sh up test      # this file, as p8-test, on 5620-5627
+#     docker compose up -d       # the same as `stacks.sh up dev`
+#
+# The last line is why every default below is the DEV instance's value: there
+# is one way to describe this stack, not a file plus a wrapper that disagree
+# with it.
+#
+# The OTHER two instances -- `release` and `dogfood` -- are deliberately NOT in
+# this file and cannot be built from this tree. They run
+# get-percolate/compose/docker-compose.yml, fetched from the URL the install
+# guide tells a reader to curl, so that "what does a user actually get" has an
+# answer that is not this repository grading its own homework.
+name: p8-dev
+
 services:
   db:
     # Pulled, not built. The image carries PG19 + pgvector + both Percolate
-    # extensions, and init/ installs them at first start -- so `docker compose
-    # up` is the whole install. There is no Dockerfile in your path and no
+    # extensions and installs them itself at first start, from the hook baked
+    # into it -- so `docker compose up` is the whole install, and it is the
+    # SAME install a user gets. There is no Dockerfile in your path and no
     # install script to run.
     #
     # `:19` is MUTABLE and that is the choice here, where `.github/workflows/
     # check.yml` pins to `:19-<published>` for the opposite reason. The
     # difference is what each is for: CI is a measurement and must not have the
     # thing under it move mid-run, while this stack is a workbench whose job is
-    # to be current -- and `dev/reload.sh` overwrites the extension SQL from
-    # this tree the moment you are testing anything, so the image supplies the
-    # parser and the roles rather than the schema. If you need a fixed one,
-    # `image: percolationlabs/percolate-postgres:19-0.1.2` is the same image CI
+    # to be current -- and `dev/stacks.sh reload` overwrites the extension SQL
+    # from this tree the moment you are testing anything, so the image supplies
+    # the parser and the roles rather than the schema. If you need a fixed one,
+    # `image: percolationlabs/percolate-postgres:19-0.1.6` is the same image CI
     # would pin, and dev/currency.sh will tell you what you actually have.
+    #
+    # The `release` and `dogfood` instances pin, because a moving tag there
+    # would make them another copy of dev wearing a different name.
     image: percolationlabs/percolate-postgres:19
-    container_name: p8-experiment-pg19
+    # NAMED, and parameterised, because every other script in this directory
+    # addresses this container by name -- `docker exec <container> psql`, not a
+    # DSN. Compose's generated name (p8-dev-db-1) would work too; a fixed one
+    # means `dev/check.sh` and `dev/reload.sh` need no lookup step, and putting
+    # the instance in the name means two instances cannot collide on it.
+    container_name: ${P8_STACK:-p8-dev}-db
     # pg_cron runs as a background worker, so it must be preloaded at startup
     # -- there is no CREATE EXTENSION that can add it later. cron.database_name
     # is which database its worker connects to, and it can only be one; leaving
@@ -28,7 +58,7 @@ services:
       - -c
       - shared_preload_libraries=pg_cron
       - -c
-      - cron.database_name=p8experiment
+      - cron.database_name=${P8_DB:-p8dev}
     # /dev/shm, because Docker's default for it is 64 MB and Postgres's
     # default `maintenance_work_mem` is ALSO 64 MB -- and pgvector sizes a
     # parallel HNSW build's shared-memory segment from the latter. The two
@@ -50,25 +80,69 @@ services:
     environment:
       POSTGRES_USER: p8
       POSTGRES_PASSWORD: p8
-      POSTGRES_DB: p8experiment
+      POSTGRES_DB: ${P8_DB:-p8dev}
+      # The two service roles the image's bootstrap creates. Passed explicitly,
+      # with the same values the services below connect with, because the image
+      # otherwise warns -- correctly -- that it is using the defaults printed in
+      # its own source. Test-only; never reuse them anywhere reachable.
+      P8_AUTHENTICATOR_PASSWORD: authpass
+      P8_WORKER_PASSWORD: workerpass
     ports:
-      - "5499:5432"
+      - "${P8_PG_PORT:-5610}:5432"
     volumes:
-      - ./init:/docker-entrypoint-initdb.d:ro
+      # NOTHING IS MOUNTED AT /docker-entrypoint-initdb.d, and that is a
+      # deletion rather than an omission. This file used to bind-mount ./init
+      # over that directory, which REPLACES it -- so the image's own
+      # `image-init/00-percolate.sh` never ran here, and `init/00-extensions.sql`,
+      # `init/01-percolate.sql` and `init/07-build-stamp.sh` existed to restate
+      # what it does. One bootstrap, two homes, and the dev stack was the one
+      # place that did not exercise the shipped path.
+      #
+      # It also broke a from-zero start outright. initdb runs whatever is in
+      # that directory against the extension the IMAGE ships, and `:19` is a
+      # release or two behind this tree by design -- so `init/04-graph-sample.sql`,
+      # a TREE fixture, died with
+      #
+      #     ERROR: function rbac.org_or_shared(uuid) does not exist
+      #
+      # the moment a branch added a function to it. The container exits 3 and
+      # every service depending on it fails to start: a whole stack refusing to
+      # boot over a sample row.
+      #
+      # So the image bootstraps itself exactly as it does for a user, and the
+      # TREE's schema and samples arrive afterwards through `dev/reload.sh` --
+      # install this tree's extension FIRST, then apply init/02..09 -- which is
+      # what `dev/ci-database.sh` has always done and what `dev/stacks.sh up`
+      # now does for any new database. The init/ files are still there and are
+      # still used by `dev/release-rehearsal.sh`, which mounts the directory at
+      # a LOCALLY BUILT image, where the versions do match.
+      #
+      # MOUNTED AT /var/lib/postgresql, NOT .../data, and on 18+ that is the
+      # difference between a stack that starts and one that restart-loops --
+      # the postgres images moved PGDATA to a version-specific subdirectory and
+      # refuse to start when they find anything at the old flat path. The
+      # published compose file records the same finding at greater length.
+      #
+      # THE VOLUME IS NAMED, so it is namespaced by the compose project:
+      # p8-dev_pgdata and p8-test_pgdata are different volumes and neither is
+      # reachable from the other's stack. Before this the database lived in the
+      # container's own filesystem, which is why `docker compose up --force-
+      # recreate` in the wrong window has already cost this repository a day.
+      - pgdata:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U p8 -d p8experiment"]
+      test: ["CMD-SHELL", "pg_isready -U p8 -d ${P8_DB:-p8dev}"]
       interval: 3s
       timeout: 3s
       retries: 20
 
   postgrest:
     image: postgrest/postgrest:v12.2.8
-    container_name: p8-experiment-postgrest
+    container_name: ${P8_STACK:-p8-dev}-postgrest
     depends_on:
       db:
         condition: service_healthy
     environment:
-      PGRST_DB_URI: postgres://authenticator:authpass@db:5432/p8experiment
+      PGRST_DB_URI: postgres://authenticator:authpass@db:5432/${P8_DB:-p8dev}
       # `agentic` is in this list because the agent runtime reads its own
       # agents and tool servers through these views like any other client
       # (brief.md §10.2) -- omitting it left the whole conversation plane
@@ -79,17 +153,18 @@ services:
       PGRST_DB_ANON_ROLE: web_anon
       # Test-only secret -- never reuse in a real deployment.
       PGRST_JWT_SECRET: experiment-only-jwt-secret-not-for-real-use-0123456789
-      PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:3099
-    # 3099, not 3000. The published compose file in get-percolate binds the
-    # canonical ports (5432, 3000, 8080, 8081, 9000/9001) because those are
-    # what every worked example in the docs types, and a newcomer should
-    # never have to think about a port. So THIS stack is the one that moves:
-    # `db` already did (5499), and the rest follow the same x99 convention,
-    # so a cold-start check of the shipped file can run beside dev with no
-    # flags on either side. Container-internal URLs below are unchanged --
-    # inside the compose network postgrest is still :3000.
+      PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:${P8_REST_PORT:-5611}
+    # NOT 3000, and no longer 3099. Every published port in this file comes out
+    # of ONE eight-port block per instance -- dev 5610-5617, test 5620-5627 --
+    # because the alternative is what this machine actually had: nineteen
+    # databases across ten containers on ports allocated one at a time, where
+    # the only way to find out what a port served was to connect to it. The
+    # canonical ports (5432, 3000, 8080, 8081, 9000/9001) stay free for the
+    # published compose file, which is what every worked example in the docs
+    # types. Container-internal URLs are unchanged: inside the compose network
+    # postgrest is still :3000.
     ports:
-      - "3099:3000"
+      - "${P8_REST_PORT:-5611}:3000"
 
   # ---------------------------------------------------------------------
   # percolate-core, pulled from Docker Hub. One image, three entrypoints --
@@ -107,13 +182,13 @@ services:
   # ---------------------------------------------------------------------
   worker:
     image: percolationlabs/percolate-core:0.1.6
-    container_name: p8-worker
+    container_name: ${P8_STACK:-p8-dev}-worker
     depends_on:
       db:
         condition: service_healthy
     command: ["worker", "--queue", "http"]
     environment:
-      P8_DSN: postgres://worker:workerpass@db:5432/p8experiment
+      P8_DSN: postgres://worker:workerpass@db:5432/${P8_DB:-p8dev}
       P8_WORKER_ID: worker-1
       # Credentials referenced by http_call tasks are resolved from HERE, by
       # name. The database stores only the reference, so a dump of
@@ -122,7 +197,7 @@ services:
 
   content:
     image: percolationlabs/percolate-core:0.1.6
-    container_name: p8-content
+    container_name: ${P8_STACK:-p8-dev}-content
     depends_on:
       db:
         condition: service_healthy
@@ -134,14 +209,14 @@ services:
       # its own and can SET ROLE into web_anon or authenticated per request.
       # A service connecting as a role that CANNOT switch would run every query
       # as itself, ignoring the caller identity it just installed.
-      P8_DSN: postgres://authenticator:authpass@db:5432/p8experiment
+      P8_DSN: postgres://authenticator:authpass@db:5432/${P8_DB:-p8dev}
       P8_S3_ENDPOINT: http://minio:9000
       P8_S3_KEY: p8admin
       P8_S3_SECRET: p8password
       P8_BUCKET: p8-content
       P8_JWT_SECRET: experiment-only-jwt-secret-not-for-real-use-0123456789
     ports:
-      - "8199:8081"
+      - "${P8_CONTENT_PORT:-5613}:8081"
 
   # ---------------------------------------------------------------------
   # The one MCP tool this collection ships: `query`, over the p8ql dialect.
@@ -154,7 +229,7 @@ services:
   # ---------------------------------------------------------------------
   query-mcp:
     image: python:3.12-alpine
-    container_name: p8-query-mcp
+    container_name: ${P8_STACK:-p8-dev}-query-mcp
     depends_on:
       db:
         condition: service_healthy
@@ -162,7 +237,7 @@ services:
     volumes:
       - ../specs/agentic/reference/query_mcp.py:/query_mcp.py:ro
     ports:
-      - "8090:8090"
+      - "${P8_MCP_PORT:-5616}:8090"
     restart: unless-stopped
 
   # Fault injection for workflow tests. Every failure this collection has hit
@@ -170,13 +245,24 @@ services:
   # not need SEC EDGAR to be having a bad day. See faultsrv/README.md.
   faultsrv:
     image: python:3.12-alpine
-    container_name: p8-faultsrv
+    container_name: ${P8_STACK:-p8-dev}-faultsrv
     command: python /app.py
     volumes:
       - ./faultsrv/app.py:/app.py:ro
     ports:
-      - "8099:8099"
+      - "${P8_FAULT_PORT:-5617}:8099"
     restart: unless-stopped
+    # THE ALIAS IS LOAD-BEARING. Around forty committed fixtures --
+    # tests/evals/scenarios.yaml, tests/evals/fixtures.sql, faultsrv/example.yaml
+    # -- name `http://p8-faultsrv:8099/...` as the URL a workflow step calls,
+    # and that name used to be this container's `container_name`. Instances
+    # need distinct container names, so the name the fixtures use is pinned as
+    # a network ALIAS instead: each instance has its own network, so p8-dev and
+    # p8-test can both answer to `p8-faultsrv` inside their own and neither can
+    # see the other's.
+    networks:
+      default:
+        aliases: [p8-faultsrv]
 
   minio:
     # PINNED, where every other third-party image here already was. `:latest`
@@ -186,16 +272,20 @@ services:
     # publishes only dated RELEASE tags, so this is its equivalent of a
     # version; move it deliberately, the way percolate-core's pin moves.
     image: minio/minio:RELEASE.2025-09-07T16-13-09Z
-    container_name: p8-minio
+    container_name: ${P8_STACK:-p8-dev}-minio
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: p8admin
       MINIO_ROOT_PASSWORD: p8password
     ports:
-      - "9099:9000"
-      - "9098:9001"
+      - "${P8_MINIO_PORT:-5614}:9000"
+      - "${P8_MINIO_CONSOLE_PORT:-5615}:9001"
     volumes:
-      - p8-minio:/data
+      # `miniodata`, the name the published compose file uses, rather than the
+      # `p8-minio` this file used to say. Compose prefixes it with the project,
+      # so the real names are p8-dev_miniodata and p8-test_miniodata.
+      - miniodata:/data
 
 volumes:
-  p8-minio:
+  pgdata:
+  miniodata:

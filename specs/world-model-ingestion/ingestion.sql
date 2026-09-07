@@ -542,7 +542,8 @@ begin
                'description', 'the default channel for POST /files',
                'ingest_workflow', 'ingest_file')
     where not exists (
-        select 1 from content.channels where name = 'uploads' and org_id is null);
+        select 1 from content.channels
+         where name = 'uploads' and org_id = rbac.shared_org_id());
 end $$;
 
 

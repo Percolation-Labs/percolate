@@ -113,7 +113,10 @@ create table if not exists workflow.deposits (
 create index if not exists idx_deposits_locus
     on workflow.deposits (locus_kind, locus, deposited_at desc);
 create index if not exists idx_deposits_time on workflow.deposits using brin (deposited_at);
-create index if not exists idx_deposits_org  on workflow.deposits (org_id) where org_id is not null;
+-- Not partial: org_id is NOT NULL (identity/spec.md §4), so `where org_id is
+-- not null` would select every row -- a partial index that is not partial,
+-- carrying a predicate the planner has to discharge for nothing.
+create index if not exists idx_deposits_org  on workflow.deposits (org_id);
 
 -- APPEND-ONLY (invariant 4), enforced by the grant AND by a trigger. The grant
 -- is the rule; the trigger is for the SECURITY DEFINER function written later

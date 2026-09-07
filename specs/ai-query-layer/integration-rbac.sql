@@ -40,10 +40,17 @@
 -- being load-bearing: a shared SEC filing is `public` because somebody chose
 -- it, and a row nobody scoped is `private` because that is the default.
 --
+-- AND THE NULL ITSELF IS GONE. identity/spec.md §4 finished the argument: a
+-- NULL may only mean unknown, so the shared tier is a ROW -- user-rbac
+-- §2b(i)'s rbac.shared_org_id() -- and org_id is NOT NULL on all sixteen
+-- tables that carry it. "org_id IS NULL -> shared" is now "org_id =
+-- rbac.shared_org_id() -> shared", which is the same sentence with nothing
+-- left for a reader to guess and nothing left for a unique index to skip.
+--
 -- "Shared reference data" is still a real category and not a loophole -- a
 -- public filing or a well-known company is legitimately global, and forcing it
 -- to be duplicated per tenant would defeat the whole point of one identity
--- registry. It is now spelled `public`.
+-- registry. It is now spelled `public`, on the shared org.
 --
 -- Membership lives in rbac, as it always claimed to. What has changed is that
 -- there is now something there to ask: rbac.org_members rather than an array
@@ -63,6 +70,21 @@ select rbac.add_scope_policy ('aiq.nodes');
 
 alter table aiq.node_keys enable row level security;
 alter table aiq.edges     enable row level security;
+
+-- THE TWO TABLES THAT CARRY org_id AND DO NOT TAKE add_scope_columns.
+--
+-- Both keep their own org_id -- node_keys because the canonical-key unique
+-- index is scoped by it, edges for authoring provenance -- and neither takes
+-- the scope columns, for the reasons written out below. That makes them the
+-- only two of the sixteen where the NOT NULL does not arrive with
+-- add_scope_columns(), so it is asked for explicitly. Two lines rather than a
+-- rule, and stated where the exception itself is stated: a catalogue sweep
+-- that quietly fixed them would hide the fact that they are exceptions.
+--
+-- identity/checks.sql asserts nobody adds a seventeenth org_id column and
+-- forgets both routes.
+select rbac.adopt_shared_org('aiq.node_keys');
+select rbac.adopt_shared_org('aiq.edges');
 
 -- node_keys INHERITS its node's visibility rather than re-deriving it from
 -- its own org_id copy. That copy exists for the canonical-key unique index
@@ -115,7 +137,7 @@ create or replace view aiq.edges_api as
   from aiq.edges;
 
 grant usage on schema aiq to api_viewer, authenticated;
-grant select on aiq.nodes, aiq.node_keys, aiq.edges to api_viewer;
+grant select on aiq.nodes, aiq.node_keys, aiq.edges, aiq.edges_current to api_viewer;
 -- rbac.current_org_ids() and the scope predicates are granted in user-rbac
 -- §9, to api_viewer and authenticated among others -- the policies above are
 -- evaluated as the view owner, so api_viewer is who must be able to run them.
@@ -145,7 +167,7 @@ grant select on aiq.nodes_api, aiq.edges_api to authenticated;
 -- The rule, generalised: views for COLUMN secrecy, RLS for ROW visibility.
 -- Reaching for a view when the problem is row-level buys nothing and costs a
 -- layer of indirection.
-grant select on aiq.nodes, aiq.node_keys, aiq.edges to authenticated;
+grant select on aiq.nodes, aiq.node_keys, aiq.edges, aiq.edges_current to authenticated;
 
 -- A PROPERTY GRAPH is its own privilege object in PG19, separate from the
 -- tables it is defined over. Granting SELECT on nodes and edges is NOT

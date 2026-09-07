@@ -52,6 +52,12 @@ done
 # Data a real user would have, so the upgrade is carrying something.
 docker exec -i "$UPGC" psql -U p8 -d percolate -v ON_ERROR_STOP=1 -q <<'SQL'
 select rbac.create_user_with_password('upgrade@ci','a long passphrase');
+
+-- AND AN ADMINISTRATOR, because the two defects this gate exists to catch live
+-- only in a database somebody has actually administered. `bootstrap_admin`
+-- marks a role `grants_all` and grants it every pair declared AT THAT MOMENT;
+-- everything the next release declares is what goes missing.
+select rbac.bootstrap_admin('upgrade@ci', 'ci_admin');
 select workflow.define_yaml($$
 name: ci_upgrade
 steps:
@@ -92,6 +98,67 @@ do \$\$ begin
                    join workflow.lifecycle_states s on s.state = r.status
                   where s.is_success)
     then raise exception 'their finished run did not survive the upgrade'; end if;
+  -- AN ADMINISTERED DATABASE STILL MEANS WHAT ADMIN MEANS.
+  --
+  -- bootstrap_admin grants every pair that exists when it runs, and it runs
+  -- once. Measured on a real 0.1.3 -> 0.1.4 upgrade: the administrator held 20
+  -- of 27 declared pairs, and the seven it had lost were every pair the newer
+  -- release declared -- so on any deployment older than the release, the person
+  -- who installed it could not administer an org and could not see the orgs
+  -- table at all, with no way to tell that from a deployment which simply has no orgs.
+  --
+  -- The fix was rbac.roles.grants_all plus a trigger. THIS is the assertion
+  -- that the fix keeps working, and it could not have existed before this file
+  -- seeded an administrator: every other gate installs fresh, and a fresh
+  -- install has nobody to lose anything.
+  -- THE SUBJECT MUST EXIST BEFORE THE ASSERTION MEANS ANYTHING. Without this,
+  -- a seed whose bootstrap_admin silently failed leaves zero grants_all roles,
+  -- the cross join below is empty, and the check passes having examined
+  -- nothing -- which is exactly the class meta/postmortems/README.md calls
+  -- verified in a world where the defect could not appear. Caught by trying to
+  -- make the assertion fail and watching it pass.
+  if not exists (select 1 from rbac.roles where grants_all)
+    then raise exception
+      'no role is marked grants_all -- the seed did not administer this database, so the next assertion would prove nothing';
+  end if;
+
+  if exists (
+      select 1 from rbac.roles r cross join rbac.permission_kinds k
+       where r.grants_all
+         and not exists (select 1 from rbac.role_permissions rp
+                          where rp.role = r.name and rp.resource = k.resource
+                            and rp.action = k.action))
+    then raise exception
+      'an administrator lost declared permissions across the upgrade: % of % pairs',
+      (select count(*) from rbac.role_permissions rp join rbac.roles r on r.name = rp.role where r.grants_all),
+      (select count(*) from rbac.permission_kinds) * (select count(*) from rbac.roles where grants_all);
+  end if;
+
+  -- EVERY checked_by STILL NAMES SOMETHING THAT EXISTS.
+  --
+  -- permission_kinds.checked_by records where a pair is consulted so it can
+  -- be verified. 0.1.4 renamed two policies and the seed ended on conflict do
+  -- nothing, so a fresh install named the new ones and every upgraded database
+  -- went on naming policies that by then existed nowhere. Invisible to
+  -- upgrade-converges.sh, which compares objects and this is a ROW.
+  --
+  -- Only the policy NAME form is checkable; the rest name functions and one
+  -- names a group of them in words. Checking the checkable form is worth more
+  -- than checking none of it, and the where says so rather than pretending.
+  if exists (
+      select 1 from rbac.permission_kinds k
+       where k.checked_by like 'policy %'
+         and not exists (select 1 from pg_policy p
+                          where p.polname = split_part(k.checked_by, ' ', 2)))
+    then raise exception
+      'these declarations name a policy that does not exist after the upgrade: %',
+      (select string_agg(k.resource || '/' || k.action || ' -> ' || k.checked_by, ', ')
+         from rbac.permission_kinds k
+        where k.checked_by like 'policy %'
+          and not exists (select 1 from pg_policy p
+                           where p.polname = split_part(k.checked_by, ' ', 2)));
+  end if;
+
   if exists (select 1 from pg_class c join pg_namespace n on n.oid=c.relnamespace
              join pg_roles r on r.oid=c.relowner
              where n.nspname in ('rbac','workflow','aiq','content','agentic') and r.rolsuper)

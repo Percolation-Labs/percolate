@@ -19,8 +19,8 @@
 #   TARGET_DB=p8other ./currency.sh
 set -euo pipefail
 
-CONTAINER="${CONTAINER:-p8-experiment-pg19}"
-TARGET_DB="${TARGET_DB:-p8experiment}"
+CONTAINER="${CONTAINER:-p8-dev-db}"
+TARGET_DB="${TARGET_DB:-p8dev}"
 REF_DB="${REF_DB:-p8currency_ref}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

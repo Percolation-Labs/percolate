@@ -49,11 +49,11 @@ sys.path.insert(0, str(HERE))
 import fixtures  # noqa: E402
 
 HOST = os.environ.get("P8_HOST", "localhost")
-PORT = os.environ.get("P8_PG_PORT", "5499")
-ADMIN_DSN = os.environ.get("P8_ADMIN_DSN", f"postgres://p8:p8@{HOST}:{PORT}/p8experiment")
-WORKER_DSN = os.environ.get("P8_WORKER_DSN", f"postgres://worker:workerpass@{HOST}:{PORT}/p8experiment")
-SERVER_DSN = os.environ.get("P8_SERVER_DSN", f"postgres://authenticator:authpass@{HOST}:{PORT}/p8experiment")
-CONTENT_URL = os.environ.get("P8_CONTENT_URL", "http://localhost:8199")
+PORT = os.environ.get("P8_PG_PORT", "5610")
+ADMIN_DSN = os.environ.get("P8_ADMIN_DSN", f"postgres://p8:p8@{HOST}:{PORT}/p8dev")
+WORKER_DSN = os.environ.get("P8_WORKER_DSN", f"postgres://worker:workerpass@{HOST}:{PORT}/p8dev")
+SERVER_DSN = os.environ.get("P8_SERVER_DSN", f"postgres://authenticator:authpass@{HOST}:{PORT}/p8dev")
+CONTENT_URL = os.environ.get("P8_CONTENT_URL", "http://localhost:5613")
 MODEL = "text-embedding-3-small"
 SPACE = "aiq.emb_text_embedding_3_small"
 

@@ -60,6 +60,22 @@ declare
     a uuid; v_res uuid; v_n int; r record;
 begin
     select org_a into a from t_ctx;
+
+    -- A CALLER IDENTITY, because a real upload has one. This block used to run
+    -- with no claims at all, so register_upload stamped owner_id = null (there
+    -- is no current user) and visibility = 'private' -- a resource owned by
+    -- nobody that nobody may read, which is the correct answer to a question
+    -- the fixture did not mean to ask.
+    --
+    -- It went unnoticed while resolve_file() gated on the ORG alone: a null
+    -- owner is invisible to a rule that never looks at the owner. Tightening
+    -- that gate to rbac.may_read(owner, org, visibility) made the fixture's
+    -- own unreality fail, which is the test doing its job on itself. The file
+    -- header already said the deployment sets a JWT per request; this block
+    -- was the one place that did not.
+    perform set_config('request.jwt.claims',
+        json_build_object('sub', '11111111-1111-1111-1111-111111111111')::text, true);
+
     v_res := content.register_upload('t-uploads', 't-sum-1', 'bucket', 'keys/one',
                                      4096, 'text/plain', 'Outage postmortem', null, a);
     update t_ctx set res_a = v_res;
@@ -347,7 +363,10 @@ end $$;
 -- by everyone ... so writing it is not a cross-tenant act". The policy was
 -- `org_id is null or org_id in (...)`, so a null org was not unscoped -- it was
 -- scoped to EVERY tenant, and writing one was the widest cross-tenant act
--- available, not the absence of one. It took no missing check and no guessed
+-- available, not the absence of one. (That predicate is spelled `org_id =
+-- rbac.shared_org_id() or org_id in (...)` today, and the shared tier is a row
+-- rather than a NULL -- which changes nothing about this argument and
+-- everything about whether a reader can see it being made.) It took no missing check and no guessed
 -- argument to reach: `p_org_id` DEFAULTS to null and the extension ships three
 -- null-org channels, so an ordinary user of one org planted a document that
 -- another org's TEXT search over the shipped corpus returned.
@@ -403,13 +422,22 @@ begin
     --    replaces "the write is refused", and it is the one that actually
     --    matters: the old failure was a READ by another tenant, and refusing
     --    the write was one way to prevent it rather than the guarantee itself.
+    --
+    -- `org_id = rbac.shared_org_id()` and not `org_id is null`: org_id is NOT
+    -- NULL now (specs/identity/spec.md §4), so an upload that named no org
+    -- lands on the shared TIER rather than carrying no tier at all. The
+    -- assertion below is deliberately unchanged in what it means -- the row
+    -- must not be scoped to any tenant, and `private` is what keeps it out of
+    -- everyone's reach. Being on the shared org buys the row nothing; only
+    -- `visibility` does, and the read probe two statements down is what
+    -- actually proves it.
     select visibility, org_id into v_vis, v_org
       from content.resources where id = v_res;
-    if v_vis is distinct from 'private' or v_org is not null then
+    if v_vis is distinct from 'private' or v_org is distinct from rbac.shared_org_id() then
         raise exception
             'a resource registered with no org came out as (%, %), not a private '
-            'row owned by its uploader -- which is what stops another tenant '
-            'reading it', v_vis, v_org;
+            'row on the shared tier owned by its uploader -- which is what stops '
+            'another tenant reading it', v_vis, v_org;
     end if;
     -- and prove it by reading, as org A, rather than by trusting the column
     set local role authenticated;

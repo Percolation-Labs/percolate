@@ -39,8 +39,19 @@ on conflict (name) do update set source_table = excluded.source_table;
 select aiq.register_entity_table(
     'document',
     'content.resources',
-    'coalesce(n.title, n.uri, n.id::text)',   -- canonical key
-    'coalesce(n.title, n.uri)',               -- summary
+    -- A LABEL IS NEVER AN IDENTITY (specs/identity/spec.md §5). `title` was
+    -- first here, and a canonical key is UNIQUE -- so two documents that
+    -- merely share a heading collided, and the second one FAILED TO INGEST
+    -- with a duplicate-key error raised inside a projection trigger, naming
+    -- neither document. Measured while loading this repository's own prose:
+    -- two spec sections both headed "run it" stopped an ingest of 797.
+    --
+    -- `uri` first because it is what a person types to find a document and is
+    -- unique in practice; `external_id` next because it is what a puller
+    -- controls and guarantees. Title stays as the SUMMARY, which is what a
+    -- label is for.
+    'coalesce(n.uri, n.external_id, n.id::text)',   -- canonical key
+    'coalesce(n.title, n.uri)',                     -- summary
     'n.org_id',
     $$n.status = 'ready'$$
 );
@@ -71,7 +82,7 @@ on conflict do nothing;
 -- (calling the equivalent function per row measured 58x slower, and sixteen
 -- hand-copies of a security predicate is how one of them drifts).
 --
--- What changes for this file specifically: `org_id is null` no longer means
+-- What changes for this file specifically: the shared tier no longer means
 -- "everyone may read it". §4b of schema.sql measured that conflation as a real
 -- cross-tenant read -- register_upload() without its optional org argument
 -- wrote a null org and another tenant retrieved the text. A row nobody scoped
@@ -79,6 +90,28 @@ on conflict do nothing;
 select rbac.add_scope_columns('content.channels', 'public');
 select rbac.add_scope_policy ('content.channels');
 select rbac.add_scope_columns('content.resources', 'public');
+
+-- AND NOW resolve_file, which needs the three columns the line above adds.
+-- Its home is here for that reason; schema.sql carries the pointer.
+create or replace function content.resolve_file(p_resource_id uuid)
+returns table(bucket text, object_key text, content_type text, size_bytes bigint) as $$
+    -- may_read, NOT may_access_org. The org rule answers "may this person
+    -- touch this tenant"; it says nothing about the ROW, so a resource marked
+    -- `private` was served to anybody who could reach its org -- and on the
+    -- shared tier that is everybody. `rbac.may_read(owner, org, visibility)`
+    -- is the single home of the read rule and content.resources carries all
+    -- three columns, so this is the same decision the `_scoped` policy on the
+    -- table already makes; resolve_file was the one path that did not ask it.
+    --
+    -- Found by the self-model: content.resources is central (16 dependants),
+    -- has broken twice, and this is the gap the graph pointed at.
+    select f.bucket, f.object_key, f.content_type, f.size_bytes
+    from content.resources r
+    join content.files f on f.id = r.file_id
+    where r.id = p_resource_id
+      and rbac.may_read(r.owner_id, r.org_id, r.visibility);
+$$ language sql stable security definer set search_path = pg_catalog, public;
+
 select rbac.add_scope_policy ('content.resources');
 
 alter table content.resource_chunks enable row level security;
@@ -202,7 +235,8 @@ select 'workflow_artifacts', 'file_upload',
        -- which content.register_upload documents as a legitimate choice.
        '{"description": "bytes produced by a workflow step, refd from tasks.output"}'::jsonb
 where not exists (
-    select 1 from content.channels where name = 'workflow_artifacts' and org_id is null);
+    select 1 from content.channels
+     where name = 'workflow_artifacts' and org_id = rbac.shared_org_id());
 
 create or replace function workflow.register_artifact(
     p_task_id      uuid,

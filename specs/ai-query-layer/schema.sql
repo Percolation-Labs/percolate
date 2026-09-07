@@ -39,10 +39,16 @@ create schema if not exists aiq;
 --    Does NOT store the payload; payload stays on the typed table.
 -- ------------------------------------------------------------
 create table if not exists aiq.nodes (
-    id           uuid primary key default gen_random_uuid(),
+    id           uuid primary key default uuidv7(),
     entity_type  text not null,          -- owning table, e.g. 'company'
     entity_id    uuid not null,          -- PK in that table
-    org_id       uuid,                   -- tenant; null = shared reference data
+    -- The tenant. NOT NULL, defaulted to rbac.shared_org_id() by
+    -- rbac.adopt_shared_org() in integration-rbac.sql -- said there rather
+    -- than here because that function lives in user-rbac, which is installed
+    -- after this file. `null = shared reference data` is what this column used
+    -- to mean and identity/spec.md §4 is why it stopped: a NULL may only mean
+    -- unknown, and the shared tier is a value.
+    org_id       uuid,
     summary      text,                   -- cheap human/agent-readable label
     created_at   timestamptz not null default now(),
     updated_at   timestamptz not null default now(),
@@ -63,6 +69,11 @@ create table if not exists aiq.node_keys (
     entity_type  text not null,
     key          text not null,          -- normalized (lowercased, trimmed)
     kind         text not null check (kind in ('canonical','short','alias')),
+    -- Copied from the node, and NOT NULL for the same reason nodes.org_id is
+    -- -- see integration-rbac.sql §2, where this table's adopt_shared_org()
+    -- call lives. It is not declared `not null` here because a `create table
+    -- if not exists` does nothing to a database that already has the table,
+    -- so the constraint would reach fresh installs only.
     org_id       uuid,
     primary key (node_id, key, kind)
 );
@@ -87,15 +98,26 @@ comment on column aiq.nodes.entity_type is
 -- deliberately NOT unique -- 'bakhmut' may be canonical for a place and an
 -- event, and short-key lookup may legitimately return several nodes.
 --
--- NULLS NOT DISTINCT, and it is the whole guarantee rather than a detail.
--- org_id IS NULL means shared reference data, which integration-rbac.sql §1
--- calls "a real category here, not a loophole" and which every public company
--- in a deployment will be. Under the default NULLS DISTINCT, two NULLs never
--- conflict -- so this index enforced canonical-key uniqueness for exactly the
--- tenants that have one and not at all for the shared tier. Measured: two
--- companies both took the canonical key 'acme', and LOOKUP "ACME" -- the
--- dialect's most common call, documented as an exact match -- returned two
--- different nodes with no way to tell which was meant.
+-- NULLS NOT DISTINCT IS NOW A NO-OP, AND IT IS KEPT DELIBERATELY.
+--
+-- It was the whole guarantee. org_id IS NULL meant shared reference data,
+-- which integration-rbac.sql §1 calls "a real category here, not a loophole"
+-- and which every public company in a deployment will be. Under the default
+-- NULLS DISTINCT two NULLs never conflict -- so this index enforced
+-- canonical-key uniqueness for exactly the tenants that have one and not at
+-- all for the shared tier. Measured: two companies both took the canonical key
+-- 'acme', and LOOKUP "ACME" -- the dialect's most common call, documented as
+-- an exact match -- returned two different nodes with no way to tell which was
+-- meant.
+--
+-- org_id is NOT NULL now (identity/spec.md §4, rbac.adopt_shared_org), so the
+-- flag decides nothing: there are no NULLs left for it to be distinct or not
+-- distinct about, and the shared tier is constrained by the same equality as
+-- every other org. It stays because dropping it would be a rewrite of a unique
+-- index on every deployment to change nothing, and because a reader arriving
+-- at NULLS NOT DISTINCT with no note has to work out for themselves whether it
+-- is load-bearing. It is not. Anything that makes org_id nullable again makes
+-- it load-bearing again.
 create unique index if not exists idx_node_keys_canonical
     on aiq.node_keys (org_id, key, entity_type) nulls not distinct
     where kind = 'canonical';
@@ -263,14 +285,27 @@ create or replace trigger relation_types_term_consistent_upd
 --    Hard FK/junction relationships are NEVER copied here (D4).
 -- ------------------------------------------------------------
 create table if not exists aiq.edges (
-    id          uuid primary key default gen_random_uuid(),
+    id          uuid primary key default uuidv7(),
     src_id      uuid not null references aiq.nodes(id) on delete cascade,
     dst_id      uuid not null references aiq.nodes(id) on delete cascade,
     relation    text not null,
     weight      real not null default 1.0,
-    valid_from  timestamptz,
+    -- BITEMPORAL, and `valid_from` defaults so that it is actually populated.
+    -- It did not, and the consequence was that the pair was half built: every
+    -- one of 9,502 edges carried a null `valid_from`, so a retraction could be
+    -- dated against nothing and "when was this first asserted" had no answer.
+    -- An edge inserted now holds from now; anything else is the writer's job
+    -- to state explicitly, which is what a default is for.
+    valid_from  timestamptz not null default now(),
+    -- Null means "still holds". Set it to retract rather than deleting the
+    -- row: a derivation that DELETEs what it can no longer derive leaves
+    -- nothing to audit, and an append-only graph with no retraction path is
+    -- the regime research-notes/build-knit-dream-theory.pdf §10 warns about.
+    -- Read through `aiq.edges_current` unless you want retracted history.
     valid_to    timestamptz,
     provenance  jsonb not null default '{}'::jsonb,
+    -- Authoring provenance, not read gating (integration-rbac.sql §3). NOT
+    -- NULL and defaulted to the shared tier by adopt_shared_org() there.
     org_id      uuid,
     created_at  timestamptz not null default now(),
     unique (src_id, dst_id, relation)
@@ -280,6 +315,38 @@ create table if not exists aiq.edges (
 create index if not exists idx_edges_src on aiq.edges (src_id);
 create index if not exists idx_edges_dst on aiq.edges (dst_id);
 create index if not exists idx_edges_relation on aiq.edges (relation);
+
+-- EDGES THAT HOLD NOW. One named place for "currently asserted", because the
+-- alternative is every caller remembering a predicate and most of them not
+-- remembering it.
+--
+-- This table has been bitemporal since it was written and, for months,
+-- decoratively so: `valid_to` was never set on any edge, and the derivations
+-- that maintain the graph DELETEd what they could no longer derive. A graph
+-- that forgets by deletion does not forget slowly. It forgets completely,
+-- leaving nothing to audit and nothing able to answer "was this ever true".
+--
+-- Two consequences that are now contract rather than convention:
+--
+--   A derivation RETRACTS by setting `valid_to`. It does not delete. Deleting
+--   is for a row that should never have existed; retraction is for one that
+--   held and no longer does, and those are different facts.
+--
+--   A reader that means "now" reads this view. `aiq.edges` is the full
+--   history including retracted intervals, and reading it raw while meaning
+--   "now" is the bug this view exists to make hard.
+--
+-- Measured consequence, recorded because it is the argument: consolidation
+-- cannot be evaluated at all without dated edges. "Does this consolidation
+-- anticipate what happened next" needs a `next`, and a graph rebuilt by
+-- delete-and-reinsert has no history to hold one out of.
+create or replace view aiq.edges_current as
+    select * from aiq.edges
+     where valid_to is null or valid_to > now();
+
+comment on view aiq.edges_current is
+    'Edges currently asserted. Read this rather than aiq.edges unless you '
+    'specifically want retracted history.';
 
 -- Enforce the catalogue, and enforce that both endpoints are real nodes
 -- (the FKs already do the latter; this makes the type-pair check real).
@@ -461,8 +528,18 @@ declare
     -- exactly what this layer meant by org_id before rbac.visibilities existed,
     -- so a registration that says nothing about visibility keeps the behaviour
     -- it had rather than projecting every node private and going dark.
+    --
+    -- rbac.is_shared_org() rather than `is null`, and this is the one place the
+    -- sentinel has to absorb a NULL it did not create. p_org_expr is an
+    -- expression over a table THIS COLLECTION DOES NOT OWN -- a customer's
+    -- `calder.products.org_id`, nullable, meaning whatever they meant by it --
+    -- so the NOT NULL guarantee stops at the registry boundary and the
+    -- translation has to happen on the way in. is_shared_org(null) is true, so
+    -- an application column that says nothing still projects as `public`,
+    -- which is the behaviour this default has always had.
     v_vis text := coalesce(p_visibility_expr,
-                           format('case when %s is null then ''public'' else ''org'' end',
+                           format('case when rbac.is_shared_org(%s) '
+                                  'then ''public'' else ''org'' end',
                                   p_org_expr));
 begin
     -- One table, one entity type. Two types over one table cannot both work
@@ -510,8 +587,15 @@ begin
         create or replace function aiq.%1$s() returns trigger as $b$
         begin
             -- 1. Rows that belong: upsert identity.
+            -- rbac.org_or_shared() wraps the org expression at every one of
+            -- the four sites that writes it, and the wrap is not decoration.
+            -- aiq.nodes.org_id is NOT NULL; %3$s is an expression over a table
+            -- somebody else owns, whose org column is nullable and whose null
+            -- has always meant "shared". Unwrapped, the first shared row a
+            -- customer projects fails the not-null constraint and the failure
+            -- names our column rather than their data.
             insert into aiq.nodes (entity_type, entity_id, org_id, summary, visibility)
-            select %2$L, n.id, %3$s, %4$s, %7$s from new_rows n where %5$s
+            select %2$L, n.id, rbac.org_or_shared(%3$s), %4$s, %7$s from new_rows n where %5$s
             on conflict (entity_type, entity_id) do update
                 -- visibility is projected on UPDATE for org_id's reason: the
                 -- source row is the truth, and a node left at the scope it had
@@ -531,7 +615,7 @@ begin
 
             -- 3. The canonical key.
             insert into aiq.node_keys (node_id, entity_type, key, kind, org_id)
-            select nd.id, %2$L, lower(trim(%6$s)), 'canonical', %3$s
+            select nd.id, %2$L, lower(trim(%6$s)), 'canonical', rbac.org_or_shared(%3$s)
             from new_rows n
             join aiq.nodes nd on nd.entity_type = %2$L and nd.entity_id = n.id
             where %5$s
@@ -647,7 +731,7 @@ begin
     -- nothing forcing them to.
     execute format($q$
         insert into aiq.nodes (entity_type, entity_id, org_id, summary, visibility)
-        select %1$L, n.id, %2$s, %3$s, %6$s from %4$s n where %5$s
+        select %1$L, n.id, rbac.org_or_shared(%2$s), %3$s, %6$s from %4$s n where %5$s
         on conflict (entity_type, entity_id) do update
             set summary = excluded.summary, org_id = excluded.org_id,
                 visibility = excluded.visibility, updated_at = now()
@@ -656,7 +740,7 @@ begin
 
     execute format($q$
         insert into aiq.node_keys (node_id, entity_type, key, kind, org_id)
-        select nd.id, %1$L, lower(trim(%2$s)), 'canonical', %3$s
+        select nd.id, %1$L, lower(trim(%2$s)), 'canonical', rbac.org_or_shared(%3$s)
         from %4$s n
         join aiq.nodes nd on nd.entity_type = %1$L and nd.entity_id = n.id
         where %5$s
@@ -1172,7 +1256,7 @@ drop function if exists aiq.semantic(text, vector, int);
 --    only inserts.
 --
 --  * The canonical-key unique index was NULLS DISTINCT, so it enforced nothing
---    at all for shared reference data (org_id is null), which is most of a
+--    at all for shared reference data (org_id = rbac.shared_org_id()), which is most of a
 --    real deployment. Two rows took the key 'acme' and LOOKUP returned both.
 --
 --  * Generated projection functions were named after the source table's SHORT
@@ -1944,6 +2028,18 @@ begin
         using hnsw (embedding %3$s)$q$,
         'idx_' || replace(m.name,'-','_') || '_hnsw',
         'emb_' || replace(m.name, '-', '_'), m.distance_op);
+
+    -- DECLARE WHAT THIS TABLE IS, here, because nothing else can. A space is
+    -- created at REGISTRATION, not at install, so specs/identity's
+    -- declarations -- which run once, when the extension is created -- cannot
+    -- name it. A table created by a function is declared by that function or
+    -- it stays undeclared forever, and specs/identity/checks.sql will say so.
+    insert into percolate.table_kinds (schema_name, table_name, kind, why)
+    values ('aiq', 'emb_' || replace(p_model, '-', '_'), 'natural',
+            'an embedding space: chunk_id is the identity and nothing '
+            'references it by surrogate; created per registered model')
+    on conflict (schema_name, table_name) do nothing;
+
 end;
 $$ language plpgsql;
 
@@ -3318,7 +3414,7 @@ returns jsonb as $$
                                 join aiq.nodes n on n.id = nk.node_id
                                where n.entity_type = r.entity_type
                                  and nk.kind = 'canonical'
-                                 and (n.org_id is null
+                                 and (n.org_id = rbac.shared_org_id()
                                       or n.org_id in (select rbac.current_org_ids()))
                                order by nk.key
                                limit 3) k), '[]'::jsonb))
