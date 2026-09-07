@@ -11480,7 +11480,18 @@ create table if not exists aiq.edges (
     dst_id      uuid not null references aiq.nodes(id) on delete cascade,
     relation    text not null,
     weight      real not null default 1.0,
-    valid_from  timestamptz,
+    -- BITEMPORAL, and `valid_from` defaults so that it is actually populated.
+    -- It did not, and the consequence was that the pair was half built: every
+    -- one of 9,502 edges carried a null `valid_from`, so a retraction could be
+    -- dated against nothing and "when was this first asserted" had no answer.
+    -- An edge inserted now holds from now; anything else is the writer's job
+    -- to state explicitly, which is what a default is for.
+    valid_from  timestamptz not null default now(),
+    -- Null means "still holds". Set it to retract rather than deleting the
+    -- row: a derivation that DELETEs what it can no longer derive leaves
+    -- nothing to audit, and an append-only graph with no retraction path is
+    -- the regime research-notes/build-knit-dream-theory.pdf §10 warns about.
+    -- Read through `aiq.edges_current` unless you want retracted history.
     valid_to    timestamptz,
     provenance  jsonb not null default '{}'::jsonb,
     -- Authoring provenance, not read gating (integration-rbac.sql §3). NOT
