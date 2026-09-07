@@ -374,8 +374,21 @@ create or replace view aiq.edges_current as
 -- SELECT does not fire one, and making every read a write would be a worse
 -- problem than the one this solves. Two entry points rather than one function
 -- and a flag, because the flag was forgotten on its first use.
+-- SECURITY INVOKER, deliberately, and the first version was not.
+--
+-- dev/tests/query/06-graph-tenancy.sql refuses a SECURITY DEFINER function on
+-- the aiq read path, in its own words: "these run on behalf of a user and must
+-- be subject to that user's RLS". Written as DEFINER out of habit, it would
+-- have let a caller increment counters on edges they cannot see, which is a
+-- cross-tenant write dressed as bookkeeping.
+--
+-- INVOKER plus a column-level grant is the shape that works. RLS restricts
+-- WHICH edges the update can reach, and the grant restricts WHICH COLUMNS it
+-- may touch, so a caller can bump a counter on an edge they can already read
+-- and can do nothing else to it. The policy on this table is SELECT-only, so
+-- the UPDATE is additionally constrained to rows the caller can see.
 create or replace function aiq.note_recall(p_edges uuid[])
-returns bigint language plpgsql security definer
+returns bigint language plpgsql
 set search_path = pg_catalog, public as $$
 declare n bigint;
 begin
@@ -388,7 +401,7 @@ begin
 end $$;
 
 create or replace function aiq.note_probe(p_edges uuid[])
-returns bigint language plpgsql security definer
+returns bigint language plpgsql
 set search_path = pg_catalog, public as $$
 declare n bigint;
 begin
@@ -416,6 +429,12 @@ revoke execute on function aiq.note_recall(uuid[]) from public;
 revoke execute on function aiq.note_probe(uuid[])  from public;
 grant  execute on function aiq.note_recall(uuid[]) to authenticated;
 grant  execute on function aiq.note_probe(uuid[])  to authenticated;
+-- COLUMN-LEVEL, so the counters are the only thing a caller may write on an
+-- edge. A blanket `grant update on aiq.edges` would let anyone rewrite a
+-- relation's weight, provenance or validity through a function that exists to
+-- count reads.
+grant  update (recall_count, probe_count, last_recalled_at)
+    on aiq.edges to authenticated;
 
 comment on view aiq.edges_current is
     'Edges currently asserted. Read this rather than aiq.edges unless you '
