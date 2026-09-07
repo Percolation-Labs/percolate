@@ -46,3 +46,15 @@
 update aiq.edges set valid_from = created_at where valid_from is null;
 alter table aiq.edges alter column valid_from set default now();
 alter table aiq.edges alter column valid_from set not null;
+
+-- THE RECALL COUNTERS, for the same reason as valid_from above: `create table
+-- if not exists` cannot add a column to a table that already exists, and an
+-- upgraded database would carry the schema without them.
+--
+-- `aiq.edges_current` does not need repairing here because it is new in 0.2.0:
+-- an upgrade creates it fresh from the replayed schema, with the full column
+-- list. A database that already had it would need a DROP, since a view cannot
+-- be widened by `create or replace`.
+alter table aiq.edges add column if not exists recall_count     bigint not null default 0;
+alter table aiq.edges add column if not exists probe_count      bigint not null default 0;
+alter table aiq.edges add column if not exists last_recalled_at timestamptz;

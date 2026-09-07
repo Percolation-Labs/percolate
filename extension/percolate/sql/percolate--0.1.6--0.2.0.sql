@@ -49,6 +49,18 @@ update aiq.edges set valid_from = created_at where valid_from is null;
 alter table aiq.edges alter column valid_from set default now();
 alter table aiq.edges alter column valid_from set not null;
 
+-- THE RECALL COUNTERS, for the same reason as valid_from above: `create table
+-- if not exists` cannot add a column to a table that already exists, and an
+-- upgraded database would carry the schema without them.
+--
+-- `aiq.edges_current` does not need repairing here because it is new in 0.2.0:
+-- an upgrade creates it fresh from the replayed schema, with the full column
+-- list. A database that already had it would need a DROP, since a view cannot
+-- be widened by `create or replace`.
+alter table aiq.edges add column if not exists recall_count     bigint not null default 0;
+alter table aiq.edges add column if not exists probe_count      bigint not null default 0;
+alter table aiq.edges add column if not exists last_recalled_at timestamptz;
+
 -- ============================================================
 -- percolate 0.2.0 -- the whole schema, as one extension script.
 --
@@ -11549,6 +11561,22 @@ create table if not exists aiq.edges (
     -- NULL and defaulted to the shared tier by adopt_shared_org() there.
     org_id      uuid,
     created_at  timestamptz not null default now(),
+    -- WHAT HAS ACTUALLY BEEN USED, as opposed to what merely still holds.
+    --
+    -- A read path that answers a real question calls `aiq.note_recall()` with
+    -- the edges it traversed. Consolidation can then distinguish an edge that
+    -- is stale from one that is stale AND load-bearing, which nothing else in
+    -- this schema can express.
+    --
+    -- PROBES ARE COUNTED SEPARATELY AND NEVER MERGED IN. A system that
+    -- consolidates on usage and cannot tell its own monitoring from real
+    -- traffic will consolidate around its monitoring. The two counters exist
+    -- rather than one flag because a flag can be forgotten silently, which was
+    -- measured: `set local` outside a transaction warns and does nothing, and
+    -- the probe counted as use.
+    recall_count     bigint not null default 0,
+    probe_count      bigint not null default 0,
+    last_recalled_at timestamptz,
     unique (src_id, dst_id, relation)
 );
 -- Forward and REVERSE both indexed: "what points at this?" is first-class,
@@ -11581,9 +11609,66 @@ create index if not exists idx_edges_relation on aiq.edges (relation);
 -- cannot be evaluated at all without dated edges. "Does this consolidation
 -- anticipate what happened next" needs a `next`, and a graph rebuilt by
 -- delete-and-reinsert has no history to hold one out of.
+--
+-- COLUMNS NAMED, not `select *`. A view's column list is fixed when it is
+-- created and `create or replace` refuses to widen it, so a `select *` view
+-- silently stops reflecting the table the moment a column is added. Measured:
+-- the recall counters above were invisible through this view until it was
+-- recreated, and a function that plainly selected one failed with "column does
+-- not exist".
 create or replace view aiq.edges_current as
-    select * from aiq.edges
+    select id, src_id, dst_id, relation, weight, valid_from, valid_to,
+           provenance, org_id, created_at,
+           recall_count, probe_count, last_recalled_at
+      from aiq.edges
      where valid_to is null or valid_to > now();
+
+-- Called by a read path with the edges it actually traversed. Not a trigger: a
+-- SELECT does not fire one, and making every read a write would be a worse
+-- problem than the one this solves. Two entry points rather than one function
+-- and a flag, because the flag was forgotten on its first use.
+create or replace function aiq.note_recall(p_edges uuid[])
+returns bigint language plpgsql security definer
+set search_path = pg_catalog, public as $$
+declare n bigint;
+begin
+    if p_edges is null or cardinality(p_edges) = 0 then return 0; end if;
+    update aiq.edges
+       set recall_count = recall_count + 1, last_recalled_at = now()
+     where id = any(p_edges);
+    get diagnostics n = row_count;
+    return n;
+end $$;
+
+create or replace function aiq.note_probe(p_edges uuid[])
+returns bigint language plpgsql security definer
+set search_path = pg_catalog, public as $$
+declare n bigint;
+begin
+    if p_edges is null or cardinality(p_edges) = 0 then return 0; end if;
+    update aiq.edges set probe_count = probe_count + 1 where id = any(p_edges);
+    get diagnostics n = row_count;
+    return n;
+end $$;
+
+-- RE-STATED, because these two are defined in schema.sql and the blanket
+-- `revoke execute on all functions in schema aiq from public` lives in
+-- integration-rbac.sql and graph-algorithms.sql, both of which load AFTER this
+-- file. Without this line the functions carry the PUBLIC default they were born
+-- with, which was measured: `web_anon` could execute both.
+--
+-- That matters more here than for a read. An anonymous caller able to call
+-- note_recall() can inflate the usage counters on any edge, and consolidation
+-- reads those counters to decide what to protect. It is a way to make the
+-- system pay attention to the wrong thing, quietly.
+--
+-- Third instance of this shape in this collection: a function defined after a
+-- blanket revoke owes another revoke. The rule is in agentic/schema.sql §9 and
+-- it applies to every file, including the one that states it.
+revoke execute on function aiq.note_recall(uuid[]) from public;
+revoke execute on function aiq.note_probe(uuid[])  from public;
+grant  execute on function aiq.note_recall(uuid[]) to authenticated;
+grant  execute on function aiq.note_probe(uuid[])  to authenticated;
 
 comment on view aiq.edges_current is
     'Edges currently asserted. Read this rather than aiq.edges unless you '
