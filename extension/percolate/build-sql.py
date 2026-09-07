@@ -233,6 +233,7 @@ ORDER = [
     ("world-model-ingestion/graph.sql",         "graph indexing: the soft/lake reference tables and upsert_graph -- after agentic, because it registers an extractor agent"),
     ("world-model-ingestion/ingestion.sql",     "the default ingestion pipeline -- LAST: it installs a workflow, so it needs the lint (agentic), the embedding registry and the graph indexer to already exist"),
     ("contract/schema.sql",                     "the published contract: percolate.enums() reads what every schema above enforces, so it goes after all of them"),
+    ("packages/schema.sql",                     "percolate.apply_package(): a domain installed as one document. AFTER agentic (it delegates the servers/skills/agents half to agentic.apply_plugin), after world-model-ingestion (it inserts channels) and after workflow-engine (it defines and schedules workflows) -- it names all three and a `language plpgsql` body is not checked at create time, so the ordering is about the RUNTIME dependency rather than the parse"),
     ("identity/declarations.sql",               "what each table IS and what each nullable column's NULL MEANS -- statements about every schema above, so they can only be made after those tables exist. The mechanism they use ships first; see identity/schema.sql"),
 ]
 
