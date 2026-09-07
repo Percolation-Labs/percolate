@@ -696,6 +696,14 @@ insert into api_exclusions (api_view, column_name, kind, why) values
 
 ('rbac.refresh_tokens_api', 'replaced_by', 'internal', 'rotation chain, internal to refresh'),
 ('aiq.edges_api',           'provenance',  'internal', 'authoring metadata, not part of the read contract'),
+-- The usage counters. Excluded deliberately and for two reasons rather than
+-- one. They are consolidation's input, not a fact about the relationship: a
+-- caller asking what connects to what does not need to know how often anyone
+-- else asked. And publishing them would publish a usage pattern, which is a
+-- read nobody requested about the people doing the reading.
+('aiq.edges_api', 'recall_count',     'internal', 'how often a real question traversed this edge; consolidation input, and publishing it publishes a usage pattern'),
+('aiq.edges_api', 'probe_count',      'internal', 'the same for the system testing itself, counted separately so usage-based consolidation does not consolidate around its own monitoring'),
+('aiq.edges_api', 'last_recalled_at', 'internal', 'recency of the above; same argument'),
 
 -- updated_at is excluded everywhere it exists. Listed per view rather than
 -- pattern-matched on the name: a rule with an unwritten exception is how the
