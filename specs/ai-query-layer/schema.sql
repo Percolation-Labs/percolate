@@ -316,6 +316,38 @@ create index if not exists idx_edges_src on aiq.edges (src_id);
 create index if not exists idx_edges_dst on aiq.edges (dst_id);
 create index if not exists idx_edges_relation on aiq.edges (relation);
 
+-- EDGES THAT HOLD NOW. One named place for "currently asserted", because the
+-- alternative is every caller remembering a predicate and most of them not
+-- remembering it.
+--
+-- This table has been bitemporal since it was written and, for months,
+-- decoratively so: `valid_to` was never set on any edge, and the derivations
+-- that maintain the graph DELETEd what they could no longer derive. A graph
+-- that forgets by deletion does not forget slowly. It forgets completely,
+-- leaving nothing to audit and nothing able to answer "was this ever true".
+--
+-- Two consequences that are now contract rather than convention:
+--
+--   A derivation RETRACTS by setting `valid_to`. It does not delete. Deleting
+--   is for a row that should never have existed; retraction is for one that
+--   held and no longer does, and those are different facts.
+--
+--   A reader that means "now" reads this view. `aiq.edges` is the full
+--   history including retracted intervals, and reading it raw while meaning
+--   "now" is the bug this view exists to make hard.
+--
+-- Measured consequence, recorded because it is the argument: consolidation
+-- cannot be evaluated at all without dated edges. "Does this consolidation
+-- anticipate what happened next" needs a `next`, and a graph rebuilt by
+-- delete-and-reinsert has no history to hold one out of.
+create or replace view aiq.edges_current as
+    select * from aiq.edges
+     where valid_to is null or valid_to > now();
+
+comment on view aiq.edges_current is
+    'Edges currently asserted. Read this rather than aiq.edges unless you '
+    'specifically want retracted history.';
+
 -- Enforce the catalogue, and enforce that both endpoints are real nodes
 -- (the FKs already do the latter; this makes the type-pair check real).
 create or replace function aiq.check_edge_catalogue() returns trigger as $$

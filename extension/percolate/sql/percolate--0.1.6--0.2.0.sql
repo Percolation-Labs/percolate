@@ -11557,6 +11557,38 @@ create index if not exists idx_edges_src on aiq.edges (src_id);
 create index if not exists idx_edges_dst on aiq.edges (dst_id);
 create index if not exists idx_edges_relation on aiq.edges (relation);
 
+-- EDGES THAT HOLD NOW. One named place for "currently asserted", because the
+-- alternative is every caller remembering a predicate and most of them not
+-- remembering it.
+--
+-- This table has been bitemporal since it was written and, for months,
+-- decoratively so: `valid_to` was never set on any edge, and the derivations
+-- that maintain the graph DELETEd what they could no longer derive. A graph
+-- that forgets by deletion does not forget slowly. It forgets completely,
+-- leaving nothing to audit and nothing able to answer "was this ever true".
+--
+-- Two consequences that are now contract rather than convention:
+--
+--   A derivation RETRACTS by setting `valid_to`. It does not delete. Deleting
+--   is for a row that should never have existed; retraction is for one that
+--   held and no longer does, and those are different facts.
+--
+--   A reader that means "now" reads this view. `aiq.edges` is the full
+--   history including retracted intervals, and reading it raw while meaning
+--   "now" is the bug this view exists to make hard.
+--
+-- Measured consequence, recorded because it is the argument: consolidation
+-- cannot be evaluated at all without dated edges. "Does this consolidation
+-- anticipate what happened next" needs a `next`, and a graph rebuilt by
+-- delete-and-reinsert has no history to hold one out of.
+create or replace view aiq.edges_current as
+    select * from aiq.edges
+     where valid_to is null or valid_to > now();
+
+comment on view aiq.edges_current is
+    'Edges currently asserted. Read this rather than aiq.edges unless you '
+    'specifically want retracted history.';
+
 -- Enforce the catalogue, and enforce that both endpoints are real nodes
 -- (the FKs already do the latter; this makes the type-pair check real).
 create or replace function aiq.check_edge_catalogue() returns trigger as $$
@@ -14998,7 +15030,7 @@ create or replace view aiq.edges_api as
   from aiq.edges;
 
 grant usage on schema aiq to api_viewer, authenticated;
-grant select on aiq.nodes, aiq.node_keys, aiq.edges to api_viewer;
+grant select on aiq.nodes, aiq.node_keys, aiq.edges, aiq.edges_current to api_viewer;
 -- rbac.current_org_ids() and the scope predicates are granted in user-rbac
 -- §9, to api_viewer and authenticated among others -- the policies above are
 -- evaluated as the view owner, so api_viewer is who must be able to run them.
@@ -15028,7 +15060,7 @@ grant select on aiq.nodes_api, aiq.edges_api to authenticated;
 -- The rule, generalised: views for COLUMN secrecy, RLS for ROW visibility.
 -- Reaching for a view when the problem is row-level buys nothing and costs a
 -- layer of indirection.
-grant select on aiq.nodes, aiq.node_keys, aiq.edges to authenticated;
+grant select on aiq.nodes, aiq.node_keys, aiq.edges, aiq.edges_current to authenticated;
 
 -- A PROPERTY GRAPH is its own privilege object in PG19, separate from the
 -- tables it is defined over. Granting SELECT on nodes and edges is NOT
@@ -21129,6 +21161,13 @@ begin
            and x.dst_id = e.dst_id and x.relation = e.relation
         returning 1)
     select count(*) into v_c from merged;  v_merged := v_merged + v_c;
+    -- DELETED, not retracted, and the distinction matters now that
+    -- `ai-query-layer/schema.sql` makes retraction the contract for removal.
+    -- A merge is the one legitimate reason to delete an edge: the fact is not
+    -- ceasing to hold, it is moving to the node that now carries the identity,
+    -- and the surviving edge on the target keeps the merged provenance. A
+    -- retracted duplicate would assert that the relationship stopped being
+    -- true, which is exactly what did not happen.
     delete from aiq.edges where src_id = v_cand;
 
     with moved as (

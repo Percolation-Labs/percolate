@@ -137,7 +137,7 @@ create or replace view aiq.edges_api as
   from aiq.edges;
 
 grant usage on schema aiq to api_viewer, authenticated;
-grant select on aiq.nodes, aiq.node_keys, aiq.edges to api_viewer;
+grant select on aiq.nodes, aiq.node_keys, aiq.edges, aiq.edges_current to api_viewer;
 -- rbac.current_org_ids() and the scope predicates are granted in user-rbac
 -- §9, to api_viewer and authenticated among others -- the policies above are
 -- evaluated as the view owner, so api_viewer is who must be able to run them.
@@ -167,7 +167,7 @@ grant select on aiq.nodes_api, aiq.edges_api to authenticated;
 -- The rule, generalised: views for COLUMN secrecy, RLS for ROW visibility.
 -- Reaching for a view when the problem is row-level buys nothing and costs a
 -- layer of indirection.
-grant select on aiq.nodes, aiq.node_keys, aiq.edges to authenticated;
+grant select on aiq.nodes, aiq.node_keys, aiq.edges, aiq.edges_current to authenticated;
 
 -- A PROPERTY GRAPH is its own privilege object in PG19, separate from the
 -- tables it is defined over. Granting SELECT on nodes and edges is NOT

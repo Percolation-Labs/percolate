@@ -1009,6 +1009,13 @@ begin
            and x.dst_id = e.dst_id and x.relation = e.relation
         returning 1)
     select count(*) into v_c from merged;  v_merged := v_merged + v_c;
+    -- DELETED, not retracted, and the distinction matters now that
+    -- `ai-query-layer/schema.sql` makes retraction the contract for removal.
+    -- A merge is the one legitimate reason to delete an edge: the fact is not
+    -- ceasing to hold, it is moving to the node that now carries the identity,
+    -- and the surviving edge on the target keeps the merged provenance. A
+    -- retracted duplicate would assert that the relationship stopped being
+    -- true, which is exactly what did not happen.
     delete from aiq.edges where src_id = v_cand;
 
     with moved as (
