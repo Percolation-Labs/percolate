@@ -1,5 +1,6 @@
--- CONTEXT COMPACTION, EXERCISED. `upsert_summary`, `apply_summary` and
--- `channel_for` were three of the twenty-three promises `agentic` makes that
+-- CONTEXT COMPACTION, EXERCISED. `agentic.upsert_summary`,
+-- `agentic.apply_summary` and `agentic.channel_for` were three of the
+-- twenty-three promises `agentic` makes that
 -- nothing called by name -- found by asking the self-model which subsystem had
 -- the most unchecked claims, not by reading the schema.
 --
@@ -85,6 +86,50 @@ begin
     end if;
     if a = agentic.channel_for(c.s2) then
         raise exception 'two sessions share a notify channel (%)', a;
+    end if;
+end $$;
+
+-- 4. apply_summary is the workflow-facing wrapper, and its whole job is a
+--    GUARD: only a scheduled run writes. A summariser reached by delegation
+--    is producing a tool result for its caller, and if that output landed in
+--    the session's rolling summary it would silently overwrite the real one
+--    with an answer to somebody's sub-question.
+--
+--    This assertion exists because the graph asked for it. The first version
+--    of this file named apply_summary in its header comment and never called
+--    it, and the `checks` edge -- which needs the QUALIFIED symbol in the body
+--    -- correctly refused to count a mention in a comment as coverage.
+do $$
+declare c t_ctx%rowtype; r jsonb;
+begin
+    select * into c from t_ctx;
+    perform set_config('request.jwt.claims', json_build_object('sub', c.u1)::text, true);
+    perform agentic.upsert_summary(c.s1, 'the real rolling summary');
+
+    -- A delegated run. Must not write.
+    r := agentic.apply_summary(jsonb_build_object(
+            'trigger_kind', 'delegated',
+            'session_id',   c.s1::text,
+            'output',       jsonb_build_object('summary', 'a sub-answer')));
+    if r->>'skipped' is null then
+        raise exception 'agentic.apply_summary wrote on a non-scheduled run: %', r;
+    end if;
+    if (select content from agentic.messages
+         where session_id = c.s1 and role = 'summary') <> 'the real rolling summary' then
+        raise exception 'a delegated run overwrote the rolling summary';
+    end if;
+
+    -- The scheduled run must write, or the guard is just an off switch.
+    r := agentic.apply_summary(jsonb_build_object(
+            'trigger_kind', 'scheduled',
+            'session_id',   c.s1::text,
+            'output',       jsonb_build_object('summary', 'compacted')));
+    if r->>'skipped' is not null then
+        raise exception 'agentic.apply_summary skipped a scheduled run: %', r;
+    end if;
+    if (select content from agentic.messages
+         where session_id = c.s1 and role = 'summary') <> 'compacted' then
+        raise exception 'a scheduled run did not write the summary';
     end if;
 end $$;
 
