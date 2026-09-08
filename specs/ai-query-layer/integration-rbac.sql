@@ -70,6 +70,7 @@ select rbac.add_scope_policy ('aiq.nodes');
 
 alter table aiq.node_keys enable row level security;
 alter table aiq.edges     enable row level security;
+alter table aiq.node_resolutions enable row level security;
 
 -- THE TWO TABLES THAT CARRY org_id AND DO NOT TAKE add_scope_columns.
 --
@@ -85,6 +86,10 @@ alter table aiq.edges     enable row level security;
 -- forgets both routes.
 select rbac.adopt_shared_org('aiq.node_keys');
 select rbac.adopt_shared_org('aiq.edges');
+-- A resolution carries the survivor's org for authoring and audit, the same
+-- way an edge does -- not for read gating, which the policy below takes from
+-- the node. Adopted so `org_id is null` cannot mean two things.
+select rbac.adopt_shared_org('aiq.node_resolutions');
 
 -- node_keys INHERITS its node's visibility rather than re-deriving it from
 -- its own org_id copy. That copy exists for the canonical-key unique index
@@ -116,6 +121,17 @@ create policy edges_via_endpoints on aiq.edges for select
   using (exists (select 1 from aiq.nodes s where s.id = aiq.edges.src_id)
      and exists (select 1 from aiq.nodes d where d.id = aiq.edges.dst_id));
 
+-- A resolution inherits from the SURVIVOR only, and the asymmetry is the point.
+-- Gating on both constituents would hide the merge from a caller who can see
+-- the node that survived -- which is the node they will actually be looking at,
+-- and D11's whole claim is that a merge is inspectable by whoever holds the
+-- result. Gating on the merged node instead would let a resolution reveal that
+-- an invisible node exists, which is what edges_via_endpoints above is
+-- avoiding. The survivor is the one a reader already has.
+drop policy if exists node_resolutions_via_canonical on aiq.node_resolutions;
+create policy node_resolutions_via_canonical on aiq.node_resolutions for select
+  using (exists (select 1 from aiq.nodes n where n.id = aiq.node_resolutions.canonical_id));
+
 -- ------------------------------------------------------------
 -- 2. Read path: views owned by api_viewer, exactly as user-rbac does.
 --    A view owned by app_owner would bypass the policies above.
@@ -137,7 +153,8 @@ create or replace view aiq.edges_api as
   from aiq.edges;
 
 grant usage on schema aiq to api_viewer, authenticated;
-grant select on aiq.nodes, aiq.node_keys, aiq.edges, aiq.edges_current to api_viewer;
+grant select on aiq.nodes, aiq.node_keys, aiq.edges, aiq.edges_current,
+                aiq.node_resolutions, aiq.node_current to api_viewer;
 -- rbac.current_org_ids() and the scope predicates are granted in user-rbac
 -- §9, to api_viewer and authenticated among others -- the policies above are
 -- evaluated as the view owner, so api_viewer is who must be able to run them.
@@ -167,7 +184,8 @@ grant select on aiq.nodes_api, aiq.edges_api to authenticated;
 -- The rule, generalised: views for COLUMN secrecy, RLS for ROW visibility.
 -- Reaching for a view when the problem is row-level buys nothing and costs a
 -- layer of indirection.
-grant select on aiq.nodes, aiq.node_keys, aiq.edges, aiq.edges_current to authenticated;
+grant select on aiq.nodes, aiq.node_keys, aiq.edges, aiq.edges_current,
+                aiq.node_resolutions, aiq.node_current to authenticated;
 
 -- A PROPERTY GRAPH is its own privilege object in PG19, separate from the
 -- tables it is defined over. Granting SELECT on nodes and edges is NOT

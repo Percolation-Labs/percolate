@@ -981,6 +981,211 @@ end;
 $$ language plpgsql;
 
 -- ------------------------------------------------------------
+-- 6b. THE RESOLUTION LEDGER (graph-identity.md D11).
+--
+-- Two rows turning out to be one thing is the most consequential write this
+-- schema accepts, and until now it was the only one that left no trace. D11 has
+-- specified this table since the document was written; it was the single
+-- absence a consumer building the whole identity pipeline on these surfaces
+-- still had to work around, writing its clusters to a local table and saying so
+-- in its output.
+--
+-- THREE PROPERTIES, and each one is the reason a column exists.
+--
+-- 1. A MERGE IS A RECORD, NOT AN INDEX BEHAVIOUR. Nothing here changes what
+--    graph_neighbors, graph_walk or GRAPH_TABLE traverse. That is deliberate
+--    and it is D11's own wording: resolution is a decision to be inspected and
+--    argued with, and a reader that wants it applied joins `aiq.node_current`
+--    below. Making it implicit would mean every existing traversal quietly
+--    changed meaning on the day somebody ran a resolver.
+--
+-- 2. NEITHER CONSTITUENT IS DELETED. The merged node keeps its id, its edges
+--    and its history; only its canonical KEY moves, becoming an alias on the
+--    survivor so a lookup of the old name reaches the new node. That is what
+--    makes unresolve mechanical rather than reconstructive -- compare the
+--    destructive path, collapse to one row and discard the loser, which cannot
+--    be undone at any price because the evidence for the merge and the loser's
+--    own history both left with it.
+--
+-- 3. `tier` IS LOAD-BEARING, for the same reason wm.claims.is_deterministic
+--    is: a registry match on a CIK and an embedding-similarity guess are not
+--    the same kind of assertion, and anything reading resolutions as ground
+--    truth without reading `tier` is unsound. It is also what makes the cheap
+--    audit a GROUP BY -- how much of this graph's identity rests on a model's
+--    guess?
+--
+-- CANDIDATE IDENTITY DOES NOT LIVE HERE. "These two may be the same" is
+-- uncertainty, not a decision; it belongs in the consumer's evidence plane
+-- where it can accumulate without asserting anything. This table records only
+-- what was decided, which is what stops embedding proximity -- legitimate for
+-- proposing a merge, forbidden as a scoring input -- from entering the graph as
+-- a fact.
+-- ------------------------------------------------------------
+create table if not exists aiq.node_resolutions (
+    id           uuid primary key default uuidv7(),
+    canonical_id uuid not null references aiq.nodes(id) on delete cascade,
+    -- NO foreign key, and the omission is the point: `on delete cascade` from
+    -- nodes would erase the record of a merge when the merged node is removed,
+    -- which is the one event that makes the record most worth having.
+    merged_id    uuid not null,
+    tier         text not null
+                     check (tier in ('registry','crosswalk','embedding','llm','human')),
+    -- The matched key, the score, the agent run. `moved_keys` under this is
+    -- written by aiq.resolve_nodes and read by aiq.unresolve_node: reversing a
+    -- merge needs to know which key rows moved, and re-deriving them later is
+    -- exactly the reconstruction this design exists to avoid.
+    evidence     jsonb not null default '{}',
+    decided_by   text not null,
+    undone_at    timestamptz,
+    org_id       uuid,
+    at           timestamptz not null default now(),
+    -- A node is folded into at most one survivor at a time. An undone row does
+    -- not hold the slot, so a pair may be resolved, unresolved and resolved
+    -- again -- and every attempt stays on the record.
+    constraint node_resolutions_no_self check (canonical_id <> merged_id)
+);
+
+create unique index if not exists idx_node_resolutions_live
+    on aiq.node_resolutions (merged_id) where undone_at is null;
+create index if not exists idx_node_resolutions_canonical
+    on aiq.node_resolutions (canonical_id) where undone_at is null;
+
+comment on table aiq.node_resolutions is
+    'graph-identity.md D11: merges as records. Neither constituent is deleted, '
+    'unresolve is a supported operation rather than a repair, and `tier` says '
+    'what KIND of assertion the merge was -- a registry match and a model''s '
+    'guess are not interchangeable and a reader that ignores tier is unsound.';
+
+-- Resolution APPLIED, for readers that want it. Transitive, because a chain
+-- (a into b, b into c) is legal and a caller asking "what is this now" means c
+-- rather than b. Cycles cannot arise -- resolve_nodes refuses one -- so this
+-- terminates without a depth cap.
+create or replace view aiq.node_current as
+    with recursive step as (
+        select n.id as node_id, n.id as current_id, 0 as hops
+          from aiq.nodes n
+        union all
+        select s.node_id, r.canonical_id, s.hops + 1
+          from step s
+          join aiq.node_resolutions r
+            on r.merged_id = s.current_id and r.undone_at is null
+    )
+    select distinct on (node_id) node_id, current_id, hops
+      from step order by node_id, hops desc;
+
+comment on view aiq.node_current is
+    'Every node and the node it currently resolves to, following chains. A node '
+    'that has not been merged maps to itself, so this can be joined '
+    'unconditionally without turning an unmerged node into a NULL.';
+
+-- ------------------------------------------------------------
+-- Merge. Records the decision and MOVES the merged node's canonical keys onto
+-- the survivor as aliases -- so a lookup of the old name finds the new node,
+-- while the old node keeps every edge ever written against it.
+-- ------------------------------------------------------------
+create or replace function aiq.resolve_nodes(
+    p_canonical uuid, p_merged uuid, p_tier text,
+    p_decided_by text, p_evidence jsonb default '{}'
+) returns uuid as $$
+declare v_id uuid; v_moved jsonb; v_org uuid;
+begin
+    if p_canonical = p_merged then
+        raise exception 'a node cannot be merged into itself';
+    end if;
+    if not exists (select 1 from aiq.nodes where id = p_canonical) then
+        raise exception 'no node % to merge into', p_canonical;
+    end if;
+    if not exists (select 1 from aiq.nodes where id = p_merged) then
+        raise exception 'no node % to merge', p_merged;
+    end if;
+    -- A cycle would make node_current non-terminating, and the caller that
+    -- would create one is a resolver whose clustering has already gone wrong.
+    -- Refused here rather than defended against in the view, so the bad state
+    -- never exists.
+    if exists (select 1 from aiq.node_current where node_id = p_canonical
+                                               and current_id = p_merged) then
+        raise exception
+            'node % already resolves to % -- merging the other way would make a '
+            'cycle. Unresolve first if the direction is wrong.',
+            p_canonical, p_merged;
+    end if;
+
+    select org_id into v_org from aiq.nodes where id = p_canonical;
+
+    -- The keys that are about to move, captured BEFORE moving them: unresolve
+    -- restores exactly these, and re-deriving them afterwards is the
+    -- reconstruction D11 says this design exists to avoid.
+    select coalesce(jsonb_agg(jsonb_build_object(
+               'key', k.key, 'kind', k.kind, 'entity_type', k.entity_type)), '[]')
+      into v_moved
+      from aiq.node_keys k
+     where k.node_id = p_merged and k.kind = 'canonical';
+
+    insert into aiq.node_resolutions
+        (canonical_id, merged_id, tier, decided_by, evidence, org_id)
+    values (p_canonical, p_merged, p_tier, p_decided_by,
+            p_evidence || jsonb_build_object('moved_keys', v_moved), v_org)
+    returning id into v_id;
+
+    -- The survivor answers to the merged node's name. `alias`, never
+    -- `canonical`: the canonical slot is unique per (org, key, entity_type) and
+    -- the survivor already holds its own.
+    insert into aiq.node_keys (node_id, entity_type, key, kind, org_id)
+    select p_canonical, n.entity_type, k.key, 'alias', n.org_id
+      from aiq.node_keys k, aiq.nodes n
+     where k.node_id = p_merged and k.kind = 'canonical' and n.id = p_canonical
+    on conflict (node_id, key, kind) do nothing;
+
+    -- And the merged node gives up the canonical slot, so LOOKUP of that name
+    -- no longer returns two nodes. Its edges, its provenance and its id are
+    -- untouched -- this is a name moving, not a row dying.
+    delete from aiq.node_keys where node_id = p_merged and kind = 'canonical';
+
+    return v_id;
+end;
+$$ language plpgsql;
+
+-- ------------------------------------------------------------
+-- Unresolve. A supported operation, not a repair -- which is only true because
+-- nothing was destroyed, and is what this whole shape buys.
+-- ------------------------------------------------------------
+create or replace function aiq.unresolve_node(p_resolution uuid, p_by text)
+returns void as $$
+declare r aiq.node_resolutions;
+begin
+    select * into r from aiq.node_resolutions where id = p_resolution;
+    if not found then
+        raise exception 'no resolution %', p_resolution;
+    end if;
+    if r.undone_at is not null then
+        raise exception 'resolution % was already undone at %', p_resolution, r.undone_at;
+    end if;
+
+    -- The survivor stops answering to the name it borrowed...
+    delete from aiq.node_keys k
+     using jsonb_array_elements(r.evidence->'moved_keys') m
+     where k.node_id = r.canonical_id and k.kind = 'alias'
+       and k.key = m->>'key';
+
+    -- ...and the merged node takes it back as canonical, which is the operation
+    -- D11 calls mechanical. It is mechanical because the row it belongs to was
+    -- never deleted.
+    insert into aiq.node_keys (node_id, entity_type, key, kind, org_id)
+    select r.merged_id, m->>'entity_type', m->>'key', m->>'kind',
+           (select org_id from aiq.nodes where id = r.merged_id)
+      from jsonb_array_elements(r.evidence->'moved_keys') m
+    on conflict (node_id, key, kind) do nothing;
+
+    -- The row is never deleted: an undone merge is part of the record, and a
+    -- ledger that forgets its reversals is not a ledger.
+    update aiq.node_resolutions
+       set undone_at = now(),
+           evidence = evidence || jsonb_build_object('undone_by', p_by)
+     where id = p_resolution;
+end;
+$$ language plpgsql;
+
+-- ------------------------------------------------------------
 -- 7. The query modes.
 --
 -- Each is an ordinary SQL function so PostgREST exposes it as an RPC and the

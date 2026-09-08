@@ -251,6 +251,12 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','function','aiq.query','text,vector','§9: one RPC for the whole dialect'),
 ('ai-query-layer','function','aiq.lookup','text,boolean,integer','§7: LOOKUP / FUZZY'),
 ('ai-query-layer','function','aiq.extension_boundary','','§9b: every place the SQL half calls the compiled half, and whether it is there'),
+('ai-query-layer','table','aiq.node_resolutions',null,
+ 'graph-identity.md D11: merges as records -- neither constituent deleted, tier says what kind of assertion it was, unresolve supported'),
+('ai-query-layer','view','aiq.node_current',null,
+ 'graph-identity.md D11: every node and what it currently resolves to, following chains; an unmerged node maps to itself so it joins unconditionally'),
+('ai-query-layer','function','aiq.resolve_nodes','uuid,uuid,text,text,jsonb','graph-identity.md D11: record a merge and move the merged node''s canonical keys onto the survivor as aliases'),
+('ai-query-layer','function','aiq.unresolve_node','uuid,text','graph-identity.md D11: reverse a merge -- mechanical rather than reconstructive, because nothing was destroyed'),
 ('ai-query-layer','function','aiq.graph_neighbors','uuid,text,integer','§7: GRAPH depth 1'),
 ('ai-query-layer','function','aiq.graph_walk','uuid,integer,text,integer','§7: GRAPH depth n>1'),
 -- The compiled algorithms, and ONLY the ones graph-algorithms.md marks SAFE.

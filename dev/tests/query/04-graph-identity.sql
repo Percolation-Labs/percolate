@@ -516,4 +516,134 @@ begin
     raise notice 'query/04: the node registry still stores identity, not payload';
 end $$;
 
+-- ---------------------------------------------------------------------
+-- THE RESOLUTION LEDGER (D11). Merges are records, and unresolve works.
+--
+-- D11 has specified this since graph-identity.md was written and it was the
+-- last absence on the identity pipeline: a consumer building all three stages
+-- on these surfaces had a substrate call for every step except recording what
+-- it decided, and wrote its clusters to a local table instead.
+--
+-- The properties asserted here are the three the table exists for -- the record
+-- survives, neither constituent is destroyed, and the reversal is mechanical --
+-- plus the one that is easy to get wrong: resolution must NOT change what a
+-- traversal returns, or every existing caller's meaning changes the day
+-- somebody runs a resolver.
+-- ---------------------------------------------------------------------
+do $$
+declare v_a uuid; v_b uuid; v_res uuid; v_n int; v_before int; v_after int;
+begin
+    insert into aiq.nodes (entity_type, entity_id)
+    values ('soft', gen_random_uuid()) returning id into v_a;
+    insert into aiq.nodes (entity_type, entity_id)
+    values ('soft', gen_random_uuid()) returning id into v_b;
+    insert into aiq.node_keys (node_id, entity_type, key, kind)
+    values (v_a, 'soft', 't_res_acme corp', 'canonical'),
+           (v_b, 'soft', 't_res_acme corporation', 'canonical');
+
+    -- An edge on the node that is about to be merged, so "neither constituent
+    -- is deleted" is asserted against something that would visibly disappear.
+    insert into aiq.edges (src_id, dst_id, relation) values (v_b, v_a, 'mentions');
+    select count(*) into v_before from aiq.edges where src_id = v_b;
+
+    v_res := aiq.resolve_nodes(v_a, v_b, 'llm', 'test-resolver',
+                               '{"score":0.91}'::jsonb);
+
+    -- 1. The record exists, and it says what KIND of assertion it was.
+    select count(*) into v_n from aiq.node_resolutions
+     where id = v_res and tier = 'llm' and decided_by = 'test-resolver'
+       and evidence->>'score' = '0.91' and undone_at is null;
+    if v_n <> 1 then
+        raise exception 'the merge left no inspectable record';
+    end if;
+
+    -- 2. The merged node still exists and still has its edges.
+    if not exists (select 1 from aiq.nodes where id = v_b) then
+        raise exception 'the merged node was deleted -- D11 says neither constituent is';
+    end if;
+    select count(*) into v_after from aiq.edges where src_id = v_b;
+    if v_after <> v_before then
+        raise exception 'edges on the merged node went from % to %', v_before, v_after;
+    end if;
+
+    -- 3. The name moved: the survivor answers to it, the merged node does not,
+    --    so LOOKUP stops returning two nodes for one thing.
+    if not exists (select 1 from aiq.node_keys
+                    where node_id = v_a and key = 't_res_acme corporation'
+                      and kind = 'alias') then
+        raise exception 'the merged node''s name did not move to the survivor';
+    end if;
+    if exists (select 1 from aiq.node_keys
+                where node_id = v_b and kind = 'canonical') then
+        raise exception 'the merged node kept its canonical key -- LOOKUP still splits';
+    end if;
+
+    -- 4. node_current applies it, transitively, and is safe to join on a node
+    --    that was never merged.
+    if (select current_id from aiq.node_current where node_id = v_b) is distinct from v_a then
+        raise exception 'node_current does not follow the resolution';
+    end if;
+    if (select current_id from aiq.node_current where node_id = v_a) is distinct from v_a then
+        raise exception 'an unmerged node does not map to itself';
+    end if;
+
+    -- 5. AND THE TRAVERSAL DID NOT CHANGE. This is the assertion that keeps
+    --    D11 a record rather than an index behaviour.
+    if not exists (select 1 from aiq.graph_neighbors(v_b, 'mentions')) then
+        raise exception
+            'graph_neighbors stopped returning the merged node''s edges. That may '
+            'be an improvement, but D11 says resolution is a RECORD -- update the '
+            'document and invert this assertion rather than deleting it, so every '
+            'existing caller''s change of meaning is a deliberate act';
+    end if;
+
+    -- 6. A second merge of the same node is refused while the first stands.
+    begin
+        perform aiq.resolve_nodes(v_a, v_b, 'human', 'test');
+        raise exception 'a node was merged into two survivors at once';
+    exception when unique_violation then null;
+    end;
+
+    -- 7. A cycle is refused rather than left for the view to loop on.
+    begin
+        perform aiq.resolve_nodes(v_b, v_a, 'human', 'test');
+        raise exception 'a resolution cycle was accepted';
+    exception when others then
+        if sqlerrm like '%cycle was accepted%' then raise; end if;
+    end;
+
+    -- 8. Unresolve is mechanical: the name goes back, the row stays.
+    perform aiq.unresolve_node(v_res, 'test-human');
+    if not exists (select 1 from aiq.node_keys
+                    where node_id = v_b and key = 't_res_acme corporation'
+                      and kind = 'canonical') then
+        raise exception 'unresolve did not restore the canonical key';
+    end if;
+    if exists (select 1 from aiq.node_keys
+                where node_id = v_a and key = 't_res_acme corporation'
+                  and kind = 'alias') then
+        raise exception 'the survivor still answers to the name it gave back';
+    end if;
+    if (select current_id from aiq.node_current where node_id = v_b) is distinct from v_b then
+        raise exception 'node_current still applies an undone resolution';
+    end if;
+    if not exists (select 1 from aiq.node_resolutions
+                    where id = v_res and undone_at is not null) then
+        raise exception
+            'the undone resolution was deleted. A ledger that forgets its '
+            'reversals is not a ledger -- the row is kept and stamped';
+    end if;
+
+    -- 9. And the pair can be resolved again afterwards, with both attempts on
+    --    the record. `unique (merged_id) where undone_at is null` is what makes
+    --    that possible, and it is easy to write as a plain unique by accident.
+    perform aiq.resolve_nodes(v_a, v_b, 'human', 'test-again');
+    select count(*) into v_n from aiq.node_resolutions where merged_id = v_b;
+    if v_n <> 2 then
+        raise exception 'the second merge replaced the first instead of joining it';
+    end if;
+
+    raise notice 'graph-identity: merges are records, nothing is destroyed, and unresolve works';
+end $$;
+
 rollback;

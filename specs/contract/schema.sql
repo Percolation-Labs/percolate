@@ -456,6 +456,7 @@ declare
         'aiq.embedding_models',
         'aiq.lake_nodes',
         'aiq.node_keys',
+        'aiq.node_resolutions',
         'aiq.nodes',
         'aiq.schema_revisions',
         'aiq.soft_nodes',

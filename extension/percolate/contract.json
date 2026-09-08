@@ -302,6 +302,21 @@
     },
     {
       "admits": [
+        "registry",
+        "crosswalk",
+        "embedding",
+        "llm",
+        "human"
+      ],
+      "column": "tier",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "aiq",
+      "table": "node_resolutions",
+      "vocabulary": null
+    },
+    {
+      "admits": [
         "org",
         "private",
         "public"
