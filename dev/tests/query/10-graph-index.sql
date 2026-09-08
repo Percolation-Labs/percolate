@@ -635,5 +635,87 @@ begin
     raise notice 'graph-index: an unknown relation is dropped and named, a bad ordinal still raises';
 end $$;
 
+-- ---------------------------------------------------------------------
+-- 14. A FRESH ASSERTION REVIVES A RETRACTED EDGE.
+--
+-- 0.2.0 made `valid_to` load-bearing: the graph forgets on purpose rather than
+-- by DELETE, and `aiq.edges_current` is what a live read means. But edge
+-- identity is still `(src, dst, relation)` with no time in it, so a retracted
+-- edge and its re-assertion are the SAME ROW and the conflict branch in
+-- `upsert_graph` is that row's only writer.
+--
+-- The failure this pins is the quiet kind §9 and §11 are also about. Before
+-- the fix the branch touched provenance and weight alone: a second document
+-- asserting the edge got its source appended, `edges_merged` counted it, the
+-- receipt reported success -- and `valid_to` stayed set, so the edge never came
+-- back into `edges_current`. A source returned and the graph did not, with
+-- nothing raised and nothing visible in the return value.
+--
+-- Both halves are asserted, because a revival that is not reported is only
+-- half a fix: a caller retracting on a schedule needs to see its retractions
+-- being undone, not infer it from a count that stopped falling.
+-- ---------------------------------------------------------------------
+do $$
+declare v_r jsonb; v_edge uuid;
+begin
+    perform aiq.upsert_graph($g${
+      "nodes": [{"k":"ord","n":"Revival Alpha"},{"k":"ord","n":"Revival Beta"}],
+      "edges": [{"s":0,"t":1,"r":"owns"}]}$g$::jsonb,
+      '{"agent":"t","resource_id":"11111111-1111-1111-1111-111111111111"}'::jsonb);
+
+    select e.id into v_edge from aiq.edges e
+      join aiq.node_keys s on s.node_id = e.src_id and s.key = 'ord/revival alpha'
+      join aiq.node_keys d on d.node_id = e.dst_id and d.key = 'ord/revival beta'
+     where e.relation = 'owns';
+    if v_edge is null then
+        raise exception 'the edge this assertion is about did not land';
+    end if;
+
+    -- Retraction, the way 0.2.0 offers it: there is no aiq function, the
+    -- column IS the interface, and a consumer sets it.
+    update aiq.edges set valid_to = now() where id = v_edge;
+    if exists (select 1 from aiq.edges_current where id = v_edge) then
+        raise exception 'a retracted edge is still current -- edges_current is not filtering';
+    end if;
+
+    -- A DIFFERENT document says it again. The source came back.
+    v_r := aiq.upsert_graph($g${
+      "nodes": [{"k":"ord","n":"Revival Alpha"},{"k":"ord","n":"Revival Beta"}],
+      "edges": [{"s":0,"t":1,"r":"owns"}]}$g$::jsonb,
+      '{"agent":"t","resource_id":"22222222-2222-2222-2222-222222222222"}'::jsonb);
+
+    if not exists (select 1 from aiq.edges_current where id = v_edge) then
+        raise exception
+            're-assertion did not revive the retracted edge. The upsert reported '
+            '%, and every one of those numbers is true -- the edge is simply '
+            'still invisible to every live read. This is the silent half; the '
+            'fix is `valid_to = null` in the conflict branch of upsert_graph.', v_r;
+    end if;
+    if (v_r->>'edges_revived')::int <> 1 then
+        raise exception 'the revival was not reported in the receipt: %', v_r;
+    end if;
+    -- It is a merge, not a new edge, and the retraction gap is auditable in
+    -- provenance because one row can only hold one interval.
+    if (v_r->>'edges_merged')::int <> 1 or (v_r->>'edges_new')::int <> 0 then
+        raise exception 'a revival must count as a merge, not a new edge: %', v_r;
+    end if;
+    if jsonb_array_length(
+           (select provenance->'sources' from aiq.edges where id = v_edge)) <> 2 then
+        raise exception 'the two assertions either side of the retraction are not both recorded';
+    end if;
+
+    -- And an ordinary merge on a LIVE edge reports no revival, or the counter
+    -- means nothing.
+    v_r := aiq.upsert_graph($g${
+      "nodes": [{"k":"ord","n":"Revival Alpha"},{"k":"ord","n":"Revival Beta"}],
+      "edges": [{"s":0,"t":1,"r":"owns"}]}$g$::jsonb,
+      '{"agent":"t","resource_id":"33333333-3333-3333-3333-333333333333"}'::jsonb);
+    if (v_r->>'edges_revived')::int <> 0 then
+        raise exception 'a merge onto a live edge was counted as a revival: %', v_r;
+    end if;
+
+    raise notice 'graph-index: a re-assertion revives a retracted edge and says so';
+end $$;
+
 rollback;
 \echo 'graph-index: all assertions passed'

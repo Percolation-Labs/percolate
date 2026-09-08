@@ -21520,6 +21520,8 @@ declare
     v_swap int;
     v_unknown text[] := '{}';   -- relations the model invented, for the receipt
     v_flipped int := 0;
+    v_revived int := 0;         -- retracted edges a fresh assertion brought back
+    v_retracted bigint;
 begin
     -- ---- Validate. This gate is LOAD-BEARING, not belt-and-braces: the
     -- step-level output_schema check is reported unimplemented by
@@ -21758,7 +21760,9 @@ begin
                 'attrs',       nullif(v_e->'a','{}'::jsonb),
                 'at',          to_char(now(),'YYYY-MM-DD"T"HH24:MI:SSOF')))));
 
-        select count(*) into v_before from aiq.edges
+        select count(*), count(*) filter (where valid_to is not null)
+          into v_before, v_retracted
+          from aiq.edges
          where src_id = v_ids[v_s+1] and dst_id = v_ids[v_t+1] and relation = v_rel;
 
         insert into aiq.edges (src_id, dst_id, relation, weight, provenance, org_id)
@@ -21795,9 +21799,42 @@ begin
                 -- from 1.0 to the machine prior and reordering every walk
                 -- through it. Corroboration by a weaker source is not evidence
                 -- against a stronger one.
-                weight = greatest(aiq.edges.weight, excluded.weight);
+                weight = greatest(aiq.edges.weight, excluded.weight),
+                -- A FRESH ASSERTION REVIVES A RETRACTED EDGE, and without this
+                -- line it silently does not. `valid_to` became load-bearing in
+                -- 0.2.0 -- the graph forgets on purpose rather than by DELETE --
+                -- but edge identity is still `(src, dst, relation)` with no time
+                -- in it, so a retracted edge and its re-assertion are the same
+                -- row. This branch is that row's only writer, and it used to
+                -- touch provenance and weight alone: the second document's
+                -- source was appended, the weight was raised, `edges_merged`
+                -- counted it, the receipt said success -- and `valid_to` stayed
+                -- set, so `aiq.edges_current` never showed the edge again. The
+                -- source came back and the graph did not, with nothing raised
+                -- and nothing to see in the return value. Measured on 0.2.0
+                -- before this line existed.
+                --
+                -- WHAT THIS DOES NOT FIX, stated because the receipt now names
+                -- a revival and a reader will ask where the gap went. One row
+                -- per triple can hold one interval, so an edge asserted, then
+                -- retracted, then re-asserted comes back as `valid_from` at the
+                -- FIRST assertion and `valid_to` null -- which reads as
+                -- continuously believed, and it was not. The gap survives in
+                -- `provenance.sources`, whose entries are individually dated,
+                -- and that is the audit trail until edge identity carries a
+                -- period. Making it carry one changes what an edge IS for every
+                -- reader in aiq -- graph_snapshot, the compiled traversals, and
+                -- every consumer relying on `unique (src_id, dst_id, relation)`
+                -- to keep one channel to one row -- so it is a version's worth
+                -- of work, not a line, and it is not smuggled in under a bug fix.
+                valid_to = null;
 
-        if v_before > 0 then v_merged := v_merged + 1; else v_edges_written := v_edges_written + 1; end if;
+        if v_before > 0 then
+            v_merged := v_merged + 1;
+            if v_retracted > 0 then v_revived := v_revived + 1; end if;
+        else
+            v_edges_written := v_edges_written + 1;
+        end if;
     end loop;
 
     -- A receipt (outputs.md §2): counts and what was written, never the rows.
@@ -21820,6 +21857,11 @@ begin
         -- an edge the schema refused is a fact about the extractor, and a
         -- receipt that omitted it would be reporting success while losing data.
         'edges_flipped_to_inverse', v_flipped,
+        -- Reported for the same reason as the two above: a revival is a real
+        -- change of belief, and a caller that retracts on a schedule needs to
+        -- see its retractions being undone rather than infer it from a count
+        -- of edges that stopped falling.
+        'edges_revived', v_revived,
         'edges_dropped_unknown_relation', to_jsonb(v_unknown),
         'node_ids', to_jsonb(v_ids));
 end;
@@ -21862,6 +21904,7 @@ declare
     v_missing int; v_total int;
     v_acc jsonb := jsonb_build_object('graphs',0,'edges_new',0,'edges_merged',0,
                                       'self_edges_dropped',0,'edges_flipped_to_inverse',0,
+                                      'edges_revived',0,
                                       'edges_dropped_unknown_relation','[]'::jsonb);
     v_r jsonb;
 begin
@@ -21903,6 +21946,7 @@ begin
             'self_edges_dropped', (v_acc->>'self_edges_dropped')::int + (v_r->>'self_edges_dropped')::int,
             'edges_flipped_to_inverse',
                 (v_acc->>'edges_flipped_to_inverse')::int + (v_r->>'edges_flipped_to_inverse')::int,
+            'edges_revived',      (v_acc->>'edges_revived')::int + (v_r->>'edges_revived')::int,
             'edges_dropped_unknown_relation', (
                 select coalesce(jsonb_agg(distinct x), '[]'::jsonb)
                   from jsonb_array_elements(
