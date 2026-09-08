@@ -7,17 +7,18 @@ and MinIO on :5614:
     P8_OFFLOAD_DSN=postgres://p8:p8@localhost:5610/p8dev \
     uv run --with asyncpg --with boto3 python dev/offload.py
 
-Seven checks, each one a sentence the specs make: a small payload is untouched;
+Eight checks, each one a sentence the specs make: a small payload is untouched;
 an oversized one becomes a "$artifact" ref with no "result"; the task COMPLETES
 where it used to fail terminally; the ref resolves to a real object; the bytes
 read back byte-identical to what the step produced; a handler that did not nest
 its payload under "result" is offloaded rather than destroyed; and the size this
-side measures is the size the engine enforces.
+side measures is the size the engine enforces; and nothing it wrote had to be
+repaired by the engine on the way in.
 
-THE LAST TWO ARE REGRESSIONS, and both were defects this file could not have
+THE LAST THREE ARE REGRESSIONS, and all were defects this file could not have
 found in the shape it had. Its one fixture was `{"status": 200, "result": ...}`
 -- a payload nested under `result`, whose JSON text and jsonb sizes happen to
-agree closely -- which is the one shape in which neither defect can occur. That
+agree closely -- which is the one shape in which none of them can occur. That
 is `meta/postmortems/README.md`'s "verified in a world where the defect could
 not appear", arriving inside the harness that exists to assert this module.
 """
@@ -70,6 +71,13 @@ async def main():
         ('t_offload', '{"steps":[{"key":"fetch","kind":"http_call","queue":"t"}]}')
         on conflict do nothing""")
     runs = []
+    # Check 8 is this number, read again at the end. workflow.normalize_output
+    # repairs a double-encoded output and files a task_events row saying the
+    # producer should have passed the object; encoding_drift() counts those. It
+    # was counting every task this worker completed, and nothing failed, so the
+    # only symptom was a number nobody read.
+    drift_before = await conn.fetchval(
+        "select coalesce(sum(repairs), 0) from workflow.encoding_drift()")
     run_id, task_id = await fresh_task(conn)
     runs.append(run_id)
 
@@ -88,7 +96,7 @@ async def main():
     rid = out["$artifact"]
 
     # 3. It completes -- the whole point, since this used to be terminal.
-    await conn.execute("select workflow.complete_task($1,$2::jsonb)", task_id, json.dumps(out))
+    await conn.execute("select workflow.complete_task($1,$2::jsonb)", task_id, out)
     status = await conn.fetchval("select status from workflow.tasks where id=$1", task_id)
     # `succeeded`, not `done`. workflow.tasks' CHECK admits pending / ready /
     # running / waiting_external / succeeded / failed / cancelled, and this
@@ -126,7 +134,7 @@ async def main():
     out = await offload(conn, str(task_id), flat)
     print(f"unnested payload: {len(json.dumps(flat).encode())} bytes -> {out}")
     assert set(out) == {"$artifact"}, f"an unnested payload kept payload keys: {sorted(out)}"
-    await conn.execute("select workflow.complete_task($1,$2::jsonb)", task_id, json.dumps(out))
+    await conn.execute("select workflow.complete_task($1,$2::jsonb)", task_id, out)
     status = await conn.fetchval("select status from workflow.tasks where id=$1", task_id)
     assert status == "succeeded", f"unnested payload did not complete: {status}"
     got = json.loads(await conn.fetchval(
@@ -152,10 +160,19 @@ async def main():
         f"text={as_text} jsonb={as_jsonb}")
     out = await offload(conn, str(task_id), band)
     assert "$artifact" in out, "a payload the engine would refuse was not offloaded"
-    await conn.execute("select workflow.complete_task($1,$2::jsonb)", task_id, json.dumps(out))
+    await conn.execute("select workflow.complete_task($1,$2::jsonb)", task_id, out)
     status = await conn.fetchval("select status from workflow.tasks where id=$1", task_id)
     assert status == "succeeded", f"the straddling payload did not complete: {status}"
     print("band payload: offloaded and completed")
+
+    # 8. And none of the three completions above was repaired on the way in.
+    drift_after = await conn.fetchval(
+        "select coalesce(sum(repairs), 0) from workflow.encoding_drift()")
+    assert drift_after == drift_before, (
+        f"{drift_after - drift_before} of these completions arrived double-encoded and "
+        "were repaired by workflow.normalize_output -- pass the OBJECT to "
+        "complete_task, not json.dumps() of it, or the jsonb codec encodes it twice")
+    print(f"encoding drift: {drift_before} -> {drift_after}, no completion repaired")
 
     for r in runs:
         await conn.execute("delete from workflow.runs where id=$1", r)

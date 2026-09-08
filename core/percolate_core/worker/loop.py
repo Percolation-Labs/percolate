@@ -113,8 +113,19 @@ async def run_once(queue: str, worker_id: str) -> bool:
             # this side; now the bytes go to object storage and the task
             # completes carrying a "$artifact" ref instead of a "result".
             out = await offload(conn, task_id, out)
+            # THE OBJECT, NOT ITS TEXT. `$2` is inferred as jsonb, and every
+            # pool this package opens installs a jsonb codec whose encoder is
+            # json.dumps -- so a pre-dumped string was encoded a SECOND time
+            # and every task this worker has ever completed arrived as a jsonb
+            # STRING containing a document. It was invisible because the engine
+            # repairs it: workflow.normalize_output unwraps the one unambiguous
+            # case and files a task_events row saying "the producer should pass
+            # the object to complete_task/fail_task(uuid, jsonb), not its
+            # text". This worker was that producer. Measured on the dogfood
+            # stack before this line changed -- workflow.encoding_drift()
+            # reported 10 repairs from ingest-1 and 2 from worker-1.
             await conn.execute(
-                "select workflow.complete_task($1, $2::jsonb)", task_id, json.dumps(out))
+                "select workflow.complete_task($1, $2::jsonb)", task_id, out)
         if isinstance(out, dict) and "$artifact" in out:
             print(f"[{worker_id}]   ok -- offloaded to {out['$artifact']}", flush=True)
         else:
@@ -124,7 +135,8 @@ async def run_once(queue: str, worker_id: str) -> bool:
         async with as_service() as conn:
             await conn.execute(
                 "select workflow.fail_task($1, $2::jsonb, true)",
-                task_id, json.dumps({"error": str(e), "terminal": True}))
+                # The object, for the reason complete_task above carries.
+                task_id, {"error": str(e), "terminal": True})
     except Exception as e:
         # A CONSTRAINT VIOLATION IS NOT A TRANSIENT FAULT, and treating every
         # non-TerminalError as one meant the same row was re-inserted against
@@ -151,7 +163,9 @@ async def run_once(queue: str, worker_id: str) -> bool:
         async with as_service() as conn:
             await conn.execute(
                 "select workflow.fail_task($1, $2::jsonb, $3)",
-                task_id, json.dumps(payload), terminal)
+                # Same: normalize_output is reached from fail_task's error
+                # too, which is why its event name covers both.
+                task_id, payload, terminal)
     return True
 
 
