@@ -8,6 +8,7 @@
       ],
       "column": "audience",
       "enforced_by": "check",
+      "members": "shipped",
       "schema": "agentic",
       "table": "agents",
       "vocabulary": null
@@ -25,14 +26,16 @@
       ],
       "column": "category",
       "enforced_by": "check",
+      "members": "shipped",
       "schema": "agentic",
       "table": "agents",
       "vocabulary": null
     },
     {
-      "admits": [],
+      "admits": null,
       "column": "plugin",
       "enforced_by": "reference",
+      "members": "deployment",
       "schema": "agentic",
       "table": "agents",
       "vocabulary": "agentic.plugins"
@@ -45,6 +48,7 @@
       ],
       "column": "visibility",
       "enforced_by": "reference",
+      "members": "shipped",
       "schema": "agentic",
       "table": "agents",
       "vocabulary": "rbac.visibilities"
@@ -56,6 +60,7 @@
       ],
       "column": "error_kind",
       "enforced_by": "check",
+      "members": "shipped",
       "schema": "agentic",
       "table": "messages",
       "vocabulary": null
@@ -71,6 +76,7 @@
       ],
       "column": "role",
       "enforced_by": "check",
+      "members": "shipped",
       "schema": "agentic",
       "table": "messages",
       "vocabulary": null
@@ -83,6 +89,7 @@
       ],
       "column": "visibility",
       "enforced_by": "reference",
+      "members": "shipped",
       "schema": "agentic",
       "table": "plugins",
       "vocabulary": "rbac.visibilities"
@@ -98,6 +105,7 @@
       ],
       "column": "status",
       "enforced_by": "check",
+      "members": "shipped",
       "schema": "agentic",
       "table": "runs",
       "vocabulary": null
@@ -115,6 +123,7 @@
       ],
       "column": "status",
       "enforced_by": "reference",
+      "members": "shipped",
       "schema": "agentic",
       "table": "runs",
       "vocabulary": "workflow.lifecycle_states"
@@ -126,6 +135,7 @@
       ],
       "column": "trigger_kind",
       "enforced_by": "check",
+      "members": "shipped",
       "schema": "agentic",
       "table": "runs",
       "vocabulary": null
@@ -138,6 +148,7 @@
       ],
       "column": "visibility",
       "enforced_by": "reference",
+      "members": "shipped",
       "schema": "agentic",
       "table": "runs",
       "vocabulary": "rbac.visibilities"
@@ -150,6 +161,7 @@
       ],
       "column": "visibility",
       "enforced_by": "reference",
+      "members": "shipped",
       "schema": "agentic",
       "table": "sessions",
       "vocabulary": "rbac.visibilities"
@@ -162,6 +174,7 @@
       ],
       "column": "audience",
       "enforced_by": "check",
+      "members": "shipped",
       "schema": "agentic",
       "table": "skills",
       "vocabulary": null
@@ -175,14 +188,16 @@
       ],
       "column": "category",
       "enforced_by": "check",
+      "members": "shipped",
       "schema": "agentic",
       "table": "skills",
       "vocabulary": null
     },
     {
-      "admits": [],
+      "admits": null,
       "column": "plugin",
       "enforced_by": "reference",
+      "members": "deployment",
       "schema": "agentic",
       "table": "skills",
       "vocabulary": "agentic.plugins"
@@ -195,6 +210,7 @@
       ],
       "column": "visibility",
       "enforced_by": "reference",
+      "members": "shipped",
       "schema": "agentic",
       "table": "skills",
       "vocabulary": "rbac.visibilities"
@@ -206,14 +222,16 @@
       ],
       "column": "kind",
       "enforced_by": "check",
+      "members": "shipped",
       "schema": "agentic",
       "table": "tool_servers",
       "vocabulary": null
     },
     {
-      "admits": [],
+      "admits": null,
       "column": "plugin",
       "enforced_by": "reference",
+      "members": "deployment",
       "schema": "agentic",
       "table": "tool_servers",
       "vocabulary": "agentic.plugins"
@@ -226,6 +244,7 @@
       ],
       "column": "visibility",
       "enforced_by": "reference",
+      "members": "shipped",
       "schema": "agentic",
       "table": "tool_servers",
       "vocabulary": "rbac.visibilities"
@@ -238,6 +257,7 @@
       ],
       "column": "distance_op",
       "enforced_by": "check",
+      "members": "shipped",
       "schema": "aiq",
       "table": "embedding_models",
       "vocabulary": null
@@ -249,6 +269,7 @@
       ],
       "column": "provider",
       "enforced_by": "reference",
+      "members": "shipped",
       "schema": "aiq",
       "table": "embedding_models",
       "vocabulary": "aiq.embedding_providers"
@@ -261,6 +282,7 @@
       ],
       "column": "visibility",
       "enforced_by": "reference",
+      "members": "shipped",
       "schema": "aiq",
       "table": "lake_nodes",
       "vocabulary": "rbac.visibilities"
@@ -273,6 +295,7 @@
       ],
       "column": "kind",
       "enforced_by": "check",
+      "members": "shipped",
       "schema": "aiq",
       "table": "node_keys",
       "vocabulary": null
@@ -285,6 +308,7 @@
       ],
       "column": "visibility",
       "enforced_by": "reference",
+      "members": "shipped",
       "schema": "aiq",
       "table": "nodes",
       "vocabulary": "rbac.visibilities"
@@ -298,6 +322,7 @@
       ],
       "column": "facet",
       "enforced_by": "reference",
+      "members": "shipped",
       "schema": "aiq",
       "table": "schema_examples",
       "vocabulary": "aiq.schema_facets"
@@ -309,6 +334,7 @@
       ],
       "column": "kind",
       "enforced_by": "check",
+      "members": "shipped",
       "schema": "aiq",
       "table": "schema_examples",
       "vocabulary": null
@@ -322,6 +348,7 @@
       ],
       "column": "facet",
       "enforced_by": "reference",
+      "members": "shipped",
       "schema": "aiq",
       "table": "schema_revisions",
       "vocabulary": "aiq.schema_facets"
@@ -334,6 +361,7 @@
       ],
       "column": "visibility",
       "enforced_by": "reference",
+      "members": "shipped",
       "schema": "aiq",
       "table": "soft_nodes",
       "vocabulary": "rbac.visibilities"
@@ -349,6 +377,7 @@
       ],
       "column": "kind",
       "enforced_by": "check",
+      "members": "shipped",
       "schema": "content",
       "table": "channels",
       "vocabulary": null
@@ -361,6 +390,7 @@
       ],
       "column": "visibility",
       "enforced_by": "reference",
+      "members": "shipped",
       "schema": "content",
       "table": "channels",
       "vocabulary": "rbac.visibilities"
@@ -378,6 +408,7 @@
       ],
       "column": "type",
       "enforced_by": "type",
+      "members": "shipped",
       "schema": "content",
       "table": "content.connector.auth",
       "vocabulary": "content.connector.auth"
@@ -396,6 +427,7 @@
       ],
       "column": "type",
       "enforced_by": "type",
+      "members": "shipped",
       "schema": "content",
       "table": "content.connector.paging",
       "vocabulary": "content.connector.paging"
@@ -409,6 +441,7 @@
       ],
       "column": "mode",
       "enforced_by": "type",
+      "members": "shipped",
       "schema": "content",
       "table": "content.ingest_policy",
       "vocabulary": "content.ingest_policy"
@@ -420,6 +453,7 @@
       ],
       "column": "mode",
       "enforced_by": "check",
+      "members": "shipped",
       "schema": "content",
       "table": "datasets",
       "vocabulary": null
@@ -432,6 +466,7 @@
       ],
       "column": "visibility",
       "enforced_by": "reference",
+      "members": "shipped",
       "schema": "content",
       "table": "datasets",
       "vocabulary": "rbac.visibilities"
@@ -446,6 +481,7 @@
       ],
       "column": "status",
       "enforced_by": "check",
+      "members": "shipped",
       "schema": "content",
       "table": "resources",
       "vocabulary": null
@@ -458,9 +494,37 @@
       ],
       "column": "visibility",
       "enforced_by": "reference",
+      "members": "shipped",
       "schema": "content",
       "table": "resources",
       "vocabulary": "rbac.visibilities"
+    },
+    {
+      "admits": [
+        "value",
+        "absence"
+      ],
+      "column": "means",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "percolate",
+      "table": "null_means",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "entity",
+        "vocabulary",
+        "junction",
+        "log",
+        "natural"
+      ],
+      "column": "kind",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "percolate",
+      "table": "table_kinds",
+      "vocabulary": null
     },
     {
       "admits": [
@@ -469,28 +533,25 @@
       ],
       "column": "role",
       "enforced_by": "check",
+      "members": "shipped",
       "schema": "rbac",
       "table": "org_members",
       "vocabulary": null
     },
     {
-      "admits": [
-        "admin",
-        "member"
-      ],
+      "admits": null,
       "column": "role",
       "enforced_by": "reference",
+      "members": "deployment",
       "schema": "rbac",
       "table": "role_permissions",
       "vocabulary": "rbac.roles"
     },
     {
-      "admits": [
-        "admin",
-        "member"
-      ],
+      "admits": null,
       "column": "role",
       "enforced_by": "reference",
+      "members": "deployment",
       "schema": "rbac",
       "table": "user_roles",
       "vocabulary": "rbac.roles"
@@ -503,6 +564,7 @@
       ],
       "column": "status",
       "enforced_by": "check",
+      "members": "shipped",
       "schema": "rbac",
       "table": "users",
       "vocabulary": null
@@ -515,6 +577,7 @@
       ],
       "column": "compensation_state",
       "enforced_by": "check",
+      "members": "shipped",
       "schema": "workflow",
       "table": "runs",
       "vocabulary": null
@@ -528,6 +591,7 @@
       ],
       "column": "status",
       "enforced_by": "check",
+      "members": "shipped",
       "schema": "workflow",
       "table": "runs",
       "vocabulary": null
@@ -545,6 +609,7 @@
       ],
       "column": "status",
       "enforced_by": "reference",
+      "members": "shipped",
       "schema": "workflow",
       "table": "runs",
       "vocabulary": "workflow.lifecycle_states"
@@ -557,6 +622,7 @@
       ],
       "column": "visibility",
       "enforced_by": "reference",
+      "members": "shipped",
       "schema": "workflow",
       "table": "runs",
       "vocabulary": "rbac.visibilities"
@@ -568,6 +634,7 @@
       ],
       "column": "overlap_policy",
       "enforced_by": "check",
+      "members": "shipped",
       "schema": "workflow",
       "table": "schedules",
       "vocabulary": null
@@ -580,6 +647,7 @@
       ],
       "column": "visibility",
       "enforced_by": "reference",
+      "members": "shipped",
       "schema": "workflow",
       "table": "schedules",
       "vocabulary": "rbac.visibilities"
@@ -597,6 +665,7 @@
       ],
       "column": "kind",
       "enforced_by": "check",
+      "members": "shipped",
       "schema": "workflow",
       "table": "tasks",
       "vocabulary": null
@@ -613,6 +682,7 @@
       ],
       "column": "status",
       "enforced_by": "check",
+      "members": "shipped",
       "schema": "workflow",
       "table": "tasks",
       "vocabulary": null
@@ -630,6 +700,7 @@
       ],
       "column": "status",
       "enforced_by": "reference",
+      "members": "shipped",
       "schema": "workflow",
       "table": "tasks",
       "vocabulary": "workflow.lifecycle_states"
@@ -646,6 +717,7 @@
       ],
       "column": "method",
       "enforced_by": "type",
+      "members": "shipped",
       "schema": "workflow",
       "table": "workflow.http_call.input",
       "vocabulary": "workflow.http_call.input"
@@ -657,13 +729,14 @@
       ],
       "column": "mode",
       "enforced_by": "type",
+      "members": "shipped",
       "schema": "workflow",
       "table": "workflow.http_call.input",
       "vocabulary": "workflow.http_call.input"
     }
   ],
   "exported_by_role": "p8",
-  "extension": "0.1.4",
+  "extension": "0.2.0",
   "types": [
     {
       "consumed_by": [

@@ -34,8 +34,10 @@ async def caller(authorization: str | None = Header(default=None)) -> dict[str, 
     """The verified caller, or None for anonymous.
 
     Anonymous is a real state, not an error: an unauthenticated request sees
-    globally-shared rows (org_id is null) and nothing else, which RLS enforces
-    without this function needing an opinion.
+    public rows and the shared tier (org_id = rbac.shared_org_id()) and nothing
+    else, which RLS enforces without this function needing an opinion. The
+    shared tier stopped being `org_id is null` when identity/spec.md §4 made it
+    a row and the column NOT NULL.
     """
     if not authorization:
         return None

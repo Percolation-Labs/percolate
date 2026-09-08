@@ -199,21 +199,49 @@ async def apply_sources(conn: Any, doc: dict[str, Any]) -> list[str]:
         done.append(f"lexical source {src['name']}")
 
     for c in doc.get("channels") or []:
-        # Looked up rather than ON CONFLICT: the unique constraint is
-        # (org_id, name) and org_id is nullable, so under the default NULLS
-        # DISTINCT two shared channels of the same name do not conflict --
-        # ON CONFLICT would insert a duplicate on every load rather than
-        # matching the existing row.
+        # AN OMITTED `org:` IS THE SHARED TIER, AND THAT IS NOW A ROW RATHER
+        # THAN A NULL. This read `org_id is not distinct from $2` and passed
+        # `$2` straight into the column, both correct while org_id was
+        # nullable and the shared tier was the absence of a value.
+        # identity/spec.md §4 made it `rbac.shared_org_id()`: the column is
+        # NOT NULL with that as its DEFAULT, and an explicitly passed NULL is
+        # not defaulted -- it is refused.
+        #
+        #   null value in column "org_id" of relation "channels"
+        #   violates not-null constraint
+        #
+        # samples/harbour/sources.yaml declares its channel with no `org:`, so
+        # `sample load` -- the command install.md tells a reader to run --
+        # dies here on any database carrying that constraint, after tenants.sql
+        # and schema.sql have already written, which is the partially-loaded
+        # state read_manifest exists to prevent. It has not bitten yet only
+        # because the published image still has the old nullable column, and
+        # that is also why ci/coldstart.sh cannot see it: it runs this command
+        # against the published artifact, where the defect cannot occur.
+        #
+        # Looked up rather than ON CONFLICT for the original reason, which the
+        # NOT NULL does not change: matching the existing row is what makes a
+        # second load a no-op instead of a duplicate.
         exists = await conn.fetchval(
             "select 1 from content.channels where name = $1"
-            "   and org_id is not distinct from $2",
+            "   and org_id = coalesce($2::uuid, rbac.shared_org_id())",
             c["name"], c.get("org"),
         )
         if not exists:
-            await conn.execute(
-                "insert into content.channels (name, kind, org_id) values ($1,$2,$3)",
-                c["name"], c.get("kind", "manual"), c.get("org"),
-            )
+            # The column is OMITTED when the document omits it, so the DEFAULT
+            # applies. Writing coalesce(...) here instead would put the name of
+            # the shared tier in a second place; the default is already the one
+            # place it is written down.
+            if c.get("org") is None:
+                await conn.execute(
+                    "insert into content.channels (name, kind) values ($1,$2)",
+                    c["name"], c.get("kind", "manual"),
+                )
+            else:
+                await conn.execute(
+                    "insert into content.channels (name, kind, org_id) values ($1,$2,$3)",
+                    c["name"], c.get("kind", "manual"), c["org"],
+                )
         done.append(f"channel {c['name']}" + ("" if not exists else " (existed)"))
 
     for k in doc.get("node_keys") or []:

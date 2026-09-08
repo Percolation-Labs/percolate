@@ -475,10 +475,16 @@ async def main() -> None:
           f"status={scheduled['status']}" if scheduled else "none")
     check("the chained action wrote the session's summary row",
           summary is not None, (summary["content"] or "")[:60] if summary else "none")
-    # 'done' is workflow-engine's terminal status for a task; the *run* uses
-    # 'succeeded'. Two vocabularies, one for each system, deliberately not
-    # unified here.
-    check("the runtime completed its own triggering task", task_status == "done",
+    # 'succeeded'. This said 'done', under a comment asserting that tasks and
+    # runs use two different terminal words "deliberately". They do not:
+    # workflow.tasks' CHECK admits pending / ready / running / waiting_external
+    # / succeeded / failed / cancelled, and 'done' is in neither vocabulary. So
+    # this check could not pass, `failures` was never empty, and the harness
+    # exited 1 whatever the runtime did -- while specs/agentic/sequence.md,
+    # RELEASE-0.1.md §6 and meta/module-composition.md all cite it as the thing
+    # that closes a gate. A check that cannot pass stops being run, and the
+    # claims resting on it keep getting written.
+    check("the runtime completed its own triggering task", task_status == "succeeded",
           f"task status={task_status}")
 
     await listener.close()

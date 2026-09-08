@@ -128,8 +128,11 @@ async def as_caller(claims: Mapping[str, Any] | None, role: str = ROLE):
 
     ``claims`` is the verified JWT payload — ``sub`` and any ``orgs`` — not
     anything a client asserted in a header. Passing ``None`` means anonymous,
-    which is a real state: the caller then sees only globally-shared rows
-    (``org_id is null``), which is what an unauthenticated request should get.
+    which is a real state: the caller then sees only ``public`` rows and the
+    shared tier — ``org_id = rbac.shared_org_id()`` — which is what an
+    unauthenticated request should get. This said ``org_id is null``, which was
+    the spelling until ``identity/spec.md`` §4 ruled that the shared tier is a
+    row rather than the absence of one and made the column NOT NULL everywhere.
 
     The claims are set **transaction-local** (``set_config(..., true)``). That
     is not a detail: an unregistered GUC left at session scope survives into

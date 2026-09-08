@@ -65,18 +65,72 @@ async def max_payload_bytes(conn: Any) -> int:
     return _max_bytes
 
 
-def _bytes_of(out: Any) -> tuple[bytes, str]:
-    """The payload as bytes, and the content type that describes them.
+async def stored_size(conn: Any, out: Any) -> int:
+    """What the ENGINE will measure, asked of the thing that measures it.
+
+    complete_task compares `pg_column_size(v_out)` against the cap -- the size
+    of the value as jsonb -- and this used to compare `len(json.dumps(out))`,
+    the size of the value as compact JSON text. Those are two different
+    quantities and jsonb is the larger one for anything object- or array-heavy,
+    because every element carries a 4-byte JEntry. Measured on a live database:
+
+        select jsonb_build_object('result', <1500 small objects>)
+        length(j::text) = 48798      pg_column_size(j) = 74029
+
+    So a 48KB payload was under a 64KB cap by this side's arithmetic and 9KB
+    over it by the engine's: the worker declined to offload and the task then
+    failed terminally, with a message telling the operator to do the thing the
+    worker had just decided was unnecessary. Between those two numbers is a
+    band where the two halves of one limit disagree, and no fudge factor closes
+    it -- the ratio is a property of the payload's shape, not a constant.
+
+    One round trip per completed task, on a connection and inside a transaction
+    that are already open for complete_task. That is the price of the cap
+    having one definition instead of two, and it is the same argument
+    max_payload_bytes() makes about the number itself.
+
+    `$1::text::jsonb` AND NOT `$1::jsonb`, which is not a style choice. With the
+    single cast Postgres infers the parameter's type as jsonb, and every pool
+    this package opens installs a jsonb codec whose encoder is json.dumps
+    (core/identity.py) -- so an already-dumped string is encoded a SECOND time
+    and what the database measures is a jsonb *string* containing JSON rather
+    than the object. Measured on the same 1,500-object payload: 74,044 bytes on
+    a bare connection and 48,819 on a pooled one, for the same value. The
+    double cast pins the parameter to text, so no codec applies on either.
+    ingest/handler.py carries the same warning about the same codec; this is
+    that defect in the one place a re-encode is invisible, because both answers
+    are plausible integers.
+    """
+    return await conn.fetchval("select pg_column_size($1::text::jsonb)", json.dumps(out))
+
+
+def _bytes_of(out: Any) -> tuple[bytes, str, bool]:
+    """The payload as bytes, the content type, and whether `result` held it.
 
     A step whose result is already text (an HTML page, a CSV, a model's prose)
     is stored as that text rather than as a JSON string containing it -- the
     artifact is meant to be openable by whatever eventually reads it, and
     "a .json file holding one giant quoted string" is not.
+
+    A HANDLER NEED NOT HAVE NESTED ITS PAYLOAD UNDER `result`, and this read
+    `out.get("result")` as though one always had. The @handler contract in
+    loop.py's own docstring returns `{"duration": ...}` -- no `result` key at
+    all -- so the get() returned None, `json.dumps(None)` stored the four bytes
+    `null` as the artifact, and the oversized payload went to complete_task
+    unchanged and failed there. Reproduced: 104,030 bytes in, 4 bytes stored,
+    104,083 bytes still sent. The data was gone and the failure named the
+    remedy that had just destroyed it.
+
+    So the third element says which of the two shapes this was. With no
+    `result` key there is no envelope to tell apart from the payload -- the
+    whole object IS the payload -- and offload() keeps nothing beside the ref.
     """
-    result = out.get("result") if isinstance(out, dict) else out
+    if not isinstance(out, dict) or "result" not in out:
+        return json.dumps(out).encode(), "application/json", False
+    result = out["result"]
     if isinstance(result, str):
-        return result.encode(), "text/plain; charset=utf-8"
-    return json.dumps(result).encode(), "application/json"
+        return result.encode(), "text/plain; charset=utf-8", True
+    return json.dumps(result).encode(), "application/json", True
 
 
 async def offload(conn: Any, task_id: str, out: Any) -> Any:
@@ -90,9 +144,9 @@ async def offload(conn: Any, task_id: str, out: Any) -> Any:
     if not isinstance(out, dict):
         return out
 
-    encoded = json.dumps(out).encode()
+    size = await stored_size(conn, out)
     cap = await max_payload_bytes(conn)
-    if len(encoded) <= cap:
+    if size <= cap:
         return out
 
     try:
@@ -103,7 +157,7 @@ async def offload(conn: Any, task_id: str, out: Any) -> Any:
         # The shipped image installs [all], so the documented path always has
         # this; only a hand-rolled minimal install lands here.
         raise TerminalError(
-            f"output is {len(encoded)} bytes, over the {cap} byte limit, and this "
+            f"output is {size} bytes, over the {cap} byte limit, and this "
             f"worker cannot offload it: object storage support is not installed. "
             f"Run `pip install 'percolate-core[content]'`, or raise "
             f"workflow.max_payload_bytes deliberately. ({e})") from None
@@ -112,7 +166,7 @@ async def offload(conn: Any, task_id: str, out: Any) -> Any:
     # ordinary transient failure, and the retry the engine already does is the
     # right response. Only the missing-dependency case above is terminal,
     # because pip will not run itself between attempts.
-    data, content_type = _bytes_of(out)
+    data, content_type, nested = _bytes_of(out)
     checksum, key = storage.put(data, content_type)
 
     # Casts are explicit: asyncpg sends a str as text, and register_artifact's
@@ -133,6 +187,13 @@ async def offload(conn: Any, task_id: str, out: Any) -> Any:
     # field a handler set stays -- those are small and are about the CALL, not
     # about the payload, so a downstream step can still branch on an HTTP
     # status without dereferencing anything.
+    #
+    # UNLESS THERE WAS NO `result`, in which case there is no envelope to keep:
+    # every key was payload, all of it is in the artifact, and carrying any of
+    # it back would put the bytes we just offloaded back over the cap. The ref
+    # alone is what completes.
+    if not nested:
+        return {"$artifact": str(resource_id)}
     kept = {k: v for k, v in out.items() if k != "result"}
     kept["$artifact"] = str(resource_id)
     return kept
