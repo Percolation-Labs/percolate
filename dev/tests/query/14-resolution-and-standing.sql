@@ -69,6 +69,73 @@ begin
 end $$;
 
 -- ------------------------------------------------------------------
+-- 3b. AN ESCALATION THAT SAMPLES SAYS SO, AND SAMPLES THE SAME WAY TWICE.
+--     `escalate:ambiguous` returns at most five exemplars. Two things about
+--     that were wrong until this test existed, and neither would ever have
+--     surfaced as an error:
+--
+--     (i)  `limit` with no `order by` -- the five were whichever five the plan
+--          happened to produce. The same mention could resolve differently on
+--          two runs of the same query, which is the shape of bug that survives
+--          a green test suite and appears when the table grows an index.
+--     (ii) five of five and five of forty-four looked identical to the caller.
+--          Measured over 2,501 backticked tokens from this repository's prose
+--          against the dogfood registry, 22 of 163 ambiguous mentions had more
+--          than five candidates and one had 44. A model handed an arbitrary
+--          five of forty-four, with nothing saying it was a sample, picks one
+--          and sounds certain.
+-- ------------------------------------------------------------------
+do $$
+declare n int; s1 uuid[]; s2 uuid[]; sc real[]; k1 text[]; two real;
+begin
+    insert into t14.things (key)
+    select fmt || '.epsilonkey'
+      from unnest(array['aa','bb','cc','dd','ee','ff','gg']) fmt;
+    perform aiq.rebuild_entity_type('t14_thing');
+
+    select count(*), array_agg(node_id order by matched_key),
+           array_agg(score order by matched_key),
+           array_agg(matched_key order by matched_key)
+      into n, s1, sc, k1
+      from aiq.resolve_mention('epsilonkey', 't14_thing');
+
+    -- The sample is capped...
+    if n is distinct from 5 then
+        raise exception 'seven candidates returned % exemplars, wanted the cap of 5', n;
+    end if;
+    -- ...and every row carries the size of the set it was drawn from, so the
+    -- caller can tell a complete answer from a sample of one.
+    if sc[1] is distinct from 7::real then
+        raise exception 'an ambiguous escalation reported score %, wanted the '
+                        'candidate count 7 -- a caller cannot see truncation '
+                        'without it', coalesce(sc[1]::text,'NULL');
+    end if;
+    -- ...and it is the FIRST five by key, not five arbitrary ones.
+    if k1[1] is distinct from 'aa.epsilonkey' or k1[5] is distinct from 'ee.epsilonkey' then
+        raise exception 'the exemplars are not ordered by key: % .. %', k1[1], k1[5];
+    end if;
+
+    -- Twice is the whole point.
+    select array_agg(node_id order by matched_key) into s2
+      from aiq.resolve_mention('epsilonkey', 't14_thing');
+    if s2 is distinct from s1 then
+        raise exception 'two calls returned different exemplar sets: limit '
+                        'without order by is not deterministic';
+    end if;
+
+    -- And an ambiguity that FITS still reports its true size rather than the
+    -- cap, so the number means candidates and not rows.
+    select score into two from aiq.resolve_mention('betakey', 't14_thing') limit 1;
+    if two is distinct from 2::real then
+        raise exception 'a two-candidate ambiguity scored %, wanted 2',
+                        coalesce(two::text,'NULL');
+    end if;
+
+    delete from t14.things where key like '%.epsilonkey';
+    perform aiq.rebuild_entity_type('t14_thing');
+end $$;
+
+-- ------------------------------------------------------------------
 -- 4. THE SEPARATORS ARE A PARAMETER. `.` and `/` are what this extension
 --    writes; they are not what qualification IS. A caller whose keys are
 --    qualified with `::` must be able to say so.

@@ -16516,6 +16516,27 @@ comment on function aiq.graph_induced(uuid[], text, timestamptz) is
 -- name matching nothing is a different question. A caller that cannot tell them
 -- apart asks a model the wrong one.
 --
+-- WHAT `score` MEANS DEPENDS ON `method`, and that is stated rather than
+-- inferred: 1.0 for `exact` and `suffix` (both are identities, not
+-- estimates), the trigram similarity for `fuzzy`, the character entropy for
+-- `escalate:low-entropy`, and THE NUMBER OF CANDIDATES for
+-- `escalate:ambiguous`. A caller that reads `score` without reading `method`
+-- is reading five different quantities as one, which is why every branch here
+-- returns the method first.
+--
+-- WHY AMBIGUITY REPORTS ITS SIZE. The escalation returns at most five
+-- exemplars, and a caller handed five of them cannot otherwise tell five from
+-- five-of-forty-four. Measured over 2,501 backticked tokens taken from this
+-- repository's own prose against the dogfood registry: 163 resolved to
+-- `escalate:ambiguous`, and 22 of those had more than five candidates -- one
+-- with 44. A model handed an arbitrary five of forty-four and no indication
+-- that it was a sample will choose one of them and sound certain, which is
+-- this file's characteristic failure: a wrong answer rather than an error.
+--
+-- AND THE EXEMPLARS ARE ORDERED, so that the same mention resolves the same
+-- way twice. `limit` without `order by` is not a bug that shows up in a test
+-- run; it is a bug that shows up when the plan changes.
+--
 -- TENANCY COMES FROM RLS AND MUST. Every function here is SECURITY INVOKER --
 -- the default, stated because it is load-bearing rather than incidental. It
 -- reads `aiq.nodes` and `aiq.node_keys`, both of which carry row-level
@@ -16569,6 +16590,12 @@ returns table (node_id uuid, matched_key text, method text, score real)
 language plpgsql stable as $$
 declare v_norm text := lower(btrim(p_text));
         v_hits int;
+        -- How many exemplars an escalation carries. Five is a sample size, not
+        -- a ranking: there is nothing to rank exact matches by, and inventing
+        -- an order here (shortest key, most edges) would dress a sample up as
+        -- a recommendation. `score` carries the TOTAL so the sample cannot be
+        -- mistaken for the set.
+        v_max  constant int := 5;
         v_sfx  text[] := array(select '%' || s || v_norm from unnest(p_separators) s);
 begin
     -- 1. EXACT, always, regardless of how short or repetitive the name is.
@@ -16588,11 +16615,12 @@ begin
         return;
     elsif v_hits > 1 then
         return query
-        select k.node_id, k.key, 'escalate:ambiguous'::text, 1.0::real
+        select k.node_id, k.key, 'escalate:ambiguous'::text, v_hits::real
           from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
          where lower(k.key) = v_norm
            and (p_entity_type is null or n.entity_type = p_entity_type)
-         limit 5;
+         order by k.key, k.node_id
+         limit v_max;
         return;
     end if;
 
@@ -16632,11 +16660,12 @@ begin
         return;
     elsif v_hits > 1 then
         return query
-        select k.node_id, k.key, 'escalate:ambiguous'::text, 1.0::real
+        select k.node_id, k.key, 'escalate:ambiguous'::text, v_hits::real
           from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
          where lower(k.key) like any (v_sfx)
            and (p_entity_type is null or n.entity_type = p_entity_type)
-         limit 5;
+         order by k.key, k.node_id
+         limit v_max;
         return;
     end if;
 
@@ -16668,7 +16697,10 @@ end $$;
 comment on function aiq.resolve_mention(text, text, real, text[]) is
     'Resolve a loose textual mention to a node: exact, then an entropy gate, '
     'then a dropped qualification, then trigram. Returns the method so a '
-    'caller can tell an answer from an escalation, and ambiguity from absence.';
+    'caller can tell an answer from an escalation, and ambiguity from absence. '
+    'score is read through method: 1.0 for exact and suffix, similarity for '
+    'fuzzy, entropy for escalate:low-entropy, and the total candidate count '
+    'for escalate:ambiguous, which returns at most five ordered exemplars.';
 
 
 -- ============================================================
