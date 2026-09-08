@@ -451,6 +451,7 @@ declare
         'agentic.sessions',
         'agentic.skills',
         'agentic.tool_servers',
+        'aiq.db_objects',
         'aiq.edges',
         'aiq.embedding_models',
         'aiq.lake_nodes',

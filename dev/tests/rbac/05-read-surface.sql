@@ -41,6 +41,12 @@ declare
         -- out-of-catalogue relation, so every tenant reads the same vocabulary
         -- or cannot write an edge at all.
         'aiq.relation_types', 'aiq.graph_vocabulary', 'aiq.entity_registry',
+        -- This database's own catalogue -- functions, tables, columns, roles.
+        -- It carries no org_id on purpose: a schema is one shared fact about
+        -- the installation, not a per-tenant one, and there is no sense in
+        -- which `aiq.edges` belongs to an org. Anybody connected can already
+        -- ask pg_catalog the same questions more slowly.
+        'aiq.db_objects',
         -- The retrieval registries: which corpora and models exist. Naming a
         -- model is not reading anyone's data.
         'aiq.embedding_models', 'aiq.embedding_providers',
