@@ -41,6 +41,41 @@ comment on table aiq.graph_vocabulary is
     'a graph_walk. Distinct from aiq.relation_types, which is what the edge '
     'table permits from any writer.';
 
+-- ------------------------------------------------------------
+-- WHAT `upsert_graph` WILL ACTUALLY ACCEPT, which is wider than the table
+-- above and was not discoverable from anywhere.
+--
+-- `graph_vocabulary` holds the forward names. Since inverses were accepted,
+-- `upsert_graph` also takes any vocabulary relation's `inverse_label` and
+-- stores it flipped -- so the table under-reports the accepted set, and a
+-- consumer pre-filtering against it drops exactly the edges the flip exists to
+-- recover. That is not hypothetical: percolate-coherence read this table,
+-- pre-filtered `owned_by` out client-side, and defeated the feature from the
+-- outside while its own counter reported the drops as a vocabulary gap.
+--
+-- A VIEW rather than a column on the table, because the answer is derived and a
+-- copy would drift: this reproduces `upsert_graph`'s resolution exactly, right
+-- down to the join that keeps the flip from being a side door into
+-- authored-only terms, and to vocabulary membership winning where a term is
+-- also some other term's inverse.
+-- ------------------------------------------------------------
+create or replace view aiq.graph_accepted_relations as
+    select relation as accepted, relation as stored_as, false as flipped
+      from aiq.graph_vocabulary
+    union
+    select distinct rt.inverse_label, rt.relation, true
+      from aiq.relation_types rt
+      join aiq.graph_vocabulary gv on gv.relation = rt.relation
+     where rt.inverse_label is not null
+       and not exists (select 1 from aiq.graph_vocabulary v
+                        where v.relation = rt.inverse_label);
+
+comment on view aiq.graph_accepted_relations is
+    'Every spelling aiq.upsert_graph will accept as `r`, and what each is stored '
+    'as. A consumer that pre-filters an extractor''s output reads THIS, not '
+    'aiq.graph_vocabulary -- the latter omits the inverse labels, so filtering '
+    'on it discards the edges upsert_graph would have flipped and landed.';
+
 -- machine_weight is not decoration: aiq.graph_walk scores a path as the
 -- PRODUCT of its edge weights and orders by that score. 0.5 means two machine
 -- hops (0.25) sort below one authored hop (1.0), which is the ordering an

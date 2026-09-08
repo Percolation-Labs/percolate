@@ -717,5 +717,65 @@ begin
     raise notice 'graph-index: a re-assertion revives a retracted edge and says so';
 end $$;
 
+-- ---------------------------------------------------------------------
+-- 15. THE CATALOGUE TELLS THE TRUTH ABOUT WHAT IT ACCEPTS.
+--
+-- `graph_vocabulary` holds forward names only, and `upsert_graph` also takes
+-- any of their `inverse_label`s and stores them flipped. A consumer told to
+-- pre-filter its extractor's output against the vocabulary therefore discards
+-- exactly the edges the flip exists to recover -- which is not hypothetical:
+-- percolate-coherence did it, and its own counter reported the drops as a
+-- vocabulary gap while the substrate would have landed them.
+--
+-- `graph_accepted_relations` is the discoverable answer, and this pins that it
+-- agrees with the resolution `upsert_graph` actually performs rather than
+-- being a second, drifting copy of it.
+-- ---------------------------------------------------------------------
+do $$
+declare v_r jsonb; v_fwd text; v_inv text;
+begin
+    -- A relation in the vocabulary that has an inverse: the inverse must be
+    -- offered as accepted, and must say what it is stored as.
+    select rt.relation, rt.inverse_label into v_fwd, v_inv
+      from aiq.relation_types rt
+      join aiq.graph_vocabulary gv on gv.relation = rt.relation
+     where rt.inverse_label is not null
+       and not exists (select 1 from aiq.graph_vocabulary v where v.relation = rt.inverse_label)
+     limit 1;
+    if v_fwd is null then
+        raise exception 'the fixture has no vocabulary relation with an inverse to test';
+    end if;
+
+    if not exists (select 1 from aiq.graph_accepted_relations
+                    where accepted = v_inv and stored_as = v_fwd and flipped) then
+        raise exception
+            'upsert_graph accepts % and stores it as %, and '
+            'graph_accepted_relations does not say so', v_inv, v_fwd;
+    end if;
+
+    -- Every forward name is accepted as itself, unflipped.
+    if exists (select 1 from aiq.graph_vocabulary gv
+                where not exists (select 1 from aiq.graph_accepted_relations a
+                                   where a.accepted = gv.relation
+                                     and a.stored_as = gv.relation
+                                     and not a.flipped)) then
+        raise exception 'a vocabulary relation is not listed as accepted as itself';
+    end if;
+
+    -- And the view does not over-promise: a name it does not list must still
+    -- be dropped by upsert_graph, or a consumer trusting it lands nothing.
+    v_r := aiq.upsert_graph($g${
+      "nodes": [{"k":"ord","n":"Accepted Alpha"},{"k":"ord","n":"Accepted Beta"}],
+      "edges": [{"s":0,"t":1,"r":"reticulates"}]}$g$::jsonb, '{"agent":"t"}'::jsonb);
+    if exists (select 1 from aiq.graph_accepted_relations where accepted = 'reticulates') then
+        raise exception 'the view lists a relation upsert_graph does not accept';
+    end if;
+    if (v_r->'edges_dropped_unknown_relation') <> '["reticulates"]'::jsonb then
+        raise exception 'a relation absent from the view was not dropped: %', v_r;
+    end if;
+
+    raise notice 'graph-index: the accepted-relations view matches what upsert_graph resolves';
+end $$;
+
 rollback;
 \echo 'graph-index: all assertions passed'

@@ -123,6 +123,8 @@ insert into expected (subsystem, kind, name, detail, why) values
  'spec.md §2: WHO holds a role, readable but RLS-scoped by user_roles_self_or_admin -- a caller sees their own assignments and an admin sees all; verified as returning zero rows to a stranger'),
 ('ai-query-layer','table','aiq.graph_vocabulary',null,
  'graph-index.md §5.3: the closed relation vocabulary, readable because SCHEMA mode publishes it deliberately -- an agent has to know which relations exist before it can walk one'),
+('ai-query-layer','view','aiq.graph_accepted_relations',null,
+ 'graph-index.md §5.3: every spelling upsert_graph accepts, inverse labels included -- graph_vocabulary alone under-reports it, and a consumer pre-filtering on the narrower set drops the edges the flip exists to recover'),
 ('ai-query-layer','table','aiq.lexical_sources',null,
  'USAGE.md: the registered TEXT sources, readable so a caller can discover what FROM accepts rather than guessing'),
 ('ai-query-layer','table','aiq.semantic_sources',null,
