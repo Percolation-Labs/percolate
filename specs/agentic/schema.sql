@@ -952,6 +952,91 @@ as $$
             and pg_catalog.has_table_privilege(session_user, p_table, 'insert'));
 $$;
 
+-- THE GENERAL BUILDER, and `extractor_call` below is now one guard on top of
+-- it. The split was asked for by a consumer, and the reason is the shape of
+-- what was here rather than a missing feature.
+--
+-- Three call-builders existed -- `extractor_call`, `embed_call`,
+-- `embed_batch_call` -- one per shape core happened to need, and no way for
+-- anybody else to get one. So a consumer whose own judgement pass is an agent
+-- with a structured output schema, which is the arrangement this whole design
+-- recommends, had to hand-build the request: read `system_prompt` and
+-- `structured_output_schema` out of the row and assemble the body themselves.
+-- That is precisely the authorship-wearing-the-costume-of-a-read that having an
+-- agent be a ROW is supposed to prevent, and it is what percolate-coherence was
+-- doing until it was noticed.
+--
+-- The pattern was right and its reach was accidental. So: the body moves here,
+-- unchanged, and `extractor_call` keeps the one thing that is actually specific
+-- to it -- the graph-schema check, without which `land_graph` cannot land what
+-- comes back. A caller with any other schema gets the same request built the
+-- same way, and no longer has a reason to write a prompt of its own.
+create or replace function agentic.agent_call(
+    p_agent      text,
+    p_input      text,
+    p_model      text default null,
+    -- Any host serving the OpenAI chat-completions API. NOT any provider --
+    -- see the note above.
+    p_endpoint   text default 'https://api.openai.com/v1/chat/completions',
+    p_credential text default 'LLM_API_KEY'
+) returns jsonb as $$
+declare a agentic.agents;
+begin
+    select * into a from agentic.agents where name = p_agent;
+    if not found then
+        raise exception
+            'no agent named ''%'' -- an agent is a ROW, and this one is not '
+            'installed. Write it with agentic.upsert_agent(...).', p_agent;
+    end if;
+    if a.structured_output_schema is null then
+        raise exception
+            'agent ''%'' declares no structured_output_schema, so there is no shape '
+            'to parse. An agent without one is a model call with extra steps.',
+            p_agent;
+    end if;
+    if coalesce(p_model, a.model) is null then
+        raise exception
+            'agent ''%'' pins no model and none was passed. The request would name '
+            'no model and the endpoint would refuse it -- which is a failure in a '
+            'worker rather than here, and this is the better place for it.', p_agent;
+    end if;
+
+    return jsonb_build_object(
+        'url',        p_endpoint,
+        'method',     'POST',
+        'timeout_ms', 120000,
+        'credential_ref', p_credential,
+        -- The vectorless half of what the runtime would have done: system
+        -- prompt from the row, schema from the row, input from the caller.
+        'body', jsonb_build_object(
+            'model', coalesce(p_model, a.model),
+            'temperature', 0,
+            'messages', jsonb_build_array(
+                jsonb_build_object('role','system','content', a.system_prompt),
+                jsonb_build_object('role','user','content', p_input)),
+            'response_format', jsonb_build_object(
+                'type','json_schema',
+                -- The schema's NAME is the agent's, not a constant. It was
+                -- hard-coded 'graph' when this only ever built one kind of
+                -- request; a caller inspecting a queued task could not tell two
+                -- agents' calls apart from the body.
+                'json_schema', jsonb_build_object(
+                    'name', a.name, 'schema', a.structured_output_schema))),
+        'jsonpath',   'choices.0.message.content',
+        -- Kept beside the call for the same reason embed_call keeps its
+        -- marker: the task row should say what it IS, not leave a reader to
+        -- infer an intent from a url and a body.
+        'agent',      jsonb_build_object('agent', a.name,
+                                         'model', coalesce(p_model, a.model)));
+end;
+$$ language plpgsql stable;
+
+comment on function agentic.agent_call(text,text,text,text,text) is
+    'Build the chat-completions request an agent ROW describes: its system '
+    'prompt, its structured_output_schema as a response_format, and the '
+    'caller''s input. The general form of aiq.extractor_call -- use this for any '
+    'agent that is not a graph extractor, rather than assembling a body by hand.';
+
 create or replace function agentic.upsert_agent(p_spec jsonb)
 returns agentic.agents
 language plpgsql security definer
@@ -962,7 +1047,40 @@ declare
     v_tools  jsonb;
     v_skills jsonb;
     v_gap    text;
+    v_cats   text;
 begin
+    -- CATEGORY IS A CLOSED VOCABULARY, so say so rather than letting the CHECK
+    -- say it. A constraint violation names the constraint and not its contents:
+    -- a consumer installing their own agent got `violates check constraint
+    -- "agents_category_check"` and a row dump, and had to go read
+    -- pg_constraint to learn the eight words it would have accepted. That is
+    -- the same defect `upsert_graph` fixed for relations, where the refusal
+    -- carries the reason and the remedy, and it is worth more here because
+    -- writing an agent is the FIRST thing a consumer does.
+    --
+    -- Read out of the catalogue rather than repeated here, so the list cannot
+    -- drift from the constraint that enforces it.
+    -- The allowed values are READ OUT OF THE CONSTRAINT, never repeated here.
+    -- A copy in this function is a second list to keep in step, and the whole
+    -- failure being fixed is a reader having to find the first one. If the
+    -- extraction ever returns nothing the CHECK still refuses -- this only
+    -- improves the sentence, it is not what enforces the rule.
+    if p_spec ? 'category' then
+        select string_agg(m[1], ', ') into v_cats
+          from pg_constraint c,
+               lateral regexp_matches(pg_get_constraintdef(c.oid),
+                                      '''([a-z_]+)''::text', 'g') m
+         where c.conrelid = 'agentic.agents'::regclass
+           and c.conname = 'agents_category_check';
+        if v_cats is not null
+           and p_spec->>'category' <> all (string_to_array(v_cats, ', ')) then
+            raise exception
+                'agent category ''%'' is not one of: %. Category is a closed '
+                'vocabulary because agents_pickable and the extractor lookup '
+                'filter on it -- a free-text one would make both silently '
+                'incomplete.', p_spec->>'category', v_cats;
+        end if;
+    end if;
     if not agentic.may_author('agents', 'agentic.agents'::regclass) then
         raise exception 'not authorized to author agents';
     end if;

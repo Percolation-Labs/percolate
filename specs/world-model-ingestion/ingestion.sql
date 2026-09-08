@@ -92,6 +92,9 @@
 -- second `jsonpath`, and the `jsonpath` is already a RETURNED field rather than
 -- a hard-coded reader, so the seam is half-built. What is not acceptable is
 -- leaving the signature to imply the branch exists.
+-- `agentic.agent_call` -- the general request builder this delegates to -- is
+-- in specs/agentic/schema.sql, with the schema that owns it. What stays here is
+-- the graph-extractor guard, which is the only part specific to this pipeline.
 create or replace function aiq.extractor_call(
     p_agent      text,
     p_model      text,
@@ -101,7 +104,7 @@ create or replace function aiq.extractor_call(
     p_endpoint   text default 'https://api.openai.com/v1/chat/completions',
     p_credential text default 'LLM_API_KEY'
 ) returns jsonb as $$
-declare a agentic.agents;
+declare a agentic.agents; v_call jsonb;
 begin
     select * into a from agentic.agents where name = p_agent;
     if not found then
@@ -110,42 +113,29 @@ begin
             'installed. Run: select aiq.install_structure_null(''%'');',
             p_agent, coalesce(p_model, 'gpt-4o-mini');
     end if;
-    if a.structured_output_schema is null then
-        raise exception
-            'agent ''%'' declares no structured_output_schema, so there is no shape '
-            'to land. An extractor without one is a model call with extra steps.',
-            p_agent;
-    end if;
-    if not aiq.is_graph_schema(a.structured_output_schema) then
+    -- THE ONE THING THAT IS SPECIFIC TO AN EXTRACTOR, which is why this
+    -- function still exists after the body moved: an agent whose schema is not
+    -- a graph returns something `land_graph` cannot land, and the good place to
+    -- say so is here rather than three steps later on a shape error.
+    if a.structured_output_schema is not null
+       and not aiq.is_graph_schema(a.structured_output_schema) then
         raise exception
             'agent ''%'' does not declare a GRAPH schema (nodes with k/n, edges with '
             's/t/r), so aiq.land_graph cannot land what it returns. It is an '
-            'extractor for something else.', p_agent;
+            'extractor for something else -- build its call with '
+            'agentic.agent_call().', p_agent;
     end if;
 
-    return jsonb_build_object(
-        'url',        p_endpoint,
-        'method',     'POST',
-        'timeout_ms', 120000,
-        'credential_ref', p_credential,
-        -- The vectorless half of what the runtime would have done: system
-        -- prompt from the row, schema from the row, text from the matrix item.
-        'body', jsonb_build_object(
-            'model', coalesce(p_model, a.model),
-            'temperature', 0,
-            'messages', jsonb_build_array(
-                jsonb_build_object('role','system','content', a.system_prompt),
-                jsonb_build_object('role','user','content', p_text)),
-            'response_format', jsonb_build_object(
-                'type','json_schema',
-                'json_schema', jsonb_build_object(
-                    'name','graph', 'schema', a.structured_output_schema))),
-        'jsonpath',   'choices.0.message.content',
-        -- Kept beside the call for the same reason embed_call keeps its
-        -- marker: the task row should say what it IS, not leave a reader to
-        -- infer an intent from a url and a body.
-        'extractor',  jsonb_build_object('agent', a.name,
-                                         'model', coalesce(p_model, a.model)));
+    v_call := agentic.agent_call(p_agent, p_text,
+                                 coalesce(p_model, 'gpt-4o-mini'),
+                                 p_endpoint, p_credential);
+    -- `extractor` rather than `agent`, and the schema name stays 'graph':
+    -- both are what this function has always returned, and a consumer reading
+    -- either is not a caller to break for tidiness.
+    return (v_call - 'agent')
+        || jsonb_build_object('extractor', v_call->'agent')
+        || jsonb_build_object('body', jsonb_set(v_call->'body',
+               '{response_format,json_schema,name}', '"graph"'::jsonb));
 end;
 $$ language plpgsql stable;
 

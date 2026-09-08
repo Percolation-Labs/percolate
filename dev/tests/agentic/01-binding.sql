@@ -281,4 +281,126 @@ begin
                  'does not hide a system_prompt from agents_api';
 end $$;
 
+-- ---------------------------------------------------------------------
+-- agentic.agent_call -- the request an agent ROW describes, for ANY agent.
+--
+-- Three call-builders existed and all three were shapes core happened to need,
+-- so a consumer whose own pass is an agent with a structured output schema --
+-- the arrangement this whole design recommends -- had to read `system_prompt`
+-- and `structured_output_schema` out of the row and assemble the body by hand.
+-- That is authorship wearing the costume of a read, which having an agent be a
+-- row exists to prevent. Found from outside, by percolate-coherence doing it.
+--
+-- What this pins is that the general builder really is general: it works for an
+-- agent with a NON-graph schema (the case that had nowhere to go), it names the
+-- schema after the agent so two agents' queued calls are distinguishable, and
+-- aiq.extractor_call still returns exactly what it always did on top of it.
+-- ---------------------------------------------------------------------
+do $$
+declare v_call jsonb; v_x jsonb;
+begin
+    perform agentic.upsert_agent(jsonb_build_object(
+        'name', 't_ac_judge',
+        'system_prompt', 'Decide the thing.',
+        'model', 'gpt-4o-mini',
+        'structured_output_schema', jsonb_build_object(
+            'type','object',
+            'properties', jsonb_build_object('verdict', jsonb_build_object('type','string')),
+            'required', jsonb_build_array('verdict'))));
+
+    v_call := agentic.agent_call('t_ac_judge', 'the input');
+
+    if v_call->'body'->>'model' <> 'gpt-4o-mini' then
+        raise exception 'agent_call did not take the model pinned on the row: %', v_call;
+    end if;
+    if v_call->'body'->'messages'->0->>'content' <> 'Decide the thing.' then
+        raise exception 'the system prompt did not come from the row: %', v_call;
+    end if;
+    if v_call->'body'->'messages'->1->>'content' <> 'the input' then
+        raise exception 'the caller input is not the user message: %', v_call;
+    end if;
+    -- Named after the agent, not a constant: a reader inspecting a queued task
+    -- must be able to tell two agents' calls apart from the body alone.
+    if v_call->'body'->'response_format'->'json_schema'->>'name' <> 't_ac_judge' then
+        raise exception 'the response_format schema is not named for the agent: %', v_call;
+    end if;
+    if v_call->>'jsonpath' <> 'choices.0.message.content' then
+        raise exception 'the answer path is not returned: %', v_call;
+    end if;
+
+    -- An agent with no schema is refused HERE rather than at request time in a
+    -- worker, which is the whole reason the builder is a function.
+    perform agentic.upsert_agent(jsonb_build_object(
+        'name', 't_ac_bare', 'system_prompt', 'no schema', 'model', 'gpt-4o-mini'));
+    begin
+        perform agentic.agent_call('t_ac_bare', 'x');
+        raise exception 'an agent with no structured_output_schema built a call';
+    exception when others then
+        if sqlerrm like '%no structured_output_schema built a call%' then raise; end if;
+    end;
+
+    -- And a non-graph agent is refused by the EXTRACTOR wrapper, pointed at the
+    -- general builder rather than merely rejected.
+    begin
+        perform aiq.extractor_call('t_ac_judge', 'gpt-4o-mini', 'x');
+        raise exception 'a non-graph agent was accepted as an extractor';
+    exception when others then
+        if sqlerrm like '%accepted as an extractor%' then raise; end if;
+        if sqlerrm not like '%agentic.agent_call%' then
+            raise exception 'the refusal does not name the general builder: %', sqlerrm;
+        end if;
+    end;
+
+    -- The extractor wrapper's own contract is unchanged: `extractor`, not
+    -- `agent`, and the schema still named 'graph'.
+    v_x := aiq.extractor_call('structure_null', 'gpt-4o-mini', 'some text');
+    if v_x->'extractor'->>'agent' <> 'structure_null' or v_x ? 'agent' then
+        raise exception 'extractor_call changed the key its callers read: %', v_x;
+    end if;
+    if v_x->'body'->'response_format'->'json_schema'->>'name' <> 'graph' then
+        raise exception 'extractor_call changed its schema name: %', v_x;
+    end if;
+
+    raise notice 'agentic: agent_call builds any agent''s request, and extractor_call is a guard on it';
+end $$;
+
+-- ---------------------------------------------------------------------
+-- A CLOSED VOCABULARY REFUSES WITH ITS CONTENTS, not with its name.
+--
+-- `category` has always been a CHECK, so a bad one was always refused. What a
+-- consumer got was `violates check constraint "agents_category_check"` and a
+-- row dump -- the constraint's NAME and not the eight words it would have
+-- taken, so the next step was reading pg_constraint. That is the same defect
+-- upsert_graph fixed for relations, and it costs more here because writing an
+-- agent is the first thing a consumer does. Found by one doing it.
+-- ---------------------------------------------------------------------
+do $$
+begin
+    begin
+        perform agentic.upsert_agent(
+            '{"name":"t_cat_bad","system_prompt":"x","category":"coherence"}'::jsonb);
+        raise exception 'an unknown agent category was accepted';
+    exception when others then
+        if sqlerrm like '%unknown agent category was accepted%' then raise; end if;
+        -- The contents, not just the name: a message that does not list the
+        -- alternatives sends the reader to the catalogue, which is the whole
+        -- thing being fixed.
+        if sqlerrm not like '%classifier%' or sqlerrm not like '%extractor%' then
+            raise exception
+                'the refusal does not name the vocabulary it enforced: %', sqlerrm;
+        end if;
+    end;
+
+    -- And it still accepts every value the constraint does, or the pre-check
+    -- has become a second, narrower vocabulary -- which is the failure mode of
+    -- reading a list into code instead of out of the constraint.
+    perform agentic.upsert_agent(
+        ('{"name":"t_cat_ok","system_prompt":"x","category":"' || c || '"}')::jsonb)
+      from unnest(array['general','extractor','summariser','classifier',
+                        'router','critic','tool_user','evaluator']) c
+     where c <> 'extractor';   -- extractor additionally requires a schema
+
+    raise notice 'agentic: an unknown category is refused by naming the vocabulary';
+end $$;
+
 rollback;
