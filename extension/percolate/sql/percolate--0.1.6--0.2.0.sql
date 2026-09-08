@@ -21962,6 +21962,7 @@ declare
     v_revived int := 0;         -- retracted edges a fresh assertion brought back
     v_retracted bigint;
     v_novel_kinds text[] := '{}';  -- claimed kinds no catalogue knows, for the receipt
+    v_lock record;              -- the canonical lock order, see the loop below
 begin
     -- ---- Validate. This gate is LOAD-BEARING, not belt-and-braces: the
     -- step-level output_schema check is reported unimplemented by
@@ -21976,6 +21977,49 @@ begin
             coalesce(p_context->>'agent','?');
     end if;
     v_n := jsonb_array_length(v_nodes);
+
+    -- ---- LOCK IN A CANONICAL ORDER FIRST, or concurrent workers deadlock.
+    --
+    -- MEASURED, not anticipated: eight workers landing 1,200 documents over 274
+    -- entities produced `deadlock detected ... while inserting index tuple in
+    -- relation "soft_nodes"`, with both processes inside land_graph. The loop
+    -- below upserts one soft node per ordinal, in the order the extractor
+    -- happened to list them, and `on conflict (org_id, claimed_kind, key)` takes
+    -- a lock on that index entry. Two documents naming Meridian and Halcyon in
+    -- opposite orders therefore take the same two locks in opposite orders,
+    -- which is a cycle, and Postgres kills one of them.
+    --
+    -- That is the exact concurrency this system recommends -- a KEDA-scaled
+    -- pool of workers claiming extraction tasks -- so the failure is not an
+    -- exotic one. It also gets MORE likely as a corpus gets denser, because the
+    -- cycle needs two documents sharing two entities.
+    --
+    -- The fix is to make every transaction take these locks in the same order,
+    -- and the order has to come from the DATA rather than from the payload.
+    -- Advisory locks keyed on the node key, acquired sorted, do that in six
+    -- lines and -- crucially -- WITHOUT REORDERING v_nodes, which the next
+    -- comment explains is not allowed to happen.
+    --
+    -- Advisory rather than row locks because the rows may not exist yet: the
+    -- deadlock is between two INSERTs, and there is nothing to lock until one
+    -- of them wins. `pg_advisory_xact_lock` releases at commit or rollback with
+    -- no unlock path to forget. A hash collision between two unrelated keys
+    -- costs a little false serialisation and nothing else, which is the right
+    -- direction for this trade.
+    --
+    -- An explicit loop, not `perform ... from (select ... order by)`: SQL does
+    -- not promise to evaluate a function in a SELECT list in sort order, and a
+    -- lock ordering that holds only by planner accident is not one.
+    for v_lock in
+        select distinct lower(trim(coalesce(n->>'k',''))) || '/'
+                     || lower(trim(coalesce(n->>'n','')))  as k
+          from jsonb_array_elements(v_nodes) n
+         where coalesce(n->>'k','') <> '' and coalesce(n->>'n','') <> ''
+         order by 1
+    loop
+        perform pg_catalog.pg_advisory_xact_lock(
+            pg_catalog.hashtextextended(v_lock.k, 0));
+    end loop;
 
     -- ---- Resolve, BY ORDINAL POSITION, from the list as emitted.
     --
