@@ -227,6 +227,8 @@ ORDER = [
     ("ai-query-layer/integration-rbac.sql",     "org scoping, api views, the SECURITY INVOKER read path"),
     ("ai-query-layer/integration-workflow.sql", "p8ql as a workflow step"),
     ("ai-query-layer/graph-algorithms.sql",     "the compiled graph algorithms, wrapped -- after integration-rbac, because it resolves names through aiq.lookup and must inherit whatever authorization that carries"),
+    ("ai-query-layer/resolution.sql",           "resolving a loose textual mention to a node: exact, an entropy gate, a dropped qualification, then trigram. After integration-rbac for the same reason graph-algorithms is -- it reads through the registry and must inherit whatever authorization that carries"),
+    ("ai-query-layer/edge-standing.sql",        "which edges answer real questions, which weights survive a uniform-partition null, and the depth-one read that records it happened. Reads the recall counters schema.sql already writes"),
     ("world-model-ingestion/schema.sql",        "the content plane: channels, files, resources, chunks"),
     ("world-model-ingestion/integration.sql",   "registers the corpus, projects documents into the graph"),
     ("agentic/schema.sql",                      "agents, sessions, runs, messages -- the conversation plane"),

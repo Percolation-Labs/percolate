@@ -16419,6 +16419,360 @@ comment on function aiq.graph_induced(uuid[], text, timestamptz) is
 
 
 -- ============================================================
+-- ai-query-layer/resolution.sql
+--   resolving a loose textual mention to a node: exact, an entropy gate, a dropped qualification, then trigram. After integration-rbac for the same reason graph-algorithms is -- it reads through the registry and must inherit whatever authorization that carries
+-- ============================================================
+
+-- ============================================================
+-- Resolving a loose mention to a node.
+--
+-- Prose names things the way people say them. A postmortem writes "the roles
+-- table", a commit message writes `claim_task`, a spec writes
+-- `workflow.claim_task`, and the registry holds exactly one of those. Every
+-- package that lands writing against `aiq.nodes` needs the same cascade, and
+-- until now each would have written its own — this shipped for weeks inside one
+-- application, which is the definition of a thing that belongs in core.
+--
+-- THE SHAPE, adapted from graphiti's dedup_helpers.py, which is the
+-- best-engineered version of it we read:
+--
+--   1. EXACT on a normalised key, always attempted, at any length
+--   2. the ENTROPY GATE, which guards the two guessing steps below it
+--   3. the DROPPED QUALIFICATION, one key ending in the mention
+--   4. FUZZY, pg_trgm above a floor
+--   5. anything left escalates, and says why
+--
+-- WHAT WE CHANGED FROM GRAPHITI. It computes MinHash signatures over 3-gram
+-- shingles and bands them into an LSH index to get candidates in linear time.
+-- Postgres has that already: pg_trgm's GIN index is the blocking step and the
+-- similarity in one operator, so eighty lines of MinHash become `%` and
+-- `similarity()`. Take the algorithm, not the implementation.
+--
+-- AMBIGUITY IS NOT ABSENCE, and the distinction earns its own return value.
+-- Two nodes sharing a name is a question a similarity score cannot answer; a
+-- name matching nothing is a different question. A caller that cannot tell them
+-- apart asks a model the wrong one.
+--
+-- TENANCY COMES FROM RLS AND MUST. Every function here is SECURITY INVOKER --
+-- the default, stated because it is load-bearing rather than incidental. It
+-- reads `aiq.nodes` and `aiq.node_keys`, both of which carry row-level
+-- security, so a caller sees the nodes their org can see and no others. A
+-- SECURITY DEFINER spelling of this would resolve a mention against every
+-- tenant's registry and hand back an id the caller may not read, which is the
+-- worst failure available here: it looks like an answer.
+-- ============================================================
+
+-- Shannon entropy over characters. A measure of whether a string carries enough
+-- evidence for similarity to mean anything: `aaa` and `Bob` cannot be
+-- fuzzy-matched because there is nothing in them to be similar about.
+create or replace function aiq.name_entropy(p_name text)
+returns real language sql immutable as $$
+    with c as (select ch, count(*)::real n
+                 from regexp_split_to_table(lower(replace(p_name,' ','')), '') ch
+                group by ch),
+         t as (select sum(n) total from c)
+    select coalesce(-sum((c.n/t.total) * ln(c.n/t.total) / ln(2)), 0)::real
+      from c, t;
+$$;
+
+-- THE THRESHOLDS ARE PARAMETERS BECAUSE THEY WERE TUNED SOMEWHERE ELSE.
+-- 1.5 and 6 are graphiti's, carried over rather than re-derived against a
+-- corpus of ours. A default that came from another project's data is a fine
+-- default and a poor constant: a registry of hex digests or of Chinese
+-- identifiers has different entropy per character, and a caller who knows that
+-- should be able to say so without forking the function.
+create or replace function aiq.has_high_entropy(
+    p_name text, p_min_entropy real default 1.5, p_min_length int default 6)
+returns boolean language sql immutable as $$
+    select case
+        when length(p_name) < p_min_length
+             and array_length(string_to_array(p_name,' '),1) < 2
+            then false
+        else aiq.name_entropy(p_name) >= p_min_entropy end;
+$$;
+
+create or replace function aiq.resolve_mention(
+    p_text        text,
+    p_entity_type text default null,
+    p_min_sim     real default 0.62,
+    -- THE SEPARATORS ARE A PARAMETER FOR THE SAME REASON. A dot qualifies a
+    -- symbol and a slash qualifies a path, which covers every key this
+    -- extension writes today. It does not cover `::`, or `#`, or a package
+    -- that qualifies with a space, and hardcoding two characters as though
+    -- they were the general rule is how a general mechanism becomes an
+    -- overfit one.
+    p_separators  text[] default array['.','/'])
+returns table (node_id uuid, matched_key text, method text, score real)
+language plpgsql stable as $$
+declare v_norm text := lower(btrim(p_text));
+        v_hits int;
+        v_sfx  text[] := array(select '%' || s || v_norm from unnest(p_separators) s);
+begin
+    -- 1. EXACT, always, regardless of how short or repetitive the name is.
+    --    An exact match is an IDENTITY and is safe at any length, which is why
+    --    the entropy gate below it does not apply here.
+    select count(*) into v_hits from aiq.node_keys k
+      join aiq.nodes n on n.id = k.node_id
+     where lower(k.key) = v_norm
+       and (p_entity_type is null or n.entity_type = p_entity_type);
+
+    if v_hits = 1 then
+        return query
+        select k.node_id, k.key, 'exact'::text, 1.0::real from aiq.node_keys k
+          join aiq.nodes n on n.id = k.node_id
+         where lower(k.key) = v_norm
+           and (p_entity_type is null or n.entity_type = p_entity_type);
+        return;
+    elsif v_hits > 1 then
+        return query
+        select k.node_id, k.key, 'escalate:ambiguous'::text, 1.0::real
+          from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
+         where lower(k.key) = v_norm
+           and (p_entity_type is null or n.entity_type = p_entity_type)
+         limit 5;
+        return;
+    end if;
+
+    -- 2. THE ENTROPY GATE, guarding both guessing steps below.
+    if not aiq.has_high_entropy(v_norm) then
+        return query select null::uuid, null::text, 'escalate:low-entropy'::text,
+                            aiq.name_entropy(v_norm);
+        return;
+    end if;
+
+    -- 3. THE DROPPED QUALIFICATION. `claim_task` for `workflow.claim_task`,
+    --    `check.sh` for `dev/check.sh`.
+    --
+    --    Measured on 300 backticked mentions taken from one repository's
+    --    postmortems: of the 159 that reached `no-match` without this step, 21
+    --    were a bare name whose qualified form was registered and 21 a bare
+    --    filename whose path was. Trigram cannot stand in for it -- the
+    --    qualifier is usually long relative to the name, and `recall_count`
+    --    against `aiq.edges.recall_count` scores 0.48, under any usable floor.
+    --
+    --    BEHIND THE ENTROPY GATE, unlike exact matching, because this is a
+    --    GUESS that a qualification was dropped rather than an identity. In
+    --    front of the gate it resolved the word `done` to a column named
+    --    `done` -- one match, so it looked confident, and the prose meant no
+    --    such thing.
+    select count(*) into v_hits from aiq.node_keys k
+      join aiq.nodes n on n.id = k.node_id
+     where lower(k.key) like any (v_sfx)
+       and (p_entity_type is null or n.entity_type = p_entity_type);
+
+    if v_hits = 1 then
+        return query
+        select k.node_id, k.key, 'suffix'::text, 1.0::real from aiq.node_keys k
+          join aiq.nodes n on n.id = k.node_id
+         where lower(k.key) like any (v_sfx)
+           and (p_entity_type is null or n.entity_type = p_entity_type);
+        return;
+    elsif v_hits > 1 then
+        return query
+        select k.node_id, k.key, 'escalate:ambiguous'::text, 1.0::real
+          from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
+         where lower(k.key) like any (v_sfx)
+           and (p_entity_type is null or n.entity_type = p_entity_type)
+         limit 5;
+        return;
+    end if;
+
+    -- 4. FUZZY, via pg_trgm. The GIN index is the blocking step.
+    --
+    --    0.62 IS MEASURED, not chosen. The test needs no judgement: a fuzzy
+    --    match is almost certainly right when the mention is a suffix of the
+    --    key it matched. Scored that way over every backticked token in one
+    --    postmortem corpus, 0.40-0.59 was 20-42% correct and 0.61-1.00 was
+    --    85-100%. The cliff is at 0.60. A threshold picked from that is a
+    --    different object from one picked because it felt about right -- and
+    --    it is a default rather than a constant, because the corpus it was
+    --    measured on is not every corpus.
+    return query
+    select k.node_id, k.key, 'fuzzy'::text, similarity(lower(k.key), v_norm)
+      from aiq.node_keys k join aiq.nodes n on n.id = k.node_id
+     where lower(k.key) % v_norm
+       and (p_entity_type is null or n.entity_type = p_entity_type)
+       and similarity(lower(k.key), v_norm) >= p_min_sim
+     order by similarity(lower(k.key), v_norm) desc
+     limit 3;
+
+    -- 5. Nothing survived the floor.
+    if not found then
+        return query select null::uuid, null::text, 'escalate:no-match'::text, 0::real;
+    end if;
+end $$;
+
+comment on function aiq.resolve_mention(text, text, real, text[]) is
+    'Resolve a loose textual mention to a node: exact, then an entropy gate, '
+    'then a dropped qualification, then trigram. Returns the method so a '
+    'caller can tell an answer from an escalation, and ambiguity from absence.';
+
+
+-- ============================================================
+-- ai-query-layer/edge-standing.sql
+--   which edges answer real questions, which weights survive a uniform-partition null, and the depth-one read that records it happened. Reads the recall counters schema.sql already writes
+-- ============================================================
+
+-- ============================================================
+-- Which edges are load-bearing, and which weights are.
+--
+-- `aiq.edges` already records two things nothing reads back: `recall_count`
+-- and `probe_count`, written by `aiq.note_recall` and `aiq.note_probe`. The
+-- counters shipped in core and the three views that make sense of them shipped
+-- inside one application, which is the wrong way round -- every graph wants to
+-- know which of its edges answer questions, and none of it is domain-specific.
+--
+-- Three separate questions, deliberately not fused into a score:
+--
+--   STANDING     has this edge ever answered a real question
+--   DISPARITY    is this edge's weight distinguishable from a null that
+--                partitions a node's strength uniformly
+--   NEIGHBOURS   read a node's neighbourhood AND record that you did
+--
+-- A single "importance" number over the three would be a weight fitted against
+-- nothing, and this collection's rule is that such a number is not eligible for
+-- core. Each view reports its own evidence and lets the caller combine them.
+--
+-- TENANCY. Everything here reads `aiq.edges`, `aiq.edges_current` and
+-- `aiq.node_keys`, all of which carry row-level security, and everything here
+-- is SECURITY INVOKER. `aiq.neighbours` writes -- it increments a counter --
+-- and it must remain INVOKER for the same reason it must be allowed to write:
+-- a caller may only ever mark edges they can already read.
+-- ============================================================
+
+-- IS THIS TRAFFIC REAL? A session declares itself a probe, and the default is
+-- that it is NOT -- because the failure to guard against is a probe silently
+-- counting as use, and a default of `false` makes forgetting to set it produce
+-- the loud error rather than the quiet one.
+--
+-- `set local percolate.probe = 'on'` outside a transaction silently does
+-- nothing, which is how a probe once counted as real traffic for a week. The
+-- separate entry point on aiq.note_probe exists so that a caller states the
+-- intent rather than setting a variable and hoping.
+create or replace function aiq.is_probe() returns boolean
+language sql stable as $$
+    select coalesce(current_setting('percolate.probe', true), 'off')
+           in ('on','true','1');
+$$;
+
+-- WHAT AN EDGE'S HISTORY OF USE SAYS ABOUT IT. An edge that is merely still
+-- true is a different object from one that is stale and load-bearing, and
+-- until the counters existed the two were indistinguishable.
+--
+-- `only ever probed` is its own state rather than folded into `never used`,
+-- because they call for opposite actions: the first says the monitoring found
+-- it and nobody else did, the second says nothing has ever looked.
+-- SECURITY INVOKER, EXPLICITLY. A view's default is to run as its OWNER, and
+-- the owner here is `app_owner`, which owns `aiq.edges` and is therefore not
+-- subject to its row-level security (the table is RLS-enabled but not FORCE
+-- RLS, and a table owner bypasses its own policies). A view left on the default
+-- would hand every org's edges to any caller granted select on it.
+--
+-- This instance cannot demonstrate that, because every edge in it carries a
+-- null org_id and is shared by the design's own rule -- which is exactly why
+-- the setting is stated rather than tested into existence. A tenancy property
+-- that holds only because the data happens to be single-tenant is not a
+-- property.
+create or replace view aiq.edge_standing with (security_invoker = true) as
+select e.id, e.relation,
+       coalesce(e.provenance->>'from', 'unknown') as source,
+       e.weight, e.recall_count, e.probe_count,
+       e.valid_from::date as asserted, e.last_recalled_at,
+       case
+           when e.valid_to is not null                    then 'retracted'
+           when e.recall_count = 0 and e.probe_count > 0  then 'only ever probed'
+           when e.recall_count = 0                        then 'never used'
+           else 'load-bearing' end as standing
+from aiq.edges e;
+
+-- THE DISPARITY FILTER, Serrano et al's backbone extraction.
+--
+-- For node i with degree k and strength s, an incident edge's normalised
+-- weight is p = w/s. Under the null that the strength is partitioned uniformly
+-- at random across the k incident edges, the probability of seeing a share at
+-- least this large is (1 - p)^(k-1). Small alpha means the weight is not what
+-- a uniform split would produce.
+--
+-- REPORTED, NOT APPLIED. The view returns alpha for both endpoints and filters
+-- nothing: the significance level is the caller's decision and a graph has no
+-- business choosing it. Fusing a threshold in here would be the same mistake as
+-- fusing the three views into a score.
+--
+-- DEGREE 1 CANNOT BE RULED ON -- the null has no variance when a node has one
+-- incident edge, so alpha is 1 by construction. Returned as NULL rather than
+-- folded into "not significant", because "no evidence either way" and "evidence
+-- of no effect" are different states and only one of them is evidence.
+create or replace view aiq.edge_disparity with (security_invoker = true) as
+with strength as (
+    -- Undirected, because the null is per-node and a node's incident set is
+    -- what the strength is partitioned across regardless of direction.
+    select node_id, sum(weight) as s, count(*) as k
+    from (select src_id as node_id, weight from aiq.edges_current
+          union all
+          select dst_id, weight from aiq.edges_current) x
+    group by node_id)
+select e.id, e.src_id, e.dst_id, e.relation, e.weight,
+       ss.k as k_src, ds.k as k_dst,
+       case when ss.k > 1
+            then power(1 - (e.weight / nullif(ss.s,0))::numeric, ss.k - 1) end as alpha_src,
+       case when ds.k > 1
+            then power(1 - (e.weight / nullif(ds.s,0))::numeric, ds.k - 1) end as alpha_dst
+from aiq.edges_current e
+join strength ss on ss.node_id = e.src_id
+join strength ds on ds.node_id = e.dst_id;
+
+-- THE READ PATH THAT COUNTS. A caller asking a real question about a node gets
+-- its neighbourhood and, as a side effect, marks the edges it actually used.
+--
+-- A function rather than a view, because a view cannot record that it was read
+-- and a trigger does not fire on SELECT. The write is the point: an edge that
+-- answers questions is different from one that merely still holds, and nothing
+-- else can tell them apart.
+--
+-- DEPTH ONE, and not a parameter. A depth-n traversal that marks everything it
+-- walked would credit edges the caller never looked at, which is the opposite
+-- of what the counter is for. Callers wanting reach have `aiq.query`'s GRAPH
+-- mode and the compiled algorithms; this one is small on purpose.
+create or replace function aiq.neighbours(p_key text, p_probe boolean default false)
+returns table (relation text, direction text, other_key text, weight real,
+               recall_count bigint, provenance jsonb)
+language plpgsql stable as $$
+declare v_node uuid;
+begin
+    select node_id into v_node from aiq.node_keys
+     where key = p_key and kind = 'canonical' limit 1;
+    if v_node is null then return; end if;
+
+    return query
+    with touched as (
+        select e.id, e.relation, 'out'::text as direction, e.dst_id as other,
+               e.weight, e.recall_count, e.provenance
+          from aiq.edges_current e where e.src_id = v_node
+        union all
+        select e.id, e.relation, 'in', e.src_id, e.weight, e.recall_count,
+               e.provenance
+          from aiq.edges_current e where e.dst_id = v_node),
+    noted as (
+        select case when p_probe
+                    then aiq.note_probe(array(select id from touched))
+                    else aiq.note_recall(array(select id from touched)) end)
+    select t.relation, t.direction, k.key, t.weight, t.recall_count, t.provenance
+      from touched t
+      join aiq.node_keys k on k.node_id = t.other and k.kind = 'canonical'
+      cross join noted;
+end $$;
+
+comment on view aiq.edge_standing is
+    'Per edge: whether it has ever answered a real question, only ever been '
+    'probed, never been used, or been retracted.';
+comment on view aiq.edge_disparity is
+    'Serrano backbone extraction: alpha per endpoint under a uniform-partition '
+    'null. Reports, never filters -- the significance level is the caller''s.';
+comment on function aiq.neighbours(text, boolean) is
+    'A node''s depth-one neighbourhood, recording that the edges were read.';
+
+
+-- ============================================================
 -- world-model-ingestion/schema.sql
 --   the content plane: channels, files, resources, chunks
 -- ============================================================
