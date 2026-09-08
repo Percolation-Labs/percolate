@@ -42,8 +42,16 @@
 # still BEHAVE the way the spec promised".
 set -euo pipefail
 
-CONTAINER="${CONTAINER:-p8-experiment-pg19}"
-DB="${DB:-p8experiment}"
+# THE DEV INSTANCE, which is what `dev/README.md` documents and what
+# `dev/check.sh` defaults to. These read `p8-experiment-pg19` / `p8experiment`,
+# a single long-lived container that `dev/stacks.sh` replaced with four named
+# instances -- so a bare `dev/tests/run.sh` died on a container that does not
+# exist, and the only reason nothing noticed is that every caller passes
+# CONTAINER and DB explicitly. Two scripts in one directory defaulting to
+# different databases is also how a run grades an instance the caller did not
+# mean; check.sh's header records the same hazard for --reload.
+CONTAINER="${CONTAINER:-p8-dev-db}"
+DB="${DB:-p8dev}"
 DSN="${DSN:-}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

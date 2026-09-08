@@ -620,7 +620,8 @@ fn identity() -> String {
     .unwrap_or_default()
 }
 
-/// The two tables' modification counters: the staleness hint.
+/// The modification counters of every table that can change what a caller
+/// sees: the staleness hint.
 ///
 /// A hint, and it says so: `pg_stat_all_tables` is fed by the stats collector,
 /// which lags, so a snapshot can be behind the graph for as long as that lag.
@@ -629,12 +630,30 @@ fn identity() -> String {
 ///
 /// A change here means the same caller's graph moved, which is a reason to
 /// rebuild and NOT a reason to discard the filter they built it with.
+///
+/// `rbac.org_members` IS ONE OF THOSE TABLES, and leaving it out left a hole
+/// shaped like the thing the identity check exists for. Reuse is `identity ==
+/// id && counters == ct`, and a membership revocation changes neither: the
+/// role is the same, the JWT claims are the same string, and no `aiq` row was
+/// written. So the snapshot built while somebody was a member of an org kept
+/// being served to them after they stopped being one, for the life of the
+/// backend -- which under a pooler is a long time. `rbac.current_org_ids()`
+/// INTERSECTS the claim with these rows, so they are as much a part of what
+/// this caller may see as `nodes` and `edges` are.
+///
+/// A write to ANY org's membership invalidates EVERY cached snapshot, which is
+/// more rebuilding than strictly necessary and is the correct direction to err
+/// in: the counters are one scalar, per-org accounting would need the caller's
+/// org set inside a function that runs before the snapshot exists, and a
+/// membership table is written rarely and read on every graph call.
 fn counters() -> String {
     Spi::get_one::<String>(
         "select coalesce((select sum(n_tup_ins + n_tup_upd + n_tup_del)::text
                             from pg_stat_all_tables
-                           where schemaname = 'aiq'
-                             and relname in ('nodes', 'edges')), '')",
+                           where (schemaname = 'aiq'
+                                  and relname in ('nodes', 'edges'))
+                              or (schemaname = 'rbac'
+                                  and relname = 'org_members')), '')",
     )
     .unwrap_or(None)
     .unwrap_or_default()
