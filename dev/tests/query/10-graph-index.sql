@@ -777,5 +777,65 @@ begin
     raise notice 'graph-index: the accepted-relations view matches what upsert_graph resolves';
 end $$;
 
+-- ---------------------------------------------------------------------
+-- 16. A CLAIMED KIND NOTHING KNOWS IS NAMED, BECAUSE `k` IS HALF OF IDENTITY.
+--
+-- A soft node is keyed `(org_id, claimed_kind, key)`, so the kind is not a
+-- label on an entity -- it is part of which entity this IS. A model that says
+-- `company/amd` in one document and `organization/amd` in the next produces two
+-- nodes for one company, and `nodes: 2` is a true receipt.
+--
+-- The vocabulary discipline exists for exactly this and had been applied to one
+-- half: an unknown RELATION is refused, on the stated grounds that an extractor
+-- which can emit anything cannot be checked, costed or swapped. The thing edges
+-- connect was left open. Found from outside, on a 159-document corpus that
+-- produced 295 distinct kinds against a catalogue of six, with 60 names split
+-- across more than one of them.
+--
+-- Named rather than refused, and the asymmetry with §14's dropped relations is
+-- deliberate: an unknown kind is a candidate doing its job, and refusing it
+-- would throw away the claim the soft plane exists to record. So this asserts
+-- that the receipt SAYS SO, and that a registered kind does not trip it.
+-- ---------------------------------------------------------------------
+do $$
+declare v_r jsonb;
+begin
+    v_r := aiq.upsert_graph($g${
+      "nodes": [{"k":"weathervane","n":"Kind Alpha"},{"k":"company","n":"Kind Beta"}],
+      "edges": [{"s":0,"t":1,"r":"owns"}]}$g$::jsonb, '{"agent":"t"}'::jsonb);
+
+    if (v_r->'node_kinds_unregistered') <> '["weathervane"]'::jsonb then
+        raise exception
+            'an unregistered claimed kind was not named in the receipt: %. It is '
+            'half of the soft node''s key, so a model drifting between kinds '
+            'silently doubles entities and nothing says so.', v_r;
+    end if;
+
+    -- A registered kind must NOT be reported, or the field says nothing.
+    v_r := aiq.upsert_graph($g${
+      "nodes": [{"k":"company","n":"Kind Gamma"},{"k":"company","n":"Kind Delta"}],
+      "edges": [{"s":0,"t":1,"r":"owns"}]}$g$::jsonb, '{"agent":"t"}'::jsonb);
+    if (v_r->'node_kinds_unregistered') <> '[]'::jsonb then
+        raise exception 'a registered kind was reported as unregistered: %', v_r;
+    end if;
+
+    -- And the drift this is about is real: same name, two kinds, two nodes.
+    perform aiq.upsert_graph($g${
+      "nodes": [{"k":"company","n":"Drifting Inc"},{"k":"company","n":"Anchor Co"}],
+      "edges": [{"s":0,"t":1,"r":"owns"}]}$g$::jsonb, '{"agent":"t"}'::jsonb);
+    perform aiq.upsert_graph($g${
+      "nodes": [{"k":"organization","n":"Drifting Inc"},{"k":"company","n":"Anchor Co"}],
+      "edges": [{"s":0,"t":1,"r":"owns"}]}$g$::jsonb, '{"agent":"t"}'::jsonb);
+    if (select count(distinct node_id) from aiq.node_keys
+         where key in ('company/drifting inc','organization/drifting inc')) <> 2 then
+        raise exception
+            'the premise of this assertion no longer holds -- one name under two '
+            'kinds is no longer two nodes, so the receipt field it justifies '
+            'should be revisited rather than left';
+    end if;
+
+    raise notice 'graph-index: an unregistered claimed kind is named, and kind drift really does split a node';
+end $$;
+
 rollback;
 \echo 'graph-index: all assertions passed'

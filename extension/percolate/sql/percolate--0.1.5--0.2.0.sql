@@ -21557,6 +21557,7 @@ declare
     v_flipped int := 0;
     v_revived int := 0;         -- retracted edges a fresh assertion brought back
     v_retracted bigint;
+    v_novel_kinds text[] := '{}';  -- claimed kinds no catalogue knows, for the receipt
 begin
     -- ---- Validate. This gate is LOAD-BEARING, not belt-and-braces: the
     -- step-level output_schema check is reported unimplemented by
@@ -21682,6 +21683,39 @@ begin
             -- scope when the extraction named one and `public` when this is
             -- shared reference data, which is the same rule everything else
             -- in the collection uses.
+            -- A CLAIMED KIND NOTHING KNOWS IS NAMED IN THE RECEIPT, for the
+            -- same reason `edges_dropped_unknown_relation` is, and the
+            -- asymmetry it closes was found by a consumer rather than here.
+            --
+            -- `upsert_graph` refuses an unknown RELATION and says why: an
+            -- extractor that can emit anything cannot be checked, costed, or
+            -- swapped for a cheaper one. That reasoning was applied to the edge
+            -- label and not to the thing edges connect -- and `k` is half of
+            -- node identity, because a soft node is keyed
+            -- `(org_id, claimed_kind, key)`. So a model that says `company/amd`
+            -- in one document and `organization/amd` in the next produces TWO
+            -- nodes for one company, `nodes: 2` is a true receipt, and nothing
+            -- anywhere says the kind moved.
+            --
+            -- Measured on percolate-coherence's 159-document corpus: 295
+            -- distinct kinds emitted against a catalogue of six, and 60 names
+            -- split across more than one kind -- entities halved by a model
+            -- changing its mind about a word. Its identity pass then could not
+            -- recover them, because a pass that pairs across kinds would be
+            -- proposing that a person is a company.
+            --
+            -- NAMED, NOT REFUSED, and the difference is the whole point of the
+            -- soft plane. An unknown relation is dropped because the closed
+            -- vocabulary is what makes an edge checkable; an unknown KIND is a
+            -- candidate doing exactly its job, and refusing it would throw away
+            -- the claim this branch exists to record. What was missing was not
+            -- a constraint, it was the sentence -- a consumer had no way to
+            -- learn from the substrate that its extractor was drifting.
+            if not exists (select 1 from aiq.relation_types where src_type = v_kind)
+               and not (v_kind = any(v_novel_kinds)) then
+                v_novel_kinds := v_novel_kinds || v_kind;
+            end if;
+
             insert into aiq.soft_nodes (claimed_kind, key, label, attrs, org_id, visibility)
             values (v_kind, v_key, v_name, coalesce(v_node->'a','{}'::jsonb), v_org,
                     rbac.default_visibility(v_org))
@@ -21898,6 +21932,9 @@ begin
         -- of edges that stopped falling.
         'edges_revived', v_revived,
         'edges_dropped_unknown_relation', to_jsonb(v_unknown),
+        -- Beside the dropped relations, because they are the same fact about
+        -- an extractor seen from the two halves of the graph.
+        'node_kinds_unregistered', to_jsonb(v_novel_kinds),
         'node_ids', to_jsonb(v_ids));
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
@@ -21940,7 +21977,8 @@ declare
     v_acc jsonb := jsonb_build_object('graphs',0,'edges_new',0,'edges_merged',0,
                                       'self_edges_dropped',0,'edges_flipped_to_inverse',0,
                                       'edges_revived',0,
-                                      'edges_dropped_unknown_relation','[]'::jsonb);
+                                      'edges_dropped_unknown_relation','[]'::jsonb,
+                                      'node_kinds_unregistered','[]'::jsonb);
     v_r jsonb;
 begin
     -- Raises unless this task belongs to the run being executed: a registered
@@ -21986,7 +22024,15 @@ begin
                 select coalesce(jsonb_agg(distinct x), '[]'::jsonb)
                   from jsonb_array_elements(
                         (v_acc->'edges_dropped_unknown_relation')
-                        || (v_r->'edges_dropped_unknown_relation')) x));
+                        || (v_r->'edges_dropped_unknown_relation')) x),
+            -- Unioned for the same reason: across a fan-in the useful fact is
+            -- WHICH kinds the model kept inventing, and a count of 295 sends a
+            -- reader nowhere.
+            'node_kinds_unregistered', (
+                select coalesce(jsonb_agg(distinct x), '[]'::jsonb)
+                  from jsonb_array_elements(
+                        (v_acc->'node_kinds_unregistered')
+                        || (v_r->'node_kinds_unregistered')) x));
     end loop;
 
     return v_acc || jsonb_build_object('children', v_total);
