@@ -415,8 +415,23 @@ $$;
 -- across namespaces; a worker credential in that position would be a
 -- task-claiming credential in that position.
 -- ----------------------------------------------------------------------------
-create role pool_manager nologin;
-create role keda_scaler  nologin;
+-- The two roles are CREATEd in user-rbac/roles.sql, not here, and this block
+-- is the check that says so out loud rather than failing four statements
+-- later on a missing grantee. A schema file loads as app_owner; app_owner has
+-- no CREATEROLE; `create role` here fails on every clean install. That was
+-- not a theory -- this file previously carried the CREATE ROLEs and stopped
+-- dead at exactly this line against the dev stack, having already created
+-- every table above it.
+do $$
+begin
+    if not exists (select 1 from pg_roles where rolname = 'pool_manager')
+       or not exists (select 1 from pg_roles where rolname = 'keda_scaler') then
+        raise exception
+            'pool_manager and keda_scaler must exist before this file loads; '
+            'apply user-rbac/roles.sql as a superuser first'
+            using errcode = 'insufficient_privilege';
+    end if;
+end $$;
 
 grant usage on schema workflow to pool_manager, keda_scaler;
 

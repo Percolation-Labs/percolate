@@ -123,3 +123,33 @@ grant authenticated to authenticator;
 -- ------------------------------------------------------------
 create role worker nologin;
 create role scheduler nologin;
+
+-- ------------------------------------------------------------
+-- 5. The worker-pool control plane's two roles.
+--
+--    They live here rather than in workflow-engine/pools.sql for the reason
+--    §1 of this file gives and pools.sql could not obey: a schema file loads
+--    as app_owner, app_owner has no CREATEROLE, and `create role` inside it
+--    therefore fails on every clean install. Found by loading pools.sql
+--    against the dev stack -- "permission denied to create role", after
+--    every table in the file had already been created.
+--
+--    pool_manager: what percolate-core's manager connects as. SELECT on
+--    desired state, EXECUTE on report_pool_status(), and deliberately NO
+--    write on workflow.pools -- so a compromised manager cannot rewrite
+--    desired state to make its own actions look correct, and the
+--    desired/observed split stays real rather than cosmetic.
+--
+--    keda_scaler: what KEDA's Postgres scaler connects as, holding EXECUTE
+--    on workflow.queue_depth(text) and nothing else. Separate from `worker`
+--    on purpose: the scaler's credential lives in a KEDA
+--    ClusterTriggerAuthentication that the operator reads across every
+--    namespace it serves, and a worker credential in that position is a
+--    task-claiming credential in that position.
+--
+--    The grants themselves stay in pools.sql, beside the objects they name.
+--    Only the CREATE ROLE moves, which is the half that needs a superuser.
+-- ------------------------------------------------------------
+create role pool_manager nologin;
+create role keda_scaler  nologin;
+
