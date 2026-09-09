@@ -42,7 +42,7 @@ tabular = ["pyarrow>=17", "duckdb>=1.0"]
 # of a row, and keeping it in the base install is what lets anyone review a
 # manifest without a cluster client. The extra is for the reconcile loop.
 manager = ["kubernetes-asyncio>=32.0"]
-# The browser surface. FastAPI hands over six static files and owns no read
+# The browser surface. FastAPI hands over static files and owns no read
 # path -- the page talks to PostgREST directly, which is the property the whole
 # UI is built on, and the reason this extra is two packages rather than a stack.
 ui = ["fastapi>=0.115", "uvicorn>=0.34"]
@@ -87,7 +87,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["percolate_core"]
-# The UI's six files are package DATA, not code, and hatchling includes them
+# The UI's static files are package DATA, not code, and hatchling includes them
 # because they live inside the package directory. Stated here because "the
 # wheel carries the UI" is a claim worth being able to point at, and
 # `dev/check.sh` asserts it against a built wheel rather than against this

@@ -42,6 +42,23 @@ export const stat = (label, value, note, tone = "") =>
     h("span", { class: "value" }, value),
     note ? h("span", { class: "trend " + tone }, note) : null);
 
+/** The stat-tile form of `gap`. A read that failed is not a zero.
+ *
+ * "0 running · queue is clear" and "0 failed · none" are the sentences a
+ * HEALTHY deployment writes, so a tile that renders them from a failed read
+ * claims all-clear on no evidence -- the one thing a dashboard must never do,
+ * and the shape a live misconfiguration took here: a 404 from the wrong REST
+ * URL while the headline read zero and nine runs, two of them still running,
+ * were in the database. An em dash is not a number, and the error goes where
+ * the trend would have been. A successful EMPTY result still renders zero:
+ * that one is evidence. */
+export const statGap = (label, err) =>
+  h("div", { class: "stat" },
+    h("span", { class: "label" }, label),
+    h("span", { class: "value", style: "color:var(--faint)" }, "—"),
+    h("span", { class: "trend down", title: (err && err.message) || "" },
+      "unavailable · " + String((err && (err.code || err.message)) || "read failed").slice(0, 44)));
+
 export const panel = (title, label, body, right) =>
   h("div", { class: "panel" },
     h("header", {}, h("h3", {}, title), label ? h("span", { class: "label" }, label) : null,
@@ -63,6 +80,18 @@ export function gap(what, detail, owner) {
 export const fmtTime = (s) => {
   if (!s) return "—";
   const d = new Date(s), secs = (Date.now() - d) / 1000;
+  /* A timestamp in the FUTURE is not an age of zero. `expires_at` is the one
+     that matters: clamping its negative age to zero rendered a refresh token
+     good for another month as "0s ago", i.e. a live credential shown as one
+     that had just lapsed. Under a day it reads as a countdown; past that it
+     is a date, which is what the branch below does with old timestamps. */
+  if (secs < -1) {
+    const ahead = -secs;
+    if (ahead < 60) return "in " + Math.round(ahead) + "s";
+    if (ahead < 3600) return "in " + Math.round(ahead / 60) + "m";
+    if (ahead < 86400) return "in " + Math.round(ahead / 3600) + "h";
+    return d.toISOString().slice(0, 10);
+  }
   if (secs < 60) return Math.max(0, Math.round(secs)) + "s ago";
   if (secs < 3600) return Math.round(secs / 60) + "m ago";
   if (secs < 86400) return Math.round(secs / 3600) + "h ago";

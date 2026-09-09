@@ -7,22 +7,30 @@
  * one that matters is the one in the database.
  */
 
-import { select, rpc, config, setEndpoint, token } from "./api.js";
-import { h, chip, status, table, stat, panel, gap, fmtTime, short, seg, stream } from "./ui.js";
+import { select, rpc, read, probeQuery, config, setEndpoint, token } from "./api.js";
+import { READS, PROBES } from "./reads.js";
+import { agentEditor } from "./workbench.js";
+import { h, chip, status, table, stat, statGap, panel, gap, fmtTime, short, seg, stream } from "./ui.js";
 import { markdown } from "./md.js";
 import { head, page, tryRead, defs } from "./views.js";
 
+/* A count that came back, or the reason it did not. `3 tool servers` and
+   `0 tool servers` are both claims about the database; a refused read is
+   neither, and saying "0" there is the failure this file had twice. */
+const countOf = (res, n, noun) => (res && res.error ? noun + " unavailable" : n + " " + noun);
+
 /* -- Agents ------------------------------------------------ */
 export async function agents() {
+  const editor = agentEditor();
   const [ag, sk, ts, pl] = await Promise.all([
-    tryRead(() => select("agentic", "agents_api",
-      "select=name,model,tools,skills,structured_output,system_prompt&order=name"), (e) => ({ rows: [], error: e })),
-    tryRead(() => select("agentic", "skills_api", "select=name,description&order=name"), () => ({ rows: [] })),
-    tryRead(() => select("agentic", "tool_servers_api", "select=name,transport&order=name"), () => ({ rows: [] })),
-    tryRead(() => select("agentic", "plugins_api", "select=name&order=name"), () => ({ rows: [] })),
+    tryRead(() => read(READS.agents), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.skills), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.toolServers), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.plugins), (e) => ({ rows: [], error: e })),
   ]);
-  const node = page(head((ag.rows || []).length + " agents · " + (ts.rows || []).length + " tool servers · " +
-    (sk.rows || []).length + " skills", "Agents",
+  const node = page(head([countOf(ag, (ag.rows || []).length, "agents"),
+                          countOf(ts, (ts.rows || []).length, "tool servers"),
+                          countOf(sk, (sk.rows || []).length, "skills")].join(" · "), "Agents",
     "An agent is a row: name, system prompt, tools, model, output schema. Adding one is an insert " +
     "through agentic.upsert_agent(), so it is scoped, audited and revocable like anything else."));
 
@@ -35,8 +43,9 @@ export async function agents() {
             h("td", { class: "pill-row" }, (a.tools || []).map((t) =>
               h("span", { class: "chip kind" }, typeof t === "string" ? t : (t.server || JSON.stringify(t))))),
             h("td", { class: "pill-row" }, (a.skills || []).map((s) => h("span", { class: "chip kind" }, s))),
-            h("td", { class: "mono" }, a.structured_output ? "typed" : "-"),
-            h("td", {}, h("button", { class: "btn ghost", onclick: (e) => {
+            h("td", { class: "mono" }, a.structured_output_schema ? "typed" : "-"),
+            h("td", {}, h("button", {class:"btn ghost", onclick:() => editor.load(a)}, "Edit"),
+              h("button", { class: "btn ghost", onclick: (e) => {
               const tr = e.target.closest("tr");
               tr.after(h("tr", {}, h("td", { colspan: 6 },
                 h("pre", { class: "code" }, a.system_prompt || "(no system prompt)"))));
@@ -44,30 +53,52 @@ export async function agents() {
             } }, "prompt"))))));
 
   node.append(h("div", { class: "grid g3" },
-    panel("Skills", (sk.rows || []).length, h("div", { class: "body pill-row" },
-      (sk.rows || []).map((s) => h("span", { class: "chip", title: s.description || "" }, s.name)))),
-    panel("Tool servers", (ts.rows || []).length, h("div", { class: "body pill-row" },
-      (ts.rows || []).map((s) => h("span", { class: "chip" }, s.name + " · " + (s.transport || ""))))),
-    panel("Plugins", (pl.rows || []).length, h("div", { class: "body pill-row" },
-      (pl.rows || []).length ? (pl.rows || []).map((s) => h("span", { class: "chip" }, s.name))
-        : h("span", { class: "mono", style: "font-size:.72rem;color:var(--muted)" }, "none installed")))));
+    panel("Skills", sk.error ? "unavailable" : (sk.rows || []).length,
+      sk.error ? h("div", { class: "body" }, gap("skills_api", sk.error.message, "schema"))
+        : h("div", { class: "body pill-row" },
+            (sk.rows || []).map((s) => h("span", { class: "chip", title: s.description || "" }, s.name)))),
+    panel("Tool servers", ts.error ? "unavailable" : (ts.rows || []).length,
+      ts.error ? h("div", { class: "body" }, gap("tool_servers_api", ts.error.message, "schema"))
+        : h("div", { class: "body pill-row" },
+            (ts.rows || []).map((s) => h("div", {},
+              h("span", {class:"chip"}, s.name + " · " + s.kind),
+              h("span", {}, s.cached_tools?.length ? " " + s.cached_tools.length + " discovered tools" : " Catalogue unavailable — sync required"),
+              h("button", {class:"btn", onclick:async (e) => {
+                e.target.disabled = true;
+                try {
+                  const base = config().core?.replace(/\/$/, "");
+                  if (!base) throw new Error("Configure the agent runtime in Settings.");
+                  const res = await fetch(base + "/tools/" + encodeURIComponent(s.name) + "/sync", {
+                    method:"POST", headers:{Authorization:"Bearer " + token()}});
+                  const data = await res.json();
+                  if (!res.ok) throw new Error(data.detail || "HTTP " + res.status);
+                  e.target.textContent = data.tools.length + " tools synced";
+                } catch (err) { e.target.after(h("div", {class:"note rose"}, err.message)); }
+                finally { e.target.disabled = false; }
+              }}, "Sync " + s.name))))),
+    panel("Plugins", pl.error ? "unavailable" : (pl.rows || []).length,
+      pl.error ? h("div", { class: "body" }, gap("plugins_api", pl.error.message, "schema"))
+        : h("div", { class: "body pill-row" },
+            (pl.rows || []).length ? (pl.rows || []).map((s) => h("span", { class: "chip" }, s.name))
+              : h("span", { class: "mono", style: "font-size:.72rem;color:var(--muted)" }, "none installed")))));
+  node.append(editor);
   return node;
 }
 
 /* -- Users ------------------------------------------------- */
 export async function users() {
   const [us, rs, roles, orgs] = await Promise.all([
-    tryRead(() => select("rbac", "users_api", "select=id,email,status,created_at&order=email"), (e) => ({ rows: [], error: e })),
-    tryRead(() => select("rbac", "user_roles", "select=user_id,role"), () => ({ rows: [] })),
-    tryRead(() => select("rbac", "roles", "select=name&order=name"), () => ({ rows: [] })),
-    tryRead(() => select("rbac", "org_members", "select=user_id,org_id,role"), () => ({ rows: [] })),
+    tryRead(() => read(READS.users), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.userRoles), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.roleNames), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.orgMembers), (e) => ({ rows: [], error: e })),
   ]);
   const roleOf = {};
   (rs.rows || []).forEach((r) => { (roleOf[r.user_id] = roleOf[r.user_id] || []).push(r.role); });
   const orgsOf = {};
   (orgs.rows || []).forEach((r) => { (orgsOf[r.user_id] = orgsOf[r.user_id] || []).push(r.role); });
 
-  const node = page(head((us.rows || []).length + " visible", "Users",
+  const node = page(head(countOf(us, (us.rows || []).length, "visible"), "Users",
     "Identity is Postgres: password verification, session revocation, throttling and the audit " +
     "trail are all SQL. This page writes through the same functions, so nothing it does is " +
     "invisible to auth_events."));
@@ -115,20 +146,26 @@ export async function users() {
 /* -- Roles ------------------------------------------------- */
 export async function roles() {
   const [kinds, perms, rl] = await Promise.all([
-    tryRead(() => select("rbac", "permission_kinds", "select=resource,action,checked_by&order=resource,action"), () => ({ rows: [] })),
-    tryRead(() => select("rbac", "role_permissions", "select=role,resource,action"), () => ({ rows: [] })),
-    tryRead(() => select("rbac", "roles", "select=name,grants_all,description&order=name"), () => ({ rows: [] })),
+    tryRead(() => read(READS.permissionKinds), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.rolePermissions), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.roles), (e) => ({ rows: [], error: e })),
   ]);
   const held = new Set((perms.rows || []).map((p) => p.role + "|" + p.resource + "|" + p.action));
   const names = (rl.rows || []).map((r) => r.name);
-  const node = page(head(names.length + " roles · " + (kinds.rows || []).length + " permission kinds",
+  const node = page(head(countOf(rl, names.length, "roles") + " · " +
+    countOf(kinds, (kinds.rows || []).length, "permission kinds"),
     "Roles & permissions",
     "One primitive for every module: rows in role_permissions, and one policy that calls " +
     "has_permission(). There is no per-module authorization code to review, which is why this " +
     "table is the whole surface."));
 
+  /* A matrix built from a failed read is a grid of "·" -- which is a specific
+     and false claim ("no role holds any permission"), not an absence of one. */
+  const matrixErr = (kinds.error || rl.error || perms.error);
   node.append(panel("Matrix", "role x (resource : action)",
-    h("div", { class: "body", style: "overflow-x:auto" },
+    matrixErr ? h("div", { class: "body" },
+      gap("rbac.permission_kinds / roles / role_permissions", matrixErr.message, "schema"))
+    : h("div", { class: "body", style: "overflow-x:auto" },
       h("table", { class: "matrix" },
         h("thead", {}, h("tr", {}, h("th", { class: "rowhead" }, "resource : action"),
           names.map((r) => h("th", {}, r)), h("th", {}, "checked by"))),
@@ -145,7 +182,8 @@ export async function roles() {
 
   node.append(h("div", { class: "grid g2" },
     panel("Roles", "rbac.roles",
-      table(["Role", "grants_all", "Description"], rl.rows || [], (r) =>
+      rl.error ? gap("rbac.roles", rl.error.message, "schema")
+      : table(["Role", "grants_all", "Description"], rl.rows || [], (r) =>
         h("tr", {}, h("td", { class: "mono" }, r.name),
           h("td", {}, r.grants_all ? chip("yes", "accent") : h("span", { class: "chip" }, "no")),
           h("td", {}, r.description || "-")))),
@@ -162,10 +200,8 @@ export async function roles() {
 /* -- Keys & sessions --------------------------------------- */
 export async function keys() {
   const [ak, rt] = await Promise.all([
-    tryRead(() => select("rbac", "api_keys_api", "select=id,name,scopes,created_at,last_used_at,revoked_at&order=created_at.desc"),
-      (e) => ({ rows: [], error: e })),
-    tryRead(() => select("rbac", "refresh_tokens_api",
-      "select=id,device_label,created_at,expires_at,revoked_at&order=created_at.desc"), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.apiKeys), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.refreshSessions), (e) => ({ rows: [], error: e })),
   ]);
   const node = page(head("revocable rows, which is the point of them", "Keys & sessions",
     "A JWT you cannot revoke is a decision you cannot take back, so both of these are rows. " +
@@ -181,7 +217,7 @@ export async function keys() {
     panel("API keys", "rbac.api_keys_api - no key_hash in the view",
       ak.error ? gap("api_keys_api", ak.error.message, "schema")
         : table(["Key", "Scopes", "Created", "Last used"], ak.rows || [], (k) =>
-            h("tr", {}, h("td", {}, k.name || short(k.id)),
+            h("tr", {}, h("td", {}, k.label || short(k.id)),
               h("td", { class: "pill-row" }, (k.scopes || []).map((s) => h("span", { class: "chip kind" }, s))),
               h("td", { class: "mono" }, fmtTime(k.created_at)),
               h("td", { class: "mono" }, fmtTime(k.last_used_at))))),
@@ -189,7 +225,7 @@ export async function keys() {
       rt.error ? gap("refresh_tokens_api", rt.error.message, "schema")
         : table(["Device", "Issued", "Expires", ""], rt.rows || [], (s) =>
             h("tr", {}, h("td", {}, s.device_label || "-"),
-              h("td", { class: "mono" }, fmtTime(s.created_at)),
+              h("td", { class: "mono" }, fmtTime(s.issued_at)),
               h("td", { class: "mono" }, fmtTime(s.expires_at)),
               h("td", {}, h("button", { class: "btn ghost danger", onclick: async (e) => {
                 const res = await tryRead(() => rpc("rbac", "revoke_session", { p_refresh_token_id: s.id }),
@@ -207,9 +243,9 @@ export async function keys() {
 /* -- Settings ---------------------------------------------- */
 export async function settings() {
   const [orgs, mem, vis] = await Promise.all([
-    tryRead(() => select("rbac", "orgs", "select=id,slug,name&order=slug"), (e) => ({ rows: [], error: e })),
-    tryRead(() => select("rbac", "org_members", "select=org_id,user_id,role"), () => ({ rows: [] })),
-    tryRead(() => select("rbac", "visibilities", "select=scope,rank,requires_org,description&order=rank"), () => ({ rows: [] })),
+    tryRead(() => read(READS.orgs), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.orgMembers), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.visibilities), (e) => ({ rows: [], error: e })),
   ]);
   const rest = h("input", { class: "control mono", style: "width:100%", value: config().rest });
   const core = h("input", { class: "control mono", style: "width:100%", value: config().core });
@@ -232,7 +268,7 @@ export async function settings() {
       orgs.error ? gap("rbac.orgs", orgs.error.message, "schema")
         : table(["Slug", "Name", "Members"], orgs.rows || [], (o) =>
             h("tr", {}, h("td", { class: "mono" }, o.slug), h("td", {}, o.name),
-              h("td", { class: "num" }, (mem.rows || []).filter((m) => m.org_id === o.id).length)))))); 
+              h("td", { class: "num" }, (mem.rows || []).filter((m) => m.org_id === o.id).length))))));
 
   node.append(panel("Visibility vocabulary", "rbac.visibilities - a table, not an enum",
     table(["Scope", "Rank", "Requires org", "Meaning"], vis.rows || [], (v) =>
@@ -298,15 +334,15 @@ const I = {
 };
 
 export async function chat() {
-  const sessions = await tryRead(() => select("agentic", "sessions_api",
-    "select=id,title,created_at&order=created_at.desc&limit=40"), (e) => ({ rows: [], error: e }));
-  const ag = await tryRead(() => select("agentic", "agents_api", "select=name&order=name"), () => ({ rows: [] }));
+  const sessions = await tryRead(() => read(READS.chatSessions, "limit=40"), (e) => ({ rows: [], error: e }));
+  const ag = await tryRead(() => read(READS.agentNames), (e) => ({ rows: [], error: e }));
 
   const convo = h("div", { class: "thread" }, h("div", { class: "empty" }, "Pick a session, or create one."));
   let list = null, sendBtn = null;
   const aside = h("div", { class: "body", style: "padding:.9rem;display:flex;flex-direction:column;gap:.8rem" },
     h("div", { class: "note" }, "Runs and messages for the selected session appear here."));
   let current = null;
+  let sending = false;
 
   /* The scroller is the conversation column, not the thread inside it. */
   const scroller = () => convo.parentElement;
@@ -317,19 +353,18 @@ export async function chat() {
   const stick = (was) => { const el = scroller(); if (was && el) el.scrollTop = el.scrollHeight; };
 
   const openSession = async (s, node) => {
+    if (sending) return;
     current = s;
+    sessionStorage.setItem("p8-chat-session", s.id);
     [...node.parentElement.children].forEach((c) => c.removeAttribute("aria-current"));
     node.setAttribute("aria-current", "true");
     convo.replaceChildren(h("div", { class: "empty" }, "Loading..."));
     const [msgs, runsRes] = await Promise.all([
-      tryRead(() => select("agentic", "messages_api",
-        "session_id=eq." + s.id + "&select=role,content,tool_calls,is_error,seq,created_at&order=seq"),
-        (e) => ({ rows: [], error: e })),
-      tryRead(() => select("agentic", "runs_api", "session_id=eq." + s.id +
-        "&select=id,agent_id,status,trigger_kind,depth,created_at&order=created_at.desc"),
-        (e) => ({ rows: [], error: e })),
+      tryRead(() => read(READS.messages, "session_id=eq." + s.id), (e) => ({ rows: [], error: e })),
+      tryRead(() => read(READS.sessionRuns, "session_id=eq." + s.id), (e) => ({ rows: [], error: e })),
     ]);
 
+    if (current?.id !== s.id) return;
     const body = msgs.error ? [gap("messages_api", msgs.error.message, "schema")]
       : ((msgs.rows || []).length
           ? (msgs.rows || []).flatMap((m) => {
@@ -337,14 +372,19 @@ export async function chat() {
               const parts = [markdown(content)];
               (m.tool_calls || []).forEach((t) => {
                 const name = t.name || t.tool_name || (t.function && t.function.name) || "tool";
-                const args = t.args || (t.function && t.function.arguments);
-                parts.push(toolRow(name, m.is_error ? "error" : "ok",
+                const args = t.args || t.arguments || (t.function && t.function.arguments);
+                parts.push(toolRow(name, (t.is_error || m.is_error) ? "error" : "ok",
                                    args ? JSON.stringify(args).slice(0, 200) : null));
+                if (t.content !== undefined) parts.push(h("details", {}, h("summary", {}, "Tool result"),
+                  h("pre", {class:"code"}, typeof t.content === "string" ? t.content : JSON.stringify(t.content, null, 2))));
               });
               return [bubble(m.role, fmtTime(m.created_at),
                              h("div", { class: "text" }, ...parts))];
             })
           : [h("div", { class: "empty" }, "No messages. Nothing has run in this session.")]);
+    for (const run of runsRes.rows || []) {
+      if (run.status === "failed") body.push(h("div", {class:"note rose"}, run.state?.error || "An agent run failed."));
+    }
     convo.replaceChildren(...body);
     title.textContent = s.title || "(untitled)";
     stick(true);
@@ -353,7 +393,7 @@ export async function chat() {
       h("dl", { class: "kv" },
         h("dt", {}, "session"), h("dd", { class: "mono" }, short(s.id)),
         h("dt", {}, "created"), h("dd", {}, fmtTime(s.created_at)),
-        h("dt", {}, "runs"), h("dd", {}, String((runsRes.rows || []).length))),
+        h("dt", {}, "runs"), h("dd", {}, runsRes.error ? "unavailable" : String((runsRes.rows || []).length))),
       runsRes.error ? gap("agentic.runs_api", runsRes.error.message, "schema")
         : (runsRes.rows || []).length
           ? stream((runsRes.rows || []).map((r) => ({
@@ -403,6 +443,7 @@ export async function chat() {
 
     return {
       block,
+      failed: false,
       handle(type, data) {
         const was = atBottom();
         if (type === "RUN_STARTED") {
@@ -434,8 +475,10 @@ export async function chat() {
           paint();
         } else if (type === "RUN_FINISHED") {
           clearInterval(tick);
-          setStatus("succeeded", data.status || "done", false);
+          this.failed ||= !!data.status && data.status !== "succeeded";
+          setStatus(this.failed ? "failed" : "succeeded", data.status || "done", false);
         } else if (type === "RUN_ERROR") {
+          this.failed = true;
           clearInterval(tick);
           setStatus("failed", "failed", false);
           steps.append(h("div", { class: "note rose" }, data.message || "the run failed"));
@@ -468,9 +511,13 @@ export async function chat() {
 
   const title = h("span", { class: "title" }, "Chat");
   const newSession = async () => {
+    if (sending) return;
     const res = await tryRead(() => rpc("agentic", "create_session",
       { p_title: "Session " + new Date().toISOString().slice(11, 19) }), (e) => ({ error: e }));
-    if (!res.error) location.reload();
+    if (!res.error) {
+      sessionStorage.setItem("p8-chat-session", String(res.rows));
+      location.reload();
+    } else convo.append(h("div", {class:"note rose"}, res.error.message));
   };
 
   const threads = h("div", { class: "threads rail-list" },
@@ -488,8 +535,16 @@ export async function chat() {
   list = threads;
 
   const box = h("textarea", { class: "box", rows: 1, placeholder: "Ask, or describe the workflow you want..." });
+  /* An empty picker and an unreadable agents_api look identical, and one of
+     them means "ask somebody about your grants" rather than "register one". */
   const agentPick = h("select", { class: "control", style: "padding:.15rem .35rem;font-size:.72rem" },
-    (ag.rows || []).map((a) => h("option", { value: a.name }, a.name)));
+    ag.error ? h("option", { value: "", disabled: true, selected: true },
+                 "agents unavailable · " + (ag.error.code || ag.error.message))
+             : (ag.rows || []).map((a) => h("option", { value: a.name }, a.name)));
+  const picked = sessionStorage.getItem("p8-chat-agent");
+  if ((ag.rows || []).some(a => a.name === picked)) agentPick.value = picked;
+  agentPick.setAttribute("aria-label", "Agent");
+  agentPick.addEventListener("change", () => sessionStorage.setItem("p8-chat-agent", agentPick.value));
   sendBtn = h("button", { class: "send-btn", title: "Send  ⌘↵" }, icon(I.send));
 
   /* Grow with the text and stop -- a fixed three-row box is too tall for "yes"
@@ -499,17 +554,20 @@ export async function chat() {
   box.addEventListener("input", autosize);
 
   const send = async () => {
+    if (sending) return;
     if (!current) { convo.append(h("div", { class: "note rose" }, "Pick a session first.")); return; }
     const text = box.value.trim();
     if (!text) return;
+    sending = true;
     box.value = "";
     sendBtn.disabled = true;
+    agentPick.disabled = true;
     convo.append(bubble("user", "now", h("div", { class: "text" }, markdown(text))));
 
     /* How many rows the transcript had before this turn -- the check that
        decides whether the re-read below is authoritative or destructive. */
-    const counted = await tryRead(() => select("agentic", "messages_api",
-      "session_id=eq." + current.id + "&select=seq", { count: true }), () => ({ total: 0 }));
+    const counted = await tryRead(() => read(READS.messageSeqs,
+      "session_id=eq." + current.id, { count: true }), () => ({ total: 0 }));
     const before = counted.total || 0;
 
     const turn = turnRenderer();
@@ -527,7 +585,9 @@ export async function chat() {
                 "Set P8_UI_CORE_URL on the server to the runtime's base URL and the " +
                 "composer posts there. Everything else on this page is PostgREST, " +
                 "which is why only this one control is inert.");
+      sending = false;
       sendBtn.disabled = false;
+      agentPick.disabled = false;
       stick(true);
       return;
     }
@@ -536,10 +596,13 @@ export async function chat() {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: "Bearer " + token(),
                    Accept: "text/event-stream" },
-        body: JSON.stringify({ session_id: current.id, agent: agentPick.value,
+        body: JSON.stringify({ session_id: current.id, model: agentPick.value,
                                messages: [{ role: "user", content: text }], stream: true }),
       });
-      if (!res.ok || !res.body) throw new Error("HTTP " + res.status);
+      if (!res.ok || !res.body) {
+        const error = await res.json().catch(() => ({}));
+        throw new Error(error.detail || error.message || "HTTP " + res.status);
+      }
 
       /* SSE off a fetch body: frames are separated by a blank line, and a
          frame's `data:` is one JSON object. Parsed here rather than with
@@ -572,12 +635,13 @@ export async function chat() {
          they are not, replacing the transcript would delete the answer the user
          just watched arrive, which is the worst thing this screen could do.
          Found by streaming against dev/agui_stub.py, which writes nothing. */
-      const after = await tryRead(() => select("agentic", "messages_api",
-        "session_id=eq." + current.id + "&select=seq", { count: true }), () => ({ total: null }));
+      const after = await tryRead(() => read(READS.messageSeqs,
+        "session_id=eq." + current.id, { count: true }), () => ({ total: null }));
       const node = list && list.querySelector('.thread-item[aria-current]');
-      if (node && after.total !== null && after.total > before) {
-        openSession(current, node);
-      } else {
+      if (node && !turn.failed && after.total !== null && after.total > before) {
+        sending = false;
+        await openSession(current, node);
+      } else if (!turn.failed) {
         turn.note("Streamed, and not written to agentic.messages -- messages_api still " +
                   "reports " + (after.total === null ? "unknown" : after.total) + " rows for this " +
                   "session. What you can see above is this page's copy; reload and it is gone.");
@@ -590,6 +654,8 @@ export async function chat() {
                 "Sessions, runs and messages are all readable over PostgREST; the turn " +
                 "is the one part of chat that is not a query, so it needs a runtime.");
     } finally {
+      sending = false;
+      agentPick.disabled = false;
       sendBtn.disabled = false;
       stick(true);
     }
@@ -633,56 +699,116 @@ export async function chat() {
   shell.dataset.right = stored("p8-chat-right", "open");
 
   queueMicrotask(() => {
-    const first = threads.querySelector(".thread-item");
-    if (first && (sessions.rows || []).length) openSession(sessions.rows[0], first);
+    const index = Math.max(0, (sessions.rows || []).findIndex(s => s.id === sessionStorage.getItem("p8-chat-session")));
+    const first = threads.querySelectorAll(".thread-item")[index];
+    if (first) openSession(sessions.rows[index], first);
   });
 
   return h("div", { class: "page flush" }, shell);
 }
 
 /* -- Surface ----------------------------------------------- */
+
+/* Is the runtime there, and which build -- asked the way that costs nothing.
+ *
+ * `GET /_build` is unauthenticated, touches no provider and returns the source
+ * fingerprint. A model turn is the other question, it costs real money, and a
+ * health page that spends provider credits every time somebody opens it is a
+ * health page nobody can afford to leave open. So this reports TRANSPORT, and
+ * says as much: the Chat screen is where a turn gets proved.
+ *
+ * A browser cannot tell a refused CORS preflight from an unreachable host --
+ * both arrive as one opaque TypeError, by design -- so neither can this. It
+ * names both, which is the honest answer and also the useful one: those are
+ * the two things to go and check. */
+async function runtimeProbe() {
+  const base = (config().core || "").replace(/\/$/, "");
+  if (!base) return { state: "unconfigured" };
+  const t0 = Date.now();
+  try {
+    const res = await fetch(base + "/_build", { cache: "no-store" });
+    const ms = Date.now() - t0;
+    if (!res.ok) return { state: "error", detail: "HTTP " + res.status, ms, base };
+    const body = await res.json().catch(() => ({}));
+    return { state: "ok", build: body.build || "(no fingerprint)", ms, base };
+  } catch (e) {
+    return { state: "blocked", detail: String((e && e.message) || e), base };
+  }
+}
+
 export async function surface() {
   const node = page(head("measured now, against this deployment", "Surface",
-    "Every row is a request made when this page loaded. Nothing here is remembered from a document, " +
-    "which is the only way a coverage claim stays true."));
-  const probes = [
-    ["Overview", "workflow", "runs_by_status_api"], ["Overview", "workflow", "tasks_by_status_api"],
-    ["Runs", "workflow", "runs_api"], ["Run detail", "workflow", "tasks_api"],
-    ["Run detail", "workflow", "task_dependencies_api"], ["Events", "workflow", "task_events_api"],
-    ["Workflows", "workflow", "definitions_api"], ["Schedules", "workflow", "schedules_api"],
-    ["Queues", "workflow", "queues_api"], ["Queues", "workflow", "rate_limits_api"],
-    ["Queues", "workflow", "pools"], ["Queues", "workflow", "v_pools"],
-    ["Queues", "workflow", "pool_queues"], ["Queues", "workflow", "v_unserved_queues"],
-    ["Queues", "workflow", "pool_image_policy"],
-    ["Users", "rbac", "users_api"], ["Roles", "rbac", "roles"], ["Roles", "rbac", "role_permissions"],
-    ["Roles", "rbac", "permission_kinds"], ["Keys", "rbac", "api_keys_api"],
-    ["Keys", "rbac", "refresh_tokens_api"], ["Events", "rbac", "auth_events"],
-    ["Settings", "rbac", "orgs"], ["Settings", "rbac", "visibilities"],
-    ["Agents", "agentic", "agents_api"], ["Agents", "agentic", "skills_api"],
-    ["Agents", "agentic", "tool_servers_api"], ["Chat", "agentic", "sessions_api"],
-    ["Chat", "agentic", "messages_api"], ["Chat", "agentic", "runs_api"],
-    ["Files", "content", "resources"],
-  ];
-  const rows = await Promise.all(probes.map(async ([screen, schema, view]) => {
-    try { await select(schema, view, "limit=1"); return { screen, schema, view, ok: true }; }
-    catch (e) { return { screen, schema, view, ok: false, code: e.code, msg: e.message }; }
-  }));
+    "Every row is a request made when this page loaded, and it is the SAME request the screen " +
+    "makes - same columns, same ordering, from reads.js. An audit that only asked whether the " +
+    "table existed is what let five screens ship asking for columns no view has."));
+
+  const contracts = Object.entries(READS).map(([key, c]) => ({ key, ...c }));
+  const [rows, existence, runtime] = await Promise.all([
+    Promise.all(contracts.map(async (c) => {
+      try { await select(c.schema, c.view, probeQuery(c)); return { ...c, ok: true }; }
+      catch (e) { return { ...c, ok: false, code: e.code, msg: e.message }; }
+    })),
+    Promise.all(PROBES.map(async (p) => {
+      try { await select(p.schema, p.view, "limit=1"); return { ...p, ok: true }; }
+      catch (e) { return { ...p, ok: false, code: e.code, msg: e.message }; }
+    })),
+    runtimeProbe(),
+  ]);
   const okN = rows.filter((r) => r.ok).length;
+  /* A failure with no SQLSTATE never reached Postgres at all -- wrong URL,
+     refused connection, blocked preflight. The three tiles below classify what
+     Postgres SAID, so with unreachable reads in the mix a zero in them is not
+     "no such problem", it is "no information" -- the same false all-clear this
+     page exists to stop the Overview making. */
+  const unreachable = rows.filter((r) => !r.ok && !r.code).length;
+  const kind = (code) => rows.filter((r) => r.code === code).length;
+  const classify = (label, code, bad, good) =>
+    unreachable ? statGap(label, { message: unreachable + " read(s) never reached PostgREST" })
+                : stat(label, kind(code), kind(code) ? bad : good, kind(code) ? "down" : "up");
 
   node.append(h("div", { class: "grid g4" },
-    stat("Reachable", okN + " / " + rows.length, "reads, right now"),
-    stat("Refused", rows.filter((r) => r.code === "42501").length, "permission denied", "down"),
-    stat("Absent", rows.filter((r) => r.code === "42P01").length, "relation does not exist", "down"),
-    stat("Writes", "RPC only", "no table grants anywhere")));
+    stat("Screen reads", okN + " / " + rows.length, "contracts executed, right now",
+         okN === rows.length ? "up" : "down"),
+    classify("Undefined column", "42703", "a screen asks for what no view has", "none"),
+    classify("Refused", "42501", "permission denied", "none denied"),
+    classify("Absent", "42P01", "relation does not exist", "all present")));
 
-  node.append(panel("Reads", okN + " of " + rows.length + " reachable",
-    table(["Screen", "Object", "Result"], rows, (r) =>
+  node.append(panel("Screen reads", okN + " of " + rows.length + " executed",
+    table(["Screen", "Object", "Read", "Result"], rows, (r) =>
       h("tr", {},
         h("td", {}, r.screen),
         h("td", { class: "mono" }, r.schema + "." + r.view),
+        h("td", { class: "mono", style: "font-size:.68rem;color:var(--muted);max-width:26rem;overflow-wrap:anywhere" },
+          r.q || r.note || "(whole row)"),
         h("td", {}, r.ok ? chip("200", "succeeded")
           : h("span", { class: "pill-row" }, chip(String(r.code || "err"), "failed"),
               h("span", { class: "mono", style: "font-size:.72rem" }, r.msg)))))));
+
+  node.append(h("div", { class: "grid g2" },
+    panel("Runtime", "percolate-core, transport only", h("div", { class: "body" },
+      runtime.state === "unconfigured"
+        ? h("div", { class: "note amber" }, h("strong", {}, "No runtime configured. "),
+            "Settings has an empty percolate-core endpoint, so Chat cannot run a turn.")
+        : runtime.state === "ok"
+          ? h("div", { class: "note" }, h("strong", {}, "GET /_build answered in " + runtime.ms + "ms. "),
+              h("code", { class: "mono" }, runtime.build))
+          : gap(runtime.base + "/_build", runtime.detail,
+                runtime.state === "blocked"
+                  ? "unreachable, or this origin is not in P8_CORS_ORIGINS - a browser cannot tell them apart"
+                  : "runtime"),
+      h("div", { class: "note" }, h("strong", {}, "This is not a model turn. "),
+        "Reachability and a real answer from a provider are different claims, and only one of them " +
+        "is free. Nothing on this page calls a paid provider; proving a turn is the Chat screen."))),
+    panel("Existence only", existence.length + " objects no screen reads",
+      h("div", { class: "body" },
+        table(["Object", "Why", "Result"], existence, (p) =>
+          h("tr", {},
+            h("td", { class: "mono" }, p.schema + "." + p.view),
+            h("td", { style: "font-size:.72rem;color:var(--muted)" }, p.why),
+            h("td", {}, p.ok ? chip("200", "succeeded") : chip(String(p.code || "err"), "failed")))),
+        h("div", { class: "note" }, h("strong", {}, "Kept apart on purpose. "),
+          "A reachable table is not a working screen, so these cannot count towards the number " +
+          "above. Writes are RPC throughout - there are no table grants anywhere.")))));
 
   node.append(h("div", { class: "grid g2" },
     h("div", { class: "panel" }, h("div", { class: "body" },

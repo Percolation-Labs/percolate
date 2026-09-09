@@ -1,4 +1,4 @@
-"""Serve the UI — a router, a config document, and six static files.
+"""Serve the UI — a router, a config document, and the static files.
 
 `meta/module-composition.md`: a subpackage exposes its HTTP surface as a
 `router()` the host includes under a prefix *it* chooses, and its standalone
@@ -31,10 +31,15 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from .. import __version__
 
-# The six files, listed rather than globbed. A directory listing would serve
+# The files, listed rather than globbed. A directory listing would serve
 # whatever happened to be in the package, including an editor's backup of a file
 # with a token in it; this serves what the UI is.
-ASSETS = ("index.html", "api.js", "ui.js", "md.js", "views.js", "access.js", "theme.css")
+#
+# A module missing from this tuple 404s and takes the whole page down with it,
+# so `tests/test_ui_reads.py` asserts that every module the UI imports is here
+# rather than leaving it to whoever adds the next one to remember.
+ASSETS = ("index.html", "api.js", "ui.js", "md.js", "reads.js", "views.js",
+          "access.js", "workbench.js", "theme.css")
 
 
 def _read(name: str) -> bytes:

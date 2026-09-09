@@ -8,10 +8,22 @@
  *   2. Every mutation is an RPC that checks its own permission. Nothing here
  *      hides a button because of a role; it lets the function refuse and shows
  *      the refusal, because the function is the authority and this is not.
+ *
+ * Rule 1 has a corollary that cost this app five broken screens and a green
+ * dashboard over them: a read that FAILED is not a read that returned nothing.
+ * Every count below comes from a `stat`/`statGap` pair for that reason, and
+ * every projection comes from `reads.js` so the audit executes the same one.
  */
 
-import { select, rpc, ApiError } from "./api.js";
-import { h, chip, status, table, stat, panel, gap, fmtTime, short, seg, stream, eventTone, dag } from "./ui.js";
+import { select, rpc, read, ApiError } from "./api.js";
+import { READS } from "./reads.js";
+import { runForm, jsonObject } from "./workbench.js";
+import { h, chip, status, table, stat, statGap, panel, gap, fmtTime, short, seg, stream, eventTone, dag } from "./ui.js";
+
+/* The tile, or the reason there is no tile. One call site cannot get this
+   wrong in the direction that matters, which is why it is a function. */
+export const statOf = (res, label, value, note, tone) =>
+  res && res.error ? statGap(label, res.error) : stat(label, value, note, tone);
 
 export const head = (kicker, title, lede, actions) =>
   h("header", { class: "page-head" },
@@ -30,14 +42,20 @@ export async function tryRead(fn, fallback) {
 
 /* The definitions map. runs_api carries workflow_def_id and no name, so every
    screen that labels a run needs this. One fetch, cached for the page load --
-   the upstream fix is a `name` column on runs_api, and then this goes. */
+   the upstream fix is a `name` column on runs_api, and then this goes.
+
+   A FAILED load is not cached and carries its error out. It used to do
+   neither: the empty result was cached as though it were an answer, so one
+   refused read turned into "0 definitions" on every screen for the rest of
+   the page's life, including after the cause was fixed. */
 let DEFS = null;
 export async function defs() {
   if (DEFS) return DEFS;
-  const r = await tryRead(() => select("workflow", "definitions_api",
-    "select=id,name,version,step_count,step_kinds,queues,created_at&order=name"), () => ({ rows: [] }));
-  DEFS = { rows: r.rows || [], byId: new Map((r.rows || []).map((d) => [d.id, d])) };
-  return DEFS;
+  const r = await tryRead(() => read(READS.definitions), (e) => ({ rows: [], error: e }));
+  const d = { rows: r.rows || [], error: r.error,
+              byId: new Map((r.rows || []).map((x) => [x.id, x])) };
+  if (!r.error) DEFS = d;
+  return d;
 }
 export const wfName = (d, id) => (d.byId.get(id) ? d.byId.get(id).name : short(id));
 
@@ -64,22 +82,21 @@ export async function overview() {
     "aggregates are disabled here, so nothing on this page is a group-by composed in a browser."));
 
   const [byStatus, d, runsRes, evRes, qRes] = await Promise.all([
-    tryRead(() => select("workflow", "runs_by_status_api"), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.runsByStatus), (e) => ({ rows: [], error: e })),
     defs(),
-    tryRead(() => select("workflow", "runs_api",
-      "select=id,status,external_id,created_at,workflow_def_id&order=created_at.desc&limit=8"), (e) => ({ rows: [], error: e })),
-    tryRead(() => select("workflow", "task_events_api",
-      "select=step_key,from_status,to_status,queue,detail,at&order=at.desc&limit=8"), (e) => ({ rows: [], error: e })),
-    tryRead(() => select("workflow", "queues_api"), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.recentRuns, "limit=8"), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.taskEvents, "limit=8"), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.queueDepth), (e) => ({ rows: [], error: e })),
   ]);
 
   const n = (s) => (byStatus.rows || []).filter((r) => r.status === s).reduce((a, r) => a + Number(r.n), 0);
   const total = (byStatus.rows || []).reduce((a, r) => a + Number(r.n), 0);
   node.append(h("div", { class: "grid g4" },
-    stat("Runs", total, "workflow.runs_by_status_api"),
-    stat("Running", n("running"), n("running") ? "in flight now" : "queue is clear"),
-    stat("Failed", n("failed"), n("failed") ? "needs a person" : "none", n("failed") ? "down" : "up"),
-    stat("Definitions", (d.rows || []).length, "registered")));
+    statOf(byStatus, "Runs", total, "workflow.runs_by_status_api"),
+    statOf(byStatus, "Running", n("running"), n("running") ? "in flight now" : "queue is clear"),
+    statOf(byStatus, "Failed", n("failed"), n("failed") ? "needs a person" : "none",
+           n("failed") ? "down" : "up"),
+    statOf(d, "Definitions", (d.rows || []).length, "registered")));
 
   node.append(h("div", { class: "grid g-2-1" },
     panel("Runs", "newest first",
@@ -124,9 +141,8 @@ export async function runs() {
 
   const load = async () => {
     holder.replaceChildren(h("div", { class: "empty" }, "Loading..."));
-    const res = await tryRead(() => select("workflow", "runs_api",
-      "select=id,status,compensation_state,external_id,created_at,completed_at,workflow_def_id" +
-      "&order=created_at.desc&limit=50" + (filter ? "&" + filter : ""), { count: true }),
+    const res = await tryRead(() => read(READS.runs,
+      "limit=50" + (filter ? "&" + filter : ""), { count: true }),
       (e) => ({ rows: [], error: e }));
     if (res.error) {
       holder.replaceChildren(h("div", { class: "body" }, gap("runs_api", res.error.message, "schema")));
@@ -165,13 +181,10 @@ export async function run(id) {
   const d = await defs();
 
   const [runRes, taskRes, edgeRes, evRes] = await Promise.all([
-    tryRead(() => select("workflow", "runs_api", "id=eq." + id), (e) => ({ rows: [], error: e })),
-    tryRead(() => select("workflow", "tasks_api", "run_id=eq." + id +
-      "&select=id,step_key,kind,status,queue,attempts,max_attempts,error,output,created_at,completed_at&order=created_at"),
-      (e) => ({ rows: [], error: e })),
-    tryRead(() => select("workflow", "task_dependencies_api", "run_id=eq." + id), (e) => ({ rows: [], error: e })),
-    tryRead(() => select("workflow", "task_events_api", "run_id=eq." + id +
-      "&select=step_key,from_status,to_status,queue,detail,at&order=at.desc&limit=40"), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.run, "id=eq." + id), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.tasks, "run_id=eq." + id), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.taskDeps, "run_id=eq." + id), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.taskEvents, "run_id=eq." + id + "&limit=40"), (e) => ({ rows: [], error: e })),
   ]);
   const r = (runRes.rows || [])[0];
   const tasks = taskRes.rows || [];
@@ -196,10 +209,11 @@ export async function run(id) {
   const done = tasks.filter((t) => t.status === "succeeded").length;
   const def = r ? d.byId.get(r.workflow_def_id) : null;
   node.append(h("div", { class: "grid g4" },
-    stat("Workflow", r ? wfName(d, r.workflow_def_id) : "-", def ? "v" + def.version : ""),
-    stat("Tasks", done + " / " + tasks.length, "succeeded / total"),
-    stat("Retries", tasks.reduce((a, t) => a + Math.max(0, (t.attempts || 1) - 1), 0), "attempts beyond the first"),
-    stat("External id", (r && r.external_id) || "-", r ? r.compensation_state : "")));
+    statOf(runRes, "Workflow", r ? wfName(d, r.workflow_def_id) : "-", def ? "v" + def.version : ""),
+    statOf(taskRes, "Tasks", done + " / " + tasks.length, "succeeded / total"),
+    statOf(taskRes, "Retries", tasks.reduce((a, t) => a + Math.max(0, (t.attempts || 1) - 1), 0),
+           "attempts beyond the first"),
+    statOf(runRes, "External id", (r && r.external_id) || "-", r ? r.compensation_state : "")));
 
   node.append(panel("Task graph", "task_dependencies_api",
     edgeRes.error ? h("div", { class: "body" }, gap("task_dependencies_api", edgeRes.error.message, "schema"))
@@ -238,13 +252,15 @@ export async function run(id) {
 /* -- Workflows --------------------------------------------- */
 export async function workflows() {
   const d = await defs();
-  const node = page(head((d.rows || []).length + " definitions", "Workflows",
+  const node = page(head(d.error ? "definitions unavailable" : (d.rows || []).length + " definitions",
+    "Workflows",
     "A definition is a row. Registering one runs validate_spec() first, so a graph with an " +
     "unreachable step is rejected there rather than discovered as a stalled run.",
     h("a", { class: "btn primary", href: "#/draft" }, "+ Draft one")));
 
   node.append(panel("Definitions", "workflow.definitions_api",
-    table(["Workflow", "Version", "Steps", "Kinds", "Queues", "Registered", ""], d.rows, (w) =>
+    d.error ? gap("workflow.definitions_api", d.error.message, "schema")
+    : table(["Workflow", "Version", "Steps", "Kinds", "Queues", "Registered", ""], d.rows, (w) =>
       h("tr", {},
         h("td", {}, w.name),
         h("td", { class: "mono" }, "v" + w.version),
@@ -253,11 +269,8 @@ export async function workflows() {
         h("td", { class: "mono" }, (w.queues || []).join(", ") || "default"),
         h("td", { class: "mono" }, fmtTime(w.created_at)),
         h("td", {}, h("button", { class: "btn", onclick: async (e) => {
+          e.target.closest("tr").after(h("tr", {}, h("td", {colspan:7}, runForm(w.name))));
           e.target.disabled = true;
-          const res = await tryRead(() => rpc("workflow", "start_workflow",
-            { p_name: w.name, p_input: {}, p_external_id: "ui-" + Date.now() }), (err) => ({ error: err }));
-          e.target.replaceWith(res.error ? chip(res.error.message, "failed")
-            : h("a", { class: "chip succeeded", href: "#/run/" + String(res.rows).replace(/"/g, "") }, "started"));
         } }, "Start"))))));
 
   node.append(h("div", { class: "grid g2" },
@@ -291,6 +304,11 @@ export async function draft() {
     "  - id: assemble\n" +
     "    needs: [gather]\n" +
     "    sql: {function: p8ql, args: ['SELECT 1']}\n");
+  yaml.setAttribute("aria-label", "Workflow YAML");
+  if (sessionStorage.getItem("p8-workflow-draft")) yaml.value = sessionStorage.getItem("p8-workflow-draft");
+  yaml.addEventListener("input", () => sessionStorage.setItem("p8-workflow-draft", yaml.value));
+  const runHolder = h("div");
+  yaml.addEventListener("input", () => { runHolder.replaceChildren(); });
   const out = h("div");
   const node = page(head("workflow.define_yaml()", "Draft",
     "The YAML compiles to ordinary workflow.tasks rows. validate_spec() runs as a trigger on " +
@@ -304,21 +322,15 @@ export async function draft() {
           out.replaceChildren(h("span", { class: "chip" }, "defining..."));
           const res = await tryRead(() => rpc("workflow", "define_yaml", { p_yaml: yaml.value }), (e) => ({ error: e }));
           if (res.error) { out.replaceChildren(h("div", { class: "note rose" }, res.error.message)); return; }
+          DEFS = null;
+          const definition = (await defs()).byId.get(String(res.rows));
+          if (definition) runHolder.replaceChildren(runForm(definition.name));
           out.replaceChildren(h("div", { class: "note" }, "Registered ",
             h("code", { class: "mono" }, String(res.rows).replace(/"/g, "")), ". ",
             h("a", { href: "#/workflows" }, "Workflows")));
         } }, "Register"),
-        h("button", { class: "btn", onclick: async () => {
-          const m = yaml.value.match(/^name:\s*(\S+)/m);
-          if (!m) { out.replaceChildren(h("div", { class: "note rose" }, "No name: line to start.")); return; }
-          const res = await tryRead(() => rpc("workflow", "start_workflow",
-            { p_name: m[1], p_input: {}, p_external_id: "draft-" + Date.now() }), (e) => ({ error: e }));
-          out.replaceChildren(res.error ? h("div", { class: "note rose" }, res.error.message)
-            : h("div", { class: "note" },
-                h("a", { href: "#/run/" + String(res.rows).replace(/"/g, "") }, "Run started")));
-        } }, "Start it"),
         h("span", { class: "mono", style: "font-size:.7rem;color:var(--muted)" }, "checked by workflow.may_define")),
-      out)),
+      out, runHolder)),
     h("div", { class: "panel" }, h("div", { class: "body" },
       h("h3", {}, "What the database checks"),
       ["Every needs: names a declared step", "No duplicate step keys", "No unreachable step",
@@ -335,9 +347,7 @@ export async function schedules() {
     "A schedule is a row that calls start_workflow on a cron. Overlap policy is the only " +
     "interesting decision: skip while the previous run is going, or queue behind it."));
   const [s, d] = await Promise.all([
-    tryRead(() => select("workflow", "schedules_api",
-      "select=name,workflow_name,cron_expr,timezone,enabled,overlap_policy,last_fired_at,fire_count,skip_count,last_error&order=name"),
-      (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.schedules), (e) => ({ rows: [], error: e })),
     defs(),
   ]);
   node.append(panel("Schedules", (s.rows || []).length + " defined",
@@ -361,6 +371,9 @@ export async function schedules() {
   const wf = h("select", { class: "control", style: "width:100%" },
     (d.rows || []).map((x) => h("option", { value: x.name }, x.name)));
   const cron = h("input", { class: "control mono", style: "width:100%", value: "0 2 * * *" });
+  const scheduleInput = h("textarea", {class:"control mono", rows:4, "aria-label":"Schedule input JSON", style:"width:100%"}, "{}");
+  const timezone = h("input", {class:"control", value:"UTC", "aria-label":"Schedule timezone"});
+  const overlap = h("select", {class:"control", "aria-label":"Overlap policy"}, h("option", {value:"skip"}, "Skip while running"), h("option", {value:"queue"}, "Queue next run"));
   const out = h("div");
   node.append(panel("Schedule a workflow", "workflow.schedule_workflow()",
     h("div", { class: "body" },
@@ -368,9 +381,11 @@ export async function schedules() {
         h("div", { class: "field" }, h("label", {}, "name"), name),
         h("div", { class: "field" }, h("label", {}, "workflow"), wf),
         h("div", { class: "field" }, h("label", {}, "cron"), cron)),
+      h("label", {}, "Input JSON", scheduleInput),
+      h("label", {}, "Timezone", timezone), h("label", {}, "Overlap", overlap),
       h("button", { class: "btn primary", onclick: async () => {
         const res = await tryRead(() => rpc("workflow", "schedule_workflow",
-          { p_name: name.value, p_workflow: wf.value, p_cron: cron.value, p_input: {} }), (e) => ({ error: e }));
+          { p_name: name.value, p_workflow: wf.value, p_cron: cron.value, p_input: jsonObject(scheduleInput.value), p_timezone: timezone.value, p_overlap: overlap.value }), (e) => ({ error: e }));
         out.replaceChildren(res.error ? h("div", { class: "note rose" }, res.error.message)
           : h("div", { class: "note" }, "Scheduled."));
         if (!res.error) setTimeout(() => location.reload(), 800);
@@ -389,24 +404,23 @@ export async function events() {
   const load = async () => {
     holder.replaceChildren(h("div", { class: "empty" }, "Loading..."));
     if (which === "auth") {
-      const r = await tryRead(() => select("rbac", "auth_events",
-        "select=id,user_id,event,detail,created_at&order=created_at.desc&limit=60"), (e) => ({ rows: [], error: e }));
+      const r = await tryRead(() => read(READS.authEvents, "limit=60"), (e) => ({ rows: [], error: e }));
       holder.replaceChildren(
-        h("header", {}, h("h3", {}, "auth_events"), h("span", { class: "label" }, (r.rows || []).length + " rows")),
+        h("header", {}, h("h3", {}, "auth_events"),
+          h("span", { class: "label" }, r.error ? "unavailable" : (r.rows || []).length + " rows")),
         h("div", { class: "body tight" }, r.error ? gap("rbac.auth_events", r.error.message, "schema")
           : stream((r.rows || []).map((e) => ({
-              t: (e.created_at || "").slice(11, 19),
-              tone: /fail|revoke|reuse/.test(e.event || "") ? "bad" : "info",
-              what: e.event,
+              t: (e.at || "").slice(11, 19),
+              tone: /fail|revoke|reuse/.test(e.event_type || "") ? "bad" : "info",
+              what: e.event_type,
               meta: short(e.user_id) + (e.detail ? " · " + JSON.stringify(e.detail).slice(0, 80) : ""),
             })))));
       return;
     }
-    const r = await tryRead(() => select("workflow", "task_events_api",
-      "select=id,run_id,step_key,kind,queue,from_status,to_status,detail,at&order=at.desc&limit=60"),
-      (e) => ({ rows: [], error: e }));
+    const r = await tryRead(() => read(READS.eventStream, "limit=60"), (e) => ({ rows: [], error: e }));
     holder.replaceChildren(
-      h("header", {}, h("h3", {}, "task_events"), h("span", { class: "label" }, (r.rows || []).length + " rows")),
+      h("header", {}, h("h3", {}, "task_events"),
+        h("span", { class: "label" }, r.error ? "unavailable" : (r.rows || []).length + " rows")),
       h("div", { class: "body tight" }, r.error ? gap("workflow.task_events_api", r.error.message, "schema")
         : stream((r.rows || []).map(evRow))));
   };
@@ -428,23 +442,23 @@ export async function queues() {
     "credentials, and no YAML is authored per pool."));
 
   const [pools, binds, unserved, depth, t, rl, policy] = await Promise.all([
-    tryRead(() => select("workflow", "v_pools", "order=name"), (e) => ({ rows: [], error: e })),
-    tryRead(() => select("workflow", "pool_queues", "order=queue"), (e) => ({ rows: [], error: e })),
-    tryRead(() => select("workflow", "v_unserved_queues", "order=queue"), (e) => ({ rows: [], error: e })),
-    tryRead(() => select("workflow", "queues_api"), () => ({ rows: [] })),
-    tryRead(() => select("workflow", "tasks_by_status_api", "order=queue"), () => ({ rows: [] })),
-    tryRead(() => select("workflow", "rate_limits_api", "order=key"), (e) => ({ rows: [], error: e })),
-    tryRead(() => select("workflow", "pool_image_policy", "order=pattern"), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.pools), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.poolQueues), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.unservedQueues), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.queueDepth), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.tasksByStatus), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.rateLimits), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.imagePolicy), (e) => ({ rows: [], error: e })),
   ]);
 
   const pending = (pools.rows || []).filter((p) => p.reconcile_pending).length;
   node.append(h("div", { class: "grid g4" },
-    stat("Pools", (pools.rows || []).length, "workflow.pools"),
-    stat("Enabled", (pools.rows || []).filter((p) => p.enabled).length, "in the desired set"),
-    stat("Awaiting a manager", pending, pending ? "observed_generation is behind" : "all reconciled",
-         pending ? "down" : "up"),
-    stat("Unserved queues", (unserved.rows || []).length, "tasks with no pool",
-         (unserved.rows || []).length ? "down" : "")));
+    statOf(pools, "Pools", (pools.rows || []).length, "workflow.pools"),
+    statOf(pools, "Enabled", (pools.rows || []).filter((p) => p.enabled).length, "in the desired set"),
+    statOf(pools, "Awaiting a manager", pending,
+           pending ? "observed_generation is behind" : "all reconciled", pending ? "down" : "up"),
+    statOf(unserved, "Unserved queues", (unserved.rows || []).length, "tasks with no pool",
+           (unserved.rows || []).length ? "down" : "")));
 
   node.append(panel("Pools", "desired state and observed state, joined",
     pools.error ? gap("workflow.v_pools", pools.error.message, "schema — apply specs/workflow-engine/pools.sql")
@@ -481,7 +495,13 @@ export async function queues() {
                               ...depths.keys()]);
   const poolOf = new Map((binds.rows || []).map((b) => [b.queue, b.pool]));
 
-  node.append(panel("Queues", "one pool per queue, enforced by a primary key",
+  /* The em dashes in this table mean "no row". When the depth or task-count
+     read FAILED they would mean nothing of the kind, so the label says so
+     rather than letting a column of dashes read as a quiet queue. */
+  node.append(panel("Queues",
+    depth.error || t.error
+      ? "depth or task counts unavailable · " + ((depth.error || t.error).code || "read failed")
+      : "one pool per queue, enforced by a primary key",
     table(["Queue", "Served by", "Depth (global)", "Your tasks, by status"], [...queueNames], (q) =>
       h("tr", {},
         h("td", { class: "mono" }, q),
@@ -538,14 +558,14 @@ export async function scale() {
     "What a load trial produces is not in the database - dev/scale writes it to a run log. This " +
     "screen shows what IS measurable from here, and names the rest as absent."));
   const [t, rs] = await Promise.all([
-    tryRead(() => select("workflow", "tasks_by_status_api"), (e) => ({ rows: [], error: e })),
-    tryRead(() => select("workflow", "runs_by_status_api"), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.tasksByStatus), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.runsByStatus), (e) => ({ rows: [], error: e })),
   ]);
   const tasks = (t.rows || []).reduce((a, r) => a + Number(r.n), 0);
   const runsN = (rs.rows || []).reduce((a, r) => a + Number(r.n), 0);
   node.append(h("div", { class: "grid g4" },
-    stat("Tasks visible", tasks, "tasks_by_status_api"),
-    stat("Runs visible", runsN, "runs_by_status_api"),
+    statOf(t, "Tasks visible", tasks, "tasks_by_status_api"),
+    statOf(rs, "Runs visible", runsN, "runs_by_status_api"),
     stat("Trials recorded", "-", "no table for them", "down"),
     stat("Retention", "-", "no policy row", "down")));
 

@@ -111,6 +111,18 @@ export function select(schema, view, q = "", opts = {}) {
   return request(view + (q ? "?" + q : ""), { schema, ...opts });
 }
 
+/** A screen's read, from its contract in `reads.js`.
+ *
+ * `extra` is what the contract deliberately does not carry: this screen's
+ * filter (`session_id=eq.<uuid>`) and its bound (`limit=40`). Everything a
+ * screen and the Surface audit must agree on -- columns, ordering, static
+ * filters -- comes from the contract, so they cannot drift apart. */
+export const read = (c, extra = "", opts = {}) =>
+  select(c.schema, c.view, [c.q, extra].filter(Boolean).join("&"), opts);
+
+/** The same contract, bounded to one row: what the audit runs. */
+export const probeQuery = (c) => [c.q, "limit=1"].filter(Boolean).join("&");
+
 /** A write. Every one of these is a function that checks its own permission. */
 export function rpc(schema, fn, args = {}) {
   return request("rpc/" + fn, { schema, method: "POST", body: args });
