@@ -45,6 +45,15 @@ _EXTRAS = {
     "ingest": ("semchunk", "pymupdf4llm", "pymupdf", "docx", "pydantic"),
     "tabular": ("pyarrow", "duckdb"),
     "agent": ("pydantic_ai", "fastapi", "uvicorn", "mcp", "yaml", "rich"),
+    # `p8 pool render` needs nothing beyond the base install -- it is a pure
+    # function of a row. Only the reconcile loop needs a Kubernetes client, so
+    # the extra names one dependency and the render half stays reachable
+    # everywhere, which is what makes it usable as a review tool.
+    "manager": ("kubernetes_asyncio",),
+    # Serving the UI is FastAPI handing over six static files. It shares the
+    # extra with nothing because a deployment that wants the browser surface
+    # does not necessarily want the Content Server's boto3.
+    "ui": ("fastapi", "uvicorn"),
 }
 
 
@@ -105,6 +114,18 @@ app.add_typer(
     _subcommands("ingest", "percolate_core.ingest.cli", "Ingest worker"),
     name="ingest",
     help="Ingest worker: parse, chunk and embed uploaded files",
+)
+# The subpackage is `manager`, the command group is `pool` -- pools.md §4.1: a
+# command names the thing being operated on, not the process that implements it.
+app.add_typer(
+    _subcommands("manager", "percolate_core.manager.cli", "Pool manager"),
+    name="pool",
+    help="Worker pools: render, diff and reconcile Deployments and ScaledObjects",
+)
+app.add_typer(
+    _subcommands("ui", "percolate_core.ui.cli", "Web UI"),
+    name="ui",
+    help="The web UI: static ES modules that talk to PostgREST directly",
 )
 
 

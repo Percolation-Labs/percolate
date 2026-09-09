@@ -1,0 +1,705 @@
+/* percolate-ui — mockup theme.
+ *
+ * Token set and discipline lifted from site/theme/blog.css: paper/ink, the
+ * brand purple as the single accent, gold as the second, Spectral for display,
+ * Source Sans 3 for body, JetBrains Mono for every label and status. Two rules
+ * carried over because they are what make it read as designed:
+ *   1. Spacing is flex/grid `gap`, never per-element margins.
+ *   2. Every colour is a token declared in the bare :root, so the un-stamped
+ *      "system" theme (what most people actually get) is complete.
+ *
+ * The one addition over the blog: the logo purple itself (--brand, #350A44)
+ * appears as a solid only in the mark, the sidebar rail and primary buttons.
+ * Everywhere else the accent is the desaturated #5B2A87 that sits on paper.
+ */
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* No visible scrollbars. Everything still scrolls -- wheel, trackpad, keys,
+   and the overflow-x containers under wide tables -- the chrome is just gone.
+   Three spellings because three engines. */
+* { scrollbar-width: none; -ms-overflow-style: none; }
+*::-webkit-scrollbar { width: 0; height: 0; display: none; }
+
+:root {
+  --paper:       #F4F2F7;
+  --card:        #FFFFFF;
+  --sunk:        #FAF9FC;
+  --ink:         #17092B;
+  --body:        #453860;
+  --muted:       #7A6E90;
+  --faint:       #9B92AC;
+  --rule:        #DCD5E4;
+  --hair:        #EAE5F0;
+
+  --brand:       #350A44;   /* the logo purple, used as a solid */
+  --accent:      #5B2A87;   /* the brand purple, desaturated to sit on paper */
+  --accent-soft: #EDE6F4;
+  --amber:       #8A6410;
+  --amber-soft:  #F6EFDD;
+  --green:       #2F6B4F;
+  --green-soft:  #E4F0E9;
+  --rose:        #9C2B45;
+  --rose-soft:   #F8E5E9;
+  --teal:        #1F5F6B;
+  --teal-soft:   #E0EFF1;
+
+  --serif: "Spectral", Georgia, "Times New Roman", serif;
+  --sans:  "Source Sans 3", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --mono:  "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --rail: 234px;
+  --rail-pad: 1.15rem;
+}
+
+/* Collapsed: the same rail, narrower, with the text gone. Nothing here is a
+   second component -- the markup is identical in both states. */
+:root[data-rail="shut"] {
+  --rail: 58px;
+  --rail-pad: 0px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0E0A16; --card: #171022; --sunk: #130D1D; --ink: #EEEAF4;
+    --body: #BFB5CE; --muted: #8B7FA0; --faint: #6E6382;
+    --rule: #2C2338; --hair: #211A2C;
+    --brand: #2A0937; --accent: #B98BE0; --accent-soft: #1E1430;
+    --amber: #D8AE5A; --amber-soft: #2A2113;
+    --green: #7FBE9C; --green-soft: #13251C;
+    --rose: #E08A9C; --rose-soft: #2A141A;
+    --teal: #7EC2CE; --teal-soft: #10242A;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0E0A16; --card: #171022; --sunk: #130D1D; --ink: #EEEAF4;
+  --body: #BFB5CE; --muted: #8B7FA0; --faint: #6E6382;
+  --rule: #2C2338; --hair: #211A2C;
+  --brand: #2A0937; --accent: #B98BE0; --accent-soft: #1E1430;
+  --amber: #D8AE5A; --amber-soft: #2A2113;
+  --green: #7FBE9C; --green-soft: #13251C;
+  --rose: #E08A9C; --rose-soft: #2A141A;
+  --teal: #7EC2CE; --teal-soft: #10242A;
+}
+
+html { -webkit-text-size-adjust: 100%; }
+body {
+  background: var(--paper); color: var(--body);
+  font-family: var(--sans); font-size: 15px; line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  display: flex; min-height: 100vh;
+}
+
+/* ── The rail ───────────────────────────────────────────────
+   A rule and a column of labels, same instinct as the blog nav: it should
+   not compete with the surface it is next to. */
+.rail {
+  width: var(--rail); flex: 0 0 var(--rail);
+  border-right: 1px solid var(--rule); background: var(--card);
+  position: sticky; top: 0; height: 100vh;
+  display: flex; flex-direction: column; gap: 1.5rem;
+  padding: 1.15rem 0 .9rem; overflow-y: auto;
+  transition: width .16s ease, flex-basis .16s ease;
+}
+.rail-head { display: flex; align-items: center; gap: .5rem; padding: 0 .8rem 0 1.15rem; }
+.rail-logo { display: flex; align-items: center; gap: .55rem; text-decoration: none; color: var(--brand); }
+.rail-logo svg { width: 21px; height: 21px; display: block; }
+.rail-toggle {
+  margin-left: auto; border: 1px solid transparent; background: none; cursor: pointer;
+  color: var(--faint); border-radius: 4px; padding: .25rem; display: grid; place-items: center;
+}
+.rail-toggle:hover { color: var(--accent); border-color: var(--rule); background: var(--sunk); }
+.rail-toggle svg { width: 15px; height: 15px; display: block; }
+.rail-toggle .when-shut { display: none; }
+:root[data-rail="shut"] .rail-toggle .when-shut { display: block; }
+:root[data-rail="shut"] .rail-toggle .when-open { display: none; }
+:root[data-rail="shut"] .rail-head { flex-direction: column; gap: .8rem; padding: 0; }
+:root[data-rail="shut"] .rail-toggle { margin-left: 0; }
+.wordmark {
+  font-family: var(--mono); font-size: .74rem; font-weight: 500;
+  letter-spacing: .1em; text-transform: uppercase; color: var(--ink);
+}
+.wordmark span { color: var(--accent); }
+
+.rail nav { display: flex; flex-direction: column; gap: 1.35rem; }
+.nav-group { display: flex; flex-direction: column; gap: .1rem; }
+.nav-group h6 {
+  font-family: var(--mono); font-size: .6rem; font-weight: 500;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--faint);
+  padding: 0 1.15rem .35rem;
+}
+.rail a.nav-item {
+  display: flex; align-items: center; gap: .6rem;
+  padding: .38rem 1.15rem; text-decoration: none;
+  color: var(--body); font-size: .875rem;
+  border-left: 2px solid transparent; white-space: nowrap; overflow: hidden;
+}
+.rail a.nav-item.screens-link { font-family: var(--mono); font-size: .68rem; letter-spacing: .06em;
+                                text-transform: uppercase; color: var(--faint); }
+.rail a.nav-item svg { width: 15px; height: 15px; flex: 0 0 15px; opacity: .62; }
+.rail a.nav-item:hover { color: var(--ink); background: var(--sunk); }
+.rail a.nav-item[aria-current] {
+  color: var(--accent); background: var(--accent-soft);
+  border-left-color: var(--accent); font-weight: 600;
+}
+.rail a.nav-item[aria-current] svg { opacity: 1; }
+.nav-count {
+  margin-left: auto; font-family: var(--mono); font-size: .62rem;
+  color: var(--faint); letter-spacing: .04em;
+}
+
+.rail-foot { margin-top: auto; padding: 0 var(--rail-pad); display: flex; flex-direction: column; gap: .7rem; }
+.rail-foot .nav-item { padding-left: 0; padding-right: 0; }
+
+/* ── Collapsed state ────────────────────────────────────────
+   The labels go, the icons centre, and the group headings become the hairline
+   they were already implying. Every item keeps its title, so hover still says
+   what it is. */
+:root[data-rail="shut"] .wordmark,
+:root[data-rail="shut"] .nav-item .lbl,
+:root[data-rail="shut"] .nav-count,
+:root[data-rail="shut"] .nav-group h6,
+:root[data-rail="shut"] .org-switch .two-line { display: none; }
+:root[data-rail="shut"] .rail { padding-left: 0; padding-right: 0; align-items: stretch; }
+:root[data-rail="shut"] .rail a.nav-item { justify-content: center; padding: .5rem 0; gap: 0; }
+:root[data-rail="shut"] .rail a.nav-item svg { width: 17px; height: 17px; flex-basis: 17px; }
+:root[data-rail="shut"] .nav-group + .nav-group { border-top: 1px solid var(--hair); padding-top: .45rem; margin-top: .45rem; }
+:root[data-rail="shut"] nav { gap: 0; }
+:root[data-rail="shut"] .rail-foot { align-items: center; }
+:root[data-rail="shut"] .org-switch { padding: .35rem; border: 0; background: none; justify-content: center; }
+.org-switch {
+  display: flex; align-items: center; gap: .55rem; padding: .5rem .6rem;
+  border: 1px solid var(--rule); border-radius: 4px; background: var(--sunk); cursor: pointer;
+}
+.avatar {
+  width: 24px; height: 24px; border-radius: 3px; flex: 0 0 24px;
+  background: var(--brand); color: #fff; display: grid; place-items: center;
+  font-family: var(--mono); font-size: .6rem; letter-spacing: .02em;
+}
+.avatar.soft { background: var(--accent-soft); color: var(--accent); }
+.org-switch .two-line { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; }
+.org-switch strong { font-size: .8rem; color: var(--ink); font-weight: 600; }
+.org-switch small { font-family: var(--mono); font-size: .6rem; color: var(--muted); letter-spacing: .04em; }
+
+/* ── Main column ────────────────────────────────────────────*/
+.main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.topbar {
+  position: sticky; top: 0; z-index: 50;
+  border-bottom: 1px solid var(--rule); background: color-mix(in srgb, var(--paper) 88%, transparent);
+  backdrop-filter: blur(8px);
+  padding: .7rem 1.6rem; display: flex; align-items: center; gap: 1rem;
+}
+.crumbs { display: flex; align-items: center; gap: .45rem; font-family: var(--mono); font-size: .66rem;
+          letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.crumbs a { color: var(--muted); text-decoration: none; }
+.crumbs a:hover { color: var(--accent); }
+.crumbs .sep { color: var(--faint); opacity: .7; }
+.crumbs .here { color: var(--ink); }
+.topbar .spacer { margin-left: auto; }
+.search {
+  display: flex; align-items: center; gap: .5rem; min-width: 260px;
+  border: 1px solid var(--rule); background: var(--card); border-radius: 4px; padding: .3rem .6rem;
+}
+.search input { border: 0; background: none; outline: none; font-family: var(--mono);
+                font-size: .72rem; color: var(--body); width: 100%; }
+.search kbd {
+  font-family: var(--mono); font-size: .58rem; color: var(--faint);
+  border: 1px solid var(--rule); border-radius: 3px; padding: .05em .3em;
+}
+
+.page { padding: 2rem 1.6rem 4rem; display: flex; flex-direction: column; gap: 1.6rem; max-width: 1220px; }
+.page.wide { max-width: none; }
+.page.flush { padding: 0; gap: 0; flex: 1; min-height: 0; }
+
+header.page-head { display: flex; flex-direction: column; gap: .55rem; }
+.kicker { font-family: var(--mono); font-size: .66rem; letter-spacing: .16em;
+          text-transform: uppercase; color: var(--accent); font-weight: 500; }
+h1 { font-family: var(--serif); font-weight: 500; color: var(--ink);
+     font-size: 2.1rem; line-height: 1.1; letter-spacing: -.015em; }
+h2 { font-family: var(--serif); font-weight: 500; color: var(--ink); font-size: 1.3rem; line-height: 1.2; }
+h3 { font-family: var(--sans); font-weight: 600; color: var(--ink); font-size: .95rem; }
+.lede { font-family: var(--serif); font-size: 1.08rem; line-height: 1.5; color: var(--ink); max-width: 46rem; }
+.head-row { display: flex; align-items: flex-end; gap: 1rem; flex-wrap: wrap; }
+.head-row .spacer { margin-left: auto; }
+
+/* ── Bits ───────────────────────────────────────────────────*/
+.btn {
+  font-family: var(--mono); font-size: .68rem; letter-spacing: .06em; text-transform: uppercase;
+  padding: .45em .85em; border-radius: 4px; border: 1px solid var(--rule);
+  background: var(--card); color: var(--body); cursor: pointer; text-decoration: none;
+  display: inline-flex; align-items: center; gap: .45em; white-space: nowrap;
+}
+.btn:hover { border-color: var(--accent); color: var(--accent); }
+.btn.primary { background: var(--brand); border-color: var(--brand); color: #F4F2F7; }
+.btn.primary:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.ghost { border-color: transparent; background: none; color: var(--muted); }
+.btn.danger:hover { border-color: var(--rose); color: var(--rose); }
+.btn svg { width: 13px; height: 13px; }
+
+.chip {
+  font-family: var(--mono); font-size: .62rem; letter-spacing: .08em; text-transform: uppercase;
+  padding: .22em .55em; border-radius: 2px; background: var(--hair); color: var(--muted);
+  display: inline-flex; align-items: center; gap: .35em; white-space: nowrap;
+}
+.chip .dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.chip.accent   { background: var(--accent-soft); color: var(--accent); }
+.chip.running  { background: var(--amber-soft);  color: var(--amber); }
+.chip.succeeded{ background: var(--green-soft);  color: var(--green); }
+.chip.failed   { background: var(--rose-soft);   color: var(--rose); }
+.chip.cancelled{ background: var(--hair);        color: var(--faint); }
+.chip.pending  { background: var(--hair);        color: var(--muted); }
+.chip.ready    { background: var(--teal-soft);   color: var(--teal); }
+.chip.waiting  { background: var(--accent-soft); color: var(--accent); }
+.chip.compensating { background: var(--amber-soft); color: var(--amber); }
+.chip.kind { background: none; border: 1px solid var(--rule); color: var(--muted); }
+
+.pill-row { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; }
+/* A <td> must stay a table-cell or the row's baseline and borders come apart. */
+table.data td.pill-row { display: table-cell; }
+table.data td.pill-row .chip { margin: 0 .3rem .15rem 0; }
+
+.panel {
+  background: var(--card); border: 1px solid var(--rule); border-radius: 6px;
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.panel > header {
+  display: flex; align-items: center; gap: .7rem;
+  padding: .7rem .95rem; border-bottom: 1px solid var(--hair); background: var(--sunk);
+}
+.panel > header h3 { font-size: .8rem; }
+.panel > header .label {
+  font-family: var(--mono); font-size: .64rem; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--muted);
+}
+.panel > header .spacer { margin-left: auto; }
+.panel .body { padding: .95rem; display: flex; flex-direction: column; gap: .8rem; }
+.panel .body > .btn, .panel .body > a.btn { align-self: flex-start; }
+.panel .body.tight { padding: 0; overflow-x: auto; }
+
+.grid { display: grid; gap: 1rem; }
+.grid > * { min-width: 0; }
+.g2 { grid-template-columns: repeat(2, minmax(0,1fr)); }
+.g3 { grid-template-columns: repeat(3, minmax(0,1fr)); }
+.g4 { grid-template-columns: repeat(4, minmax(0,1fr)); }
+.g-2-1 { grid-template-columns: minmax(0,2fr) minmax(0,1fr); }
+.g-1-2 { grid-template-columns: minmax(0,1fr) minmax(0,2fr); }
+@media (max-width: 1080px) { .g4 { grid-template-columns: repeat(2,minmax(0,1fr)); }
+                             .g3, .g-2-1, .g-1-2 { grid-template-columns: 1fr; } }
+
+.stat { background: var(--card); border: 1px solid var(--rule); border-radius: 6px;
+        padding: .85rem .95rem; display: flex; flex-direction: column; gap: .3rem; }
+.stat .label { font-family: var(--mono); font-size: .62rem; letter-spacing: .12em;
+               text-transform: uppercase; color: var(--muted); }
+.stat .value { font-family: var(--serif); font-size: 1.75rem; line-height: 1; color: var(--ink); }
+.stat .value small { font-family: var(--mono); font-size: .68rem; color: var(--muted); letter-spacing: .04em; }
+.stat .trend { font-family: var(--mono); font-size: .64rem; color: var(--faint); letter-spacing: .03em; }
+.stat .trend.up { color: var(--green); } .stat .trend.down { color: var(--rose); }
+
+table.data { width: 100%; border-collapse: collapse; font-size: .84rem; }
+table.data th {
+  text-align: left; font-family: var(--mono); font-weight: 500; font-size: .62rem;
+  letter-spacing: .12em; text-transform: uppercase; color: var(--muted);
+  padding: .5rem .95rem; border-bottom: 1px solid var(--rule); background: var(--sunk);
+  position: sticky; top: 0;
+}
+table.data td { padding: .55rem .95rem; border-bottom: 1px solid var(--hair); vertical-align: middle; }
+table.data tr:last-child td { border-bottom: 0; }
+table.data tbody tr:hover { background: var(--sunk); }
+table.data td.mono, .mono { font-family: var(--mono); font-size: .74rem; letter-spacing: .01em; }
+table.data td.num { text-align: right; font-family: var(--mono); font-size: .76rem; }
+table.data a { color: var(--ink); text-decoration: none; border-bottom: 1px solid var(--rule); }
+table.data a:hover { color: var(--accent); border-color: var(--accent); }
+td .sub { display: block; font-family: var(--mono); font-size: .64rem; color: var(--faint); }
+
+.toolbar { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+.toolbar .spacer { margin-left: auto; }
+.seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; background: var(--card); }
+.seg button {
+  font-family: var(--mono); font-size: .64rem; letter-spacing: .07em; text-transform: uppercase;
+  padding: .38em .7em; border: 0; border-right: 1px solid var(--rule);
+  background: none; color: var(--muted); cursor: pointer;
+}
+.seg button:last-child { border-right: 0; }
+.seg button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+
+.bar { height: 6px; border-radius: 3px; background: var(--hair); overflow: hidden; min-width: 70px; }
+.bar > span { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+.bar.amber > span { background: var(--amber); }
+.bar.green > span { background: var(--green); }
+.bar.rose  > span { background: var(--rose); }
+
+pre.code, .code {
+  font-family: var(--mono); font-size: .74rem; line-height: 1.65;
+  background: var(--sunk); border: 1px solid var(--hair); border-radius: 5px;
+  padding: .8rem .9rem; overflow-x: auto; color: var(--body); white-space: pre;
+}
+.code .k { color: var(--accent); } .code .s { color: var(--green); }
+.code .c { color: var(--faint); font-style: italic; } .code .n { color: var(--amber); }
+
+.kv { display: grid; grid-template-columns: minmax(120px,auto) 1fr; gap: .4rem .9rem; align-items: baseline; }
+.kv dt { font-family: var(--mono); font-size: .64rem; letter-spacing: .1em;
+         text-transform: uppercase; color: var(--muted); }
+.kv dd { font-size: .84rem; color: var(--ink); }
+
+.empty { padding: 2.5rem; text-align: center; color: var(--muted); display: flex;
+         flex-direction: column; gap: .5rem; align-items: center; }
+
+/* ── Event stream / timeline ────────────────────────────────*/
+.stream { display: flex; flex-direction: column; }
+.ev { display: grid; grid-template-columns: 92px 18px 1fr; gap: .7rem;
+      padding: .5rem .95rem; border-bottom: 1px solid var(--hair); align-items: baseline; font-size: .82rem; }
+.ev:last-child { border-bottom: 0; }
+.ev .t { font-family: var(--mono); font-size: .66rem; color: var(--faint); }
+.ev .m { width: 7px; height: 7px; border-radius: 50%; background: var(--rule); margin-top: .45em; }
+.ev.ok  .m { background: var(--green); } .ev.bad .m { background: var(--rose); }
+.ev.warn .m { background: var(--amber); } .ev.info .m { background: var(--accent); }
+.ev .d { min-width: 0; }
+.ev .d code { font-family: var(--mono); font-size: .72rem; color: var(--ink); }
+.ev .d .meta { display: block; font-family: var(--mono); font-size: .64rem; color: var(--faint); }
+
+/* ── Chat ───────────────────────────────────────────────────
+   Three zones, and only the middle one is load-bearing. Both side panels
+   collapse, because a conversation is the thing being read and a fixed 250px
+   list of session titles is 250px the prose does not get. The state persists,
+   the way the rail's does -- a layout you have to re-collapse on every visit is
+   a layout that is not really collapsible. */
+.chat { display: flex; flex: 1; min-height: 0; }
+.chat > * { min-width: 0; }
+
+.chat-side, .chat-aside {
+  background: var(--card); display: flex; flex-direction: column;
+  overflow: hidden; flex: 0 0 auto;
+}
+.chat-side  { width: 244px; border-right: 1px solid var(--rule); }
+.chat-aside { width: 300px; border-left: 1px solid var(--rule); }
+.chat[data-left="shut"]  .chat-side  { display: none; }
+.chat[data-right="shut"] .chat-aside { display: none; }
+
+.panel-head {
+  display: flex; align-items: center; gap: .5rem; flex: 0 0 auto;
+  padding: .6rem .5rem .6rem .9rem; border-bottom: 1px solid var(--hair);
+}
+.panel-head h6 {
+  font-family: var(--mono); font-size: .62rem; letter-spacing: .13em;
+  text-transform: uppercase; color: var(--faint); font-weight: 500;
+}
+.panel-head .spacer { margin-left: auto; }
+.icon-btn {
+  border: 1px solid transparent; background: none; cursor: pointer; color: var(--faint);
+  border-radius: 4px; padding: .25rem; display: grid; place-items: center; line-height: 0;
+}
+.icon-btn:hover { color: var(--accent); border-color: var(--rule); background: var(--sunk); }
+.icon-btn svg { width: 15px; height: 15px; }
+
+.threads { flex: 1; overflow-y: auto; display: flex; flex-direction: column; }
+.thread-item {
+  padding: .55rem .9rem; cursor: pointer; display: flex; flex-direction: column; gap: .15rem;
+  border-left: 2px solid transparent;
+}
+.thread-item:hover { background: var(--sunk); }
+.thread-item[aria-current] {
+  background: var(--accent-soft); border-left-color: var(--accent);
+}
+.thread-item strong {
+  font-size: .82rem; color: var(--ink); font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.thread-item .meta { font-family: var(--mono); font-size: .62rem; color: var(--muted); display: flex; gap: .45rem; }
+
+/* ── The conversation ───────────────────────────────────────
+   One centred measure, and no box around it. The reading surface of a chat is
+   the text; the further the chrome stays from it the better it reads. */
+.convo { flex: 1; display: flex; flex-direction: column; min-height: 0; background: var(--paper); }
+.convo-head {
+  display: flex; align-items: center; gap: .6rem; flex: 0 0 auto;
+  padding: .55rem .9rem; border-bottom: 1px solid var(--rule);
+  background: color-mix(in srgb, var(--paper) 88%, transparent); backdrop-filter: blur(8px);
+}
+.convo-head .title { font-size: .88rem; color: var(--ink); font-weight: 600;
+                     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.convo-head .spacer { margin-left: auto; }
+.convo .scroll { flex: 1; overflow-y: auto; padding: 1.6rem 1.2rem 2rem; }
+.thread { max-width: 46rem; margin: 0 auto; display: flex; flex-direction: column; gap: 1.5rem; }
+
+/* A user turn is a short aside; an assistant turn is the document. Giving them
+   the same bubble made every screen look like a form, and made the answer --
+   the part with the tables and the code in it -- the same weight as "do it". */
+.msg { display: flex; flex-direction: column; gap: .35rem; }
+.msg .name {
+  font-family: var(--mono); font-size: .6rem; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--faint);
+}
+.msg.user { align-items: flex-end; }
+.msg.user .name { padding-right: .2rem; }
+.msg.user .text {
+  background: var(--accent-soft); color: var(--ink);
+  border-radius: 12px 12px 3px 12px; padding: .6rem .85rem; max-width: 80%;
+  font-size: .92rem; line-height: 1.55;
+}
+.msg.assistant .text { color: var(--body); }
+
+/* A tool call, stored or live. Rebuilding the chat CSS dropped these and the
+   rows in a read-back transcript rendered as bare text -- the styles were in
+   the block that got replaced, and nothing failed loudly about it. */
+.tool-call {
+  border: 1px solid var(--hair); border-left: 2px solid var(--accent);
+  border-radius: 0 5px 5px 0; background: var(--sunk);
+  padding: .45rem .65rem; display: flex; flex-direction: column; gap: .3rem;
+}
+.tool-call .head { display: flex; align-items: center; gap: .5rem; }
+.tool-call .out {
+  font-family: var(--mono); font-size: .7rem; color: var(--muted);
+  overflow-x: auto; white-space: pre;
+}
+.msg .tool-call { margin-top: .5rem; }
+
+/* ── The composer ───────────────────────────────────────────*/
+.composer { flex: 0 0 auto; padding: 0 1.2rem 1.1rem; background: var(--paper); }
+.composer-inner {
+  max-width: 46rem; margin: 0 auto; border: 1px solid var(--rule); border-radius: 14px;
+  background: var(--card); padding: .55rem .55rem .5rem .85rem;
+  display: flex; flex-direction: column; gap: .4rem;
+  box-shadow: 0 1px 2px rgba(23,9,43,.04), 0 6px 18px rgba(23,9,43,.05);
+  transition: border-color .15s;
+}
+.composer-inner:focus-within { border-color: var(--accent); }
+.composer .box {
+  border: 0; background: none; padding: .25rem 0; outline: none; resize: none;
+  font-family: var(--sans); font-size: .95rem; line-height: 1.5; color: var(--ink); width: 100%;
+  max-height: 40vh;
+}
+.composer .row { display: flex; align-items: center; gap: .45rem; }
+.composer .row .spacer { margin-left: auto; }
+.send-btn {
+  border: 0; border-radius: 999px; width: 30px; height: 30px; cursor: pointer;
+  background: var(--brand); color: #F4F2F7; display: grid; place-items: center; line-height: 0;
+}
+.send-btn:hover { background: var(--accent); }
+.send-btn:disabled { background: var(--rule); color: var(--faint); cursor: default; }
+.send-btn svg { width: 15px; height: 15px; }
+
+.chat-aside .body { flex: 1; overflow-y: auto; }
+.tabs { display: flex; gap: .1rem; }
+.tabs button { font-family: var(--mono); font-size: .63rem; letter-spacing: .08em; text-transform: uppercase;
+               padding: .3em .6em; border: 0; background: none; color: var(--muted); cursor: pointer;
+               border-bottom: 2px solid transparent; }
+.tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+
+@media (max-width: 900px) {
+  .chat-side, .chat-aside { display: none; }
+}
+
+/* ── Graph ─────────────────────────────────────────────────*/
+.graphwrap { overflow-x: auto; padding: 1rem .95rem; }
+.graph text { font-family: var(--mono); font-size: 9.5px; fill: var(--body); letter-spacing: .02em; }
+.graph text.lbl { fill: var(--faint); font-size: 8px; letter-spacing: .1em; }
+.graph .edge { stroke: var(--rule); stroke-width: 1.4; fill: none; }
+.graph .node { fill: var(--card); stroke: var(--rule); stroke-width: 1.2; rx: 4; }
+.graph .node.ok   { fill: var(--green-soft);  stroke: var(--green); }
+.graph .node.run  { fill: var(--amber-soft);  stroke: var(--amber); }
+.graph .node.bad  { fill: var(--rose-soft);   stroke: var(--rose); }
+.graph .node.wait { fill: var(--accent-soft); stroke: var(--accent); }
+
+.note {
+  border-left: 2px solid var(--accent); background: var(--accent-soft);
+  padding: .6rem .8rem; border-radius: 0 4px 4px 0; font-size: .84rem; color: var(--ink);
+}
+.note.amber { border-color: var(--amber); background: var(--amber-soft); }
+.note.rose  { border-color: var(--rose);  background: var(--rose-soft); }
+.note strong { font-weight: 600; }
+
+.form { display: flex; flex-direction: column; gap: .9rem; max-width: 34rem; }
+.field { display: flex; flex-direction: column; gap: .28rem; }
+.field label { font-family: var(--mono); font-size: .63rem; letter-spacing: .11em;
+               text-transform: uppercase; color: var(--muted); }
+.field .control { border: 1px solid var(--rule); border-radius: 4px; background: var(--card);
+                  padding: .45rem .6rem; font-size: .88rem; color: var(--ink); }
+
+/* ── Selects ────────────────────────────────────────────────
+   A native <select> renders in the OS's chrome, which is the one control in a
+   page that ignores everything else about it -- and there are three of them
+   here (the agent picker, the role grant, the schedule's workflow). So:
+   `appearance: none`, our own chevron as a background image, and the same
+   hairline-and-radius language as the buttons beside it.
+
+   Still a native select underneath, deliberately. A custom listbox is a popup,
+   a focus trap, arrow-key handling and a screen-reader contract to get right,
+   and the thing being chosen here is one word from a short list. The chevron is
+   drawn with `currentColor` so it follows the text through hover and dark
+   mode rather than being a second colour to keep in step. */
+select.control {
+  appearance: none; -webkit-appearance: none;
+  border: 1px solid var(--rule); border-radius: 5px; background-color: var(--card);
+  color: var(--ink); font-family: var(--sans); font-size: .82rem; line-height: 1.2;
+  padding: .32rem 1.5rem .32rem .55rem; cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%237A6E90' stroke-width='1.3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right .5rem center; background-size: 9px 6px;
+  transition: border-color .15s, color .15s;
+}
+select.control.compact { font-size: .76rem; padding: .22rem 1.35rem .22rem .45rem; }
+select.control:hover { border-color: var(--accent); color: var(--accent); }
+select.control:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+select.control option { color: var(--ink); background: var(--card); }
+:root[data-theme="dark"] select.control,
+:root:not([data-theme="light"]) select.control {
+  /* The chevron is a data URI and cannot inherit a token, so dark mode gets its
+     own. One duplicated colour, and the alternative is an inline SVG element in
+     every select. */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238B7FA0' stroke-width='1.3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+/* In the composer the picker sits next to a chip and should read as one of
+   them: no fill, no border until you reach for it. */
+.composer select.control {
+  border-color: transparent; background-color: transparent; color: var(--muted);
+  font-family: var(--mono); font-size: .72rem; letter-spacing: .04em;
+  padding: .28rem 1.35rem .28rem .45rem;
+}
+.composer select.control:hover { border-color: var(--rule); background-color: var(--sunk); color: var(--accent); }
+.field .control.placeholder { color: var(--faint); }
+.field .hint { font-size: .76rem; color: var(--muted); }
+.switch { width: 34px; height: 19px; border-radius: 10px; background: var(--rule); position: relative; flex: 0 0 34px; }
+.switch::after { content:""; position: absolute; top: 2px; left: 2px; width: 15px; height: 15px;
+                 border-radius: 50%; background: var(--card); }
+.switch.on { background: var(--accent); } .switch.on::after { left: 17px; }
+.row-between { display: flex; align-items: center; gap: .8rem; }
+.row-between .spacer { margin-left: auto; }
+
+.matrix { width: 100%; border-collapse: collapse; font-size: .8rem; }
+.matrix th, .matrix td { border: 1px solid var(--hair); padding: .45rem .6rem; text-align: center; }
+.matrix th { font-family: var(--mono); font-size: .61rem; letter-spacing: .08em; text-transform: uppercase;
+             color: var(--muted); background: var(--sunk); font-weight: 500; }
+.matrix th.rowhead, .matrix td.rowhead { text-align: left; font-family: var(--mono); font-size: .7rem; color: var(--ink); }
+.matrix td .yes { color: var(--green); font-weight: 600; }
+.matrix td .no  { color: var(--faint); }
+.matrix td .inherit { color: var(--accent); }
+
+.spark { display: block; width: 100%; height: 34px; }
+.spark path { fill: none; stroke: var(--accent); stroke-width: 1.5; }
+.spark path.fill { fill: var(--accent-soft); stroke: none; }
+
+.legend { display: flex; gap: .9rem; flex-wrap: wrap; font-family: var(--mono);
+          font-size: .63rem; color: var(--muted); letter-spacing: .04em; }
+.legend span { display: inline-flex; align-items: center; gap: .35em; }
+.legend i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+
+a { color: var(--accent); }
+:where(a, button):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+
+/* ── Markdown in a bubble ───────────────────────────────────
+   Tuned for a chat column rather than for an article: the measure is already
+   narrow, so headings step down gently and everything gets its spacing from
+   `gap` on the container rather than from margins that would collapse against
+   the bubble's padding. */
+.md { display: flex; flex-direction: column; gap: .55rem; }
+.md > *:first-child { margin-top: 0; }
+.md p { font-size: .92rem; line-height: 1.6; }
+.md h3, .md h4, .md h5, .md h6 {
+  font-family: var(--sans); color: var(--ink); font-weight: 600; line-height: 1.3;
+}
+.md h3 { font-size: 1.02rem; } .md h4 { font-size: .94rem; }
+.md h5, .md h6 { font-size: .86rem; color: var(--body); }
+.md ul, .md ol { padding-left: 1.15rem; display: flex; flex-direction: column; gap: .25rem; }
+.md li { font-size: .9rem; line-height: 1.55; }
+.md code {
+  font-family: var(--mono); font-size: .8em; background: var(--accent-soft);
+  color: var(--accent); padding: .1em .35em; border-radius: 3px;
+}
+.md pre.code { margin: 0; white-space: pre; position: relative; }
+.md pre.code code { background: none; color: inherit; padding: 0; }
+.md pre.code[data-lang]::after {
+  content: attr(data-lang); position: absolute; top: .35rem; right: .5rem;
+  font-family: var(--mono); font-size: .58rem; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--faint);
+}
+.md blockquote {
+  border-left: 2px solid var(--rule); padding-left: .7rem; color: var(--muted);
+  display: flex; flex-direction: column; gap: .4rem;
+}
+.md hr { border: 0; border-top: 1px solid var(--hair); }
+.md a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+.md-table { border-collapse: collapse; font-size: .84rem; display: block; overflow-x: auto; }
+.md-table th, .md-table td { border: 1px solid var(--hair); padding: .3rem .55rem; text-align: left; }
+.md-table th {
+  background: var(--sunk); font-family: var(--mono); font-size: .64rem;
+  letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 500;
+}
+
+/* ── The live turn ──────────────────────────────────────────
+   A progress block, not a spinner. What a reader wants to know mid-turn is
+   which tool is running and how long it has been -- "thinking…" answers
+   neither, and is what every one of these looks like by default. */
+.turn {
+  /* min(), not a fixed measure: the conversation is one column of a three-column
+     layout, so 46rem is a ceiling and not a width. Without this the block kept
+     its ceiling and pushed its status chips out of the column -- which only
+     showed up once the rows stopped wrapping. */
+  align-self: stretch; max-width: 100%;
+  border: 1px solid var(--rule); border-left: 2px solid var(--accent);
+  border-radius: 0 6px 6px 0; background: var(--card);
+  display: flex; flex-direction: column;
+}
+.turn-head {
+  display: flex; align-items: center; gap: .5rem;
+  padding: .45rem .7rem; border-bottom: 1px solid var(--hair); background: var(--sunk);
+}
+.turn-head .label {
+  font-family: var(--mono); font-size: .6rem; letter-spacing: .13em;
+  text-transform: uppercase; color: var(--faint);
+}
+.turn-head .elapsed { font-size: .66rem; color: var(--muted); }
+.turn-steps { display: flex; flex-direction: column; gap: .4rem; padding: .55rem .7rem; }
+.turn-steps:empty { display: none; }
+.turn .tool-call { border-left-width: 1px; border-left-color: var(--hair); background: var(--card); }
+.tool-call .tool-name { font-family: var(--mono); font-size: .72rem; color: var(--ink); }
+
+/* The one animation in the app, and it earns its place: a status that says
+   "running" without moving is indistinguishable from one that has stalled. */
+.spin {
+  width: 8px; height: 8px; border-radius: 50%;
+  border: 1.5px solid currentColor; border-right-color: transparent;
+  display: inline-block; animation: p8spin .7s linear infinite;
+}
+@keyframes p8spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .spin { animation: none; opacity: .6; }
+}
+
+/* A delegated call is a child run, and reads as one: indented under the step
+   that spawned it, with the connector drawn rather than implied. */
+.tool-call .head { flex-wrap: nowrap; min-width: 0; }
+/* min-width:0 on the flex item, or the ellipsis never engages: a flex child's
+   default min-width is auto, which is its content, so it refuses to shrink and
+   overflows instead of truncating. */
+.tool-call .tool-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.tool-call.delegated {
+  margin-left: 1.1rem; border-left-color: var(--accent); position: relative;
+}
+.tool-call.delegated::before {
+  content: ""; position: absolute; left: -1.1rem; top: -.35rem; bottom: 50%;
+  width: .75rem; border-left: 1px solid var(--rule); border-bottom: 1px solid var(--rule);
+  border-bottom-left-radius: 4px;
+}
+
+/* ── Sessions, in the rail ──────────────────────────────────
+   Under the Chat item, because a list of session titles is navigation and the
+   rail is where navigation lives. Collapsed with the rail, and gone from the
+   layout entirely when it is, so the conversation gets the width back twice. */
+.rail-sessions {
+  display: flex; flex-direction: column;
+  max-height: 42vh; overflow-y: auto;
+  margin: .15rem 0 .35rem; padding-left: 1.15rem;
+  border-left: 1px solid var(--hair); margin-left: 1.7rem;
+}
+:root[data-rail="shut"] .rail-sessions { display: none; }
+.rail-sessions .thread-item {
+  padding: .3rem .5rem .3rem .55rem; border-left: 2px solid transparent; border-radius: 0 4px 4px 0;
+}
+.rail-sessions .thread-item strong { font-size: .78rem; font-weight: 500; }
+.rail-sessions .thread-item .meta { font-size: .58rem; }
+.rail-sessions .new {
+  font-family: var(--mono); font-size: .62rem; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--muted); background: none; border: 0; cursor: pointer; text-align: left;
+  padding: .35rem .5rem .35rem .55rem;
+}
+.rail-sessions .new:hover { color: var(--accent); }

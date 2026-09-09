@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>percolate</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Spectral:wght@400;500&family=Source+Sans+3:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="theme.css">
+<style>
+  /* theme.css is shared verbatim with the mockups, which have no router. The
+     outlet is this app's own object: it has to stretch, or `.page.flush` --
+     the chat's full-height three-column layout -- floats at the top of the
+     viewport with dead space under it. */
+  #outlet { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  #outlet > .page { flex: 1; }
+</style>
+<script>
+  try { if (localStorage.getItem("p8-rail") === "shut") document.documentElement.dataset.rail = "shut"; } catch (e) {}
+  function toggleRail() {
+    var d = document.documentElement, shut = d.dataset.rail === "shut";
+    if (shut) delete d.dataset.rail; else d.dataset.rail = "shut";
+    try { localStorage.setItem("p8-rail", shut ? "open" : "shut"); } catch (e) {}
+  }
+  addEventListener("keydown", function (e) {
+    if (e.key === "[" && !/^(INPUT|TEXTAREA)$/.test(e.target.tagName)) toggleRail();
+  });
+</script>
+</head>
+<body>
+<aside class="rail">
+  <div class="rail-head">
+    <a class="rail-logo" href="#/" title="Overview">
+      <svg viewBox="0 0 100 100" aria-hidden="true"><g fill="currentColor">
+        <rect x="42" y="2" width="40" height="40" transform="rotate(45 62 22)"/>
+        <rect x="2" y="42" width="40" height="40" transform="rotate(45 22 62)"/>
+        <rect x="42" y="82" width="40" height="40" transform="rotate(45 62 102)"/></g></svg>
+      <span class="wordmark">percolate<span>.</span></span>
+    </a>
+    <button class="rail-toggle" onclick="toggleRail()" aria-label="Collapse the sidebar" title="Collapse the sidebar  [">
+      <span class="when-open"><svg viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"><path d="M9.5 3.5L5.5 7.5l4 4"/><path d="M2.5 2v11"/></svg></span>
+      <span class="when-shut"><svg viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"><path d="M5.5 3.5l4 4-4 4"/><path d="M12.5 2v11"/></svg></span>
+    </button>
+  </div>
+  <nav id="nav"></nav>
+  <div class="rail-foot">
+    <div class="org-switch" id="whoami" title="The token this browser is using">
+      <span class="avatar soft">?</span>
+      <span class="two-line"><strong>Not signed in</strong><small>NO TOKEN</small></span>
+    </div>
+  </div>
+</aside>
+<main class="main">
+  <div class="topbar">
+    <div class="crumbs" id="crumbs"></div>
+    <span class="spacer"></span>
+    <div class="pill-row" id="conn"></div>
+  </div>
+  <div id="outlet"></div>
+</main>
+
+<script type="module">
+import { h } from "./ui.js";
+import * as W from "./views.js";
+import * as A from "./access.js";
+import { token, setToken, claims, config, setEndpoint, loadConfig } from "./api.js";
+
+/* The routing table doubles as the rail, grouped the way the mockups grouped
+   it. A screen listed here exists; there is no entry for one that does not. */
+const NAV = [
+  ["", [["", "Overview", "home", W.overview], ["chat", "Chat", "chat", A.chat]]],
+  ["Work", [["workflows", "Workflows", "flow", W.workflows],
+            ["draft", "Draft", "book", W.draft],
+            ["runs", "Runs", "runs", W.runs],
+            ["schedules", "Schedules", "clock", W.schedules]]],
+  ["Fleet", [["queues", "Queues & pools", "pools", W.queues],
+             ["scale", "Load & limits", "scale", W.scale],
+             ["events", "Events", "events", W.events]]],
+  ["Access", [["agents", "Agents", "agents", A.agents],
+              ["users", "Users", "users", A.users],
+              ["roles", "Roles", "roles", A.roles],
+              ["keys", "Keys & sessions", "keys", A.keys],
+              ["settings", "Settings", "settings", A.settings],
+              ["surface", "Surface", "grid", A.surface]]],
+];
+const ROUTES = new Map(NAV.flatMap(([, items]) => items.map((i) => [i[0], i])));
+const ALIAS = { run: "runs" };
+
+const ICONS = {
+  home: '<path d="M2 7l5.5-4.5L13 7v6H2z"/>',
+  chat: '<path d="M2 3h11v8H7l-3 3v-3H2z"/>',
+  flow: '<path d="M2 3h4v3H2zM9 3h4v3H9zM5.5 10h4v3h-4z"/><path d="M4 6v2h7V6M7.5 8v2"/>',
+  book: '<path d="M2.5 2.5h4c1 0 1 .8 1 .8V13s0-.8-1-.8h-4zM12.5 2.5h-4c-1 0-1 .8-1 .8V13s0-.8 1-.8h4z"/>',
+  runs: '<path d="M2 8h3l2-5 2 10 2-5h2"/>',
+  clock: '<circle cx="7.5" cy="7.5" r="5.5"/><path d="M7.5 4v3.5L10 9"/>',
+  pools: '<rect x="1.5" y="2" width="12" height="3.2"/><rect x="1.5" y="6.4" width="12" height="3.2"/><rect x="1.5" y="10.8" width="12" height="2.4"/>',
+  scale: '<path d="M2 12.5V6M6 12.5V3M10 12.5V8M14 12.5V4.5"/>',
+  events: '<path d="M1.5 11l3-4 2.5 2L10 4.5l3.5 3"/>',
+  agents: '<circle cx="7.5" cy="4.5" r="2.5"/><path d="M2.5 13c0-2.8 2.2-4.5 5-4.5s5 1.7 5 4.5"/>',
+  users: '<circle cx="5.5" cy="5" r="2.3"/><circle cx="11" cy="5.8" r="1.8"/><path d="M1.5 12.5c0-2.3 1.8-3.8 4-3.8s4 1.5 4 3.8M10.5 9c1.8 0 3 1.2 3 3.2"/>',
+  roles: '<path d="M7.5 1.5l5 2.2v4c0 3-2.2 5.2-5 6.3-2.8-1.1-5-3.3-5-6.3v-4z"/>',
+  keys: '<circle cx="4.5" cy="7.5" r="2.8"/><path d="M7.3 7.5H14M12 7.5v2.6M10 7.5v2"/>',
+  settings: '<circle cx="7.5" cy="7.5" r="2.3"/><path d="M7.5 1.2v1.8M7.5 12v1.8M13.8 7.5H12M3 7.5H1.2M12 3l-1.3 1.3M4.3 10.7L3 12M12 12l-1.3-1.3M4.3 4.3L3 3"/>',
+  grid: '<rect x="2" y="2" width="4.6" height="4.6"/><rect x="8.4" y="2" width="4.6" height="4.6"/><rect x="2" y="8.4" width="4.6" height="4.6"/><rect x="8.4" y="8.4" width="4.6" height="4.6"/>',
+};
+const iconEl = (n) => {
+  const s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  s.setAttribute("viewBox", "0 0 15 15"); s.setAttribute("fill", "none");
+  s.setAttribute("stroke", "currentColor"); s.setAttribute("stroke-width", "1.2");
+  s.setAttribute("stroke-linecap", "round"); s.setAttribute("stroke-linejoin", "round");
+  s.innerHTML = ICONS[n] || ICONS.grid;
+  return s;
+};
+
+function drawNav(active) {
+  document.getElementById("nav").replaceChildren(...NAV.map(([group, items]) =>
+    h("div", { class: "nav-group" },
+      group ? h("h6", {}, group) : null,
+      items.flatMap(([slug, label, ic]) => {
+        const item = h("a", { class: "nav-item", href: "#/" + slug, title: label,
+                              "aria-current": slug === active ? "page" : null },
+          iconEl(ic), h("span", { class: "lbl" }, label));
+        /* The chat sessions live HERE, under the Chat item, rather than in a
+           column of their own. A list of session titles is navigation, and
+           navigation already has a home -- giving it a second one cost the
+           conversation 244px of measure for something the rail was already
+           shaped to hold. The view fills it; the router empties it. */
+        return slug === "chat" && active === "chat"
+          ? [item, h("div", { class: "rail-sessions", id: "rail-sessions" })]
+          : [item];
+      }))));
+}
+
+function drawWho() {
+  const c = claims();
+  document.getElementById("whoami").replaceChildren(
+    h("span", { class: "avatar soft" }, c ? (c.sub || "?").slice(0, 2).toUpperCase() : "?"),
+    h("span", { class: "two-line" },
+      h("strong", {}, c ? "signed in" : "Not signed in"),
+      h("small", {}, c ? (c.role || "") : "NO TOKEN")));
+  document.getElementById("conn").replaceChildren(
+    h("span", { class: "chip" }, "REST " + config().rest.replace(/^https?:\/\//, "")),
+    h("a", { class: "btn", href: "#/signin" }, c ? "Token" : "Sign in"));
+}
+
+/* Dev sign-in.
+ *
+ * The gap made concrete: rbac.login() verifies the password IN THE DATABASE and
+ * returns (user_id, refresh_token_id) -- ids, not a token. Signing a JWT is the
+ * one thing in this flow SQL does not do, so in a deployment percolate-core
+ * does it and hands the browser a short-lived access token. Here, against a dev
+ * stack whose secret is printed in the compose file, the browser signs its own.
+ * That is honest for a workbench and would be a hole anywhere else. */
+async function devToken(sub, secret) {
+  const enc = new TextEncoder();
+  const b64 = (o) => btoa(typeof o === "string" ? o : JSON.stringify(o))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const head = b64({ alg: "HS256", typ: "JWT" });
+  const body = b64({ role: "authenticated", sub, exp: Math.floor(Date.now() / 1000) + 3600 });
+  const key = await crypto.subtle.importKey("raw", enc.encode(secret),
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(head + "." + body));
+  return head + "." + body + "." + btoa(String.fromCharCode(...new Uint8Array(sig)))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function signin() {
+  const sub = h("input", { class: "control", style: "width:100%",
+    value: localStorage.getItem("p8-sub") || "11111111-1111-1111-1111-111111111111" });
+  const secret = h("input", { class: "control", style: "width:100%",
+    value: localStorage.getItem("p8-secret") || config().devSecret || "" });
+  const rest = h("input", { class: "control", style: "width:100%", value: config().rest });
+  const paste = h("input", { class: "control mono", style: "width:100%", placeholder: "or paste a JWT" });
+  const out = h("div");
+  /* The server decides whether this control exists at all. Where percolate-core
+     serves the page and has not set P8_UI_DEV_TOKEN=1, minting a token in the
+     browser is not offered -- because offering it invites somebody to put the
+     signing secret where a script can read it. */
+  const devMint = config().devToken;
+  return h("div", { class: "page" },
+    h("header", { class: "page-head" },
+      h("span", { class: "kicker" }, "the one thing SQL does not do"),
+      h("h1", {}, "Sign in"),
+      h("p", { class: "lede" },
+        "rbac.login() verifies the password inside Postgres and returns a user id and a refresh-token id. ",
+        "It does not return a JWT, because signing one is not a query — so something has to, and that ",
+        "something is percolate-core.",
+        devMint ? " On this stack the browser does it instead, with the secret from the compose file."
+                : " Until it does, a token comes from the CLI.")),
+    h("div", { class: "grid g2" },
+      h("div", { class: "panel" }, h("div", { class: "body" },
+        h("h3", {}, devMint ? "Dev token" : "Bring a token"),
+        devMint ? null : h("div", { class: "note amber" },
+          h("strong", {}, "This deployment does not mint tokens in the browser. "),
+          "Sign one with ", h("code", { class: "mono" }, "p8 auth token <email>"),
+          " and paste it below. Set ", h("code", { class: "mono" }, "P8_UI_DEV_TOKEN=1"),
+          " on the server to re-enable the control, which is only ever right on a ",
+          "stack whose JWT secret is already public."),
+        devMint ? h("div", { class: "field" }, h("label", {}, "user id (sub)"), sub) : null,
+        devMint ? h("div", { class: "field" }, h("label", {}, "PGRST_JWT_SECRET"), secret) : null,
+        h("div", { class: "field" }, h("label", {}, "PostgREST"), rest),
+        devMint ? h("button", { class: "btn primary", onclick: async () => {
+          localStorage.setItem("p8-sub", sub.value);
+          localStorage.setItem("p8-secret", secret.value);
+          setEndpoint("rest", rest.value.replace(/\/$/, ""));
+          setToken(await devToken(sub.value.trim(), secret.value));
+          drawWho();
+          out.replaceChildren(h("div", { class: "note" }, "Signed. ", h("a", { href: "#/" }, "Overview")));
+        } }, "Mint and use") : null,
+        h("div", { class: "field" }, h("label", {}, "or paste one"), paste,
+          h("button", { class: "btn", onclick: () => { setToken(paste.value.trim()); drawWho();
+            out.replaceChildren(h("div", { class: "note" }, "Token stored in sessionStorage.")); } }, "Use pasted")),
+        out)),
+      h("div", { class: "panel" }, h("div", { class: "body" },
+        h("h3", {}, "What a real one looks like"),
+        h("div", { class: "note" }, h("strong", {}, "POST /auth/login "), "on percolate-core: it calls ",
+          h("code", { class: "mono" }, "rbac.login()"), ", signs a short-lived access token, and sets the ",
+          "refresh token as an HttpOnly cookie so no script can read it."),
+        h("div", { class: "note" }, h("strong", {}, "POST /auth/refresh "), "rotates it. ",
+          h("code", { class: "mono" }, "rbac.refresh_session()"), " already implements the rotation chain, ",
+          "including revoking the whole chain when an already-rotated token is presented."),
+        h("div", { class: "note amber" }, "Neither endpoint exists yet. They are the smallest thing ",
+          "percolate-core owes this UI, and the only part of sign-in that is not already a row.")))));
+}
+
+async function route() {
+  const [slug, arg] = (location.hash || "#/").slice(2).split("/");
+  const outlet = document.getElementById("outlet");
+  drawNav(ALIAS[slug] || (ROUTES.has(slug) ? slug : null));
+  const label = slug === "signin" ? "Sign in"
+    : slug === "run" ? "Run detail"
+    : (ROUTES.get(slug) || [, "Overview"])[1];
+  document.getElementById("crumbs").replaceChildren(h("span", { class: "here" }, label));
+  outlet.replaceChildren(h("div", { class: "page" }, h("div", { class: "empty" }, "Loading...")));
+  try {
+    if (slug === "signin") { outlet.replaceChildren(signin()); return; }
+    if (slug === "run") { outlet.replaceChildren(await W.run(arg)); return; }
+    outlet.replaceChildren(await (ROUTES.get(slug) || ROUTES.get(""))[3]());
+  } catch (e) {
+    outlet.replaceChildren(h("div", { class: "page" },
+      h("div", { class: "note rose" }, String((e && e.message) || e))));
+  }
+  document.querySelector(".main").scrollTo?.(0, 0);
+}
+
+addEventListener("hashchange", route);
+drawWho();
+
+/* `?dev=1` mints the dev token with the compose-file defaults and goes straight
+   in -- the same code path the Sign in button takes, so no token ever travels
+   in a URL. */
+(async () => {
+  await loadConfig();          // before anything reads config(), including drawWho
+  drawWho();
+  if (config().devToken && new URLSearchParams(location.search).get("dev") === "1" && !token()) {
+    const secret = localStorage.getItem("p8-secret") || config().devSecret;
+    if (secret) {
+      setToken(await devToken(
+        localStorage.getItem("p8-sub") || "11111111-1111-1111-1111-111111111111", secret));
+      drawWho();
+    }
+  }
+  if (!token()) location.hash = "#/signin";
+  route();
+})();
+</script>
+</body>
+</html>

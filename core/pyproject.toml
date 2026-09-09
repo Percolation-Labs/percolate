@@ -38,6 +38,14 @@ ingest = [
 # Tabular is separate because a deployment that never uploads a CSV should not
 # carry pyarrow (~120MB) and duckdb (~45MB) to find that out.
 tabular = ["pyarrow>=17", "duckdb>=1.0"]
+# The pool manager. `p8 pool render` needs none of this -- it is a pure function
+# of a row, and keeping it in the base install is what lets anyone review a
+# manifest without a cluster client. The extra is for the reconcile loop.
+manager = ["kubernetes-asyncio>=32.0"]
+# The browser surface. FastAPI hands over six static files and owns no read
+# path -- the page talks to PostgREST directly, which is the property the whole
+# UI is built on, and the reason this extra is two packages rather than a stack.
+ui = ["fastapi>=0.115", "uvicorn>=0.34"]
 # `percolate sample load` reads authored YAML, and that is the whole of what it
 # needs beyond the base install. It used to be reachable only through [agent],
 # so the first thing anyone following the install guide was told to do -- load
@@ -79,6 +87,12 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["percolate_core"]
+# The UI's six files are package DATA, not code, and hatchling includes them
+# because they live inside the package directory. Stated here because "the
+# wheel carries the UI" is a claim worth being able to point at, and
+# `dev/check.sh` asserts it against a built wheel rather than against this
+# comment.
+artifacts = ["percolate_core/ui/static/*"]
 
 [project.urls]
 Homepage = "https://github.com/Percolation-Labs/percolate-core"

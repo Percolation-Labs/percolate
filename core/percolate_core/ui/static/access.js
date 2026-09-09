@@ -1,0 +1,716 @@
+/* Access, chat, settings -- and Surface, which re-measures the whole thing.
+ *
+ * Same two rules as views.js. The one worth repeating here: no button on these
+ * screens is hidden or disabled because of a role. `rbac.grant_role` and
+ * `agentic.upsert_agent` check permission themselves; a UI that also decided
+ * would be a second authorization model to keep in sync with the first, and the
+ * one that matters is the one in the database.
+ */
+
+import { select, rpc, config, setEndpoint, token } from "./api.js";
+import { h, chip, status, table, stat, panel, gap, fmtTime, short, seg, stream } from "./ui.js";
+import { markdown } from "./md.js";
+import { head, page, tryRead, defs } from "./views.js";
+
+/* -- Agents ------------------------------------------------ */
+export async function agents() {
+  const [ag, sk, ts, pl] = await Promise.all([
+    tryRead(() => select("agentic", "agents_api",
+      "select=name,model,tools,skills,structured_output,system_prompt&order=name"), (e) => ({ rows: [], error: e })),
+    tryRead(() => select("agentic", "skills_api", "select=name,description&order=name"), () => ({ rows: [] })),
+    tryRead(() => select("agentic", "tool_servers_api", "select=name,transport&order=name"), () => ({ rows: [] })),
+    tryRead(() => select("agentic", "plugins_api", "select=name&order=name"), () => ({ rows: [] })),
+  ]);
+  const node = page(head((ag.rows || []).length + " agents · " + (ts.rows || []).length + " tool servers · " +
+    (sk.rows || []).length + " skills", "Agents",
+    "An agent is a row: name, system prompt, tools, model, output schema. Adding one is an insert " +
+    "through agentic.upsert_agent(), so it is scoped, audited and revocable like anything else."));
+
+  node.append(panel("Agents", "agentic.agents_api",
+    ag.error ? gap("agents_api", ag.error.message, "schema")
+      : table(["Agent", "Model", "Tools", "Skills", "Output", ""], ag.rows || [], (a) =>
+          h("tr", {},
+            h("td", {}, a.name),
+            h("td", { class: "mono" }, a.model || "-"),
+            h("td", { class: "pill-row" }, (a.tools || []).map((t) =>
+              h("span", { class: "chip kind" }, typeof t === "string" ? t : (t.server || JSON.stringify(t))))),
+            h("td", { class: "pill-row" }, (a.skills || []).map((s) => h("span", { class: "chip kind" }, s))),
+            h("td", { class: "mono" }, a.structured_output ? "typed" : "-"),
+            h("td", {}, h("button", { class: "btn ghost", onclick: (e) => {
+              const tr = e.target.closest("tr");
+              tr.after(h("tr", {}, h("td", { colspan: 6 },
+                h("pre", { class: "code" }, a.system_prompt || "(no system prompt)"))));
+              e.target.remove();
+            } }, "prompt"))))));
+
+  node.append(h("div", { class: "grid g3" },
+    panel("Skills", (sk.rows || []).length, h("div", { class: "body pill-row" },
+      (sk.rows || []).map((s) => h("span", { class: "chip", title: s.description || "" }, s.name)))),
+    panel("Tool servers", (ts.rows || []).length, h("div", { class: "body pill-row" },
+      (ts.rows || []).map((s) => h("span", { class: "chip" }, s.name + " · " + (s.transport || ""))))),
+    panel("Plugins", (pl.rows || []).length, h("div", { class: "body pill-row" },
+      (pl.rows || []).length ? (pl.rows || []).map((s) => h("span", { class: "chip" }, s.name))
+        : h("span", { class: "mono", style: "font-size:.72rem;color:var(--muted)" }, "none installed")))));
+  return node;
+}
+
+/* -- Users ------------------------------------------------- */
+export async function users() {
+  const [us, rs, roles, orgs] = await Promise.all([
+    tryRead(() => select("rbac", "users_api", "select=id,email,status,created_at&order=email"), (e) => ({ rows: [], error: e })),
+    tryRead(() => select("rbac", "user_roles", "select=user_id,role"), () => ({ rows: [] })),
+    tryRead(() => select("rbac", "roles", "select=name&order=name"), () => ({ rows: [] })),
+    tryRead(() => select("rbac", "org_members", "select=user_id,org_id,role"), () => ({ rows: [] })),
+  ]);
+  const roleOf = {};
+  (rs.rows || []).forEach((r) => { (roleOf[r.user_id] = roleOf[r.user_id] || []).push(r.role); });
+  const orgsOf = {};
+  (orgs.rows || []).forEach((r) => { (orgsOf[r.user_id] = orgsOf[r.user_id] || []).push(r.role); });
+
+  const node = page(head((us.rows || []).length + " visible", "Users",
+    "Identity is Postgres: password verification, session revocation, throttling and the audit " +
+    "trail are all SQL. This page writes through the same functions, so nothing it does is " +
+    "invisible to auth_events."));
+
+  node.append(panel("Users", "rbac.users_api",
+    us.error ? gap("users_api", us.error.message, "schema")
+      : table(["Email", "Roles", "Org roles", "Status", "Created", "Grant"], us.rows || [], (u) =>
+          h("tr", {},
+            h("td", {}, u.email, h("span", { class: "sub" }, short(u.id))),
+            h("td", { class: "pill-row" }, (roleOf[u.id] || []).map((r) => h("span", { class: "chip accent" }, r))),
+            h("td", { class: "pill-row" }, (orgsOf[u.id] || []).map((r) => h("span", { class: "chip" }, r))),
+            h("td", {}, status(u.status)),
+            h("td", { class: "mono" }, fmtTime(u.created_at)),
+            h("td", {}, (() => {
+              /* No inline padding: it would win over select.control's right
+                 padding and the chevron would sit on top of the word. */
+              const sel = h("select", { class: "control compact" },
+                (roles.rows || []).map((r) => h("option", { value: r.name }, r.name)));
+              const out = h("span");
+              return h("span", { class: "pill-row" }, sel,
+                h("button", { class: "btn ghost", onclick: async () => {
+                  const res = await tryRead(() => rpc("rbac", "grant_role",
+                    { p_target_user_id: u.id, p_role: sel.value }), (e) => ({ error: e }));
+                  out.replaceChildren(res.error ? chip(res.error.message, "failed") : chip("granted", "succeeded"));
+                } }, "grant"), out);
+            })())))));
+
+  node.append(h("div", { class: "grid g2" },
+    h("div", { class: "panel" }, h("div", { class: "body" },
+      h("h3", {}, "Escalation is the function's problem, not this page's"),
+      h("div", { class: "note" }, "The grant control is offered for every user and every role. ",
+        h("code", { class: "mono" }, "rbac.grant_role()"), " is gated on ",
+        h("code", { class: "mono" }, "users:admin"), " and raises if the caller does not hold it - ",
+        "so what you see when you try is the database's answer, not a guess this page made."))),
+    h("div", { class: "panel" }, h("div", { class: "body" },
+      h("h3", {}, "What is missing"),
+      h("div", { class: "note amber" }, h("strong", {}, "No API-key issuance. "),
+        h("code", { class: "mono" }, "rbac.verify_api_key()"), " exists and nothing creates what it verifies, ",
+        "so Keys can list and revoke and cannot issue. Writing the other half means deciding how a ",
+        "secret is generated, returned exactly once and scoped - which belongs in user-rbac/schema.sql ",
+        "beside the rest of the credential handling.")))));
+  return node;
+}
+
+/* -- Roles ------------------------------------------------- */
+export async function roles() {
+  const [kinds, perms, rl] = await Promise.all([
+    tryRead(() => select("rbac", "permission_kinds", "select=resource,action,checked_by&order=resource,action"), () => ({ rows: [] })),
+    tryRead(() => select("rbac", "role_permissions", "select=role,resource,action"), () => ({ rows: [] })),
+    tryRead(() => select("rbac", "roles", "select=name,grants_all,description&order=name"), () => ({ rows: [] })),
+  ]);
+  const held = new Set((perms.rows || []).map((p) => p.role + "|" + p.resource + "|" + p.action));
+  const names = (rl.rows || []).map((r) => r.name);
+  const node = page(head(names.length + " roles · " + (kinds.rows || []).length + " permission kinds",
+    "Roles & permissions",
+    "One primitive for every module: rows in role_permissions, and one policy that calls " +
+    "has_permission(). There is no per-module authorization code to review, which is why this " +
+    "table is the whole surface."));
+
+  node.append(panel("Matrix", "role x (resource : action)",
+    h("div", { class: "body", style: "overflow-x:auto" },
+      h("table", { class: "matrix" },
+        h("thead", {}, h("tr", {}, h("th", { class: "rowhead" }, "resource : action"),
+          names.map((r) => h("th", {}, r)), h("th", {}, "checked by"))),
+        h("tbody", {}, (kinds.rows || []).map((k) =>
+          h("tr", {},
+            h("td", { class: "rowhead" }, k.resource + " : " + k.action),
+            names.map((r) => {
+              const role = (rl.rows || []).find((x) => x.name === r);
+              if (role && role.grants_all) return h("td", {}, h("span", { class: "inherit" }, "grants_all"));
+              return h("td", {}, held.has(r + "|" + k.resource + "|" + k.action)
+                ? h("span", { class: "yes" }, "✓") : h("span", { class: "no" }, "·"));
+            }),
+            h("td", { class: "mono", style: "text-align:left;color:var(--muted)" }, k.checked_by))))))));
+
+  node.append(h("div", { class: "grid g2" },
+    panel("Roles", "rbac.roles",
+      table(["Role", "grants_all", "Description"], rl.rows || [], (r) =>
+        h("tr", {}, h("td", { class: "mono" }, r.name),
+          h("td", {}, r.grants_all ? chip("yes", "accent") : h("span", { class: "chip" }, "no")),
+          h("td", {}, r.description || "-")))),
+    panel("Visibility scopes", "rbac.visibilities", h("div", { class: "body" },
+      h("dl", { class: "kv" },
+        h("dt", {}, "private"), h("dd", {}, "the owner only"),
+        h("dt", {}, "org"), h("dd", {}, "every member of the owning org"),
+        h("dt", {}, "public"), h("dd", {}, "every authenticated caller")),
+      h("div", { class: "note" }, "Orthogonal to roles: a role says what you may do, a scope says ",
+        "which rows you may do it to. Generated into one RLS policy per table by add_scope_policy().")))));
+  return node;
+}
+
+/* -- Keys & sessions --------------------------------------- */
+export async function keys() {
+  const [ak, rt] = await Promise.all([
+    tryRead(() => select("rbac", "api_keys_api", "select=id,name,scopes,created_at,last_used_at,revoked_at&order=created_at.desc"),
+      (e) => ({ rows: [], error: e })),
+    tryRead(() => select("rbac", "refresh_tokens_api",
+      "select=id,device_label,created_at,expires_at,revoked_at&order=created_at.desc"), (e) => ({ rows: [], error: e })),
+  ]);
+  const node = page(head("revocable rows, which is the point of them", "Keys & sessions",
+    "A JWT you cannot revoke is a decision you cannot take back, so both of these are rows. " +
+    "Presenting an already-rotated refresh token revokes the whole chain - theft shows up as a " +
+    "revocation rather than a quiet second session.",
+    h("button", { class: "btn danger", onclick: async (e) => {
+      e.target.disabled = true;
+      const res = await tryRead(() => rpc("rbac", "revoke_all_sessions", {}), (err) => ({ error: err }));
+      e.target.replaceWith(res.error ? chip(res.error.message, "failed") : chip("all sessions revoked", "succeeded"));
+    } }, "Revoke everywhere")));
+
+  node.append(h("div", { class: "grid g2" },
+    panel("API keys", "rbac.api_keys_api - no key_hash in the view",
+      ak.error ? gap("api_keys_api", ak.error.message, "schema")
+        : table(["Key", "Scopes", "Created", "Last used"], ak.rows || [], (k) =>
+            h("tr", {}, h("td", {}, k.name || short(k.id)),
+              h("td", { class: "pill-row" }, (k.scopes || []).map((s) => h("span", { class: "chip kind" }, s))),
+              h("td", { class: "mono" }, fmtTime(k.created_at)),
+              h("td", { class: "mono" }, fmtTime(k.last_used_at))))),
+    panel("Sessions", "rbac.refresh_tokens_api - no token_hash either",
+      rt.error ? gap("refresh_tokens_api", rt.error.message, "schema")
+        : table(["Device", "Issued", "Expires", ""], rt.rows || [], (s) =>
+            h("tr", {}, h("td", {}, s.device_label || "-"),
+              h("td", { class: "mono" }, fmtTime(s.created_at)),
+              h("td", { class: "mono" }, fmtTime(s.expires_at)),
+              h("td", {}, h("button", { class: "btn ghost danger", onclick: async (e) => {
+                const res = await tryRead(() => rpc("rbac", "revoke_session", { p_refresh_token_id: s.id }),
+                  (err) => ({ error: err }));
+                e.target.replaceWith(res.error ? chip(res.error.message, "failed") : chip("revoked", "succeeded"));
+              } }, "revoke")))))));
+
+  node.append(h("div", { class: "note amber" },
+    h("strong", {}, "Issuing is the missing half. "),
+    "There is no function that creates an API key, so this screen lists and revokes and cannot ",
+    "issue - and the list is empty on a deployment where nothing has ever made one."));
+  return node;
+}
+
+/* -- Settings ---------------------------------------------- */
+export async function settings() {
+  const [orgs, mem, vis] = await Promise.all([
+    tryRead(() => select("rbac", "orgs", "select=id,slug,name&order=slug"), (e) => ({ rows: [], error: e })),
+    tryRead(() => select("rbac", "org_members", "select=org_id,user_id,role"), () => ({ rows: [] })),
+    tryRead(() => select("rbac", "visibilities", "select=scope,rank,requires_org,description&order=rank"), () => ({ rows: [] })),
+  ]);
+  const rest = h("input", { class: "control mono", style: "width:100%", value: config().rest });
+  const core = h("input", { class: "control mono", style: "width:100%", value: config().core });
+  const out = h("div");
+  const node = page(head("this deployment", "Settings",
+    "Two endpoints and a handful of rows. Everything else this app knows, it asks the database."));
+
+  node.append(h("div", { class: "grid g2" },
+    panel("Endpoints", "where this browser points", h("div", { class: "body" },
+      h("div", { class: "field" }, h("label", {}, "PostgREST"), rest,
+        h("span", { class: "hint" }, "every read and every write on every other screen")),
+      h("div", { class: "field" }, h("label", {}, "percolate-core"), core,
+        h("span", { class: "hint" }, "files, and the agent turn - the two things that are not queries")),
+      h("button", { class: "btn primary", onclick: () => {
+        setEndpoint("rest", rest.value.replace(/\/$/, ""));
+        setEndpoint("core", core.value.replace(/\/$/, ""));
+        out.replaceChildren(h("div", { class: "note" }, "Saved to localStorage."));
+      } }, "Save"), out)),
+    panel("Orgs", "rbac.orgs",
+      orgs.error ? gap("rbac.orgs", orgs.error.message, "schema")
+        : table(["Slug", "Name", "Members"], orgs.rows || [], (o) =>
+            h("tr", {}, h("td", { class: "mono" }, o.slug), h("td", {}, o.name),
+              h("td", { class: "num" }, (mem.rows || []).filter((m) => m.org_id === o.id).length)))))); 
+
+  node.append(panel("Visibility vocabulary", "rbac.visibilities - a table, not an enum",
+    table(["Scope", "Rank", "Requires org", "Meaning"], vis.rows || [], (v) =>
+      h("tr", {}, h("td", { class: "mono" }, v.scope), h("td", { class: "num" }, v.rank),
+        h("td", {}, v.requires_org ? "yes" : "no"), h("td", {}, v.description)))));
+  return node;
+}
+
+/* -- Chat -------------------------------------------------- */
+
+/* One tool call, as a row that changes state.
+ *
+ * The same component renders a stored call and a live one, because they are the
+ * same thing at different times -- a transcript read back from `messages_api`
+ * is a turn that finished, and rendering it with a second component is how the
+ * two drift into looking like different events. */
+function toolRow(name, state, detail, opts = {}) {
+  const marks = { running: "running", ok: "succeeded", error: "failed", pending: "" };
+  const mark = (st) => h("span", { class: "chip " + (marks[st] || "") },
+    h("i", { class: st === "running" ? "spin" : "dot" }),
+    st === "running" ? "running" : st === "ok" ? "done" : st);
+
+  const row = h("div", { class: "tool-call" + (opts.delegated ? " delegated" : ""), "data-tool": name },
+    h("div", { class: "head" },
+      h("span", { class: "tool-name" }, name),
+      /* A delegated call is a whole child run with its own event stream, not a
+         function that happened to take a while. It gets its own chip and its own
+         indent rather than a "(delegated)" appended to the name -- which wrapped
+         at any sensible column width, and read as part of the tool's name. */
+      opts.delegated ? h("span", { class: "chip accent" }, "sub-agent") : null,
+      h("span", { class: "spacer" }),
+      mark(state)),
+    detail ? h("div", { class: "out" }, detail) : null);
+
+  row.setState = (next, text) => {
+    row.querySelector(".head .chip:last-of-type").replaceWith(mark(next));
+    if (text) row.append(h("div", { class: "out" }, text));
+  };
+  return row;
+}
+
+const bubble = (role, when, body) =>
+  h("div", { class: "msg " + (role === "user" ? "user" : "assistant") },
+    h("span", { class: "name" }, role === "user" ? "you" : role, when ? " · " + when : ""),
+    body);
+
+const icon = (d) => {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 15 15");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.4");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.innerHTML = d;
+  return svg;
+};
+const I = {
+  panelLeft: '<rect x="1.5" y="2.5" width="12" height="10" rx="1.5"/><path d="M5.5 2.5v10"/>',
+  panelRight: '<rect x="1.5" y="2.5" width="12" height="10" rx="1.5"/><path d="M9.5 2.5v10"/>',
+  plus: '<path d="M7.5 3v9M3 7.5h9"/>',
+  send: '<path d="M2 7.5h10M8 3.5l4 4-4 4"/>',
+};
+
+export async function chat() {
+  const sessions = await tryRead(() => select("agentic", "sessions_api",
+    "select=id,title,created_at&order=created_at.desc&limit=40"), (e) => ({ rows: [], error: e }));
+  const ag = await tryRead(() => select("agentic", "agents_api", "select=name&order=name"), () => ({ rows: [] }));
+
+  const convo = h("div", { class: "thread" }, h("div", { class: "empty" }, "Pick a session, or create one."));
+  let list = null, sendBtn = null;
+  const aside = h("div", { class: "body", style: "padding:.9rem;display:flex;flex-direction:column;gap:.8rem" },
+    h("div", { class: "note" }, "Runs and messages for the selected session appear here."));
+  let current = null;
+
+  /* The scroller is the conversation column, not the thread inside it. */
+  const scroller = () => convo.parentElement;
+  const atBottom = () => {
+    const el = scroller();
+    return !el || el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  };
+  const stick = (was) => { const el = scroller(); if (was && el) el.scrollTop = el.scrollHeight; };
+
+  const openSession = async (s, node) => {
+    current = s;
+    [...node.parentElement.children].forEach((c) => c.removeAttribute("aria-current"));
+    node.setAttribute("aria-current", "true");
+    convo.replaceChildren(h("div", { class: "empty" }, "Loading..."));
+    const [msgs, runsRes] = await Promise.all([
+      tryRead(() => select("agentic", "messages_api",
+        "session_id=eq." + s.id + "&select=role,content,tool_calls,is_error,seq,created_at&order=seq"),
+        (e) => ({ rows: [], error: e })),
+      tryRead(() => select("agentic", "runs_api", "session_id=eq." + s.id +
+        "&select=id,agent_id,status,trigger_kind,depth,created_at&order=created_at.desc"),
+        (e) => ({ rows: [], error: e })),
+    ]);
+
+    const body = msgs.error ? [gap("messages_api", msgs.error.message, "schema")]
+      : ((msgs.rows || []).length
+          ? (msgs.rows || []).flatMap((m) => {
+              const content = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
+              const parts = [markdown(content)];
+              (m.tool_calls || []).forEach((t) => {
+                const name = t.name || t.tool_name || (t.function && t.function.name) || "tool";
+                const args = t.args || (t.function && t.function.arguments);
+                parts.push(toolRow(name, m.is_error ? "error" : "ok",
+                                   args ? JSON.stringify(args).slice(0, 200) : null));
+              });
+              return [bubble(m.role, fmtTime(m.created_at),
+                             h("div", { class: "text" }, ...parts))];
+            })
+          : [h("div", { class: "empty" }, "No messages. Nothing has run in this session.")]);
+    convo.replaceChildren(...body);
+    title.textContent = s.title || "(untitled)";
+    stick(true);
+
+    aside.replaceChildren(
+      h("dl", { class: "kv" },
+        h("dt", {}, "session"), h("dd", { class: "mono" }, short(s.id)),
+        h("dt", {}, "created"), h("dd", {}, fmtTime(s.created_at)),
+        h("dt", {}, "runs"), h("dd", {}, String((runsRes.rows || []).length))),
+      runsRes.error ? gap("agentic.runs_api", runsRes.error.message, "schema")
+        : (runsRes.rows || []).length
+          ? stream((runsRes.rows || []).map((r) => ({
+              t: (r.created_at || "").slice(11, 19),
+              tone: r.status === "failed" ? "bad" : r.status === "running" ? "warn" : "ok",
+              what: (r.trigger_kind || "run") + " " + r.status,
+              meta: "depth " + r.depth + " · " + short(r.id) })))
+          : h("div", { class: "note" }, "No runs yet. A run row is created by agentic.start_run(), ",
+              "which the runtime calls when a turn begins."));
+  };
+
+  /* The live turn.
+   *
+   * AG-UI events, rendered as they arrive: RUN_STARTED opens a progress block,
+   * TOOL_CALL_START/END drive rows in it, TEXT_MESSAGE_CONTENT deltas stream
+   * into a bubble that is re-rendered as markdown, RUN_FINISHED closes it. The
+   * events are the runtime's contract (agentic/contracts/protocol.py), not a
+   * shape invented here -- which is why the progress block can show a delegated
+   * sub-agent: a TOOL_CALL_START carrying child_run_id IS the delegation. */
+  function turnRenderer() {
+    const rows = new Map();
+    let agent = "agent";
+    const started = Date.now();
+    const status = h("span", { class: "chip running" }, h("i", { class: "spin" }), "starting");
+    const elapsed = h("span", { class: "mono elapsed" }, "0.0s");
+    const steps = h("div", { class: "turn-steps" });
+    const head = h("div", { class: "turn-head" },
+      h("span", { class: "label" }, "turn"), status, h("span", { class: "spacer" }), elapsed);
+    const block = h("div", { class: "turn" }, head, steps);
+    const tick = setInterval(() => {
+      elapsed.textContent = ((Date.now() - started) / 1000).toFixed(1) + "s";
+    }, 100);
+
+    let bubbleEl = null, text = "", pending = false;
+    const paint = () => {
+      pending = false;
+      if (!bubbleEl) return;
+      const was = atBottom();
+      bubbleEl.replaceChildren(markdown(text));
+      stick(was);
+    };
+
+    const setStatus = (cls, label, spin) => {
+      status.className = "chip " + cls;
+      status.replaceChildren(h("i", { class: spin ? "spin" : "dot" }), label);
+    };
+
+    return {
+      block,
+      handle(type, data) {
+        const was = atBottom();
+        if (type === "RUN_STARTED") {
+          agent = data.agent_name || "agent";
+          setStatus("running", agent, true);
+        } else if (type === "TOOL_CALL_START") {
+          const label = data.tool_name || "tool";
+          const row = toolRow(label, "running", null, { delegated: !!data.child_run_id });
+          rows.set(data.tool_call_id, row);
+          steps.append(row);
+          // The header counts; the rows name. Repeating the running tool in both
+          // put the same word twice on one screen and told a reader nothing the
+          // second time.
+          setStatus("running", agent + " · step " + rows.size, true);
+        } else if (type === "TOOL_CALL_END") {
+          const row = rows.get(data.tool_call_id);
+          if (row) row.setState(data.is_error ? "error" : "ok", data.error_kind || null);
+        } else if (type === "TEXT_MESSAGE_START") {
+          bubbleEl = h("div", { class: "text" });
+          text = "";
+          convo.append(bubble("assistant", "now", bubbleEl));
+          setStatus("running", agent + " · writing", true);
+        } else if (type === "TEXT_MESSAGE_CONTENT") {
+          text += data.delta || "";
+          // One repaint per frame: a token-rate re-render of a markdown tree is
+          // the one place this UI could actually be slow.
+          if (!pending) { pending = true; requestAnimationFrame(paint); }
+        } else if (type === "TEXT_MESSAGE_END") {
+          paint();
+        } else if (type === "RUN_FINISHED") {
+          clearInterval(tick);
+          setStatus("succeeded", data.status || "done", false);
+        } else if (type === "RUN_ERROR") {
+          clearInterval(tick);
+          setStatus("failed", "failed", false);
+          steps.append(h("div", { class: "note rose" }, data.message || "the run failed"));
+        }
+        stick(was);
+      },
+      stop(message) {
+        clearInterval(tick);
+        setStatus("failed", "no stream", false);
+        if (message) steps.append(h("div", { class: "note rose" }, message));
+      },
+      note(message) {
+        steps.append(h("div", { class: "note amber" }, message));
+      },
+    };
+  }
+
+  /* Both panels collapse, and the state persists. `data-left`/`data-right` on
+     the container rather than a class on each panel, so the CSS can also move
+     the toggle that reopens them into the conversation header -- one attribute,
+     two consequences, no second source of truth. */
+  const shell = h("div", { class: "chat" });
+  const stored = (k, d) => { try { return localStorage.getItem(k) || d; } catch (e) { return d; } };
+  const setPanel = (side, state) => {
+    shell.dataset[side] = state;
+    try { localStorage.setItem("p8-chat-" + side, state); } catch (e) {}
+  };
+  const rightBtn = h("button", { class: "icon-btn", title: "Session details",
+    onclick: () => setPanel("right", shell.dataset.right === "open" ? "shut" : "open") }, icon(I.panelRight));
+
+  const title = h("span", { class: "title" }, "Chat");
+  const newSession = async () => {
+    const res = await tryRead(() => rpc("agentic", "create_session",
+      { p_title: "Session " + new Date().toISOString().slice(11, 19) }), (e) => ({ error: e }));
+    if (!res.error) location.reload();
+  };
+
+  const threads = h("div", { class: "threads rail-list" },
+    sessions.error ? gap("sessions_api", sessions.error.message, "schema")
+      : ((sessions.rows || []).length
+          ? (sessions.rows || []).map((sess) => {
+              const node = h("div", { class: "thread-item" },
+                h("strong", {}, sess.title || "(untitled)"),
+                h("div", { class: "meta" }, h("span", {}, fmtTime(sess.created_at)),
+                  h("span", { class: "mono" }, short(sess.id))));
+              node.addEventListener("click", () => openSession(sess, node));
+              return node;
+            })
+          : h("div", { class: "empty" }, "No sessions.")));
+  list = threads;
+
+  const box = h("textarea", { class: "box", rows: 1, placeholder: "Ask, or describe the workflow you want..." });
+  const agentPick = h("select", { class: "control", style: "padding:.15rem .35rem;font-size:.72rem" },
+    (ag.rows || []).map((a) => h("option", { value: a.name }, a.name)));
+  sendBtn = h("button", { class: "send-btn", title: "Send  ⌘↵" }, icon(I.send));
+
+  /* Grow with the text and stop -- a fixed three-row box is too tall for "yes"
+     and too short for a spec. Capped in CSS at 40vh so it cannot eat the
+     transcript. */
+  const autosize = () => { box.style.height = "auto"; box.style.height = box.scrollHeight + "px"; };
+  box.addEventListener("input", autosize);
+
+  const send = async () => {
+    if (!current) { convo.append(h("div", { class: "note rose" }, "Pick a session first.")); return; }
+    const text = box.value.trim();
+    if (!text) return;
+    box.value = "";
+    sendBtn.disabled = true;
+    convo.append(bubble("user", "now", h("div", { class: "text" }, markdown(text))));
+
+    /* How many rows the transcript had before this turn -- the check that
+       decides whether the re-read below is authoritative or destructive. */
+    const counted = await tryRead(() => select("agentic", "messages_api",
+      "session_id=eq." + current.id + "&select=seq", { count: true }), () => ({ total: 0 }));
+    const before = counted.total || 0;
+
+    const turn = turnRenderer();
+    convo.append(turn.block);
+    autosize();
+    stick(true);
+
+    const endpoint = (config().core || "").replace(/\/$/, "");
+    if (!endpoint) {
+      /* Not an exception: "this deployment has no runtime" is a configuration
+         fact, and reporting it as a failed request would send the reader
+         looking for a broken service instead of an unset variable. */
+      turn.stop(null);
+      turn.note("No agent runtime configured — config.json reports core: \"\". " +
+                "Set P8_UI_CORE_URL on the server to the runtime's base URL and the " +
+                "composer posts there. Everything else on this page is PostgREST, " +
+                "which is why only this one control is inert.");
+      sendBtn.disabled = false;
+      stick(true);
+      return;
+    }
+    try {
+      const res = await fetch(endpoint + "/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer " + token(),
+                   Accept: "text/event-stream" },
+        body: JSON.stringify({ session_id: current.id, agent: agentPick.value,
+                               messages: [{ role: "user", content: text }], stream: true }),
+      });
+      if (!res.ok || !res.body) throw new Error("HTTP " + res.status);
+
+      /* SSE off a fetch body: frames are separated by a blank line, and a
+         frame's `data:` is one JSON object. Parsed here rather than with
+         EventSource because EventSource cannot POST -- and the POST is what
+         starts the turn. `GET /sessions/{id}/events` is the EventSource half,
+         for an observer or a reconnect. */
+      const reader = res.body.getReader(), dec = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let cut;
+        while ((cut = buf.indexOf("\n\n")) !== -1) {
+          const frame = buf.slice(0, cut);
+          buf = buf.slice(cut + 2);
+          let type = "message", data = {};
+          for (const line of frame.split("\n")) {
+            if (line.startsWith("event:")) type = line.slice(6).trim();
+            else if (line.startsWith("data:")) {
+              try { data = JSON.parse(line.slice(5).trim()); } catch (e) { data = {}; }
+            }
+          }
+          turn.handle(type, data);
+        }
+      }
+
+      /* Re-read the turn as rows -- but only swap if the rows are actually
+         there. The runtime persists during the turn, so normally they are; if
+         they are not, replacing the transcript would delete the answer the user
+         just watched arrive, which is the worst thing this screen could do.
+         Found by streaming against dev/agui_stub.py, which writes nothing. */
+      const after = await tryRead(() => select("agentic", "messages_api",
+        "session_id=eq." + current.id + "&select=seq", { count: true }), () => ({ total: null }));
+      const node = list && list.querySelector('.thread-item[aria-current]');
+      if (node && after.total !== null && after.total > before) {
+        openSession(current, node);
+      } else {
+        turn.note("Streamed, and not written to agentic.messages -- messages_api still " +
+                  "reports " + (after.total === null ? "unknown" : after.total) + " rows for this " +
+                  "session. What you can see above is this page's copy; reload and it is gone.");
+      }
+    } catch (e) {
+      /* Report what happened, then what it probably means -- in that order. An
+         explanation that arrives before the fact is an explanation that is
+         sometimes wrong about a fact the reader can see. */
+      turn.stop(String(e.message || e) + " — POST " + endpoint + "/chat. " +
+                "Sessions, runs and messages are all readable over PostgREST; the turn " +
+                "is the one part of chat that is not a query, so it needs a runtime.");
+    } finally {
+      sendBtn.disabled = false;
+      stick(true);
+    }
+  };
+
+  sendBtn.addEventListener("click", send);
+  box.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(); }
+  });
+
+  /* Into the rail, under the Chat item. index.html's drawNav left the slot. */
+  const slot = document.getElementById("rail-sessions");
+  if (slot) {
+    slot.replaceChildren(
+      h("button", { class: "new", onclick: newSession }, "+ new session"),
+      threads);
+  }
+
+  shell.append(
+    h("section", { class: "convo" },
+      h("div", { class: "convo-head" }, title, h("span", { class: "spacer" }),
+        h("span", { class: "chip" }, config().core ? "runtime configured" : "no runtime configured"),
+        rightBtn),
+      h("div", { class: "scroll" }, convo),
+      h("div", { class: "composer" },
+        h("div", { class: "composer-inner" }, box,
+          h("div", { class: "row" },
+            h("span", { class: "chip accent" }, "agent"), agentPick,
+            h("span", { class: "spacer" }),
+            h("span", { class: "mono", style: "font-size:.62rem;color:var(--faint)" }, "⌘↵"),
+            sendBtn)))),
+    h("aside", { class: "chat-aside" },
+      h("div", { class: "panel-head" },
+        h("div", { class: "tabs" }, h("button", { "aria-selected": "true" }, "Session")),
+        h("span", { class: "spacer" }),
+        h("button", { class: "icon-btn", title: "Hide", onclick: () => setPanel("right", "shut") },
+          icon(I.panelRight))),
+      aside));
+
+  shell.dataset.left = stored("p8-chat-left", "open");
+  shell.dataset.right = stored("p8-chat-right", "open");
+
+  queueMicrotask(() => {
+    const first = threads.querySelector(".thread-item");
+    if (first && (sessions.rows || []).length) openSession(sessions.rows[0], first);
+  });
+
+  return h("div", { class: "page flush" }, shell);
+}
+
+/* -- Surface ----------------------------------------------- */
+export async function surface() {
+  const node = page(head("measured now, against this deployment", "Surface",
+    "Every row is a request made when this page loaded. Nothing here is remembered from a document, " +
+    "which is the only way a coverage claim stays true."));
+  const probes = [
+    ["Overview", "workflow", "runs_by_status_api"], ["Overview", "workflow", "tasks_by_status_api"],
+    ["Runs", "workflow", "runs_api"], ["Run detail", "workflow", "tasks_api"],
+    ["Run detail", "workflow", "task_dependencies_api"], ["Events", "workflow", "task_events_api"],
+    ["Workflows", "workflow", "definitions_api"], ["Schedules", "workflow", "schedules_api"],
+    ["Queues", "workflow", "queues_api"], ["Queues", "workflow", "rate_limits_api"],
+    ["Queues", "workflow", "pools"], ["Queues", "workflow", "v_pools"],
+    ["Queues", "workflow", "pool_queues"], ["Queues", "workflow", "v_unserved_queues"],
+    ["Queues", "workflow", "pool_image_policy"],
+    ["Users", "rbac", "users_api"], ["Roles", "rbac", "roles"], ["Roles", "rbac", "role_permissions"],
+    ["Roles", "rbac", "permission_kinds"], ["Keys", "rbac", "api_keys_api"],
+    ["Keys", "rbac", "refresh_tokens_api"], ["Events", "rbac", "auth_events"],
+    ["Settings", "rbac", "orgs"], ["Settings", "rbac", "visibilities"],
+    ["Agents", "agentic", "agents_api"], ["Agents", "agentic", "skills_api"],
+    ["Agents", "agentic", "tool_servers_api"], ["Chat", "agentic", "sessions_api"],
+    ["Chat", "agentic", "messages_api"], ["Chat", "agentic", "runs_api"],
+    ["Files", "content", "resources"],
+  ];
+  const rows = await Promise.all(probes.map(async ([screen, schema, view]) => {
+    try { await select(schema, view, "limit=1"); return { screen, schema, view, ok: true }; }
+    catch (e) { return { screen, schema, view, ok: false, code: e.code, msg: e.message }; }
+  }));
+  const okN = rows.filter((r) => r.ok).length;
+
+  node.append(h("div", { class: "grid g4" },
+    stat("Reachable", okN + " / " + rows.length, "reads, right now"),
+    stat("Refused", rows.filter((r) => r.code === "42501").length, "permission denied", "down"),
+    stat("Absent", rows.filter((r) => r.code === "42P01").length, "relation does not exist", "down"),
+    stat("Writes", "RPC only", "no table grants anywhere")));
+
+  node.append(panel("Reads", okN + " of " + rows.length + " reachable",
+    table(["Screen", "Object", "Result"], rows, (r) =>
+      h("tr", {},
+        h("td", {}, r.screen),
+        h("td", { class: "mono" }, r.schema + "." + r.view),
+        h("td", {}, r.ok ? chip("200", "succeeded")
+          : h("span", { class: "pill-row" }, chip(String(r.code || "err"), "failed"),
+              h("span", { class: "mono", style: "font-size:.72rem" }, r.msg)))))));
+
+  node.append(h("div", { class: "grid g2" },
+    h("div", { class: "panel" }, h("div", { class: "body" },
+      h("h3", {}, "What percolate-core has to own"),
+      h("div", { class: "note" }, h("strong", {}, "Minting a JWT. "),
+        "rbac.login() returns (user_id, refresh_token_id) - ids, not a token. Signing is not a query."),
+      h("div", { class: "note" }, h("strong", {}, "The agent turn. "),
+        "POST /chat and GET /sessions/{id}/events: an LLM call, and an SSE relay of Postgres NOTIFY."),
+      h("div", { class: "note" }, h("strong", {}, "Bytes. "),
+        "POST /files and GET /files/{id}. The database halves - register_upload, resolve_file - are reachable."),
+      h("div", { class: "note" }, h("strong", {}, "Live updates. "),
+        "The triggers already pg_notify. A browser cannot LISTEN, so the relay is a service job."))),
+    h("div", { class: "panel" }, h("div", { class: "body" },
+      h("h3", {}, "What was a schema gap, and what closing it took"),
+      h("div", { class: "note" }, h("strong", {}, "Six views and four grants. "),
+        "definitions_api, task_events_api, task_dependencies_api, runs_by_status_api, ",
+        "tasks_by_status_api, queues_api, rate_limits_api - all in sql/ui-views.sql, all additive, ",
+        "each owned by api_viewer so RLS still applies."),
+      h("div", { class: "note amber" }, h("strong", {}, "One of them is a filter, not a grant. "),
+        "rate_limits holds login throttle keys containing email addresses, so granting it would ",
+        "publish who has tried to sign in."),
+      h("div", { class: "note" }, h("strong", {}, "workflow.pools now exists. "),
+        "pools.sql shipped -- and could not load as app_owner until its two CREATE ROLEs moved to ",
+        h("code", { class: "mono" }, "user-rbac/roles.sql"), ", which is where this collection's own ",
+        "rule says cluster roles live."),
+      h("div", { class: "note amber" }, h("strong", {}, "No manager has observed any of them. "),
+        "The rows are desired state; ", h("code", { class: "mono" }, "p8 pool run"),
+        " is what would reconcile them, and only ", h("code", { class: "mono" }, "p8 pool render"),
+        " is implemented.")))));
+  return node;
+}
