@@ -308,7 +308,17 @@ insert into rbac.permission_kinds (resource, action, checked_by) values
     ('workflow_runs',      'signal', 'workflow.assert_run_access'),
     ('workflow_schedules', 'create', 'workflow.assert_schedule_access'),
     ('workflow_schedules', 'enable', 'workflow.assert_schedule_access'),
-    ('workflow_schedules', 'delete', 'workflow.assert_schedule_access')
+    ('workflow_schedules', 'delete', 'workflow.assert_schedule_access'),
+    -- Using an agent and reading its row are different authorities, and only
+    -- the second one had a pair. `agents:select` says you may see that an
+    -- agent exists; `agents:invoke` says you may spend money and reach tools
+    -- as yourself through it. A deployment that wants chat available to
+    -- operators and not to every account expresses that here and nowhere else.
+    ('agents',             'invoke', 'agentic.may_invoke'),
+    -- Same argument on the content side. `content.assert_org_write` already
+    -- asks whether the caller may act inside the org; nothing asked whether
+    -- they may put bytes in it at all, so any member of any org could upload.
+    ('resources',          'create', 'content.may_upload')
 -- `do update`, not `do nothing`, and the difference is only visible on an
 -- UPGRADED database. `checked_by` says where the pair is consulted so that it
 -- can be verified, and 0.1.4 renamed the policies that consult two of these to
@@ -402,6 +412,27 @@ insert into rbac.role_permissions (role, resource, action)
 select r.name, k.resource, k.action
   from rbac.roles r cross join rbac.permission_kinds k
  where r.grants_all
+on conflict do nothing;
+
+-- UPGRADE BACKFILL for the two pairs added in 0.1.10 (agents:invoke,
+-- resources:create). Both gate a capability that was previously ungated, so
+-- without this every existing role loses chat and upload the moment the
+-- schema loads -- a silent outage produced by a security improvement, which is
+-- how security improvements get reverted.
+--
+-- So: existing roles keep what they had, and DENYING becomes the deliberate
+-- act it should be --
+--
+--     delete from rbac.role_permissions
+--      where role = 'member' and resource = 'agents' and action = 'invoke';
+--
+-- On a fresh install this matches nothing (no roles exist yet) and
+-- bootstrap_admin() grants every pair to the first administrator, so a new
+-- deployment starts closed to everyone else and opens by grant.
+insert into rbac.role_permissions (role, resource, action)
+select r.name, k.resource, k.action
+  from rbac.roles r
+  cross join (values ('agents', 'invoke'), ('resources', 'create')) as k(resource, action)
 on conflict do nothing;
 
 -- One function every module's RLS policy calls. Add a new module

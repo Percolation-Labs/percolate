@@ -305,6 +305,25 @@ grant execute on function content.assert_org_write(uuid, text) to authenticated,
 drop function if exists content.register_upload(
     text,text,text,text,bigint,text,text,text,uuid,jsonb,text,text);
 
+-- May this caller put bytes into this org?
+--
+-- assert_org_write() asks whether the caller may act inside the org at all.
+-- This asks the other half -- whether uploading is something their roles
+-- permit -- and the two are different questions: every member of an org could
+-- previously upload to it, because nothing had been written down that said
+-- otherwise. Storage costs money and an uploaded document is read back by
+-- agents, so it is worth a permission of its own.
+create or replace function content.may_upload(p_org_id uuid)
+returns boolean
+language sql stable security definer
+set search_path = pg_catalog, public
+as $$
+    select rbac.may_access_org(p_org_id)
+       and rbac.has_permission(rbac.current_user_id(), 'resources', 'create');
+$$;
+
+grant execute on function content.may_upload(uuid) to authenticated, worker;
+
 create or replace function content.register_upload(
     p_channel     text,
     p_checksum    text,
@@ -337,6 +356,14 @@ declare
     v_vis      text := coalesce(p_visibility, rbac.default_visibility(p_org_id));
 begin
     perform content.assert_org_write(p_org_id, 'register content');
+
+    -- Both halves, and assert_org_write is only the first. A caller may belong
+    -- to the org and still not be someone this deployment lets upload.
+    if not content.may_upload(p_org_id) then
+        raise exception 'not authorized to upload content'
+            using errcode = 'insufficient_privilege',
+                  hint = 'needs resources:create';
+    end if;
 
     -- ORDER BY, because (org_id, name) is unique but this predicate matches
     -- TWO rows when a public channel and an org channel share a name -- and

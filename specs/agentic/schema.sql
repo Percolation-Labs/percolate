@@ -721,6 +721,34 @@ as $$
     returning *;
 $$;
 
+-- May this caller run a turn with this agent?
+--
+-- TWO conditions, and neither implies the other. The scope half asks whether
+-- the agent is visible to the caller at all -- a `private` agent belongs to
+-- one person and is not invokable by anyone else, which `agents_scoped`
+-- already says about reading it and said nothing about running it. The
+-- permission half is the deployment's own answer to "may this account use the
+-- agent system": chat costs money, reaches tools, and delegates, and until now
+-- the only thing standing between any authenticated account and all three was
+-- that nobody had asked.
+--
+-- STABLE and SECURITY DEFINER for the same reason has_permission() is: the
+-- caller must not need a grant on agentic.agents to be told no.
+create or replace function agentic.may_invoke(p_agent_name text)
+returns boolean
+language sql stable security definer
+set search_path = pg_catalog, public
+as $$
+    select exists (
+        select 1 from agentic.agents a
+         where a.name = p_agent_name
+           and rbac.may_read(a.owner_id, a.org_id, a.visibility)
+    )
+    and rbac.has_permission(rbac.current_user_id(), 'agents', 'invoke');
+$$;
+
+grant execute on function agentic.may_invoke(text) to authenticated, web_anon, worker;
+
 create or replace function agentic.start_run(
     p_agent_name    text,
     p_session_id    uuid default null,
@@ -746,6 +774,18 @@ begin
     select * into v_agent from agentic.agents where name = p_agent_name;
     if not found then
         raise exception 'no agent named %', p_agent_name;
+    end if;
+
+    -- The gate is HERE and not in the HTTP layer, and that is the load-bearing
+    -- part. An interactive turn, a delegated sub-agent through the gateway, a
+    -- scheduled run and a workflow-triggered run all begin by calling this
+    -- function; a check on POST /chat would gate one of the four. Delegation
+    -- especially: a chain that starts as somebody permitted must not become a
+    -- way to invoke an agent they are not.
+    if not agentic.may_invoke(p_agent_name) then
+        raise exception 'not authorized to invoke agent %', p_agent_name
+            using errcode = 'insufficient_privilege',
+                  hint = 'needs agents:invoke, and the agent must be visible to you';
     end if;
 
     if p_session_id is not null then

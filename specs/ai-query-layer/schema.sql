@@ -1248,7 +1248,7 @@ begin
         limit p_limit;
     end if;
 end;
-$$ language plpgsql stable;
+$$ language plpgsql stable security invoker;   -- caller's RLS, deliberately
 
 -- LOOKUP over a LIST of keys -- what the dialect's `LOOKUP "a", "b"` compiles
 -- to, and the shape an agent actually needs: it rarely holds exactly one name.
@@ -1452,7 +1452,7 @@ create or replace function aiq.graph_walk(
     ) d
     order by d.depth, d.score desc, d.id
     limit p_max_nodes;
-$$ language sql stable;
+$$ language sql stable security invoker;   -- caller's RLS, deliberately
 
 -- SEMANTIC's corpus registry: which table a `FROM <name>` names, for the
 -- vector modes. Registered per corpus rather than hardcoded, because the
@@ -1960,7 +1960,7 @@ begin
                 then jsonb_build_object('exhausted', v_exhausted)
                 else '{}'::jsonb end;
 end;
-$$ language plpgsql stable;
+$$ language plpgsql stable security invoker;   -- caller's RLS, deliberately
 
 -- ------------------------------------------------------------
 -- 9b. The extension boundary, reported rather than remembered.
@@ -2727,7 +2727,7 @@ begin
         perform set_config('hnsw.iterative_scan', v_iter, true);
     end if;
 end;
-$$ language plpgsql stable;
+$$ language plpgsql stable security invoker;   -- caller's RLS, deliberately
 
 -- ============================================================
 -- 11. Lexical search -- the mode that was missing entirely.
@@ -2805,7 +2805,7 @@ begin
         s.content_col, s.regconfig, s.source_table, s.regconfig, s.regconfig)
         using p_query, p_limit;
 end;
-$$ language plpgsql stable;
+$$ language plpgsql stable security invoker;   -- caller's RLS, deliberately
 
 -- SEARCH: reciprocal rank fusion of lexical + semantic.
 --
@@ -2820,6 +2820,31 @@ $$ language plpgsql stable;
 -- This is the mode that answers the "R7" case AND "is this product
 -- dangerous?" with one call -- which is the actual argument for a unified
 -- dialect over three separate APIs.
+-- ------------------------------------------------------------
+-- RETRIEVAL IS `SECURITY INVOKER`, AND THAT IS THE WHOLE OF THE TENANT
+-- BOUNDARY ON THE READ PATH.
+--
+-- Every mode below -- SEARCH, TEXT, SEMANTIC, LOOKUP, GRAPH -- runs as the
+-- CALLER, so the RLS policies on the underlying sources apply inside the
+-- search. Two users over one corpus get different result sets from the same
+-- query, and neither can reach the other's `private` rows.
+--
+-- Make one of them `security definer` and the tables still look correctly
+-- protected while every tenant's chunks come back to everyone: the policies are
+-- intact, and nothing evaluates them. That is the classic retrieval leak, and
+-- it is a one-word edit away at all times -- which is why it is written down
+-- here and spelled out on each function rather than left to the default.
+--
+-- The pressure to make the edit is real and will recur: a definer function
+-- needs no grant on the source tables, so `permission denied for table chunks`
+-- looks like it is asking for one. It is asking for a GRANT, not for DEFINER.
+--
+-- The exceptions are deliberate and are not retrieval: `sql_passthrough` (§12)
+-- is invoker for the same reason, and the catalog/registry helpers that read
+-- only this schema's own configuration are definer because there is no tenant
+-- data in them to scope.
+-- ------------------------------------------------------------
+
 create or replace function aiq.search(
     p_lexical_source text, p_query_text text,
     p_query_vector vector, p_model text default null,
@@ -2865,7 +2890,7 @@ begin
     $q$, src.content_col, src.source_table)
     using p_lexical_source, p_query_text, p_query_vector, p_limit, p_k, p_model;
 end;
-$$ language plpgsql stable;
+$$ language plpgsql stable security invoker;   -- caller's RLS, deliberately
 
 -- ------------------------------------------------------------
 -- 12. The SQL escape hatch, actually implemented.
