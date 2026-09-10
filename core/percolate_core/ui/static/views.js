@@ -15,13 +15,28 @@
  * every projection comes from `reads.js` so the audit executes the same one.
  */
 
-import { select, rpc, read, ApiError } from "./api.js";
+import { select, rpc, read, ApiError, config, claims } from "./api.js";
 import { READS } from "./reads.js";
+import { describeCron, nextFires } from "./cron.js";
+import { suggestSchedule } from "./schedule-assist.js";
 import { runForm, jsonObject } from "./workbench.js";
+import { BRIEF_INPUT, evidenceBrief, taskResult } from "./workflow-authoring.js";
+import {workflowComposer} from './workflow-composer.js';
+import { draftStore, stageWorkflow } from "./drafts.js";
+import { markdown } from "./md.js";
+import {workspaceTabs,contextualHelp,editorWorkspace} from "./workspace.js";
 import { h, chip, status, table, stat, statGap, panel, gap, fmtTime, short, seg, stream, eventTone, dag } from "./ui.js";
 
 /* The tile, or the reason there is no tile. One call site cannot get this
    wrong in the direction that matters, which is why it is a function. */
+const pad2 = (n) => String(n).padStart(2, "0");
+
+/* A stored expression the engine accepted should always describe, but a row
+   predating a validation change should not take the page down with it. */
+const safeDescribe = (expr) => {
+  try { return describeCron(expr); } catch (e) { return "unreadable expression: " + e.message; }
+};
+
 export const statOf = (res, label, value, note, tone) =>
   res && res.error ? statGap(label, res.error) : stat(label, value, note, tone);
 
@@ -48,16 +63,20 @@ export async function tryRead(fn, fallback) {
    neither: the empty result was cached as though it were an answer, so one
    refused read turned into "0 definitions" on every screen for the rest of
    the page's life, including after the cause was fixed. */
-let DEFS = null;
+let DEFS = null, DEFS_ACCOUNT = null;
+addEventListener("p8-definitions-changed", () => { DEFS = null; });
 export async function defs() {
-  if (DEFS) return DEFS;
+  const account = config().rest + ":" + claims()?.sub;
+  if (DEFS && DEFS_ACCOUNT === account) return DEFS;
   const r = await tryRead(() => read(READS.definitions), (e) => ({ rows: [], error: e }));
-  const d = { rows: r.rows || [], error: r.error,
+  const sources = await tryRead(() => read(READS.dataSources), () => ({rows:[]}));
+  const sourceNames = new Map(sources.rows.filter(s=>s.config.ingest_workflow).map(s=>[s.config.ingest_workflow,s.name]));
+  const d = { rows: r.rows || [], error: r.error, sourceNames,
               byId: new Map((r.rows || []).map((x) => [x.id, x])) };
-  if (!r.error) DEFS = d;
+  if (!r.error) { DEFS = d; DEFS_ACCOUNT = account; }
   return d;
 }
-export const wfName = (d, id) => (d.byId.get(id) ? d.byId.get(id).name : short(id));
+export const wfName = (d, id) => { const name = d.byId.get(id)?.name; return d.sourceNames?.get(name) || name || short(id); };
 
 /* task_events.detail carries every field the trigger recorded, most of them
    null on a normal transition. Printing them makes every row read the same. */
@@ -77,9 +96,17 @@ const evRow = (e) => ({
 
 /* -- Overview ---------------------------------------------- */
 export async function overview() {
-  const node = page(head("live · this deployment", "Overview",
-    "Every number is a read. Counts come from a view or a Content-Range header - " +
-    "aggregates are disabled here, so nothing on this page is a group-by composed in a browser."));
+  const node = page(head("Your work, in motion", "Overview",
+    "Define the job. Run it with your data. See what happened at every step."));
+  node.append(h("section", {class:"workflow-hero", "aria-label":"Start a workflow"},
+    h("div", {class:"workflow-hero-copy"}, h("span", {class:"kicker"}, "From a task to a repeatable process"),
+      h("h2", {}, "What work needs doing?"),
+      h("p", {}, "Build a workflow from queries, agents and calls to other systems. Give it inputs, inspect its results, and run it again when the job returns."),
+      h("div", {class:"form-actions"}, h("a", {class:"btn primary", href:"#/draft"}, "Create a workflow"),
+        h("a", {class:"btn", href:"#/workflows"}, "Browse workflows"), h("a", {href:"#/help"}, "Help me plan it"))),
+    h("ol", {class:"workflow-lifecycle"},
+      [["01","Define","Choose the steps and their inputs."],["02","Run","Follow progress and inspect each result."],["03","Repeat","Use new inputs or add a schedule."]].map(([n,title,copy]) =>
+        h("li", {}, h("span", {class:"lifecycle-number"}, n), h("div", {}, h("h3", {}, title), h("p", {}, copy)))))));
 
   const [byStatus, d, runsRes, evRes, qRes] = await Promise.all([
     tryRead(() => read(READS.runsByStatus), (e) => ({ rows: [], error: e })),
@@ -89,11 +116,17 @@ export async function overview() {
     tryRead(() => read(READS.queueDepth), (e) => ({ rows: [], error: e })),
   ]);
 
+  node.querySelector('.head-row').append(h('a',{class:'btn primary',href:'#/draft'},'Create a workflow'));
+  if(!d.error && d.rows.length){
+    const hero=node.querySelector('.workflow-hero');
+    const help=contextualHelp('How a workflow comes together',hero);
+    node.append(help);
+  }
   const n = (s) => (byStatus.rows || []).filter((r) => r.status === s).reduce((a, r) => a + Number(r.n), 0);
   const total = (byStatus.rows || []).reduce((a, r) => a + Number(r.n), 0);
   node.append(h("div", { class: "grid g4" },
-    statOf(byStatus, "Runs", total, "workflow.runs_by_status_api"),
-    statOf(byStatus, "Running", n("running"), n("running") ? "in flight now" : "queue is clear"),
+    statOf(byStatus, "Runs", total, "recorded executions"),
+    statOf(byStatus, "Running", n("running"), n("running") ? "in flight now" : "no active runs"),
     statOf(byStatus, "Failed", n("failed"), n("failed") ? "needs a person" : "none",
            n("failed") ? "down" : "up"),
     statOf(d, "Definitions", (d.rows || []).length, "registered")));
@@ -110,7 +143,7 @@ export async function overview() {
               h("td", { class: "mono" }, fmtTime(r.created_at)))),
       h("a", { class: "btn ghost", href: "#/runs" }, "All runs")),
     h("div", { style: "display:flex;flex-direction:column;gap:1rem" },
-      panel("Queue depth", "queue_depth(), the true depth",
+      panel("Queued work", "waiting for a worker",
         h("div", { class: "body" },
           qRes.error ? gap("queues_api", qRes.error.message, "schema")
             : (qRes.rows || []).length
@@ -123,18 +156,18 @@ export async function overview() {
                   h("strong", {}, "No queues configured. "),
                   "queue_config is empty here, and a queue only appears once someone tunes it - " +
                   "tasks route by name whether or not a row exists."))),
-      panel("Recent events", "task_events_api",
+      panel("Recent activity", "task transitions",
         evRes.error ? gap("workflow.task_events_api", evRes.error.message, "schema")
           : stream((evRes.rows || []).map(evRow)),
         h("a", { class: "btn ghost", href: "#/events" }, "Stream")))));
+  const onboarding=node.querySelector(':scope > .contextual-help');if(onboarding)node.append(onboarding);
   return node;
 }
 
 /* -- Runs -------------------------------------------------- */
 export async function runs() {
-  const node = page(head("workflow.runs_api", "Runs",
-    "Filtered server-side: every control below is PostgREST query syntax on the URL, " +
-    "and RLS decides which rows exist before any filter applies."));
+  const node = page(head("Execution history", "Runs",
+    "Follow work in progress, inspect completed results and find the step that needs attention."));
   const d = await defs();
   const holder = h("div", { class: "panel" });
   let filter = "";
@@ -189,17 +222,35 @@ export async function run(id) {
   const r = (runRes.rows || [])[0];
   const tasks = taskRes.rows || [];
   const out = h("span");
+  const def = r ? d.byId.get(r.workflow_def_id) : null;
+  const repeat = h("div", {hidden:true});
+  const showRepeat = () => {
+    if (!repeat.childNodes.length) repeat.append(panel("Run again", "latest saved version · new inputs",
+      runForm(def.name, {input:JSON.stringify(r.input || {}, null, 2), draftKey:"repeat:"+id})));
+    repeat.hidden = false;
+  };
+  if (def && draftStore("repeat:"+id).read().input !== undefined) showRepeat();
+  const active = r?.status === "running";
 
   actions.append(
     r ? status(r.status) : chip("not found", "failed"),
-    h("button", { class: "btn", onclick: async () => {
+    ...(r && def ? [h("button", {class:"btn primary", onclick:() => {
+      showRepeat();
+      repeat.scrollIntoView({behavior:"smooth", block:"start"});
+    }}, "Run again")] : []),
+    h("button", {class:"btn", onclick:async (e) => {
+      e.currentTarget.disabled = true;
+      const refreshed = await run(id);
+      if (node.isConnected) node.replaceWith(refreshed);
+    }}, "Refresh"),
+    h("button", { class: "btn", disabled:!active, onclick: async () => {
       const sig = prompt("Signal name for signal_task()");
       if (!sig) return;
       const res = await tryRead(() => rpc("workflow", "signal_task",
         { p_run_id: id, p_signal: sig, p_payload: {} }), (e) => ({ error: e }));
       out.replaceChildren(res.error ? chip(res.error.message, "failed") : chip("signalled", "succeeded"));
     } }, "Signal"),
-    h("button", { class: "btn danger", onclick: async (e) => {
+    h("button", { class: "btn danger", disabled:!active, onclick: async (e) => {
       e.target.disabled = true;
       const res = await tryRead(() => rpc("workflow", "cancel_run", { p_run_id: id }), (err) => ({ error: err }));
       out.replaceChildren(res.error ? chip(res.error.message, "failed") : chip("cancel_run sent", "succeeded"));
@@ -207,15 +258,55 @@ export async function run(id) {
     } }, "Cancel run"), out);
 
   const done = tasks.filter((t) => t.status === "succeeded").length;
-  const def = r ? d.byId.get(r.workflow_def_id) : null;
+  node.querySelector("h1").textContent = r ? wfName(d, r.workflow_def_id) : "Run unavailable";
+  node.append(repeat);
+  const failed = tasks.filter(t => t.status === "failed");
+  if (failed.length) node.append(h("div", {class:"note rose", role:"alert"},
+    h("strong", {}, "This run needs attention"), failed.map(t => h("p", {},
+      t.step_key + ": " + (typeof t.error === "string" ? t.error : t.error?.message || t.error?.detail || t.error?.error || JSON.stringify(t.error || "The step failed.")))),
+    h("p", {}, "Check the failed step below. Correct its inputs or configuration, then use Run again to start a fresh run.")));
   node.append(h("div", { class: "grid g4" },
-    statOf(runRes, "Workflow", r ? wfName(d, r.workflow_def_id) : "-", def ? "v" + def.version : ""),
+    statOf(runRes, "Workflow", h("span",{class:"stat-name"},r ? wfName(d, r.workflow_def_id) : "-"), def ? "v" + def.version : ""),
     statOf(taskRes, "Tasks", done + " / " + tasks.length, "succeeded / total"),
     statOf(taskRes, "Retries", tasks.reduce((a, t) => a + Math.max(0, (t.attempts || 1) - 1), 0),
            "attempts beyond the first"),
-    statOf(runRes, "External id", (r && r.external_id) || "-", r ? r.compensation_state : "")));
+    statOf(runRes, "Run reference", h("span",{class:"stat-reference"},(r && r.external_id) || "-"), "deduplication reference")));
 
-  node.append(panel("Task graph", "task_dependencies_api",
+  const dependents = new Set((edgeRes.rows || []).map(e => e.depends_on_task_id));
+  const completed = tasks.filter(t => t.status === "succeeded" && !dependents.has(t.id));
+  const evidence = new Map(tasks.flatMap(t => {
+    const rows = taskResult(t.output)?.rows;
+    return Array.isArray(rows) ? rows.filter(row => row.content && (row.chunk_id || row.resource_id))
+      .map(row => [row.chunk_id || row.resource_id, row.content]) : [];
+  }));
+  const sourcePassage = s => evidence.get(String(s).trim().replace(/^(?:chunk_id|resource_id)\s*:\s*/i, ""));
+  if (completed.length && !edgeRes.error) node.append(panel("Results", "completed final steps",
+    h("div", {class:"form-stack"}, completed.map(t => {
+      const result = taskResult(t.output);
+      const resultSources=[...(Array.isArray(result?.sources)?result.sources:[]),...(Array.isArray(result?.source_urls)?result.source_urls:[])];
+      return h("article", {class:"workflow-result"}, h("h3", {}, t.step_key),
+        result?.mode === "SQL" && Array.isArray(result.rows)
+          ? h("div", {}, h("p",{},result.rows.length+" rows returned"+(result.rows.length>100?" · showing the first 100":"")),
+              result.rows.length ? h("div",{style:"overflow:auto"},table(Object.keys(result.rows[0]),result.rows.slice(0,100),row=>h("tr",{},Object.keys(result.rows[0]).map(key=>h("td",{},h("div",{class:"query-cell"},typeof row[key]==="object"?JSON.stringify(row[key]):row[key])))))) : null,
+              h("details",{},h("summary",{},"Full query result"),h("pre",{class:"code"},JSON.stringify(result,null,2))))
+          : result && typeof result === "object" && result.source_id && ['complete','paused'].includes(result.status)
+          ? h("div", {class:"api-receipt"}, h("p",{},result.has_more ? "Page budget reached. Continue from the saved checkpoint." : "Pull complete. Incremental progress is saved."),
+              h("div",{class:"api-receipt-counts"}, ['inserted','updated','unchanged','pages'].map(k=>h("span",{}, String(result[k]??0)+" "+({inserted:"new records",updated:"updated",unchanged:"unchanged",pages:"pages"}[k])))),
+              h("p",{},"Committed watermark: "+(result.watermark||"Not advanced yet")),
+              h("p",{class:"document-help"},result.has_more?"Counts cover this run. The source keeps progress across continuations.":"Counts cover the completed pull, including its continuation runs."),
+              h("a",{class:"btn",href:"#/sources/"+result.source_id},"Open source & records"),
+              h("details",{},h("summary",{},"Full ingestion receipt"),h("pre",{class:"code"},JSON.stringify(result,null,2))))
+          : result && typeof result === "object" && typeof result.summary === "string"
+          ? h("div", {}, markdown(result.summary),
+              resultSources.length ? h("div", {class:"result-sources"}, h("h4", {}, "Sources"), h("ul", {}, resultSources.map(s => h("li", {}, sourcePassage(s)
+                ? h("details", {class:"result-source"}, h("summary", {class:"mono"}, s), markdown(sourcePassage(s)))
+                : typeof s==='string' && /^https?:\/\//i.test(s) ? h('a',{href:s,target:'_blank',rel:'noopener noreferrer'},s)
+                : h("span", {class:"mono"}, typeof s==='object'?JSON.stringify(s):s))))) : null,
+              Array.isArray(result.next_steps) && result.next_steps.length ? h("div", {}, h("h4", {}, "Suggested next steps"), h("ul", {}, result.next_steps.map(s => h("li", {}, typeof s==='object'?JSON.stringify(s):s)))) : null,
+              h('details',{},h('summary',{},'Full structured result'),h('pre',{class:'composition-code'},JSON.stringify(result,null,2))))
+          : typeof result === "string" ? markdown(result) : h("pre", {class:"code suggestion-code"}, JSON.stringify(result, null, 2)));
+    }))));
+  node.append(panel("Task graph", "step dependencies",
     edgeRes.error ? h("div", { class: "body" }, gap("task_dependencies_api", edgeRes.error.message, "schema"))
       : dag(tasks, edgeRes.rows || []),
     h("div", { class: "legend" },
@@ -246,17 +337,28 @@ export async function run(id) {
         : stream((evRes.rows || []).map(evRow))),
     panel("Run", "runs_api", h("div", { class: "body" },
       h("pre", { class: "code" }, JSON.stringify(r || {}, null, 2))))));
+  const panels=[...node.children].filter(el=>el.classList.contains('panel'));
+  const byTitle=title=>panels.find(el=>el.querySelector('header h3')?.textContent===title);
+  const history=node.querySelector('.grid.g2');
+  const resultPanel=byTitle('Results')||h('div',{class:'library-empty'},active?'This run is in progress. Open Tasks to follow its steps.':'No final result is available. Open Tasks to inspect outputs or errors.');
+  const tabs=workspaceTabs({label:'Run inspection',initial:failed.length?'tasks':'results',sections:[
+    {key:'results',title:'Results',content:resultPanel},
+    {key:'tasks',title:'Tasks',content:byTitle('Tasks')},
+    {key:'graph',title:'Dependencies',content:byTitle('Task graph')},
+    {key:'history',title:'History & details',content:history}]});
+  node.classList.add('run-page');node.append(tabs.node);
   return node;
 }
 
 /* -- Workflows --------------------------------------------- */
 export async function workflows() {
   const d = await defs();
+  const latest = new Map();
+  for (const row of d.rows || []) latest.set(row.name, Math.max(latest.get(row.name) || 0, row.version));
   const node = page(head(d.error ? "definitions unavailable" : (d.rows || []).length + " definitions",
     "Workflows",
-    "A definition is a row. Registering one runs validate_spec() first, so a graph with an " +
-    "unreachable step is rejected there rather than discovered as a stalled run.",
-    h("a", { class: "btn primary", href: "#/draft" }, "+ Draft one")));
+    "Combine sources, queries and agents into repeatable jobs. Run them with new inputs and package their definitions for reuse.",
+    h("a", { class: "btn primary", href: "#/draft" }, "Create a workflow")));
 
   node.append(panel("Definitions", "workflow.definitions_api",
     d.error ? gap("workflow.definitions_api", d.error.message, "schema")
@@ -268,95 +370,130 @@ export async function workflows() {
         h("td", { class: "pill-row" }, (w.step_kinds || []).map((k) => h("span", { class: "chip kind" }, k))),
         h("td", { class: "mono" }, (w.queues || []).join(", ") || "default"),
         h("td", { class: "mono" }, fmtTime(w.created_at)),
-        h("td", {}, h("button", { class: "btn", onclick: async (e) => {
+        h("td", {}, h("button", { class: "btn", disabled: latest.get(w.name) !== w.version,
+          title: "New runs use the latest registered version", onclick: async (e) => {
           e.target.closest("tr").after(h("tr", {}, h("td", {colspan:7}, runForm(w.name))));
           e.target.disabled = true;
         } }, "Start"))))));
 
-  node.append(h("div", { class: "grid g2" },
-    h("div", { class: "panel" }, h("div", { class: "body" },
-      h("h3", {}, "Why there is no spec on this page"),
-      h("div", { class: "note amber" },
-        h("strong", {}, "definitions_api publishes names and shapes, not bodies. "),
-        "workflow.definitions has no owner_id, no org_id and no RLS, so a view over its ",
-        h("code", { class: "mono" }, "spec"), " column would show every tenant every workflow body. ",
-        "Scoping it is rbac.add_scope_columns + add_scope_policy - the collection's own primitive, ",
-        "and a schema decision rather than a UI one."))),
-    h("div", { class: "panel" }, h("div", { class: "body" },
-      h("h3", {}, "Who may define"),
-      h("div", { class: "note" }, "workflow.define_yaml() is executable by ",
-        h("code", { class: "mono" }, "authenticated"), " and checks ",
-        h("code", { class: "mono" }, "workflow.may_define"), " itself. This screen disables nothing ",
-        "on the strength of a role - it lets the function refuse, and shows the refusal.")))));
+  node.append(h("p", {class:"document-help"}, "Start uses the latest saved version. Choose Create a workflow to author a definition, or open Runs to inspect an execution."));
   return node;
 }
 
 /* -- Draft ------------------------------------------------- */
 export async function draft() {
-  const yaml = h("textarea", { class: "control mono", rows: 18, style: "width:100%;resize:vertical" },
-    "name: demo_" + Math.floor(Math.random() * 9999) + "\n" +
-    "steps:\n" +
-    "  - id: plan\n" +
-    "    sql: {function: p8ql, args: ['SELECT 1']}\n\n" +
-    "  - id: gather\n" +
-    "    needs: [plan]\n" +
-    "    sql: {function: p8ql, args: ['SELECT 1']}\n\n" +
-    "  - id: assemble\n" +
-    "    needs: [gather]\n" +
-    "    sql: {function: p8ql, args: ['SELECT 1']}\n");
-  yaml.setAttribute("aria-label", "Workflow YAML");
-  if (sessionStorage.getItem("p8-workflow-draft")) yaml.value = sessionStorage.getItem("p8-workflow-draft");
-  yaml.addEventListener("input", () => sessionStorage.setItem("p8-workflow-draft", yaml.value));
+  const yaml = h("textarea", {class:"control mono", rows:18, "aria-label":"Workflow YAML",
+    placeholder:"Describe a job in Design with AI, choose a starter, or write your workflow here."}, sessionStorage.getItem("p8-workflow-draft") || "");
+  const out = h("div", {role:"status"});
   const runHolder = h("div");
-  yaml.addEventListener("input", () => { runHolder.replaceChildren(); });
-  const out = h("div");
-  const node = page(head("workflow.define_yaml()", "Draft",
-    "The YAML compiles to ordinary workflow.tasks rows. validate_spec() runs as a trigger on " +
-    "registration - duplicate keys, unknown dependencies, unreachable steps and cycles with no " +
-    "entry point are rejected by the database, not by this page."));
-
-  node.append(h("div", { class: "grid g-2-1" },
-    panel("YAML", "compiles to tasks", h("div", { class: "body" }, yaml,
-      h("div", { class: "pill-row" },
-        h("button", { class: "btn primary", onclick: async () => {
-          out.replaceChildren(h("span", { class: "chip" }, "defining..."));
-          const res = await tryRead(() => rpc("workflow", "define_yaml", { p_yaml: yaml.value }), (e) => ({ error: e }));
-          if (res.error) { out.replaceChildren(h("div", { class: "note rose" }, res.error.message)); return; }
-          DEFS = null;
-          const definition = (await defs()).byId.get(String(res.rows));
-          if (definition) runHolder.replaceChildren(runForm(definition.name));
-          out.replaceChildren(h("div", { class: "note" }, "Registered ",
-            h("code", { class: "mono" }, String(res.rows).replace(/"/g, "")), ". ",
-            h("a", { href: "#/workflows" }, "Workflows")));
-        } }, "Register"),
-        h("span", { class: "mono", style: "font-size:.7rem;color:var(--muted)" }, "checked by workflow.may_define")),
-      out, runHolder)),
-    h("div", { class: "panel" }, h("div", { class: "body" },
-      h("h3", {}, "What the database checks"),
-      ["Every needs: names a declared step", "No duplicate step keys", "No unreachable step",
-       "No cycle without an entry point", "Every sql: function is in step_functions"]
-        .map((s) => h("div", { class: "row-between" }, chip("trigger", "accent"), h("span", {}, s))),
-      h("div", { class: "note" }, "A rejection arrives as a Postgres error with its reason, and this ",
-        "page shows it verbatim rather than restating it.")))));
-  return node;
+  const draftState = h("span", {class:"draft-state", role:"status"}, "Draft");
+  let workflowWorkspace = null;
+  let composer = null;
+  let saving = false;
+  const save = h("button", {class:"btn primary", disabled:!yaml.value.trim(), onclick:async () => {
+    if (saving || !yaml.value.trim()) return;
+    saving = true; save.disabled = true; runHolder.replaceChildren();
+    const submitted = yaml.value;
+    out.replaceChildren(h("p", {}, "Validating and saving your workflow…"));
+    try {
+      await composer?.beforeSave();
+      const {rows} = await rpc("workflow", "define_yaml", {p_yaml:submitted});
+      DEFS = null;
+      const id = typeof rows === "string" ? rows : rows?.id;
+      const definition = (await defs()).byId.get(id);
+      if (submitted !== yaml.value) {
+        out.replaceChildren(h("div", {class:"note"}, "The submitted definition was saved. Your newer edits have not been saved yet."));
+      } else if (definition) {
+        out.replaceChildren(h("div", {class:"note"}, "Saved ", h("strong", {}, definition.name), " · version " + definition.version + ". Ready to run."));
+        draftState.textContent = "Saved · version " + definition.version;
+        runHolder.replaceChildren(panel("Run this workflow", "2 · provide inputs", runForm(definition.name,
+          {input:sessionStorage.getItem("p8-workflow-input") || JSON.stringify(BRIEF_INPUT, null, 2)})));
+        workflowWorkspace?.enable("run", true); workflowWorkspace?.show("run");
+      } else {
+        out.replaceChildren(h("div", {class:"note"}, "Saved. ", h("a", {href:"#/workflows"}, "Open Workflows to start a run.")));
+      }
+    } catch (e) { out.replaceChildren(h("div", {class:"note rose", role:"alert"}, e.message)); }
+    finally { saving = false; save.disabled = !yaml.value.trim(); }
+  }}, "Validate & save");
+  const changed = () => {
+    sessionStorage.setItem("p8-workflow-draft", yaml.value);
+    runHolder.replaceChildren(); out.replaceChildren(); save.disabled = saving || !yaml.value.trim();
+    draftState.textContent = "Unsaved changes"; workflowWorkspace?.enable("run",false);
+    composer?.changed();
+  };
+  const restore = h("button", {class:"btn", hidden:!sessionStorage.getItem("p8-workflow-draft-backup"), onclick:() => {
+    sessionStorage.setItem("p8-workflow-input", sessionStorage.getItem("p8-workflow-input-backup") || "{}");
+    yaml.value = sessionStorage.getItem("p8-workflow-draft-backup") || ""; changed();
+  }}, "Restore previous draft");
+  yaml.addEventListener("input", changed);
+  const name = h("input", {class:"control", value:"evidence_brief", "aria-label":"Workflow name"});
+  const agents = await tryRead(() => read(READS.agentNames), e => ({rows:[],error:e}));
+  const agent = h("select", {class:"control", "aria-label":"Briefing agent"},
+    (agents.rows || []).map(a => h("option", {value:a.name}, a.name)));
+  if (agents.rows.some(a => a.name === "operations_brief")) agent.value = "operations_brief";
+  else if (agents.rows.some(a => a.name === "percolate_help")) agent.value = "percolate_help";
+  const starterStatus = h("div", {role:"status"});
+  const starter = h("section", {class:"workflow-starter"},
+    h("div", {class:"assistant-intro"}, h("span", {class:"kicker"}, "A useful starting point"),
+      h("h2", {}, "Turn evidence into a brief"),
+      h("p", {}, "Run a query, pass its evidence to an agent, and get a sourced answer with suggested next steps. Change the question and query for each run.")),
+    h("div", {class:"workflow-step-strip", "aria-label":"Starter steps"},
+      h("span", {}, "1. Retrieve evidence"), h("span", {"aria-hidden":"true"}, "→"), h("span", {}, "2. Write the brief")),
+    h("div", {class:"starter-fields"},
+      h("label", {class:"field"}, h("span", {}, "Workflow name"), name),
+      h("label", {class:"field"}, h("span", {}, "Agent"), agent),
+      h("button", {class:"btn primary", disabled:!agents.rows.length, onclick:() => {
+        try {
+          const next = evidenceBrief(name.value.trim(), agent.value, config().workflowQueue || "http");
+          stageWorkflow(next, BRIEF_INPUT); restore.hidden = !sessionStorage.getItem("p8-workflow-draft-backup");
+          yaml.value = next; sessionStorage.setItem("p8-workflow-input", JSON.stringify(BRIEF_INPUT,null,2)); changed();
+          starterChoice.open = false;
+          out.replaceChildren(h('div',{class:'note'},'Starter added. Review the steps, then validate and save.'));
+          yaml.focus();
+        } catch (e) { starterStatus.textContent = e.message; }
+      }}, "Use this starter")),
+    agents.error ? h("div", {class:"note rose"}, agents.error.message) : !agents.rows.length ? h("p", {}, "Create an agent in ", h("a", {href:"#/agents"}, "Agents"), " to use this starter.") : null,
+    starterStatus);
+  const starterChoice=h('details',{class:'contextual-help starter-choice',open:!yaml.value.trim()},h('summary',{},'Start from an example'),starter);
+  const definition=h('div',{class:'workflow-definition'},
+    h('div',{class:'workspace-actions'},save,draftState,h('a',{class:'btn',href:'#/query'},'Develop a query')),
+    starterChoice,h('label',{class:'field'},h('span',{},'Workflow YAML'),yaml),
+    contextualHelp('Workflow help & draft recovery',
+      h('p',{},'Define your steps and inputs, validate and save, then start a recorded run. Use {{run.field}} for an input and {{steps.retrieve.result}} for a previous result.'),
+      h('div',{class:'form-actions'},h('a',{href:'#/help'},'Open workflow help'),restore)));
+  yaml.addEventListener('input',()=>{if(yaml.value.trim())starterChoice.open=false;});
+  composer=await workflowComposer({getDraft:()=>({yaml:yaml.value,input:sessionStorage.getItem('p8-workflow-input') || '{}'}),
+    applyDraft:(text,input)=>{stageWorkflow(text,input);yaml.value=text;changed();starterChoice.open=false;restore.hidden=!sessionStorage.getItem('p8-workflow-draft-backup');},
+    showDefinition:()=>workflowWorkspace.show('definition',true)});
+  const initialMode=sessionStorage.getItem('p8-workflow-open-definition')?'definition':'design';
+  sessionStorage.removeItem('p8-workflow-open-definition');
+  workflowWorkspace=workspaceTabs({label:'Workflow authoring',initial:initialMode,sections:[
+    {key:'design',title:'Design with AI',content:composer.node},
+    {key:'definition',title:'Definition',content:definition},
+    {key:'run',title:'Run with inputs',content:runHolder,disabled:true},
+    {key:'package',title:'Package',content:composer.packagePane}]});
+  return page(head('Workflows','Create a workflow','Describe the job. Compose sources, queries and agents. Run it, inspect the result and package it for reuse.'),out,workflowWorkspace.node);
 }
 
 /* -- Schedules --------------------------------------------- */
-export async function schedules() {
+export async function schedules(sourceWorkflow) {
   const node = page(head("workflow.schedules_api", "Schedules",
-    "A schedule is a row that calls start_workflow on a cron. Overlap policy is the only " +
-    "interesting decision: skip while the previous run is going, or queue behind it."));
+    "Run a workflow on a schedule with saved inputs and a timezone. Choose whether runs may overlap."));
   const [s, d] = await Promise.all([
     tryRead(() => read(READS.schedules), (e) => ({ rows: [], error: e })),
     defs(),
   ]);
-  node.append(panel("Schedules", (s.rows || []).length + " defined",
+  const listing = panel("Schedules", (s.rows || []).length + " defined",
     s.error ? gap("schedules_api", s.error.message, "schema")
       : table(["Schedule", "Workflow", "Cron", "Overlap", "Last fired", "Fired", "Skipped", "Enabled"], s.rows || [], (r) =>
           h("tr", {},
             h("td", {}, r.name, r.last_error ? h("span", { class: "sub" }, r.last_error) : null),
-            h("td", { class: "mono" }, r.workflow_name),
-            h("td", { class: "mono" }, r.cron_expr + " " + (r.timezone || "")),
+            h("td", {}, d.sourceNames?.get(r.workflow_name) || r.workflow_name),
+            /* The expression stays visible — it is what the database holds —
+               with the sentence under it, so a schedule somebody else wrote is
+               readable without parsing five fields. */
+            h("td", {}, h("div", { class: "mono" }, r.cron_expr + " " + (r.timezone || "")),
+              h("div", { class: "sub" }, safeDescribe(r.cron_expr))),
             h("td", {}, h("span", { class: "chip" }, r.overlap_policy)),
             h("td", { class: "mono" }, fmtTime(r.last_fired_at)),
             h("td", { class: "num" }, r.fire_count),
@@ -365,22 +502,88 @@ export async function schedules() {
               const res = await tryRead(() => rpc("workflow", "set_schedule_enabled",
                 { p_name: r.name, p_enabled: !r.enabled }), (err) => ({ error: err }));
               e.target.replaceWith(res.error ? chip(res.error.message, "failed") : chip("toggled", "succeeded"));
-            } }, r.enabled ? "on" : "off"))))));
+            } }, r.enabled ? "on" : "off")))));
 
-  const name = h("input", { class: "control", style: "width:100%", value: "nightly" });
-  const wf = h("select", { class: "control", style: "width:100%" },
-    (d.rows || []).map((x) => h("option", { value: x.name }, x.name)));
-  const cron = h("input", { class: "control mono", style: "width:100%", value: "0 2 * * *" });
+  const name = h("input", { class: "control", style: "width:100%", value: "nightly", "aria-label":"Schedule name" });
+  const wf = h("select", { class: "control", style: "width:100%", "aria-label":"Scheduled workflow" },
+    [...new Set((d.rows || []).map(x => x.name))].map(name => h("option", { value:name }, d.sourceNames?.get(name) || name)));
+  if(sourceWorkflow && [...wf.options].some(o=>o.value===sourceWorkflow)){wf.value=sourceWorkflow;name.value=(d.sourceNames?.get(sourceWorkflow)||sourceWorkflow)+"_schedule";}
+  const cron = h("input", { class: "control mono", style: "width:100%", value: "0 2 * * *", "aria-label":"Cron expression" });
+  /* The expression in words, and the next three firings, recomputed on every
+     keystroke. Cron's day-of-month/day-of-week OR rule is the reason this is
+     worth the space: `0 0 13 * 5` reads as Friday the 13th and is not. */
+  const preview = h("div", { class: "note" });
+  const repaint = () => {
+    try {
+      const sentence = describeCron(cron.value, timezone.value.trim() || "UTC");
+      const fires = nextFires(cron.value, timezone.value.trim() || "UTC", 3);
+      preview.className = "note";
+      preview.replaceChildren(
+        h("strong", {}, sentence),
+        ...fires.map((f) => h("div", { class: "mono", style: "font-size:.72rem;color:var(--muted)" },
+          `${f.local.year}-${pad2(f.local.month)}-${pad2(f.local.day)} `
+          + `${pad2(f.local.hour)}:${pad2(f.local.minute)}`
+          + (f.note ? "  — " + f.note : ""))),
+        ...(fires.length ? [] : [h("div", { class: "mono", style: "font-size:.72rem" },
+          "No firing in the next 400 days.")]));
+    } catch (e) {
+      preview.className = "note rose";
+      preview.replaceChildren(e.message);
+    }
+  };
+  cron.addEventListener("input", repaint);
   const scheduleInput = h("textarea", {class:"control mono", rows:4, "aria-label":"Schedule input JSON", style:"width:100%"}, "{}");
   const timezone = h("input", {class:"control", value:"UTC", "aria-label":"Schedule timezone"});
-  const overlap = h("select", {class:"control", "aria-label":"Overlap policy"}, h("option", {value:"skip"}, "Skip while running"), h("option", {value:"queue"}, "Queue next run"));
+  const describe = h("input", { class: "control", style: "flex:1",
+    placeholder: "every weekday at 7am London, skip if the last one is still running",
+    "aria-label": "Describe the schedule in words" });
+  const overlap = h("select", {class:"control", "aria-label":"Overlap policy"}, h("option", {value:"skip"}, "Skip while running"), h("option", {value:"allow"}, "Allow overlapping runs"));
   const out = h("div");
-  node.append(panel("Schedule a workflow", "workflow.schedule_workflow()",
+  repaint();
+  const editor = panel("Schedule a workflow", "",
     h("div", { class: "body" },
       h("div", { class: "grid g3" },
         h("div", { class: "field" }, h("label", {}, "name"), name),
         h("div", { class: "field" }, h("label", {}, "workflow"), wf),
         h("div", { class: "field" }, h("label", {}, "cron"), cron)),
+      preview,
+      h("div", { class: "field" }, h("label", {}, "or describe it"),
+        h("div", { class: "pill-row" }, describe,
+          h("button", { class: "btn", onclick: async (e) => {
+            e.target.disabled = true;
+            const status = h("span", { class: "mono", style: "font-size:.72rem" }, "");
+            out.replaceChildren(status);
+            const requestedDraft=JSON.stringify([cron.value,timezone.value,overlap.value]);
+            try {
+              const s = await suggestSchedule({
+                description: describe.value,
+                workflows: (d.rows || []).map((w) => w.name),
+                onStatus: (t) => status.replaceChildren(t),
+              });
+              /* A question and a draft are different answers, and the assistant
+                 returns them in different fields, so this cannot render one as
+                 the other. Neither writes anything: filling the form is not
+                 saving it. */
+              if (!s.cron_expr.trim()) {
+                out.replaceChildren(h("div", { class: "note amber" },
+                  h("strong", {}, "Needs one more detail. "), s.needs_clarification));
+              } else {
+                out.replaceChildren(h('article',{class:'suggestion-card'},
+                  h('h3',{},'Suggested schedule'),h('p',{},s.explanation),
+                  h('p',{},describeCron(s.cron_expr,s.timezone)),
+                  h('p',{class:'mono'},s.cron_expr+' · '+s.timezone+' · '+s.overlap_policy),
+                  ...s.assumptions.map(a=>h('p',{class:'hint'},a)),
+                  h('button',{class:'btn primary',onclick:()=>{
+                    if(JSON.stringify([cron.value,timezone.value,overlap.value])!==requestedDraft){out.replaceChildren(h('p',{class:'note'},'The schedule changed. Ask for a new suggestion to review the current draft.'));return;}
+                    cron.value=s.cron_expr;timezone.value=s.timezone;overlap.value=s.overlap_policy;repaint();
+                    out.replaceChildren(h('p',{class:'note'},'Suggestion applied. Review the next fire times, then choose Schedule to save it.'));
+                  }},'Apply suggestion')));
+              }
+            } catch (err) {
+              out.replaceChildren(h("div", { class: "note rose" }, err.message));
+            }
+            e.target.disabled = false;
+          } }, "Suggest"))),
       h("label", {}, "Input JSON", scheduleInput),
       h("label", {}, "Timezone", timezone), h("label", {}, "Overlap", overlap),
       h("button", { class: "btn primary", onclick: async () => {
@@ -389,7 +592,14 @@ export async function schedules() {
         out.replaceChildren(res.error ? h("div", { class: "note rose" }, res.error.message)
           : h("div", { class: "note" }, "Scheduled."));
         if (!res.error) setTimeout(() => location.reload(), 800);
-      } }, "Schedule"), out)));
+      } }, "Schedule"), out));
+  timezone.addEventListener('input',repaint);
+  const scheduleBody=editor.querySelector('.body > .body');
+  scheduleBody.prepend(h('div',{class:'workspace-actions'},scheduleBody.querySelector('.btn.primary')),out);
+  const space=editorWorkspace({label:'Schedule',browse:listing,editor,createLabel:'New schedule'});
+  node.querySelector('.head-row').append(space.create);
+  node.append(space.node);
+  if(sourceWorkflow)space.open('New schedule',{expanded:true,focus:false});
   return node;
 }
 

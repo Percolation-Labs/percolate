@@ -95,6 +95,8 @@ async def resolve_toolset(repo: Repository, agent: AgentSpec) -> ResolvedToolset
             raise LookupError(
                 f"agent {agent.name!r} references unknown tool server {ref.server!r}"
             )
+        if not server.cached_tools and ref.tools != []:
+            raise LookupError(f"tool server {server.name!r} has no discovered tools; sync its catalogue in Agents")
         servers[server.name] = server
         allow = set(ref.tools) if ref.tools is not None else None
         for tool in server.cached_tools:

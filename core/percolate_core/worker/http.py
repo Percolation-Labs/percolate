@@ -27,9 +27,11 @@ import httpx
 
 from ..core import credential
 from .templates import TerminalError, dig, resolve
+from .agent_auth import agent_authorization
 
 
 def build_request(spec: dict, ctx: dict) -> tuple[dict, dict]:
+    original = spec
     spec = resolve(spec, ctx)
     if not spec.get("url"):
         raise TerminalError("http_call task has no 'url'")
@@ -47,7 +49,10 @@ def build_request(spec: dict, ctx: dict) -> tuple[dict, dict]:
     # credential_ref is a NAME resolved from this process's environment. The
     # database stores only the reference, so a dump of workflow.tasks never
     # contains a secret and a task stays inspectable and replayable.
-    if ref := spec.get("credential_ref"):
+    if authorization := agent_authorization(original, spec, ctx.get("_agent_caller")):
+        headers = {k: v for k, v in headers.items() if k.lower() != "authorization"}
+        headers["Authorization"] = authorization
+    elif ref := spec.get("credential_ref"):
         headers["Authorization"] = f"{spec.get('auth_scheme', 'Bearer')} {credential(ref)}"
 
     return {

@@ -198,6 +198,28 @@ honours the verdict.
 
 ## Configuration
 
+### Browser UI and agent origins
+
+`percolate ui serve` serves files only. Set `P8_UI_REST_URL` to PostgREST and
+`P8_UI_CORE_URL` to the Agent Runtime (not the Content Server). Both backends
+must use the same JWT identity/secret and database. Provider keys belong only
+in the runtime environment: an `openai:` agent reads `OPENAI_API_KEY`, not
+the worker's `LLM_API_KEY`. A model stored on an agent overrides the default.
+
+In this working tree, the standalone runtime accepts a comma-separated
+`P8_CORS_ORIGINS` allowlist, e.g. `http://localhost:8082`. It defaults to no
+cross-origin access and rejects wildcards; bearer verification and RLS are
+unchanged. Hosts mounting the router own their CORS policy. This change is not
+in the published 0.1.8 image yet.
+
+For source development, `p8-subsystems/dev/stacks.sh ui` loads that repo's
+ignored `.env` and runs the UI plus runtime on the dev Docker network using
+this working package. See its `applications/percolate-ui/README.md` for the
+complete setup and persisted-turn check. Never expose a dev signing secret or
+provider key in production UI configuration.
+
+### Service variables
+
 Environment only. Credentials by **reference**, never by value:
 `credential_ref: "LLM_API_KEY"` on a task names a variable this process
 resolves, so `workflow.tasks` stays inspectable and replayable.

@@ -101,7 +101,7 @@ class ContractTableTest(unittest.TestCase):
         for key, c in self.table["reads"].items():
             with self.subTest(contract=key):
                 self.assertIn("screen", c, "Surface prints this; a read with no screen has no owner")
-                self.assertIn(c["schema"], ("workflow", "rbac", "agentic", "content"))
+                self.assertIn(c["schema"], ("workflow", "rbac", "agentic", "content", "aiq"))
                 self.assertTrue(c["view"], "a contract names one view")
                 self.assertIsInstance(c.get("q"), str, "q is a string, empty for a whole-row read")
                 self.assertNotIn("limit=", c["q"], f"{key}: the bound is the screen's, not the contract's")

@@ -97,6 +97,27 @@ def router() -> APIRouter:
         context = RequestContext.from_headers(headers)
         return user_id, context.model_copy(update={"user_id": user_id})
 
+    @api.post("/tools/{name}/sync")
+    async def sync_tools(name: str, request: Request) -> dict:
+        from .tools import sync_server
+        from .tools.auth import caller_credentials
+
+        client, settings = _state(request)
+        user_id, _ = _identity(request)
+        if user_id is None:
+            raise HTTPException(401, "a verified bearer token is required")
+        repo = PgRepository(client, user_id)
+        server = await repo.get_tool_server(name)
+        if server is None:
+            raise HTTPException(404, "tool server not found")
+        try:
+            with caller_credentials(request.headers.get("authorization"), settings.tool_auth_origins):
+                synced = await sync_server(repo, server)
+        except Exception as exc:
+            # Do not return upstream headers or credential-bearing error text.
+            raise HTTPException(502, f"Tool discovery failed ({type(exc).__name__}); catalogue was not updated") from None
+        return {"name": synced.name, "tools": [t.name for t in synced.cached_tools]}
+
     @api.get("/_build")
     async def build() -> dict[str, str]:
         """Which source this process is running.
@@ -161,10 +182,10 @@ def router() -> APIRouter:
         session = await _resume_or_open(repo, body, request)
 
         if not body.stream:
-            return await _completion(repo, settings, body, context, session)
+            return await _completion(repo, settings, body, context, session, request.headers.get("authorization"))
 
         return StreamingResponse(
-            _run_and_stream(client, repo, settings, body, context, session),
+            _run_and_stream(client, repo, settings, body, context, session, request.headers.get("authorization")),
             media_type="text/event-stream",
             headers={
                 # The session is in the response headers as well as in every
@@ -219,6 +240,20 @@ def build_app(settings: Settings | None = None) -> FastAPI:
     from .. import __version__
 
     app = FastAPI(title="percolate-agent", version=__version__, lifespan=_lifespan)
+    # Standalone deployment policy. A host mounting router()/lifespan() owns
+    # its own policy. No cookies and no wildcard; bearer verification and RLS
+    # still run in the existing handler, including on cross-origin requests.
+    if resolved.cors_origins:
+        from fastapi.middleware.cors import CORSMiddleware
+
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(resolved.cors_origins),
+            allow_methods=["GET", "POST"],
+            allow_headers=["Authorization", "Content-Type", "X-P8-Session-Id"],
+            expose_headers=["X-P8-Session-Id"],
+            allow_credentials=False,
+        )
     app.include_router(router())
     return app
 
@@ -257,6 +292,7 @@ async def _completion(
     body: ChatRequest,
     context: RequestContext,
     session: Session,
+    authorization: str | None = None,
 ) -> Response:
     """Run the turn to completion and answer in the OpenAI envelope.
 
@@ -273,7 +309,7 @@ async def _completion(
     missing `OPENAI_API_KEY` read as "the runtime is fine, the answer is
     strange" for as long as it did.
     """
-    sequencer = TurnSequencer(repo, settings, sink=EventSink(repo))
+    sequencer = TurnSequencer(repo, settings, sink=EventSink(repo), caller_authorization=authorization)
     result = await sequencer.run_turn(
         body.model_copy(update={"session_id": session.id}), context
     )
@@ -291,7 +327,7 @@ async def _completion(
         raise HTTPException(
             502,
             f"run {result.run.id} finished {status or 'without an assistant message'}"
-            + (f": {result.run.error}" if getattr(result.run, "error", None) else ""),
+            + (f": {result.run.state['error']}" if result.run.state.get("error") else ""),
         )
 
     return JSONResponse(
@@ -324,6 +360,7 @@ async def _run_and_stream(
     body: ChatRequest,
     context: RequestContext,
     session: Session,
+    authorization: str | None = None,
 ) -> AsyncIterator[str]:
     """Start listening, start the turn, forward until the turn is done.
 
@@ -334,7 +371,7 @@ async def _run_and_stream(
     """
     queue: asyncio.Queue = asyncio.Queue()
     conn = await client.listen(channel(session.id), queue)
-    sequencer = TurnSequencer(repo, settings, sink=EventSink(repo))
+    sequencer = TurnSequencer(repo, settings, sink=EventSink(repo), caller_authorization=authorization)
     turn = asyncio.create_task(
         sequencer.run_turn(
             body.model_copy(update={"session_id": session.id}), context
@@ -373,5 +410,4 @@ async def _run_and_stream(
         if not turn.done():
             turn.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
         await conn.close()
-
 

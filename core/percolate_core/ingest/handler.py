@@ -192,7 +192,9 @@ async def ingest(spec: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
                        "characters": len(parsed.markdown)}}
 
 
-OPS = {"ingest": ingest, "embed": embed_resource}
+from .api import api_pull
+
+OPS = {"ingest": ingest, "embed": embed_resource, "api_pull": api_pull}
 
 
 @handler("work")

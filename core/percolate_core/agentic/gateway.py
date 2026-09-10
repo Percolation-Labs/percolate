@@ -272,13 +272,17 @@ async def run_scheduled(
     from .sequencer import TurnSequencer
 
     context = RequestContext.from_headers(headers)
-    user_id = caller_id(headers) or context.user_id
+    user_id = caller_id(headers)
+    if user_id is None:
+        raise PermissionError("a verified caller is required")
+    context = context.model_copy(update={"user_id": user_id})
 
     async with connected(settings, user_id) as repo:
         if session_id is not None and not prompt:
             prompt = await _window_to_summarize(repo, settings, session_id, for_agent)
 
-        sequencer = TurnSequencer(repo, settings, sink=EventSink(repo))
+        authorization = next((v for k, v in headers.items() if k.lower() == "authorization"), None)
+        sequencer = TurnSequencer(repo, settings, sink=EventSink(repo), caller_authorization=authorization)
         sequencer.workflow_task_id = task_id
         result = await sequencer.run_turn(
             ChatRequest(
@@ -331,11 +335,15 @@ async def run_delegated(
     from .sequencer import TurnSequencer
 
     context, session_id, parent_run_id, delegated_by = inbound_delegation(headers)
-    user_id = caller_id(headers) or context.user_id
+    user_id = caller_id(headers)
+    if user_id is None:
+        raise PermissionError("a verified caller is required")
+    context = context.model_copy(update={"user_id": user_id})
 
     async with connected(settings, user_id) as repo:
         parent = await repo.get_run(parent_run_id) if parent_run_id else None
-        sequencer = TurnSequencer(repo, settings, sink=EventSink(repo))
+        authorization = next((v for k, v in headers.items() if k.lower() == "authorization"), None)
+        sequencer = TurnSequencer(repo, settings, sink=EventSink(repo), caller_authorization=authorization)
         sequencer.delegated_by_message_id = delegated_by
         result = await sequencer.run_turn(
             ChatRequest(

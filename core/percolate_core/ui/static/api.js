@@ -31,6 +31,7 @@
 const CONFIG = {
   rest: localStorage.getItem("p8-rest") || "http://localhost:5611",
   core: localStorage.getItem("p8-core") || "http://localhost:5613",
+  content: localStorage.getItem("p8-content") || "",
   devToken: true,          // until the server says otherwise; see loadConfig
   devSecret: "",           // never a default: the deployment supplies it or nobody does
   served: false,
@@ -56,7 +57,10 @@ export async function loadConfig() {
        true, and pointed at the wrong port while saying it. */
     if (!localStorage.getItem("p8-rest")) CONFIG.rest = c.rest || CONFIG.rest;
     if (!localStorage.getItem("p8-core")) CONFIG.core = c.core || "";
+    if (!localStorage.getItem("p8-content")) CONFIG.content = c.content || "";
     CONFIG.version = c.version;
+    CONFIG.workflowQueue = c.workflow_queue || "http";
+    CONFIG.ingestQueue = c.ingest_queue || "ingest";
   } catch (e) {
     /* No config.json is not an error: it is the file:// and static-host case,
        and the defaults above are for exactly that. */
@@ -65,13 +69,92 @@ export async function loadConfig() {
 }
 
 export function token() { return sessionStorage.getItem("p8-token") || ""; }
-export function setToken(t) { t ? sessionStorage.setItem("p8-token", t) : sessionStorage.removeItem("p8-token"); }
+let sessionGeneration = 0;
+export function setToken(t) {
+  sessionGeneration++;
+  if (t) sessionStorage.removeItem("p8-signed-out");
+  t ? sessionStorage.setItem("p8-token", t) : sessionStorage.removeItem("p8-token");
+  window.dispatchEvent(new CustomEvent("p8-session-changed"));
+}
 
 export function claims() {
   const t = token();
   if (!t) return null;
   try { return JSON.parse(atob(t.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))); }
   catch (e) { return null; }
+}
+
+
+// All protected HTTP surfaces use this transport, so an expired session has
+// one recovery path in Files, Query, Chat and tool discovery alike.
+export function sessionState() {
+  const c = claims();
+  if (!token()) return "signed-out";
+  if (!c?.sub || !Number.isFinite(c.exp)) return "invalid";
+  return c.exp <= Date.now() / 1000 ? "expired" : "active";
+}
+export function canRenewSession() { return !!(CONFIG.devToken && CONFIG.devSecret); }
+
+export async function devToken(sub, secret = CONFIG.devSecret) {
+  const enc = new TextEncoder();
+  const b64 = value => btoa(unescape(encodeURIComponent(JSON.stringify(value))))
+    .replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+  const head = b64({alg:"HS256",typ:"JWT"});
+  const body = b64({role:"authenticated",sub,exp:Math.floor(Date.now()/1000)+3600});
+  const key = await crypto.subtle.importKey("raw",enc.encode(secret),{name:"HMAC",hash:"SHA-256"},false,["sign"]);
+  const sig = await crypto.subtle.sign("HMAC",key,enc.encode(head+"."+body));
+  return head+"."+body+"."+btoa(String.fromCharCode(...new Uint8Array(sig))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+}
+let renewal = null;
+export async function renewSession(sub = claims()?.sub) {
+  if (!canRenewSession() || !sub) throw new Error("Sign in to continue to your workspace.");
+  if (renewal?.sub === sub && renewal.generation === sessionGeneration) return renewal.promise;
+  const job = {sub, generation:sessionGeneration};
+  renewal = job;
+  job.promise = (async () => {
+    const signed = await devToken(sub);
+    if (renewal !== job || sessionGeneration !== job.generation) throw new Error("The account changed while renewing. Sign in again.");
+    setToken(signed);
+    return signed;
+  })().finally(() => { if (renewal === job) renewal = null; });
+  return job.promise;
+}
+export class SessionError extends Error {
+  constructor() {
+    super("Your session has expired. Sign in to continue; your drafts are saved.");
+    this.status = 401; this.code = "SESSION_EXPIRED";
+  }
+}
+function requireSignIn() {
+  window.dispatchEvent(new CustomEvent("p8-auth-required"));
+  return new SessionError();
+}
+export async function ensureSession() {
+  if (!token()) return;
+  const c = claims();
+  if (!c?.sub || !Number.isFinite(c.exp)) throw requireSignIn();
+  if (c.exp <= Date.now()/1000 + 30) {
+    if (canRenewSession()) await renewSession(c.sub);
+    else if (c.exp <= Date.now()/1000) throw requireSignIn();
+  }
+}
+export async function authFetch(url, options = {}) {
+  await ensureSession();
+  const send = () => {
+    const headers = new Headers(options.headers);
+    if (token()) headers.set("Authorization","Bearer "+token());
+    else headers.delete("Authorization");
+    return fetch(url,{...options,headers});
+  };
+  let response = await send();
+  // Only a refused authentication is replayed. Permission errors (403) are
+  // not session expiry, and neither network failures nor writes are retried.
+  if (response.status === 401 && token() && canRenewSession() && claims()?.sub) {
+    await renewSession();
+    response = await send();
+  }
+  if (response.status === 401) throw requireSignIn();
+  return response;
 }
 
 export class ApiError extends Error {
@@ -97,7 +180,7 @@ async function request(path, { schema = "public", method = "GET", body, count, r
   if (range) headers.Range = range;
 
   const url = CONFIG.rest + "/" + path;
-  const res = await fetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  const res = await authFetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
   const text = await res.text();
   let parsed = null;
   try { parsed = text ? JSON.parse(text) : null; } catch (e) { parsed = { message: text }; }

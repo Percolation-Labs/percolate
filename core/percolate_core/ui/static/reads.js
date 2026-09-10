@@ -30,6 +30,26 @@
 /* `screen` is the name Surface prints, so it is the screen a failure breaks --
    not the module the call happens to live in. */
 export const READS = {
+  workflowPlugins: {screen:"Workflow design",schema:"agentic",view:"plugins_api",
+    q:"select=name,description&order=name"},
+  apiSourceState: {screen:"Data Sources",schema:"content",view:"source_state",
+    q:"select=source_id,revision,watermark,pending_watermark,next_url,pages,inserted,updated,unchanged,total_records,last_page_at,last_completed_at"},
+  apiSourceRecords: {screen:"Data Sources",schema:"content",view:"source_records",
+    q:"select=external_id,watermark,data,raw,updated_at&order=updated_at.desc"},
+  sourceRuns: {screen:"Data Sources",schema:"workflow",view:"runs_api",
+    q:"select=id,status,created_at&order=created_at.desc"},
+  dataSources: {screen:"Data Sources",schema:"content",view:"channels",
+    q:"select=id,name,kind,config,enabled,owner_id,visibility,updated_at&order=name"},
+  sourceResources: {screen:"Data Sources",schema:"content",view:"resources",
+    q:"select=id,title,status,ingested_at&order=ingested_at.desc"},
+  embeddingModels: {screen:"Data Sources",schema:"aiq",view:"embedding_models",q:"select=name&order=name"},
+  /* -- content -------------------------------------------------------- */
+  resources: { screen: "Files", schema: "content", view: "resources",
+    q: "select=id,title,status,channel_id,file_id,ingested_at,metadata,visibility&file_id=not.is.null&order=ingested_at.desc" },
+  uploadChannels: { screen: "Files", schema: "content", view: "channels",
+    q: "select=id,name,org_id,config&enabled=eq.true&kind=eq.file_upload&order=name" },
+  resourceChunks: { screen: "Files", schema: "content", view: "resource_chunks",
+    q: "select=id,ordinal,content,token_count&order=ordinal" },
   /* -- workflow ------------------------------------------------------- */
   definitions: { screen: "Workflows", schema: "workflow", view: "definitions_api",
     q: "select=id,name,version,step_count,step_kinds,queues,created_at&order=name" },
@@ -102,10 +122,16 @@ export const READS = {
 
   /* -- agentic -------------------------------------------------------- */
   agents: { screen: "Agents", schema: "agentic", view: "agents_api",
-    q: "select=name,model,tools,skills,structured_output_schema,system_prompt&order=name" },
-  agentNames: { screen: "Chat", schema: "agentic", view: "agents_api", q: "select=name&order=name" },
+    q: "select=name,model,tools,skills,structured_output_schema,system_prompt,plugin,visibility"
+       + "&order=name" },
+  agentNames: { screen: "Chat · Query · Help · Draft", schema: "agentic", view: "agents_api", q: "select=name&order=name" },
   skills: { screen: "Agents", schema: "agentic", view: "skills_api",
     q: "select=name,description&order=name" },
+  /* The body, fetched one skill at a time when the editor previews the
+     composed prompt. Separate from `skills` because the listing does not want
+     to carry every body, which is the reason `skills_api` publishes both. */
+  skillBodies: { screen: "Agents", schema: "agentic", view: "skills_api",
+    q: "select=name,content" },
   toolServers: { screen: "Agents", schema: "agentic", view: "tool_servers_api",
     q: "select=name,kind,cached_tools,synced_at&order=name" },
   plugins: { screen: "Agents", schema: "agentic", view: "plugins_api", q: "select=name&order=name" },
@@ -125,5 +151,4 @@ export const READS = {
  * exactly the arithmetic that let five broken projections pass. */
 export const PROBES = [
   { schema: "workflow", view: "pools", why: "written by the pool toggle (PATCH); never read as a list" },
-  { schema: "content", view: "resources", why: "no screen reads it yet" },
 ];

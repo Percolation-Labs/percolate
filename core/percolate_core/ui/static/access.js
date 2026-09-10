@@ -1,3 +1,4 @@
+import {editorWorkspace,contextualHelp} from "./workspace.js";
 /* Access, chat, settings -- and Surface, which re-measures the whole thing.
  *
  * Same two rules as views.js. The one worth repeating here: no button on these
@@ -7,9 +8,11 @@
  * one that matters is the one in the database.
  */
 
+import { authFetch } from "./api.js";
 import { select, rpc, read, probeQuery, config, setEndpoint, token } from "./api.js";
 import { READS, PROBES } from "./reads.js";
-import { agentEditor } from "./workbench.js";
+import { agentEditor } from "./agent-editor.js";
+import { HELP_AGENT, createChatSession } from "./query-assist.js";
 import { h, chip, status, table, stat, statGap, panel, gap, fmtTime, short, seg, stream } from "./ui.js";
 import { markdown } from "./md.js";
 import { head, page, tryRead, defs } from "./views.js";
@@ -30,58 +33,89 @@ export async function agents() {
   ]);
   const node = page(head([countOf(ag, (ag.rows || []).length, "agents"),
                           countOf(ts, (ts.rows || []).length, "tool servers"),
-                          countOf(sk, (sk.rows || []).length, "skills")].join(" · "), "Agents",
-    "An agent is a row: name, system prompt, tools, model, output schema. Adding one is an insert " +
-    "through agentic.upsert_agent(), so it is scoped, audited and revocable like anything else."));
+                          countOf(sk, (sk.rows || []).length, "skills")].join(" · "), "Agents & Plugins",
+    "Configure the instructions, models and tools your workflows use."));
 
   node.append(panel("Agents", "agentic.agents_api",
     ag.error ? gap("agents_api", ag.error.message, "schema")
-      : table(["Agent", "Model", "Tools", "Skills", "Output", ""], ag.rows || [], (a) =>
-          h("tr", {},
-            h("td", {}, a.name),
-            h("td", { class: "mono" }, a.model || "-"),
+      /* Six columns, not seven. Provenance rides with the name because most
+         agents are hand-authored, so a column for it is mostly empty and buys
+         its width from the two columns that hold unbreakable identifiers. */
+      /* The row opens the agent. One target, the whole row, the way the source
+         library's cards work — rather than an actions column whose two ghost
+         buttons made "edit" compete with "prompt" for the same intent. The
+         prompt is not a separate disclosure any more because the editor shows
+         it, composed with its skills, which the inline expander never could. */
+      : table(["Agent", "Model", "Tools", "Skills", "Output"], ag.rows || [], (a) =>
+          h("tr", { class: "row-open", onclick: (e) => {
+            if (!e.target.closest("button, a, input, select")) editor.load(a);
+          } },
+            h("td", { class: "ident" },
+              h("button", { class: "row-open-name", onclick: () => editor.load(a) }, a.name),
+              a.plugin ? h("span", { class: "sub" }, "from " + a.plugin) : null),
+            h("td", { class: "mono ident" }, a.model || "-"),
             h("td", { class: "pill-row" }, (a.tools || []).map((t) =>
               h("span", { class: "chip kind" }, typeof t === "string" ? t : (t.server || JSON.stringify(t))))),
             h("td", { class: "pill-row" }, (a.skills || []).map((s) => h("span", { class: "chip kind" }, s))),
-            h("td", { class: "mono" }, a.structured_output_schema ? "typed" : "-"),
-            h("td", {}, h("button", {class:"btn ghost", onclick:() => editor.load(a)}, "Edit"),
-              h("button", { class: "btn ghost", onclick: (e) => {
-              const tr = e.target.closest("tr");
-              tr.after(h("tr", {}, h("td", { colspan: 6 },
-                h("pre", { class: "code" }, a.system_prompt || "(no system prompt)"))));
-              e.target.remove();
-            } }, "prompt"))))));
+            h("td", { class: "mono" }, a.structured_output_schema ? "typed" : "-")))));
 
-  node.append(h("div", { class: "grid g3" },
-    panel("Skills", sk.error ? "unavailable" : (sk.rows || []).length,
-      sk.error ? h("div", { class: "body" }, gap("skills_api", sk.error.message, "schema"))
-        : h("div", { class: "body pill-row" },
-            (sk.rows || []).map((s) => h("span", { class: "chip", title: s.description || "" }, s.name)))),
-    panel("Tool servers", ts.error ? "unavailable" : (ts.rows || []).length,
-      ts.error ? h("div", { class: "body" }, gap("tool_servers_api", ts.error.message, "schema"))
-        : h("div", { class: "body pill-row" },
-            (ts.rows || []).map((s) => h("div", {},
-              h("span", {class:"chip"}, s.name + " · " + s.kind),
-              h("span", {}, s.cached_tools?.length ? " " + s.cached_tools.length + " discovered tools" : " Catalogue unavailable — sync required"),
-              h("button", {class:"btn", onclick:async (e) => {
-                e.target.disabled = true;
-                try {
-                  const base = config().core?.replace(/\/$/, "");
-                  if (!base) throw new Error("Configure the agent runtime in Settings.");
-                  const res = await fetch(base + "/tools/" + encodeURIComponent(s.name) + "/sync", {
-                    method:"POST", headers:{Authorization:"Bearer " + token()}});
-                  const data = await res.json();
-                  if (!res.ok) throw new Error(data.detail || "HTTP " + res.status);
-                  e.target.textContent = data.tools.length + " tools synced";
-                } catch (err) { e.target.after(h("div", {class:"note rose"}, err.message)); }
-                finally { e.target.disabled = false; }
-              }}, "Sync " + s.name))))),
-    panel("Plugins", pl.error ? "unavailable" : (pl.rows || []).length,
-      pl.error ? h("div", { class: "body" }, gap("plugins_api", pl.error.message, "schema"))
-        : h("div", { class: "body pill-row" },
-            (pl.rows || []).length ? (pl.rows || []).map((s) => h("span", { class: "chip" }, s.name))
-              : h("span", { class: "mono", style: "font-size:.72rem;color:var(--muted)" }, "none installed")))));
-  node.append(editor);
+  /* One catalogue, not three equal cards. They are not three equal things:
+     skills are a flat list of names, plugins are usually empty, and a tool
+     server has a status and an action. Giving each a third of the width left
+     the names in a single column and put a button in the middle of a
+     sentence. */
+  const chips = (rows, label) => rows.length
+    ? h("div", { class: "catalogue-chips" }, rows.map((r) =>
+        h("span", { class: "chip", title: r.description || "" }, r.name)))
+    : h("p", { class: "catalogue-empty" }, label);
+
+  const server = (s) => {
+    const count = (s.cached_tools || []).length;
+    const status = h("span", { class: "catalogue-status" }, count
+      ? `${count} operation${count === 1 ? "" : "s"} discovered`
+      : "Catalogue not synced");
+    const button = h("button", { class: "btn", onclick: async (e) => {
+      e.target.disabled = true;
+      try {
+        const base = config().core?.replace(/\/$/, "");
+        if (!base) throw new Error("Configure the agent runtime in Settings.");
+        const res = await authFetch(base + "/tools/" + encodeURIComponent(s.name) + "/sync",
+          { method: "POST", headers: { Authorization: "Bearer " + token() } });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "HTTP " + res.status);
+        status.textContent = `${data.tools.length} operation${data.tools.length === 1 ? "" : "s"} discovered`;
+      } catch (err) { status.replaceChildren(h("span", { class: "note rose" }, err.message)); }
+      finally { e.target.disabled = false; }
+    } }, count ? "Re-sync" : "Sync");
+    return h("div", { class: "catalogue-row" },
+      h("span", { class: "chip kind" }, s.name), h("span", { class: "mono" }, s.kind),
+      status, h("span", { class: "spacer" }), button);
+  };
+
+  const group = (title, count, body, error, view) => h("div", { class: "catalogue-group" },
+    h("h4", {}, title, count === null ? null : h("span", { class: "catalogue-count" }, count)),
+    error ? gap(view, error.message, "schema") : body);
+
+  node.append(h("div", { class: "catalogue" },
+    group("Skills", sk.error ? null : (sk.rows || []).length,
+      chips(sk.rows || [], "No skills registered. A skill is a named prompt fragment agents can share."),
+      sk.error, "skills_api"),
+    group("Tool servers", ts.error ? null : (ts.rows || []).length,
+      (ts.rows || []).length
+        ? h("div", { class: "catalogue-list" }, (ts.rows || []).map(server))
+        : h("p", { class: "catalogue-empty" }, "No tool servers registered."),
+      ts.error, "tool_servers_api"),
+    group("Plugins", pl.error ? null : (pl.rows || []).length,
+      chips(pl.rows || [], "None installed. A plugin installs agents and skills as a set."),
+      pl.error, "plugins_api")));
+
+  const browse=h('div',{class:'form-stack'},...Array.from(node.children).slice(1));
+  const catalogue=browse.querySelector('.grid.g3');
+  if(catalogue)browse.append(contextualHelp('Tools, skills & plugins',catalogue));
+  const space=editorWorkspace({label:'Agent',browse,editor,createLabel:'Create agent',onCreate:()=>editor.startNew()});
+  const load=editor.load;
+  editor.load=value=>{space.open(value.name||'Agent',{expanded:true});load(value);};
+  node.querySelector('.head-row').append(space.create);node.append(space.node);
   return node;
 }
 
@@ -99,9 +133,7 @@ export async function users() {
   (orgs.rows || []).forEach((r) => { (orgsOf[r.user_id] = orgsOf[r.user_id] || []).push(r.role); });
 
   const node = page(head(countOf(us, (us.rows || []).length, "visible"), "Users",
-    "Identity is Postgres: password verification, session revocation, throttling and the audit " +
-    "trail are all SQL. This page writes through the same functions, so nothing it does is " +
-    "invisible to auth_events."));
+    "Inspect workspace members, their roles and their access."));
 
   node.append(panel("Users", "rbac.users_api",
     us.error ? gap("users_api", us.error.message, "schema")
@@ -140,6 +172,7 @@ export async function users() {
         "so Keys can list and revoke and cannot issue. Writing the other half means deciding how a ",
         "secret is generated, returned exactly once and scoped - which belongs in user-rbac/schema.sql ",
         "beside the rest of the credential handling.")))));
+  const help=node.querySelector('.grid.g2');if(help)node.append(contextualHelp('About access and available actions',help));
   return node;
 }
 
@@ -249,19 +282,23 @@ export async function settings() {
   ]);
   const rest = h("input", { class: "control mono", style: "width:100%", value: config().rest });
   const core = h("input", { class: "control mono", style: "width:100%", value: config().core });
+  const content = h("input", { class: "control mono", style: "width:100%", "aria-label": "Content Server URL", value: config().content });
   const out = h("div");
   const node = page(head("this deployment", "Settings",
-    "Two endpoints and a handful of rows. Everything else this app knows, it asks the database."));
+    "Three endpoints and a handful of rows. Everything else this app knows, it asks the database."));
 
   node.append(h("div", { class: "grid g2" },
     panel("Endpoints", "where this browser points", h("div", { class: "body" },
       h("div", { class: "field" }, h("label", {}, "PostgREST"), rest,
         h("span", { class: "hint" }, "every read and every write on every other screen")),
-      h("div", { class: "field" }, h("label", {}, "percolate-core"), core,
-        h("span", { class: "hint" }, "files, and the agent turn - the two things that are not queries")),
+      h("div", { class: "field" }, h("label", {}, "Agent Runtime"), core,
+        h("span", { class: "hint" }, "agent turns and tool discovery")),
+      h("div", { class: "field" }, h("label", {}, "Content Server"), content,
+        h("span", { class: "hint" }, "upload and download file bytes")),
       h("button", { class: "btn primary", onclick: () => {
         setEndpoint("rest", rest.value.replace(/\/$/, ""));
         setEndpoint("core", core.value.replace(/\/$/, ""));
+        setEndpoint("content", content.value.replace(/\/$/, ""));
         out.replaceChildren(h("div", { class: "note" }, "Saved to localStorage."));
       } }, "Save"), out)),
     panel("Orgs", "rbac.orgs",
@@ -332,6 +369,38 @@ const I = {
   plus: '<path d="M7.5 3v9M3 7.5h9"/>',
   send: '<path d="M2 7.5h10M8 3.5l4 4-4 4"/>',
 };
+
+export async function help() {
+  const guide = h("div", {class:"help-guide"});
+  try {
+    const response = await fetch("help.md");
+    if (!response.ok) throw new Error("The product guide could not be loaded.");
+    guide.append(markdown(await response.text()));
+  } catch (e) { guide.append(h("div", {class:"note rose"}, e.message)); }
+  const notice = h("div", {role:"status"});
+  const ask = async prompt => {
+    for (const button of actions.querySelectorAll("button")) button.disabled = true;
+    notice.textContent = "Opening your help conversation…";
+    try {
+      const {rows:agents} = await read(READS.agentNames);
+      if (!agents.some(a => a.name === HELP_AGENT)) throw new Error("The help agent has not been configured. Ask your workspace administrator to run dev/ui_assistant.py with a configured model; the guide below is available now.");
+      const session = await createChatSession("Percolate help");
+      sessionStorage.setItem("p8-chat-session", session);
+      sessionStorage.setItem("p8-chat-agent", HELP_AGENT);
+      sessionStorage.setItem("p8-chat-prompt", prompt);
+      location.hash = "#/chat";
+    } catch (e) {
+      notice.replaceChildren(h("div", {class:"note rose"}, e.message));
+      for (const button of actions.querySelectorAll("button")) button.disabled = false;
+    }
+  };
+  const actions = h("div", {class:"help-actions"},
+    h("div", {class:"assistant-intro"}, h("h3", {}, "What work do you want to automate?"), h("p", {}, "Get help defining a workflow, choosing its steps and understanding a run.")),
+    h("div", {class:"form-actions"}, h("button", {class:"btn primary", onclick:() => ask("")}, "Start a help conversation"),
+      h("button", {class:"btn", onclick:() => ask("How does Percolate work?")}, "How does Percolate work?"),
+      h("button", {class:"btn", onclick:() => ask("Help me plan a recurring operations review with queries and an agent step. Explain what to define and how to inspect a run.")}, "Plan a workflow")), notice);
+  return page(head("A guide to your workspace", "Help", "Understand Percolate and put it to work."), actions, guide);
+}
 
 export async function chat() {
   const sessions = await tryRead(() => read(READS.chatSessions, "limit=40"), (e) => ({ rows: [], error: e }));
@@ -512,8 +581,7 @@ export async function chat() {
   const title = h("span", { class: "title" }, "Chat");
   const newSession = async () => {
     if (sending) return;
-    const res = await tryRead(() => rpc("agentic", "create_session",
-      { p_title: "Session " + new Date().toISOString().slice(11, 19) }), (e) => ({ error: e }));
+    const res = await tryRead(async () => ({rows:await createChatSession("Session " + new Date().toISOString().slice(11, 19))}), (e) => ({ error: e }));
     if (!res.error) {
       sessionStorage.setItem("p8-chat-session", String(res.rows));
       location.reload();
@@ -534,7 +602,9 @@ export async function chat() {
           : h("div", { class: "empty" }, "No sessions.")));
   list = threads;
 
-  const box = h("textarea", { class: "box", rows: 1, placeholder: "Ask, or describe the workflow you want..." });
+  const box = h("textarea", { class: "box", rows: 1, "aria-label":"Message", placeholder: "Describe work to automate, or ask about Percolate…" });
+  const starter = sessionStorage.getItem("p8-chat-prompt");
+  if (starter) { box.value = starter; sessionStorage.removeItem("p8-chat-prompt"); }
   /* An empty picker and an unreadable agents_api look identical, and one of
      them means "ask somebody about your grants" rather than "register one". */
   const agentPick = h("select", { class: "control", style: "padding:.15rem .35rem;font-size:.72rem" },
@@ -543,6 +613,7 @@ export async function chat() {
              : (ag.rows || []).map((a) => h("option", { value: a.name }, a.name)));
   const picked = sessionStorage.getItem("p8-chat-agent");
   if ((ag.rows || []).some(a => a.name === picked)) agentPick.value = picked;
+  else if ((ag.rows || []).some(a => a.name === HELP_AGENT)) agentPick.value = HELP_AGENT;
   agentPick.setAttribute("aria-label", "Agent");
   agentPick.addEventListener("change", () => sessionStorage.setItem("p8-chat-agent", agentPick.value));
   sendBtn = h("button", { class: "send-btn", title: "Send  ⌘↵" }, icon(I.send));
@@ -592,7 +663,7 @@ export async function chat() {
       return;
     }
     try {
-      const res = await fetch(endpoint + "/chat", {
+      const res = await authFetch(endpoint + "/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: "Bearer " + token(),
                    Accept: "text/event-stream" },
@@ -702,6 +773,7 @@ export async function chat() {
     const index = Math.max(0, (sessions.rows || []).findIndex(s => s.id === sessionStorage.getItem("p8-chat-session")));
     const first = threads.querySelectorAll(".thread-item")[index];
     if (first) openSession(sessions.rows[index], first);
+    if (starter) { box.focus(); autosize(); }
   });
 
   return h("div", { class: "page flush" }, shell);

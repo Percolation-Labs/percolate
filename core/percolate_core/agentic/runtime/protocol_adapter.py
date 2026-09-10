@@ -61,10 +61,16 @@ def apply_response_format(agent: AgentSpec, request: ChatRequest) -> AgentSpec:
     Returns the agent unchanged when nothing is requested, so this is inert for
     every existing caller.
     """
+    # Authoring clients can narrow a turn to a proposal. This must be enforced
+    # here, before binding tools, rather than entrusted to a prompt. A chained
+    # action would also execute the proposal, so it is disabled for this turn.
+    updates = {}
     schema = (request.response_format or {}).get("json_schema", {}).get("schema")
-    if not schema:
-        return agent
-    return agent.model_copy(update={"structured_output_schema": schema})
+    if schema:
+        updates['structured_output_schema'] = schema
+    if request.tool_choice == 'none':
+        updates.update(tools=[], chained_action=None)
+    return agent.model_copy(update=updates) if updates else agent
 
 
 class EventSink:

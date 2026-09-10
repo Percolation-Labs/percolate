@@ -38,8 +38,9 @@ from .. import __version__
 # A module missing from this tuple 404s and takes the whole page down with it,
 # so `tests/test_ui_reads.py` asserts that every module the UI imports is here
 # rather than leaving it to whoever adds the next one to remember.
-ASSETS = ("index.html", "api.js", "ui.js", "md.js", "reads.js", "views.js",
-          "access.js", "workbench.js", "theme.css")
+ASSETS = ("index.html", "api.js", "ui.js", "workspace.js", "md.js", "reads.js", "views.js",
+          "access.js", "cron.js", "schedule-assist.js", "agent-authoring.js",
+          "agent-assist.js", "agent-editor.js", "workbench.js", "drafts.js", "query-assist.js", "workflow-authoring.js", "workflow-plan.js", "workflow-assist.js", "workflow-composer.js", "help.md", "files.js", "sources.js", "source-authoring.js", "source-assist.js", "api-sources.js", "api-source-authoring.js", "api-source-assist.js", "theme.css")
 
 
 def _read(name: str) -> bytes:
@@ -65,6 +66,9 @@ def config() -> dict:
     return {
         "rest": os.environ.get("P8_UI_REST_URL", "http://localhost:5611"),
         "core": os.environ.get("P8_UI_CORE_URL", ""),
+        "content": os.environ.get("P8_UI_CONTENT_URL", ""),
+        "workflow_queue": os.environ.get("P8_UI_WORKFLOW_QUEUE", "http"),
+        "ingest_queue": os.environ.get("P8_UI_INGEST_QUEUE", "ingest"),
         "dev_token": dev,
         # The signing secret comes from the DEPLOYMENT, and only when that
         # deployment has asked for browser-side minting. It used to be a default
@@ -119,4 +123,18 @@ def serve(host: str = "0.0.0.0", port: int | None = None) -> None:
     # Resolved here rather than as a Typer default, for the reason content/cli.py
     # records: a default in the option is a value, so it wins over the
     # environment variable the module documents.
-    uvicorn.run(build_app(), host=host, port=port or int(os.environ.get("P8_UI_PORT", "8082")))
+    port = port or int(os.environ.get("P8_UI_PORT", "8082"))
+
+    # P8_UI_RELOAD exists because ASSETS is evaluated at import and everything
+    # else in this module is read from disk per request. So editing a served
+    # file works live, and ADDING one does not: the new module 404s, the page's
+    # import graph fails, and the whole UI goes blank with nothing in the server
+    # log. It has cost two debugging sessions in one day. Under a source mount
+    # the fix is for the process to restart itself when the file it reads the
+    # tuple from changes; in production nothing is mounted and this stays off.
+    if os.environ.get("P8_UI_RELOAD") == "1":
+        uvicorn.run("percolate_core.ui.server:build_app", factory=True,
+                    host=host, port=port, reload=True,
+                    reload_dirs=[str(resources.files(__package__))])
+        return
+    uvicorn.run(build_app(), host=host, port=port)

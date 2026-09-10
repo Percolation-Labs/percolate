@@ -35,6 +35,7 @@ import asyncpg
 from ..core import as_service
 from .artifacts import offload
 from .http import http_call
+from .agent_auth import uses_run_identity
 from .templates import TerminalError, resolve
 
 PERMANENT_DB_ERRORS = (
@@ -86,6 +87,15 @@ async def run_once(queue: str, worker_id: str) -> bool:
                 f"@handler({kind!r}), or point this worker at a different queue")
 
         spec = ctx.get("task_input") or {}
+        if kind == "http_call" and uses_run_identity(spec):
+            try:
+                async with as_service() as conn:
+                    owner = await conn.fetchval("select workflow.task_owner($1, $2)", task_id, worker_id)
+            except asyncpg.InsufficientPrivilegeError as e:
+                raise TerminalError(str(e)) from None
+            except asyncpg.UndefinedFunctionError:
+                raise TerminalError("The database needs workflow.task_owner; apply the workflow-engine RBAC integration before running agent steps") from None
+            ctx["_agent_caller"] = str(owner)
         # `work` steps get their templates resolved HERE, and http_call ones do
         # not, and the asymmetry is deliberate rather than left over.
         #
@@ -105,6 +115,8 @@ async def run_once(queue: str, worker_id: str) -> bool:
         if kind == "work":
             spec = resolve(spec, ctx)
 
+        ctx["_task_id"] = task_id
+        ctx["_worker_id"] = worker_id
         out = await fn(spec, ctx)
         async with as_service() as conn:
             # Between the handler and complete_task, so it covers every step

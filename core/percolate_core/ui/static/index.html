@@ -45,10 +45,10 @@
   </div>
   <nav id="nav"></nav>
   <div class="rail-foot">
-    <div class="org-switch" id="whoami" title="The token this browser is using">
+    <a class="org-switch" id="whoami" href="#/signin" title="Account and sign in">
       <span class="avatar soft">?</span>
       <span class="two-line"><strong>Not signed in</strong><small>NO TOKEN</small></span>
-    </div>
+    </a>
   </div>
 </aside>
 <main class="main">
@@ -57,6 +57,7 @@
     <span class="spacer"></span>
     <div class="pill-row" id="conn"></div>
   </div>
+  <div id="session-notice" aria-live="polite"></div>
   <div id="outlet"></div>
 </main>
 
@@ -64,20 +65,23 @@
 import { h } from "./ui.js";
 import * as W from "./views.js";
 import * as A from "./access.js";
-import { token, setToken, claims, config, setEndpoint, loadConfig } from "./api.js";
+import { query } from "./workbench.js";
+import { files } from "./files.js";
+import { sources } from "./sources.js";
+import { token, setToken, claims, config, setEndpoint, loadConfig, sessionState, canRenewSession, renewSession, ensureSession, devToken } from "./api.js";
 
-/* The routing table doubles as the rail, grouped the way the mockups grouped
-   it. A screen listed here exists; there is no entry for one that does not. */
+/* Top-level navigation also registers its screens. Child screens are added
+   to ROUTES below without creating another sidebar entry. */
 const NAV = [
-  ["", [["", "Overview", "home", W.overview], ["chat", "Chat", "chat", A.chat]]],
+  ["", [["", "Overview", "home", W.overview], ["chat", "Chat", "chat", A.chat], ["help", "Help", "book", A.help]]],
   ["Work", [["workflows", "Workflows", "flow", W.workflows],
-            ["draft", "Draft", "book", W.draft],
             ["runs", "Runs", "runs", W.runs],
-            ["schedules", "Schedules", "clock", W.schedules]]],
+            ["schedules", "Schedules", "clock", W.schedules],
+            ["query", "Query", "grid", query], ["sources", "Data Sources", "flow", sources], ["files", "Files", "book", files]]],
   ["Fleet", [["queues", "Queues & pools", "pools", W.queues],
              ["scale", "Load & limits", "scale", W.scale],
              ["events", "Events", "events", W.events]]],
-  ["Access", [["agents", "Agents", "agents", A.agents],
+  ["Access", [["agents", "Agents & Plugins", "agents", A.agents],
               ["users", "Users", "users", A.users],
               ["roles", "Roles", "roles", A.roles],
               ["keys", "Keys & sessions", "keys", A.keys],
@@ -85,7 +89,8 @@ const NAV = [
               ["surface", "Surface", "grid", A.surface]]],
 ];
 const ROUTES = new Map(NAV.flatMap(([, items]) => items.map((i) => [i[0], i])));
-const ALIAS = { run: "runs" };
+ROUTES.set("draft", ["draft", "Draft", "book", W.draft]);
+const ALIAS = { run: "runs", draft: "workflows" };
 
 const ICONS = {
   home: '<path d="M2 7l5.5-4.5L13 7v6H2z"/>',
@@ -132,101 +137,85 @@ function drawNav(active) {
       }))));
 }
 
+let authRequired = false;
 function drawWho() {
-  const c = claims();
+  const c = claims(), active = sessionState() === "active";
+  const label = active ? "Your workspace" : token() ? "Session expired" : "Sign in";
   document.getElementById("whoami").replaceChildren(
-    h("span", { class: "avatar soft" }, c ? (c.sub || "?").slice(0, 2).toUpperCase() : "?"),
-    h("span", { class: "two-line" },
-      h("strong", {}, c ? "signed in" : "Not signed in"),
-      h("small", {}, c ? (c.role || "") : "NO TOKEN")));
+    h("span", {class:"avatar soft"}, active ? (c.sub || "?").slice(0,2).toUpperCase() : "↗"),
+    h("span", {class:"two-line"}, h("strong", {}, label),
+      h("small", {}, active ? (config().devToken ? "Development" : "Account") : "Continue to Percolate")));
   document.getElementById("conn").replaceChildren(
-    h("span", { class: "chip" }, "REST " + config().rest.replace(/^https?:\/\//, "")),
-    h("a", { class: "btn", href: "#/signin" }, c ? "Token" : "Sign in"));
-}
-
-/* Dev sign-in.
- *
- * The gap made concrete: rbac.login() verifies the password IN THE DATABASE and
- * returns (user_id, refresh_token_id) -- ids, not a token. Signing a JWT is the
- * one thing in this flow SQL does not do, so in a deployment percolate-core
- * does it and hands the browser a short-lived access token. Here, against a dev
- * stack whose secret is printed in the compose file, the browser signs its own.
- * That is honest for a workbench and would be a hole anywhere else. */
-async function devToken(sub, secret) {
-  const enc = new TextEncoder();
-  const b64 = (o) => btoa(typeof o === "string" ? o : JSON.stringify(o))
-    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  const head = b64({ alg: "HS256", typ: "JWT" });
-  const body = b64({ role: "authenticated", sub, exp: Math.floor(Date.now() / 1000) + 3600 });
-  const key = await crypto.subtle.importKey("raw", enc.encode(secret),
-    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(head + "." + body));
-  return head + "." + body + "." + btoa(String.fromCharCode(...new Uint8Array(sig)))
-    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    h("span", {class:"connection-label", title:config().rest}, config().devToken ? "Development workspace" : "Workspace"),
+    h("a", {class:"btn", href:"#/signin"}, active ? "Account" : "Sign in"));
+  const notice = document.getElementById("session-notice");
+  const expired = authRequired || ["expired","invalid"].includes(sessionState());
+  notice.replaceChildren();
+  if (!expired || location.hash === "#/signin") return;
+  notice.append(h("div", {class:"session-banner", role:"alert"},
+    h("div", {}, h("strong", {}, "Your session has expired"),
+      h("p", {}, "Continue where you left off. Your drafts are saved.")),
+    canRenewSession() && c?.sub ? h("button", {class:"btn primary", onclick:async e => {
+      e.target.disabled = true;
+      try { await renewSession(); authRequired = false; drawWho(); }
+      catch (_) { location.hash = "#/signin"; }
+    }}, "Renew session") : h("a", {class:"btn primary", href:"#/signin"}, "Sign in")));
 }
 
 function signin() {
-  const sub = h("input", { class: "control", style: "width:100%",
-    value: localStorage.getItem("p8-sub") || "11111111-1111-1111-1111-111111111111" });
-  const secret = h("input", { class: "control", style: "width:100%",
-    value: localStorage.getItem("p8-secret") || config().devSecret || "" });
-  const rest = h("input", { class: "control", style: "width:100%", value: config().rest });
-  const paste = h("input", { class: "control mono", style: "width:100%", placeholder: "or paste a JWT" });
-  const out = h("div");
-  /* The server decides whether this control exists at all. Where percolate-core
-     serves the page and has not set P8_UI_DEV_TOKEN=1, minting a token in the
-     browser is not offered -- because offering it invites somebody to put the
-     signing secret where a script can read it. */
-  const devMint = config().devToken;
-  return h("div", { class: "page" },
-    h("header", { class: "page-head" },
-      h("span", { class: "kicker" }, "the one thing SQL does not do"),
-      h("h1", {}, "Sign in"),
-      h("p", { class: "lede" },
-        "rbac.login() verifies the password inside Postgres and returns a user id and a refresh-token id. ",
-        "It does not return a JWT, because signing one is not a query — so something has to, and that ",
-        "something is percolate-core.",
-        devMint ? " On this stack the browser does it instead, with the secret from the compose file."
-                : " Until it does, a token comes from the CLI.")),
-    h("div", { class: "grid g2" },
-      h("div", { class: "panel" }, h("div", { class: "body" },
-        h("h3", {}, devMint ? "Dev token" : "Bring a token"),
-        devMint ? null : h("div", { class: "note amber" },
-          h("strong", {}, "This deployment does not mint tokens in the browser. "),
-          "Sign one with ", h("code", { class: "mono" }, "p8 auth token <email>"),
-          " and paste it below. Set ", h("code", { class: "mono" }, "P8_UI_DEV_TOKEN=1"),
-          " on the server to re-enable the control, which is only ever right on a ",
-          "stack whose JWT secret is already public."),
-        devMint ? h("div", { class: "field" }, h("label", {}, "user id (sub)"), sub) : null,
-        devMint ? h("div", { class: "field" }, h("label", {}, "PGRST_JWT_SECRET"), secret) : null,
-        h("div", { class: "field" }, h("label", {}, "PostgREST"), rest),
-        devMint ? h("button", { class: "btn primary", onclick: async () => {
-          localStorage.setItem("p8-sub", sub.value);
-          localStorage.setItem("p8-secret", secret.value);
-          setEndpoint("rest", rest.value.replace(/\/$/, ""));
-          setToken(await devToken(sub.value.trim(), secret.value));
-          drawWho();
-          out.replaceChildren(h("div", { class: "note" }, "Signed. ", h("a", { href: "#/" }, "Overview")));
-        } }, "Mint and use") : null,
-        h("div", { class: "field" }, h("label", {}, "or paste one"), paste,
-          h("button", { class: "btn", onclick: () => { setToken(paste.value.trim()); drawWho();
-            out.replaceChildren(h("div", { class: "note" }, "Token stored in sessionStorage.")); } }, "Use pasted")),
-        out)),
-      h("div", { class: "panel" }, h("div", { class: "body" },
-        h("h3", {}, "What a real one looks like"),
-        h("div", { class: "note" }, h("strong", {}, "POST /auth/login "), "on percolate-core: it calls ",
-          h("code", { class: "mono" }, "rbac.login()"), ", signs a short-lived access token, and sets the ",
-          "refresh token as an HttpOnly cookie so no script can read it."),
-        h("div", { class: "note" }, h("strong", {}, "POST /auth/refresh "), "rotates it. ",
-          h("code", { class: "mono" }, "rbac.refresh_session()"), " already implements the rotation chain, ",
-          "including revoking the whole chain when an already-rotated token is presented."),
-        h("div", { class: "note amber" }, "Neither endpoint exists yet. They are the smallest thing ",
-          "percolate-core owes this UI, and the only part of sign-in that is not already a row.")))));
+  const active = sessionState() === "active" && !authRequired;
+  const dev = canRenewSession();
+  const sub = h("input", {class:"control mono", "aria-label":"Development user ID",
+    value:claims()?.sub || localStorage.getItem("p8-sub") || "11111111-1111-1111-1111-111111111111"});
+  const paste = h("textarea", {class:"control mono", rows:4, "aria-label":"Access token", placeholder:"Paste your access token", autocomplete:"off", spellcheck:"false"});
+  const out = h("div", {role:"status"});
+  const destination = () => {
+    const saved = sessionStorage.getItem("p8-auth-return");
+    return saved?.startsWith("#/") && saved !== "#/signin" ? saved : "#/files";
+  };
+  const done = () => { authRequired = false; drawWho(); location.hash = destination(); };
+  const use = h("button", {class:"btn primary", onclick:async e => {
+    e.target.disabled = true;
+    try {
+      if (!/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sub.value.trim())) throw new Error("Enter a valid development user ID.");
+      await renewSession(sub.value.trim());
+      localStorage.setItem("p8-sub",sub.value.trim());
+      done();
+    } catch (err) { out.replaceChildren(h("p", {class:"note rose"},err.message)); }
+    finally { e.target.disabled = false; }
+  }}, active ? "Return to workspace" : "Continue to workspace");
+  const tokenEntry = h("div", {class:"form-stack"},
+    h("label", {class:"field"}, h("span", {}, "Access token"), paste),
+    h("button", {class:"btn", onclick:() => {
+      const previous = token();
+      setToken(paste.value.trim());
+      if (sessionState() !== "active") { setToken(previous); out.replaceChildren(h("p",{class:"note rose"},"This token is expired or invalid. Use a current access token.")); return; }
+      done();
+    }}, "Sign in with token"));
+  return h("div", {class:"page account-page"},
+    h("div", {class:"account-card"},
+      h("span", {class:"kicker"}, dev ? "Development workspace" : "Your workspace"),
+      h("h1", {}, active ? "You're signed in" : "Welcome to Percolate"),
+      h("p", {class:"account-intro"}, active ? "Your files, conversations and workflows are ready." :
+        dev ? "Continue with your development identity. Your session renews automatically while you work." : "Use an access token from your administrator or Percolate CLI to sign in."),
+      dev ? use : tokenEntry,
+      dev ? h("details", {class:"disclosure"}, h("summary", {}, "Development identity"),
+        h("div", {class:"form-stack"}, h("label", {class:"field"}, h("span", {}, "User ID"), sub),
+          h("p", {class:"hint"}, "The development server provides this sign-in method. Your existing user permissions still apply."))) : null,
+      dev ? h("details", {class:"disclosure"}, h("summary", {}, "Use an access token instead"), tokenEntry) : null,
+      active ? h("button", {class:"btn ghost", onclick:() => {
+        setToken(""); sessionStorage.setItem("p8-signed-out","1"); authRequired = false; route();
+      }}, "Sign out") : null,
+      out));
 }
 
+let routeVersion = 0;
 async function route() {
+  const version = ++routeVersion;
   const [slug, arg] = (location.hash || "#/").slice(2).split("/");
   const outlet = document.getElementById("outlet");
+  if (slug !== "signin") sessionStorage.setItem("p8-auth-return",location.hash || "#/");
+  drawWho();
   drawNav(ALIAS[slug] || (ROUTES.has(slug) ? slug : null));
   const label = slug === "signin" ? "Sign in"
     : slug === "run" ? "Run detail"
@@ -234,10 +223,12 @@ async function route() {
   document.getElementById("crumbs").replaceChildren(h("span", { class: "here" }, label));
   outlet.replaceChildren(h("div", { class: "page" }, h("div", { class: "empty" }, "Loading...")));
   try {
-    if (slug === "signin") { outlet.replaceChildren(signin()); return; }
-    if (slug === "run") { outlet.replaceChildren(await W.run(arg)); return; }
-    outlet.replaceChildren(await (ROUTES.get(slug) || ROUTES.get(""))[3]());
+    const screen = slug === "signin" ? signin() : slug === "run" ? await W.run(arg)
+      : await (ROUTES.get(slug) || ROUTES.get(""))[3](arg);
+    if (version !== routeVersion) return;
+    outlet.replaceChildren(screen);
   } catch (e) {
+    if (version !== routeVersion) return;
     outlet.replaceChildren(h("div", { class: "page" },
       h("div", { class: "note rose" }, String((e && e.message) || e))));
   }
@@ -245,6 +236,10 @@ async function route() {
 }
 
 addEventListener("hashchange", route);
+addEventListener("p8-session-changed", () => { authRequired = false; drawWho(); });
+addEventListener("p8-auth-required", () => { authRequired = true; drawWho(); });
+addEventListener("focus", () => { ensureSession().then(drawWho).catch(drawWho); });
+setInterval(drawWho, 15000);
 drawWho();
 
 /* `?dev=1` mints the dev token with the compose-file defaults and goes straight
@@ -253,14 +248,15 @@ drawWho();
 (async () => {
   await loadConfig();          // before anything reads config(), including drawWho
   drawWho();
-  if (config().devToken && new URLSearchParams(location.search).get("dev") === "1" && !token()) {
-    const secret = localStorage.getItem("p8-secret") || config().devSecret;
+  if (config().devToken && new URLSearchParams(location.search).get("dev") === "1" && !token() && !sessionStorage.getItem("p8-signed-out")) {
+    const secret = config().devSecret;
     if (secret) {
       setToken(await devToken(
         localStorage.getItem("p8-sub") || "11111111-1111-1111-1111-111111111111", secret));
       drawWho();
     }
   }
+  try { await ensureSession(); } catch (_) {}
   if (!token()) location.hash = "#/signin";
   route();
 })();

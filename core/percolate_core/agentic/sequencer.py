@@ -53,6 +53,7 @@ from .runtime import (
 from .runtime.delegation import DELEGATED_BY_HEADER
 from .settings import Settings
 from .tools import ResolvedToolset, resolve_toolset
+from .tools.auth import caller_credentials
 
 
 @dataclass(slots=True)
@@ -89,7 +90,9 @@ class TurnSequencer:
         *,
         sink: EventSink | None = None,
         engine: AgentEngine | None = None,
+        caller_authorization: str | None = None,
     ) -> None:
+        self._caller_authorization = caller_authorization
         self.repo = repo
         self.settings = settings or Settings.from_env()
         self.persistence = PersistenceAdapter(repo, self.settings)
@@ -150,8 +153,9 @@ class TurnSequencer:
         passed to the model separately — reload after the write and the model
         sees the same message twice.
         """
-        async with self.sink.publishing():
-            return await self._run_turn(request, context, model=model, parent=parent)
+        with caller_credentials(self._caller_authorization, self.settings.tool_auth_origins):
+            async with self.sink.publishing():
+                return await self._run_turn(request, context, model=model, parent=parent)
 
     async def _run_turn(
         self,
@@ -173,25 +177,36 @@ class TurnSequencer:
         if not await self.guard_quota(run, context):
             return await self.finish(run, session, status="quota_exceeded")
 
-        toolset = await self.bind_tools(agent)
-        execution = await self.invoke_model(
-            agent, run, context, prompt, history, toolset, model=model
-        )
-        citations = self.attribute_citations(execution)
-        messages = await self.persist(run, execution, citations)
-        await self.sink.emit(
-            TextMessageEnd(
-                run_id=run.id,
-                thread_id=run.session_id,
-                message_id=self.message_id,
+        try:
+            toolset = await self.bind_tools(agent)
+            execution = await self.invoke_model(
+                agent, run, context, prompt, history, toolset, model=model
             )
-        )
-        await self.maybe_chain(agent, run, execution)
-        await self.maybe_summarize(session, agent)
-        result = await self.finish(run, session, status="succeeded")
-        result.messages = messages
-        result.execution = execution
-        return result
+            citations = self.attribute_citations(execution)
+            messages = await self.persist(run, execution, citations)
+            await self.sink.emit(
+                TextMessageEnd(
+                    run_id=run.id,
+                    thread_id=run.session_id,
+                    message_id=self.message_id,
+                )
+            )
+            await self.maybe_chain(agent, run, execution)
+            await self.maybe_summarize(session, agent)
+            result = await self.finish(run, session, status="succeeded")
+            result.messages = messages
+            result.execution = execution
+            return result
+        except Exception as exc:
+            from .contracts import RunError
+            message = f"{type(exc).__name__}: {exc}"
+            if self._caller_authorization:
+                message = message.replace(self._caller_authorization, "[redacted]")
+                message = message.replace(self._caller_authorization.split(" ", 1)[-1], "[redacted]")
+            run = await self.repo.update_run(run.id, status="failed", state={**run.state, "error": message})
+            await self.sink.emit(RunError(thread_id=run.session_id, run_id=run.id, message=message))
+            self._record("finish", "brief §5.1", "failed")
+            return TurnResult(run=run, session=session, trace=list(self.trace))
 
     # -- steps -------------------------------------------------------------
 

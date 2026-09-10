@@ -44,6 +44,32 @@ jobs:
       - name: The stated guarantees still hold
         run: python tests/smoke.py
 
+      - name: Browser transport remains opt-in and authenticated
+        run: python -m unittest discover -s tests -p test_agent_cors.py
+
+      # The live half of this needs a database and lives in dev/ui_reads.py.
+      # What runs here is the structure that made the live check possible: the
+      # screens share their read contracts with the audit, so a projection
+      # cannot go unexecuted the way five of them did.
+      - name: Screens and their audit still read the same contracts
+        run: python -m unittest discover -s tests -p test_ui_reads.py
+
+      # The Schedules screen reimplements the engine's cron matcher so it can
+      # preview a schedule. These pin the decisions that differ from an
+      # ordinary cron library; dev/cron_agrees.py runs both against a live
+      # database, which needs one and so does not run here.
+      - name: The browser's cron reader still means what the engine means
+        run: python -m unittest discover -s tests -p test_cron.py
+
+      - name: Expired browser sessions recover safely
+        run: python -m unittest discover -s tests -p test_ui_session.py
+
+      - name: Browser file uploads preserve authentication
+        run: python -m unittest discover -s tests -p test_content_cors.py
+
+      - name: Tool identity and persisted execution
+        run: python -m unittest discover -s tests -p test_tool_auth.py
+
       - name: A released version number may not be reused
         run: dev/check-version.sh
 

@@ -25,7 +25,7 @@ const SAFE_URL = /^(https?:|mailto:|#|\/)/i;
 
 /** Inline: `code`, **bold**, *italic*, [text](url). Emitted as nodes, in order. */
 function inline(text, into) {
-  const pattern = /(`[^`]+`)|(\*\*.+?\*\*)|(\*[^*\n]+\*|_[^_\n]+_)|(\[[^\]]+\]\([^)\s]+\))/g;
+  const pattern = /(`[^`]+`)|(\*\*.+?\*\*)|(\*[^*\n]+\*|(?<![\p{L}\p{N}_])_[^_\n]+_(?![\p{L}\p{N}_]))|(\[[^\]]+\]\([^)\s]+\))/gu;
   let last = 0, m;
   while ((m = pattern.exec(text)) !== null) {
     if (m.index > last) into.append(document.createTextNode(text.slice(last, m.index)));

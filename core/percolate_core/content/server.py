@@ -21,13 +21,13 @@ import os
 from typing import Any
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Response
 
 from .. import __version__
 from ..core import as_caller, claims_from_jwt, optional
 from . import storage
 
-app = FastAPI(title="percolate content", version=__version__)
+routes = APIRouter()
 
 
 async def caller(authorization: str | None = Header(default=None)) -> dict[str, Any] | None:
@@ -52,11 +52,12 @@ async def caller(authorization: str | None = Header(default=None)) -> dict[str, 
         raise HTTPException(401, str(e))
 
 
-@app.post("/files", status_code=201)
+@routes.post("/files", status_code=201)
 async def upload(request: Request,
                  claims: dict | None = Depends(caller),
                  x_p8_channel: str = Header(default="uploads"),
                  x_p8_title: str | None = Header(default=None),
+                 x_p8_title_utf8: str | None = Header(default=None),
                  x_p8_org: str | None = Header(default=None),
                  traceparent: str | None = Header(default=None)):
     """Store bytes, register them, and start the ingestion workflow.
@@ -64,6 +65,14 @@ async def upload(request: Request,
     All three in one transaction, so a committed resource always has a run and
     a rolled-back upload leaves neither.
     """
+    if not claims:
+        raise HTTPException(401, "Sign in before uploading a file")
+    if x_p8_title_utf8 is not None:
+        from urllib.parse import unquote
+        try:
+            x_p8_title = unquote(x_p8_title_utf8, encoding="utf-8", errors="strict")
+        except UnicodeError:
+            raise HTTPException(400, "X-P8-Title-Utf8 must contain percent-encoded UTF-8") from None
     data = await request.body()
     if not data:
         raise HTTPException(400, "empty body -- send the file bytes")
@@ -92,7 +101,7 @@ async def upload(request: Request,
     return {"resource_id": str(resource_id), "checksum": checksum, "bytes": len(data)}
 
 
-@app.get("/files/{resource_id}")
+@routes.get("/files/{resource_id}")
 async def fetch(resource_id: UUID, claims: dict | None = Depends(caller)):
     async with as_caller(claims) as conn:
         row = await conn.fetchrow("select * from content.resolve_file($1)", resource_id)
@@ -107,9 +116,35 @@ async def fetch(resource_id: UUID, claims: dict | None = Depends(caller)):
     return Response(body, media_type=row["content_type"] or "application/octet-stream")
 
 
-@app.get("/health")
+@routes.get("/health")
 async def health():
     return {"status": "ok", "bucket": storage.bucket()}
+
+
+def build_app(cors_origins: tuple[str, ...] | None = None) -> FastAPI:
+    from urllib.parse import urlsplit
+    from fastapi.middleware.cors import CORSMiddleware
+
+    origins = cors_origins if cors_origins is not None else tuple(
+        o.strip() for o in os.environ.get("P8_CONTENT_CORS_ORIGINS", "").split(",") if o.strip())
+    for origin in origins:
+        parsed = urlsplit(origin)
+        if ("*" in origin or parsed.scheme not in {"http", "https"}
+                or not parsed.hostname or parsed.username or parsed.password
+                or parsed.path or parsed.query or parsed.fragment
+                or "\\" in origin or any(c.isspace() for c in origin)):
+            raise ValueError("Content CORS requires explicit HTTP(S) origins without paths")
+    application = FastAPI(title="percolate content", version=__version__)
+    if origins:
+        application.add_middleware(CORSMiddleware, allow_origins=list(origins),
+            allow_methods=["GET", "POST"],
+            allow_headers=["Authorization", "Content-Type", "X-P8-Channel", "X-P8-Title", "X-P8-Title-Utf8", "X-P8-Org", "Traceparent"],
+            allow_credentials=False)
+    application.include_router(routes)
+    return application
+
+
+app = build_app()
 
 
 def serve(host: str = "0.0.0.0", port: int | None = None) -> None:

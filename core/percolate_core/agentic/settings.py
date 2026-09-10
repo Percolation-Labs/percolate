@@ -52,6 +52,16 @@ class Settings:
         )
     )
     schema: str = field(default_factory=lambda: os.getenv("P8_SCHEMA", "agentic"))
+    # The UI and runtime may have separate origins. Opt in per deployment;
+    # this grants browser transport access, never identity or database access.
+    cors_origins: tuple[str, ...] = field(default_factory=lambda: tuple(
+        origin.strip() for origin in os.getenv("P8_CORS_ORIGINS", "").split(",")
+        if origin.strip()
+    ))
+    tool_auth_origins: tuple[str, ...] = field(default_factory=lambda: tuple(
+        origin.strip() for origin in os.getenv("P8_TOOL_AUTH_ORIGINS", "").split(",")
+        if origin.strip()
+    ))
     pool_min: int = field(default_factory=lambda: int(os.getenv("P8_POOL_MIN", "1")))
     pool_max: int = field(default_factory=lambda: int(os.getenv("P8_POOL_MAX", "8")))
 
@@ -98,3 +108,13 @@ class Settings:
     @classmethod
     def from_env(cls) -> Settings:
         return cls()
+
+    def __post_init__(self) -> None:
+        from urllib.parse import urlsplit
+
+        for origin in (*self.cors_origins, *self.tool_auth_origins):
+            parsed = urlsplit(origin)
+            if ("*" in origin or parsed.scheme not in {"http", "https"}
+                    or not parsed.netloc or parsed.username or parsed.password
+                    or parsed.path or parsed.query or parsed.fragment):
+                raise ValueError("CORS and tool auth allowlists must contain explicit HTTP(S) origins without paths")

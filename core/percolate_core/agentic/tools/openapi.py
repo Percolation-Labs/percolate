@@ -34,7 +34,7 @@ from ..contracts import (
     ToolResult,
     ToolServer,
 )
-from .provider import resolve_credential
+from .auth import outbound_headers
 
 HTTP_METHODS = ("get", "post", "put", "patch", "delete")
 
@@ -174,7 +174,7 @@ class OpenApiProvider:
         from under a cached binding. Leaning loud — compare on re-sync, refuse to
         resolve a drifted tool — but not settled, and not silently settled here.
         """
-        headers = _auth_headers(await resolve_credential(server.credential_ref))
+        headers = await outbound_headers(server)
         async with httpx.AsyncClient(timeout=20) as client:
             response = await client.get(server.url, headers=headers)
             response.raise_for_status()
@@ -211,9 +211,9 @@ class OpenApiProvider:
         path = target.path
         query: dict[str, Any] = {}
         body: dict[str, Any] = {}
-        outbound = dict(headers or {})
+        url = urljoin(_base(server.url), path.lstrip("/"))
         try:
-            outbound.update(_auth_headers(await resolve_credential(server.credential_ref)))
+            outbound = await outbound_headers(server, headers, url=url)
         except (LookupError, NotImplementedError) as exc:
             # A credential this runtime cannot resolve is a tool it cannot
             # reach, which §5.2 already has a name for. Letting it raise instead
@@ -249,8 +249,13 @@ class OpenApiProvider:
                 query[name] = value
 
         url = urljoin(_base(server.url), path.lstrip("/"))
+        from .auth import origin
+        if origin(url) != origin(server.url):
+            return ToolResult(call_id=call.call_id, tool_name=tool.name,
+                              content="tool target changed origin", is_error=True,
+                              error_kind="dispatch_error")
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
                 response = await client.request(
                     target.method, url, params=query or None, json=body or None,
                     headers=outbound,

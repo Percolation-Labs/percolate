@@ -25,7 +25,7 @@ from ..contracts import (
     ToolResult,
     ToolServer,
 )
-from .provider import resolve_credential
+from .auth import outbound_headers
 
 
 @asynccontextmanager
@@ -41,13 +41,10 @@ async def _session(server: ToolServer, headers: dict[str, str] | None) -> Any:
     from mcp import ClientSession
     from mcp.client.streamable_http import streamable_http_client
 
-    outbound = dict(headers or {})
-    credential = await resolve_credential(server.credential_ref)
-    if credential:
-        outbound["Authorization"] = f"Bearer {credential}"
+    outbound = await outbound_headers(server, headers)
 
     async with (
-        httpx.AsyncClient(headers=outbound, timeout=60) as http_client,
+        httpx.AsyncClient(headers=outbound, timeout=60, follow_redirects=False) as http_client,
         streamable_http_client(server.url, http_client=http_client) as streams,
         ClientSession(streams[0], streams[1]) as session,
     ):
@@ -115,12 +112,15 @@ class McpProvider:
                 latency_ms=int((time.monotonic() - started) * 1000),
             )
 
+        is_error = bool(getattr(result, "is_error", getattr(result, "isError", False)))
+        meta = getattr(result, "meta", getattr(result, "_meta", None)) or {}
+        error_kind = "dispatch_error" if meta.get("errorKind") == "dispatch_error" else "tool_error"
         return ToolResult(
             call_id=call.call_id,
             tool_name=tool.name,
             content=_content(result),
-            is_error=bool(getattr(result, "isError", False)),
-            error_kind="tool_error" if getattr(result, "isError", False) else None,
+            is_error=is_error,
+            error_kind=error_kind if is_error else None,
             latency_ms=int((time.monotonic() - started) * 1000),
         )
 
@@ -132,8 +132,8 @@ def _content(result: Any) -> Any:
     a retrieval tool returned — flattening everything to text would throw away
     exactly the fields provenance is built from.
     """
-    structured = getattr(result, "structuredContent", None)
-    if structured:
+    structured = getattr(result, "structured_content", getattr(result, "structuredContent", None))
+    if structured is not None:
         return structured
     parts = [getattr(block, "text", None) for block in getattr(result, "content", [])]
     text = "\n".join(p for p in parts if p)

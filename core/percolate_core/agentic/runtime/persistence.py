@@ -243,6 +243,7 @@ class PersistenceAdapter:
                 {
                     "call_id": r.call_id,
                     "tool_name": r.tool_name,
+                    "content": r.content,
                     "is_error": r.is_error,
                     "error_kind": r.error_kind,
                 }
