@@ -608,3 +608,25 @@ revoke execute on function workflow.may_define() from public;
 -- reaches its own runs through workflow.runs_api and the entry points that
 -- authorize against the run.
 grant execute on function workflow.encoding_drift() to worker;
+
+-- The principal of a claimed task comes from the run, never from run input.
+-- Workers use this only to authenticate an agent step to the configured runtime.
+create or replace function workflow.task_owner(p_task_id uuid, p_worker_id text)
+returns uuid as $$
+declare v_owner uuid;
+begin
+    select r.owner_id into v_owner
+      from workflow.tasks t join workflow.runs r on r.id = t.run_id
+     where t.id = p_task_id and t.status = 'running'
+       and t.claimed_by = p_worker_id;
+    if not found then
+        raise exception 'task is not currently held by this worker' using errcode = '42501';
+    end if;
+    if v_owner is null then
+        raise exception 'agent execution requires a run owner' using errcode = '42501';
+    end if;
+    return v_owner;
+end;
+$$ language plpgsql stable security definer set search_path = pg_catalog, public;
+revoke all on function workflow.task_owner(uuid, text) from public;
+grant execute on function workflow.task_owner(uuid, text) to worker;

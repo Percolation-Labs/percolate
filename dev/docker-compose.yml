@@ -195,6 +195,111 @@ services:
       # workflow.tasks never contains a secret.
       LLM_API_KEY: ${LLM_API_KEY:-}
 
+  # Opt-in workbench: `dev/stacks.sh ui`. Published dependencies, working-tree
+  # Python code; the Docker network preserves the seeded tool-server URLs.
+  # Neither process gets a privileged DB login, and the UI gets no provider key.
+  agent:
+    profiles: [ui]
+    image: percolationlabs/percolate-core:0.1.8
+    container_name: ${P8_STACK:-p8-dev}-agent
+    command: ["agent", "serve"]
+    environment:
+      PYTHONPATH: /src
+      PYTHONDONTWRITEBYTECODE: "1"
+      P8_DSN: postgres://authenticator:authpass@db:5432/${P8_DB:-p8dev}
+      P8_JWT_SECRET: experiment-only-jwt-secret-not-for-real-use-0123456789
+      P8_CORS_ORIGINS: http://localhost:${P8_UI_PORT:-8082},http://127.0.0.1:${P8_UI_PORT:-8082}
+      # These first-party services verify the browser caller's JWT themselves.
+      # Registered external tools never receive that caller credential.
+      P8_TOOL_AUTH_ORIGINS: http://query-mcp:8090,http://postgrest:3000
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+    volumes:
+      - ../percolate-core/percolate_core:/src/percolate_core:ro
+    ports:
+      - "127.0.0.1:${P8_AGENT_PORT:-5612}:8080"
+
+  ui:
+    profiles: [ui]
+    image: percolationlabs/percolate-core:0.1.8
+    container_name: ${P8_STACK:-p8-dev}-ui
+    command: ["ui", "serve", "--port", "8082"]
+    environment:
+      PYTHONPATH: /src
+      PYTHONDONTWRITEBYTECODE: "1"
+      P8_UI_REST_URL: http://localhost:${P8_REST_PORT:-5611}
+      P8_UI_CORE_URL: http://localhost:${P8_AGENT_PORT:-5612}
+      P8_UI_WORKFLOW_QUEUE: ui-workflows
+      P8_UI_INGEST_QUEUE: ingest-ui
+      P8_UI_CONTENT_URL: http://localhost:${P8_UI_CONTENT_PORT:-5618}
+      P8_UI_DEV_TOKEN: "1"
+      # The source is mounted, so adding a UI module must not need a manual
+      # restart: without this the new file 404s and the page goes blank.
+      P8_UI_RELOAD: "1"
+      P8_UI_DEV_SECRET: experiment-only-jwt-secret-not-for-real-use-0123456789
+    volumes:
+      - ../percolate-core/percolate_core:/src/percolate_core:ro
+    ports:
+      - "127.0.0.1:${P8_UI_PORT:-8082}:8082"
+
+  # Browser workbench content and a dedicated ingest queue. The normal content
+  # service and any pending work on its ingest queue remain independently run.
+  ui-content:
+    profiles: [ui]
+    image: percolationlabs/percolate-core:0.1.8
+    container_name: ${P8_STACK:-p8-dev}-ui-content
+    command: ["content", "serve"]
+    environment:
+      PYTHONPATH: /src
+      PYTHONDONTWRITEBYTECODE: "1"
+      P8_DSN: postgres://authenticator:authpass@db:5432/${P8_DB:-p8dev}
+      P8_S3_ENDPOINT: http://minio:9000
+      P8_S3_KEY: p8admin
+      P8_S3_SECRET: p8password
+      P8_BUCKET: p8-content
+      P8_JWT_SECRET: experiment-only-jwt-secret-not-for-real-use-0123456789
+      P8_CONTENT_CORS_ORIGINS: http://localhost:${P8_UI_PORT:-8082},http://127.0.0.1:${P8_UI_PORT:-8082}
+    volumes:
+      - ../percolate-core/percolate_core:/src/percolate_core:ro
+    ports:
+      - "127.0.0.1:${P8_UI_CONTENT_PORT:-5618}:8081"
+
+  ui-ingest:
+    profiles: [ui]
+    image: percolationlabs/percolate-core:0.1.8
+    container_name: ${P8_STACK:-p8-dev}-ui-ingest
+    command: ["ingest", "serve", "--queue", "ingest-ui", "--id", "ui-ingest-1"]
+    environment:
+      PYTHONPATH: /src
+      PYTHONDONTWRITEBYTECODE: "1"
+      P8_DSN: postgres://worker:workerpass@db:5432/${P8_DB:-p8dev}
+      P8_S3_ENDPOINT: http://minio:9000
+      P8_S3_KEY: p8admin
+      P8_S3_SECRET: p8password
+      P8_BUCKET: p8-content
+      LLM_API_KEY: ${LLM_API_KEY:-${OPENAI_API_KEY:-}}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      P8_INGEST_CREDENTIAL_ORIGINS: ${P8_INGEST_CREDENTIAL_ORIGINS:-}
+    volumes:
+      - ../percolate-core/percolate_core:/src/percolate_core:ro
+
+  ui-worker:
+    profiles: [ui]
+    image: percolationlabs/percolate-core:0.1.8
+    container_name: ${P8_STACK:-p8-dev}-ui-worker
+    command: ["worker", "--queue", "ui-workflows", "--id", "ui-workflows-1"]
+    environment:
+      PYTHONPATH: /src
+      PYTHONDONTWRITEBYTECODE: "1"
+      P8_DSN: postgres://worker:workerpass@db:5432/${P8_DB:-p8dev}
+      P8_AGENT_URL: http://agent:8080
+      P8_AGENT_SIGNING_KEY_FILE: /run/secrets/agent-signing-key
+    volumes:
+      - ../percolate-core/percolate_core:/src/percolate_core:ro
+      - ./.stacks/ui-agent-signing-key:/run/secrets/agent-signing-key:ro
+
   content:
     image: percolationlabs/percolate-core:0.1.6
     container_name: ${P8_STACK:-p8-dev}-content

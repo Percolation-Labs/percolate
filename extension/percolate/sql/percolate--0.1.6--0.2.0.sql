@@ -8483,7 +8483,17 @@ insert into rbac.permission_kinds (resource, action, checked_by) values
     ('workflow_runs',      'signal', 'workflow.assert_run_access'),
     ('workflow_schedules', 'create', 'workflow.assert_schedule_access'),
     ('workflow_schedules', 'enable', 'workflow.assert_schedule_access'),
-    ('workflow_schedules', 'delete', 'workflow.assert_schedule_access')
+    ('workflow_schedules', 'delete', 'workflow.assert_schedule_access'),
+    -- Using an agent and reading its row are different authorities, and only
+    -- the second one had a pair. `agents:select` says you may see that an
+    -- agent exists; `agents:invoke` says you may spend money and reach tools
+    -- as yourself through it. A deployment that wants chat available to
+    -- operators and not to every account expresses that here and nowhere else.
+    ('agents',             'invoke', 'agentic.may_invoke'),
+    -- Same argument on the content side. `content.assert_org_write` already
+    -- asks whether the caller may act inside the org; nothing asked whether
+    -- they may put bytes in it at all, so any member of any org could upload.
+    ('resources',          'create', 'content.may_upload')
 -- `do update`, not `do nothing`, and the difference is only visible on an
 -- UPGRADED database. `checked_by` says where the pair is consulted so that it
 -- can be verified, and 0.1.4 renamed the policies that consult two of these to
@@ -8577,6 +8587,27 @@ insert into rbac.role_permissions (role, resource, action)
 select r.name, k.resource, k.action
   from rbac.roles r cross join rbac.permission_kinds k
  where r.grants_all
+on conflict do nothing;
+
+-- UPGRADE BACKFILL for the two pairs added in 0.1.10 (agents:invoke,
+-- resources:create). Both gate a capability that was previously ungated, so
+-- without this every existing role loses chat and upload the moment the
+-- schema loads -- a silent outage produced by a security improvement, which is
+-- how security improvements get reverted.
+--
+-- So: existing roles keep what they had, and DENYING becomes the deliberate
+-- act it should be --
+--
+--     delete from rbac.role_permissions
+--      where role = 'member' and resource = 'agents' and action = 'invoke';
+--
+-- On a fresh install this matches nothing (no roles exist yet) and
+-- bootstrap_admin() grants every pair to the first administrator, so a new
+-- deployment starts closed to everyone else and opens by grant.
+insert into rbac.role_permissions (role, resource, action)
+select r.name, k.resource, k.action
+  from rbac.roles r
+  cross join (values ('agents', 'invoke'), ('resources', 'create')) as k(resource, action)
 on conflict do nothing;
 
 -- One function every module's RLS policy calls. Add a new module
@@ -11245,6 +11276,28 @@ revoke execute on function workflow.may_define() from public;
 -- authorize against the run.
 grant execute on function workflow.encoding_drift() to worker;
 
+-- The principal of a claimed task comes from the run, never from run input.
+-- Workers use this only to authenticate an agent step to the configured runtime.
+create or replace function workflow.task_owner(p_task_id uuid, p_worker_id text)
+returns uuid as $$
+declare v_owner uuid;
+begin
+    select r.owner_id into v_owner
+      from workflow.tasks t join workflow.runs r on r.id = t.run_id
+     where t.id = p_task_id and t.status = 'running'
+       and t.claimed_by = p_worker_id;
+    if not found then
+        raise exception 'task is not currently held by this worker' using errcode = '42501';
+    end if;
+    if v_owner is null then
+        raise exception 'agent execution requires a run owner' using errcode = '42501';
+    end if;
+    return v_owner;
+end;
+$$ language plpgsql stable security definer set search_path = pg_catalog, public;
+revoke all on function workflow.task_owner(uuid, text) from public;
+grant execute on function workflow.task_owner(uuid, text) to worker;
+
 
 -- ============================================================
 -- ai-query-layer/schema.sql
@@ -12501,7 +12554,7 @@ begin
         limit p_limit;
     end if;
 end;
-$$ language plpgsql stable;
+$$ language plpgsql stable security invoker;   -- caller's RLS, deliberately
 
 -- LOOKUP over a LIST of keys -- what the dialect's `LOOKUP "a", "b"` compiles
 -- to, and the shape an agent actually needs: it rarely holds exactly one name.
@@ -12705,7 +12758,7 @@ create or replace function aiq.graph_walk(
     ) d
     order by d.depth, d.score desc, d.id
     limit p_max_nodes;
-$$ language sql stable;
+$$ language sql stable security invoker;   -- caller's RLS, deliberately
 
 -- SEMANTIC's corpus registry: which table a `FROM <name>` names, for the
 -- vector modes. Registered per corpus rather than hardcoded, because the
@@ -13213,7 +13266,7 @@ begin
                 then jsonb_build_object('exhausted', v_exhausted)
                 else '{}'::jsonb end;
 end;
-$$ language plpgsql stable;
+$$ language plpgsql stable security invoker;   -- caller's RLS, deliberately
 
 -- ------------------------------------------------------------
 -- 9b. The extension boundary, reported rather than remembered.
@@ -13980,7 +14033,7 @@ begin
         perform set_config('hnsw.iterative_scan', v_iter, true);
     end if;
 end;
-$$ language plpgsql stable;
+$$ language plpgsql stable security invoker;   -- caller's RLS, deliberately
 
 -- ============================================================
 -- 11. Lexical search -- the mode that was missing entirely.
@@ -14058,7 +14111,7 @@ begin
         s.content_col, s.regconfig, s.source_table, s.regconfig, s.regconfig)
         using p_query, p_limit;
 end;
-$$ language plpgsql stable;
+$$ language plpgsql stable security invoker;   -- caller's RLS, deliberately
 
 -- SEARCH: reciprocal rank fusion of lexical + semantic.
 --
@@ -14073,6 +14126,31 @@ $$ language plpgsql stable;
 -- This is the mode that answers the "R7" case AND "is this product
 -- dangerous?" with one call -- which is the actual argument for a unified
 -- dialect over three separate APIs.
+-- ------------------------------------------------------------
+-- RETRIEVAL IS `SECURITY INVOKER`, AND THAT IS THE WHOLE OF THE TENANT
+-- BOUNDARY ON THE READ PATH.
+--
+-- Every mode below -- SEARCH, TEXT, SEMANTIC, LOOKUP, GRAPH -- runs as the
+-- CALLER, so the RLS policies on the underlying sources apply inside the
+-- search. Two users over one corpus get different result sets from the same
+-- query, and neither can reach the other's `private` rows.
+--
+-- Make one of them `security definer` and the tables still look correctly
+-- protected while every tenant's chunks come back to everyone: the policies are
+-- intact, and nothing evaluates them. That is the classic retrieval leak, and
+-- it is a one-word edit away at all times -- which is why it is written down
+-- here and spelled out on each function rather than left to the default.
+--
+-- The pressure to make the edit is real and will recur: a definer function
+-- needs no grant on the source tables, so `permission denied for table chunks`
+-- looks like it is asking for one. It is asking for a GRANT, not for DEFINER.
+--
+-- The exceptions are deliberate and are not retrieval: `sql_passthrough` (§12)
+-- is invoker for the same reason, and the catalog/registry helpers that read
+-- only this schema's own configuration are definer because there is no tenant
+-- data in them to scope.
+-- ------------------------------------------------------------
+
 create or replace function aiq.search(
     p_lexical_source text, p_query_text text,
     p_query_vector vector, p_model text default null,
@@ -14118,7 +14196,7 @@ begin
     $q$, src.content_col, src.source_table)
     using p_lexical_source, p_query_text, p_query_vector, p_limit, p_k, p_model;
 end;
-$$ language plpgsql stable;
+$$ language plpgsql stable security invoker;   -- caller's RLS, deliberately
 
 -- ------------------------------------------------------------
 -- 12. The SQL escape hatch, actually implemented.
@@ -17777,6 +17855,25 @@ grant execute on function content.assert_org_write(uuid, text) to authenticated,
 drop function if exists content.register_upload(
     text,text,text,text,bigint,text,text,text,uuid,jsonb,text,text);
 
+-- May this caller put bytes into this org?
+--
+-- assert_org_write() asks whether the caller may act inside the org at all.
+-- This asks the other half -- whether uploading is something their roles
+-- permit -- and the two are different questions: every member of an org could
+-- previously upload to it, because nothing had been written down that said
+-- otherwise. Storage costs money and an uploaded document is read back by
+-- agents, so it is worth a permission of its own.
+create or replace function content.may_upload(p_org_id uuid)
+returns boolean
+language sql stable security definer
+set search_path = pg_catalog, public
+as $$
+    select rbac.may_access_org(p_org_id)
+       and rbac.has_permission(rbac.current_user_id(), 'resources', 'create');
+$$;
+
+grant execute on function content.may_upload(uuid) to authenticated, worker;
+
 create or replace function content.register_upload(
     p_channel     text,
     p_checksum    text,
@@ -17810,6 +17907,14 @@ declare
 begin
     perform content.assert_org_write(p_org_id, 'register content');
 
+    -- Both halves, and assert_org_write is only the first. A caller may belong
+    -- to the org and still not be someone this deployment lets upload.
+    if not content.may_upload(p_org_id) then
+        raise exception 'not authorized to upload content'
+            using errcode = 'insufficient_privilege',
+                  hint = 'needs resources:create';
+    end if;
+
     -- ORDER BY, because (org_id, name) is unique but this predicate matches
     -- TWO rows when a public channel and an org channel share a name -- and
     -- `select into` with no order takes whichever the plan produced. The
@@ -17825,6 +17930,7 @@ begin
     -- nothing else, which is what the old form did too.
     select id into v_channel from content.channels
     where name = p_channel
+      and enabled and rbac.may_read(owner_id, org_id, visibility)
       and org_id in (rbac.org_or_shared(p_org_id), rbac.shared_org_id())
     order by (org_id = rbac.org_or_shared(p_org_id)) desc
     limit 1;
@@ -17905,6 +18011,7 @@ begin
 
     select id into v_channel from content.channels
     where name = p_channel
+      and enabled and rbac.may_read(owner_id, org_id, visibility)
       and org_id in (rbac.org_or_shared(p_org_id), rbac.shared_org_id())
     order by (org_id = rbac.org_or_shared(p_org_id)) desc
     limit 1;
@@ -19678,6 +19785,34 @@ as $$
     returning *;
 $$;
 
+-- May this caller run a turn with this agent?
+--
+-- TWO conditions, and neither implies the other. The scope half asks whether
+-- the agent is visible to the caller at all -- a `private` agent belongs to
+-- one person and is not invokable by anyone else, which `agents_scoped`
+-- already says about reading it and said nothing about running it. The
+-- permission half is the deployment's own answer to "may this account use the
+-- agent system": chat costs money, reaches tools, and delegates, and until now
+-- the only thing standing between any authenticated account and all three was
+-- that nobody had asked.
+--
+-- STABLE and SECURITY DEFINER for the same reason has_permission() is: the
+-- caller must not need a grant on agentic.agents to be told no.
+create or replace function agentic.may_invoke(p_agent_name text)
+returns boolean
+language sql stable security definer
+set search_path = pg_catalog, public
+as $$
+    select exists (
+        select 1 from agentic.agents a
+         where a.name = p_agent_name
+           and rbac.may_read(a.owner_id, a.org_id, a.visibility)
+    )
+    and rbac.has_permission(rbac.current_user_id(), 'agents', 'invoke');
+$$;
+
+grant execute on function agentic.may_invoke(text) to authenticated, web_anon, worker;
+
 create or replace function agentic.start_run(
     p_agent_name    text,
     p_session_id    uuid default null,
@@ -19703,6 +19838,18 @@ begin
     select * into v_agent from agentic.agents where name = p_agent_name;
     if not found then
         raise exception 'no agent named %', p_agent_name;
+    end if;
+
+    -- The gate is HERE and not in the HTTP layer, and that is the load-bearing
+    -- part. An interactive turn, a delegated sub-agent through the gateway, a
+    -- scheduled run and a workflow-triggered run all begin by calling this
+    -- function; a check on POST /chat would gate one of the four. Delegation
+    -- especially: a chain that starts as somebody permitted must not become a
+    -- way to invoke an agent they are not.
+    if not agentic.may_invoke(p_agent_name) then
+        raise exception 'not authorized to invoke agent %', p_agent_name
+            using errcode = 'insufficient_privilege',
+                  hint = 'needs agents:invoke, and the agent must be visible to you';
     end if;
 
     if p_session_id is not null then
@@ -23386,6 +23533,284 @@ end $$;
 
 
 -- ============================================================
+-- world-model-ingestion/sources.sql
+--   private data sources and workflow package authoring
+-- ============================================================
+
+-- Data Sources authoring: a private channel and its workflow saved atomically.
+-- Loads after ingestion.sql. Workflow authoring remains an explicit privilege.
+create or replace function content.save_source(
+    p_id uuid, p_name text, p_config jsonb, p_workflow jsonb,
+    p_updated_at timestamptz default null
+) returns jsonb language plpgsql security definer
+set search_path = pg_catalog, public as $$
+declare
+    v_user uuid := rbac.current_user_id();
+    v_old content.channels;
+    v_row content.channels;
+    v_definition uuid;
+    v_workflow text := 'source_' || replace(p_id::text, '-', '');
+begin
+    if v_user is null or not workflow.may_define() then
+        raise exception 'Saving a data source requires workflows:update.' using errcode='42501';
+    end if;
+    if p_id is null or p_name is null or p_name !~ '^[a-z][a-z0-9_-]{0,63}$' then
+        raise exception 'Use a source name of 1–64 lowercase letters, numbers, underscores or hyphens, starting with a letter.';
+    end if;
+    if jsonb_typeof(p_config) is distinct from 'object'
+       or exists(select 1 from jsonb_object_keys(p_config) k where k not in ('description','ingest_policy','editor'))
+       or jsonb_typeof(p_config->'ingest_policy') is distinct from 'object' then
+        raise exception 'A source needs a description, ingestion policy and editor settings.';
+    end if;
+    if jsonb_typeof(p_workflow) is distinct from 'object'
+       or p_workflow->>'name' is distinct from v_workflow then
+        raise exception 'The workflow name must belong to this source: %', v_workflow;
+    end if;
+    -- Lock before comparing the revision: a second editor cannot silently win.
+    select * into v_old from content.channels where id=p_id for update;
+    if found then
+        if v_old.owner_id is distinct from v_user then
+            raise exception 'Only the owner can update this source. Create a new source instead.' using errcode='42501';
+        end if;
+        if p_updated_at is distinct from v_old.updated_at then
+            raise exception 'This source changed since you opened it. Reopen it before saving; your draft is still available.' using errcode='40001';
+        end if;
+    elsif exists(select 1 from workflow.definitions where name=v_workflow) then
+        raise exception 'That workflow name is already in use. Create a new source.';
+    end if;
+    if exists(select 1 from content.channels where org_id=rbac.shared_org_id() and name=p_name and id<>p_id) then
+        raise exception 'That source name is already in use. Choose another name.';
+    end if;
+    v_definition := workflow.define_yaml(p_workflow::text);
+    insert into content.channels(id,name,kind,config,owner_id,visibility,org_id)
+    values(p_id,p_name,'file_upload',p_config || jsonb_build_object('ingest_workflow',v_workflow,'workflow',p_workflow),v_user,'private',rbac.shared_org_id())
+    on conflict(id) do update set name=excluded.name, config=excluded.config, updated_at=clock_timestamp()
+    returning * into v_row;
+    return to_jsonb(v_row) || jsonb_build_object('definition_id',v_definition);
+end;
+$$;
+revoke all on function content.save_source(uuid,text,jsonb,jsonb,timestamptz) from public;
+grant execute on function content.save_source(uuid,text,jsonb,jsonb,timestamptz) to authenticated;
+
+-- Bound arguments, and a verified run owner, rather than interpolated SQL or
+-- a worker-wide corpus read. Only the engine invokes this registered function.
+create or replace function content.source_passages(p_resource_id uuid)
+returns jsonb language plpgsql stable security definer
+set search_path = pg_catalog, public as $$
+declare
+    v_owner uuid;
+    v_rows jsonb;
+    v_chars bigint;
+begin
+    select owner_id into v_owner from workflow.runs
+      where id=nullif(current_setting('workflow.current_run_id',true),'')::uuid;
+    if v_owner is null or not exists (
+        select 1 from content.resources r where r.id=p_resource_id and (
+            r.owner_id=v_owner or r.visibility='public' or
+            (r.visibility='org' and r.org_id<>rbac.shared_org_id() and exists(
+                select 1 from rbac.org_members m where m.org_id=r.org_id and m.user_id=v_owner)))) then
+        raise exception 'This run cannot read the source document.' using errcode='42501';
+    end if;
+    select sum(length(content)) into v_chars from content.resource_chunks where resource_id=p_resource_id;
+    if coalesce(v_chars,0)=0 then
+        raise exception 'This document has no text passages. Use the text ingestion mode for an AI transformation.';
+    end if;
+    if v_chars>80000 then
+        raise exception 'This document exceeds the 80,000-character transformation limit. Split it into smaller documents or author a workflow that processes windows.';
+    end if;
+    select jsonb_agg(jsonb_build_object('chunk_id',id,'resource_id',resource_id,'content',content) order by ordinal)
+      into v_rows from content.resource_chunks where resource_id=p_resource_id;
+    return jsonb_build_object('rows',v_rows);
+end;
+$$;
+revoke all on function content.source_passages(uuid) from public;
+select workflow.register_step_function('source_passages','content.source_passages',array['uuid'],30000,
+    'Read one source document for its run owner; refuses empty or oversized text.');
+
+
+-- ============================================================
+-- world-model-ingestion/api-sources.sql
+--   incremental API sources, records and durable checkpoints
+-- ============================================================
+
+-- Incremental API sources. Configuration travels in a package; progress does not.
+create table if not exists content.source_state (
+    source_id uuid primary key references content.channels(id) on delete cascade,
+    revision bigint not null default 0,
+    watermark text,
+    pending_watermark text,
+    next_url text,
+    visited_urls jsonb not null default '[]',
+    last_page_hash text,
+    active_task uuid references workflow.tasks(id),
+    last_completed_task uuid references workflow.tasks(id),
+    last_receipt jsonb,
+    pages int not null default 0,
+    inserted int not null default 0,
+    updated int not null default 0,
+    unchanged int not null default 0,
+    total_records bigint not null default 0,
+    last_page_at timestamptz,
+    last_completed_at timestamptz
+);
+create table if not exists content.source_records (
+    source_id uuid not null references content.channels(id) on delete cascade,
+    external_id text not null,
+    watermark text,
+    raw jsonb not null,
+    data jsonb not null,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    primary key(source_id,external_id)
+);
+alter table content.source_state enable row level security;
+alter table content.source_records enable row level security;
+drop policy if exists source_read on content.source_state;
+create policy source_read on content.source_state for select using (exists(select 1 from content.channels c where c.id=source_id));
+drop policy if exists source_read on content.source_records;
+create policy source_read on content.source_records for select using (exists(select 1 from content.channels c where c.id=source_id));
+grant select on content.source_state,content.source_records to authenticated,api_viewer;
+
+create or replace function content.save_api_source(p_id uuid,p_name text,p_config jsonb,p_queue text,p_updated_at timestamptz default null)
+returns jsonb language plpgsql security definer set search_path=pg_catalog,public as $$
+declare v_user uuid:=rbac.current_user_id(); old content.channels; c content.channels; w jsonb; a jsonb:=p_config->'api'; n text:='source_'||replace(p_id::text,'-','');
+begin
+ if v_user is null or not workflow.may_define() then raise exception 'Saving an API source requires workflows:update.' using errcode='42501';end if;
+ if p_id is null or p_name is null or p_name !~ '^[a-z][a-z0-9_-]{0,63}$' then raise exception 'Use a source name starting with a lowercase letter, with up to 64 letters, numbers, hyphens or underscores.';end if;
+ if jsonb_typeof(a) is distinct from 'object' or coalesce(a->>'url','') !~ '^https?://' or coalesce(a->>'id_path','')='' then raise exception 'An API source needs an HTTP(S) endpoint and a record ID field.';end if;
+ if coalesce(a->>'auth_type','none') not in ('none','bearer','header') or
+    coalesce(a->>'pagination','none') not in ('none','link_header','next_url','page_token','page') or
+    coalesce(a->>'watermark_type','none') not in ('none','timestamp','number') then raise exception 'Unsupported authentication, pagination or watermark type.';end if;
+ if a ? 'token' or a ? 'secret' or a ? 'password' or exists(select 1 from jsonb_object_keys(coalesce(a->'headers','{}')) k where lower(k) in ('authorization','cookie','x-api-key','api-key')) then
+  raise exception 'Store authentication by credential reference, never as a token or literal authentication header.';end if;
+ if p_queue is null or p_queue !~ '^[a-zA-Z0-9_:/.-]+$' then raise exception 'Choose an ingestion worker queue.';end if;
+ select * into old from content.channels where id=p_id for update;
+ if found then
+  if old.owner_id is distinct from v_user then raise exception 'Only the owner can update this source. Create a private copy.' using errcode='42501';end if;
+  if old.kind<>'http_pull' then raise exception 'Create a new source to change its type.';end if;
+  if p_updated_at is distinct from old.updated_at then raise exception 'The source changed since you opened it. Reopen it before saving; your draft is preserved.' using errcode='40001';end if;
+  if old.config->'api' is distinct from a and exists(select 1 from content.source_state where source_id=p_id and (watermark is not null or next_url is not null)) then
+   raise exception 'This source has saved progress. Create a new source for a different ingestion configuration, or reset its progress first.';end if;
+  if exists(select 1 from workflow.runs r join workflow.definitions d on d.id=r.workflow_def_id where d.name in (n,old.config->>'ingest_workflow') and r.status='running') then raise exception 'Wait for the active pull to finish before changing this source.';end if;
+ elsif exists(select 1 from workflow.definitions where name=n) then raise exception 'That workflow identity already exists. Create a new source.';
+ end if;
+ if exists(select 1 from content.channels where name=p_name and org_id=rbac.shared_org_id() and id<>p_id) then raise exception 'That source name is already in use.';end if;
+ w:=jsonb_build_object('name',n,'steps',jsonb_build_array(jsonb_build_object('id','pull','work',true,'queue',p_queue,'input',jsonb_build_object('op','api_pull','source_id',p_id))));
+ perform workflow.define_yaml(w::text);
+ insert into content.channels(id,name,kind,config,owner_id,visibility,org_id)
+ values(p_id,p_name,'http_pull',p_config||jsonb_build_object('ingest_workflow',n,'workflow',w),v_user,'private',rbac.shared_org_id())
+ on conflict(id) do update set name=excluded.name,config=excluded.config,updated_at=clock_timestamp()
+ returning * into c;
+ return to_jsonb(c);
+end $$;
+revoke all on function content.save_api_source(uuid,text,jsonb,text,timestamptz) from public;
+grant execute on function content.save_api_source(uuid,text,jsonb,text,timestamptz) to authenticated;
+
+create or replace function content.start_source_pull(p_source_id uuid,p_external_id text default null)
+returns uuid language plpgsql security definer set search_path=pg_catalog,public as $$
+declare c content.channels; r uuid;
+begin
+ select * into c from content.channels where id=p_source_id for update;
+ if c.id is null or rbac.current_user_id() is null or c.owner_id is distinct from rbac.current_user_id() then raise exception 'Only the source owner can start this pull.' using errcode='42501';end if;
+ if c.kind<>'http_pull' or not c.enabled then raise exception 'This API source is not enabled.';end if;
+ select x.id into r from workflow.runs x join workflow.definitions d on d.id=x.workflow_def_id
+ where d.name=c.config->>'ingest_workflow' and x.status='running' order by x.created_at desc limit 1;
+ if r is not null then return r;end if;
+ return workflow.start_workflow(c.config->>'ingest_workflow','{}',p_external_id);
+end $$;
+revoke all on function content.start_source_pull(uuid,text) from public;
+grant execute on function content.start_source_pull(uuid,text) to authenticated;
+
+create or replace function content.begin_api_pull(p_task uuid,p_worker text,p_source uuid)
+returns jsonb language plpgsql security definer set search_path=pg_catalog,public as $$
+declare v_owner uuid; c content.channels; s content.source_state;
+begin
+ v_owner:=workflow.task_owner(p_task,p_worker);
+ select * into c from content.channels where id=p_source for update;
+ if c.owner_id is distinct from v_owner or c.kind<>'http_pull' or not c.enabled then raise exception 'This run cannot pull the requested API source.' using errcode='42501';end if;
+ insert into content.source_state(source_id) values(p_source) on conflict do nothing;
+ select * into s from content.source_state where source_id=p_source for update;
+ if s.last_completed_task=p_task then return jsonb_build_object('complete',true,'receipt',s.last_receipt);end if;
+ if s.active_task is not null and s.active_task<>p_task and exists(select 1 from workflow.tasks where id=s.active_task and status='running') then raise exception 'Another task is pulling this source; retry after it finishes.' using errcode='40001';end if;
+ update content.source_state set active_task=p_task,
+  pages=case when next_url is null then 0 else pages end,
+  inserted=case when next_url is null then 0 else inserted end,
+  updated=case when next_url is null then 0 else updated end,
+  unchanged=case when next_url is null then 0 else unchanged end
+ where source_id=p_source returning * into s;
+ return to_jsonb(s)||jsonb_build_object('config',c.config->'api');
+end $$;
+revoke all on function content.begin_api_pull(uuid,text,uuid) from public;
+grant execute on function content.begin_api_pull(uuid,text,uuid) to worker;
+
+create or replace function content.commit_api_page(p_task uuid,p_worker text,p_source uuid,p_revision bigint,p_records jsonb,p_url text,p_next text,p_watermark text,p_hash text)
+returns jsonb language plpgsql security definer set search_path=pg_catalog,public as $$
+declare v_owner uuid; s content.source_state; c content.channels; v jsonb; old content.source_records; ni int:=0;nu int:=0;ns int:=0;receipt jsonb;
+begin
+ v_owner:=workflow.task_owner(p_task,p_worker);
+ select * into c from content.channels where id=p_source for update;
+ if c.owner_id is distinct from v_owner then raise exception 'This task does not own the source.' using errcode='42501';end if;
+ select * into s from content.source_state where source_id=p_source for update;
+ if s.source_id is null or s.active_task is distinct from p_task or s.revision<>p_revision then raise exception 'Source progress changed; retry from the current checkpoint.' using errcode='40001';end if;
+ if jsonb_typeof(p_records) is distinct from 'array' or jsonb_array_length(p_records)>10000 then raise exception 'A page must contain at most 10,000 records.';end if;
+ for v in select * from jsonb_array_elements(p_records) loop
+  if coalesce(v->>'external_id','')='' or jsonb_typeof(v->'data') is distinct from 'object' or jsonb_typeof(v->'raw') is distinct from 'object' then raise exception 'Each record needs an ID, original object and transformed object.';end if;
+  select * into old from content.source_records where source_id=p_source and external_id=v->>'external_id';
+  if not found then
+   insert into content.source_records(source_id,external_id,watermark,raw,data) values(p_source,v->>'external_id',v->>'watermark',v->'raw',v->'data');ni:=ni+1;
+  elsif old.watermark is not null and v->>'watermark' is not null and (case c.config->'api'->>'watermark_type'
+    when 'timestamp' then (v->>'watermark')::timestamptz < old.watermark::timestamptz
+    when 'number' then (v->>'watermark')::numeric < old.watermark::numeric
+    else false end) then
+   ns:=ns+1; -- A delayed older version cannot replace a newer stored record.
+  elsif old.raw is distinct from v->'raw' or old.data is distinct from v->'data' then
+   update content.source_records set raw=v->'raw',data=v->'data',watermark=v->>'watermark',updated_at=clock_timestamp() where source_id=p_source and external_id=v->>'external_id';nu:=nu+1;
+  else ns:=ns+1;end if;
+ end loop;
+ receipt:=jsonb_build_object('source_id',p_source,'pages',s.pages+1,'inserted',s.inserted+ni,'updated',s.updated+nu,'unchanged',s.unchanged+ns,'watermark',p_watermark,'has_more',false,'status','complete');
+ update content.source_state set revision=revision+1,next_url=p_next,
+  pending_watermark=case when p_next is null then null else p_watermark end,
+  watermark=case when p_next is null then p_watermark else watermark end,
+  visited_urls=case when p_next is null then '[]'::jsonb else visited_urls||jsonb_build_array(p_url) end,
+  last_page_hash=case when p_next is null then null else p_hash end,
+  pages=pages+1,inserted=inserted+ni,updated=updated+nu,unchanged=unchanged+ns,total_records=total_records+ni,
+  last_page_at=clock_timestamp(),last_completed_at=case when p_next is null then clock_timestamp() else last_completed_at end,
+  last_completed_task=case when p_next is null then p_task else last_completed_task end,
+  last_receipt=case when p_next is null then receipt else last_receipt end
+ where source_id=p_source;
+ return jsonb_build_object('revision',s.revision+1,'inserted',ni,'updated',nu,'unchanged',ns,'receipt',receipt);
+end $$;
+revoke all on function content.commit_api_page(uuid,text,uuid,bigint,jsonb,text,text,text,text) from public;
+grant execute on function content.commit_api_page(uuid,text,uuid,bigint,jsonb,text,text,text,text) to worker;
+
+create or replace function content.reset_source_progress(p_source_id uuid)
+returns void language plpgsql security definer set search_path=pg_catalog,public as $$
+declare c content.channels;
+begin
+ select * into c from content.channels where id=p_source_id for update;
+ if c.owner_id is distinct from rbac.current_user_id() or rbac.current_user_id() is null or not workflow.may_define() then raise exception 'Only the source author can reset its progress.' using errcode='42501';end if;
+ if exists(select 1 from workflow.runs r join workflow.definitions d on d.id=r.workflow_def_id where d.name=c.config->>'ingest_workflow' and r.status='running') then raise exception 'Wait for the active run before resetting progress.';end if;
+ update content.source_state set watermark=null,pending_watermark=null,next_url=null,visited_urls='[]',last_page_hash=null,active_task=null,last_completed_task=null,revision=revision+1 where source_id=p_source_id;
+end $$;
+revoke all on function content.reset_source_progress(uuid) from public;
+grant execute on function content.reset_source_progress(uuid) to authenticated;
+
+-- Portable package workflows resolve a source by name under the verified run
+-- owner. Never resolve a private feed using a caller-supplied owner or org.
+create or replace function content.begin_named_api_pull(p_task uuid,p_worker text,p_name text)
+returns jsonb language plpgsql security definer set search_path=pg_catalog,public as $$
+declare u uuid; c content.channels;
+begin
+ u:=workflow.task_owner(p_task,p_worker);
+ select * into c from content.channels where name=p_name and owner_id=u and org_id=rbac.shared_org_id();
+ if c.id is null then raise exception 'No owned API source with that name. Install the package for the run owner.' using errcode='42501';end if;
+ return content.begin_api_pull(p_task,p_worker,c.id)||jsonb_build_object('source_id',c.id);
+end $$;
+revoke all on function content.begin_named_api_pull(uuid,text,text) from public;
+grant execute on function content.begin_named_api_pull(uuid,text,text) to worker;
+
+
+-- ============================================================
 -- contract/schema.sql
 --   the published contract: percolate.enums() reads what every schema above enforces, so it goes after all of them
 -- ============================================================
@@ -24026,12 +24451,26 @@ begin
         -- the conflict target is real -- but the insert site convention in
         -- world-model-ingestion is the guard, and a package should not be the
         -- one caller that does it differently.
+        if v_e->>'kind'='http_pull' and v_e->'config' ? 'api' then
+            if rbac.current_user_id() is null then
+                raise exception 'An API source package needs an installation owner.'
+                using hint = 'Use packages/apply.py --owner USER_UUID. The source and its runs belong to this user.';
+            end if;
+            if exists(select 1 from content.channels where name=v_e->>'name' and org_id=rbac.shared_org_id()
+                      and (owner_id is distinct from rbac.current_user_id() or kind<>'http_pull' or config is distinct from v_e->'config')) then
+                raise exception 'API source % already exists with different settings or ownership. Use a new source name or update it explicitly.',v_e->>'name';
+            end if;
+            insert into content.channels(name,kind,config,owner_id,visibility)
+            select v_e->>'name','http_pull',v_e->'config',rbac.current_user_id(),'private'
+            where not exists(select 1 from content.channels where name=v_e->>'name' and org_id=rbac.shared_org_id());
+        else
         insert into content.channels (name, kind, config)
         select v_e->>'name', coalesce(v_e->>'kind','manual'),
                coalesce(v_e->'config','{}'::jsonb)
         where not exists (select 1 from content.channels c
                            where c.name = v_e->>'name'
                              and c.org_id = rbac.shared_org_id());
+        end if;
         v_n := v_n + 1;
     end loop;
     v_out := v_out || jsonb_build_object('sources', v_n);

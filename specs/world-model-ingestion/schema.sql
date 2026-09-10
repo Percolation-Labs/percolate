@@ -380,6 +380,7 @@ begin
     -- nothing else, which is what the old form did too.
     select id into v_channel from content.channels
     where name = p_channel
+      and enabled and rbac.may_read(owner_id, org_id, visibility)
       and org_id in (rbac.org_or_shared(p_org_id), rbac.shared_org_id())
     order by (org_id = rbac.org_or_shared(p_org_id)) desc
     limit 1;
@@ -460,6 +461,7 @@ begin
 
     select id into v_channel from content.channels
     where name = p_channel
+      and enabled and rbac.may_read(owner_id, org_id, visibility)
       and org_id in (rbac.org_or_shared(p_org_id), rbac.shared_org_id())
     order by (org_id = rbac.org_or_shared(p_org_id)) desc
     limit 1;

@@ -114,12 +114,26 @@ begin
         -- the conflict target is real -- but the insert site convention in
         -- world-model-ingestion is the guard, and a package should not be the
         -- one caller that does it differently.
+        if v_e->>'kind'='http_pull' and v_e->'config' ? 'api' then
+            if rbac.current_user_id() is null then
+                raise exception 'An API source package needs an installation owner.'
+                using hint = 'Use packages/apply.py --owner USER_UUID. The source and its runs belong to this user.';
+            end if;
+            if exists(select 1 from content.channels where name=v_e->>'name' and org_id=rbac.shared_org_id()
+                      and (owner_id is distinct from rbac.current_user_id() or kind<>'http_pull' or config is distinct from v_e->'config')) then
+                raise exception 'API source % already exists with different settings or ownership. Use a new source name or update it explicitly.',v_e->>'name';
+            end if;
+            insert into content.channels(name,kind,config,owner_id,visibility)
+            select v_e->>'name','http_pull',v_e->'config',rbac.current_user_id(),'private'
+            where not exists(select 1 from content.channels where name=v_e->>'name' and org_id=rbac.shared_org_id());
+        else
         insert into content.channels (name, kind, config)
         select v_e->>'name', coalesce(v_e->>'kind','manual'),
                coalesce(v_e->'config','{}'::jsonb)
         where not exists (select 1 from content.channels c
                            where c.name = v_e->>'name'
                              and c.org_id = rbac.shared_org_id());
+        end if;
         v_n := v_n + 1;
     end loop;
     v_out := v_out || jsonb_build_object('sources', v_n);
