@@ -87,14 +87,31 @@ body {
 /* ── The rail ───────────────────────────────────────────────
    A rule and a column of labels, same instinct as the blog nav: it should
    not compete with the surface it is next to. */
+/* THE RAIL DOES NOT SCROLL; ITS NAV DOES.
+ *
+ * It used to be `overflow-y: auto` on the whole column, which is the obvious
+ * spelling and the wrong one. The rail is head, nav, foot -- and the foot
+ * carries the account and org switcher, held down by `margin-top: auto`. That
+ * margin only pins anything while the content FITS: at 698px of viewport the
+ * nav alone is 777px, so the auto margin resolved to zero, the foot went 216px
+ * below the fold, and the account switch was reachable only by discovering
+ * that a column with no visible scrollbar could be scrolled. Every screenshot
+ * of this app is cut off mid-nav for the same reason.
+ *
+ * So the column is fixed and the middle scrolls. `min-height: 0` on the nav is
+ * the part that actually does the work: a flex item defaults to
+ * `min-height: auto`, which refuses to shrink below its content, and without
+ * it `overflow-y: auto` on that child has nothing to overflow. */
 .rail {
   width: var(--rail); flex: 0 0 var(--rail);
   border-right: 1px solid var(--rule); background: var(--card);
   position: sticky; top: 0; height: 100vh;
   display: flex; flex-direction: column; gap: 1.5rem;
-  padding: 1.15rem 0 .9rem; overflow-y: auto;
+  padding: 1.15rem 0 .9rem; overflow: hidden;
   transition: width .16s ease, flex-basis .16s ease;
 }
+.rail-head { flex: 0 0 auto; }
+.rail > nav { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .rail-head { display: flex; align-items: center; gap: .5rem; padding: 0 .8rem 0 1.15rem; }
 .rail-logo { display: flex; align-items: center; gap: .55rem; text-decoration: none; color: var(--brand); }
 .rail-logo svg { width: 21px; height: 21px; display: block; }
@@ -142,7 +159,7 @@ body {
   color: var(--faint); letter-spacing: .04em;
 }
 
-.rail-foot { margin-top: auto; padding: 0 var(--rail-pad); display: flex; flex-direction: column; gap: .7rem; }
+.rail-foot { flex: 0 0 auto; padding: 0 var(--rail-pad); display: flex; flex-direction: column; gap: .7rem; }
 .rail-foot .nav-item { padding-left: 0; padding-right: 0; }
 
 /* ── Collapsed state ────────────────────────────────────────
