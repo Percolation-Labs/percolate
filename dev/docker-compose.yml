@@ -181,7 +181,7 @@ services:
   # transaction, so RLS sees the user rather than the service.
   # ---------------------------------------------------------------------
   worker:
-    image: percolationlabs/percolate-core:0.1.6
+    image: percolationlabs/percolate-core:0.1.8
     container_name: ${P8_STACK:-p8-dev}-worker
     depends_on:
       db:
@@ -301,7 +301,7 @@ services:
       - ./.stacks/ui-agent-signing-key:/run/secrets/agent-signing-key:ro
 
   content:
-    image: percolationlabs/percolate-core:0.1.6
+    image: percolationlabs/percolate-core:0.1.8
     container_name: ${P8_STACK:-p8-dev}-content
     depends_on:
       db:
