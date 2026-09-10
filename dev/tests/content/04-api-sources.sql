@@ -51,7 +51,10 @@ do $$ declare c content.channels; s content.source_state; begin
  select * into s from content.source_state where source_id='faaa0000-0000-4000-8000-000000000004';
  if s.total_records<>1 or s.watermark<>'10' or s.revision<>2 or s.next_url is not null then raise exception 'checkpoint/atomicity failed';end if;
  if (select count(*) from content.source_records where source_id=s.source_id)<>1 then raise exception 'bad page partially persisted';end if;
- if (select data->>'v' from content.source_records where source_id=s.source_id)<>'10' then raise exception 'older row won';end if;
+ -- `is distinct from`: with no row the subquery is NULL, `NULL <> '10'` is
+ -- NULL, and `if NULL then` does not fire -- so the assertion that the NEWER
+ -- row won would have passed on a table with no rows at all.
+ if (select data->>'v' from content.source_records where source_id=s.source_id) is distinct from '10' then raise exception 'older row won';end if;
  select * into c from content.channels where id=s.source_id;
  begin
   perform content.save_api_source(c.id,c.name,jsonb_set(c.config,'{api,url}','"https://other.test"'),'t-api-source',c.updated_at);raise exception 'configuration changed with live progress';

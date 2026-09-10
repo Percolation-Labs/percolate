@@ -226,14 +226,26 @@ select workflow.register_step_function(
 -- (it does; that is how this comment got written), and the version that
 -- compiles would silently insert a second row on the next install, leaving
 -- register_upload's lookup to pick one of them arbitrarily.
-insert into content.channels (name, kind, config)
+-- `public`, explicitly, and it is the channel ROW that is public rather than
+-- anything written through it. Omitted, the column defaults to `private`, and
+-- a private channel owned by nobody in the shared org is readable by nobody:
+-- rbac.may_read(null, shared_org, 'private') returns NULL, the lookup in
+-- register_upload filters the row out, and the caller is told "no channel
+-- named workflow_artifacts for this org" -- a message about the org, for a
+-- channel that is right there. Every artifact write failed that way.
+--
+-- The other global channel, sample-corpus, is public for the same reason. What
+-- a step writes THROUGH this channel still takes its own visibility from
+-- rbac.default_visibility(p_org_id), so nothing here publishes an artifact.
+insert into content.channels (name, kind, config, visibility)
 select 'workflow_artifacts', 'file_upload',
        -- No ingest_workflow: registering an artifact must not start an
        -- ingestion run. That key is what makes an upload chunk itself, and a
        -- rendered PDF that a step just produced is output, not intake. A
        -- channel with none configured registers content and starts nothing,
        -- which content.register_upload documents as a legitimate choice.
-       '{"description": "bytes produced by a workflow step, refd from tasks.output"}'::jsonb
+       '{"description": "bytes produced by a workflow step, refd from tasks.output"}'::jsonb,
+       'public'
 where not exists (
     select 1 from content.channels
      where name = 'workflow_artifacts' and org_id = rbac.shared_org_id());

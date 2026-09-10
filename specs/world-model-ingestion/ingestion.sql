@@ -526,11 +526,20 @@ begin
     select content.install_ingest_workflow() into v_msg;
     raise notice 'ingestion pipeline installed -- %', v_msg;
 
-    insert into content.channels (name, kind, config)
+    -- `public` explicitly, and it is the same omission one door along from the
+    -- one this comment already records. The channel exists now; it defaulted to
+    -- `private` with no owner, and rbac.may_read(null, shared_org, 'private')
+    -- is NULL, so register_upload's lookup dropped it and POST /files raised
+    -- "no channel named uploads for this org" -- the very sentence above,
+    -- earned a second time by a different cause. The visibility of the CHANNEL
+    -- is not the visibility of what is uploaded through it: each resource
+    -- still takes rbac.default_visibility(p_org_id).
+    insert into content.channels (name, kind, config, visibility)
     select 'uploads', 'file_upload',
            jsonb_build_object(
                'description', 'the default channel for POST /files',
-               'ingest_workflow', 'ingest_file')
+               'ingest_workflow', 'ingest_file'),
+           'public'
     where not exists (
         select 1 from content.channels
          where name = 'uploads' and org_id = rbac.shared_org_id());

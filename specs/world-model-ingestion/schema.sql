@@ -319,7 +319,22 @@ language sql stable security definer
 set search_path = pg_catalog, public
 as $$
     select rbac.may_access_org(p_org_id)
-       and rbac.has_permission(rbac.current_user_id(), 'resources', 'create');
+       and (rbac.has_permission(rbac.current_user_id(), 'resources', 'create')
+            -- THE OWNER PATH, exactly as agentic.may_author carries it, and
+            -- missing here is what broke workflow artifacts: the engine writes
+            -- a step's output to the workflow_artifacts channel as app_owner,
+            -- with no JWT, so current_user_id() is null, so has_permission()
+            -- said no and register_upload raised "not authorized to upload
+            -- content". dev/tests/workflow/08-artifacts.sql is what noticed.
+            --
+            -- It grants nothing new: a caller already running as the table
+            -- owner bypasses RLS entirely, so refusing it here stopped the
+            -- engine without stopping anybody it was written to stop. Bare
+            -- `session_user` for the reason may_author records -- it is a
+            -- reserved expression, not a function in a schema, and qualifying
+            -- it fails to parse.
+            or (rbac.current_user_id() is null
+                and pg_catalog.has_table_privilege(session_user, 'content.resources', 'insert')));
 $$;
 
 grant execute on function content.may_upload(uuid) to authenticated, worker;

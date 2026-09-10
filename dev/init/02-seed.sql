@@ -82,17 +82,47 @@ select workflow.schedule_workflow(
 -- The sample in 03 does not depend on this -- it runs as the table owner --
 -- but every agent authored after it does.
 -- ------------------------------------------------------------
-insert into rbac.roles (name) values ('admin') on conflict do nothing;
+-- GRANTS_ALL RATHER THAN A LIST, which is what a real install gets and what
+-- this file used to approximate by hand.
+--
+-- The list was agents:update, tool_servers:update and workflows:update, and it
+-- was right on the day it was written. Three permission kinds have been added
+-- since -- agents:invoke, resources:create, skills:update -- and none reached
+-- this role, so a dev and CI database quietly diverged from every deployment a
+-- reader installs. It cost real time twice in one day: authoring a skill in
+-- the workbench answered "not authorized to author skills" against a database
+-- where nobody held skills:update, and dev/tests/rbac's upload assertions
+-- failed with "not authorized to upload content" because resources:create was
+-- held by nobody -- neither a defect in the code being tested.
+--
+-- `rbac.bootstrap_admin()` sets this column on a real install, and the trigger
+-- on rbac.permission_kinds then grants every future kind to the roles that
+-- carry it. Setting it here is the same statement, so the next permission kind
+-- needs no edit to this file.
+insert into rbac.roles (name, grants_all) values ('admin', true)
+on conflict (name) do update set grants_all = true;
+
+-- The trigger only fires for kinds inserted AFTER the role exists, so the ones
+-- the extension already declared need the same catch-up bootstrap_admin runs.
+insert into rbac.role_permissions (role, resource, action)
+select r.name, k.resource, k.action
+  from rbac.roles r cross join rbac.permission_kinds k
+ where r.grants_all
+on conflict do nothing;
+
+-- `member` is an ordinary account, and these are the two pairs user-rbac's own
+-- 0.1.10 backfill grants to every role that already exists, so that adding a
+-- permission kind does not take a capability away from a live deployment. On a
+-- fresh install that backfill matches nothing -- no roles exist yet -- and the
+-- roles here are created afterwards, so it never reached them.
+--
+-- Without them an ordinary member cannot upload a file to their own org, which
+-- dev/tests/content/01-write-path.sql asserts in as many words: "a check that
+-- refuses everyone is not a check, it is an outage."
+insert into rbac.roles (name) values ('member') on conflict do nothing;
 insert into rbac.role_permissions (role, resource, action) values
-    ('admin', 'agents',       'update'),
-    ('admin', 'tool_servers', 'update'),
-    -- `workflows: update` is what workflow.may_define() asks for, and it is
-    -- here for the same reason as the two above: the check names a resource,
-    -- and a resource nothing inserts is a check nobody can pass. Defining a
-    -- workflow is an authoring privilege rather than a read because a step may
-    -- carry its own SQL, which runs as the engine owner outside RLS --
-    -- workflow-engine/schema.sql, "SQL a step wrote itself".
-    ('admin', 'workflows',    'update')
+    ('member', 'resources', 'create'),
+    ('member', 'agents',    'invoke')
 on conflict do nothing;
 
 -- ------------------------------------------------------------

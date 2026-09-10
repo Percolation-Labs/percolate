@@ -43,9 +43,17 @@ do $$
 declare a uuid; b uuid;
 begin
     select org_a, org_b into a, b from t_ctx;
-    insert into content.channels (name, kind, org_id) values ('t-uploads', 'file_upload', a);
-    insert into content.channels (name, kind, org_id) values ('t-uploads', 'file_upload', b);
-    insert into content.channels (name, kind, org_id) values ('t-feed', 'feed', a);
+    -- `org`, because these are per-org channels and the default is not.
+    -- content.channels.visibility defaults to 'private' and owner_id has no
+    -- default, so a raw insert makes a channel owned by nobody that private
+    -- means nobody may read: rbac.may_read(null, org, 'private') is NULL, the
+    -- lookup in register_upload drops the row, and the caller is told "no
+    -- channel named t-uploads for this org" about a channel that is right
+    -- there. content.save_source, the supported path, sets owner_id instead;
+    -- this file writes the rows directly and has to say which it means.
+    insert into content.channels (name, kind, org_id, visibility) values ('t-uploads', 'file_upload', a, 'org');
+    insert into content.channels (name, kind, org_id, visibility) values ('t-uploads', 'file_upload', b, 'org');
+    insert into content.channels (name, kind, org_id, visibility) values ('t-feed', 'feed', a, 'org');
 end $$;
 
 -- ---------------------------------------------------------------------
@@ -405,6 +413,14 @@ begin
     -- to is not that org's caller. Before, the array in the token WAS the
     -- membership, and this probe would have passed while asserting nothing.
     insert into rbac.org_members (org_id, user_id) values (v_b, v_u);
+    -- A ROLE, because membership is not permission. This probe is about
+    -- tenancy -- whose org a row lands in and who can read it back -- and it
+    -- registers content to get something to test with. `resources:create`
+    -- (0.1.10) made registering a permission, so a user with no role now fails
+    -- at content.may_upload before reaching anything this block asserts. An
+    -- ordinary member is what this user is meant to be.
+    insert into rbac.user_roles (user_id, role) values (v_u, 'member')
+    on conflict do nothing;
 
     -- 1. A TENANT REGISTERS WITHOUT NAMING AN ORG. Allowed now -- the act the
     --    old rule refused -- because the row it produces is private.

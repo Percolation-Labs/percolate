@@ -747,7 +747,16 @@ as $$
     and rbac.has_permission(rbac.current_user_id(), 'agents', 'invoke');
 $$;
 
-grant execute on function agentic.may_invoke(text) to authenticated, web_anon, worker;
+-- NOT web_anon, unlike has_permission() above, and the difference is the
+-- argument. `has_permission` and `current_org_ids` are on
+-- dev/tests/rbac/04-definer-surface.sql's allow-list because they can only be
+-- asked about the caller, so an anonymous caller reaching them learns what it
+-- already knew. This one takes an agent NAME: anonymous execute makes it a
+-- probe for which agents exist and which a stranger's absent permissions would
+-- allow, run as app_owner outside RLS. Nothing needed the grant -- the only
+-- caller is start_run(), which web_anon cannot execute either -- so it was
+-- reach without a user, which is the definition of surface nobody asked for.
+grant execute on function agentic.may_invoke(text) to authenticated, worker;
 
 create or replace function agentic.start_run(
     p_agent_name    text,

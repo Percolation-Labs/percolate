@@ -85,6 +85,20 @@ from percolate.table_kind_proposal
 where proposed_kind is not null
 on conflict (schema_name, table_name) do nothing;
 
+-- The abstentions, declared one at a time, which is what the view asks for:
+-- "Read it, disagree with it, then write the row."
+--
+-- content.source_state is a sidecar: one row per content.channels row, keyed
+-- by that parent's id rather than by a surrogate of its own. `natural` is the
+-- kind already carried by the three tables of that exact shape --
+-- aiq.emb_text_embedding_3_small and the two emb_demo_quad tables -- whose key
+-- is likewise the parent's id and not an `id` column. It is not `entity`: no
+-- row references it, and its key cannot change because it is not its own.
+insert into percolate.table_kinds (schema_name, table_name, kind, why) values
+ ('content','source_state','natural',
+  'a sidecar keyed by content.channels(id); same shape as the aiq.emb_* tables')
+on conflict (schema_name, table_name) do nothing;
+
 -- ------------------------------------------------------------
 -- 5. ENFORCE THE KEY DEFAULT, on upgrades as well as fresh installs.
 --

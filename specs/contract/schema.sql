@@ -465,6 +465,12 @@ declare
         'content.files',
         'content.resource_chunks',
         'content.resources',
+        -- The API-pull pair. Both hold a deployment's own rows: source_state is
+        -- where a pull resumes from, and losing it silently re-pulls a source
+        -- from the beginning after a restore; source_records is what came back.
+        -- Neither is a vocabulary the extension can recreate.
+        'content.source_records',
+        'content.source_state',
         'public.percolate_build',
         'rbac.api_keys',
         'rbac.auth_events',
