@@ -201,6 +201,21 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('workflow-engine','function','workflow.matrix_gate_passes','uuid','§21e: min_success is checked before the aggregate is released'),
 ('workflow-engine','function','workflow.compensation_keys','jsonb','§21d: compensations are not part of the forward graph'),
 ('workflow-engine','column','workflow.tasks.tolerate_failure',null,'§21e: a fan-out survives an ordinary 404'),
+-- integration-rbac.sql §c2. The read surface a caller needs to do anything
+-- with a workflow beyond starting one and polling it: what workflows exist,
+-- what a run actually did, the shape of its task graph, and the four
+-- aggregates PostgREST will not compute because aggregates are off (PGRST123).
+-- Each is owned by api_viewer so RLS on the base table still applies; the two
+-- that touch no per-tenant row say so in their own line.
+('workflow-engine','view','workflow.definitions_api','','§c2: nothing could list the workflows -- names, versions and derived shape, never the body'),
+('workflow-engine','view','workflow.task_events_api','','§c2: the run timeline; scoped by joining the run whose policy decides what this caller sees'),
+('workflow-engine','view','workflow.task_dependencies_api','','§c2: the edges of the task graph, same scoping -- tasks_api is the nodes'),
+('workflow-engine','view','workflow.runs_by_status_api','','§c2: the group-by a browser may not run; counts what THIS caller may see'),
+('workflow-engine','view','workflow.tasks_by_status_api','','§c2: the same per queue and kind'),
+('workflow-engine','view','workflow.queues_api','','§c2: the configured queues and the TRUE depth of each, which is what a worker pool scales on'),
+('workflow-engine','view','workflow.rate_limits_api','','§c2: token buckets minus the login and reset keys, whose keys are email addresses'),
+('workflow-engine','table','workflow.queue_config',null,'§c2: three knobs per queue, no tenant column; plan_catalog() reads it to say which queues a step may name'),
+('workflow-engine','function','workflow.queue_depth','text','§c2: the true backlog regardless of who asks -- SECURITY DEFINER on purpose, and it returns one integer'),
 ('workflow-engine','function','workflow.run_meta','uuid','§22a: a run can see itself'),
 ('workflow-engine','function','workflow.run_session','uuid,text','§22a: the engine mints the session a workflow could not'),
 ('workflow-engine','function','workflow.substitute_meta','jsonb,jsonb','§22d: {{run.$*}} is bound before the worker sees it'),
@@ -343,6 +358,33 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('world-model-ingestion','function','content.dataset_uri','text','ingestion.md §6: DuckDB reads the dataset by name, not by object key'),
 ('world-model-ingestion','channel','workflow_artifacts',null,'outputs.md §4: step output has a channel, with no ingest_workflow on it'),
 
+-- The authoring surface the workbench writes through, and the two tables an
+-- API pull fills. Every one of these was reachable by `authenticated` and
+-- described nowhere here, which is the state this file exists to make
+-- impossible -- they arrived with the API source editor and the audit found
+-- them the same day.
+--
+-- The pull state is TWO tables on purpose. source_state is one row per source
+-- and carries the watermark, so resuming is reading a row rather than scanning
+-- what was already stored; source_records is what came back, keyed by the
+-- API's own id so a re-pull upserts rather than duplicates.
+('world-model-ingestion','table','content.source_state',null,'sources.md §4.1: the cursor is a closed taxonomy, and this is where its position lives'),
+('world-model-ingestion','table','content.source_records',null,'sources.md §3: staging -- what we were told, before anything interprets it'),
+('world-model-ingestion','function','content.save_source','uuid,text,jsonb,jsonb,timestamptz',
+     'sources.md §4: the declaration is data, so authoring one is an upsert with the caller''s own permissions'),
+('world-model-ingestion','function','content.save_api_source','uuid,text,jsonb,text,timestamptz',
+     'sources.md §4: the same declaration for a pulled API, carrying its watermark and pagination'),
+('world-model-ingestion','function','content.start_source_pull','uuid,text',
+     'sources.md §8: a pull is queued work, so starting one is a row rather than a request the browser holds open'),
+('world-model-ingestion','function','content.reset_source_progress','uuid',
+     'sources.md §4.1: re-reading from the beginning is resetting the cursor, not deleting what it produced'),
+-- A predicate rather than an action, and SECURITY DEFINER for the reason
+-- has_permission is: the caller must not need a grant on the org tables to be
+-- told no. It takes an org id the caller already holds, so it answers about
+-- the caller and nobody else.
+('world-model-ingestion','function','content.may_upload','uuid',
+     'brief.md §3.5: an upload is checked before bytes move, not after'),
+
 -- ---------- workflow-engine: schedules (schema.sql §19) ----------------
 -- pg_cron is deliberately NOT asserted here. It is one caller of tick(), not
 -- the mechanism -- an operator or a KEDA-scaled pod driving the same function
@@ -381,6 +423,11 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('agentic','table','agentic.tool_servers',null,'brief.md §5.2: a tool is an OpenAPI/MCP binding'),
 ('agentic','function','agentic.create_session','text','brief.md §3'),
 ('agentic','function','agentic.start_run','text,uuid,uuid,uuid,text,text,text,uuid','brief.md §3: delegation carries the span tree'),
+-- The predicate start_run is gated on, reachable so a caller can be told no
+-- without holding a grant on agentic.agents. `authenticated` only: the
+-- anonymous grant it carried made it a probe for which agents exist, and
+-- nothing needed it, since web_anon cannot execute start_run either.
+('agentic','function','agentic.may_invoke','text','brief.md §5.1: chat costs money and reaches tools, so invoking is a permission'),
 ('agentic','function','agentic.finish_run','uuid,text,jsonb','brief.md §3'),
 ('agentic','function','agentic.persist_turn','jsonb','brief.md §4: one call per turn, not N inserts'),
 ('agentic','function','agentic.upsert_agent','jsonb','brief.md §2: agents are declared, not deployed'),
@@ -736,6 +783,22 @@ insert into api_exclusions (api_view, column_name, kind, why) values
 -- calling aiq.lexical or aiq.search; handing them the tsvector would be
 -- publishing the index and inviting somebody to rank in application code.
 ('agentic.skills_api', 'search_tsv', 'internal', 'the generated lexical index; TEXT mode is the read path, not the vector'),
+
+-- definitions_api publishes the CATALOGUE and not the bodies. `spec` is the
+-- one that matters: workflow.definitions carries no owner_id, no org_id and no
+-- RLS, so a column in this view is a column every tenant reads. Names,
+-- versions and the derived shape (step_count, step_kinds, queues) are what
+-- listing and labelling need. The body waits for the table to adopt scope --
+-- rbac.add_scope_columns('workflow.definitions') plus a scope policy -- at
+-- which point this exclusion is the thing to delete.
+('workflow.definitions_api', 'spec',       'internal', 'the workflow body, on a table with no tenant scope; the derived step_count/step_kinds/queues are the published shape'),
+('workflow.definitions_api', 'deleted_at', 'internal', 'the view IS where deleted_at is null; a soft-delete tombstone is not a fact about a live definition'),
+
+-- task_events records the transition. input_snapshot is what the engine held
+-- at the moment of it, kept for replay, and it is the same argument as
+-- tasks_api.input above: an input may carry the target of a resolved
+-- credential_ref, and the OUTPUT is the contract.
+('workflow.task_events_api', 'input_snapshot', 'internal', 'replay state; may carry a resolved credential target, same as tasks_api.input'),
 
 ('workflow.runs_api', 'parent_task_id',   'internal', 'engine linkage; the parent/child relation is served by run_meta'),
 ('workflow.runs_api', 'cancel_requested', 'internal', 'engine flag; cancellation is an action, not a field to poll'),

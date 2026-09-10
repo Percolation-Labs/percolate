@@ -99,6 +99,220 @@ distinguishes ready, running, completed and failed; attempts against
 max_attempts shows what has been retried, and error carries why the last
 attempt failed.$c$;
 
+-- ============================================================
+-- (c2) The rest of the read surface: the registry, the audit trail, the
+--      edges, the four aggregates, and rate limits minus the personal data.
+--
+--      These arrived as `applications/percolate-ui/sql/ui-views.sql`, applied
+--      to a live deployment by hand, and that was the defect rather than the
+--      views. `dev/owns-its-schema.py` states the rule: an application may
+--      FILL a core schema and may not SHAPE one, because needing a view on a
+--      core table is a signal the mechanism is general -- and every one of
+--      these is. A screen is not the only thing that wants to list workflow
+--      definitions or read a run's history.
+--
+--      Same pattern as (c) above, and it is load-bearing rather than
+--      stylistic (user-rbac/spec.md §2, roles.sql §2): each view is created
+--      by the table owner and then HANDED to api_viewer, which owns nothing
+--      else. A view is owner-privileged, so RLS on the base table is
+--      evaluated as the VIEW's owner. Leave these owned by the table owner
+--      and they bypass RLS entirely; own them as superuser and they bypass it
+--      twice. The self-check in (d) below asserts exactly that, which is why
+--      this section sits before it rather than at the end of the file.
+-- ============================================================
+
+-- ------------------------------------------------------------
+-- 1. The registry. `workflow.definitions` was readable by nobody, so nothing
+--    could list the workflows, and a run could not be labelled with its
+--    workflow's name -- runs_api carries workflow_def_id and there was no row
+--    on the other end of it.
+--
+--    `spec` IS DELIBERATELY NOT PUBLISHED HERE. definitions has no owner_id,
+--    no org_id and no RLS, so every authenticated caller in every tenant
+--    would read every workflow body. Names and shapes are what a list and a
+--    run label need; the body waits for the table to adopt scope, which is
+--    `rbac.add_scope_columns('workflow.definitions')` +
+--    `rbac.add_scope_policy(...)` -- the collection's own primitive.
+-- ------------------------------------------------------------
+grant select on workflow.definitions to api_viewer;
+
+create or replace view workflow.definitions_api as
+select d.id,
+       d.name,
+       d.version,
+       d.created_at,
+       jsonb_array_length(d.spec -> 'steps')            as step_count,
+       (select array_agg(distinct coalesce(s ->> 'kind', 'work') order by coalesce(s ->> 'kind', 'work'))
+          from jsonb_array_elements(d.spec -> 'steps') s) as step_kinds,
+       (select array_agg(distinct s ->> 'queue')
+          from jsonb_array_elements(d.spec -> 'steps') s
+         where s ? 'queue')                              as queues
+  from workflow.definitions d
+ where d.deleted_at is null;
+
+-- ------------------------------------------------------------
+-- 2. The audit trail. A trigger writes `task_events` on every status change
+--    and nothing could read it, so a run timeline had no source.
+--
+--    task_events has no RLS of its own -- it inherits scope the way
+--    `tasks_via_run` does, by joining the run whose policy already decides
+--    what this caller may see. The join is the security control, not a
+--    convenience: drop it and this view publishes every tenant's history.
+-- ------------------------------------------------------------
+grant select on workflow.task_events to api_viewer;
+
+create or replace view workflow.task_events_api as
+select e.id,
+       e.run_id,
+       e.task_id,
+       t.step_key,
+       t.kind,
+       t.queue,
+       e.from_status,
+       e.to_status,
+       e.detail,
+       e.at
+  from workflow.task_events e
+  join workflow.tasks t on t.id = e.task_id
+ where exists (select 1 from workflow.runs r where r.id = e.run_id);
+
+-- ------------------------------------------------------------
+-- 3. The edges. The task graph a run detail draws is `task_dependencies`,
+--    which nothing could read -- so a caller could list a run's tasks and not
+--    the shape they form. Scoped through the run, same as above.
+-- ------------------------------------------------------------
+grant select on workflow.task_dependencies to api_viewer;
+
+create or replace view workflow.task_dependencies_api as
+select d.task_id,
+       d.depends_on_task_id,
+       t.run_id
+  from workflow.task_dependencies d
+  join workflow.tasks t on t.id = d.task_id
+ where exists (select 1 from workflow.runs r where r.id = t.run_id);
+
+-- ------------------------------------------------------------
+-- 4. The shapes an aggregate would have answered. PostgREST aggregates are
+--    disabled on this deployment (PGRST123), on purpose: a group-by from a
+--    browser over a million-row task table is exactly the query that setting
+--    exists to prevent. A view is the right answer anyway -- it is named,
+--    grantable and testable, and it is one plan rather than whatever the
+--    caller composed.
+--
+--    Both are RLS-scoped, so these are counts of what THIS caller may see.
+-- ------------------------------------------------------------
+create or replace view workflow.runs_by_status_api as
+select status, compensation_state, count(*) as n,
+       max(created_at) as latest
+  from workflow.runs
+ group by status, compensation_state;
+
+create or replace view workflow.tasks_by_status_api as
+select queue, status, kind, count(*) as n
+  from workflow.tasks
+ group by queue, status, kind;
+
+-- ------------------------------------------------------------
+-- 5. Queues. There is no `workflow.pools` in this schema -- pools.md
+--    specifies pools, KEDA bounds and a reconciler, and what shipped is
+--    queue_config and rate_limits. So the read surface publishes what exists:
+--    the configured queues, and the depth of each.
+--
+--    `queue_depth(queue)` is SECURITY DEFINER, so it answers with the TRUE
+--    depth rather than this caller's slice -- which is what an operator needs
+--    and what KEDA already scales on. The per-status breakdown in (4) is
+--    RLS-scoped and will be smaller. Two numbers that disagree, both correct,
+--    and whoever renders them labels which is which.
+-- ------------------------------------------------------------
+grant select on workflow.queue_config to api_viewer;
+grant select on workflow.queue_config to authenticated;   -- unbreaks plan_catalog()
+grant execute on function workflow.queue_depth(text) to authenticated;
+
+create or replace view workflow.queues_api as
+select q.queue,
+       q.stale_timeout,
+       q.rate_lookahead,
+       workflow.queue_depth(q.queue) as depth
+  from workflow.queue_config q;
+
+-- ------------------------------------------------------------
+-- 6. Rate limits, MINUS the ones that are personal data.
+--
+--    `workflow.rate_limits` is the shared token bucket, and user-rbac reuses
+--    it for login and password-reset throttling keyed by email address
+--    (`'login:' || lower(p_email)`). So `grant select on rate_limits` -- the
+--    obvious way to publish this -- would publish the email address of
+--    everyone who has recently tried to sign in, to every authenticated
+--    caller. That is why this is a filtered view and not a grant.
+-- ------------------------------------------------------------
+grant select on workflow.rate_limits to api_viewer;
+
+create or replace view workflow.rate_limits_api as
+select key, capacity, tokens, refill_rate, updated_at
+  from workflow.rate_limits
+ where key not like 'login:%'
+   and key not like 'reset:%';
+
+-- Hand all seven to api_viewer and publish them. ALTER ... OWNER TO requires
+-- the NEW owner to hold CREATE on the schema, which is what the grant/revoke
+-- pair around this is for -- api_viewer owns nothing but views, so CREATE here
+-- buys it nothing except the ability to be handed one.
+grant create on schema workflow to api_viewer;
+alter view workflow.definitions_api        owner to api_viewer;
+alter view workflow.task_events_api        owner to api_viewer;
+alter view workflow.task_dependencies_api  owner to api_viewer;
+alter view workflow.runs_by_status_api     owner to api_viewer;
+alter view workflow.tasks_by_status_api    owner to api_viewer;
+alter view workflow.queues_api             owner to api_viewer;
+alter view workflow.rate_limits_api        owner to api_viewer;
+revoke create on schema workflow from api_viewer;
+
+grant select on workflow.definitions_api, workflow.task_events_api,
+                workflow.task_dependencies_api, workflow.runs_by_status_api,
+                workflow.tasks_by_status_api, workflow.queues_api,
+                workflow.rate_limits_api
+   to authenticated;
+
+comment on view workflow.definitions_api is
+$c$One row per registered workflow definition -- the catalog you start a run from.
+Carries the name and version to start by, and the shape of the body without the
+body itself: step_count, the distinct step_kinds, and the queues its steps
+name. Filter it the PostgREST way -- ?name=eq.<name>, ?order=created_at.desc.$c$;
+
+comment on view workflow.task_events_api is
+$c$Every status transition of every task, for the runs you may see.
+The timeline behind a run: from_status, to_status, when, and the step it
+happened to. Filter by ?run_id=eq.<uuid> and ?order=at.asc to read one run's
+history in order.$c$;
+
+comment on view workflow.task_dependencies_api is
+$c$The edges of a run's task graph -- which task waits on which.
+tasks_api gives you the nodes; this gives you the shape they form. Filter by
+?run_id=eq.<uuid>.$c$;
+
+comment on view workflow.runs_by_status_api is
+$c$How many runs are in each status right now, of the runs you may see.
+One row per (status, compensation_state) with a count and the most recent
+created_at. This is the aggregate to read instead of counting runs_api
+yourself -- PostgREST aggregates are disabled here on purpose.$c$;
+
+comment on view workflow.tasks_by_status_api is
+$c$How many tasks are in each status right now, per queue and kind.
+Counts what THIS caller may see. For the true depth of a queue regardless of
+who is asking, read queues_api.depth.$c$;
+
+comment on view workflow.queues_api is
+$c$The configured queues and how deep each one is.
+depth is the TRUE backlog -- every waiting task, not just yours -- because it
+is what a worker pool scales on. stale_timeout is how long a claimed task may
+go without a heartbeat before it is reaped.$c$;
+
+comment on view workflow.rate_limits_api is
+$c$The token buckets that throttle work, and how full each is.
+capacity against tokens says how much burst is left; refill_rate is per second.
+Login and password-reset buckets are excluded -- their keys are email
+addresses.$c$;
+
 -- (d) Self-check, mirroring user-rbac/schema.sql §10 -- the invariants that
 -- silently degrade rather than fail loudly are the ones worth verifying.
 do $$

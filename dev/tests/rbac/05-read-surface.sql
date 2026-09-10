@@ -60,6 +60,13 @@ declare
         -- The allow-list a `sql` step may call. Registering is owner-only;
         -- reading the list is how an author knows what they may name.
         'workflow.step_functions',
+        -- The queue registry: names, stale timeout, rate lookahead. Three
+        -- knobs per queue and no tenant column -- a queue is a property of the
+        -- installation, not of an org, and workflow.plan_catalog() (granted to
+        -- authenticated, SECURITY INVOKER) reads it to say which queues a step
+        -- may name. The DEPTH of a queue is a different question and goes
+        -- through queues_api, whose queue_depth() is SECURITY DEFINER.
+        'workflow.queue_config',
         -- The lifecycle vocabulary. One home for the words every status column
         -- references, identical for every tenant, and unreadable it would mean
         -- a caller could not name the state they are filtering on.
