@@ -90,14 +90,33 @@ def token() -> str:
     sys.path.insert(0, str(HERE))
     from mint_jwt import mint  # noqa: E402  -- dev-only, and only when unset
 
+    # The default sub need not have a row in rbac.users, and does not have one
+    # in dev: no read here follows a foreign key to a user, so what matters is
+    # that PostgREST switches to `authenticated` and the policies evaluate a
+    # real current_user_id(). Such a caller simply owns nothing, which exercises
+    # every grant and every projection while returning the org-visible rows.
+    # Set P8_USER_ID to audit as somebody with data.
     return mint(os.environ.get("P8_USER_ID", "aaaaaaaa-0000-0000-0000-000000000001"))
 
 
-def run(contract: dict, auth: dict[str, str]) -> tuple[bool, str]:
+def run(contract: dict, auth: dict[str, str]) -> tuple[str, str]:
+    """ok, absent or fail -- and `absent` is narrower than it looks.
+
+    A contract carrying `absent` names a component this deployment may not have
+    installed, and 42P01 on it is the expected answer rather than a broken
+    screen. Nothing else is forgiven: a relation that EXISTS still has to serve
+    the projection, because a wrong column is the exact defect this table was
+    written to catch, and letting absence stand in for it would put the check
+    back where it started.
+    """
     query = "&".join(x for x in (contract.get("q") or "", "limit=1") if x)
     status, detail = get(f"{REST}/{contract['view']}?{query}",
                          {**auth, "Accept-Profile": contract["schema"]})
-    return status == 200, detail
+    if status == 200:
+        return "ok", detail
+    if contract.get("absent") and detail.startswith("42P01"):
+        return "absent", contract["absent"]
+    return "fail", detail
 
 
 def main() -> int:
@@ -105,18 +124,22 @@ def main() -> int:
     auth = {"Authorization": f"Bearer {token()}", "Accept": "application/json"}
     print(f"{len(reads)} screen reads against {REST}\n")
 
-    failed = []
+    failed, absent = [], []
     for c in sorted(reads, key=lambda x: (x["screen"], x["view"])):
-        ok, detail = run(c, auth)
-        if not ok:
+        verdict, detail = run(c, auth)
+        if verdict == "fail":
             failed.append((c, detail))
-        print(f"  {'ok  ' if ok else 'FAIL'}  {c['screen']:<20} "
+        elif verdict == "absent":
+            absent.append((c, detail))
+        label = {"ok": "ok  ", "absent": "n/a ", "fail": "FAIL"}[verdict]
+        print(f"  {label}  {c['screen']:<20} "
               f"{c['schema']}.{c['view']:<24} {detail}")
 
     print()
     for p in probes:
-        ok, detail = run({**p, "q": ""}, auth)
-        print(f"  {'ok  ' if ok else 'warn'}  {'(existence only)':<20} "
+        verdict, _ = run({**p, "q": ""}, auth)
+        label = {"ok": "ok  ", "absent": "n/a ", "fail": "warn"}[verdict]
+        print(f"  {label}  {'(existence only)':<20} "
               f"{p['schema']}.{p['view']:<24} {p['why']}")
 
     if CORE:
@@ -125,13 +148,21 @@ def main() -> int:
         print("  (transport and build identity only; a model turn is not free "
               "and is not checked here)")
 
+    if absent:
+        print(f"\n{len(absent)} read(s) name a component this deployment "
+              f"has not installed, which is not a defect:")
+        for c, why in absent:
+            print(f"  {c['screen']}: {c['schema']}.{c['view']} -- {why}")
+        print("  The screen renders the refusal and names the file to apply. "
+              "A projection\n  error on any of these would still fail above.")
+
     if failed:
         print(f"\n{len(failed)} screen read(s) failed:")
         for c, detail in failed:
             print(f"  {c['screen']}: {c['schema']}.{c['view']} -- {detail}")
             print(f"    contract `{c['key']}` in {READS_JS.name}: {c.get('q') or '(whole row)'}")
         return 1
-    print(f"\nAll {len(reads)} screen reads returned 200.")
+    print(f"\nAll {len(reads) - len(absent)} installed screen reads returned 200.")
     return 0
 
 

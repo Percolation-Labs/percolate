@@ -661,6 +661,21 @@ export async function queues() {
     tryRead(() => read(READS.imagePolicy), (e) => ({ rows: [], error: e })),
   ]);
 
+  /* pools.sql is on build-sql.py's NOT_SHIPPED list -- pools.md §13 verifies
+     the data model and leaves the control loop a proposal -- so a standard
+     install has NONE of these relations and every panel below shows a gap.
+     Four unexplained refusals read as a broken screen; one sentence says what
+     it actually is, which is a component this deployment did not install. */
+  if ([pools, binds, unserved, policy].every((r) => r.error?.code === "42P01")) {
+    node.append(h("div", { class: "note" },
+      h("strong", {}, "This deployment has no pool schema. "),
+      "The extension does not ship one: ", h("code", { class: "mono" }, "pools.md"),
+      " §13 verifies the data model and leaves the control loop a proposal, so a table with no " +
+      "manager behind it stays out of the product. Apply ",
+      h("code", { class: "mono" }, "specs/workflow-engine/pools.sql"),
+      " to a deployment that runs one. Queue depth and rate limits below are core and work either way."));
+  }
+
   const pending = (pools.rows || []).filter((p) => p.reconcile_pending).length;
   node.append(h("div", { class: "grid g4" },
     statOf(pools, "Pools", (pools.rows || []).length, "workflow.pools"),
@@ -708,31 +723,40 @@ export async function queues() {
   /* The em dashes in this table mean "no row". When the depth or task-count
      read FAILED they would mean nothing of the kind, so the label says so
      rather than letting a column of dashes read as a quiet queue. */
+  /* binds is in this list and was not: when pool_queues is unreadable every
+     row rendered "no pool", which is a CLAIM -- the same mistake the em-dash
+     comment below refuses to make about depth. Absence and refusal have to
+     read differently or the screen is confidently wrong. */
+  const queuesGap = [["workflow.queues_api", depth],
+                     ["workflow.tasks_by_status_api", t],
+                     ["workflow.pool_queues", binds]].filter(([, r]) => r.error);
   node.append(panel("Queues",
-    depth.error || t.error
-      ? "depth or task counts unavailable · " + ((depth.error || t.error).code || "read failed")
+    queuesGap.length
+      ? queuesGap.map(([what]) => what).join(", ") + " unavailable · "
+        + (queuesGap[0][1].error.code || "read failed")
       : "one pool per queue, enforced by a primary key",
     table(["Queue", "Served by", "Depth (global)", "Your tasks, by status"], [...queueNames], (q) =>
       h("tr", {},
         h("td", { class: "mono" }, q),
-        h("td", {}, poolOf.has(q) ? chip(poolOf.get(q), "accent")
-                                  : h("span", { class: "chip failed" }, "no pool")),
+        h("td", {}, binds.error ? h("span", { class: "chip" }, "unknown")
+                    : poolOf.has(q) ? chip(poolOf.get(q), "accent")
+                                    : h("span", { class: "chip failed" }, "no pool")),
         h("td", { class: "num" }, depths.has(q) ? String(depths.get(q)) : "—"),
         h("td", { class: "pill-row" }, (t.rows || []).filter((r) => r.queue === q).map((b) =>
           h("span", { class: "chip" }, b.status + " " + b.n)))))));
 
   node.append(h("div", { class: "grid g3" },
     panel("Unserved queues", "tasks waiting, no pool bound",
-      unserved.error ? gap("v_unserved_queues", unserved.error.message, "schema")
+      unserved.error ? gap("workflow.v_unserved_queues", unserved.error.message, "schema — apply specs/workflow-engine/pools.sql")
         : table(["Queue", "Ready", "Running", "Oldest"], unserved.rows || [], (u) =>
             h("tr", {}, h("td", { class: "mono" }, u.queue), h("td", { class: "num" }, u.ready_tasks),
               h("td", { class: "num" }, u.running_tasks), h("td", { class: "mono" }, fmtTime(u.oldest_task))))),
     panel("Image allow-list", "deny by default",
-      policy.error ? gap("pool_image_policy", policy.error.message, "schema")
+      policy.error ? gap("workflow.pool_image_policy", policy.error.message, "schema — apply specs/workflow-engine/pools.sql")
         : table(["Pattern", "Note"], policy.rows || [], (r) =>
             h("tr", {}, h("td", { class: "mono" }, r.pattern), h("td", {}, r.note || "—")))),
     panel("Rate limits", "the bucket, minus the personal keys",
-      rl.error ? gap("rate_limits_api", rl.error.message, "schema")
+      rl.error ? gap("workflow.rate_limits_api", rl.error.message, "schema")
         : table(["Key", "Capacity", "Tokens"], rl.rows || [], (r) =>
             h("tr", {}, h("td", { class: "mono" }, r.key), h("td", { class: "num" }, r.capacity),
               h("td", { class: "num" }, Number(r.tokens).toFixed(1)))))));

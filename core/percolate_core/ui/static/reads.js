@@ -81,16 +81,33 @@ export const READS = {
        + "fire_count,skip_count,last_error&order=name" },
   queueDepth: { screen: "Overview · Queues", schema: "workflow", view: "queues_api",
     q: "select=queue,depth" },
+  /* The four pool reads are CONDITIONAL, and it is the only conditional
+     group here. `specs/workflow-engine/pools.sql` is on build-sql.py's
+     NOT_SHIPPED list on purpose -- pools.md §13 verifies the data model and
+     leaves the control loop a proposal, so shipping the schema would put
+     tables in the product with no manager on the other end. A deployment that
+     runs one applies pools.sql itself; every other deployment does not have
+     these relations and is not broken.
+
+     `absent` is what says so. The Queues screen already renders the refusal
+     with the file to apply (views.js, `gap(...)`), and dev/ui_reads.py treats
+     42P01 on these as expected rather than as a failed screen -- while still
+     failing on a wrong PROJECTION, which is the defect this table exists to
+     catch and which absence must not be allowed to hide. */
   pools: { screen: "Queues", schema: "workflow", view: "v_pools",
+    absent: "specs/workflow-engine/pools.sql is not shipped with the extension",
     q: "select=name,image,enabled,queues,min_replicas,max_replicas,node_class,generation,"
        + "observed_generation,reconcile_pending,phase&order=name" },
   poolQueues: { screen: "Queues", schema: "workflow", view: "pool_queues",
+    absent: "specs/workflow-engine/pools.sql is not shipped with the extension",
     q: "select=queue,pool&order=queue" },
   unservedQueues: { screen: "Queues", schema: "workflow", view: "v_unserved_queues",
+    absent: "specs/workflow-engine/pools.sql is not shipped with the extension",
     q: "select=queue,ready_tasks,running_tasks,oldest_task&order=queue" },
   rateLimits: { screen: "Queues", schema: "workflow", view: "rate_limits_api",
     q: "select=key,capacity,tokens&order=key" },
   imagePolicy: { screen: "Queues", schema: "workflow", view: "pool_image_policy",
+    absent: "specs/workflow-engine/pools.sql is not shipped with the extension",
     q: "select=pattern,note&order=pattern" },
 
   /* -- rbac ----------------------------------------------------------- */
@@ -150,5 +167,6 @@ export const READS = {
  * that is merely reachable cannot count towards "the screens work", which is
  * exactly the arithmetic that let five broken projections pass. */
 export const PROBES = [
-  { schema: "workflow", view: "pools", why: "written by the pool toggle (PATCH); never read as a list" },
+  { schema: "workflow", view: "pools", absent: "specs/workflow-engine/pools.sql is not shipped with the extension",
+    why: "written by the pool toggle (PATCH); never read as a list" },
 ];

@@ -119,6 +119,40 @@ class ContractTableTest(unittest.TestCase):
             with self.subTest(probe=p["view"]):
                 self.assertTrue(p.get("why"), "an existence-only probe states why no screen reads it")
 
+    def test_an_absent_contract_names_the_file_that_installs_it(self):
+        """`absent` forgives a missing relation, so it has to say what is missing.
+
+        The four pool reads are the only ones that carry it: pools.sql is on
+        build-sql.py's NOT_SHIPPED list, so a standard install does not have
+        v_pools and is not broken. A bare `absent: true` would let any future
+        read opt out of the audit with no argument attached.
+        """
+        entries = [(k, c) for k, c in self.table["reads"].items() if c.get("absent")]
+        entries += [(p["view"], p) for p in self.table["probes"] if p.get("absent")]
+        self.assertTrue(entries, "nothing is conditional; did the field get renamed?")
+        for key, c in entries:
+            with self.subTest(contract=key):
+                self.assertIsInstance(c["absent"], str)
+                self.assertIn(".sql", c["absent"], "name the file a deployment applies")
+
+    def test_a_screen_that_may_be_absent_renders_the_refusal(self):
+        """Forgiving it in the audit is only honest if the screen still says so.
+
+        Otherwise the two halves disagree: the gate calls the read expected and
+        the page shows an empty table with no reason for being empty.
+        """
+        body = "".join((STATIC / name).read_text() for name in SCREENS)
+        for key, c in self.table["reads"].items():
+            if not c.get("absent"):
+                continue
+            with self.subTest(contract=key):
+                qualified = f'"{c["schema"]}.{c["view"]}"'
+                self.assertTrue(
+                    qualified in body,
+                    f"{key} may be absent and no screen names {qualified} in a gap(). "
+                    "A read the audit forgives must still show the reader why the "
+                    "panel is empty, and it names the object the way reads.js does.")
+
 
 if __name__ == "__main__":
     unittest.main()
