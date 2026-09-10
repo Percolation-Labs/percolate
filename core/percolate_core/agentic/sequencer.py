@@ -50,6 +50,7 @@ from .runtime import (
     latest_user_prompt,
     outbound_headers,
 )
+from .runtime.budget import Budget
 from .runtime.delegation import DELEGATED_BY_HEADER
 from .settings import Settings
 from .tools import ResolvedToolset, resolve_toolset
@@ -114,6 +115,12 @@ class TurnSequencer:
         # what makes this run 'scheduled' rather than 'interactive', and what
         # obliges this runtime to complete that task when the run finishes.
         self.workflow_task_id: UUID | None = None
+        # The delegation tree's allowance and running total. A root run takes
+        # the deployment default; the gateway replaces this with what the parent
+        # sent, so every run in one tree spends against one budget rather than
+        # each level starting fresh. See runtime/budget.py for why the parent's
+        # object cannot simply be passed the way pydantic-ai's own guidance says.
+        self.budget: Budget = Budget.from_env()
         self.chained_action_failed = False
         self._text_started = False
         self.trace_id: str | None = None
@@ -192,7 +199,7 @@ class TurnSequencer:
                 )
             )
             await self.maybe_chain(agent, run, execution)
-            await self.maybe_summarize(session, agent)
+            await self.maybe_summarize(session, agent, execution)
             result = await self.finish(run, session, status="succeeded")
             result.messages = messages
             result.execution = execution
@@ -385,7 +392,22 @@ class TurnSequencer:
             call_row.tool_call_id = str(call_row.id)
             row = (await self.persistence.persist_turn([call_row]))[0]
             self.delegated_calls.add(tool_name)
-            return str(row.id), {**base_headers, DELEGATED_BY_HEADER: str(row.id)}
+            # The budget rides the delegation and nothing else. An ordinary MCP
+            # server has no business knowing this tree's token spend, and
+            # `base_headers` goes to every tool -- so these are added here, on
+            # the branch that is by definition talking to our own gateway.
+            #
+            # The figure is the tree's total as of the START of this turn: the
+            # parent's own current turn is still in flight and its usage is
+            # inside pydantic-ai's run context, which `before_call` has no
+            # handle on. So a child is charged for every completed ancestor turn
+            # and not for the partial one that spawned it. Bounded and stated
+            # rather than exact; runtime/budget.py records why.
+            return str(row.id), {
+                **base_headers,
+                DELEGATED_BY_HEADER: str(row.id),
+                **self.budget.to_headers(),
+            }
 
         async def after_call(result: Any) -> None:
             collected.append(result)
@@ -416,8 +438,18 @@ class TurnSequencer:
             before_call=before_call,
         )
         execution = await self.engine.execute(
-            pai_agent, prompt, history, deps, on_event=self._stream_event(run)
+            pai_agent,
+            prompt,
+            history,
+            deps,
+            on_event=self._stream_event(run),
+            budget=self.budget,
+            run=run,
         )
+        # What this turn spent joins what the tree had already spent, so the
+        # next delegation out of this run carries the running total downward
+        # rather than handing a child a clean slate.
+        self.budget = self.budget.charge(execution.usage)
         execution.tool_results = collected
         self._record("invoke_model", "brief §5", f"{len(collected)} tool calls")
         return execution
@@ -556,7 +588,12 @@ class TurnSequencer:
             f"{agent.chained_action.target}{' FAILED' if result.is_error else ''}",
         )
 
-    async def maybe_summarize(self, session: Session | None, agent: AgentSpec) -> None:
+    async def maybe_summarize(
+        self,
+        session: Session | None,
+        agent: AgentSpec,
+        execution: ExecutionResult | None = None,
+    ) -> None:
         """Step 12 — dispatch ``summarize_session_window`` when the threshold trips.
 
         Dispatch, never compute: "that summary doesn't get computed inline,
@@ -566,7 +603,8 @@ class TurnSequencer:
         """
         if session is None:
             return
-        if not await self.persistence.needs_summarization(session.id, agent):
+        used = execution.context_window_used if execution else None
+        if not await self.persistence.needs_summarization(session.id, agent, used):
             self._record("maybe_summarize", "brief §3", "below threshold")
             return
 

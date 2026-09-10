@@ -95,6 +95,16 @@ class Settings:
     window_messages: int = field(
         default_factory=lambda: int(os.getenv("P8_WINDOW_MESSAGES", "20"))
     )
+    # The other half of brief.md §9's "message count vs. token estimate", now
+    # that pydantic-ai measures the estimate for us (see
+    # persistence.needs_summarization). 0.75 leaves a quarter of the window for
+    # the turn that trips it plus the summary being written -- a threshold set
+    # at 1.0 fires only once there is no room left to act on it.
+    summarize_at_context_fraction: float = field(
+        default_factory=lambda: float(
+            os.getenv("P8_SUMMARIZE_AT_CONTEXT_FRACTION", "0.75")
+        )
+    )
     # brief.md §3: agents.summarizer_agent_id being null "falls back to one
     # system-wide default summarizer agent" -- this names it. Still data: which
     # agent that is, is a row, not a code path.

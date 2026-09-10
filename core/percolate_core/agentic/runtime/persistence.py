@@ -283,22 +283,48 @@ class PersistenceAdapter:
 
     # -- summarization trigger --------------------------------------------
 
-    async def needs_summarization(self, session_id: UUID, agent: AgentSpec) -> bool:
+    async def needs_summarization(
+        self,
+        session_id: UUID,
+        agent: AgentSpec,
+        context_window_used: float | None = None,
+    ) -> bool:
         """Has this session crossed the threshold that fires the summarizer?
 
         ``brief.md`` §3: once a session's message count or token estimate crosses
         a configurable threshold, ``start_workflow('summarize_session_window',
         ...)`` fires — "most naturally from a trigger on ``messages`` insert".
 
-        OPEN (§9): trigger-in-Postgres vs. here. If it ends up being a database
-        trigger, this method is deleted rather than kept as a second, drifting
-        copy of the same rule — that is the whole reason it is one method.
+        **The token estimate is no longer owed.** §9 left "message count vs.
+        token estimate" open, and count shipped as the honest minimum because
+        the alternative was a token count of our own -- a tokenizer per provider,
+        kept in step with models nobody here controls. pydantic-ai 2.38 added
+        ``RunContext.context_window_used``: the fraction of *this model's
+        declared* window the response occupied, computed by the library that
+        already knows both numbers. The estimate now arrives
+        correct-by-construction, and it is the better of the two triggers
+        because message count was only ever a proxy for it.
+
+        **Either fires it, rather than one replacing the other.** The estimate is
+        ``None`` for a model that declares no context window, and a session can
+        equally fill up on many small messages without ever filling a context.
+        The two fail in opposite directions, so this is a disjunction -- and the
+        cheap count is still evaluated first.
+
+        OPEN (§9) still: trigger-in-Postgres vs. here. If it becomes a database
+        trigger this method is deleted rather than kept as a second, drifting
+        copy of the rule -- which is why the new input arrives as an argument
+        rather than as state this object reads for itself.
         """
         threshold = (
             agent.context_policy.summarize_after_messages
             or self.settings.summarize_after_messages
         )
-        return await self.repo.message_count(session_id) >= threshold
+        if await self.repo.message_count(session_id) >= threshold:
+            return True
+        if context_window_used is None:
+            return False
+        return context_window_used >= self.settings.summarize_at_context_fraction
 
 
 def _paired_tool_name(messages: list[Message], response: Message) -> str:

@@ -70,6 +70,21 @@ jobs:
       - name: Tool identity and persisted execution
         run: python -m unittest discover -s tests -p test_tool_auth.py
 
+      # These three exist because the dependency moves under us. `result.usage`
+      # changed from a METHOD to an ATTRIBUTE between two pydantic-ai versions
+      # this package has shipped against, and a serialised budget is a
+      # hand-written mapping onto somebody else's field names. Without these, a
+      # rename lands as a delegation tree that quietly stops being budgeted --
+      # which is indistinguishable from a limit nobody happened to hit.
+      - name: A delegation tree still spends one budget
+        run: python -m unittest discover -s tests -p test_delegation_budget.py
+
+      - name: Usage is captured and limits still bind
+        run: python -m unittest discover -s tests -p test_engine_usage.py
+
+      - name: Telemetry stays off unless configured, and cannot fail a turn
+        run: python -m unittest discover -s tests -p test_telemetry.py
+
       - name: A released version number may not be reused
         run: dev/check-version.sh
 

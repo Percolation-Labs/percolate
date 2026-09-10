@@ -27,6 +27,8 @@ interleaved, correlated by ``run_id``.
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -41,6 +43,7 @@ from .gateway import caller_id
 from .runtime import EventSink, channel, relay
 from .sequencer import TurnSequencer
 from .settings import Settings
+from . import telemetry
 
 
 @asynccontextmanager
@@ -53,6 +56,16 @@ async def lifespan(app: FastAPI, settings: Settings | None = None) -> AsyncItera
     finds it exactly where a standalone one does.
     """
     resolved = settings or Settings.from_env()
+    # Before the pool. Instrumentation is global and `instrument_all` only
+    # reaches agents constructed after it runs -- and agents here are built per
+    # turn from a row, so an early request would otherwise produce an untraced
+    # turn. A no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set, and it cannot
+    # raise: see agentic/telemetry.py.
+    if telemetry.start():
+        logging.getLogger(__name__).info(
+            "OpenTelemetry exporting to %s",
+            os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+        )
     app.state.percolate_agent_settings = resolved
     app.state.percolate_agent_client = PgClient(resolved)
     await app.state.percolate_agent_client.connect()

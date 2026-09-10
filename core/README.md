@@ -231,6 +231,65 @@ resolves, so `workflow.tasks` stays inspectable and replayable.
 | `P8_QUEUE`, `P8_WORKER_ID`, `P8_POLL_SECONDS` | worker |
 | `P8_S3_ENDPOINT`, `P8_S3_KEY`, `P8_S3_SECRET`, `P8_BUCKET` | content |
 
+### Tracing — OpenTelemetry, off unless pointed somewhere
+
+`pip install 'percolate-core[agent,otel]'`, then set the variable every other
+OTel-aware process in the deployment already reads:
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+export OTEL_SERVICE_NAME=percolate-agent-runtime
+```
+
+That is the whole switch — no `P8_OTEL=1` of our own, because a second flag is a
+second thing to forget and the failure it causes (tracing silently off) is the
+expensive one. Unset, nothing is installed and nothing is sent.
+
+pydantic-ai supplies the [GenAI semantic
+conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/) for every model
+request and tool call. This package adds one span per turn carrying the ids that
+join a trace to a row — `percolate.run.id`, `.session_id`, `.parent_run_id`,
+`.depth`, and `percolate.usage.*`. A delegated turn is a **child span** of the
+turn that delegated it, so the delegation tree and the trace tree are one tree.
+Logs go out on the same connection.
+
+| | |
+|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | the switch; unset means off |
+| `OTEL_SERVICE_NAME` | defaults to `percolate-agent-runtime` |
+| `P8_OTEL_CONTENT` | **prompts and completions in span attributes.** Off by default: it walks message bodies out of the database's RLS into whatever you pointed OTLP at. Turn it on for a debugging session, on a backend you trust |
+
+Setting up SigNoz locally, and exporting percolate's own tables as metrics, is in
+[the docs](https://percolation-labs.github.io/get-percolate/operating.html). One
+gotcha worth repeating here: create the SigNoz org *before* sending anything, or
+its collector refuses to register and resets every OTLP connection — which looks
+exactly like a network fault on your side.
+
+### Delegation budgets
+
+A delegation tree spends one budget rather than one per level. The parent sends
+what the tree has spent and what it may spend; the child seeds pydantic-ai's
+`RunUsage` with the former and applies `UsageLimits` from the latter. That is the
+over-the-wire form of pydantic-ai's "pass `ctx.usage` to the delegate agent run",
+which an in-process framework gets by sharing an object and we cannot, because a
+delegation here is an MCP call into `gateway.run_delegated`.
+
+Off unless configured — a limit invented here would be a number nobody chose, and
+the first thing it would do is fail somebody's legitimate long run.
+
+| | |
+|---|---|
+| `P8_TREE_TOTAL_TOKENS_LIMIT` | tokens across the whole tree |
+| `P8_TREE_REQUEST_LIMIT` | model requests across the whole tree |
+| `P8_TREE_TOOL_CALLS_LIMIT` | tool calls across the whole tree |
+| `P8_TREE_COST_LIMIT` | cost, where the provider reports it |
+| `P8_MAX_DELEGATION_DEPTH` | how deep delegation may go (default 3) |
+
+Depth alone was never a budget: three levels with unbounded fan-out per level is
+155 turns, and nothing counted them. The accounting is conservative across
+*concurrent* siblings — `agentic/runtime/budget.py` states that bound rather than
+leaving it to be discovered.
+
 ---
 
 ## Deployment

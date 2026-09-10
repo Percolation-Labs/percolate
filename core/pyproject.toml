@@ -54,12 +54,32 @@ ui = ["fastapi>=0.115", "uvicorn>=0.34"]
 sample = ["pyyaml>=6.0"]
 agent = [
     "pydantic>=2.9",
-    "pydantic-ai-slim[openai]>=0.4",
+    # FLOOR 2.38, NOT 0.4. The old bound spanned 0.4 to 2.42 -- two major eras
+    # of the same library -- which is not a constraint, it is a wish, and the
+    # lockfile was doing all the work. Anything resolving inside that range
+    # would have been "supported" by this file and unrunnable in fact.
+    #
+    # 2.38 is the floor because it is where `RunContext.context_window_used`
+    # lands, and `persistence.window_size` now reads it. The upper bound is the
+    # next major: this package calls `Agent(...)`, `agent.run(...)`,
+    # `StructuredDict` and `RunUsage`, all of which are 2.x surface.
+    "pydantic-ai-slim[openai]>=2.38,<3",
     "fastapi>=0.115",
     "uvicorn>=0.34",
     "mcp>=1.2",
     "pyyaml>=6.0",
     "rich>=13.9",
+]
+# OpenTelemetry, opt-in and off unless configured (see `agentic/telemetry.py`).
+#
+# Separate from [agent] on the same rule the providers below follow: a runtime
+# that exports nothing should not carry an exporter to find that out. The SDK
+# and the OTLP exporter are the whole of it -- pydantic-ai emits GenAI-semantic
+# spans through the OTel API on its own, so what this extra buys is somewhere
+# to send them.
+otel = [
+    "opentelemetry-sdk>=1.29",
+    "opentelemetry-exporter-otlp-proto-http>=1.29",
 ]
 # Every provider pydantic-ai can drive, because `model` is a COLUMN and a
 # column should not be constrained by what somebody remembered to install.
@@ -74,9 +94,9 @@ agent = [
 # run the model named in a row fails at request time rather than install time,
 # and 140MB is a poor trade against that.
 providers = [
-    "pydantic-ai-slim[anthropic,google,groq,mistral,cohere,huggingface,bedrock]>=0.4",
+    "pydantic-ai-slim[anthropic,google,groq,mistral,cohere,huggingface,bedrock]>=2.38,<3",
 ]
-all = ["percolate-core[content,agent,providers,ingest,tabular]"]
+all = ["percolate-core[content,agent,providers,ingest,tabular,otel]"]
 
 [project.scripts]
 percolate = "percolate_core.cli:app"

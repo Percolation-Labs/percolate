@@ -36,6 +36,7 @@ from uuid import UUID
 from .contracts import ChatRequest, InboundMessage, RequestContext
 from .db import connected
 from .runtime import EventSink, inbound_delegation
+from .runtime.budget import Budget
 from .runtime.delegation import TOOL_PREFIX
 from .settings import Settings
 
@@ -345,6 +346,19 @@ async def run_delegated(
         authorization = next((v for k, v in headers.items() if k.lower() == "authorization"), None)
         sequencer = TurnSequencer(repo, settings, sink=EventSink(repo), caller_authorization=authorization)
         sequencer.delegated_by_message_id = delegated_by
+        # THE CHILD INHERITS THE TREE'S BUDGET RATHER THAN STARTING AT ZERO.
+        # Without this the sequencer keeps the fresh `Budget.from_env()` its
+        # constructor made, and a parent's limit binds one level of a tree that
+        # `max_delegation_depth` lets go three deep with unbounded fan-out at
+        # each. This is the over-the-wire form of pydantic-ai's "pass ctx.usage
+        # to the delegate agent run".
+        #
+        # Only when the parent actually sent one: a direct call to this gateway
+        # that is not a delegation carries no budget headers, and falling back
+        # to the deployment default is the right answer for it.
+        inherited = Budget.from_headers(headers)
+        if inherited.limits or inherited.spent:
+            sequencer.budget = inherited
         result = await sequencer.run_turn(
             ChatRequest(
                 model=agent_name,

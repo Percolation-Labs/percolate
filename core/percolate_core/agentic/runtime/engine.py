@@ -18,9 +18,11 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from .. import telemetry
 from ..contracts import AgentDeps, AgentSpec, RequestContext, ToolResult
 from ..settings import Settings
 from ..tools import ResolvedToolset, build_pydantic_ai_tools
+from . import budget as budget_usage
 from .injection import build_instructions
 
 
@@ -71,6 +73,12 @@ class ExecutionResult:
     output: Any = None
     tool_results: list[ToolResult] = field(default_factory=list)
     usage: dict[str, Any] = field(default_factory=dict)
+    # Fraction of the model's context window this turn occupied, as pydantic-ai
+    # measured it against the model's declared window. None when the model
+    # declares no window, or when nothing was streamed. `brief.md` §9 asked for
+    # "message count vs. token estimate"; this is the estimate, and it is the
+    # library's rather than one of ours built out of len().
+    context_window_used: float | None = None
 
 
 class AgentEngine:
@@ -149,6 +157,8 @@ class AgentEngine:
         deps: AgentDeps,
         *,
         on_event: Any = None,
+        budget: Any = None,
+        run: Any = None,
     ) -> ExecutionResult:
         """Run one turn, streaming pydantic-ai's own events out as they happen.
 
@@ -162,22 +172,91 @@ class AgentEngine:
         affinity") — a client that disconnects mid-run loses the deltas and
         nothing else, because the ``MESSAGE_PERSISTED`` checkpoint on the same
         channel lets it resume from the row.
+
+        ``budget`` carries the delegation tree's allowance and what it has spent
+        (``runtime/budget.py``). Passing ``usage`` seeded with the ancestors'
+        spend is the over-the-wire form of pydantic-ai's own instruction to hand
+        a delegate ``ctx.usage``: a limit applies to a sum, so a child that
+        starts at zero makes the parent's limit bind one level of the tree.
+
+        ``run`` supplies the ids. ``run_id`` and ``conversation_id`` are handed
+        to pydantic-ai rather than left to be generated, so the ids in its spans
+        are the ids in ``agentic.runs`` and ``agentic.sessions`` and a trace
+        joins to a row without a lookup table.
         """
-        handler = None
-        if on_event is not None:
+        # The handler is installed even with no `on_event`, because it is also
+        # how the run context is reached: `context_window_used` lives on the
+        # `RunContext` pydantic-ai hands the stream handler and is not on the
+        # result. Without a handler there is no other way to read it, and
+        # `persistence.needs_summarization` now wants it.
+        window: dict[str, Any] = {}
 
-            async def handler(ctx: Any, stream: Any) -> None:
-                async for event in stream:
-                    for mapped in map_stream_event(event):
-                        await on_event(mapped)
+        async def handler(ctx: Any, stream: Any) -> None:
+            used = getattr(ctx, "context_window_used", None)
+            if isinstance(used, float):
+                # Highest of the turn, not the last: a turn that filled the
+                # window and then had a tool return trimmed history still spent
+                # the window, and the summarizer wants to know that.
+                window["used"] = max(window.get("used", 0.0), used)
+            async for event in stream:
+                if on_event is None:
+                    continue
+                for mapped in map_stream_event(event):
+                    await on_event(mapped)
 
-        result = await pai_agent.run(
-            user_prompt,
-            message_history=message_history or None,
-            deps=deps,
-            event_stream_handler=handler,
+        kwargs: dict[str, Any] = {}
+        if budget is not None:
+            if (limits := budget.usage_limits()) is not None:
+                kwargs["usage_limits"] = limits
+            if (seed := budget.seed_usage()) is not None:
+                kwargs["usage"] = seed
+        if run is not None:
+            if getattr(run, "id", None) is not None:
+                kwargs["run_id"] = str(run.id)
+            if getattr(run, "session_id", None) is not None:
+                kwargs["conversation_id"] = str(run.session_id)
+
+        # The turn's own span WRAPS the model call rather than being annotated
+        # beside it, so pydantic-ai's spans are its children and percolate's ids
+        # sit on their common parent. A no-op when tracing is off.
+        with telemetry.run_span(run) as span:
+            result = await pai_agent.run(
+                user_prompt,
+                message_history=message_history or None,
+                deps=deps,
+                event_stream_handler=handler,
+                **kwargs,
+            )
+            usage = budget_usage.usage_dict(_usage_of(result))
+            telemetry.record_usage(span, usage)
+        # `result.usage()` was dropped on the floor here, which left
+        # `ExecutionResult.usage` declared and never written -- and left
+        # `rbac.has_quota_remaining(user, 'llm_tokens')` gating every call on a
+        # counter that nothing in this runtime increments. Capturing it does not
+        # by itself close that loop (the SQL function is still owed, per
+        # `sequence.md`), but it is the half that has to exist first.
+        return ExecutionResult(
+            text=as_text(result.output),
+            output=result.output,
+            usage=usage,
+            context_window_used=window.get("used"),
         )
-        return ExecutionResult(text=as_text(result.output), output=result.output)
+
+
+def _usage_of(result: Any) -> Any:
+    """``result.usage()`` without letting its absence fail a completed turn.
+
+    It is a method on the run result today. It has been an attribute before, and
+    a turn whose model call succeeded and whose deltas already reached the client
+    must not be reported as failed because an accounting accessor moved.
+    """
+    usage = getattr(result, "usage", None)
+    if usage is None:
+        return None
+    try:
+        return usage() if callable(usage) else usage
+    except Exception:  # noqa: BLE001 -- see the docstring
+        return None
 
 
 def as_text(output: Any) -> str:
