@@ -24600,6 +24600,20 @@ insert into percolate.table_kinds (schema_name, table_name, kind, why)
 select schema_name, table_name, proposed_kind,
        'reviewed against percolate.table_kind_proposal, 2026-09-06'
 from percolate.table_kind_proposal
+-- The proposal ABSTAINS on a shape it does not recognise, on purpose: the
+-- view's own comment argues that a proposal confident about what it does not
+-- understand is worse than one that says nothing. This statement then read
+-- every row of it, so the first table nobody had classified -- content.
+-- source_state, whose key is a single uuid FK to content.channels -- arrived
+-- as a null `kind` and took the whole extension install down with a NOT NULL
+-- violation. A fresh install of 0.2.0 failed outright.
+--
+-- Skipping the abstentions is the fix rather than defaulting them, and it
+-- restores what the paragraph above claims: an unclassified table stays
+-- UNDECLARED, and specs/identity/checks.sql already lists undeclared tables
+-- for whoever owns them. A guess written here would be indistinguishable
+-- from a decision, which is the failure the view was built to avoid.
+where proposed_kind is not null
 on conflict (schema_name, table_name) do nothing;
 
 -- ------------------------------------------------------------
