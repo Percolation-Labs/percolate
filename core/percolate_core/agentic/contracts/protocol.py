@@ -103,11 +103,11 @@ class ChatRequest(BaseModel):
             "at (brief.md §5.2, zero built-in and zero caller-supplied tools)."
         ),
     )
-    tool_choice: Literal['none'] | None = Field(
+    tool_choice: Literal['none', 'auto'] | None = Field(
         default=None,
         description=(
             "'none' narrows this turn to a response: no tool bindings or "
-            "chained action. It never changes the stored agent. Omitting it "
+            "chained action. It never changes the stored agent. 'auto' or omitting it "
             "keeps the agent's configured behaviour. Caller-supplied tools "
             "still cannot widen an agent's capabilities."
         ),

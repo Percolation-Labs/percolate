@@ -135,7 +135,7 @@ class ProposalTurnTest(unittest.TestCase):
         self.assertEqual(scoped.structured_output_schema,{'type':'object'})
         self.assertEqual(len(agent.tools),1)
         self.assertIsNotNone(agent.chained_action)
-        normal=ChatRequest(model='helper',messages=[])
+        normal=ChatRequest(model='helper',messages=[],tool_choice='auto')
         self.assertIs(apply_response_format(agent,normal),agent)
         with self.assertRaises(ValueError):
             ChatRequest(model='helper',messages=[],tool_choice='required')
