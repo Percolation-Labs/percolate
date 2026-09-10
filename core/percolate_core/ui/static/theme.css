@@ -194,6 +194,33 @@ body {
 
 /* ── Main column ────────────────────────────────────────────*/
 .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+
+/* A FLUSH PAGE FILLS THE VIEWPORT; EVERY OTHER PAGE SCROLLS THE DOCUMENT.
+ *
+ * `body` is `min-height: 100vh` on purpose -- an ordinary screen is taller
+ * than the window and the document scrolls, with the rail staying put because
+ * it is `position: sticky` at `height: 100vh`. That is right for Files and
+ * Overview and wrong for Chat, whose three panels are supposed to scroll
+ * independently inside one screenful.
+ *
+ * `.page.flush` already asks for that with `flex: 1; min-height: 0`, and it
+ * could not get it: `.main` is a flex item in a ROW container, so its height
+ * comes from cross-axis stretch, and stretch grows the line to the tallest
+ * item rather than clipping it. Every `min-height: 0` below `.main` is
+ * therefore resolving against an indefinite height and falls back to content.
+ * Measured: 2000px of probe content in `.chat-aside .body` took `body` itself
+ * to 2208px in a 698px window, with every panel reporting `scrollHeight -
+ * clientHeight === 0`.
+ *
+ * So the flush case, and only the flush case, gives the column a definite
+ * height. `:has()` rather than a class the screens have to remember to set --
+ * `.page.flush` is already the marker, and a second one would be a second
+ * thing to get wrong. The `#outlet` in the middle is the router's mount point
+ * and is named rather than skipped with a descendant match: a bare
+ * `:has(.page.flush)` would also fire on a flush page nested inside a
+ * scrolling one, which is a layout nobody has written and nobody should
+ * discover by having the outer page stop scrolling. */
+.main:has(> #outlet > .page.flush) { height: 100vh; overflow: hidden; }
 .topbar {
   position: sticky; top: 0; z-index: 50;
   border-bottom: 1px solid var(--rule); background: color-mix(in srgb, var(--paper) 88%, transparent);
@@ -402,7 +429,15 @@ pre.code, .code {
 .icon-btn:hover { color: var(--accent); border-color: var(--rule); background: var(--sunk); }
 .icon-btn svg { width: 15px; height: 15px; }
 
-.threads { flex: 1; overflow-y: auto; display: flex; flex-direction: column; }
+/* `min-height: 0` on every flex child that scrolls, here and in `.convo
+   .scroll` and `.chat-aside .body`. A flex item's default `min-height: auto`
+   refuses to shrink below its content, so `overflow-y: auto` on it never
+   engages: the item grows instead, and the parent's `overflow: hidden` clips
+   whatever went past the viewport. Measured before the fix -- 2000px of probe
+   content in `.chat-aside .body` took the panel to 2149px inside a 698px
+   window with `scrollHeight - clientHeight` still zero. Same defect the rail
+   had above, and the reason it is worth stating once here. */
+.threads { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
 .thread-item {
   padding: .55rem .9rem; cursor: pointer; display: flex; flex-direction: column; gap: .15rem;
   border-left: 2px solid transparent;
@@ -429,7 +464,7 @@ pre.code, .code {
 .convo-head .title { font-size: .88rem; color: var(--ink); font-weight: 600;
                      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .convo-head .spacer { margin-left: auto; }
-.convo .scroll { flex: 1; overflow-y: auto; padding: 1.6rem 1.2rem 2rem; }
+.convo .scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 1.6rem 1.2rem 2rem; }
 .thread { max-width: 46rem; margin: 0 auto; display: flex; flex-direction: column; gap: 1.5rem; }
 
 /* A user turn is a short aside; an assistant turn is the document. Giving them
@@ -489,7 +524,7 @@ pre.code, .code {
 .send-btn:disabled { background: var(--rule); color: var(--faint); cursor: default; }
 .send-btn svg { width: 15px; height: 15px; }
 
-.chat-aside .body { flex: 1; overflow-y: auto; }
+.chat-aside .body { flex: 1; min-height: 0; overflow-y: auto; }
 .tabs { display: flex; gap: .1rem; }
 .tabs button { font-family: var(--mono); font-size: .63rem; letter-spacing: .08em; text-transform: uppercase;
                padding: .3em .6em; border: 0; background: none; color: var(--muted); cursor: pointer;
