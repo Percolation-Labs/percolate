@@ -9,7 +9,9 @@
 begin;
 set local role app_owner;
 create schema t_pkgvoc;
-create table t_pkgvoc.widgets (id uuid not null default gen_random_uuid() unique, key text primary key, org_id uuid);
+-- No org_id: a nullable one is what percolate.check_package_schema refuses
+-- (content/08), and nothing here is about tenancy.
+create table t_pkgvoc.widgets (id uuid not null default gen_random_uuid() unique, key text primary key);
 insert into t_pkgvoc.widgets (key) values ('w-1'), ('w-2');
 set local request.jwt.claims = '{}';
 do $$ declare r jsonb; g jsonb; begin
