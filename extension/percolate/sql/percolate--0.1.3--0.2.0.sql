@@ -4928,12 +4928,12 @@ declare
     v_b         record;
     v_common    jsonb;
     v_brace     text;
+    v_prev_run  text;
     v_input     jsonb;
     v_ref       text[];
     v_bad_ord   bigint;
     v_bad_type  text;
     v_bad_col   text;
-    v_prev_run  text;
 begin
     select * into t from workflow.tasks where id = p_task_id;
     -- run_after is checked here and not in execute_sql_step's equivalent, and
@@ -5006,12 +5006,13 @@ begin
         end if;
 
         -- THE ROW SOURCE RUNS FOR THIS RUN, and publishes it the way
-        -- execute_sql_step does. It did not, so everything keyed on
-        -- workflow.current_run_id was blind here: a `rows:` statement or a
+        -- execute_sql_step does -- once, around both kinds of source. Two fixes
+        -- arrived the same day from two directions: a `rows:` statement or a
         -- `rows: {function: p8ql}` read with the engine's reach instead of the
-        -- starter's, and a row function could not tell its own run from a run
-        -- id typed into its arguments. Restored after; an
-        -- error unwinds it with the subtransaction.
+        -- starter's (the tour, act 8), and a row function that reads its run
+        -- found nothing and returned an empty set, releasing the successor as if
+        -- there were nothing to fan out over (dogfood, 2026-09-11). Restored
+        -- after; an error unwinds it with the subtransaction.
         v_prev_run := coalesce(nullif(current_setting('workflow.current_run_id', true), ''), '');
         perform set_config('workflow.current_run_id', t.run_id::text, true);
 

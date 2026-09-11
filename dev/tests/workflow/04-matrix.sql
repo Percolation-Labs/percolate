@@ -682,6 +682,36 @@ begin
     end if;
 end $$;
 
+-- A row function sees its run, as a `sql` step does. It did not: expansion
+-- called it without publishing workflow.current_run_id, so a row function
+-- that read its run's input returned an empty set, and the empty matrix
+-- released its successor as though there had been nothing to fan out over.
+create function t_mx_run_rows() returns jsonb as $fn$
+    select coalesce((select jsonb_agg(jsonb_build_object('n', n))
+                       from jsonb_array_elements_text(r.input->'ns') n), '[]'::jsonb)
+      from workflow.runs r
+     where r.id = nullif(current_setting('workflow.current_run_id', true), '')::uuid;
+$fn$ language sql stable;
+select workflow.register_step_function('t_mx_run_rows', 't_mx_run_rows', '{}');
+
+insert into workflow.definitions (name, spec) values
+('t_mx_runctx', '{"steps":[
+    {"key":"fan", "kind":"matrix", "queue":"t", "input":{
+        "rows":{"function":"t_mx_run_rows","args":[]}, "max_fanout":10,
+        "template":{"queue":"t-sql", "kind":"sql",
+                    "input":{"function":"t_mx_echo", "args":["{{item.n}}"]}}}}
+ ]}');
+
+do $$
+declare v_run uuid; v_n int;
+begin
+    v_run := workflow.start_workflow('t_mx_runctx', '{"ns":["a","b","c"]}'::jsonb);
+    select count(*) into v_n from workflow.tasks where run_id = v_run and step_key like 'fan[%';
+    if v_n <> 3 then
+        raise exception 'a row function could not see its run: % children where the run input named 3', v_n;
+    end if;
+end $$;
+
 -- ---------------------------------------------------------------------
 -- 8c. The fan-in, which the first version of §20 shipped without and
 --     described wrongly. It claimed children could write to a domain table
@@ -836,6 +866,7 @@ do $$ begin
     raise notice 'workflow/04: matrix_rows is authorized against the run, not the task id it is handed';
     raise notice 'workflow/04: {{item.*}} is substituted at expansion -- a worker never learns a task was fanned out';
     raise notice 'workflow/04: row text is data -- {{...}} inside a row reaches the step as text, never a template';
+    raise notice 'workflow/04: a row function sees its run, as a sql step does';
     raise notice 'workflow/04: a successor reaches its siblings via {{steps.<id>.result.task_id}} + matrix_outputs';
     raise notice 'workflow/04: an output that cannot be stored fails terminally, not five times';
 end $$;
