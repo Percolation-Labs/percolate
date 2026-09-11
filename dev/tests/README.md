@@ -235,13 +235,33 @@ service calls, and the service guarantees its own routes.
 ## The fifth directory, which asks a different question
 
 `evals/` is not a sixth surface. The five above test a **mechanism** against its
-spec; `evals/` tests a **journey** — 109 of them, in `scenarios.yaml`, each
+spec; `evals/` tests a **journey** — 111 of them, in `scenarios.yaml`, each
 citing which of 28 named failure modes it would notice, run by `./evals/run.py`
 against one committed fixture.
 
 ```bash
 cd evals && ./run.py --fixture
 ```
+
+**IT IS ONE OF THE GATES.** `dev/check.sh` runs it, under the question *a
+journey somebody could complete last month still completes*, straight after the
+mechanism suite and before the contract re-check. A non-zero exit is red
+locally and red in Actions, which runs this same script and keeps no second
+list.
+
+Nothing here said that until 2026-09-12, and the silence was not a
+documentation gap — it was the reason the suite could stop working in four
+separate ways, over weeks, with nothing going red anywhere: its defaults named
+a container that no longer existed on any machine, its fixture would not load,
+two whole categories were refused by a permission model it predated, and
+sixteen assertions described a schema that had moved (REM-75). A suite nothing
+runs is not a weak suite, it is prose. `dev/check.sh` is now what decides
+whether a scenario added here was worth adding.
+
+The gate reloads the fixture on every run (`--fixture`), which makes the
+fixture's idempotence a thing the gate proves rather than a thing somebody
+remembers: every scope column added to `content.*`, `aiq.*` or a fixture table
+since it was written has broken a second load at least once.
 
 The distinction is not coverage, and it earns its own directory because it finds
 a different class. A mechanism can be correct at every step of a journey that
@@ -274,7 +294,7 @@ surface list above is explicit, so nothing there is globbed.
 
 It is separate from `evals/` next door for one reason, and it is the reason that
 directory earns its own place. `evals/run.py` rolls every scenario back, which
-is right for 109 of them and structurally cannot find anything that only goes
+is right for every one of them and structurally cannot find anything that only goes
 wrong on the *fourth* thing a user does — the class two of the five postmortems
 are about and `../../meta/postmortems/README.md` still lists as the largest open
 shape. A journey does not roll back. Re-running one means rebuilding the
