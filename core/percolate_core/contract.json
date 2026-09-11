@@ -302,6 +302,21 @@
     },
     {
       "admits": [
+        "registry",
+        "crosswalk",
+        "embedding",
+        "llm",
+        "human"
+      ],
+      "column": "tier",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "aiq",
+      "table": "node_resolutions",
+      "vocabulary": null
+    },
+    {
+      "admits": [
         "org",
         "private",
         "public"
@@ -316,6 +331,7 @@
     {
       "admits": [
         "graph",
+        "lake",
         "p8ql",
         "sql",
         "workflow"
@@ -342,6 +358,7 @@
     {
       "admits": [
         "graph",
+        "lake",
         "p8ql",
         "sql",
         "workflow"
@@ -397,6 +414,47 @@
     },
     {
       "admits": [
+        "bearer",
+        "header",
+        "none"
+      ],
+      "column": "auth_type",
+      "enforced_by": "type",
+      "members": "shipped",
+      "schema": "content",
+      "table": "content.api_source",
+      "vocabulary": "content.api_source"
+    },
+    {
+      "admits": [
+        "link_header",
+        "next_url",
+        "none",
+        "page",
+        "page_token"
+      ],
+      "column": "pagination",
+      "enforced_by": "type",
+      "members": "shipped",
+      "schema": "content",
+      "table": "content.api_source",
+      "vocabulary": "content.api_source"
+    },
+    {
+      "admits": [
+        "none",
+        "number",
+        "timestamp"
+      ],
+      "column": "watermark_type",
+      "enforced_by": "type",
+      "members": "shipped",
+      "schema": "content",
+      "table": "content.api_source",
+      "vocabulary": "content.api_source"
+    },
+    {
+      "admits": [
         "basic",
         "bearer",
         "header",
@@ -448,8 +506,21 @@
     },
     {
       "admits": [
+        "parquet",
+        "iceberg"
+      ],
+      "column": "format",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "content",
+      "table": "datasets",
+      "vocabulary": null
+    },
+    {
+      "admits": [
         "append",
-        "replace"
+        "replace",
+        "merge"
       ],
       "column": "mode",
       "enforced_by": "check",
@@ -799,6 +870,146 @@
         "type": "array"
       },
       "title": "One entry of agentic.messages.citations"
+    },
+    {
+      "consumed_by": [
+        "content.api_source_settings",
+        "content.validate_api_source",
+        "content.save_api_source",
+        "content.begin_api_pull",
+        "content.commit_api_page",
+        "percolate.apply_package",
+        "percolate_core.ingest.api.APIConfig",
+        "percolate_core/ui/static/api-source-authoring.js API_DEFAULTS, API_CHOICES"
+      ],
+      "implemented": null,
+      "name": "content.api_source",
+      "owner": "world-model-ingestion",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "auth_header": {
+            "default": "X-API-Key",
+            "description": "The header carrying the credential when auth_type is header.",
+            "type": "string"
+          },
+          "auth_type": {
+            "default": "none",
+            "enum": [
+              "none",
+              "bearer",
+              "header"
+            ],
+            "type": "string"
+          },
+          "credential_ref": {
+            "default": "",
+            "description": "A NAME resolved from the worker's environment, never the value.",
+            "type": "string"
+          },
+          "headers": {
+            "default": {},
+            "description": "Extra request headers. Never Authorization, Cookie, X-API-Key or API-Key: authentication goes through credential_ref.",
+            "type": "object"
+          },
+          "id_path": {
+            "default": "id",
+            "description": "Dot path to each record's stable ID, the deduplication key.",
+            "type": "string"
+          },
+          "initial_watermark": {
+            "default": "",
+            "description": "Where the first pull starts. A timestamp must carry its timezone.",
+            "type": "string"
+          },
+          "mappings": {
+            "default": {},
+            "description": "Output field name to a source dot path, or {path, cast} with cast one of string, number, boolean, lowercase, trim. Empty keeps every field.",
+            "type": "object"
+          },
+          "max_pages": {
+            "default": 5,
+            "description": "Pages per run. A capped run saves its next page and resumes.",
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "next_path": {
+            "default": "next",
+            "description": "Dot path to the next URL or page token, for next_url and page_token.",
+            "type": "string"
+          },
+          "overlap_seconds": {
+            "default": 60,
+            "description": "How far a timestamp watermark is re-read, to catch boundary updates.",
+            "maximum": 604800,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "page_param": {
+            "default": "page",
+            "type": "string"
+          },
+          "page_size": {
+            "default": 100,
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "page_size_param": {
+            "default": "per_page",
+            "type": "string"
+          },
+          "pagination": {
+            "default": "link_header",
+            "enum": [
+              "none",
+              "link_header",
+              "next_url",
+              "page_token",
+              "page"
+            ],
+            "type": "string"
+          },
+          "params": {
+            "default": {},
+            "description": "Query parameters sent on the first page. Scalars only.",
+            "type": "object"
+          },
+          "records_path": {
+            "default": "$",
+            "description": "Dot path to the array of records; `$` is the response itself.",
+            "type": "string"
+          },
+          "url": {
+            "description": "The HTTP(S) endpoint. No embedded credentials, no fragment.",
+            "type": "string"
+          },
+          "watermark_field": {
+            "default": "updated_at",
+            "type": "string"
+          },
+          "watermark_param": {
+            "default": "since",
+            "type": "string"
+          },
+          "watermark_type": {
+            "default": "timestamp",
+            "description": "How record versions are ordered. `timestamp` and `number` filter each pull by the saved watermark and stop a late, older version of a record from replacing a newer one; `none` does neither.",
+            "enum": [
+              "none",
+              "timestamp",
+              "number"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "title": "The api block of an http_pull source"
     },
     {
       "consumed_by": [

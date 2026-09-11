@@ -87,6 +87,12 @@ jobs:
             python -m unittest discover -s tests -p "$t" || exit 1
           done
 
+      # content.api_source in the extension is the one home of an API source's
+      # defaults and choices (REM-61); APIConfig and the UI's API_DEFAULTS are
+      # copies, and a copy that drifts saves a different source.
+      - name: API source settings mean what the database says
+        run: python -m unittest discover -s tests -p test_api_source_contract.py
+
       # These three exist because the dependency moves under us. `result.usage`
       # changed from a METHOD to an ATTRIBUTE between two pydantic-ai versions
       # this package has shipped against, and a serialised budget is a
