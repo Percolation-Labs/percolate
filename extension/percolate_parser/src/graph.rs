@@ -446,13 +446,26 @@ impl Snapshot {
 }
 
 /// A traversal's view of which edges exist: relation and validity.
+///
+/// `at` is not optional, and it was. With no `as_of` the filter applied no
+/// window at all, so every walk that did not ask for a time -- which is every
+/// walk anybody writes -- crossed edges that had been retracted, while
+/// `aiq.edges_current` hid them from every SQL reader (REM-51). An instant is
+/// now always supplied, and the default is the statement's `now()`, the same
+/// instant `aiq.edge_is_current` is asked about by the view.
 #[derive(Clone, Copy)]
 struct Filter {
     rel: Option<u16>,
-    as_of: Option<i64>,
+    at: i64,
 }
 
 impl Filter {
+    /// What holds now, over every relation: the graph the derived indexes
+    /// (reach sketches, labels, communities, components) describe.
+    fn current() -> Filter {
+        Filter { rel: None, at: now_us() }
+    }
+
     #[inline]
     fn keep(&self, e: &Edge) -> bool {
         if let Some(r) = self.rel {
@@ -460,13 +473,23 @@ impl Filter {
                 return false;
             }
         }
-        if let Some(t) = self.as_of {
-            if e.vf > t || e.vt <= t {
-                return false;
-            }
+        // `aiq.edge_is_current`, in microseconds: valid_from <= t < valid_to.
+        if e.vf > self.at || e.vt <= self.at {
+            return false;
         }
         true
     }
+}
+
+/// The transaction's `now()` in microseconds since the Unix epoch -- the
+/// instant `aiq.edges_current` means. Falls back to "only edges never
+/// retracted" rather than to "everything" if it cannot be read, because the
+/// wrong direction to fail in is the one that answers with withdrawn facts.
+fn now_us() -> i64 {
+    Spi::get_one::<i64>("select (extract(epoch from now()) * 1000000)::bigint")
+        .ok()
+        .flatten()
+        .unwrap_or(T_MAX - 1)
 }
 
 // The cache is one snapshot per backend, held as a raw pointer rather than
@@ -669,6 +692,12 @@ fn build(bf: &BuildFilter) -> Snapshot {
     let mut edges: Vec<Edge> = Vec::new();
     let mut rel_names: Vec<String> = Vec::new();
     let mut rel_ids: Map<String, u16> = map();
+    // Asked before the cursors open rather than inside them; see the edge
+    // query below for what it decides.
+    let periods = Spi::get_one::<bool>("select to_regclass('aiq.edge_periods') is not null")
+        .ok()
+        .flatten()
+        .unwrap_or(false);
 
     Spi::connect(|client| {
         let mut cur = client.open_cursor("select id from aiq.nodes", &[]);
@@ -699,20 +728,32 @@ fn build(bf: &BuildFilter) -> Snapshot {
             bf.weight_floor.into(),
             bf.as_of.into(),
         ];
-        let mut cur = client.open_cursor(
+        // BELIEF PERIODS, not rows. An edge retracted and re-asserted is one
+        // row whose single [valid_from, valid_to) covers the retraction, so an
+        // as-of walk inside it crossed an edge nobody believed then (REM-65).
+        // `aiq.edge_periods` is that row with its undone retractions cut out,
+        // one record per period; the periods of one edge are disjoint, so at
+        // any instant at most one of them passes the filter and a walk never
+        // sees an edge twice. Almost every edge has one period, so this is the
+        // same scan as before plus an anti-join against a small table.
+        //
+        // aiq.edges where the view is absent: a parser newer than the
+        // extension it is loaded beside, mid-upgrade, still walks.
+        let from = if periods { "aiq.edge_periods" } else { "aiq.edges" };
+        let q = format!(
             "select src_id, dst_id, relation, weight,
                     coalesce((extract(epoch from valid_from) * 1000000)::bigint, (-9223372036854775808)::bigint),
                     coalesce((extract(epoch from valid_to)   * 1000000)::bigint,   9223372036854775807::bigint)
-               from aiq.edges
+               from {from}
               where ($1::text[] is null or relation = any($1::text[]))
                 and weight >= $2::real
                 and ($3::bigint is null
                      or (coalesce((extract(epoch from valid_from) * 1000000)::bigint,
                                   (-9223372036854775808)::bigint) <= $3::bigint
                      and coalesce((extract(epoch from valid_to) * 1000000)::bigint,
-                                  9223372036854775807::bigint) > $3::bigint))",
-            &args,
+                                  9223372036854775807::bigint) > $3::bigint))"
         );
+        let mut cur = client.open_cursor(&q, &args);
         loop {
             let tbl = cur.fetch(65_536).expect("aiq.edges cursor");
             if tbl.is_empty() {
@@ -2045,7 +2086,7 @@ fn build_reach(g: &Snapshot, depth: usize, b: &mut Budget) -> Option<Reach> {
         let rho = ((x << HLL_P) | (1 << (HLL_P - 1))).leading_zeros() as u8 + 1;
         cur[v * HLL_M + idx] = rho;
     }
-    let f = Filter { rel: None, as_of: None };
+    let f = Filter::current();
     let mut est = vec![0f32; n * depth];
     let mut buf: Vec<(u32, f32, u32)> = Vec::new();
     for d in 0..depth {
@@ -2077,7 +2118,7 @@ fn build_reach(g: &Snapshot, depth: usize, b: &mut Budget) -> Option<Reach> {
 /// query the sketch exists to avoid.
 fn exact_reach(g: &Snapshot, sc: &mut Scratch, v: u32, depth: usize, b: &mut Budget) -> (usize, bool) {
     let epoch = sc.bump();
-    let f = Filter { rel: None, as_of: None };
+    let f = Filter::current();
     let mut frontier = vec![v];
     sc.stamp[v as usize] = epoch;
     let mut seen = 1usize;
@@ -2162,7 +2203,7 @@ fn build_labels(g: &Snapshot, b: &mut Budget, max_entries: usize) -> Labels {
     // almost immediately. A bad order does not make the index wrong, it makes
     // it enormous.
     order.sort_by_key(|&v| std::cmp::Reverse(g.out(v).len() + g.inc(v).len()));
-    let f = Filter { rel: None, as_of: None };
+    let f = Filter::current();
     let mut dist = vec![u8::MAX; n];
     let mut touched: Vec<u32> = Vec::new();
     let mut buf: Vec<(u32, f32, u32)> = Vec::new();
@@ -2322,7 +2363,7 @@ fn label_prop(g: &Snapshot, iters: usize, b: &mut Budget) -> (Vec<u32>, usize, u
     let t0 = Instant::now();
     let n = g.n();
     let mut lbl: Vec<u32> = (0..n as u32).collect();
-    let f = Filter { rel: None, as_of: None };
+    let f = Filter::current();
     let mut buf: Vec<(u32, f32, u32)> = Vec::new();
     let mut tally: Map<u32, f64> = map();
     let mut rounds = 0usize;
@@ -2421,7 +2462,7 @@ fn filter_of(g: &Snapshot, relation: Option<&str>, as_of_us: Option<i64>) -> Res
             }
         },
     };
-    Ok(Filter { rel, as_of: as_of_us })
+    Ok(Filter { rel, at: as_of_us.unwrap_or_else(now_us) })
 }
 
 fn err(msg: String) -> JsonB {
@@ -2958,9 +2999,16 @@ fn p8_graph_components(
         x
     }
 
+    // What holds now. The loop read every edge in the snapshot, and the
+    // snapshot carries retracted history for as-of reads, so two nodes joined
+    // only by a withdrawn edge came back as one component (REM-51).
+    let f = Filter::current();
     for (i, e) in g.edges.iter().enumerate() {
         if i % 8192 == 0 && !b.spend(8192) {
             break;
+        }
+        if !f.keep(e) {
+            continue;
         }
         let (a, c) = (find(&mut parent, e.src), find(&mut parent, e.dst));
         if a != c {

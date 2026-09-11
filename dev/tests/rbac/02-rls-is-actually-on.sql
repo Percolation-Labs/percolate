@@ -60,6 +60,54 @@ begin
     raise notice 'rbac/02: every *_api view is owned by api_viewer';
 end $$;
 
+-- 2b. ...AND THE RULE IS ABOUT EVERY VIEW A USER CAN READ, NOT THE NAME.
+--
+-- §2 checks views whose name ends in `_api`, which is the convention and not
+-- the property. Six views outside it were owner-privileged, owned by the
+-- owner of a table they read, and granted to `authenticated`:
+-- aiq.edges_current, aiq.node_current, agentic.agents_pickable,
+-- agentic.v_plan_agents, agentic.v_plan_servers and workflow.v_artifacts.
+-- Each returned rows the caller's policies refuse -- 15 edges instead of 14,
+-- another org's private agents with their system prompts. edges_current had
+-- been written down as a hazard two days earlier and left, because the data
+-- then could not show a leak (meta/postmortems/
+-- 2026-09-11-owner-privileged-views.md).
+--
+-- So the property itself: a view an end-user role can SELECT, over a table
+-- with RLS enabled and not forced, is either security_invoker or owned by a
+-- role that does not own that table. The dependency walk is pg_rewrite ->
+-- pg_depend, which names every relation the view's query reads, including
+-- through a join.
+do $$
+declare v_bad text;
+begin
+    select string_agg(distinct format('%s.%s (reads %s.%s)', vn.nspname, v.relname,
+                                      tn.nspname, t.relname), '; ')
+      into v_bad
+      from pg_class v
+      join pg_namespace vn on vn.oid = v.relnamespace
+      join pg_rewrite rw on rw.ev_class = v.oid
+      join pg_depend d on d.objid = rw.oid and d.classid = 'pg_rewrite'::regclass
+                      and d.refclassid = 'pg_class'::regclass
+      join pg_class t on t.oid = d.refobjid and t.relkind in ('r','p')
+      join pg_namespace tn on tn.oid = t.relnamespace
+     where v.relkind = 'v'
+       and vn.nspname not in ('pg_catalog','information_schema')
+       and t.relrowsecurity and not t.relforcerowsecurity
+       and v.relowner = t.relowner
+       and not coalesce(v.reloptions @> array['security_invoker=true'], false)
+       and (has_table_privilege('authenticated', v.oid, 'select')
+            or has_table_privilege('api_viewer', v.oid, 'select')
+            or has_table_privilege('web_anon', v.oid, 'select'));
+    if v_bad is not null then
+        raise exception 'views an end user can read bypass the RLS of a table they read, '
+            'because they run as that table''s owner: %. Make the view '
+            'security_invoker, or hand it to api_viewer (specs/README.md, '
+            '"What it takes, concretely").', v_bad;
+    end if;
+    raise notice 'rbac/02: no view an end user can read runs as the owner of an RLS table it reads';
+end $$;
+
 -- ---------------------------------------------------------------------
 -- 3. RLS IS ENABLED, AND DELIBERATELY NOT FORCED.
 --

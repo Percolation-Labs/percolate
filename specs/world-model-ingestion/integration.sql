@@ -103,8 +103,16 @@ select rbac.add_scope_columns('content.resources', 'public');
 
 -- AND NOW resolve_file, which needs the three columns the line above adds.
 -- Its home is here for that reason; schema.sql carries the pointer.
+--
+-- `checksum` is appended LAST, and the drop is what lets it be: a changed
+-- return type cannot be `create or replace`d. It is there so
+-- workflow.v_artifacts can take its file columns from here instead of reading
+-- content.files, which no end-user role may be granted (§ below); callers that
+-- select by name, like percolate-core's content server, are unaffected.
+drop function if exists content.resolve_file(uuid);
 create or replace function content.resolve_file(p_resource_id uuid)
-returns table(bucket text, object_key text, content_type text, size_bytes bigint) as $$
+returns table(bucket text, object_key text, content_type text, size_bytes bigint,
+              checksum text) as $$
     -- may_read, NOT may_access_org. The org rule answers "may this person
     -- touch this tenant"; it says nothing about the ROW, so a resource marked
     -- `private` was served to anybody who could reach its org -- and on the
@@ -115,7 +123,7 @@ returns table(bucket text, object_key text, content_type text, size_bytes bigint
     --
     -- Found by the self-model: content.resources is central (16 dependants),
     -- has broken twice, and this is the gap the graph pointed at.
-    select f.bucket, f.object_key, f.content_type, f.size_bytes
+    select f.bucket, f.object_key, f.content_type, f.size_bytes, f.checksum
     from content.resources r
     join content.files f on f.id = r.file_id
     where r.id = p_resource_id
@@ -480,6 +488,16 @@ $$ language plpgsql stable;
 
 -- Both directions of the link, as one join, so "what did this run produce" and
 -- "which step produced this file" are the same query read from either end.
+--
+-- DROPPED AND RECREATED, owned by api_viewer. It was owned by app_owner, the
+-- owner of workflow.tasks and content.resources, so it bypassed both tables'
+-- policies and joined every tenant's runs to every tenant's files for any
+-- signed-in reader. Owned by api_viewer the policies apply; and the file
+-- columns now come from content.resolve_file(), because api_viewer may not
+-- read content.files (the invariant below) and resolve_file is the scoped
+-- door to it. Recreated rather than replaced because its query changed shape,
+-- and nothing depends on it.
+drop view if exists workflow.v_artifacts;
 create or replace view workflow.v_artifacts as
 select t.run_id,
        t.id             as task_id,
@@ -496,7 +514,7 @@ select t.run_id,
 from workflow.tasks t
 join content.resources r
   on r.id = workflow.artifact_ref(t.output)
-left join content.files f on f.id = r.file_id;
+left join lateral content.resolve_file(r.id) f on true;
 
 -- WORKER ONLY. It was granted to `authenticated` too, and it takes any task id
 -- and asks nothing about whose run that task is in: the resource it registers
@@ -514,6 +532,15 @@ grant execute on function workflow.register_artifact(uuid,text,text,text,bigint,
 revoke execute on function workflow.register_artifact(uuid,text,text,text,bigint,text,text,uuid)
     from authenticated;
 grant execute on function workflow.artifact(uuid) to worker, authenticated;
+-- OWNED BY api_viewer (specs/README.md, "What it takes, concretely"); the
+-- view's header says why. It reads tasks and resources, resolves the rest
+-- through two functions, and needs exactly those.
+grant select on workflow.tasks, content.resources to api_viewer;
+grant execute on function workflow.artifact_ref(jsonb), content.resolve_file(uuid)
+    to api_viewer;
+grant create on schema workflow to api_viewer;
+alter view workflow.v_artifacts owner to api_viewer;
+revoke create on schema workflow from api_viewer;
 grant select on workflow.v_artifacts to authenticated;
 
 -- Registered so a downstream step can be handed an artifact by id and resolve

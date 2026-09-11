@@ -2143,6 +2143,12 @@ alter view agentic.tool_servers_api owner to api_viewer;
 alter view agentic.agents_api       owner to api_viewer;
 alter view agentic.skills_api       owner to api_viewer;
 alter view agentic.plugins_api      owner to api_viewer;
+-- agents_pickable too, and it was not: owned by app_owner, which owns
+-- agentic.agents, it bypassed agents_scoped and listed every tenant's private
+-- and org agents to every signed-in user. The column list keeps system_prompt
+-- out; only the owner decides which rows. meta/postmortems/
+-- 2026-09-11-owner-privileged-views.md.
+alter view agentic.agents_pickable  owner to api_viewer;
 revoke create on schema agentic from api_viewer;
 
 grant select on agentic.sessions_api, agentic.runs_api, agentic.messages_api,
@@ -2354,6 +2360,18 @@ as $$
                 'version', version, 'requires_tools', to_jsonb(requires_tools))))
               from agentic.skills), '{}'::jsonb));
 $$;
+
+-- OWNED BY api_viewer, so the policies apply to whoever reads them. The
+-- header above says "nothing here can show a caller a row it could not
+-- select directly" because agents and tool_servers carried `using (true)`
+-- policies; they now carry scope policies, and a view owned by app_owner (the
+-- tables' owner) skips those -- so v_plan_agents handed every tenant's private
+-- agents, system_prompt included, to any signed-in caller of plan_facet().
+-- The ownership is what makes the header's sentence true again.
+grant create on schema agentic to api_viewer;
+alter view agentic.v_plan_agents  owner to api_viewer;
+alter view agentic.v_plan_servers owner to api_viewer;
+revoke create on schema agentic from api_viewer;
 
 grant select on agentic.v_plan_agents, agentic.v_plan_servers to authenticated;
 grant execute on function agentic.plan_facet() to authenticated;

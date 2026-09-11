@@ -453,6 +453,12 @@ declare
         'agentic.tool_servers',
         'aiq.db_objects',
         'aiq.edges',
+        -- Which of an edge's retractions were later undone, so an as-of read
+        -- knows the periods nobody believed it. Deployment data by the same
+        -- argument as aiq.edges itself, and losing it in a restore does not
+        -- lose an edge: it silently makes every past as-of answer about that
+        -- edge wrong, in the confident direction.
+        'aiq.edge_retractions',
         'aiq.embedding_models',
         'aiq.lake_nodes',
         'aiq.node_keys',
