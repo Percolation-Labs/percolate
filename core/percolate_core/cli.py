@@ -123,6 +123,11 @@ app.add_typer(
     help="Worker pools: render, diff and reconcile Deployments and ScaledObjects",
 )
 app.add_typer(
+    _subcommands("lake", "percolate_core.lake.cli", "Lake worker"),
+    name="lake",
+    help="The lake: refine staged data in DuckDB before it reaches Postgres",
+)
+app.add_typer(
     _subcommands("ui", "percolate_core.ui.cli", "Web UI"),
     name="ui",
     help="The web UI: static ES modules that talk to PostgREST directly",

@@ -2011,6 +2011,13 @@ ingest = [
     { name = "semchunk" },
     { name = "uvicorn" },
 ]
+lake = [
+    { name = "boto3" },
+    { name = "duckdb" },
+    { name = "fastapi" },
+    { name = "pyarrow" },
+    { name = "uvicorn" },
+]
 manager = [
     { name = "kubernetes-asyncio" },
 ]
@@ -2037,6 +2044,7 @@ ui = [
 requires-dist = [
     { name = "asyncpg", specifier = ">=0.30" },
     { name = "boto3", marker = "extra == 'content'", specifier = ">=1.35" },
+    { name = "duckdb", marker = "extra == 'lake'", specifier = ">=1.5" },
     { name = "duckdb", marker = "extra == 'tabular'", specifier = ">=1.0" },
     { name = "fastapi", marker = "extra == 'agent'", specifier = ">=0.115" },
     { name = "fastapi", marker = "extra == 'content'", specifier = ">=0.115" },
@@ -2047,7 +2055,9 @@ requires-dist = [
     { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'otel'", specifier = ">=1.29" },
     { name = "opentelemetry-sdk", marker = "extra == 'otel'", specifier = ">=1.29" },
     { name = "percolate-core", extras = ["content"], marker = "extra == 'ingest'" },
-    { name = "percolate-core", extras = ["content", "agent", "providers", "ingest", "tabular", "otel"], marker = "extra == 'all'" },
+    { name = "percolate-core", extras = ["content"], marker = "extra == 'lake'" },
+    { name = "percolate-core", extras = ["content", "agent", "providers", "ingest", "tabular", "lake", "otel"], marker = "extra == 'all'" },
+    { name = "pyarrow", marker = "extra == 'lake'", specifier = ">=17" },
     { name = "pyarrow", marker = "extra == 'tabular'", specifier = ">=17" },
     { name = "pydantic", marker = "extra == 'agent'", specifier = ">=2.9" },
     { name = "pydantic", marker = "extra == 'ingest'", specifier = ">=2.9" },
@@ -2064,7 +2074,7 @@ requires-dist = [
     { name = "uvicorn", marker = "extra == 'content'", specifier = ">=0.34" },
     { name = "uvicorn", marker = "extra == 'ui'", specifier = ">=0.34" },
 ]
-provides-extras = ["content", "ingest", "tabular", "manager", "ui", "sample", "agent", "otel", "providers", "all"]
+provides-extras = ["content", "ingest", "tabular", "lake", "manager", "ui", "sample", "agent", "otel", "providers", "all"]
 
 [[package]]
 name = "propcache"

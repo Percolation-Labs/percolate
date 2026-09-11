@@ -24,12 +24,18 @@ COPY --from=build /src/dist/*.whl /tmp/
 # as a literal path. Resolve the filename first.
 RUN whl=$(ls /tmp/*.whl) && pip install --no-cache-dir "${whl}[all]" && rm /tmp/*.whl
 
+# DuckDB extensions are downloads from extensions.duckdb.org at first use, and a
+# worker without egress would otherwise meet that inside a customer's step. They
+# are installed here, into the user's home that the services run as, and the
+# lake refuses to download at run time unless told to (engine._load).
+
 # Never root. The services hold no table grants and no filesystem state; there
 # is nothing they need root for, and running as root is the default only
 # because it is the default.
 RUN useradd --create-home --uid 10001 percolate
 USER percolate
 WORKDIR /home/percolate
+RUN percolate lake doctor --install >/dev/null || percolate lake doctor
 
 # No default command: the three services are equal citizens, and defaulting to
 # one of them makes the other two look like afterthoughts.
