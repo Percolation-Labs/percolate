@@ -131,8 +131,15 @@ services:
       # container's own filesystem, which is why `docker compose up --force-
       # recreate` in the wrong window has already cost this repository a day.
       - pgdata:/var/lib/postgresql
+    # OVER TCP. On a first start the image's hook runs against a temporary
+    # server that listens on the unix socket only, so a socket check can report
+    # healthy mid-install and release every service below at a database with
+    # no extension in it, moments before the entrypoint stops that server to
+    # start the real one. TCP is not accepted until the install has finished.
+    # The get-percolate chart's readiness probe (d6f79fc) and
+    # dev/ci-database.sh already wait this way.
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U p8 -d ${P8_DB:-p8dev}"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U p8 -d ${P8_DB:-p8dev}"]
       interval: 3s
       timeout: 3s
       retries: 20
