@@ -126,8 +126,11 @@ begin
             'agentic.agent_call().', p_agent;
     end if;
 
+    -- The row's own model when the caller names none, which is what
+    -- ingest_file's run description has always said ("the agent's own
+    -- model"). It fell through to gpt-4o-mini whatever the row pinned (REM-54).
     v_call := agentic.agent_call(p_agent, p_text,
-                                 coalesce(p_model, 'gpt-4o-mini'),
+                                 coalesce(p_model, a.model, 'gpt-4o-mini'),
                                  p_endpoint, p_credential);
     -- `extractor` rather than `agent`, and the schema name stays 'graph':
     -- both are what this function has always returned, and a consumer reading

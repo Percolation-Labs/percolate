@@ -338,6 +338,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','function','aiq.install_structure_null','text','graph-index.md §1: the null extractor is a row, installed like the ingest workflow'),
 ('ai-query-layer','function','aiq.extractor_call','text,text,text,text,text','graph-index.md §6: the model half -- an OpenAI-shaped chat call, built as a row'),
 ('agentic','function','agentic.agent_call','text,text,text,text,text','the general form of the above: the chat-completions request ANY agent row describes, so a consumer with its own agent does not hand-assemble a body'),
+('agentic','function','agentic.parse_model','text','brief §7: agents.model is provider:model_id; one parse for every path that runs a row'),
 ('ai-query-layer','function','aiq.plan_facet','','plan-graph.md §4: the sources and models half of the plan catalog'),
 ('ai-query-layer','function','aiq.space_populated','text,text','plan-graph.md §4: which models a corpus is ACTUALLY embedded in, as opposed to registered'),
 ('ai-query-layer','view','aiq.v_plan_sources','','plan-graph.md §4: one row per source name, with the columns and spaces a plan expands'),
