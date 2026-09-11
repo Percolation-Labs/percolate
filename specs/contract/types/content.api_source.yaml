@@ -1,0 +1,129 @@
+name: content.api_source
+title: The api block of an http_pull source
+owner: world-model-ingestion
+
+consumed_by:
+  - content.api_source_settings
+  - content.validate_api_source
+  - content.save_api_source
+  - content.begin_api_pull
+  - content.commit_api_page
+  - percolate.apply_package
+  - percolate_core.ingest.api.APIConfig
+  - percolate_core/ui/static/api-source-authoring.js API_DEFAULTS, API_CHOICES
+
+why: >-
+  Four copies of this block disagreed about what an omitted setting means.
+  percolate-core's APIConfig read a missing watermark_type as `timestamp` and a
+  missing pagination as `link_header`; content.save_api_source validated them
+  with `coalesce(..., 'none')`; content.commit_api_page switched on the raw key,
+  so a source saved without watermark_type pulled as a timestamp source and was
+  guarded as none. Measured on 2026-09-11: a record re-delivered late with an
+  older updated_at replaced the newer stored version on exactly the sources an
+  agent or a SQL user wrote, and not on the ones the UI wrote, because the UI
+  always sends every key (REM-61).
+
+  So the defaults live here, once. content.api_source_settings() lays these
+  defaults under whatever a row stores; the writers store its result, so a row
+  states every setting explicitly; and the readers apply it again, so a row
+  written before this existed means what the worker always took it to mean.
+  The Python model and the UI's defaults are copies tested against this file
+  through percolate_core/contract.json, the way the agentic Literals are.
+
+  `additionalProperties: false` because APIConfig is `extra='forbid'`: a
+  misspelled `watermark_typ` is refused at the write, instead of saving a
+  source whose author believes the setting is in force.
+
+schema:
+  type: object
+  additionalProperties: false
+  required: [url]
+  properties:
+    url:
+      description: The HTTP(S) endpoint. No embedded credentials, no fragment.
+      type: string
+    params:
+      description: Query parameters sent on the first page. Scalars only.
+      type: object
+      default: {}
+    headers:
+      description: >-
+        Extra request headers. Never Authorization, Cookie, X-API-Key or
+        API-Key: authentication goes through credential_ref.
+      type: object
+      default: {}
+    auth_type:
+      type: string
+      enum: [none, bearer, header]
+      default: none
+    credential_ref:
+      description: A NAME resolved from the worker's environment, never the value.
+      type: string
+      default: ''
+    auth_header:
+      description: The header carrying the credential when auth_type is header.
+      type: string
+      default: X-API-Key
+    records_path:
+      description: Dot path to the array of records; `$` is the response itself.
+      type: string
+      default: $
+    id_path:
+      description: Dot path to each record's stable ID, the deduplication key.
+      type: string
+      default: id
+    watermark_type:
+      description: >-
+        How record versions are ordered. `timestamp` and `number` filter each
+        pull by the saved watermark and stop a late, older version of a record
+        from replacing a newer one; `none` does neither.
+      type: string
+      enum: [none, timestamp, number]
+      default: timestamp
+    watermark_field:
+      type: string
+      default: updated_at
+    watermark_param:
+      type: string
+      default: since
+    initial_watermark:
+      description: Where the first pull starts. A timestamp must carry its timezone.
+      type: string
+      default: ''
+    overlap_seconds:
+      description: How far a timestamp watermark is re-read, to catch boundary updates.
+      type: integer
+      minimum: 0
+      maximum: 604800
+      default: 60
+    pagination:
+      type: string
+      enum: [none, link_header, next_url, page_token, page]
+      default: link_header
+    next_path:
+      description: Dot path to the next URL or page token, for next_url and page_token.
+      type: string
+      default: next
+    page_param:
+      type: string
+      default: page
+    page_size_param:
+      type: string
+      default: per_page
+    page_size:
+      type: integer
+      minimum: 1
+      maximum: 1000
+      default: 100
+    max_pages:
+      description: Pages per run. A capped run saves its next page and resumes.
+      type: integer
+      minimum: 1
+      maximum: 100
+      default: 5
+    mappings:
+      description: >-
+        Output field name to a source dot path, or {path, cast} with cast one of
+        string, number, boolean, lowercase, trim. Empty keeps every field.
+      type: object
+      default: {}

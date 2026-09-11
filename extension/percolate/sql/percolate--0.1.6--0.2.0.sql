@@ -24943,25 +24943,68 @@ drop policy if exists source_read on content.source_records;
 create policy source_read on content.source_records for select using (exists(select 1 from content.channels c where c.id=source_id));
 grant select on content.source_state,content.source_records to authenticated,api_viewer;
 
+-- WHAT AN OMITTED SETTING MEANS, in one place: the defaults declared by
+-- specs/contract/types/content.api_source.yaml, laid under whatever the row
+-- says. Every reader goes through this, so a row saved before writers stored
+-- the full block means what the worker always took it to mean. Four copies used
+-- to disagree: a source saved here without watermark_type pulled as `timestamp`
+-- in the worker and was guarded as `none` in commit_api_page (REM-61).
+--
+-- Merge only, never a refusal: the worker's own validation turns a bad row into
+-- a terminal task error, and a raise here would turn it into a retry.
+create or replace function content.api_source_settings(p_api jsonb)
+returns jsonb language plpgsql stable set search_path=pg_catalog,public as $$
+declare d jsonb;
+begin
+ select coalesce(jsonb_object_agg(p.key,p.value->'default'),'{}') into d
+   from percolate.types t, jsonb_each(t.schema->'properties') p
+  where t.name='content.api_source' and p.value ? 'default';
+ if d='{}' then raise exception 'percolate.types has no content.api_source defaults; the extension is incompletely installed.';end if;
+ return d||case when jsonb_typeof(p_api)='object' then p_api else '{}' end;
+end $$;
+
+-- What every WRITER calls: save_api_source and percolate.apply_package. Refuses
+-- what the worker would refuse at pull time, and returns the complete block to
+-- store, so the row states each setting rather than leaving it to a default.
+create or replace function content.validate_api_source(p_api jsonb)
+returns jsonb language plpgsql stable set search_path=pg_catalog,public as $$
+declare t jsonb; a jsonb; bad text; p record;
+begin
+ if jsonb_typeof(p_api) is distinct from 'object' then raise exception 'An API source needs an HTTP(S) endpoint and a record ID field.';end if;
+ -- Before the unknown-key check, so a pasted token is told where it belongs
+ -- rather than that `token` is not a setting.
+ if p_api ? 'token' or p_api ? 'secret' or p_api ? 'password' or exists(select 1 from jsonb_object_keys(coalesce(p_api->'headers','{}')) k where lower(k) in ('authorization','cookie','x-api-key','api-key')) then
+  raise exception 'Store authentication by credential reference, never as a token or literal authentication header.';end if;
+ select schema into t from percolate.types where name='content.api_source';
+ select string_agg(k,', ' order by k) into bad from jsonb_object_keys(p_api) k where not t->'properties' ? k;
+ if bad is not null then raise exception 'Unknown API settings: %.',bad using hint='The settings are listed in percolate.types, content.api_source.';end if;
+ a:=content.api_source_settings(p_api);
+ for p in select key,value from jsonb_each(t->'properties') where value ? 'enum' loop
+  if not p.value->'enum' @> jsonb_build_array(a->p.key) then
+   raise exception 'Unsupported %: %. Use one of %.',p.key,a->p.key,p.value->'enum';end if;
+ end loop;
+ if coalesce(a->>'url','') !~ '^https?://' or coalesce(a->>'id_path','')='' then raise exception 'An API source needs an HTTP(S) endpoint and a record ID field.';end if;
+ return a;
+end $$;
+-- Called only from inside the SECURITY DEFINER functions below and
+-- percolate.apply_package, which run as the owner. Nobody else needs them.
+revoke all on function content.api_source_settings(jsonb) from public;
+revoke all on function content.validate_api_source(jsonb) from public;
+
 create or replace function content.save_api_source(p_id uuid,p_name text,p_config jsonb,p_queue text,p_updated_at timestamptz default null)
 returns jsonb language plpgsql security definer set search_path=pg_catalog,public as $$
 declare v_user uuid:=rbac.current_user_id(); old content.channels; c content.channels; w jsonb; a jsonb:=p_config->'api'; n text:='source_'||replace(p_id::text,'-','');
 begin
  if v_user is null or not workflow.may_define() then raise exception 'Saving an API source requires workflows:update.' using errcode='42501';end if;
  if p_id is null or p_name is null or p_name !~ '^[a-z][a-z0-9_-]{0,63}$' then raise exception 'Use a source name starting with a lowercase letter, with up to 64 letters, numbers, hyphens or underscores.';end if;
- if jsonb_typeof(a) is distinct from 'object' or coalesce(a->>'url','') !~ '^https?://' or coalesce(a->>'id_path','')='' then raise exception 'An API source needs an HTTP(S) endpoint and a record ID field.';end if;
- if coalesce(a->>'auth_type','none') not in ('none','bearer','header') or
-    coalesce(a->>'pagination','none') not in ('none','link_header','next_url','page_token','page') or
-    coalesce(a->>'watermark_type','none') not in ('none','timestamp','number') then raise exception 'Unsupported authentication, pagination or watermark type.';end if;
- if a ? 'token' or a ? 'secret' or a ? 'password' or exists(select 1 from jsonb_object_keys(coalesce(a->'headers','{}')) k where lower(k) in ('authorization','cookie','x-api-key','api-key')) then
-  raise exception 'Store authentication by credential reference, never as a token or literal authentication header.';end if;
+ a:=content.validate_api_source(a);
  if p_queue is null or p_queue !~ '^[a-zA-Z0-9_:/.-]+$' then raise exception 'Choose an ingestion worker queue.';end if;
  select * into old from content.channels where id=p_id for update;
  if found then
   if old.owner_id is distinct from v_user then raise exception 'Only the owner can update this source. Create a private copy.' using errcode='42501';end if;
   if old.kind<>'http_pull' then raise exception 'Create a new source to change its type.';end if;
   if p_updated_at is distinct from old.updated_at then raise exception 'The source changed since you opened it. Reopen it before saving; your draft is preserved.' using errcode='PT409';end if;
-  if old.config->'api' is distinct from a and exists(select 1 from content.source_state where source_id=p_id and (watermark is not null or next_url is not null)) then
+  if content.api_source_settings(old.config->'api') is distinct from a and exists(select 1 from content.source_state where source_id=p_id and (watermark is not null or next_url is not null)) then
    raise exception 'This source has saved progress. Create a new source for a different ingestion configuration, or reset its progress first.';end if;
   if exists(select 1 from workflow.runs r join workflow.definitions d on d.id=r.workflow_def_id where d.name in (n,old.config->>'ingest_workflow') and r.status='running') then raise exception 'Wait for the active pull to finish before changing this source.';end if;
  elsif exists(select 1 from workflow.definitions where name=n) then raise exception 'That workflow identity already exists. Create a new source.';
@@ -24970,7 +25013,7 @@ begin
  w:=jsonb_build_object('name',n,'steps',jsonb_build_array(jsonb_build_object('id','pull','work',true,'queue',p_queue,'input',jsonb_build_object('op','api_pull','source_id',p_id))));
  perform workflow.define_yaml(w::text);
  insert into content.channels(id,name,kind,config,owner_id,visibility,org_id)
- values(p_id,p_name,'http_pull',p_config||jsonb_build_object('ingest_workflow',n,'workflow',w),v_user,'private',rbac.shared_org_id())
+ values(p_id,p_name,'http_pull',p_config||jsonb_build_object('api',a,'ingest_workflow',n,'workflow',w),v_user,'private',rbac.shared_org_id())
  on conflict(id) do update set name=excluded.name,config=excluded.config,updated_at=clock_timestamp()
  returning * into c;
  return to_jsonb(c);
@@ -25010,18 +25053,19 @@ begin
   updated=case when next_url is null then 0 else updated end,
   unchanged=case when next_url is null then 0 else unchanged end
  where source_id=p_source returning * into s;
- return to_jsonb(s)||jsonb_build_object('config',c.config->'api');
+ return to_jsonb(s)||jsonb_build_object('config',content.api_source_settings(c.config->'api'));
 end $$;
 revoke all on function content.begin_api_pull(uuid,text,uuid) from public;
 grant execute on function content.begin_api_pull(uuid,text,uuid) to worker;
 
 create or replace function content.commit_api_page(p_task uuid,p_worker text,p_source uuid,p_revision bigint,p_records jsonb,p_url text,p_next text,p_watermark text,p_hash text)
 returns jsonb language plpgsql security definer set search_path=pg_catalog,public as $$
-declare v_owner uuid; s content.source_state; c content.channels; v jsonb; old content.source_records; ni int:=0;nu int:=0;ns int:=0;receipt jsonb;
+declare v_owner uuid; s content.source_state; c content.channels; v jsonb; old content.source_records; ni int:=0;nu int:=0;ns int:=0;receipt jsonb; wt text;
 begin
  v_owner:=workflow.task_owner(p_task,p_worker);
  select * into c from content.channels where id=p_source for update;
  if c.owner_id is distinct from v_owner then raise exception 'This task does not own the source.' using errcode='42501';end if;
+ wt:=content.api_source_settings(c.config->'api')->>'watermark_type';
  select * into s from content.source_state where source_id=p_source for update;
  if s.source_id is null or s.active_task is distinct from p_task or s.revision<>p_revision then raise exception 'Source progress changed; retry from the current checkpoint.' using errcode='40001';end if;
  if jsonb_typeof(p_records) is distinct from 'array' or jsonb_array_length(p_records)>10000 then raise exception 'A page must contain at most 10,000 records.';end if;
@@ -25030,7 +25074,7 @@ begin
   select * into old from content.source_records where source_id=p_source and external_id=v->>'external_id';
   if not found then
    insert into content.source_records(source_id,external_id,watermark,raw,data) values(p_source,v->>'external_id',v->>'watermark',v->'raw',v->'data');ni:=ni+1;
-  elsif old.watermark is not null and v->>'watermark' is not null and (case c.config->'api'->>'watermark_type'
+  elsif old.watermark is not null and v->>'watermark' is not null and (case wt
     when 'timestamp' then (v->>'watermark')::timestamptz < old.watermark::timestamptz
     when 'number' then (v->>'watermark')::numeric < old.watermark::numeric
     else false end) then
@@ -26297,8 +26341,15 @@ begin
                 raise exception 'An API source package needs an installation owner.'
                 using hint = 'Use packages/apply.py --owner USER_UUID. The source and its runs belong to this user.';
             end if;
+            -- The same refusal and the same complete block content.save_api_source
+            -- stores, so a packaged source cannot mean something the UI's would
+            -- not: this path used to store the block unvalidated (REM-61).
+            v_e := jsonb_set(v_e, '{config,api}', content.validate_api_source(v_e->'config'->'api'));
             if exists(select 1 from content.channels where name=v_e->>'name' and org_id=rbac.shared_org_id()
-                      and (owner_id is distinct from rbac.current_user_id() or kind<>'http_pull' or config is distinct from v_e->'config')) then
+                      -- Compared as settings, so a source this installed before
+                      -- the block was stored whole still counts as the same one.
+                      and (owner_id is distinct from rbac.current_user_id() or kind<>'http_pull'
+                           or jsonb_set(config,'{api}',content.api_source_settings(config->'api')) is distinct from v_e->'config')) then
                 raise exception 'API source % already exists with different settings or ownership. Use a new source name or update it explicitly.',v_e->>'name';
             end if;
             insert into content.channels(name,kind,config,owner_id,visibility)
@@ -26526,6 +26577,12 @@ values
      null,
      'brief.md §5.3 calls this "a tagged union, deliberately -- not one column trying to mean both things", and the schema comment on the column writes the two shapes out in prose. Prose in a comment is not a discriminator: the column is jsonb, and the only thing standing between it and a malformed citation is the runtime that writes it. A chunk citation never carries a node_id because resource_chunk rows are machine-generated data-plane rows rather than graph nodes -- which is a rule the shape can express and a comment can only assert.
 Citations are derived by the runtime from the turn''s tool_response rows and are NEVER authored by the model, so this shape is also the boundary that keeps provenance a construction rather than a claim.'),
+    ('content.api_source', 'The api block of an http_pull source', 'world-model-ingestion', array['content.api_source_settings', 'content.validate_api_source', 'content.save_api_source', 'content.begin_api_pull', 'content.commit_api_page', 'percolate.apply_package', 'percolate_core.ingest.api.APIConfig', 'percolate_core/ui/static/api-source-authoring.js API_DEFAULTS, API_CHOICES']::text[],
+     '{"additionalProperties": false, "properties": {"auth_header": {"default": "X-API-Key", "description": "The header carrying the credential when auth_type is header.", "type": "string"}, "auth_type": {"default": "none", "enum": ["none", "bearer", "header"], "type": "string"}, "credential_ref": {"default": "", "description": "A NAME resolved from the worker''s environment, never the value.", "type": "string"}, "headers": {"default": {}, "description": "Extra request headers. Never Authorization, Cookie, X-API-Key or API-Key: authentication goes through credential_ref.", "type": "object"}, "id_path": {"default": "id", "description": "Dot path to each record''s stable ID, the deduplication key.", "type": "string"}, "initial_watermark": {"default": "", "description": "Where the first pull starts. A timestamp must carry its timezone.", "type": "string"}, "mappings": {"default": {}, "description": "Output field name to a source dot path, or {path, cast} with cast one of string, number, boolean, lowercase, trim. Empty keeps every field.", "type": "object"}, "max_pages": {"default": 5, "description": "Pages per run. A capped run saves its next page and resumes.", "maximum": 100, "minimum": 1, "type": "integer"}, "next_path": {"default": "next", "description": "Dot path to the next URL or page token, for next_url and page_token.", "type": "string"}, "overlap_seconds": {"default": 60, "description": "How far a timestamp watermark is re-read, to catch boundary updates.", "maximum": 604800, "minimum": 0, "type": "integer"}, "page_param": {"default": "page", "type": "string"}, "page_size": {"default": 100, "maximum": 1000, "minimum": 1, "type": "integer"}, "page_size_param": {"default": "per_page", "type": "string"}, "pagination": {"default": "link_header", "enum": ["none", "link_header", "next_url", "page_token", "page"], "type": "string"}, "params": {"default": {}, "description": "Query parameters sent on the first page. Scalars only.", "type": "object"}, "records_path": {"default": "$", "description": "Dot path to the array of records; `$` is the response itself.", "type": "string"}, "url": {"description": "The HTTP(S) endpoint. No embedded credentials, no fragment.", "type": "string"}, "watermark_field": {"default": "updated_at", "type": "string"}, "watermark_param": {"default": "since", "type": "string"}, "watermark_type": {"default": "timestamp", "description": "How record versions are ordered. `timestamp` and `number` filter each pull by the saved watermark and stop a late, older version of a record from replacing a newer one; `none` does neither.", "enum": ["none", "timestamp", "number"], "type": "string"}}, "required": ["url"], "type": "object"}'::jsonb,
+     null,
+     'Four copies of this block disagreed about what an omitted setting means. percolate-core''s APIConfig read a missing watermark_type as `timestamp` and a missing pagination as `link_header`; content.save_api_source validated them with `coalesce(..., ''none'')`; content.commit_api_page switched on the raw key, so a source saved without watermark_type pulled as a timestamp source and was guarded as none. Measured on 2026-09-11: a record re-delivered late with an older updated_at replaced the newer stored version on exactly the sources an agent or a SQL user wrote, and not on the ones the UI wrote, because the UI always sends every key (REM-61).
+So the defaults live here, once. content.api_source_settings() lays these defaults under whatever a row stores; the writers store its result, so a row states every setting explicitly; and the readers apply it again, so a row written before this existed means what the worker always took it to mean. The Python model and the UI''s defaults are copies tested against this file through percolate_core/contract.json, the way the agentic Literals are.
+`additionalProperties: false` because APIConfig is `extra=''forbid''`: a misspelled `watermark_typ` is refused at the write, instead of saving a source whose author believes the setting is in force.'),
     ('content.connector.auth', 'The auth block of a content.connectors row', 'world-model-ingestion', array['specs/world-model-ingestion/reference/connector.py apply_auth']::text[],
      '{"not": {"anyOf": [{"required": ["value"]}, {"required": ["secret"]}, {"required": ["token"]}]}, "properties": {"credential_ref": {"description": "A NAME. The trigger refuses a row carrying `value`, `secret` or `token`.", "type": "string"}, "header": {"description": "Header name, for type=header.", "type": "string"}, "param": {"description": "Query parameter name, for type=query_param.", "type": "string"}, "template": {"description": "For type=user_agent -- SEC requires an identifying UA, which is a credential.", "type": "string"}, "type": {"enum": ["none", "user_agent", "header", "bearer", "query_param", "basic", "oauth2_cc", "signed"], "type": "string"}}, "required": ["type"], "type": "object"}'::jsonb,
      '{"basic": false, "bearer": true, "header": true, "none": true, "oauth2_cc": false, "query_param": true, "signed": false, "user_agent": true}'::jsonb,

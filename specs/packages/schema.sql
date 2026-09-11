@@ -261,8 +261,15 @@ begin
                 raise exception 'An API source package needs an installation owner.'
                 using hint = 'Use packages/apply.py --owner USER_UUID. The source and its runs belong to this user.';
             end if;
+            -- The same refusal and the same complete block content.save_api_source
+            -- stores, so a packaged source cannot mean something the UI's would
+            -- not: this path used to store the block unvalidated (REM-61).
+            v_e := jsonb_set(v_e, '{config,api}', content.validate_api_source(v_e->'config'->'api'));
             if exists(select 1 from content.channels where name=v_e->>'name' and org_id=rbac.shared_org_id()
-                      and (owner_id is distinct from rbac.current_user_id() or kind<>'http_pull' or config is distinct from v_e->'config')) then
+                      -- Compared as settings, so a source this installed before
+                      -- the block was stored whole still counts as the same one.
+                      and (owner_id is distinct from rbac.current_user_id() or kind<>'http_pull'
+                           or jsonb_set(config,'{api}',content.api_source_settings(config->'api')) is distinct from v_e->'config')) then
                 raise exception 'API source % already exists with different settings or ownership. Use a new source name or update it explicitly.',v_e->>'name';
             end if;
             insert into content.channels(name,kind,config,owner_id,visibility)

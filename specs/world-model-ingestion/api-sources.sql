@@ -36,25 +36,68 @@ drop policy if exists source_read on content.source_records;
 create policy source_read on content.source_records for select using (exists(select 1 from content.channels c where c.id=source_id));
 grant select on content.source_state,content.source_records to authenticated,api_viewer;
 
+-- WHAT AN OMITTED SETTING MEANS, in one place: the defaults declared by
+-- specs/contract/types/content.api_source.yaml, laid under whatever the row
+-- says. Every reader goes through this, so a row saved before writers stored
+-- the full block means what the worker always took it to mean. Four copies used
+-- to disagree: a source saved here without watermark_type pulled as `timestamp`
+-- in the worker and was guarded as `none` in commit_api_page (REM-61).
+--
+-- Merge only, never a refusal: the worker's own validation turns a bad row into
+-- a terminal task error, and a raise here would turn it into a retry.
+create or replace function content.api_source_settings(p_api jsonb)
+returns jsonb language plpgsql stable set search_path=pg_catalog,public as $$
+declare d jsonb;
+begin
+ select coalesce(jsonb_object_agg(p.key,p.value->'default'),'{}') into d
+   from percolate.types t, jsonb_each(t.schema->'properties') p
+  where t.name='content.api_source' and p.value ? 'default';
+ if d='{}' then raise exception 'percolate.types has no content.api_source defaults; the extension is incompletely installed.';end if;
+ return d||case when jsonb_typeof(p_api)='object' then p_api else '{}' end;
+end $$;
+
+-- What every WRITER calls: save_api_source and percolate.apply_package. Refuses
+-- what the worker would refuse at pull time, and returns the complete block to
+-- store, so the row states each setting rather than leaving it to a default.
+create or replace function content.validate_api_source(p_api jsonb)
+returns jsonb language plpgsql stable set search_path=pg_catalog,public as $$
+declare t jsonb; a jsonb; bad text; p record;
+begin
+ if jsonb_typeof(p_api) is distinct from 'object' then raise exception 'An API source needs an HTTP(S) endpoint and a record ID field.';end if;
+ -- Before the unknown-key check, so a pasted token is told where it belongs
+ -- rather than that `token` is not a setting.
+ if p_api ? 'token' or p_api ? 'secret' or p_api ? 'password' or exists(select 1 from jsonb_object_keys(coalesce(p_api->'headers','{}')) k where lower(k) in ('authorization','cookie','x-api-key','api-key')) then
+  raise exception 'Store authentication by credential reference, never as a token or literal authentication header.';end if;
+ select schema into t from percolate.types where name='content.api_source';
+ select string_agg(k,', ' order by k) into bad from jsonb_object_keys(p_api) k where not t->'properties' ? k;
+ if bad is not null then raise exception 'Unknown API settings: %.',bad using hint='The settings are listed in percolate.types, content.api_source.';end if;
+ a:=content.api_source_settings(p_api);
+ for p in select key,value from jsonb_each(t->'properties') where value ? 'enum' loop
+  if not p.value->'enum' @> jsonb_build_array(a->p.key) then
+   raise exception 'Unsupported %: %. Use one of %.',p.key,a->p.key,p.value->'enum';end if;
+ end loop;
+ if coalesce(a->>'url','') !~ '^https?://' or coalesce(a->>'id_path','')='' then raise exception 'An API source needs an HTTP(S) endpoint and a record ID field.';end if;
+ return a;
+end $$;
+-- Called only from inside the SECURITY DEFINER functions below and
+-- percolate.apply_package, which run as the owner. Nobody else needs them.
+revoke all on function content.api_source_settings(jsonb) from public;
+revoke all on function content.validate_api_source(jsonb) from public;
+
 create or replace function content.save_api_source(p_id uuid,p_name text,p_config jsonb,p_queue text,p_updated_at timestamptz default null)
 returns jsonb language plpgsql security definer set search_path=pg_catalog,public as $$
 declare v_user uuid:=rbac.current_user_id(); old content.channels; c content.channels; w jsonb; a jsonb:=p_config->'api'; n text:='source_'||replace(p_id::text,'-','');
 begin
  if v_user is null or not workflow.may_define() then raise exception 'Saving an API source requires workflows:update.' using errcode='42501';end if;
  if p_id is null or p_name is null or p_name !~ '^[a-z][a-z0-9_-]{0,63}$' then raise exception 'Use a source name starting with a lowercase letter, with up to 64 letters, numbers, hyphens or underscores.';end if;
- if jsonb_typeof(a) is distinct from 'object' or coalesce(a->>'url','') !~ '^https?://' or coalesce(a->>'id_path','')='' then raise exception 'An API source needs an HTTP(S) endpoint and a record ID field.';end if;
- if coalesce(a->>'auth_type','none') not in ('none','bearer','header') or
-    coalesce(a->>'pagination','none') not in ('none','link_header','next_url','page_token','page') or
-    coalesce(a->>'watermark_type','none') not in ('none','timestamp','number') then raise exception 'Unsupported authentication, pagination or watermark type.';end if;
- if a ? 'token' or a ? 'secret' or a ? 'password' or exists(select 1 from jsonb_object_keys(coalesce(a->'headers','{}')) k where lower(k) in ('authorization','cookie','x-api-key','api-key')) then
-  raise exception 'Store authentication by credential reference, never as a token or literal authentication header.';end if;
+ a:=content.validate_api_source(a);
  if p_queue is null or p_queue !~ '^[a-zA-Z0-9_:/.-]+$' then raise exception 'Choose an ingestion worker queue.';end if;
  select * into old from content.channels where id=p_id for update;
  if found then
   if old.owner_id is distinct from v_user then raise exception 'Only the owner can update this source. Create a private copy.' using errcode='42501';end if;
   if old.kind<>'http_pull' then raise exception 'Create a new source to change its type.';end if;
   if p_updated_at is distinct from old.updated_at then raise exception 'The source changed since you opened it. Reopen it before saving; your draft is preserved.' using errcode='PT409';end if;
-  if old.config->'api' is distinct from a and exists(select 1 from content.source_state where source_id=p_id and (watermark is not null or next_url is not null)) then
+  if content.api_source_settings(old.config->'api') is distinct from a and exists(select 1 from content.source_state where source_id=p_id and (watermark is not null or next_url is not null)) then
    raise exception 'This source has saved progress. Create a new source for a different ingestion configuration, or reset its progress first.';end if;
   if exists(select 1 from workflow.runs r join workflow.definitions d on d.id=r.workflow_def_id where d.name in (n,old.config->>'ingest_workflow') and r.status='running') then raise exception 'Wait for the active pull to finish before changing this source.';end if;
  elsif exists(select 1 from workflow.definitions where name=n) then raise exception 'That workflow identity already exists. Create a new source.';
@@ -63,7 +106,7 @@ begin
  w:=jsonb_build_object('name',n,'steps',jsonb_build_array(jsonb_build_object('id','pull','work',true,'queue',p_queue,'input',jsonb_build_object('op','api_pull','source_id',p_id))));
  perform workflow.define_yaml(w::text);
  insert into content.channels(id,name,kind,config,owner_id,visibility,org_id)
- values(p_id,p_name,'http_pull',p_config||jsonb_build_object('ingest_workflow',n,'workflow',w),v_user,'private',rbac.shared_org_id())
+ values(p_id,p_name,'http_pull',p_config||jsonb_build_object('api',a,'ingest_workflow',n,'workflow',w),v_user,'private',rbac.shared_org_id())
  on conflict(id) do update set name=excluded.name,config=excluded.config,updated_at=clock_timestamp()
  returning * into c;
  return to_jsonb(c);
@@ -103,18 +146,19 @@ begin
   updated=case when next_url is null then 0 else updated end,
   unchanged=case when next_url is null then 0 else unchanged end
  where source_id=p_source returning * into s;
- return to_jsonb(s)||jsonb_build_object('config',c.config->'api');
+ return to_jsonb(s)||jsonb_build_object('config',content.api_source_settings(c.config->'api'));
 end $$;
 revoke all on function content.begin_api_pull(uuid,text,uuid) from public;
 grant execute on function content.begin_api_pull(uuid,text,uuid) to worker;
 
 create or replace function content.commit_api_page(p_task uuid,p_worker text,p_source uuid,p_revision bigint,p_records jsonb,p_url text,p_next text,p_watermark text,p_hash text)
 returns jsonb language plpgsql security definer set search_path=pg_catalog,public as $$
-declare v_owner uuid; s content.source_state; c content.channels; v jsonb; old content.source_records; ni int:=0;nu int:=0;ns int:=0;receipt jsonb;
+declare v_owner uuid; s content.source_state; c content.channels; v jsonb; old content.source_records; ni int:=0;nu int:=0;ns int:=0;receipt jsonb; wt text;
 begin
  v_owner:=workflow.task_owner(p_task,p_worker);
  select * into c from content.channels where id=p_source for update;
  if c.owner_id is distinct from v_owner then raise exception 'This task does not own the source.' using errcode='42501';end if;
+ wt:=content.api_source_settings(c.config->'api')->>'watermark_type';
  select * into s from content.source_state where source_id=p_source for update;
  if s.source_id is null or s.active_task is distinct from p_task or s.revision<>p_revision then raise exception 'Source progress changed; retry from the current checkpoint.' using errcode='40001';end if;
  if jsonb_typeof(p_records) is distinct from 'array' or jsonb_array_length(p_records)>10000 then raise exception 'A page must contain at most 10,000 records.';end if;
@@ -123,7 +167,7 @@ begin
   select * into old from content.source_records where source_id=p_source and external_id=v->>'external_id';
   if not found then
    insert into content.source_records(source_id,external_id,watermark,raw,data) values(p_source,v->>'external_id',v->>'watermark',v->'raw',v->'data');ni:=ni+1;
-  elsif old.watermark is not null and v->>'watermark' is not null and (case c.config->'api'->>'watermark_type'
+  elsif old.watermark is not null and v->>'watermark' is not null and (case wt
     when 'timestamp' then (v->>'watermark')::timestamptz < old.watermark::timestamptz
     when 'number' then (v->>'watermark')::numeric < old.watermark::numeric
     else false end) then
