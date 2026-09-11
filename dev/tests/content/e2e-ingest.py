@@ -109,11 +109,16 @@ async def wait_for_runs(conn, run_ids: list[str], seconds: int = 240) -> dict[st
     """Poll until every run is terminal. Returns run_id -> status."""
     deadline = time.time() + seconds
     while time.time() < deadline:
+        # "Has it finished" is asked of workflow.lifecycle_states, through
+        # workflow.is_terminal, rather than spelled out here: a waiting loop
+        # with its own list of terminal states waits out its deadline on a
+        # state it has not heard of (REM-52).
         rows = await conn.fetch(
-            "select id::text, status from workflow.runs where id = any($1::uuid[])",
+            "select id::text, status, workflow.is_terminal(status) as done "
+            "from workflow.runs where id = any($1::uuid[])",
             run_ids)
         status = {r["id"]: r["status"] for r in rows}
-        if all(s in ("succeeded", "failed", "cancelled") for s in status.values()):
+        if rows and all(r["done"] for r in rows):
             return status
         await asyncio.sleep(2)
     return status
@@ -121,8 +126,11 @@ async def wait_for_runs(conn, run_ids: list[str], seconds: int = 240) -> dict[st
 
 async def failure_detail(conn, run_id: str) -> str:
     rows = await conn.fetch(
+        # `dead` was never a status; the FK on workflow.tasks.status would
+        # refuse it. What this wants is "finished, and did not succeed".
         "select step_key, status, output::text from workflow.tasks "
-        "where run_id = $1::uuid and status in ('failed','dead') limit 3", run_id)
+        "where run_id = $1::uuid and workflow.is_terminal(status) "
+        "and not workflow.is_success(status) limit 3", run_id)
     return "; ".join(f"{r['step_key']}: {(r['output'] or '')[:300]}" for r in rows)
 
 

@@ -113,6 +113,41 @@ on conflict (state) do nothing;
 
 grant select on workflow.lifecycle_states to authenticated, api_viewer;
 
+-- THE TABLE ANSWERS THE QUESTION, rather than being a list beside the answers.
+-- `is_terminal` and `is_success` were columns nothing read: every place that
+-- needed "has this finished" wrote `status in ('succeeded','failed',
+-- 'cancelled')` again -- nine times in this file alone, once in
+-- world-model-ingestion, and in the tests, the browser and the eval suite. Each
+-- copy is correct today and is a place a ninth state would have to be
+-- remembered into, which is the shape `challenge-the-process` §9 names: push
+-- the whole fact, not the label (REM-52).
+--
+-- STABLE, not immutable, because the answer is rows -- so these cannot be used
+-- in an index predicate or a CHECK, and are not: which subset of the vocabulary
+-- a table admits stays a CHECK on that table, for the reason above.
+create or replace function workflow.is_terminal(p_status text)
+returns boolean language sql stable parallel safe
+set search_path = pg_catalog, public as $$
+    select coalesce((select s.is_terminal from workflow.lifecycle_states s
+                      where s.state = p_status), false);
+$$;
+
+create or replace function workflow.is_success(p_status text)
+returns boolean language sql stable parallel safe
+set search_path = pg_catalog, public as $$
+    select coalesce((select s.is_success from workflow.lifecycle_states s
+                      where s.state = p_status), false);
+$$;
+
+comment on function workflow.is_terminal(text) is
+    'Has a run, task or step in this status finished, by the vocabulary rather '
+    'than by a list written down beside it.';
+comment on function workflow.is_success(text) is
+    'Did it finish AND do what it was asked. A failed run also completed.';
+
+grant execute on function workflow.is_terminal(text), workflow.is_success(text)
+    to authenticated, api_viewer, worker, scheduler;
+
 create table if not exists workflow.definitions (
     id          uuid primary key default uuidv7(),
     name        text not null,
@@ -259,8 +294,12 @@ create table if not exists workflow.runs (
     workflow_def_id  uuid not null references workflow.definitions(id),
     parent_task_id   uuid,
     external_id      text unique,     -- caller-supplied idempotency key for workflow.start_workflow
-    status           text not null default 'running'
-                         check (status in ('running','succeeded','failed','cancelled')),
+    -- The CHECK is not here. It is one drop-then-add near the end of this
+    -- file, with the tasks one beside it, so which subset of the vocabulary a
+    -- table admits is stated once and an existing installation picks up a
+    -- change to it. Written in both places, a fresh install and an upgraded
+    -- one differed by one word and nothing said so (REM-52).
+    status           text not null default 'running',
     compensation_state text not null default 'none'
                          check (compensation_state in ('none','compensating','compensated')),
     cancel_requested boolean not null default false,
@@ -309,10 +348,7 @@ create table if not exists workflow.tasks (
     -- their contents and reported one column declared three times, differently.
     kind             text not null default 'work',
     queue            text not null default 'default',
-    status           text not null default 'pending'
-                         check (status in
-                             ('pending','ready','running','waiting_external',
-                              'succeeded','failed','cancelled')),
+    status           text not null default 'pending',   -- CHECK: see runs.status
     priority         int not null default 100,
     attempts         int not null default 0,
     max_attempts     int not null default 5,
@@ -649,8 +685,8 @@ begin
 
     -- A terminal state SATISFIES a dependent if it succeeded, or if it failed
     -- and this task was expanded under continue_on.
-    v_satisfies := new.status = 'succeeded'
-                   or (new.status in ('failed', 'cancelled') and new.tolerate_failure);
+    v_satisfies := workflow.is_success(new.status)
+                   or (workflow.is_terminal(new.status) and new.tolerate_failure);
 
     if v_satisfies then
         -- Already cascaded once (§20i): pending_deps is decremented on the
@@ -665,7 +701,7 @@ begin
         if new.matrix_parent_id is not null then
             select count(*) into v_remaining from workflow.tasks
             where matrix_parent_id = new.matrix_parent_id
-              and status not in ('succeeded', 'failed', 'cancelled');
+              and not workflow.is_terminal(status);
 
             if v_remaining = 0 and not workflow.matrix_gate_passes(new.matrix_parent_id) then
                 update workflow.tasks t2 set status = 'cancelled'
@@ -691,7 +727,7 @@ begin
         where t.status = 'ready'
           and t.id in (select task_id from workflow.task_dependencies where depends_on_task_id = new.id);
 
-    elsif new.status in ('cancelled', 'failed') then
+    elsif workflow.is_terminal(new.status) then
         update workflow.tasks t2
         set status = 'cancelled'
         where t2.status in ('pending', 'ready', 'waiting_external')
@@ -766,7 +802,7 @@ create or replace function workflow.check_compensation_completion(p_run_id uuid)
       and not exists (
           select 1 from workflow.tasks
           where run_id = p_run_id and compensates_task_id is not null
-            and status not in ('succeeded', 'failed', 'cancelled')
+            and not workflow.is_terminal(status)
       );
 $$ language sql;
 
@@ -1089,7 +1125,7 @@ begin
         return format('no task %s', p_task_id);
     end if;
 
-    if t.status in ('succeeded', 'failed', 'cancelled') then
+    if workflow.is_terminal(t.status) then
         v_why := format('task is already %s', t.status);
 
     -- The revoked lease, and the reason this test is on `attempts` rather than
@@ -1569,9 +1605,9 @@ begin
     -- completion trigger fired before the link above existed, so resolve the
     -- parent here rather than leaving it blocked on a run that is over.
     select status, context into v_status, v_ctx from workflow.runs where id = v_child;
-    if v_status = 'succeeded' then
+    if workflow.is_success(v_status) then
         perform workflow.complete_task(p_task_id, jsonb_build_object('result', v_ctx));
-    elsif v_status in ('failed', 'cancelled') then
+    elsif workflow.is_terminal(v_status) then
         perform workflow.fail_task(p_task_id,
             jsonb_build_object('child_run_status', v_status, 'child_run_id', v_child), true);
     end if;
@@ -1582,7 +1618,7 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 
 create or replace function workflow.resolve_parent_on_child_completion() returns trigger as $$
 begin
-    if new.status in ('succeeded', 'failed', 'cancelled') and old.status = 'running' then
+    if workflow.is_terminal(new.status) and old.status = 'running' then
         if new.parent_task_id is not null then
             if new.status = 'succeeded' then
                 perform workflow.complete_task(new.parent_task_id, new.context);
@@ -7029,7 +7065,7 @@ begin
         -- than left as a mysteriously growing table.
         v_sql := 'select array_agg(r.id) from ('
               || ' select r.id from workflow.runs r'
-              || ' where r.status in (''succeeded'',''failed'',''cancelled'')'
+              || ' where workflow.is_terminal(r.status)'
               || '   and coalesce(r.completed_at, r.updated_at) < $1'
               -- A schedule points at its most recent run. Deleting it would
               -- lose the schedule's own history.
@@ -7087,7 +7123,7 @@ begin
     -- blocking retention when nothing is -- a number that is worse than no
     -- number, because it answers the question wrongly rather than not at all.
     v_sql := 'select count(*) from workflow.runs r'
-          || ' where r.status in (''succeeded'',''failed'',''cancelled'')'
+          || ' where workflow.is_terminal(r.status)'
           || '   and coalesce(r.completed_at, r.updated_at) < $1'
           || '   and (exists (select 1 from workflow.schedules s where s.last_run_id = r.id)'
           || '     or exists (select 1 from workflow.tasks t where t.child_run_id = r.id)'

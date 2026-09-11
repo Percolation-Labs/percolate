@@ -40,7 +40,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SCENARIOS = os.path.join(HERE, "scenarios.yaml")
 FIXTURES = os.path.join(HERE, "fixtures.sql")
 
-CONTAINER = os.environ.get("CONTAINER", "p8-experiment-pg19")
+CONTAINER = os.environ.get("CONTAINER", "p8-dev-db")
+DB = os.environ.get("DB", "p8dev")
 DSN = os.environ.get("DSN", "")
 
 # The dollar-quote tags the generated SQL uses. A scenario containing one of
@@ -75,7 +76,7 @@ def psql(sql):
         cmd = ["psql", DSN, "-v", "ON_ERROR_STOP=1", "-q", "-f", "-"]
     else:
         cmd = ["docker", "exec", "-i", CONTAINER, "psql", "-U", "p8",
-               "-d", "p8experiment", "-v", "ON_ERROR_STOP=1", "-q"]
+               "-d", DB, "-v", "ON_ERROR_STOP=1", "-q"]
     p = subprocess.run(cmd, input=sql, stdout=subprocess.PIPE,
                        stderr=subprocess.STDOUT, universal_newlines=True)
     return p.returncode == 0, p.stdout
