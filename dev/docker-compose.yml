@@ -19,6 +19,22 @@
 # answer that is not this repository grading its own homework.
 name: p8-dev
 
+# WHERE EACH CREDENTIAL MAY BE SENT, for every core service that sends one: the
+# http_call steps of worker and ui-worker, and ui-ingest's embeddings and
+# transcription.
+# percolate-core resolves a credential only for an origin this map binds it to
+# (core/credentials.py, deny by default), because the destination comes from a
+# row or an upload that a signed-in user can write -- an upload's ingest policy
+# could name its own host and have the ingest worker send P8_S3_SECRET there.
+# With no entry, embedding and model calls are refused once the stack runs
+# that core; the ui services mount the linked working copy, so they meet it
+# first.
+# Written once and referenced below, so the three services cannot disagree;
+# the default is literal JSON inside ${...:-...}, which compose passes through
+# intact (`docker compose config` shows it), and an environment value still
+# replaces it.
+x-credential-origins: &credential-origins '${P8_CREDENTIAL_ORIGINS:-{"LLM_API_KEY":["https://api.openai.com"]}}'
+
 services:
   db:
     # Pulled, not built. The image carries PG19 + pgvector + both Percolate
@@ -203,6 +219,7 @@ services:
       # name. The database stores only the reference, so a dump of
       # workflow.tasks never contains a secret.
       LLM_API_KEY: ${LLM_API_KEY:-}
+      P8_CREDENTIAL_ORIGINS: *credential-origins
 
   # Opt-in workbench: `dev/stacks.sh ui`. Published dependencies, working-tree
   # Python code; the Docker network preserves the seeded tool-server URLs.
@@ -293,6 +310,7 @@ services:
       P8_BUCKET: p8-content
       LLM_API_KEY: ${LLM_API_KEY:-${OPENAI_API_KEY:-}}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      P8_CREDENTIAL_ORIGINS: *credential-origins
       P8_INGEST_CREDENTIAL_ORIGINS: ${P8_INGEST_CREDENTIAL_ORIGINS:-}
     volumes:
       - ../percolate-core/percolate_core:/src/percolate_core:ro
@@ -308,6 +326,7 @@ services:
       P8_DSN: postgres://worker:workerpass@db:5432/${P8_DB:-p8dev}
       P8_AGENT_URL: http://agent:8080
       P8_AGENT_SIGNING_KEY_FILE: /run/secrets/agent-signing-key
+      P8_CREDENTIAL_ORIGINS: *credential-origins
     volumes:
       - ../percolate-core/percolate_core:/src/percolate_core:ro
       - ./.stacks/ui-agent-signing-key:/run/secrets/agent-signing-key:ro
