@@ -266,6 +266,25 @@ begin
     raise notice 'query/04: a table projects into exactly one entity type';
 end $$;
 
+-- A table with no `id uuid` is refused at registration. It used to register,
+-- and then every insert into it failed inside the generated projection trigger
+-- with `column n.id does not exist` -- the table unusable, the registry row
+-- describing it as fine (found by scenarios/tour).
+do $$
+declare v_msg text;
+begin
+    create table t_s1.keyed_naturally (key text primary key, label text);
+    begin
+        perform aiq.register_entity_table('ttype_natural', 't_s1.keyed_naturally', 'n.key');
+        raise exception 'a table with no id column was registered as an entity type';
+    exception when others then
+        get stacked diagnostics v_msg = message_text;
+        if v_msg not like '%no `id uuid` column%' then raise; end if;
+    end;
+    insert into t_s1.keyed_naturally values ('still-writable', 'x');
+    raise notice 'query/04: an entity table without id uuid is refused before it can break inserts';
+end $$;
+
 -- ---------------------------------------------------------------------
 -- 6. THE PROJECTION IS STATEMENT-LEVEL (D6), AND THAT IS THE SCALE ARGUMENT.
 --

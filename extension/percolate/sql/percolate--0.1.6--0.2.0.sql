@@ -12407,6 +12407,24 @@ begin
             p_source_table, v_other;
     end if;
 
+    -- THE TABLE MUST HAVE `id uuid`, and saying so HERE is the difference
+    -- between a registration error and a broken table. The projection below
+    -- writes `n.id` into aiq.nodes.entity_id (uuid), so a table keyed any other
+    -- way registered cleanly, printed nothing, and then refused EVERY insert
+    -- from then on -- `column n.id does not exist`, raised inside a generated
+    -- trigger that names neither the entity type nor this function. Found by
+    -- scenarios/tour, whose package keyed its tables by their natural keys.
+    if to_regclass(p_source_table) is not null and not exists (
+        select 1 from pg_attribute
+         where attrelid = to_regclass(p_source_table) and attname = 'id'
+           and atttypid = 'uuid'::regtype and not attisdropped) then
+        raise exception
+            '% has no `id uuid` column, and an entity table needs one: it is what '
+            'aiq.nodes.entity_id points at. Add `id uuid not null default gen_random_uuid() unique` '
+            'and keep the natural key in the key expression (%).',
+            p_source_table, p_key_expr;
+    end if;
+
     insert into aiq.entity_registry
         (entity_type, source_table, key_expr, summary_expr, org_expr,
          visibility_expr, include_where)
@@ -19398,7 +19416,17 @@ select aiq.register_entity_table(
     -- unique in practice; `external_id` next because it is what a puller
     -- controls and guarantees. Title stays as the SUMMARY, which is what a
     -- label is for.
-    'coalesce(n.uri, n.external_id, n.id::text)',   -- canonical key
+    --
+    -- EXCEPT AN UPLOAD, whose uri is the CONTENT-ADDRESSED object path: the
+    -- Content Server keys objects by checksum, so the same bytes uploaded twice
+    -- into one org are two resources with one uri, and the second to reach
+    -- `ready` died here on idx_node_keys_canonical -- the same failure the
+    -- paragraph above records for titles, reached through dedup instead
+    -- (scenarios/tour, re-uploading a runbook; dev/tests/content/01 §2). The
+    -- object path is the FILE's identity, and a file is shared; nobody types
+    -- it. A resource with a file is keyed by its own id.
+    'case when n.file_id is not null then coalesce(n.external_id, n.id::text)
+          else coalesce(n.uri, n.external_id, n.id::text) end',   -- canonical key
     'coalesce(n.title, n.uri)',                     -- summary
     'n.org_id',
     $$n.status = 'ready'$$
@@ -23923,6 +23951,20 @@ grant execute on function aiq.extractor_call(text, text, text, text, text) to au
 --     dropped HERE, before upsert_graph sees it, and COUNTED in the receipt --
 --     which keeps their invariant exactly as written: what reaches upsert_graph
 --     is coherent, and nothing is lost silently.
+-- A model's answer, as jsonb. The one thing a JSON parser accepts and jsonb
+-- does not is the NUL escape: `\u0000` is valid JSON and jsonb refuses it
+-- ("unsupported Unicode escape sequence"), because a Postgres text value
+-- cannot hold a NUL. Models do emit it -- scenarios/tour's extractor wrote one
+-- into a quote from a GitHub issue -- and in a fan-in that casts each child's
+-- answer, one such window used to fail the landing of the whole document.
+-- Stripping it changes no meaning a Postgres row could have held.
+create or replace function content.model_json(p_text text)
+returns jsonb language sql immutable parallel safe
+set search_path = pg_catalog as $$
+    select replace(p_text, '\u0000', '')::jsonb
+$$;
+revoke all on function content.model_json(text) from public;
+
 create or replace function content.land_graph_windows(p_matrix_task uuid)
 returns jsonb as $$
 declare
@@ -23966,7 +24008,7 @@ begin
         -- (1) above: the model's answer arrives as a string.
         if jsonb_typeof(v_child.payload) = 'string' then
             begin
-                v_graph := (v_child.payload #>> '{}')::jsonb;
+                v_graph := content.model_json(v_child.payload #>> '{}');
             exception when others then
                 raise exception
                     'child % returned text that is not JSON, so there is no graph to '
@@ -24412,7 +24454,12 @@ begin
             raise exception 'Only the owner can update this source. Create a new source instead.' using errcode='42501';
         end if;
         if p_updated_at is distinct from v_old.updated_at then
-            raise exception 'This source changed since you opened it. Reopen it before saving; your draft is still available.' using errcode='40001';
+            -- PT409, NOT 40001. PostgREST runs every request in a transaction that
+            -- retries on serialization_failure, so a deterministic 40001 is an
+            -- infinite loop: the browser waits forever and the database takes
+            -- about five thousand rollbacks a second (measured, scenarios/tour).
+            -- PT409 is PostgREST's own convention for "answer with HTTP 409".
+            raise exception 'This source changed since you opened it. Reopen it before saving; your draft is still available.' using errcode='PT409';
         end if;
     elsif exists(select 1 from workflow.definitions where name=v_workflow) then
         raise exception 'That workflow name is already in use. Create a new source.';
@@ -24527,7 +24574,7 @@ begin
  if found then
   if old.owner_id is distinct from v_user then raise exception 'Only the owner can update this source. Create a private copy.' using errcode='42501';end if;
   if old.kind<>'http_pull' then raise exception 'Create a new source to change its type.';end if;
-  if p_updated_at is distinct from old.updated_at then raise exception 'The source changed since you opened it. Reopen it before saving; your draft is preserved.' using errcode='40001';end if;
+  if p_updated_at is distinct from old.updated_at then raise exception 'The source changed since you opened it. Reopen it before saving; your draft is preserved.' using errcode='PT409';end if;
   if old.config->'api' is distinct from a and exists(select 1 from content.source_state where source_id=p_id and (watermark is not null or next_url is not null)) then
    raise exception 'This source has saved progress. Create a new source for a different ingestion configuration, or reset its progress first.';end if;
   if exists(select 1 from workflow.runs r join workflow.definitions d on d.id=r.workflow_def_id where d.name in (n,old.config->>'ingest_workflow') and r.status='running') then raise exception 'Wait for the active pull to finish before changing this source.';end if;
@@ -25705,7 +25752,27 @@ begin
             set inverse_label = excluded.inverse_label;
         v_n := v_n + 1;
     end loop;
-    if v_n > 0 then perform aiq.register_graph_vocabulary(); end if;
+    -- INTO THE MACHINE VOCABULARY, TOO, or the package cannot write its own
+    -- relations. A package is mostly derivation (brief.md §8) and its knit and
+    -- dream stages write edges through aiq.upsert_graph, which drops any
+    -- relation that is not in aiq.graph_vocabulary. This used to call
+    -- register_graph_vocabulary() with no payload -- the REFRESH form, which
+    -- widens the cross product of relations already in the vocabulary and adds
+    -- none -- so every relation a package declared was an authored triple its
+    -- own derivations could never land: scenarios/tour's knit wrote 0 of its
+    -- edges, each named in the receipt as an unknown relation. The inverse
+    -- label travels with it, so a model reaching for `affected_by` is flipped
+    -- onto `affects` rather than dropped.
+    if v_n > 0 then
+        perform aiq.register_graph_vocabulary((
+            select jsonb_agg(jsonb_build_object(
+                       'relation', r.relation, 'inverse_label', r.inverse_label,
+                       'description', r.description))
+              from (select e->>1 as relation, min(e->>3) as inverse_label,
+                           min(coalesce(e->>4, 'declared by package ' || v_name)) as description
+                      from jsonb_array_elements(p_manifest->'relations') e
+                     group by e->>1) r));
+    end if;
     v_out := v_out || jsonb_build_object('relations', v_n);
 
     -- 2. SOURCES.

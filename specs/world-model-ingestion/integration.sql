@@ -50,7 +50,17 @@ select aiq.register_entity_table(
     -- unique in practice; `external_id` next because it is what a puller
     -- controls and guarantees. Title stays as the SUMMARY, which is what a
     -- label is for.
-    'coalesce(n.uri, n.external_id, n.id::text)',   -- canonical key
+    --
+    -- EXCEPT AN UPLOAD, whose uri is the CONTENT-ADDRESSED object path: the
+    -- Content Server keys objects by checksum, so the same bytes uploaded twice
+    -- into one org are two resources with one uri, and the second to reach
+    -- `ready` died here on idx_node_keys_canonical -- the same failure the
+    -- paragraph above records for titles, reached through dedup instead
+    -- (scenarios/tour, re-uploading a runbook; dev/tests/content/01 §2). The
+    -- object path is the FILE's identity, and a file is shared; nobody types
+    -- it. A resource with a file is keyed by its own id.
+    'case when n.file_id is not null then coalesce(n.external_id, n.id::text)
+          else coalesce(n.uri, n.external_id, n.id::text) end',   -- canonical key
     'coalesce(n.title, n.uri)',                     -- summary
     'n.org_id',
     $$n.status = 'ready'$$

@@ -53,7 +53,7 @@ begin
  if found then
   if old.owner_id is distinct from v_user then raise exception 'Only the owner can update this source. Create a private copy.' using errcode='42501';end if;
   if old.kind<>'http_pull' then raise exception 'Create a new source to change its type.';end if;
-  if p_updated_at is distinct from old.updated_at then raise exception 'The source changed since you opened it. Reopen it before saving; your draft is preserved.' using errcode='40001';end if;
+  if p_updated_at is distinct from old.updated_at then raise exception 'The source changed since you opened it. Reopen it before saving; your draft is preserved.' using errcode='PT409';end if;
   if old.config->'api' is distinct from a and exists(select 1 from content.source_state where source_id=p_id and (watermark is not null or next_url is not null)) then
    raise exception 'This source has saved progress. Create a new source for a different ingestion configuration, or reset its progress first.';end if;
   if exists(select 1 from workflow.runs r join workflow.definitions d on d.id=r.workflow_def_id where d.name in (n,old.config->>'ingest_workflow') and r.status='running') then raise exception 'Wait for the active pull to finish before changing this source.';end if;

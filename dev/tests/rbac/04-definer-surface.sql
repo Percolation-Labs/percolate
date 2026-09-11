@@ -238,4 +238,33 @@ begin
     raise notice 'rbac/04: a function a package creates later is nobody''s until granted';
 end $$;
 
+-- ---------------------------------------------------------------------
+-- NO FUNCTION AN HTTP CALLER CAN EXECUTE MAY RAISE 40001.
+--
+-- PostgREST runs each request in a transaction that is retried on
+-- serialization_failure, which is right for a real serialization conflict and
+-- an infinite loop for a function that raises 40001 on purpose. Found by
+-- `scenarios/tour`: saving an API source a second time without its revision
+-- hung the request and drove about five thousand rollbacks a second until
+-- PostgREST was restarted. A conflict a person should see is `PT409`, which
+-- PostgREST answers as HTTP 409. Worker-only functions may keep 40001 -- their
+-- callers retry on purpose and give up.
+-- ---------------------------------------------------------------------
+do $$
+declare v_bad text;
+begin
+    select string_agg(n.nspname || '.' || p.proname, ', ' order by 1)
+      into v_bad
+      from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname in ('rbac', 'workflow', 'content', 'aiq', 'agentic', 'percolate', 'public')
+       and (has_function_privilege('authenticated', p.oid, 'execute')
+            or has_function_privilege('web_anon', p.oid, 'execute'))
+       and p.prosrc ~* $re$errcode\s*=\s*'40001'|raise\s+serialization_failure$re$;
+    if v_bad is not null then
+        raise exception 'reachable over PostgREST and raises 40001, which PostgREST retries forever: %', v_bad
+            using hint = 'raise with errcode ''PT409'' (HTTP 409) for a conflict the caller should resolve';
+    end if;
+    raise notice 'rbac/04: no HTTP-reachable function raises serialization_failure on purpose';
+end $$;
+
 rollback;

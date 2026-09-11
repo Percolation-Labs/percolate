@@ -215,6 +215,9 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # A `moonshotai:` agent model reads pydantic-ai's name for the Kimi key;
+      # the root .env keeps it as KIMI_API_KEY (meta/skills/live-credentials).
+      MOONSHOTAI_API_KEY: ${KIMI_API_KEY:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
     volumes:
       - ../percolate-core/percolate_core:/src/percolate_core:ro

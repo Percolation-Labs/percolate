@@ -19,7 +19,7 @@ do $$ declare c content.channels; begin
  begin
   perform content.save_source(c.id,c.name,'{"ingest_policy":{}}',c.config->'workflow',null);
   raise exception 'stale revision accepted';
- exception when serialization_failure then null;end;
+ exception when sqlstate 'PT409' then null;end;
  perform content.save_source(c.id,c.name,'{"ingest_policy":{},"description":"updated"}',c.config->'workflow',c.updated_at);
 end $$;
 set local request.jwt.claims = '{"sub":"22222222-2222-2222-2222-222222222222"}';
