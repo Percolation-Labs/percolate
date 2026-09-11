@@ -293,13 +293,13 @@ begin
         raise exception 'an edge another writer still asserts was retracted';
     end if;
     if (select provenance->'sources' from aiq.edges where id = e_shared)
-         <> '[{"agent":"knit","run_id":"r1"}]'::jsonb then
+         is distinct from '[{"agent":"knit","run_id":"r1"}]'::jsonb then
         raise exception 'the shared edge''s sources are %, not knit''s alone',
             (select provenance->'sources' from aiq.edges where id = e_shared);
     end if;
     if (select valid_to from aiq.edges where id = e_pgw) is null
        or (select provenance->'sources' from aiq.edges where id = e_pgw)
-          <> '[{"agent":"theme-dreamer","run_id":"r1"}]'::jsonb then
+          is distinct from '[{"agent":"theme-dreamer","run_id":"r1"}]'::jsonb then
         raise exception 'a solely-asserted edge was not retracted with its provenance intact';
     end if;
 
