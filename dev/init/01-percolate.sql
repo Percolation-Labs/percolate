@@ -11,6 +11,7 @@
 create role app_owner nologin;
 create role api_viewer nologin;
 grant api_viewer to app_owner;          -- so app_owner can hand it the views
+grant authenticated to api_viewer;      -- so a workflow step can read as the person it runs for
 create role web_anon nologin;
 create role authenticated nologin;
 create role authenticator noinherit login password 'authpass';

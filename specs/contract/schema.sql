@@ -517,3 +517,7 @@ grant usage on schema percolate to web_anon, authenticated, api_viewer;
 grant select on percolate.types to web_anon, authenticated, api_viewer;
 grant execute on function percolate.enums() to web_anon, authenticated, api_viewer;
 grant execute on function percolate.contract() to web_anon, authenticated, api_viewer;
+-- The three roles above are the audience. A database installed before 0.2.0
+-- also gave these to PUBLIC by default; this makes the two agree.
+revoke execute on function percolate.enums() from public;
+revoke execute on function percolate.contract() from public;

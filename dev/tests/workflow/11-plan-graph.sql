@@ -490,10 +490,15 @@ end $$;
 -- Found by asking which claims have a definition committed after the last
 -- commit to the file that checks them.
 -- ---------------------------------------------------------------------
+-- PUBLIC itself, and web_anon. This used to probe api_viewer as "some role
+-- that is neither anonymous nor signed in", which stopped meaning that when
+-- api_viewer became a member of authenticated (a workflow step acts for a
+-- person through it, integration-rbac.sql execute_for). Asking PUBLIC is the
+-- question the probe stood in for.
 do $$
 declare r text;
 begin
-    foreach r in array array['web_anon', 'api_viewer'] loop
+    foreach r in array array['web_anon', 'public'] loop
         if has_function_privilege(r, 'agentic.plan_facet()', 'execute') then
             raise exception
                 'agentic.plan_facet() is executable by % -- a function defined after '

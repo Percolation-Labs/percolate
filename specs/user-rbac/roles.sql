@@ -72,6 +72,14 @@ create role api_viewer nologin;
 -- anything as app_owner -- membership only flows in the direction granted.
 grant api_viewer to app_owner;
 
+-- api_viewer also holds what a signed-in person holds, because it is the role a
+-- workflow step becomes when it acts for one (workflow-engine
+-- integration-rbac.sql, execute_for). A step's statement runs as api_viewer
+-- with that person's claims, under RLS, so it can read exactly what they could
+-- read through PostgREST -- and it needs their grants to read even that much.
+-- Membership flows one way: nobody becomes api_viewer by being authenticated.
+grant authenticated to api_viewer;
+
 -- ------------------------------------------------------------
 -- 3. PostgREST's role model (user-rbac/spec.md §2, schema.sql §9).
 --    web_anon: unauthenticated requests. authenticated: valid JWT.

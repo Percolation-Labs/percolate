@@ -461,6 +461,110 @@ returns boolean as $$
                     session_user, 'workflow.definitions'::regclass, 'insert'));
 $$ language sql stable security definer set search_path = pg_catalog, public;
 
+-- A STEP'S STATEMENT RUNS AS THE PERSON WHO STARTED THE RUN -- the rbac half
+-- of schema.sql's "WHOSE REACH A STATEMENT HAS".
+--
+-- WHO. The run's owner, stamped from the verified JWT at start (set_run_owner,
+-- below). Not the current caller: a step executes long after the request that
+-- started it, often on a worker's connection with no claims at all. Orgs are
+-- not captured, because rbac.current_org_ids() derives them from org_members
+-- by user id -- so a person removed from an org loses that org's rows at their
+-- run's next step, the same "revocation is immediate" the read path promises.
+create or replace function workflow.run_owner_of(p_run_id uuid)
+returns uuid as $$
+    select owner_id from workflow.runs where id = p_run_id;
+$$ language sql stable security definer set search_path = pg_catalog, public;
+
+-- WHAT THIS DOES NOT CLOSE, and the debt it owes. `request.jwt.claims` is a
+-- setting any role can write with set_config, so an author's statement can set
+-- it and read as someone else -- the whole-database class REM-44 is about
+-- (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §2). This
+-- function narrows the step path from "runs as app_owner, RLS bypassed" to
+-- "runs as the run's owner, under RLS", which is strictly less; it does not
+-- make the principal unforgeable. When REM-44 lands a trusted `rbac.principal()`,
+-- the identity-set here (raw set_config) moves onto it, and the guard below
+-- keys on that rather than on current_user. Until then, an author already had
+-- app_owner's reach, so this is a reduction and not a new door.
+--
+-- HOW, and why this is possible at all when the roadmap said it was not.
+--
+-- execute_sql_step is SECURITY DEFINER owned by app_owner, which owns every
+-- table and so bypasses RLS. Postgres refuses `SET ROLE` anywhere in a
+-- SECURITY DEFINER stack, so the step cannot become the person. What it CAN do
+-- is call another SECURITY DEFINER function, and that switches identity to the
+-- callee's owner. This function is owned by api_viewer -- the role that already
+-- owns every *_api view for exactly this reason: it is not the table owner, so
+-- RLS applies to it, and the claims decide whose rows it sees. With the claims
+-- set to the run's owner, a statement here sees what that person would see
+-- through PostgREST, no more. (api_viewer holds authenticated's grants by
+-- membership -- roles.sql / bootstrap.sql -- so it can read what they can.)
+--
+-- Replaying the claims WITHOUT changing identity would change nothing, since
+-- an owner bypasses RLS whatever the claims say -- which is why the role
+-- switch, done by ownership rather than SET ROLE, is the whole mechanism.
+--
+-- NOBODY BUT THE ENGINE MAY CALL IT. It takes a user id and a statement, so a
+-- caller who could reach it could read as anyone. EXECUTE is granted to
+-- app_owner alone, and nobody is a member of api_viewer but app_owner.
+--
+-- The claims are restored on BOTH exit paths, in this function's own exception
+-- handler, and NOT left to the caller's subtransaction. The caller's abort does
+-- roll the set_config back -- but `tick()` and an autorun cascade run several
+-- sql tasks in one transaction, and a design where the identity outlives a
+-- failing step until something else happens to unwind it is one set_config away
+-- from the next task in that tick running as the previous run's owner. So this
+-- restores and re-raises itself, and the restore does not depend on who calls
+-- it. (Regression covered in dev/tests/workflow/15: two owners in one
+-- transaction, the first failing.)
+create or replace function workflow.execute_for(
+    p_user uuid, p_statement text, p_write boolean, p_params jsonb)
+returns jsonb as $$
+declare
+    v_prev  text := current_setting('request.jwt.claims', true);
+    v_out   jsonb;
+    v_count bigint;
+begin
+    if p_user is null then
+        raise exception 'execute_for was given nobody to run as';
+    end if;
+    perform set_config('request.jwt.claims',
+        json_build_object('sub', p_user, 'role', 'authenticated')::text, true);
+    begin
+        if p_write then
+            if p_params is not null then execute p_statement using p_params;
+            else                         execute p_statement;
+            end if;
+            get diagnostics v_count = row_count;
+            v_out := jsonb_build_object('rows_affected', v_count);
+        elsif p_params is not null then
+            execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
+            into v_out using p_params;
+        else
+            execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
+            into v_out;
+        end if;
+    exception when others then
+        perform set_config('request.jwt.claims', coalesce(v_prev, ''), true);
+        raise;
+    end;
+    perform set_config('request.jwt.claims', coalesce(v_prev, ''), true);
+    return coalesce(v_out, '[]'::jsonb);
+end;
+$$ language plpgsql volatile security definer set search_path = pg_catalog, public;
+
+-- Handed to api_viewer the way the *_api views are (section (c)): app_owner is a
+-- member of api_viewer, and the new owner needs CREATE on the schema for the
+-- moment of the transfer.
+grant create on schema workflow to api_viewer;
+alter function workflow.execute_for(uuid, text, boolean, jsonb) owner to api_viewer;
+revoke create on schema workflow from api_viewer;
+revoke execute on function workflow.execute_for(uuid, text, boolean, jsonb) from public;
+grant execute on function workflow.execute_for(uuid, text, boolean, jsonb) to app_owner;
+
+-- workflow.p8ql runs inside execute_for when a person's step calls it, and its
+-- SQL-mode guard asks the policy there. It reads one setting.
+grant execute on function workflow.sql_policy() to api_viewer;
+
 -- The authorization check, and then the cascade -- which is the unchecked form
 -- below, called rather than repeated. The first version inlined the same four
 -- statements here, so the cascade existed twice and the tree walk reached the
@@ -810,6 +914,7 @@ revoke execute on function workflow.schedule_workflow(text, text, text, jsonb, t
 revoke execute on function workflow.set_schedule_enabled(text, boolean) from public;
 revoke execute on function workflow.unschedule_workflow(text) from public;
 revoke execute on function workflow.may_define() from public;
+revoke execute on function workflow.run_owner_of(uuid) from public;
 -- workflow.register_artifact() is the eleventh and it is NOT revoked here:
 -- content loads after the engine, so naming it in this file fails the install
 -- with "function does not exist". The revoke belongs beside its definition in

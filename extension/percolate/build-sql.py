@@ -357,6 +357,21 @@ begin
             v_missing;
     end if;
 
+    -- A workflow step acting for a person runs as api_viewer with their claims
+    -- (workflow-engine integration-rbac.sql, execute_for), so api_viewer needs
+    -- what a signed-in person holds. A cluster bootstrapped before 0.2.0 does
+    -- not have that grant, and without it a person's workflow fails on its
+    -- first read with "permission denied" -- so say so here, with the line.
+    if not pg_has_role('api_viewer', 'authenticated', 'member') then
+        raise exception
+            'percolate needs api_viewer to be a member of authenticated, and on this '
+            'cluster it is not. Run once as a superuser: grant authenticated to '
+            'api_viewer; -- a workflow step runs as the person who started its run, through '
+            'api_viewer, and needs their grants to do it. bootstrap.sql does this '
+            'from 0.2.0: '
+            'https://github.com/Percolation-Labs/get-percolate/blob/main/bootstrap.sql';
+    end if;
+
     if (select rolsuper from pg_roles where rolname = current_user) then
         raise exception
             'REFUSING TO LOAD: current_user (%) is a cluster superuser. '

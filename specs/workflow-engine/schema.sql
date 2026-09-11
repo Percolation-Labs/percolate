@@ -2208,11 +2208,10 @@ end $$;
 --      authoring a workflow never widened what could be executed. That is a
 --      sound boundary and it made every QUESTION a pipeline wanted to ask into
 --      an owner-only registration, which is why `percolate.sql_policy` now
---      chooses -- `open` (a step may carry its own SQL, running as the engine
---      owner) or `registered` (the old rule). See "SQL a step wrote itself"
---      above for what open mode trades away and roadmap.md §6 for the mode
---      that would close it without the friction. Under either policy a READ
---      cannot write: transaction_read_only decides that, not the policy.
+--      chooses -- `open` (a step may carry its own SQL, running with the reach
+--      of whoever started the run) or `registered` (the old rule). See "SQL a
+--      step wrote itself" above for whose reach that is. Under either policy a
+--      READ cannot write: transaction_read_only decides that, not the policy.
 --   2. A SUBTRANSACTION per step. A failing step fails ITSELF -- it must not
 --      abort the transaction of whichever worker happened to complete the
 --      preceding task. Without this, one bad SQL step would roll back an
@@ -2374,12 +2373,22 @@ $$ language plpgsql;
 --     - id: quarters
 --       sql: "select fy, fp, val from sec.facts where cik = '{{run.cik}}'"
 --
--- WHAT THIS COSTS, STATED PLAINLY. Workflow SQL runs as the engine owner:
--- app_owner owns every table and bypasses RLS, and execute_sql_step is
--- SECURITY DEFINER, so a statement here reads across tenants. Anyone who may
--- define a workflow may therefore read anything in the database. That is a
--- deliberate trade for the beta -- expressiveness over isolation, taken with
--- eyes open -- and the two things that make it survivable are below.
+-- WHOSE REACH A STATEMENT HAS. The person's who started the run. A step
+-- executes inside execute_sql_step, which is SECURITY DEFINER and owned by
+-- app_owner, the owner of every table -- so a statement run there directly
+-- would read every tenant's rows past RLS. It is not run there directly: when
+-- the run has an owner, run_sql hands the statement to workflow.execute_for,
+-- which runs it with that person's identity and under RLS, as if they had
+-- typed it themselves (execute_for below says how). A run nobody started -- a
+-- schedule, a system pass -- has no person to act for and keeps the engine's
+-- reach; that is the operator's own trade.
+--
+-- It was not always so, and the history is the argument for it. The first
+-- version ran every statement as app_owner and defended it as "anyone who may
+-- define a workflow may read anything". Defining was gated; STARTING was not,
+-- so a workflow an admin wrote read every tenant for whoever ran it. The tour
+-- (scenarios/tour, act 8) had a member of one org start `ask_uploads` and get
+-- another org's runbook back from its SEARCH step.
 --
 -- READS CANNOT WRITE, AND THE DATABASE ENFORCES IT, not a parser. A statement
 -- without `write: true` runs with transaction_read_only on, which is the same
@@ -2388,24 +2397,15 @@ $$ language plpgsql;
 -- transaction is a guarantee. The keyword check beside it is a courtesy that
 -- turns a transaction abort into a sentence.
 --
--- AND THE OLD BOUNDARY IS STILL THERE, one setting away:
+-- AND AUTHORING CAN STILL BE NARROWED, one setting away:
 --
 --     alter database <db> set percolate.sql_policy = 'registered';
 --
 --   open       (default)  a step may carry a statement, or name a function
 --   registered            statements are refused; only the allow-list runs
 --
--- A third mode -- `scoped`, where a statement runs under the run owner's
--- identity so RLS applies -- is the one that would make this safe as a
--- production default, and it cannot be built here. Tried: Postgres refuses
--- `SET ROLE` anywhere inside a SECURITY DEFINER call stack, and
--- execute_sql_step must be SECURITY DEFINER because it writes task rows --
--- `cannot set parameter "role" within security-definer function`. Replaying
--- the claims without the role switch changes nothing, because an owner
--- bypasses RLS whatever the claims say. So scoping needs the statement
--- executed OUTSIDE this call stack: the worker claiming it, or a loopback
--- connection. roadmap.md §6 carries both routes, what each costs, and the
--- trigger -- a second tenant sharing a deployment.
+-- That narrows what an author may WRITE. Whose rows a statement sees is the
+-- paragraph above, under either policy.
 --
 -- The registry does not go away and is not deprecated. It keeps the two jobs it
 -- was always better at than gatekeeping: a per-function timeout, and a
@@ -2424,6 +2424,32 @@ as $$
     -- is a policy somebody can UPDATE from inside the system it constrains.
     select lower(coalesce(nullif(current_setting('percolate.sql_policy', true), ''), 'open'));
 $$;
+
+-- THE TWO HOOKS A STEP'S STATEMENT GOES THROUGH, stub-and-shadow like
+-- may_define. Standalone the engine has no people, so no run has an owner to
+-- act for and every statement keeps the engine's reach. integration-rbac.sql
+-- shadows both once the identity plane is installed: run_owner_of reads
+-- runs.owner_id, and execute_for runs the statement as that person.
+--
+-- The run is the one execute_sql_step (or expand_matrix, for a row source)
+-- publishes in workflow.current_run_id, never an argument: an argument is text
+-- a workflow author wrote, and naming somebody else's run would borrow their
+-- reach.
+create or replace function workflow.run_owner_of(p_run_id uuid)
+returns uuid as $$
+    select null::uuid;
+$$ language sql stable;
+
+create or replace function workflow.execute_for(
+    p_user uuid, p_statement text, p_write boolean, p_params jsonb)
+returns jsonb as $$
+begin
+    raise exception 'no identity plane is installed, so there is nobody to run % for', p_user;
+end;
+$$ language plpgsql;
+
+revoke execute on function workflow.run_owner_of(uuid) from public;
+revoke execute on function workflow.execute_for(uuid, text, boolean, jsonb) from public;
 
 -- Dropped rather than left beside the new signature: `create or replace` with
 -- an added parameter makes a SECOND function, and the old three-argument one
@@ -2448,6 +2474,10 @@ declare
     -- Only bind when there is something to bind: EXECUTE refuses USING against
     -- a statement with no placeholders ("too many parameters specified").
     v_bind  boolean := p_params is not null and p_params <> '{}'::jsonb;
+    -- Who this statement runs for: the owner of the run being executed, or
+    -- nobody (a system run, or the engine standalone). See "WHOSE REACH".
+    v_for   uuid := workflow.run_owner_of(
+                        nullif(current_setting('workflow.current_run_id', true), '')::uuid);
 begin
     if v_pol = 'registered' then
         raise exception
@@ -2467,11 +2497,15 @@ begin
     perform set_config('statement_timeout', greatest(p_timeout_ms, 1)::text, true);
 
     if p_write then
-        -- A write says so in the document. This is not a security control --
-        -- the step runs as the owner either way -- but a plan that cannot tell
-        -- a question from a mutation is a plan nobody can review, and every
-        -- reader of a definition deserves to see which steps change the
-        -- database.
+        -- A write says so in the document. That is not the security control --
+        -- whose reach the write has is, and for a person's run it is theirs, so
+        -- it succeeds only where they could have written the same rows -- but a
+        -- plan that cannot tell a question from a mutation is a plan nobody can
+        -- review, and every reader of a definition deserves to see which steps
+        -- change the database.
+        if v_for is not null then
+            return workflow.execute_for(v_for, p_statement, true, case when v_bind then p_params end);
+        end if;
         if v_bind then execute p_statement using p_params;
         else           execute p_statement;
         end if;
@@ -2509,7 +2543,11 @@ begin
     -- a syntax error's worth of confusion for something that was neither.
     begin
         perform set_config('transaction_read_only', 'on', true);
-        if v_bind then
+        if v_for is not null then
+            -- Inside the same unwound subtransaction, so the identity
+            -- execute_for sets is unwound with the read-only flag.
+            v_out := workflow.execute_for(v_for, p_statement, false, case when v_bind then p_params end);
+        elsif v_bind then
             execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
             into v_out using p_params;
         else
@@ -4239,6 +4277,7 @@ declare
     v_bad_ord   bigint;
     v_bad_type  text;
     v_bad_col   text;
+    v_prev_run  text;
 begin
     select * into t from workflow.tasks where id = p_task_id;
     -- run_after is checked here and not in execute_sql_step's equivalent, and
@@ -4310,6 +4349,16 @@ begin
                 'function) or `items` (a literal list)', t.step_key;
         end if;
 
+        -- THE ROW SOURCE RUNS FOR THIS RUN, and publishes it the way
+        -- execute_sql_step does. It did not, so everything keyed on
+        -- workflow.current_run_id was blind here: a `rows:` statement or a
+        -- `rows: {function: p8ql}` read with the engine's reach instead of the
+        -- starter's, and a row function could not tell its own run from a run
+        -- id typed into its arguments. Restored after; an
+        -- error unwinds it with the subtransaction.
+        v_prev_run := coalesce(nullif(current_setting('workflow.current_run_id', true), ''), '');
+        perform set_config('workflow.current_run_id', t.run_id::text, true);
+
         if v_spec ? 'items' then
             v_rows := v_spec->'items';
         elsif v_spec #> '{rows}' ? 'statement' then
@@ -4328,6 +4377,7 @@ begin
             v_rows := workflow.call_step_function(
                 v_spec#>>'{rows,function}', v_spec#>'{rows,args}', t.run_id, t.input->'item');
         end if;
+        perform set_config('workflow.current_run_id', v_prev_run, true);
 
         if v_rows is null or jsonb_typeof(v_rows) <> 'array' then
             raise exception
