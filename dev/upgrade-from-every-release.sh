@@ -23,7 +23,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-C="${UPGC_ALL:-p8-upgrade-all}"
+# After the container this run grades, for dev/upgrade-with-data.sh's reason.
+C="${UPGC_ALL:-${CONTAINER:-p8}-upgrade-all}"
 V=$(sed -n "s/^default_version = '\(.*\)'/\1/p" extension/percolate/percolate.control)
 TAGS=$(git tag --list 'v*' | sed 's/^v//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
        | grep -v "^$V$" | sort -t. -k1,1n -k2,2n -k3,3n)

@@ -25,7 +25,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-UPGC="${UPGC:-p8-upgrade}"
+# Named after the database container this run grades, not a fixed name. The
+# cleanup removes it by name, and on 2026-09-11 three sessions ran this gate
+# within minutes of each other, each against its own database and all three
+# through one container called p8-upgrade -- the collision
+# dev/release-rehearsal.sh records for its own containers.
+UPGC="${UPGC:-${CONTAINER:-p8}-upgrade}"
 V=$(sed -n "s/^default_version = '\(.*\)'/\1/p" extension/percolate/percolate.control)
 PREV=$(git tag --list 'v*' | sed 's/^v//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
        | grep -v "^$V$" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
