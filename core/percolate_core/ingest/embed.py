@@ -28,6 +28,7 @@ from typing import Any
 import httpx
 
 from ..core import as_service, credential_for
+from ..core.provider_errors import raise_for
 from ..worker.templates import TerminalError
 
 __all__ = ["embed_resource", "embed_texts"]
@@ -115,8 +116,7 @@ def embed_texts(spec: dict[str, Any], texts: list[str],
                 body[key] = [texts[i] for i in group]
                 r = client.request(method, url, headers=headers, json=body)
                 requests += 1
-                if r.status_code >= 400:
-                    _raise_for(r)
+                raise_for(r.status_code, r.content, "embedding endpoint", r.text[:500])
                 got = _vectors_from(r.json(), spec.get("jsonpath", "data"), len(group))
                 for slot, vector in zip(group, got):
                     vectors[slot] = vector
@@ -132,8 +132,7 @@ def embed_texts(spec: dict[str, Any], texts: list[str],
                         for k, v in template.items()}
                 r = client.request(method, url, headers=headers, json=body)
                 requests += 1
-                if r.status_code >= 400:
-                    _raise_for(r)
+                raise_for(r.status_code, r.content, "embedding endpoint", r.text[:500])
                 node: Any = r.json()
                 for part in path.split("."):
                     if isinstance(node, list):
@@ -146,19 +145,6 @@ def embed_texts(spec: dict[str, Any], texts: list[str],
     if missing:
         raise TerminalError(f"{len(missing)} of {len(texts)} texts came back with no vector")
     return vectors, requests  # type: ignore[return-value]
-
-
-def _raise_for(r: httpx.Response) -> None:
-    """4xx is ours and fails identically forever; 5xx and 429 are theirs.
-
-    The same split the http_call handler makes, for the same reason: collapsing
-    them turns a fast failure into five slow ones, and turns a rate limit into
-    a permanent one.
-    """
-    detail = r.text[:500]
-    if 400 <= r.status_code < 500 and r.status_code not in (408, 429):
-        raise TerminalError(f"embedding endpoint returned {r.status_code}: {detail}")
-    raise RuntimeError(f"embedding endpoint returned {r.status_code}: {detail}")
 
 
 async def embed_resource(spec: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
