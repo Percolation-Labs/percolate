@@ -1292,6 +1292,27 @@ begin
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
+-- CREATING AN ORG, which had no function: the first tenant on a new install
+-- was a raw insert into rbac.orgs by the database owner, and add_org_member
+-- then needed a caller who was already an admin of an org nobody belonged to.
+-- Found setting up the dogfood stack for its first real user, 2026-09-11.
+-- The creator becomes the org's admin in the same transaction, so a new org is
+-- never memberless.
+create or replace function rbac.create_org(p_slug text, p_name text)
+returns uuid as $$
+declare v_id uuid; v_user uuid := rbac.current_user_id();
+begin
+    if v_user is null or not rbac.has_permission(v_user, 'orgs', 'admin') then
+        raise exception 'creating an org needs orgs/admin' using errcode = '42501';
+    end if;
+    insert into rbac.orgs (slug, name) values (p_slug, p_name) returning id into v_id;
+    insert into rbac.org_members (org_id, user_id, role) values (v_id, v_user, 'admin');
+    insert into rbac.auth_events (user_id, event_type, detail)
+    values (v_user, 'org_created', jsonb_build_object('org_id', v_id, 'slug', p_slug));
+    return v_id;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
 create or replace function rbac.remove_org_member(p_org_id uuid, p_user_id uuid)
 returns void as $$
 begin
@@ -1315,7 +1336,7 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 -- with no line added there.
 insert into rbac.permission_kinds (resource, action, checked_by) values
     ('orgs',        'select', 'policy orgs_member_visible'),
-    ('orgs',        'admin',  'rbac.add_org_member / rbac.remove_org_member'),
+    ('orgs',        'admin',  'rbac.create_org / rbac.add_org_member / rbac.remove_org_member'),
     ('org_members', 'select', 'policy org_members_own_orgs')
 on conflict (resource, action) do update set checked_by = excluded.checked_by;
 
@@ -2192,6 +2213,7 @@ grant execute on function rbac.org_or_shared(uuid) to web_anon, authenticated, a
 -- nothing and widened the anonymous surface by three functions -- exactly the
 -- allow-by-omission this section exists to refuse.
 grant execute on function rbac.add_org_member(uuid, uuid, text) to authenticated;
+grant execute on function rbac.create_org(text, text) to authenticated;
 grant execute on function rbac.remove_org_member(uuid, uuid) to authenticated;
 -- add_scope_columns() executes DDL and stays owner-only, like
 -- aiq.register_entity_table(): a deployment calls it during migration, never

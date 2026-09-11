@@ -306,8 +306,17 @@ begin
             'the three-argument substitute_item is still installed beside the '
             'four-argument one -- a caller on that arity gets a body that drops {{items}}';
     end if;
-    if to_regprocedure('workflow.substitute_item(jsonb,jsonb,jsonb,text)') is null then
-        raise exception 'the four-argument substitute_item is missing';
+    -- §20a-ter added the brace sentinel as a fifth, defaulted argument. The
+    -- four-argument form is dropped by the same file, and a stale copy beside
+    -- the new one would be exactly the resident-old-arity hazard above: a
+    -- caller on four arguments would get a body that does not escape row text.
+    if to_regprocedure('workflow.substitute_item(jsonb,jsonb,jsonb,text)') is not null then
+        raise exception
+            'the four-argument substitute_item is still installed beside the '
+            'five-argument one -- a caller on that arity would not escape row text';
+    end if;
+    if to_regprocedure('workflow.substitute_item(jsonb,jsonb,jsonb,text,text)') is null then
+        raise exception 'the five-argument substitute_item is missing';
     end if;
 end $$;
 

@@ -265,4 +265,44 @@ begin
     raise notice 'rbac/04: no HTTP-reachable function raises serialization_failure on purpose';
 end $$;
 
+-- rbac.create_org: gated by orgs/admin, and the creator is the new org's
+-- admin in the same transaction. Before it existed the first org on an
+-- install was a raw insert by the owner, and add_org_member then needed an
+-- admin of an org that had no members (dogfood setup, 2026-09-11). A fresh
+-- user and role, because `admin` already holds orgs/admin on a seeded stack.
+do $$
+declare v_org uuid; v_refused boolean := false;
+        v_user uuid := 'eeeeeeee-0000-0000-0000-00000000000e';
+        v_claims text := '{"sub":"eeeeeeee-0000-0000-0000-00000000000e"}';
+begin
+    insert into rbac.users (id, email) values (v_user, 't-org-maker@example.test');
+    insert into rbac.roles (name) values ('t_org_maker') on conflict do nothing;
+    insert into rbac.user_roles (user_id, role) values (v_user, 't_org_maker');
+
+    set local role authenticated;
+    perform set_config('request.jwt.claims', v_claims, true);
+    begin
+        perform rbac.create_org('t-refused-org', 'refused');
+    exception when insufficient_privilege then
+        v_refused := true;
+    end;
+    reset role;
+    if not v_refused then
+        raise exception 'a caller without orgs/admin created an org';
+    end if;
+
+    insert into rbac.role_permissions (role, resource, action)
+    values ('t_org_maker', 'orgs', 'admin');
+    set local role authenticated;
+    perform set_config('request.jwt.claims', v_claims, true);
+    v_org := rbac.create_org('t-created-org', 'created');
+    reset role;
+
+    if not exists (select 1 from rbac.org_members
+                    where org_id = v_org and role = 'admin' and user_id = v_user) then
+        raise exception 'create_org left its creator outside the org it created';
+    end if;
+    raise notice 'rbac/04: create_org needs orgs/admin and makes its creator the org''s admin';
+end $$;
+
 rollback;

@@ -613,6 +613,76 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
+-- 8b-bis. Row text is data (§20a-ter). A row whose text holds `{{...}}` must
+--     reach the step as that text: not resolved against the run, not a
+--     terminal "resolved to nothing", and not assembled into a template from
+--     two adjacent values. Found by uploading a session transcript that
+--     quoted a workflow document; on the worker side the same pass resolves
+--     {{env.*}}, so the stakes there are a secret sent to a model provider.
+-- ---------------------------------------------------------------------
+do $$
+declare v jsonb; v_s text;
+begin
+    v_s := workflow.brace_sentinel('{}'::jsonb, '[{"a":"x"}]'::jsonb);
+    v := workflow.substitute_item(
+        '{"body":"say {{item.a}}", "whole":"{{item.a}}", "obj":"{{item.o}}", "keep":"{{run.tier}}"}'::jsonb,
+        '{"a":"{{env.P8_JWT_SECRET}}", "o":{"k":"{{steps.x.result}}"}}'::jsonb,
+        '[{"a":"x"}]'::jsonb, 'fan', v_s);
+    if v::text like '%{{env%' or v::text like '%{{steps%' then
+        raise exception 'row text still opens a template after substitution: %', v;
+    end if;
+    if v->>'keep' <> '{{run.tier}}' then
+        raise exception 'the author''s own template was escaped: %', v->>'keep';
+    end if;
+    if workflow.brace_restore(v, v_s)->>'body' <> 'say {{env.P8_JWT_SECRET}}'
+       or workflow.brace_restore(v, v_s)->'obj'->>'k' <> '{{steps.x.result}}' then
+        raise exception 'restoring the sentinel did not give back the row text: %',
+            workflow.brace_restore(v, v_s);
+    end if;
+    -- A null sentinel is the four-argument behaviour, unchanged.
+    if workflow.substitute_item('{"u":"{{item.a}}"}'::jsonb, '{"a":"{x"}'::jsonb,
+                                '[]'::jsonb, 'fan')->>'u' <> '{x' then
+        raise exception 'a call without a sentinel changed the row text';
+    end if;
+    -- A non-string argument is a value, never a template: a batch of rows
+    -- used to come back from resolve_args as a STRING when its text held braces.
+    if jsonb_typeof(workflow.resolve_args('[["a {{run.x}}"]]'::jsonb, gen_random_uuid(), null)->0)
+       <> 'array' then
+        raise exception 'resolve_args rewrote an array argument into a string';
+    end if;
+end $$;
+
+insert into workflow.definitions (name, spec) values
+('t_mx_braces', '{"steps":[
+    {"key":"fan", "kind":"matrix", "queue":"t", "input":{
+        "items":[{"a":"x","b":"y"},
+                 {"a":"say {{run.secret}}","b":"."},
+                 {"a":"{","b":"{run.secret}}"}], "max_fanout":10,
+        "template":{"queue":"t-sql", "kind":"sql",
+                    "input":{"function":"t_mx_echo", "args":["{{item.a}}{{item.b}}"]}}}}
+ ]}');
+
+do $$
+declare v_run uuid; v_outs text; v_braced text;
+begin
+    v_run := workflow.start_workflow('t_mx_braces', '{"secret":"LEAKED"}'::jsonb);
+    select string_agg(output#>>'{result,saw}', '|' order by step_key),
+           string_agg(case when input ? 'braces' then step_key end, ',' order by step_key)
+      into v_outs, v_braced
+      from workflow.tasks where run_id = v_run and kind = 'sql';
+    if v_outs is distinct from 'xy|say {{run.secret}}.|{{run.secret}}' then
+        raise exception 'row text was resolved as a template in a sql child -- got %, tasks: %',
+            coalesce(v_outs, '<null>'),
+            (select jsonb_agg(jsonb_build_object('k',step_key,'s',status,'e',error))
+             from workflow.tasks where run_id = v_run);
+    end if;
+    -- The sentinel is recorded only where something was escaped.
+    if v_braced is distinct from 'fan[1],fan[2]' then
+        raise exception 'input.braces was recorded on the wrong children: %', v_braced;
+    end if;
+end $$;
+
+-- ---------------------------------------------------------------------
 -- 8c. The fan-in, which the first version of §20 shipped without and
 --     described wrongly. It claimed children could write to a domain table
 --     and a `sql` successor could read it -- true for `work` children, false
@@ -765,6 +835,7 @@ do $$ begin
     raise notice 'workflow/04: the spec p8_compile_workflow emits for a matrix step runs on this engine';
     raise notice 'workflow/04: matrix_rows is authorized against the run, not the task id it is handed';
     raise notice 'workflow/04: {{item.*}} is substituted at expansion -- a worker never learns a task was fanned out';
+    raise notice 'workflow/04: row text is data -- {{...}} inside a row reaches the step as text, never a template';
     raise notice 'workflow/04: a successor reaches its siblings via {{steps.<id>.result.task_id}} + matrix_outputs';
     raise notice 'workflow/04: an output that cannot be stored fails terminally, not five times';
 end $$;

@@ -1096,8 +1096,11 @@ begin
         from workflow.tasks t
         where t.matrix_parent_id = p_matrix_task and t.status = 'succeeded'
     loop
+        -- The resource's org, as aiq.land_graph passes it; omitted, it is the
+        -- shared tier (content.land_graph_windows had the same omission).
         v_r := aiq.upsert_graph(v_child.graph, jsonb_build_object(
             'resource_id', v_child.rid, 'run_id', v_run,
+            'org_id', (select r.org_id from content.resources r where r.id = v_child.rid::uuid),
             'window', v_child.win, 'agent', 'structure_null'));
         -- The dropped relations are UNIONED rather than summed: the useful
         -- fact across a fan-in is which names the model kept inventing, and a

@@ -2770,6 +2770,10 @@ begin
     -- connection's next transaction; the same hazard rbac.current_user_id()
     -- was hardened against.
     perform set_config('workflow.current_run_id', t.run_id::text, true);
+    -- §20a-ter: resolve_args puts `{` back into row text after its one pass.
+    -- Always set, to '' when absent, so the previous task's sentinel in the
+    -- same transaction cannot apply to this one.
+    perform set_config('workflow.braces', coalesce(t.input->>'braces', ''), true);
 
     begin      -- subtransaction: a failure here must not abort the caller
         -- TWO SPELLINGS, ONE KIND. A step either names something the deployment
@@ -3907,7 +3911,11 @@ declare
 begin
     for v_arg in select * from jsonb_array_elements(coalesce(p_args, '[]'::jsonb))
     loop
-        v_txt := v_arg #>> '{}';
+        -- ONLY A STRING IS A TEMPLATE. `#>> '{}'` on an array or object is its
+        -- JSON text, so a batch of rows ({{items}}, substituted at expansion)
+        -- whose text held `{{...}}` was re-resolved and came back as a STRING
+        -- in place of the array. A non-string argument is a value.
+        v_txt := case when jsonb_typeof(v_arg) = 'string' then v_arg #>> '{}' end;
         -- `$` joins the character class so {{run.$id}} is a whole-string
         -- reference like any other.
         if v_txt is not null and v_txt ~ '^\s*\{\{\s*[a-zA-Z0-9_.$]+\s*\}\}\s*$' then
@@ -3970,7 +3978,9 @@ begin
             v_out := v_out || jsonb_build_array(v_arg);
         end if;
     end loop;
-    return v_out;
+    -- §20a-ter: row text arrives with `{` escaped; put it back now that the
+    -- single pass is done.
+    return workflow.brace_restore(v_out, nullif(current_setting('workflow.braces', true), ''));
 end;
 $$ language plpgsql stable;
 
@@ -4114,8 +4124,79 @@ drop function if exists workflow.substitute_item(jsonb, jsonb, text);
 -- this task is about" and "every row this task owns" -- and a function that
 -- guessed which was meant from the type it was handed would answer the wrong
 -- one silently on a batch of exactly one.
+--
+-- 20a-ter. ROW TEXT IS DATA, AND IS ESCAPED ON THE WAY IN. Substitution puts
+-- a row's text into the child input, and the input is then resolved a SECOND
+-- time: by the worker at dispatch (`{{run.*}}`, `{{steps.*}}`, `{{env.*}}`) or
+-- by resolve_args for a `sql` child. A row whose text contains `{{env.X}}` was
+-- therefore resolved as a template. Found backfilling session transcripts
+-- through the upload pipeline (2026-09-11): a session that quoted a workflow
+-- document failed with `template {{env.LLM_URL}} resolved to nothing`, and
+-- `{{env.<secret>}}` in an uploaded document would have put that secret into
+-- the prompt sent to the model provider. The same loop below also re-scanned
+-- text it had just inserted, so one column's value could name another.
+--
+-- p_braces is a sentinel, chosen per child by the expansion, that replaces
+-- every `{` in text that came from a row. No template can then begin inside
+-- row data, and none can be assembled from two adjacent values either. The
+-- expansion records the sentinel as `input.braces` when anything was escaped,
+-- and each resolver puts `{` back after its single pass: the worker
+-- (templates.resolve_task) and resolve_args. A null sentinel is the old
+-- behaviour, kept so a caller that passes four arguments is unchanged.
+create or replace function workflow.brace_escape(p_value jsonb, p_braces text)
+returns jsonb language sql immutable as $$
+    select case
+        when p_braces is null or p_value is null then p_value
+        when jsonb_typeof(p_value) = 'string'
+            then to_jsonb(replace(p_value #>> '{}', '{', p_braces))
+        when jsonb_typeof(p_value) = 'object' then coalesce((
+            select jsonb_object_agg(k, workflow.brace_escape(v, p_braces))
+              from jsonb_each(p_value) as e(k, v)), '{}'::jsonb)
+        when jsonb_typeof(p_value) = 'array' then coalesce((
+            select jsonb_agg(workflow.brace_escape(v, p_braces) order by o)
+              from jsonb_array_elements(p_value) with ordinality as e(v, o)), '[]'::jsonb)
+        else p_value
+    end;
+$$;
+
+create or replace function workflow.brace_restore(p_value jsonb, p_braces text)
+returns jsonb language sql immutable as $$
+    select case
+        when p_braces is null or p_braces = '' or p_value is null then p_value
+        when jsonb_typeof(p_value) = 'string'
+            then to_jsonb(replace(p_value #>> '{}', p_braces, '{'))
+        when jsonb_typeof(p_value) = 'object' then coalesce((
+            select jsonb_object_agg(k, workflow.brace_restore(v, p_braces))
+              from jsonb_each(p_value) as e(k, v)), '{}'::jsonb)
+        when jsonb_typeof(p_value) = 'array' then coalesce((
+            select jsonb_agg(workflow.brace_restore(v, p_braces) order by o)
+              from jsonb_array_elements(p_value) with ordinality as e(v, o)), '[]'::jsonb)
+        else p_value
+    end;
+$$;
+
+-- The sentinel, derived from the rows rather than random so the same rows
+-- expand to the same input (a replay can be diffed), and checked absent from
+-- both template and rows, since a sentinel the data already contains would be
+-- restored into a `{` that was never there.
+create or replace function workflow.brace_sentinel(p_tmpl jsonb, p_rows jsonb)
+returns text language plpgsql immutable as $$
+declare v text; i int := 0; v_all text := coalesce(p_tmpl::text, '') || coalesce(p_rows::text, '');
+begin
+    loop
+        v := '⦃' || left(md5(coalesce(p_rows::text, '') || i::text), 12) || '⦄';
+        exit when position(v in v_all) = 0;
+        i := i + 1;
+        if i > 16 then
+            raise exception 'could not choose a brace sentinel absent from the rows';
+        end if;
+    end loop;
+    return v;
+end $$;
+
+drop function if exists workflow.substitute_item(jsonb, jsonb, jsonb, text);
 create or replace function workflow.substitute_item(
-    p_value jsonb, p_item jsonb, p_rows jsonb, p_step text)
+    p_value jsonb, p_item jsonb, p_rows jsonb, p_step text, p_braces text default null)
 returns jsonb as $$
 declare
     v_txt   text;
@@ -4134,13 +4215,13 @@ begin
         v_out := '{}'::jsonb;
         for v_key in select jsonb_object_keys(p_value) loop
             v_out := v_out || jsonb_build_object(
-                v_key, workflow.substitute_item(p_value->v_key, p_item, p_rows, p_step));
+                v_key, workflow.substitute_item(p_value->v_key, p_item, p_rows, p_step, p_braces));
         end loop;
         return v_out;
 
     when 'array' then
         return coalesce((
-            select jsonb_agg(workflow.substitute_item(e, p_item, p_rows, p_step) order by ord)
+            select jsonb_agg(workflow.substitute_item(e, p_item, p_rows, p_step, p_braces) order by ord)
             from jsonb_array_elements(p_value) with ordinality as x(e, ord)), '[]'::jsonb);
 
     when 'string' then
@@ -4157,7 +4238,7 @@ begin
         -- number an author can turn up or down without rewriting the step it
         -- feeds.
         if v_txt ~ '^\s*\{\{\s*items\s*\}\}\s*$' then
-            return p_rows;
+            return workflow.brace_escape(p_rows, p_braces);
         end if;
         -- Embedded in a larger string, it is refused rather than rendered.
         -- {{item.cik}} interpolates because a column is a scalar; a batch is
@@ -4184,7 +4265,7 @@ begin
                     p_step, m[1], (select string_agg(k, ', ' order by k)
                                    from jsonb_object_keys(p_item) k);
             end if;
-            return v_val;
+            return workflow.brace_escape(v_val, p_braces);
         end if;
 
         -- Embedded in a larger string -- a URL, a prompt -- so the value is
@@ -4202,8 +4283,8 @@ begin
             end if;
             v_txt := replace(v_txt,
                 (regexp_match(v_txt, '\{\{\s*item\.' || m[1] || '\s*\}\}'))[1],
-                case when jsonb_typeof(v_val) = 'string' then v_val #>> '{}'
-                     else v_val::text end);
+                replace(case when jsonb_typeof(v_val) = 'string' then v_val #>> '{}'
+                             else v_val::text end, '{', coalesce(p_braces, '{')));
         end loop;
         return to_jsonb(v_txt);
 
@@ -4283,6 +4364,7 @@ declare
     v_cap       int;
     v_b         record;
     v_common    jsonb;
+    v_brace     text;
     v_input     jsonb;
     v_ref       text[];
     v_bad_ord   bigint;
@@ -4571,9 +4653,10 @@ begin
                     end if;
                 end loop;
 
+                v_brace := workflow.brace_sentinel(v_tmpl, v_b.rows);
                 v_input := workflow.substitute_item(
                                coalesce(v_tmpl->'input', '{}'::jsonb),
-                               v_common, v_b.rows, t.step_key)
+                               v_common, v_b.rows, t.step_key, v_brace)
                            || jsonb_build_object(
                                 'items', v_b.rows,
                                 'batch', jsonb_build_object(
@@ -4585,10 +4668,17 @@ begin
                 -- Substituted, then the row appended verbatim. The child's
                 -- input therefore says exactly what will be sent AND still
                 -- carries the snapshot §20 records.
+                v_brace := workflow.brace_sentinel(v_tmpl, v_row);
                 v_input := workflow.substitute_item(
                                coalesce(v_tmpl->'input', '{}'::jsonb),
-                               v_row, jsonb_build_array(v_row), t.step_key)
+                               v_row, jsonb_build_array(v_row), t.step_key, v_brace)
                            || jsonb_build_object('item', v_row);
+            end if;
+
+            -- §20a-ter: the sentinel is recorded only when row text was
+            -- escaped, so a child whose rows hold no `{` is unchanged.
+            if position(v_brace in v_input::text) > 0 then
+                v_input := v_input || jsonb_build_object('braces', v_brace);
             end if;
 
             -- A `sql` STATEMENT IS PUT BACK UNSUBSTITUTED, and this is the
@@ -5194,6 +5284,8 @@ revoke execute on function workflow.expand_matrix(uuid) from public;
 grant execute on function workflow.matrix_rows(uuid) to worker, authenticated;
 grant execute on function workflow.matrix_outputs(uuid) to worker, authenticated;
 grant execute on function workflow.resolve_args(jsonb, uuid, jsonb) to worker, authenticated;
+-- §20a-ter: resolve_args restores row braces through this, as its caller.
+grant execute on function workflow.brace_restore(jsonb, text) to worker, authenticated;
 grant execute on function workflow.resolve_template_ref(text, uuid, jsonb) to worker, authenticated;
 
 -- Registered in the allow-list, so a fan-in needs no user code at all:

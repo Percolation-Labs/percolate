@@ -95,7 +95,10 @@ docker exec -i "$CONTAINER" psql -U "$SUPERUSER" -d "$ADMIN_DB" -q \
 # ran after a recreate. A reload that does not reproduce a fresh install is a
 # reload you have to remember a caveat about.
 CRON_DB=$(docker exec -i "$CONTAINER" psql -U "$SUPERUSER" -d "$ADMIN_DB" -tAc \
-          "show cron.database_name" 2>/dev/null | tr -d ' ')
+          "show cron.database_name" 2>/dev/null | tr -d ' ' || true)
+# `|| true`: on a container started without pg_cron preloaded the SHOW fails,
+# and under `set -o pipefail` that assignment ended the script with exit 1 and
+# no message, right after dropping the database. No cron is an answer here.
 if [ "$CRON_DB" = "$DB" ]; then
   echo "    (this is cron.database_name, so pg_cron goes in too)"
   docker exec -i "$CONTAINER" psql -U "$SUPERUSER" -d "$DB" -v ON_ERROR_STOP=1 -q \

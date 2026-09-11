@@ -696,4 +696,63 @@ begin
     raise notice 'content: a model answer with a NUL escape parses, and the graph fan-in uses the parser that allows it';
 end $$;
 
+-- ---------------------------------------------------------------------
+-- 6d. A graph landed from an upload stays in the upload's org.
+--
+-- content.land_graph_windows did not pass the resource's org to
+-- aiq.upsert_graph, which reads an omitted org as the shared tier -- so
+-- every entity and edge the upload pipeline extracted was readable outside
+-- the org its document was uploaded into. aiq.land_graph always passed it.
+-- Found backfilling private transcripts on the dogfood stack, 2026-09-11.
+-- ---------------------------------------------------------------------
+do $$
+declare v_org uuid := gen_random_uuid(); v_ch uuid; v_res uuid; v_run uuid; v_mx uuid;
+        v_r jsonb; v_edges int; v_wrong int;
+begin
+    if to_regprocedure('content.land_graph_windows(uuid)') is null then
+        raise notice 'graph.sql is not installed -- skipping graph org scoping';
+        return;
+    end if;
+    insert into rbac.orgs (id, slug, name) values (v_org, 't-graph-org', 'graph org');
+    select channel into v_ch from t_ing limit 1;
+    insert into content.resources (channel_id, title, status, org_id)
+    values (v_ch, 'g.md', 'ready', v_org) returning id into v_res;
+
+    insert into workflow.definitions (name, spec) values ('t_graph_org', jsonb_build_object(
+        'steps', jsonb_build_array(jsonb_build_object(
+            'key', 'graph', 'kind', 'matrix', 'queue', 't', 'input', jsonb_build_object(
+                'items', jsonb_build_array(jsonb_build_object(
+                    'resource_id', v_res, 'window_ordinal', 0, 'content', 'x')),
+                'max_fanout', 5,
+                'template', jsonb_build_object('queue', 't-graph', 'kind', 'work',
+                                               'input', jsonb_build_object('op', 'noop')))))));
+    v_run := workflow.start_workflow('t_graph_org', '{}'::jsonb);
+    select id into v_mx from workflow.tasks where run_id = v_run and step_key = 'graph';
+
+    update workflow.tasks set status = 'running', claimed_by = 't', claimed_at = now()
+     where matrix_parent_id = v_mx;
+    perform workflow.complete_task(t.id, jsonb_build_object('result',
+        '{"nodes":[{"k":"company","n":"Orgville Metals"},{"k":"company","n":"Orgville Parts"}],
+          "edges":[{"s":0,"t":1,"r":"mentions"}]}'::jsonb))
+       from workflow.tasks t where t.matrix_parent_id = v_mx;
+
+    perform set_config('workflow.current_run_id', v_run::text, true);
+    v_r := content.land_graph_windows(v_mx);
+
+    select count(*), count(*) filter (where e.org_id is distinct from v_org)
+      into v_edges, v_wrong
+      from aiq.edges e
+     where e.provenance->'sources' @> jsonb_build_array(jsonb_build_object('resource_id', v_res::text));
+    if v_edges <> 1 or v_wrong <> 0 then
+        raise exception 'an upload''s graph did not land in its org: % edges, % elsewhere (receipt %)',
+            v_edges, v_wrong, v_r;
+    end if;
+    if exists (select 1 from aiq.soft_nodes s
+                where s.key in ('orgville metals', 'orgville parts')
+                  and s.org_id is distinct from v_org) then
+        raise exception 'an upload''s entities landed outside its org';
+    end if;
+    raise notice 'content: a graph extracted from an upload lands in the upload''s org, not the shared tier';
+end $$;
+
 rollback;

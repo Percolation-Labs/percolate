@@ -274,8 +274,14 @@ begin
         end loop;
         v_graph := jsonb_set(v_graph, '{edges}', v_kept);
 
+        -- THE RESOURCE'S ORG, which aiq.land_graph has always passed and this
+        -- function did not: upsert_graph maps an omitted org to the shared
+        -- tier, so every graph the upload pipeline produced was readable
+        -- outside the org its document was uploaded into. Found backfilling
+        -- private session transcripts on the dogfood stack, 2026-09-11.
         v_r := aiq.upsert_graph(v_graph, jsonb_build_object(
             'resource_id', v_child.rid, 'run_id', v_run,
+            'org_id', (select r.org_id from content.resources r where r.id = v_child.rid),
             'window', v_child.win, 'agent', 'structure_null'));
 
         v_acc := jsonb_build_object(
