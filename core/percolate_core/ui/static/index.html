@@ -257,6 +257,15 @@ drawWho();
     }
   }
   try { await ensureSession(); } catch (_) {}
+  /* The status vocabulary, once, after there is a token to read it with. It
+     only adds colour, so a deployment that refuses the read renders exactly as
+     before rather than not at all. */
+  try {
+    const { read } = await import("./api.js");
+    const { READS } = await import("./reads.js");
+    const { setStatusVocabulary } = await import("./ui.js");
+    setStatusVocabulary((await read(READS.lifecycleStates)).rows);
+  } catch (_) {}
   if (!token()) location.hash = "#/signin";
   route();
 })();

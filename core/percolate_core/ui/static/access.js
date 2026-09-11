@@ -13,7 +13,7 @@ import { select, rpc, read, probeQuery, config, setEndpoint, token } from "./api
 import { READS, PROBES } from "./reads.js";
 import { agentEditor } from "./agent-editor.js";
 import { HELP_AGENT, createChatSession } from "./query-assist.js";
-import { h, chip, status, table, stat, statGap, panel, gap, fmtTime, short, seg, stream } from "./ui.js";
+import { h, chip, status, setStatusVocabulary, table, stat, statGap, panel, gap, fmtTime, short, seg, stream } from "./ui.js";
 import { markdown } from "./md.js";
 import { head, page, tryRead, defs } from "./views.js";
 
@@ -275,11 +275,15 @@ export async function keys() {
 
 /* -- Settings ---------------------------------------------- */
 export async function settings() {
-  const [orgs, mem, vis] = await Promise.all([
+  const [orgs, mem, vis, states] = await Promise.all([
     tryRead(() => read(READS.orgs), (e) => ({ rows: [], error: e })),
     tryRead(() => read(READS.orgMembers), (e) => ({ rows: [], error: e })),
     tryRead(() => read(READS.visibilities), (e) => ({ rows: [], error: e })),
+    tryRead(() => read(READS.lifecycleStates), (e) => ({ rows: [], error: e })),
   ]);
+  /* Read here as well as at boot: this screen is where somebody asks what a
+     word on a run means, and the same read is what colours the chips. */
+  if (states.rows) setStatusVocabulary(states.rows);
   const rest = h("input", { class: "control mono", style: "width:100%", value: config().rest });
   const core = h("input", { class: "control mono", style: "width:100%", value: config().core });
   const content = h("input", { class: "control mono", style: "width:100%", "aria-label": "Content Server URL", value: config().content });
@@ -306,6 +310,12 @@ export async function settings() {
         : table(["Slug", "Name", "Members"], orgs.rows || [], (o) =>
             h("tr", {}, h("td", { class: "mono" }, o.slug), h("td", {}, o.name),
               h("td", { class: "num" }, (mem.rows || []).filter((m) => m.org_id === o.id).length))))));
+
+  node.append(panel("Run status vocabulary", "workflow.lifecycle_states - what each word means, and which of them are finished",
+    states.error ? gap("workflow.lifecycle_states", states.error.message, "schema")
+      : table(["State", "Finished", "Succeeded", "Meaning"], states.rows || [], (v) =>
+          h("tr", {}, h("td", {}, status(v.state)), h("td", {}, v.is_terminal ? "yes" : "no"),
+            h("td", {}, v.is_success ? "yes" : "no"), h("td", {}, v.note)))));
 
   node.append(panel("Visibility vocabulary", "rbac.visibilities - a table, not an enum",
     table(["Scope", "Rank", "Requires org", "Meaning"], vis.rows || [], (v) =>
