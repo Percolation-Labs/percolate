@@ -18,7 +18,7 @@ import json
 import os
 import unittest
 from contextlib import asynccontextmanager
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import asyncpg
 from fastapi import FastAPI
@@ -31,6 +31,7 @@ from percolate_core.agentic.testing import MemoryRepository
 from percolate_core.content.server import build_app as content_app, caller
 from percolate_core.core.identity import mint_jwt
 from percolate_core.core.refusal import refusal
+from percolate_core.worker.loop import run_once
 
 SECRET = "test-only-secret-not-a-production-key"
 ALICE = "11111111-1111-1111-1111-111111111111"
@@ -248,6 +249,47 @@ class TheRuleTest(unittest.TestCase):
         two = refusal(refused(*INVOKE))
         self.assertEqual(str(two), f"{INVOKE[0]} ({INVOKE[1]})")
         self.assertEqual(two.body()["hint"], INVOKE[1])
+
+
+class WorkerRetryTest(unittest.IsolatedAsyncioTestCase):
+    """A refused step fails on its first attempt, rather than four times.
+
+    The same rule one layer out. `PERMANENT_DB_ERRORS` decides whether the
+    worker spends a task's retry budget, and it listed integrity and data
+    errors only -- so a `work:` step refused by a may_* predicate, or by a
+    policy admitting no row, burned every attempt on an answer that cannot
+    change and buried the message under four copies of itself. The engine's own
+    SQL retry lists treat 42501 as terminal (workflow-engine
+    execute_sql_step), which is what left this as the last path retrying it.
+    """
+
+    async def outcome(self, error: BaseException) -> bool:
+        conn = AsyncMock()
+        conn.fetchval.side_effect = [
+            "1e0f2b8a-0000-4000-8000-000000000001",
+            json.dumps({"kind": "work", "step_key": "land", "task_input": {}}),
+        ]
+
+        @asynccontextmanager
+        async def service():
+            yield conn
+
+        handler = AsyncMock(side_effect=error)
+        with patch("percolate_core.worker.loop.as_service", service), \
+             patch.dict("percolate_core.worker.loop.HANDLERS", {"work": handler}):
+            await run_once("ingest", "worker-1")
+        handler.assert_awaited_once()
+        sql, _task, payload, terminal = conn.execute.await_args.args
+        self.assertEqual(sql, "select workflow.fail_task($1, $2::jsonb, $3)")
+        self.assertEqual(payload.get("terminal", False), terminal)
+        return terminal
+
+    async def test_a_refused_step_is_terminal_on_the_first_attempt(self):
+        self.assertTrue(await self.outcome(refused(*INVOKE)))
+
+    async def test_a_busy_database_is_still_retried(self):
+        self.assertFalse(await self.outcome(asyncpg.DeadlockDetectedError.new(
+            {"C": "40P01", "M": "deadlock detected"})))
 
 
 if __name__ == "__main__":

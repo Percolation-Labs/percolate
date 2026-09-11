@@ -43,6 +43,14 @@ PERMANENT_DB_ERRORS = (
     asyncpg.exceptions.IntegrityConstraintViolationError,
     # 22xxx -- bad literal, numeric overflow, invalid json. The value is wrong.
     asyncpg.exceptions.DataError,
+    # 42501 -- the database refused this caller: a missing permission, a may_*
+    # predicate, or a policy that admits no row to write. The CALLER is wrong,
+    # and the fourth attempt asks the same question of the same grants. The
+    # engine's own SQL retry lists already treat 42501 as terminal
+    # (workflow-engine execute_sql_step and run_ready_sql_steps), so a `work:`
+    # step refused out here was the one path still spending its whole budget on
+    # it -- the inbound half of the class an exhausted provider account is.
+    asyncpg.exceptions.InsufficientPrivilegeError,
 )
 """Database errors a retry cannot fix, so the task fails on the first attempt.
 
@@ -164,8 +172,9 @@ async def run_once(queue: str, worker_id: str) -> bool:
         # buries the real message under four identical copies.
         #
         # Deliberately narrow. Integrity and data errors say "what you sent is
-        # wrong"; serialization failures and deadlocks say "try again" and are
-        # NOT in here, because those are exactly what the retry budget is for.
+        # wrong" and a refusal says "who you are is wrong"; serialization
+        # failures and deadlocks say "try again" and are NOT in here, because
+        # those are exactly what the retry budget is for.
         terminal = isinstance(e, PERMANENT_DB_ERRORS)
         label = "terminal" if terminal else "retryable"
         print(f"[{worker_id}]   {label}: {e}", flush=True)
