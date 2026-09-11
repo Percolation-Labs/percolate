@@ -280,7 +280,7 @@ begin
     insert into rbac.user_roles (user_id, role) values (v_user, 't_org_maker');
 
     set local role authenticated;
-    perform set_config('request.jwt.claims', v_claims, true);
+    execute format('set local request.jwt.claims = %L', coalesce(v_claims, ''));
     begin
         perform rbac.create_org('t-refused-org', 'refused');
     exception when insufficient_privilege then
@@ -294,7 +294,7 @@ begin
     insert into rbac.role_permissions (role, resource, action)
     values ('t_org_maker', 'orgs', 'admin');
     set local role authenticated;
-    perform set_config('request.jwt.claims', v_claims, true);
+    execute format('set local request.jwt.claims = %L', coalesce(v_claims, ''));
     v_org := rbac.create_org('t-created-org', 'created');
     reset role;
 
