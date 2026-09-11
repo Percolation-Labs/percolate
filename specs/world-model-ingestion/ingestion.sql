@@ -143,6 +143,52 @@ revoke execute on function aiq.extractor_call(text, text, text, text, text) from
 grant execute on function aiq.extractor_call(text, text, text, text, text) to authenticated;
 
 -- ------------------------------------------------------------
+-- WHETHER A MODEL'S QUOTE IS IN ITS SOURCE, decided once (extraction.md §4.2).
+--
+-- Every extractor here asks for a verbatim quote and discards or flags an
+-- answer whose quote is not found. The check was written eight times with four
+-- rules (REM-59): the self-model scripts forgave asterisks and smart quotes and
+-- had no minimum, pgvector-watch forgave neither and wanted eight characters,
+-- the tour accepted a three-letter quote. The same quote against the same text
+-- counted as evidence in one package and not in the next, so evidence counts
+-- could not be compared across them.
+--
+-- The rule is an identity check with formatting taken out, not a similarity
+-- measure: both sides are lowercased, every quote mark is folded to one, the
+-- emphasis a model adds (`*`, `_`, backticks) is dropped and whitespace runs
+-- become one space; the quote also loses the punctuation and quote marks at
+-- its edges. What is left must occur whole, and be at least eight characters,
+-- because a short enough quote occurs in anything. A paraphrase stays a
+-- miss: accepting a fragment of the quote accepts everything eventually
+-- (extraction.md §4.2 records the measurement).
+create or replace function aiq.quote_occurs(p_quote text, p_source text)
+returns boolean language sql immutable parallel safe
+set search_path = pg_catalog, public
+as $$
+    with norm as (
+        -- Both texts, the same way: fold the quote marks, drop the emphasis
+        -- (translate deletes the characters its target string runs out
+        -- for), lowercase, collapse whitespace.
+        select t.side, btrim(regexp_replace(lower(translate(coalesce(t.v, ''),
+                   E'‘’“”"*_`', repeat(chr(39), 5))), '\s+', ' ', 'g')) as v
+          from (values ('quote', p_quote), ('source', p_source)) as t(side, v)
+    ), q as (
+        select btrim(v, E' \'.,;:…-') as v from norm where side = 'quote'
+    )
+    select length(q.v) >= 8 and strpos(s.v, q.v) > 0
+      from q, norm s where s.side = 'source';
+$$;
+
+comment on function aiq.quote_occurs(text, text) is
+    'True when a model''s quote occurs in its source after both are lowercased, '
+    'quote marks folded, emphasis markup dropped and whitespace collapsed, and '
+    'the quote is at least 8 characters once its edge punctuation is trimmed. '
+    'The one rule for "is this evidence" (extraction.md §4.2).';
+
+revoke execute on function aiq.quote_occurs(text, text) from public;
+grant execute on function aiq.quote_occurs(text, text) to authenticated, worker;
+
+-- ------------------------------------------------------------
 -- The graph fan-in, with the two things running it found.
 --
 -- aiq.land_graph_fanout does this job and is the function graph-index.md
