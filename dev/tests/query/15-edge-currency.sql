@@ -64,7 +64,13 @@ begin
     end if;
     select node_id into v_acme from aiq.lookup('acme');
     select node_id into v_ndlr from aiq.lookup('ndlr');
-    update aiq.edges set valid_to = now() - interval '1 minute' where id = v_edge;
+    -- BOTH ENDS SET EXPLICITLY. The assertion at the end reads the graph as of
+    -- before the retraction, and "before" has to be inside the edge's own
+    -- validity: dated only by `valid_to`, it depended on how long ago the
+    -- fixture happened to be loaded, which is minutes on a fresh database.
+    update aiq.edges
+       set valid_from = now() - interval '2 days', valid_to = now() - interval '1 day'
+     where id = v_edge;
     perform aiq.graph_snapshot(true);
 
     select count(*) into n from aiq.graph_neighbors(v_acme, 'competes_with') g where g.neighbor_id = v_ndlr;
@@ -92,7 +98,7 @@ begin
     select count(*) into n from aiq.graph_induced(array[v_acme, v_ndlr], 'competes_with');
     if n <> 0 then raise exception 'graph_induced returned a retracted edge'; end if;
 
-    v := aiq.graph_paths('acme', 'ndlr', 1, 1, 250, 'competes_with', now() - interval '1 hour');
+    v := aiq.graph_paths('acme', 'ndlr', 1, 1, 250, 'competes_with', now() - interval '36 hours');
     if jsonb_array_length(v->'paths') <> 1 then
         raise exception 'an as-of read from before the retraction lost the edge -- retraction '
             'must be history, not deletion';

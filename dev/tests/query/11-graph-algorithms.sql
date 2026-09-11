@@ -166,7 +166,9 @@ end $$;
 -- retraction history rather than deletion.
 -- ---------------------------------------------------------------------
 do $$
-declare v_default jsonb; v_now jsonb; v_before jsonb; v_edge uuid;
+declare
+    v_default jsonb; v_now jsonb; v_before jsonb; v_edge uuid;
+    v_from timestamptz; v_to timestamptz;
 begin
     select e.id into v_edge
       from aiq.edges e
@@ -177,7 +179,13 @@ begin
         raise exception 'the fixture no longer has the acme->ndlr edge this assertion is about';
     end if;
 
-    update aiq.edges set valid_to = now() - interval '1 day' where id = v_edge;
+    -- valid_from too, not only valid_to: `v_before` below reads the graph as
+    -- of before the retraction, and on a fresh database the fixture was loaded
+    -- minutes ago, so "two days ago" was before the edge existed at all.
+    select valid_from, valid_to into v_from, v_to from aiq.edges where id = v_edge;
+    update aiq.edges
+       set valid_from = now() - interval '3 days', valid_to = now() - interval '1 day'
+     where id = v_edge;
     perform aiq.graph_snapshot(true);
 
     v_default := aiq.graph_paths('acme', 'ndlr', 1);
@@ -197,6 +205,12 @@ begin
         raise exception 'as of before its expiry the direct edge was not used -- '
             'retraction must remain readable as history';
     end if;
+    -- PUT THE FIXTURE BACK. It did not need to before: a retracted edge was
+    -- still traversed, so nothing downstream could tell. Now §9 reads the same
+    -- triangle and counts its edges, and a section that leaves one retracted
+    -- hands the next one a different graph (REM-51).
+    update aiq.edges set valid_from = v_from, valid_to = v_to where id = v_edge;
+    perform aiq.graph_snapshot(true);
     raise notice 'query/11: an expired edge is excluded by default and by as_of now, and used as of before';
 end $$;
 

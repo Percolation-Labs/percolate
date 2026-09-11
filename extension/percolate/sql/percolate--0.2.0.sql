@@ -12616,8 +12616,14 @@ begin
             or (e.provenance->'sources' @> v_mine
                 and not exists (select 1 from jsonb_array_elements(e.provenance->'sources') s
                                  where s->>'agent' is distinct from p_agent)))
+       -- coalesce, not a bare comparison: `provenance->>'run_id'` is NULL on
+       -- every edge written in the sources shape, NULL = 'r1' is NULL, and
+       -- `not (… or NULL)` is NULL -- which a WHERE clause does not satisfy,
+       -- so the edges this argument exists to retract were the ones it
+       -- skipped. Found by dev/tests/query/15 §5; it is the same three-valued
+       -- trap the projection's eviction carries a comment about.
        and not (p_run is not null
-                and (e.provenance->>'run_id' = p_run
+                and (coalesce(e.provenance->>'run_id', '') = p_run
                      or e.provenance->'sources' @> v_this_run));
     get diagnostics v_retracted = row_count;
 

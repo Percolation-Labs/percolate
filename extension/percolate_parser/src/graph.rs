@@ -692,12 +692,33 @@ fn build(bf: &BuildFilter) -> Snapshot {
     let mut edges: Vec<Edge> = Vec::new();
     let mut rel_names: Vec<String> = Vec::new();
     let mut rel_ids: Map<String, u16> = map();
-    // Asked before the cursors open rather than inside them; see the edge
-    // query below for what it decides.
-    let periods = Spi::get_one::<bool>("select to_regclass('aiq.edge_periods') is not null")
+    // WHICH RELATION THE EDGES COME FROM, asked before the cursors open rather
+    // than inside them. `aiq.edge_periods` is the correct source (see the edge
+    // query below) and it costs an anti-join per row: measured at 3.94M edges,
+    // 410 ms off the table against 1,130 ms off the view, which is ~19% of the
+    // 3.8 s a full build takes -- paid by every deployment to describe an event
+    // that has not happened on any of them yet.
+    //
+    // So: no undone retraction anywhere means every edge has exactly one belief
+    // period and the periods ARE the rows. The probe is one index lookup, it
+    // runs as the caller (aiq.edge_retractions carries the same RLS as the
+    // edges it describes), and the moment a revival is recorded every later
+    // build pays the join and answers as-of reads correctly.
+    // TWO QUERIES, not one `and`: the second names aiq.edge_retractions, and
+    // naming a relation that does not exist is a parse error rather than a
+    // false -- which on an extension too old to have the table would abort the
+    // build instead of falling back to aiq.edges.
+    let have_periods = Spi::get_one::<bool>(
+        "select to_regclass('aiq.edge_periods') is not null
+            and to_regclass('aiq.edge_retractions') is not null")
         .ok()
         .flatten()
         .unwrap_or(false);
+    let periods = have_periods
+        && Spi::get_one::<bool>("select exists (select 1 from aiq.edge_retractions)")
+            .ok()
+            .flatten()
+            .unwrap_or(false);
 
     Spi::connect(|client| {
         let mut cur = client.open_cursor("select id from aiq.nodes", &[]);
@@ -737,8 +758,9 @@ fn build(bf: &BuildFilter) -> Snapshot {
         // sees an edge twice. Almost every edge has one period, so this is the
         // same scan as before plus an anti-join against a small table.
         //
-        // aiq.edges where the view is absent: a parser newer than the
-        // extension it is loaded beside, mid-upgrade, still walks.
+        // aiq.edges where the view is absent (a parser newer than the
+        // extension it is loaded beside, mid-upgrade) and where no edge has a
+        // hole in it, which is the same set of rows for less work.
         let from = if periods { "aiq.edge_periods" } else { "aiq.edges" };
         let q = format!(
             "select src_id, dst_id, relation, weight,
