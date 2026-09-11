@@ -16223,10 +16223,18 @@ returns jsonb as $$
             -- is the one thing a naming convention cannot be reasoned out of.
             --
             -- Scoped explicitly, because this function is SECURITY DEFINER and
-            -- therefore does NOT get the RLS that protects aiq.nodes: the
-            -- predicate below is the nodes_org_scoped policy written out by
-            -- hand. Without it the facet would be a cross-tenant key
-            -- disclosure dressed as documentation.
+            -- therefore does NOT get the RLS that protects aiq.nodes. Without it
+            -- the facet would be a cross-tenant key disclosure dressed as
+            -- documentation.
+            --
+            -- THE ROW'S QUESTION, rbac.may_read, and not the org's. This was
+            -- "the nodes_org_scoped policy written out by hand", and the policy
+            -- moved on to owner and visibility while the hand copy stayed on
+            -- the org: every node on the shared tier qualified, private or not,
+            -- so anybody signed in was shown up to three canonical keys of
+            -- other people's private nodes of each type. The sibling of
+            -- 75abb1d's resolve_file fix, found by declaring how each reachable
+            -- definer authorizes (dev/tests/rbac/14, REM-46).
             'entity_types', coalesce((select jsonb_agg(jsonb_build_object(
                     'entity_type', r.entity_type, 'source_table', r.source_table,
                     'key_expr', r.key_expr, 'include_where', r.include_where,
@@ -16237,8 +16245,7 @@ returns jsonb as $$
                                 join aiq.nodes n on n.id = nk.node_id
                                where n.entity_type = r.entity_type
                                  and nk.kind = 'canonical'
-                                 and (n.org_id = rbac.shared_org_id()
-                                      or n.org_id in (select rbac.current_org_ids()))
+                                 and rbac.may_read(n.owner_id, n.org_id, n.visibility)
                                order by nk.key
                                limit 3) k), '[]'::jsonb))
                     order by r.entity_type)
@@ -21411,6 +21418,24 @@ begin
         raise exception 'cannot write messages into a run that is not yours';
     end if;
 
+    -- AND THE SESSION, which the check above never looked at. A row may carry
+    -- a session_id with no run (a summary) or beside a run of the caller's, and
+    -- messages_via_run shows a session's owner every row naming it -- so a
+    -- signed-in caller could put a summary, which is read back into the next
+    -- turn's context, into anyone's conversation by knowing its id. Measured on
+    -- a CI database before this: bob wrote `planted by bob` into alice's private
+    -- session and alice read it back. start_run and upsert_summary already
+    -- refuse a session that is not the caller's; this was the third door
+    -- (found declaring how each reachable definer authorizes, REM-46).
+    if exists (select 1 from jsonb_array_elements(p_rows) as r
+                where r->>'session_id' is not null
+                  and not exists (select 1 from agentic.sessions s
+                                   where s.id = (r->>'session_id')::uuid
+                                     and s.owner_id = rbac.current_user_id()))
+    then
+        raise exception 'cannot write messages into a session that is not yours';
+    end if;
+
     return query
     insert into agentic.messages (id, run_id, session_id, role, content, tool_calls,
                                   tool_call_id, is_error, error_kind, citations)
@@ -22157,6 +22182,18 @@ as $$
 declare
     v_skills text[];
 begin
+    -- THE AUTHORITY FIRST, before the agent is so much as looked up. This read
+    -- `no agent named %` to anybody and took a row lock for them, so a caller
+    -- with no right to author anything could learn which agent names exist
+    -- and hold one agent's row until their transaction ended -- the probe
+    -- 2e5995e closed in may_invoke, open here (REM-46). upsert_agent would
+    -- have refused them further down; the answer they got first was the leak.
+    if not agentic.may_author('agents', 'agentic.agents'::regclass) then
+        raise exception 'not authorized to author agents'
+            using errcode = 'insufficient_privilege',
+                  hint = 'needs agents:update';
+    end if;
+
     -- Not upsert_agent's job to notice: called with {name, skills} for an
     -- agent that does not exist, it would happily CREATE one with an empty
     -- prompt and no tools -- an agent that resolves by name and can do
@@ -22206,6 +22243,13 @@ as $$
 declare
     v_skills text[];
 begin
+    -- First, for attach_skill's reason.
+    if not agentic.may_author('agents', 'agentic.agents'::regclass) then
+        raise exception 'not authorized to author agents'
+            using errcode = 'insufficient_privilege',
+                  hint = 'needs agents:update';
+    end if;
+
     select a.skills into v_skills
       from agentic.agents a where a.name = p_agent
       for update;

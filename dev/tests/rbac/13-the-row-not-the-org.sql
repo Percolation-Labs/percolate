@@ -161,4 +161,51 @@ begin
 end $$;
 reset role;
 
+-- 6. The graph facet's sample keys are keys the caller may read.
+--
+-- aiq.schema_graph shows up to three canonical keys per entity type, and it
+-- scoped them by hand as "the nodes_org_scoped policy written out": shared
+-- tier or one of the caller's orgs. The policy became nodes_scoped, on owner
+-- and visibility, and the copy did not follow -- the sibling of every section
+-- above, found by declaring how each reachable definer authorizes (rbac/14,
+-- REM-46). Alice's private node in the org she shares with bob, keyed to sort
+-- first so that it is one of the three whenever it is visible at all.
+do $$
+declare v uuid;
+begin
+    insert into aiq.nodes (entity_type, entity_id, owner_id, org_id, visibility)
+    values ('document', gen_random_uuid(), '11111111-1111-1111-1111-111111111111',
+            (select org from t13), 'private')
+    returning id into v;
+    insert into aiq.node_keys (node_id, entity_type, key, kind, org_id)
+    values (v, 'document', '0000-t13-alice-private', 'canonical', (select org from t13));
+end $$;
+
+create temp view t13_sample_keys as
+select k.key
+  from jsonb_array_elements(aiq.schema_graph('document')->'derived'->'entity_types') e,
+       jsonb_array_elements_text(e->'sample_keys') k(key);
+grant select on t13_sample_keys to public;
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"11111111-1111-1111-1111-111111111111"}';
+do $$
+begin
+    -- The subject first: if alice cannot see her own key here, bob not seeing
+    -- it below says nothing.
+    if not exists (select 1 from t13_sample_keys where key = '0000-t13-alice-private') then
+        raise exception 'aiq.schema_graph does not show alice her own node''s key -- the '
+                        'refusal below would pass vacuously';
+    end if;
+end $$;
+set local request.jwt.claims = '{"sub":"22222222-2222-2222-2222-222222222222"}';
+do $$
+begin
+    if exists (select 1 from t13_sample_keys where key = '0000-t13-alice-private') then
+        raise exception 'aiq.schema_graph showed bob the key of alice''s private node';
+    end if;
+    raise notice 'rbac/13: the graph facet samples only keys the caller may read';
+end $$;
+reset role;
+
 rollback;
