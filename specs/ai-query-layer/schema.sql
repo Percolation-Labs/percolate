@@ -1853,6 +1853,21 @@ begin
         -- (brief.md §3's correction).
         return jsonb_build_object('mode','SQL','statement', p->>'arg',
             'note','execute via the SECURITY INVOKER read-only passthrough, not here');
+
+    when 'LAKE' then
+        -- Planned here, run in the lake worker (world-model-ingestion/lake.md
+        -- §6): the datasets are in object storage and Postgres has no route
+        -- there. content.lake_plan resolves the FROM list AS THE CALLER and
+        -- returns the plan; a `p8ql:` step with a LAKE query compiles to the
+        -- work step that runs it. Called dynamically because this file loads
+        -- before the content plane, and a missing lake says so by name.
+        if to_regprocedure('content.lake_plan(jsonb)') is null then
+            raise exception
+                'LAKE needs the lake half of the content plane (content.lake_plan), '
+                'which this database does not have';
+        end if;
+        execute 'select content.lake_plan($1)' into v_out using p;
+        return v_out;
     when 'PATH' then
         -- Two arities, one question. Two names is the route between them;
         -- three or more is the smallest structure joining all of them, which

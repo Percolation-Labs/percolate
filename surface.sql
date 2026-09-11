@@ -356,6 +356,17 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('world-model-ingestion','table','content.dataset_files',null,'ingestion.md §6: append means this month''s export joins last month''s under one prefix'),
 ('world-model-ingestion','function','content.register_dataset','uuid,text,text,text,jsonb,bigint,text,text[]','ingestion.md §7.4: the upsert is the API, so the constraint is NULLS NOT DISTINCT'),
 ('world-model-ingestion','function','content.dataset_uri','text','ingestion.md §6: DuckDB reads the dataset by name, not by object key'),
+-- The lake worker's four calls (lake.md). Each is where a boundary lives: what
+-- the run owner may read, where an output may be written, what the registry may
+-- claim a location is, and which functions a refined row may reach.
+('world-model-ingestion','function','content.lake_resolve','uuid,text,text[]','lake.md §3: inputs resolve as the run owner, through rbac.may_read'),
+('world-model-ingestion','function','content.lake_target','uuid,text,text,text','lake.md §3: the output layout has one definition, and it is here'),
+('world-model-ingestion','function','content.register_lake_output','uuid,text,jsonb','lake.md §3: the registry refuses a location outside the writer''s org, because the sandbox trusts it'),
+('world-model-ingestion','function','content.lake_land','uuid,text,text,jsonb','lake.md §5: a refined row reaches a table only through a registered step function'),
+('world-model-ingestion','function','content.lake_datasets','text[]','lake.md §3: the one visibility rule lake_resolve applies, through rbac.may_read'),
+('world-model-ingestion','function','content.lake_catalog','text,integer','lake.md §6: what an agent can find in the lake -- columns, sizes, vector spaces, CRS -- and not where the bytes are'),
+('world-model-ingestion','function','content.lake_plan','jsonb','lake.md §6: p8ql LAKE is planned as the caller and run on the lake worker'),
+('world-model-ingestion','function','content.schema_lake','text','lake.md §6: SCHEMA "lake" -- caller-scoped, so the global p8ql facet stays one document'),
 ('world-model-ingestion','channel','workflow_artifacts',null,'outputs.md §4: step output has a channel, with no ingest_workflow on it'),
 
 -- The authoring surface the workbench writes through, and the two tables an

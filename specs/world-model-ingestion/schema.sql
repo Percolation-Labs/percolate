@@ -890,8 +890,11 @@ create table if not exists content.datasets (
     -- The prefix files land under, NOT one file: an appended dataset is many.
     bucket       text not null,
     prefix       text not null,
-    format       text not null default 'parquet' check (format in ('parquet')),
-    mode         text not null default 'append' check (mode in ('append','replace')),
+    -- Both CHECKs are named constraints below, not inline: lake.md widened
+    -- them, and only a named constraint can be widened on an installation
+    -- that already has the table.
+    format       text not null default 'parquet',
+    mode         text not null default 'append',
     -- What a reader needs before it reads: [{name, type}]. Written from the
     -- Arrow schema the conversion actually produced, never from the CSV header
     -- alone -- a header is names, and a query needs types.
@@ -929,6 +932,44 @@ create table if not exists content.datasets (
 alter table content.datasets drop constraint if exists datasets_org_name_key;
 alter table content.datasets add constraint datasets_org_name_key
     unique nulls not distinct (org_id, name);
+
+-- What the lake (lake.md, lake.sql) added: Iceberg as a second format, a merge
+-- mode that only Iceberg can honour, and two maps saying what a column MEANS
+-- when the storage format cannot carry it. `datasets_format_check` and
+-- `datasets_mode_check` are the names the original inline CHECKs generated,
+-- so dropping them by name also upgrades an installation that has them.
+alter table content.datasets drop constraint if exists datasets_format_check;
+alter table content.datasets add constraint datasets_format_check
+    check (format in ('parquet', 'iceberg'));
+alter table content.datasets drop constraint if exists datasets_mode_check;
+alter table content.datasets add constraint datasets_mode_check
+    check (mode in ('append', 'replace', 'merge'));
+
+-- `<namespace>.<table>` in the deployment's Iceberg catalog. The catalog, not
+-- this row, knows the table's current metadata file: a snapshot pointer copied
+-- here would be stale after the next commit by anyone.
+alter table content.datasets add column if not exists table_ref text;
+-- Iceberg has no fixed-width array (DuckDB: "Array type not supported in
+-- Iceberg type. Please cast to LIST") and the catalog refused DuckDB's GEOMETRY
+-- schema outright, so an embedding is stored as FLOAT[] and a shape as WKB.
+-- These two maps are what turn them back into FLOAT[N] and GEOMETRY on read.
+--   geometry:   {"<col>": {"encoding": "native" | "wkb", "crs": "OGC:CRS84"}}
+--   embeddings: {"<col>": {"model": "<aiq.embedding_models.name>", "dims": N}}
+alter table content.datasets add column if not exists geometry jsonb not null default '{}'::jsonb;
+alter table content.datasets add column if not exists embeddings jsonb not null default '{}'::jsonb;
+-- The task that wrote the current version, and the datasets it read. No FK to
+-- workflow.tasks: task rows are purged on a schedule and a dataset outlives
+-- the run that made it.
+alter table content.datasets add column if not exists produced_by uuid;
+alter table content.datasets add column if not exists inputs text[] not null default '{}';
+
+alter table content.datasets drop constraint if exists datasets_table_ref_check;
+alter table content.datasets add constraint datasets_table_ref_check
+    check ((format = 'iceberg') = (table_ref is not null));
+-- Parquet under a prefix has no row identity to merge on.
+alter table content.datasets drop constraint if exists datasets_merge_needs_iceberg;
+alter table content.datasets add constraint datasets_merge_needs_iceberg
+    check (mode <> 'merge' or format = 'iceberg');
 
 -- Which resources make up a dataset. A dataset is not one upload, and the
 -- resource still exists in its own right -- it has bytes, an uploader, a
@@ -1037,7 +1078,15 @@ select rbac.add_scope_columns('content.datasets', 'public');
 -- therefore no bucket path. A storage location is a capability.
 create or replace function content.dataset_uri(p_name text)
 returns text as $$
-    select 's3://' || d.bucket || '/' || d.prefix || '/*.parquet'
+    -- AN ICEBERG TABLE IS NOT ITS DATA DIRECTORY. Globbing an Iceberg table's
+    -- files reads every row a delete or a merge has since removed, and returns
+    -- them as if they were current. So an iceberg dataset answers with a
+    -- catalog reference that read_parquet refuses by name, rather than a glob
+    -- it would accept; lake.md §4 is how it is read.
+    select case d.format
+             when 'iceberg' then 'iceberg:' || d.table_ref
+             else 's3://' || d.bucket || '/' || d.prefix || '/*.parquet'
+           end
     from content.datasets d
     where d.name = p_name
       and rbac.may_read(d.owner_id, d.org_id, d.visibility)

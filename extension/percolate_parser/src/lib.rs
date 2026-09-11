@@ -66,6 +66,7 @@ pub extern "C-unwind" fn _PG_init() {
 //   SEARCH   "<text>" FROM <source> [USING <model>] [LIMIT n]  -- RRF fusion
 //   GRAPH    "<key>"  [DEPTH n] [TYPE <relation>] [LIMIT n]
 //   SCHEMA   ["<facet>"] [FROM <name>]              -- what this database IS
+//   LAKE FROM <dataset> [, <dataset> ...] <select>  -- DuckDB, in the lake
 //   <any ordinary SQL statement>
 //
 // SCHEMA is the one mode whose argument is optional, and deliberately so:
@@ -106,6 +107,9 @@ pub struct ParsedQuery {
     pub depth: i32,
     pub relation: Option<String>,
     pub source: Option<String>,
+    /// LAKE's dataset list. Every other mode has at most one source and keeps
+    /// using `source`; a lake query joins datasets, so it names several.
+    pub sources: Vec<String>,
     pub model: Option<String>,
     pub limit: i32,
 }
@@ -153,9 +157,90 @@ const SQL_OPENERS: [&str; 5] = ["SELECT", "WITH", "TABLE", "VALUES", "EXPLAIN"];
 /// `SQL` is deliberately not here. It is not spelled -- it is sniffed, from
 /// SQL_OPENERS above -- so it is not a name a caller can get wrong, and the
 /// message gives it its own clause rather than a slot in this list.
-const MODES: [&str; 8] = [
-    "LOOKUP", "SEMANTIC", "TEXT", "SEARCH", "GRAPH", "RELEVANCE", "PATH", "SCHEMA",
+const MODES: [&str; 9] = [
+    "LOOKUP", "SEMANTIC", "TEXT", "SEARCH", "GRAPH", "RELEVANCE", "PATH", "LAKE", "SCHEMA",
 ];
+
+/// The most rows a LAKE result carries. In the PLAN, so the worker that runs
+/// the query reads its cap from the same place a caller reads what to expect
+/// (lake.md §6), rather than from a constant of its own that could disagree.
+const LAKE_ROW_CAP: i32 = 1000;
+
+/// `LAKE FROM <dataset> [, <dataset> ...] <select statement>`.
+///
+/// ITS OWN SCANNER, run before `tokenize`, because the statement is DuckDB SQL
+/// and must reach the lake worker byte for byte. Tokenizing it would split on
+/// commas, treat an apostrophe in `'O''Brien'` as the start of a key, and
+/// refuse a quoted identifier as an unterminated string -- three ways of
+/// changing a query that the caller wrote correctly.
+///
+/// The dataset list ends at the first bare word that opens a statement
+/// (SQL_OPENERS), and everything from there is the statement, untouched. So
+/// the grammar needs no quoting of the SQL at all, which is what lets a query
+/// with string literals and quoted identifiers in it be written as-is. A
+/// dataset whose name is itself a SQL keyword is written quoted.
+///
+/// There is no LIMIT keyword: the statement's own LIMIT is the one that means
+/// something, and a second one outside it would be two answers to one
+/// question. The plan carries LAKE_ROW_CAP as its limit instead.
+fn parse_lake(input: &str) -> Result<ParsedQuery, ParseError> {
+    let usage = "LAKE FROM <dataset> [, <dataset> ...] <select> -- e.g. \
+                 LAKE FROM sales select region, sum(amount) from sales group by 1";
+    // `get`, never `[..4]`: a byte slice through a multibyte character panics,
+    // and inside Postgres a panic in a parser is an error about nothing.
+    let body = input.trim_start().get(4..).unwrap_or("").trim_start();
+    if !body.get(..4).is_some_and(|h| h.eq_ignore_ascii_case("FROM"))
+        || !body.get(4..).is_some_and(|t| t.starts_with(char::is_whitespace)) {
+        return Err(ParseError::MissingArgument(
+            "LAKE names its datasets first: LAKE FROM <dataset> [, <dataset> ...] <select>"));
+    }
+    let rest = &body[4..];
+    let mut names: Vec<String> = Vec::new();
+    let mut pos = 0;
+    let bytes = rest.as_bytes();
+    let statement: &str = loop {
+        while pos < bytes.len() && (bytes[pos].is_ascii_whitespace() || bytes[pos] == b',') {
+            pos += 1;
+        }
+        if pos >= bytes.len() {
+            break "";
+        }
+        let c = bytes[pos];
+        if c == b'"' || c == b'\'' {
+            let close = rest[pos + 1..].find(c as char).ok_or(ParseError::UnterminatedQuote)?;
+            names.push(rest[pos + 1..pos + 1 + close].to_string());
+            pos += close + 2;
+            continue;
+        }
+        let end = rest[pos..].find(|ch: char| ch.is_whitespace() || ch == ',')
+            .map(|e| pos + e).unwrap_or(rest.len());
+        let word = &rest[pos..end];
+        if SQL_OPENERS.contains(&word.to_uppercase().as_str()) {
+            break &rest[pos..];
+        }
+        names.push(word.to_string());
+        pos = end;
+    };
+    if names.is_empty() {
+        return Err(ParseError::MissingArgument(usage));
+    }
+    if statement.trim().is_empty() {
+        return Err(ParseError::MissingArgument(
+            "LAKE needs a SELECT after its dataset list -- the statement starts at the \
+             first SELECT, WITH, TABLE, VALUES or EXPLAIN"));
+    }
+    Ok(ParsedQuery {
+        mode: "LAKE".into(),
+        args: vec![statement.trim().to_string()],
+        fuzzy: false,
+        depth: 1,
+        relation: None,
+        source: names.first().cloned(),
+        sources: names,
+        model: None,
+        limit: LAKE_ROW_CAP,
+    })
+}
 
 #[derive(Debug, PartialEq)]
 pub enum ParseError {
@@ -256,6 +341,12 @@ fn tokenize(input: &str) -> Result<(Vec<String>, Vec<bool>), ParseError> {
 }
 
 pub fn parse_query(input: &str) -> Result<ParsedQuery, ParseError> {
+    // LAKE before tokenizing: its statement must survive verbatim (parse_lake).
+    let head = input.trim_start();
+    if head.get(..4).is_some_and(|h| h.eq_ignore_ascii_case("LAKE"))
+        && head.get(4..).is_some_and(|t| t.chars().next().map_or(true, char::is_whitespace)) {
+        return parse_lake(input);
+    }
     let (toks, quoted) = tokenize(input)?;
     if toks.is_empty() {
         return Err(ParseError::Empty);
@@ -268,6 +359,7 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, ParseError> {
         depth: 1,
         relation: None,
         source: None,
+        sources: Vec::new(),
         model: None,
         limit: 20,
     };
@@ -543,6 +635,7 @@ fn aiq_parse(query: &str) -> pgrx::JsonB {
             "depth": q.depth,
             "relation": q.relation,
             "source": q.source,
+            "sources": q.sources,
             "model": q.model,
             "limit": q.limit,
         })),
@@ -605,6 +698,10 @@ fn p8_query_grammar() -> pgrx::JsonB {
              "syntax": "SEARCH \"<text>\" FROM <source> [USING <model>] [LIMIT n]",
              "purpose": "Lexical and semantic rank fused. Named for the intent, not the fusion.",
              "example": "SEARCH \"safety recall\" FROM chunks LIMIT 5"},
+            {"mode": "LAKE",
+             "syntax": "LAKE FROM <dataset> [, <dataset> ...] <select statement>",
+             "purpose": "Query datasets in the lake -- Parquet and Iceberg in object storage, which no other mode can reach -- in DuckDB's SQL, spatial and vector functions included. Each dataset is a table under its own name. Postgres plans it and cannot run it: it runs as a `p8ql:` step in a workflow, on the lake worker, and comes back as at most 1000 rows. SCHEMA \"lake\" lists the datasets you can read, with their columns.",
+             "example": "LAKE FROM sales select region, sum(amount) from sales group by 1"},
             {"mode": "SCHEMA",
              "syntax": "SCHEMA [\"<facet>\"] [FROM <name>]",
              "purpose": "What this database IS. Bare SCHEMA is the index of facets; the argument names one. The only mode answerable before you know anything.",
@@ -651,7 +748,7 @@ fn p8_workflow_grammar() -> pgrx::JsonB {
         },
         "actions": [
             {"key": "p8ql", "compiles_to": "kind: sql", "runs_on": "nobody -- inside Postgres",
-             "purpose": "A dialect query as a step. No process, no queue wait. In SEMANTIC or SEARCH mode it compiles to TWO tasks -- see `desugaring` below -- because those rank against a vector and the database makes no model calls."},
+             "purpose": "A dialect query as a step. No process, no queue wait. In SEMANTIC or SEARCH mode it compiles to TWO tasks -- see `desugaring` below -- because those rank against a vector and the database makes no model calls. In LAKE mode it compiles to a `work` step on the lake queue, because Postgres cannot reach object storage."},
             {"key": "sql", "compiles_to": "kind: sql", "runs_on": "nobody -- inside Postgres",
              "purpose": "Run SQL. `sql: \"select ...\"` runs the statement you wrote, read-only unless the step declares `write: true`; `sql: {function, args}` calls a name from workflow.step_functions, which keeps a per-function timeout and a description. A statement's {{templates}} are substituted as quoted LITERALS, so a table name cannot be templated. A deployment running percolate.sql_policy = 'registered' accepts only the second form.",
              "example": "sql: \"select fy, val from sec.facts where cik = '{{run.cik}}'\""},
@@ -683,6 +780,13 @@ fn p8_workflow_grammar() -> pgrx::JsonB {
                 "the_model_is_pinned_at_definition_time": "USING <model> is written into the query if it was not there, and refused if it disagrees with the embed step's model. A vector from one space ranked against another is not an error at runtime, only a meaningless number.",
                 "queue": "queue: on the step routes the EMBED half; the search half runs in-database and is claimed by nobody",
                 "escape_hatch": "write the two steps by hand -- `embed:` then `sql: {function: p8ql_vec, ...}` -- and you get the same rows"
+            },
+            "p8ql LAKE": {
+                "you_write": "- id: totals\n  p8ql: 'LAKE FROM sales select region, sum(amount) from sales group by 1'",
+                "compiles_to": "one work step on queue lake, input {op: query, p8ql: <the query>}, which the lake worker runs in DuckDB against the datasets resolved for the run owner",
+                "result": "{{steps.<id>.result.rows}} -- at most 1000 rows, with `truncated` when there were more",
+                "templates": "refused: a {{template}} would be spliced into the SQL as text. A lake query with values in it is a `work` step with op: refine and `params:`",
+                "escape_hatch": "write `work: true`, `queue: lake`, `input: {op: query, p8ql: ...}` by hand and the stored spec is identical"
             }
         },
         "limits": {
@@ -877,6 +981,36 @@ mod tests {
         assert_eq!(q.mode, "SQL");
         assert_eq!(q.arg(), "select 1 from t where x = 'y'");
         assert_eq!(parse_query("WITH x as (select 1) select * from x").unwrap().mode, "SQL");
+    }
+
+    /// A LAKE statement reaches the worker byte for byte: the commas, the
+    /// apostrophes and the quoted identifiers that `tokenize` would have split
+    /// or refused all survive, and the dataset list stops at the statement.
+    #[pg_test]
+    fn lake_keeps_its_statement_verbatim_and_its_datasets_apart() {
+        let sql = "select \"Weird Col\", count(*) from sales s join ports using (port) \
+                   where note = 'O''Brien, Ltd' group by 1 limit 5";
+        let q = parse_query(&format!("lake from sales, ports {sql}")).unwrap();
+        assert_eq!(q.mode, "LAKE");
+        assert_eq!(q.sources, vec!["sales", "ports"]);
+        assert_eq!(q.arg(), sql);
+        assert_eq!(q.limit, LAKE_ROW_CAP, "the cap travels in the plan");
+        // A dataset named like a keyword is quoted, and a CTE opens a statement.
+        let q = parse_query("LAKE FROM 'select' \"my-data\" WITH x as (select 1) select * from x").unwrap();
+        assert_eq!(q.sources, vec!["select", "my-data"]);
+        assert!(q.arg().starts_with("WITH x"));
+    }
+
+    #[pg_test]
+    fn lake_refuses_what_it_cannot_run() {
+        for bad in ["LAKE select 1",                 // no FROM
+                    "LAKE FROM select 1 from x",     // FROM with no dataset
+                    "LAKE FROM sales",               // no statement
+                    "LAKE FROM 'sales select 1"] {   // unterminated name
+            assert!(parse_query(bad).is_err(), "{bad} parsed");
+        }
+        // LAKEFRONT is not LAKE: the mode is a word, not a prefix.
+        assert!(matches!(parse_query("LAKEFRONT \"x\""), Err(ParseError::UnknownMode(_))));
     }
 
     /// LOOKUP resolves a list; commas are optional and every other mode
@@ -1408,10 +1542,37 @@ fn resolve_action(what: &str, a: &Action) -> Result<(&'static str, String, serde
     Ok(match chosen[0] {
         // P8QL runs in-database as an allow-listed sql step. No queue, no
         // process: 'none' is a label, nothing polls it.
-        "p8ql" => ("sql", "none".to_string(), serde_json::json!({
-            "function": "p8ql",
-            "args": [a.p8ql.clone().unwrap()]
-        })),
+        // A LAKE query is the one p8ql Postgres cannot run: its datasets are in
+        // object storage and the database has no route there (lake.md §6). So
+        // it compiles to the step an author could write by hand -- `work: true`
+        // on the lake queue, op `query` -- the way a SEMANTIC query compiles to
+        // an embed step plus a search. The diff test in dev/tests/content/
+        // 06-lake.sql holds the two spellings to the same stored spec.
+        "p8ql" => {
+            let q = a.p8ql.clone().unwrap();
+            match parse_query(&q) {
+                Ok(p) if p.mode == "LAKE" => {
+                    // A template in a LAKE query would be substituted into the
+                    // SQL as text by the worker -- a run input becoming a
+                    // fragment of a statement. `sql:` steps bind templates as
+                    // values for this reason; a lake query with values in it is
+                    // a refine step, whose `params:` bind as $name.
+                    if q.contains("{{") {
+                        return Err(format!(
+                            "{}: a LAKE query cannot carry a {{{{template}}}} -- the worker would \
+                             splice it into the SQL as text. Use a `work:` step with op: refine, \
+                             whose `params:` bind as $name",
+                            what));
+                    }
+                    ("work", a.queue.clone().unwrap_or_else(|| "lake".into()),
+                     serde_json::json!({"op": "query", "p8ql": q}))
+                }
+                _ => ("sql", "none".to_string(), serde_json::json!({
+                    "function": "p8ql",
+                    "args": [q]
+                })),
+            }
+        }
         "sql" => ("sql", "none".to_string(),
                   parse_sql(what, a.sql.as_ref().unwrap())?),
         "rest" => ("http_call",
