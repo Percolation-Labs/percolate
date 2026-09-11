@@ -273,7 +273,9 @@ create or replace function content.assert_org_write(p_org_id uuid, p_what text)
 returns void as $$
 begin
     if not rbac.may_access_org(p_org_id) then
-        raise exception 'not authorized to % for that organization', p_what;
+        raise exception 'not authorized to % for that organization', p_what
+            using errcode = 'insufficient_privilege',
+                  hint = 'the token must carry that org, and the caller must be a member';
     end if;
 end;
 $$ language plpgsql stable security definer set search_path = pg_catalog, public;

@@ -1280,7 +1280,9 @@ begin
                         where m.org_id = p_org_id
                           and m.user_id = rbac.current_user_id()
                           and m.role = 'admin')) then
-        raise exception 'not authorized to administer this org';
+        raise exception 'not authorized to administer this org'
+            using errcode = 'insufficient_privilege',
+                  hint = 'needs orgs:admin, or the admin role in that org';
     end if;
     insert into rbac.org_members (org_id, user_id, role)
     values (p_org_id, p_user_id, p_role)
@@ -1321,7 +1323,9 @@ begin
                         where m.org_id = p_org_id
                           and m.user_id = rbac.current_user_id()
                           and m.role = 'admin')) then
-        raise exception 'not authorized to administer this org';
+        raise exception 'not authorized to administer this org'
+            using errcode = 'insufficient_privilege',
+                  hint = 'needs orgs:admin, or the admin role in that org';
     end if;
     delete from rbac.org_members where org_id = p_org_id and user_id = p_user_id;
     insert into rbac.auth_events (user_id, event_type, detail)
@@ -1904,7 +1908,9 @@ create or replace function rbac.grant_role(p_target_user_id uuid, p_role text)
 returns void as $$
 begin
     if not rbac.has_permission(rbac.current_user_id(), 'users', 'admin') then
-        raise exception 'not authorized to grant roles';
+        raise exception 'not authorized to grant roles'
+            using errcode = 'insufficient_privilege',
+                  hint = 'needs users:admin';
     end if;
     insert into rbac.user_roles (user_id, role) values (p_target_user_id, p_role)
     on conflict do nothing;

@@ -1131,7 +1131,9 @@ begin
         end if;
     end if;
     if not agentic.may_author('agents', 'agentic.agents'::regclass) then
-        raise exception 'not authorized to author agents';
+        raise exception 'not authorized to author agents'
+            using errcode = 'insufficient_privilege',
+                  hint = 'needs agents:update';
     end if;
 
     -- THE TOOL BINDING IS SHAPE-CHECKED HERE, because the near-miss spellings
@@ -1405,7 +1407,9 @@ declare
     v_row agentic.tool_servers;
 begin
     if not agentic.may_author('tool_servers', 'agentic.tool_servers'::regclass) then
-        raise exception 'not authorized to register tool servers';
+        raise exception 'not authorized to register tool servers'
+            using errcode = 'insufficient_privilege',
+                  hint = 'needs tool_servers:update';
     end if;
 
     insert into agentic.tool_servers (name, kind, url, credential_ref,
@@ -1518,7 +1522,9 @@ declare
     v_row agentic.skills;
 begin
     if not agentic.may_author('skills', 'agentic.skills'::regclass) then
-        raise exception 'not authorized to author skills';
+        raise exception 'not authorized to author skills'
+            using errcode = 'insufficient_privilege',
+                  hint = 'needs skills:update';
     end if;
 
     insert into agentic.skills (name, description, when_to_use, content,
@@ -1778,7 +1784,9 @@ begin
             'what makes the rows removable later.';
     end if;
     if not agentic.may_author('plugins', 'agentic.plugins'::regclass) then
-        raise exception 'not authorized to install plugins';
+        raise exception 'not authorized to install plugins'
+            using errcode = 'insufficient_privilege',
+                  hint = 'needs plugins:update';
     end if;
 
     -- A KEY THIS FUNCTION DOES NOT READ IS A MISTAKE, NOT AN EXTENSION, and on

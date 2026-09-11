@@ -430,7 +430,9 @@ begin
     if rbac.has_permission(rbac.current_user_id(), 'workflow_runs', p_action) then
         return;
     end if;
-    raise exception 'not authorized to % run %', p_action, p_run_id;
+    raise exception 'not authorized to % run %', p_action, p_run_id
+        using errcode = 'insufficient_privilege',
+              hint = 'needs workflow_runs:' || p_action || ', or ownership of the run';
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
@@ -889,7 +891,8 @@ begin
             return;
         end if;
         raise exception 'not authorized to create schedule "%"', p_name
-            using hint = 'authenticate first: a schedule needs an owner';
+            using errcode = 'insufficient_privilege',
+                  hint = 'authenticate first: a schedule needs an owner';
     end if;
 
     if v_owner is not null and v_owner = v_caller then
@@ -898,7 +901,9 @@ begin
     if rbac.has_permission(v_caller, 'workflow_schedules', p_action) then
         return;
     end if;
-    raise exception 'not authorized to % schedule "%"', p_action, p_name;
+    raise exception 'not authorized to % schedule "%"', p_action, p_name
+        using errcode = 'insufficient_privilege',
+              hint = 'needs workflow_schedules:' || p_action || ', or ownership of the schedule';
 end;
 $$ language plpgsql stable security definer set search_path = pg_catalog, public;
 
