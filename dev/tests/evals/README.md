@@ -1,5 +1,27 @@
 # The evals — journeys, run
 
+**This is a gate.** `dev/check.sh` runs `./run.py --fixture` as the database
+gate *a journey somebody could complete last month still completes*, so a
+non-zero exit here is a red build — locally, and in Actions, which runs that
+same script. Until 2026-09-12 it was referenced by no workflow and by no line
+of `check.sh`, and it had stopped working in four separate ways before a single
+scenario ran; `../README.md` records what those were, and why the absence of
+this sentence was the cause rather than a symptom (REM-75).
+
+Two obligations follow from it being a gate, and the gate proves both rather
+than trusting anyone to remember them:
+
+- **`fixtures.sql` loads twice in a row**, on a database that already has it.
+  The gate reloads on every run, and every scope column added to `content.*`,
+  `aiq.*` or a `calder.*` table since this file was written has broken that at
+  least once.
+- **The seat is in the claims, not in the role.** `set local role app_owner`
+  does not make a caller an author: `rbac.may_define` reads
+  `request.jwt.claims` (REM-44), so a scenario that has to define a workflow
+  sets a `sub` holding `workflows:define` — the fixture's officer, not its
+  analyst. `hitl-12` failed on exactly that, and the red line was about its own
+  scaffolding rather than about the guarantee it was written to protect.
+
 ```bash
 ./run.py --fixture        # load the fixture, then run everything
 ./run.py                  # run everything against the fixture already loaded
@@ -11,9 +33,11 @@ DSN="postgres://…" ./run.py
 ```
 
 Three files. `fixtures.sql` is one domain, loaded once. `scenarios.yaml` is the
-catalogue — 109 scenarios over 8 categories, each citing which of 28 named
-failure modes it would notice. `run.py` compiles each scenario to SQL, runs it
-in a transaction, and rolls back.
+catalogue — 111 scenarios over 8 categories as of 2026-09-12, each citing which
+of 28 named failure modes it would notice. `run.py --list` prints the live
+count and is the authority; a number written down here is a number that goes
+stale, and this one was three behind. `run.py` compiles each scenario to SQL,
+runs it in a transaction, and rolls back.
 
 ## Why this is not `../run.sh`
 
@@ -120,6 +144,24 @@ in `iter-01` and `iter-02`, that the **property graph** and the recursive walk
 answer the same question the same way. PG19 rejects a path *quantifier* but
 accepts a fixed-length chain — so "GRAPH_TABLE cannot do depth n" was too
 strong, and `schema.sql` now says the narrower true thing.
+
+**And sixteen that came from making it a gate (REM-75, 2026-09-12).** The first
+run after the harness was repaired had 16 red scenarios, and they sorted into
+four kinds rather than sixteen problems. Recorded here because the shape is the
+useful part:
+
+| kind | which | what it was |
+|---|---|---|
+| **one defect, in the system** | `coll-11` | `content.register_fetched` wrote a resource with the column defaults `visibility = 'private'` and `owner_id = null`, a pair `resources_scoped` grants to nobody at all — so a poll landed a row, returned its id, and the puller's next select over its own `external_id` found nothing. `register_upload` had been given both columns when `visibility` arrived and this sibling had not: `meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md`, seventeenth instance. Fixed in `world-model-ingestion/schema.sql`. |
+| **one predicate in the fixture** | `coll-01 02 03 07 08 09` | `calder.registry_targets()` selected the shared tier as `org_id is null`, which `rbac.adopt_shared_org` turned into a uuid. A `rows:` function returning `[]` does not fail — a matrix of width zero *succeeds* — so six scenarios went red about child counts, floors and tallies, one layer downstream of one `where` clause. |
+| **a scenario the schema moved past** | `f2g-01 02 03 10`, `hitl-12`, `upload-04 07` | A document is keyed by its **uri**, never its title (a label is never an identity; two sections headed "run it" once stopped an ingest of 797). Authoring is read from the **claims**, not the role. `org_id` is NOT NULL with a default an explicit `null` defeats. Each corrected, each with the change and its date in a comment beside it. |
+| **an assertion that could not pass** | `coll-09`, `recov-09` | `{result,done}` named a key `calder.tally_children` has never returned, and `already done` named a status the vocabulary stopped spelling that way. Both now read their subject from the row instead of from a literal, so the next rename does not recreate them. |
+| **a scenario asserting a decision that was reversed** | `f2g-06` | It asserted that an out-of-vocabulary relation `raise`s. The raise was removed, with a measurement: it discarded four good nodes and four good edges to refuse one invented relation (`graph-index.md` §4.4). Rewritten to assert the drop, the *named* relation in the receipt, and that the document's nodes survived — which is harder than what it replaced, and would have caught the regression the change was made to fix. |
+
+The one worth carrying forward: **twelve of the sixteen were one cause each, and
+the causes were three.** A journey suite reports at the assertion, which is
+usually several layers from the change — so the first move on a red batch is to
+group them, not to read them.
 
 ## The fixture
 

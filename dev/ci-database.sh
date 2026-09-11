@@ -82,7 +82,23 @@ for _ in $(seq 1 90); do
     echo -n "."; sleep 1
 done
 
-python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+# `python3 -m pip`, never bare `pip`. The two are not the same command: `pip`
+# is a script that may be absent (a Homebrew python3 ships none on PATH) or may
+# belong to a DIFFERENT interpreter than the `python3` on the next line, so the
+# install lands where build-sql.py cannot see it. Measured here: bare `pip`
+# exited 127 with `pip: command not found`, this script stopped at line 85
+# having copied nothing into the container, and the database it reported was one
+# nobody had installed the tree's extension into.
+#
+# And the fallback is FATAL when it fails, which it was not before: `|| pip
+# install` with the script under `set -e` still let a 127 through as the last
+# statement's status in some shells, and a build step that cannot install its
+# own build dependency must not continue as though it had.
+python3 -c 'import yaml' 2>/dev/null || {
+    python3 -m pip install --quiet pyyaml || {
+        echo "cannot install PyYAML for $(command -v python3) -- build-sql.py needs it" >&2
+        echo "  python3 -m pip install pyyaml     # or run inside a venv" >&2
+        exit 1; }; }
 python3 extension/percolate/build-sql.py >/dev/null
 
 # The control file goes in WITH the script. `create extension percolate`

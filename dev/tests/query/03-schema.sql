@@ -334,19 +334,52 @@ begin
     end if;
     -- And a relation that does NOT admit everything must say so specifically,
     -- or `* > *` is not a collapse, it is a wrong answer that happens to be
-    -- short. works_at is person -> company and nothing else.
-    if not exists (
-        select 1 from jsonb_array_elements(v->'relations') r
-        where r->>'relation' = 'works_at'
-          and r->'pairs' = '["person > company"]'::jsonb)
-    then
-        raise exception
-            'works_at is person -> company in aiq.relation_types and the facet '
-            'reports its pairs as %, so the collapse to `* > *` is not reading '
-            'the catalogue it claims to serve',
-            (select r->'pairs' from jsonb_array_elements(v->'relations') r
-              where r->>'relation' = 'works_at');
-    end if;
+    -- short.
+    --
+    -- WALKED FROM THE CATALOGUE, NOT FROM A LITERAL. This asserted
+    -- `works_at` reports exactly `["person > company"]`, which is
+    -- aiq.relation_types' content on a database holding nothing but the seed --
+    -- and an APPLICATION may legitimately register the same relation name
+    -- between its own types. dev/tests/evals' fixture registers `works_at` for
+    -- investigator > site, so the facet correctly reported two pairs and this
+    -- went red about the facet while the facet was right. It is the shape
+    -- ../README.md names under "prefer a test that walks the catalogue to one
+    -- that walks a list": the literal made the assertion depend on what else
+    -- is installed, which is not what it protects.
+    --
+    -- What it protects is the equality: for a relation admitting fewer than
+    -- every registered pair, the facet must report that relation's OWN pairs.
+    -- Asserted against aiq.relation_types for every such relation at once,
+    -- which also stops being a one-relation spot check.
+    declare v_bad text;
+    begin
+        select string_agg(format('%s: catalogue %s, facet %s',
+                                 c.relation, c.pairs, coalesce(f.pairs::text,'(absent)')),
+                          '; ' order by c.relation)
+          into v_bad
+          from (select rt.relation,
+                       jsonb_agg(distinct rt.src_type || ' > ' || rt.dst_type) as pairs,
+                       count(*) as n
+                  from aiq.relation_types rt group by rt.relation) c
+          left join (select r->>'relation' as relation, r->'pairs' as pairs
+                       from jsonb_array_elements(v->'relations') r) f
+                 on f.relation = c.relation
+         -- Only the relations that do NOT admit every pair: a relation covering
+         -- the whole cross product is the case `* > *` exists for, and asserting
+         -- a list there would forbid the collapse this section is about.
+         where c.n < (select count(*) from (select distinct src_type from aiq.relation_types) s
+                                         , (select distinct dst_type from aiq.relation_types) d)
+           and (f.pairs is null
+                or (select count(*) from jsonb_array_elements_text(f.pairs)) <> c.n
+                or exists (select 1 from jsonb_array_elements_text(c.pairs) p
+                            where not f.pairs ? p));
+        if v_bad is not null then
+            raise exception
+                'the graph facet does not report the pairs aiq.relation_types '
+                'holds, so the collapse to `* > *` is not reading the catalogue '
+                'it claims to serve -- %', v_bad;
+        end if;
+    end;
     if not exists (select 1 from jsonb_array_elements(v->'entity_types') e
                    where e->>'source_table' is not null) then
         raise exception 'the graph facet does not serve the entity registry';

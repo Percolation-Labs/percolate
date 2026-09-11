@@ -19457,7 +19457,9 @@ create or replace function content.register_fetched(
     p_org_id      uuid default null,
     p_metadata    jsonb default '{}'::jsonb
 ) returns uuid as $$
-declare v_channel uuid; v_res uuid;
+declare
+    v_channel uuid; v_res uuid;
+    v_vis text := rbac.default_visibility(p_org_id);
 begin
     perform content.assert_org_write(p_org_id, 'register content');
 
@@ -19471,9 +19473,24 @@ begin
         raise exception 'no channel named % for this org', p_channel;
     end if;
 
-    insert into content.resources (channel_id, external_id, uri, title, org_id, metadata)
+    -- owner_id AND visibility, for the reason register_upload spells out forty
+    -- lines above: this is SECURITY DEFINER, so it bypasses RLS and will
+    -- happily write a row its own caller cannot then select. The columns'
+    -- defaults are `private` and a null owner, and `resources_scoped` reads
+    -- that pair as readable by nobody -- so a poll landed a row, returned its
+    -- id, and the puller's very next `select` over its own external_id found
+    -- nothing. Not a read bug: a write that the writer is locked out of.
+    --
+    -- register_upload got these two columns when the visibility column arrived
+    -- and this sibling did not, which is the pattern
+    -- meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md is about.
+    -- Found by dev/tests/evals coll-11 (REM-75), which had asserted since it
+    -- was written that a polled record is readable by the poller.
+    insert into content.resources (channel_id, external_id, uri, title, org_id,
+                                   owner_id, visibility, metadata)
     values (v_channel, p_external_id, p_uri, p_title,
-            rbac.org_or_shared(p_org_id), p_metadata)
+            rbac.org_or_shared(p_org_id), rbac.current_user_id(), v_vis,
+            p_metadata)
     on conflict (channel_id, external_id) do nothing
     returning id into v_res;
 

@@ -702,12 +702,25 @@ $f$;
 -- The endpoints a collection run walks. A literal set would have been simpler
 -- and would not have exercised the thing that matters: the width comes from a
 -- query, so it changes when the data does.
+--
+-- `rbac.is_shared_org(p.org_id)` rather than `p.org_id is null`, and the
+-- difference was six red scenarios. The shared tier used to BE a null org_id;
+-- `rbac.adopt_shared_org` (REM-38/39) made `org_id` NOT NULL with
+-- `rbac.shared_org_id()` as its default, so the inserts above now write that
+-- uuid and this predicate matched nothing. A `rows:` function that returns an
+-- empty array does not fail -- a matrix of width zero SUCCEEDS -- so the six
+-- `coll-*` scenarios that fan out over this went red one layer downstream of
+-- the cause, each complaining about a child count, a floor or a tally. Which
+-- is the reason the first check of coll-01 asserts the width and not just the
+-- exclusion: the fixture's own precondition, asserted before anything reads
+-- it.
 create or replace function calder.registry_targets()
 returns jsonb language sql stable as $f$
     select coalesce(jsonb_agg(jsonb_build_object(
                'registry', 'eudra', 'ref', p.inn, 'path', 'empty')
                order by p.inn), '[]'::jsonb)
-    from calder.products p where not p.withdrawn and p.org_id is null;
+    from calder.products p
+    where not p.withdrawn and rbac.is_shared_org(p.org_id);
 $f$;
 
 -- A fan-in that reads its children through the documented handle rather than
