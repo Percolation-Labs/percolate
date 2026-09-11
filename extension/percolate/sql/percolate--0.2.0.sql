@@ -25960,6 +25960,92 @@ revoke execute on function percolate.contract() from public;
 
 create schema if not exists percolate;
 
+-- WHAT A PACKAGE'S STORAGE MAY NOT ADD, checked in the catalog after it runs.
+--
+-- A package brings its own DDL (brief.md §3), and until 2026-09-11 nothing
+-- looked at it. Each package wrote its own tenancy and grants, and the three
+-- in this tree disagreed: pgvector-watch had an org foreign key, policies and
+-- a revoke; percolate-dev and incident-review had a nullable org_id, no RLS and
+-- no grants, and their manifests named no `org:`, so every row they projected
+-- landed on the shared tier as public. On the tour database every pgw definer
+-- function had a NULL ACL, which is PUBLIC's EXECUTE (REM-47; postmortem
+-- 2026-09-11-fixed-at-the-copy-that-failed §2.2).
+--
+-- So the rules the core holds its own tables to are stated here for a schema
+-- the extension does not own:
+--
+--   * no SECURITY DEFINER function PUBLIC can execute. A NULL ACL is PUBLIC's
+--     default, so it is read through acldefault() rather than as "no grants";
+--     dev/tests/rbac/04 reads it the same way.
+--   * an org_id column is NOT NULL and defaults to rbac.shared_org_id(), which
+--     is identity/checks.sql §5 for the core's tables.
+--   * a table with org_id has row-level security on and at least one policy.
+--
+-- Every finding is reported in one error rather than the first. A storage file
+-- that gets one of these wrong usually gets it wrong on every table, and
+-- fixing them one run at a time is the loop apply.py's check_schema_refs
+-- already refuses to make somebody sit through.
+create or replace function percolate.check_package_schema(p_schema name)
+returns void language plpgsql stable
+set search_path = pg_catalog, public as $$
+declare
+    v_ns       oid := (select oid from pg_namespace where nspname = p_schema);
+    v_problems text[];
+begin
+    -- A schema that is not there has nothing wrong with it, so a misspelt name
+    -- would pass. Refused instead.
+    if v_ns is null then
+        raise exception 'package schema % does not exist', p_schema;
+    end if;
+
+    select array_agg(problem order by problem) into v_problems from (
+        select format('%s is SECURITY DEFINER and PUBLIC can execute it', p.oid::regprocedure) as problem
+          from pg_proc p
+         where p.pronamespace = v_ns and p.prosecdef
+           and exists (select 1 from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+                        where a.grantee = 0 and a.privilege_type = 'EXECUTE')
+        union all
+        select format('%s.org_id is %s', c.oid::regclass,
+                      case when not a.attnotnull then 'nullable'
+                           else 'defaulted to ' || coalesce(pg_get_expr(d.adbin, d.adrelid), 'nothing')
+                                || ', where the core defaults to rbac.shared_org_id()' end)
+          from pg_class c
+          join pg_attribute a on a.attrelid = c.oid and a.attname = 'org_id' and not a.attisdropped
+          left join pg_attrdef d on d.adrelid = c.oid and d.adnum = a.attnum
+         where c.relnamespace = v_ns and c.relkind in ('r', 'p')
+           -- EXACT, not a pattern: pg_get_expr prints the call qualified under
+           -- this function's search_path, so the text is fixed.
+           and (not a.attnotnull
+                or pg_get_expr(d.adbin, d.adrelid) is distinct from 'rbac.shared_org_id()')
+        union all
+        select format('%s has org_id and %s', c.oid::regclass,
+                      case when not c.relrowsecurity then 'row-level security is off'
+                           else 'no policy' end)
+          from pg_class c
+          join pg_attribute a on a.attrelid = c.oid and a.attname = 'org_id' and not a.attisdropped
+         where c.relnamespace = v_ns and c.relkind in ('r', 'p')
+           and (not c.relrowsecurity
+                or not exists (select 1 from pg_policy pol where pol.polrelid = c.oid))
+    ) f;
+
+    if v_problems is not null then
+        raise exception 'package schema % adds what the core would refuse:%', p_schema,
+            E'\n  ' || array_to_string(v_problems, E'\n  ')
+        using hint = 'A table with an org: select rbac.add_scope_columns(''<schema>.<table>''); '
+                     'select rbac.add_scope_policy(''<schema>.<table>''); -- or, for a table '
+                     'that keeps its own policy, rbac.adopt_shared_org(''<schema>.<table>''). '
+                     'A definer function: revoke execute on function <fn> from public, and '
+                     'grant it to the role that needs it.';
+    end if;
+end $$;
+
+comment on function percolate.check_package_schema(name) is
+    'Refuse a package schema holding a PUBLIC-executable SECURITY DEFINER function, '
+    'an org_id that is nullable or not defaulted to rbac.shared_org_id(), or an '
+    'org_id table without RLS and a policy. packages/apply.py runs it in the '
+    'transaction that applies storage; apply_package runs it on every schema an '
+    'entity type names.';
+
 create or replace function percolate.apply_package(p_manifest jsonb)
 returns jsonb language plpgsql security definer
 set search_path = pg_catalog, public as $$
@@ -25974,6 +26060,7 @@ declare
     v_out     jsonb := '{}'::jsonb;
     v_n       int;
     v_req     text;
+    v_tbl     regclass;
 begin
     if v_name is null or v_name = '' then
         raise exception 'a package manifest needs a name';
@@ -26026,13 +26113,48 @@ begin
                          'image that produces the rows owns the DDL, and it runs '
                          'before the manifest is applied. See specs/packages §3.';
         end if;
+        v_tbl := to_regclass(v_e->>'table');
+
+        -- THE STORAGE IS HELD TO THE CORE'S RULES HERE TOO, not only in
+        -- apply.py. A client that applies storage its own way and then calls
+        -- this function is still refused, before a projection trigger is
+        -- attached to a table every tenant could read. Not over the
+        -- extension's own schemas: identity/checks.sql and rbac/04 hold those,
+        -- and rbac.org_members is the one table whose org_id is the tenancy
+        -- itself rather than a scope, which the core exempts and a package
+        -- never has.
+        perform percolate.check_package_schema(n.nspname)
+           from pg_class c join pg_namespace n on n.oid = c.relnamespace
+          where c.oid = v_tbl
+            and not exists (select 1 from pg_depend dep
+                             where dep.classid = 'pg_namespace'::regclass and dep.objid = n.oid
+                               and dep.refclassid = 'pg_extension'::regclass and dep.deptype = 'e');
+
+        -- THE ROW'S OWN SCOPE, UNLESS THE MANIFEST SAYS OTHERWISE. With no
+        -- `org:` this passed 'null', and register_entity_table reads a null org
+        -- as the shared tier and a shared-tier node as public: every row
+        -- percolate-dev and incident-review would have projected was readable
+        -- by every tenant, whatever org the row carried. A table with the
+        -- column has already said where its rows belong. `visibility` for the
+        -- same reason: a table scoped by rbac.add_scope_columns() carries it,
+        -- and deriving it from the org instead turned a private row on the
+        -- shared tier into a public node.
         perform aiq.register_entity_table(
             p_entity_type  => v_e->>'name',
             p_source_table => v_e->>'table',
             p_key_expr     => v_e->>'key',
             p_summary_expr => coalesce(v_e->>'summary', 'null'),
-            p_org_expr     => coalesce(v_e->>'org', 'null'),
-            p_include_where=> coalesce(v_e->>'where', 'true'));
+            p_org_expr     => coalesce(v_e->>'org',
+                                  case when exists (select 1 from pg_attribute
+                                                     where attrelid = v_tbl and attname = 'org_id'
+                                                       and not attisdropped)
+                                       then 'n.org_id' else 'null' end),
+            p_include_where=> coalesce(v_e->>'where', 'true'),
+            p_visibility_expr => coalesce(v_e->>'visibility',
+                                  case when exists (select 1 from pg_attribute
+                                                     where attrelid = v_tbl and attname = 'visibility'
+                                                       and not attisdropped)
+                                       then 'n.visibility' end));
         v_n := v_n + 1;
     end loop;
     v_out := v_out || jsonb_build_object('entity_types', v_n);
