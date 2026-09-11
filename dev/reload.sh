@@ -105,19 +105,11 @@ if [ "$CRON_DB" = "$DB" ]; then
     -c "create extension if not exists pg_cron"
 fi
 
-# Same order as init/.
-docker exec -i "$CONTAINER" psql -U "$SUPERUSER" -d "$DB" -v ON_ERROR_STOP=1 -q <<SQL
-create extension if not exists pgcrypto;
-create extension if not exists pg_trgm;
-create extension if not exists vector;
-create extension if not exists percolate_parser;
-do \$\$ begin execute format('grant create on database %I to app_owner', current_database()); end \$\$;
-grant create, usage on schema public to app_owner;
--- bootstrap.sql's grant, for an image built before it (0.2.0)
-grant authenticated to api_viewer;
--- and its set_config revoke, per database (specs/user-rbac/roles.sql §6)
-revoke execute on function pg_catalog.set_config(text, text, boolean) from public;
-grant execute on function pg_catalog.set_config(text, text, boolean) to authenticator, app_owner, worker, scheduler;
+# The image's own superuser step, from this tree, then the system as app_owner:
+# the order the image's initdb runs them in (dev/image-init/).
+docker cp "$ROOT/dev/image-init/00-superuser.sql" "$CONTAINER:/tmp/00-superuser.sql" >/dev/null
+docker exec -i "$CONTAINER" psql -U "$SUPERUSER" -d "$DB" -v ON_ERROR_STOP=1 -q <<'SQL'
+\i /tmp/00-superuser.sql
 set role app_owner;
 create extension percolate cascade;
 reset role;
@@ -128,7 +120,7 @@ SQL
 # database -- and nothing else puts them back, so a reload used to leave a
 # stack whose scheduled workflows, stale-task reaper and timer steps silently
 # never fired again. Same three jobs, same `scheduler` role, as the image's own
-# bootstrap (dev/image-init/00-percolate.sh §5).
+# bootstrap (dev/image-init/01-percolate.sh §5).
 if [ "$CRON_DB" = "$DB" ]; then
   docker exec -i "$CONTAINER" psql -U "$SUPERUSER" -d "$DB" -v ON_ERROR_STOP=1 -qtA >/dev/null <<'SQL'
 select cron.schedule('workflow-tick',   '* * * * *', 'select workflow.tick()');

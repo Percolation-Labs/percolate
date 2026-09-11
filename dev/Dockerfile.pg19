@@ -109,10 +109,11 @@ COPY dist/percolate_parser.control dist/percolate_parser--*.sql \
      dist/percolate.control dist/percolate--*.sql \
      /usr/share/postgresql/19/extension/
 
-# The bootstrap, so `docker run` gives a system rather than an empty database
-# with an available extension. See the file for why it is shell and not SQL,
-# and for why dev/'s bind mount shadows it rather than colliding with it.
 # What this image was built from. Not in the extension directory: it is not
 # part of the extension, it is a statement about this build of it.
 COPY dist/percolate-build.sql /usr/local/share/percolate/build.sql
-COPY image-init/00-percolate.sh /docker-entrypoint-initdb.d/00-percolate.sh
+# The bootstrap, so `docker run` gives a system rather than an empty database
+# with an available extension. The WHOLE directory, not a named file: its
+# 00-superuser.sql is the one copy of the superuser step, which every dev
+# script also runs, and a list of names here is how a new file gets left out.
+COPY image-init/ /docker-entrypoint-initdb.d/

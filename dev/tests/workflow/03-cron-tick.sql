@@ -25,7 +25,7 @@ begin
         raise exception
             'pg_cron is not installed. The image builds it with '
             'dev/patches/pg_cron-pg19.patch; the extension is created by '
-            'init/00-extensions.sql, and its worker needs '
+            'dev/image-init/01-percolate.sh, and its worker needs '
             'shared_preload_libraries=pg_cron (docker-compose.yml).';
     end if;
 end $$;

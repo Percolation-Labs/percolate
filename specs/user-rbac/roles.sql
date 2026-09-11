@@ -20,6 +20,15 @@
 -- refuses to load as one):
 --     psql -c 'set role app_owner;' -f ../workflow-engine/schema.sql
 --     psql -c 'set role app_owner;' -f schema.sql
+--
+-- THIS FILE IS THE REASONING; THE STATEMENTS ARE ONE FILE ELSEWHERE. Every
+-- role in §1-§4 and the grants of §6 are made by
+-- dev/image-init/00-superuser.sql, which the image runs at initdb and every
+-- dev script runs before CREATE EXTENSION, and which the end of this file
+-- includes -- so applying the spec applies exactly what ships. This file used
+-- to carry its own copy, one of ten that disagreed: it said worker and
+-- scheduler were NOLOGIN while every install made them LOGIN. Only §5's two
+-- roles are created here, because nothing shipped needs them.
 -- ============================================================
 
 -- ------------------------------------------------------------
@@ -36,8 +45,6 @@
 --    exists. That is the trusted path, and it is exactly what SECURITY
 --    DEFINER is for. The untrusted path is api_viewer, below.
 -- ------------------------------------------------------------
-create role app_owner nologin;
-
 -- ------------------------------------------------------------
 -- 2. View owner -- owns ONLY the *_api views, and must be a DIFFERENT
 --    role from app_owner. This separation is what makes RLS actually
@@ -63,14 +70,12 @@ create role app_owner nologin;
 --    api_viewer must also not be a superuser, for the same reason
 --    app_owner must not be.
 -- ------------------------------------------------------------
-create role api_viewer nologin;
-
 -- app_owner creates the views (it owns the schema) and then hands them to
 -- api_viewer. Postgres requires the role doing an ALTER ... OWNER TO to be a
 -- member of the target role, so this grant is what makes schema.sql's
 -- `alter view ... owner to api_viewer` legal. It does NOT let api_viewer do
 -- anything as app_owner -- membership only flows in the direction granted.
-grant api_viewer to app_owner;
+-- (`grant api_viewer to app_owner`.)
 
 -- api_viewer also holds what a signed-in person holds, because it is the role a
 -- workflow step becomes when it acts for one (workflow-engine
@@ -78,7 +83,9 @@ grant api_viewer to app_owner;
 -- with that person's claims, under RLS, so it can read exactly what they could
 -- read through PostgREST -- and it needs their grants to read even that much.
 -- Membership flows one way: nobody becomes api_viewer by being authenticated.
-grant authenticated to api_viewer;
+-- (`grant authenticated to api_viewer`, after both roles exist: two copies of
+-- this line once sat above `create role authenticated`, and the image's first
+-- start stopped on it.)
 
 -- ------------------------------------------------------------
 -- 3. PostgREST's role model (user-rbac/spec.md §2, schema.sql §9).
@@ -89,15 +96,12 @@ grant authenticated to api_viewer;
 --    would hold both roles' privileges simultaneously at all times,
 --    defeating the separation).
 -- ------------------------------------------------------------
-create role web_anon nologin;
-create role authenticated nologin;
-create role authenticator noinherit login;
-grant web_anon to authenticator;
-grant authenticated to authenticator;
 
--- The authenticator LOGIN password belongs in deployment config, never
--- in a checked-in file:
---     alter role authenticator with password '<from your secret store>';
+-- The authenticator LOGIN password belongs in deployment config: the image
+-- reads P8_AUTHENTICATOR_PASSWORD, and 00-superuser.sql takes -v auth_pw.
+-- Given neither, it falls back to a password printed in the file and says so
+-- with a WARNING, as the image always has. It is set only on a role the file
+-- creates, never on one that exists.
 
 -- ------------------------------------------------------------
 -- 4. Workflow-engine roles (workflow-engine/schema.sql §16).
@@ -118,19 +122,18 @@ grant authenticated to authenticator;
 --    able to reap.
 --
 --    Neither may be a superuser, for the same reason as every other role
---    here. Both are NOLOGIN here: real deployments grant them to a LOGIN role
---    whose credential lives in deployment config.
+--    here. Both LOGIN: worker with a password from deployment config
+--    (P8_WORKER_PASSWORD, or -v worker_pw), scheduler with none, for the
+--    reason below.
 --
 --    One caveat worth stating because it costs an hour to rediscover:
 --    pg_cron does not run a job inside the server, it opens a libpq
 --    CONNECTION as the job's username. A NOLOGIN scheduler therefore produces
 --    "cron job N connection failed" in the server log once a minute -- the
 --    job is registered, active, and silently doing nothing. A deployment that
---    drives the clock with pg_cron must give this role LOGIN (dev/ does, over
---    loopback); one that drives tick() from outside does not.
+--    drives the clock with pg_cron must give this role LOGIN (the image
+--    does, over loopback); one that drives tick() from outside does not.
 -- ------------------------------------------------------------
-create role worker nologin;
-create role scheduler nologin;
 
 -- ------------------------------------------------------------
 -- 5. The worker-pool control plane's two roles.
@@ -158,8 +161,15 @@ create role scheduler nologin;
 --    The grants themselves stay in pools.sql, beside the objects they name.
 --    Only the CREATE ROLE moves, which is the half that needs a superuser.
 -- ------------------------------------------------------------
-create role pool_manager nologin;
-create role keda_scaler  nologin;
+do $$
+begin
+    if not exists (select 1 from pg_roles where rolname = 'pool_manager') then
+        create role pool_manager nologin;
+    end if;
+    if not exists (select 1 from pg_roles where rolname = 'keda_scaler') then
+        create role keda_scaler nologin;
+    end if;
+end $$;
 
 -- ------------------------------------------------------------
 -- 6. WHO MAY SAY WHO THE CALLER IS. Per DATABASE, not per cluster.
@@ -197,9 +207,11 @@ create role keda_scaler  nologin;
 --    which refuses to proceed while authenticated can still call it (the
 --    preflight at the top of the generated script, written by
 --    extension/percolate/build-sql.py). Run it in template1 too and every
---    database created afterwards starts closed.
+--    database created afterwards starts closed; the image does.
 -- ------------------------------------------------------------
-revoke execute on function pg_catalog.set_config(text, text, boolean) from public;
-grant execute on function pg_catalog.set_config(text, text, boolean)
-    to authenticator, app_owner, worker, scheduler;
+
+-- ------------------------------------------------------------
+-- The statements for §1-§4 and §6: the file every install path runs.
+-- ------------------------------------------------------------
+\ir ../../dev/image-init/00-superuser.sql
 

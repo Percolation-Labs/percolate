@@ -89,20 +89,15 @@ git show "v$FROM:extension/percolate/sql/percolate--$FROM.sql" > "$OLD_SQL" 2>/d
 
 echo "==> comparing a fresh $VERSION against $FROM upgraded to $VERSION"
 
+# Both databases get the image's own superuser step, so the only difference
+# between them is the one this file measures.
+docker cp dev/image-init/00-superuser.sql "$CONTAINER:/tmp/00-superuser.sql" >/dev/null
 mk() {
     docker exec -i "$CONTAINER" psql -U p8 -d postgres -q \
         -c "set client_min_messages = warning;" \
         -c "drop database if exists $1;" -c "create database $1;" >/dev/null 2>&1
-    docker exec -i "$CONTAINER" psql -U p8 -d "$1" -q >/dev/null <<SQL
-create extension if not exists pgcrypto;
-create extension if not exists pg_trgm;
-create extension if not exists vector;
-create extension if not exists percolate_parser;
-revoke execute on function pg_catalog.set_config(text, text, boolean) from public;
-grant execute on function pg_catalog.set_config(text, text, boolean) to authenticator, app_owner, worker, scheduler;
-grant create on database $1 to app_owner;
-grant create, usage on schema public to app_owner;
-SQL
+    docker exec "$CONTAINER" psql -U p8 -d "$1" -v ON_ERROR_STOP=1 -q \
+        -f /tmp/00-superuser.sql >/dev/null
 }
 # `client_min_messages = warning` because the schema is deliberately loud --
 # every subsystem raises a notice from its own load-time self-check, and three

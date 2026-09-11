@@ -19,6 +19,22 @@
 # answer that is not this repository grading its own homework.
 name: p8-dev
 
+# WHERE EACH CREDENTIAL MAY BE SENT, for every core service that sends one: the
+# http_call steps of worker and ui-worker, and ui-ingest's embeddings and
+# transcription.
+# percolate-core resolves a credential only for an origin this map binds it to
+# (core/credentials.py, deny by default), because the destination comes from a
+# row or an upload that a signed-in user can write -- an upload's ingest policy
+# could name its own host and have the ingest worker send P8_S3_SECRET there.
+# With no entry, embedding and model calls are refused once the stack runs
+# that core; the ui services mount the linked working copy, so they meet it
+# first.
+# Written once and referenced below, so the three services cannot disagree;
+# the default is literal JSON inside ${...:-...}, which compose passes through
+# intact (`docker compose config` shows it), and an environment value still
+# replaces it.
+x-credential-origins: &credential-origins '${P8_CREDENTIAL_ORIGINS:-{"LLM_API_KEY":["https://api.openai.com"]}}'
+
 services:
   db:
     # Pulled, not built. The image carries PG19 + pgvector + both Percolate
@@ -92,11 +108,12 @@ services:
     volumes:
       # NOTHING IS MOUNTED AT /docker-entrypoint-initdb.d, and that is a
       # deletion rather than an omission. This file used to bind-mount ./init
-      # over that directory, which REPLACES it -- so the image's own
-      # `image-init/00-percolate.sh` never ran here, and `init/00-extensions.sql`,
-      # `init/01-percolate.sql` and `init/07-build-stamp.sh` existed to restate
-      # what it does. One bootstrap, two homes, and the dev stack was the one
-      # place that did not exercise the shipped path.
+      # over that directory, which REPLACES it -- so the image's own hook
+      # (`image-init/`) never ran here, and init/ carried three files that
+      # restated what it does. One bootstrap, two homes, and the dev stack was
+      # the one place that did not exercise the shipped path. Those three files
+      # are gone now; `image-init/00-superuser.sql` is the one copy, and every
+      # script that stands up a database runs it.
       #
       # It also broke a from-zero start outright. initdb runs whatever is in
       # that directory against the extension the IMAGE ships, and `:19` is a
@@ -113,9 +130,10 @@ services:
       # TREE's schema and samples arrive afterwards through `dev/reload.sh` --
       # install this tree's extension FIRST, then apply init/02..09 -- which is
       # what `dev/ci-database.sh` has always done and what `dev/stacks.sh up`
-      # now does for any new database. The init/ files are still there and are
-      # still used by `dev/release-rehearsal.sh`, which mounts the directory at
-      # a LOCALLY BUILT image, where the versions do match.
+      # now does for any new database. The init/ samples are also mounted, one
+      # file at a time beside the image's own hook, by
+      # `dev/release-rehearsal.sh`, at a LOCALLY BUILT image where the versions
+      # do match.
       #
       # MOUNTED AT /var/lib/postgresql, NOT .../data, and on 18+ that is the
       # difference between a stack that starts and one that restart-loops --
@@ -129,8 +147,15 @@ services:
       # container's own filesystem, which is why `docker compose up --force-
       # recreate` in the wrong window has already cost this repository a day.
       - pgdata:/var/lib/postgresql
+    # OVER TCP. On a first start the image's hook runs against a temporary
+    # server that listens on the unix socket only, so a socket check can report
+    # healthy mid-install and release every service below at a database with
+    # no extension in it, moments before the entrypoint stops that server to
+    # start the real one. TCP is not accepted until the install has finished.
+    # The get-percolate chart's readiness probe (d6f79fc) and
+    # dev/ci-database.sh already wait this way.
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U p8 -d ${P8_DB:-p8dev}"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U p8 -d ${P8_DB:-p8dev}"]
       interval: 3s
       timeout: 3s
       retries: 20
@@ -194,6 +219,7 @@ services:
       # name. The database stores only the reference, so a dump of
       # workflow.tasks never contains a secret.
       LLM_API_KEY: ${LLM_API_KEY:-}
+      P8_CREDENTIAL_ORIGINS: *credential-origins
 
   # Opt-in workbench: `dev/stacks.sh ui`. Published dependencies, working-tree
   # Python code; the Docker network preserves the seeded tool-server URLs.
@@ -284,6 +310,7 @@ services:
       P8_BUCKET: p8-content
       LLM_API_KEY: ${LLM_API_KEY:-${OPENAI_API_KEY:-}}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      P8_CREDENTIAL_ORIGINS: *credential-origins
       P8_INGEST_CREDENTIAL_ORIGINS: ${P8_INGEST_CREDENTIAL_ORIGINS:-}
     volumes:
       - ../percolate-core/percolate_core:/src/percolate_core:ro
@@ -299,6 +326,7 @@ services:
       P8_DSN: postgres://worker:workerpass@db:5432/${P8_DB:-p8dev}
       P8_AGENT_URL: http://agent:8080
       P8_AGENT_SIGNING_KEY_FILE: /run/secrets/agent-signing-key
+      P8_CREDENTIAL_ORIGINS: *credential-origins
     volumes:
       - ../percolate-core/percolate_core:/src/percolate_core:ro
       - ./.stacks/ui-agent-signing-key:/run/secrets/agent-signing-key:ro
@@ -379,7 +407,10 @@ services:
     # would notice, by failing for a reason nothing in the tree records. MinIO
     # publishes only dated RELEASE tags, so this is its equivalent of a
     # version; move it deliberately, the way percolate-core's pin moves.
-    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    # From quay.io, MinIO's own registry: on 2026-09-11 Docker Hub began
+    # answering "pull access denied ... repository does not exist" for
+    # minio/minio, and the same tag here is the same image id (14cea493...).
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
     container_name: ${P8_STACK:-p8-dev}-minio
     command: server /data --console-address ":9001"
     environment:

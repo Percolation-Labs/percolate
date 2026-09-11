@@ -38,15 +38,9 @@ q() { docker exec -i "$CONTAINER" psql -U p8 -d "$1" -tAqc "$2"; }
 echo "==> building a pristine reference database from $(basename "$SCRIPT")"
 docker exec "$CONTAINER" psql -U p8 -d postgres -q \
     -c "drop database if exists $REF_DB;" -c "create database $REF_DB;" >/dev/null
-docker exec "$CONTAINER" psql -U p8 -d "$REF_DB" -q \
-    -c "create extension if not exists pgcrypto;
-        create extension if not exists pg_trgm;
-        create extension if not exists vector;
-        create extension if not exists percolate_parser;
-        revoke execute on function pg_catalog.set_config(text, text, boolean) from public;
-        grant execute on function pg_catalog.set_config(text, text, boolean) to authenticator, app_owner, worker, scheduler;
-        grant create on database $REF_DB to app_owner;
-        grant create, usage on schema public to app_owner;" >/dev/null
+docker cp "$HERE/image-init/00-superuser.sql" "$CONTAINER:/tmp/00-superuser.sql" >/dev/null
+docker exec "$CONTAINER" psql -U p8 -d "$REF_DB" -v ON_ERROR_STOP=1 -q \
+    -f /tmp/00-superuser.sql >/dev/null
 docker exec -i "$CONTAINER" psql -U p8 -d "$REF_DB" -v ON_ERROR_STOP=1 -q \
     -c "set role app_owner;" -f - < "$SCRIPT" >/dev/null
 

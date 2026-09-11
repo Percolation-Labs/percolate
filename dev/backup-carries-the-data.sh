@@ -37,16 +37,11 @@ SU="${SUPERUSER:-p8}"
 docker exec -i "$CONTAINER" psql -U "$SU" -d postgres -q \
     -c "drop database if exists $BARE (force);" -c "create database $BARE;" >/dev/null 2>&1
 
-# No dev/init seeds, no pg_cron: the extension and nothing else.
+# No dev/init seeds, no pg_cron: the image's superuser step, the extension and
+# nothing else.
+docker cp dev/image-init/00-superuser.sql "$CONTAINER:/tmp/00-superuser.sql" >/dev/null
 docker exec -i "$CONTAINER" psql -U "$SU" -d "$BARE" -v ON_ERROR_STOP=1 -q >/dev/null 2>&1 <<'SQL'
-create extension if not exists pgcrypto;
-create extension if not exists pg_trgm;
-create extension if not exists vector;
-create extension if not exists percolate_parser;
-revoke execute on function pg_catalog.set_config(text, text, boolean) from public;
-grant execute on function pg_catalog.set_config(text, text, boolean) to authenticator, app_owner, worker, scheduler;
-do $$ begin execute format('grant create on database %I to app_owner', current_database()); end $$;
-grant create, usage on schema public to app_owner;
+\i /tmp/00-superuser.sql
 set role app_owner;
 create extension percolate cascade;
 reset role;

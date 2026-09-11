@@ -59,7 +59,7 @@ $$);
 -- Note what is NOT here: no cron entry, no privileged call. A schedule is an
 -- ordinary row, so this line is the same thing a user does over REST with
 -- POST /rpc/schedule_workflow. The single pg_cron job installed by
--- 01-percolate.sql drives all of them.
+-- dev/image-init/01-percolate.sh drives all of them.
 -- ------------------------------------------------------------
 select workflow.schedule_workflow(
     p_name     => 'content-reconcile',
