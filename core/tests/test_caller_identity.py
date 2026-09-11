@@ -115,6 +115,39 @@ class ClaimsReachTheConnectionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(args[0]), verified)
         self.assertEqual(second, f"set role {identity.ROLE}")
 
+    async def test_publisher_hands_the_connection_back_as_its_login_role(self):
+        # RESET ALL, which asyncpg runs on release, leaves `role` alone: a
+        # connection returned as `authenticated` failed the next caller's
+        # set_config (found live, with set_config revoked). So the publisher
+        # resets it itself -- also when the turn raises.
+        client = PgClient(Settings())
+        client._pool = self.pool
+        with self.assertRaises(Stop):
+            async with client.publisher({"sub": ALICE}):
+                raise Stop
+        last_two = self.pool.conn.statements[-2:]
+        self.assertEqual([sql for sql, _ in last_two],
+                         ["reset role", "select set_config('request.jwt.claims', '', false)"])
+
+    async def test_a_connection_that_cannot_be_reset_is_terminated(self):
+        client = PgClient(Settings())
+        client._pool = self.pool
+        conn = self.pool.conn
+        terminated = []
+        conn.terminate = lambda: terminated.append(True)
+        record = conn.execute
+
+        async def execute(sql, *args):
+            if sql == "reset role":
+                raise ConnectionError("connection lost")
+            await record(sql, *args)
+
+        conn.execute = execute
+        with self.assertRaises(ConnectionError):
+            async with client.publisher({"sub": ALICE}):
+                pass
+        self.assertEqual(terminated, [True])
+
     async def test_a_user_id_where_claims_belong_is_refused(self):
         with self.assertRaises(TypeError):
             async with PgClient(Settings()).as_user(uuid4()):

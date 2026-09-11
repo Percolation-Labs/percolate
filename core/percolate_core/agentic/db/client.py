@@ -105,13 +105,21 @@ class PgClient:
         would delay every event to the end of the turn and destroy the streaming
         it exists for. So: one connection, session-level identity set once,
         autocommit per event. Four statements and a transaction become one
-        statement. asyncpg resets session state when the connection returns to
-        the pool, which is what makes the session-level ``set role`` safe.
+        statement.
 
         The same claims ``as_user`` sets, whole, and in the same order: claims
         while the connection is still ``authenticator``, THEN the role, because
         ``authenticated`` may not call ``set_config`` (see
         ``core.identity.as_caller``).
+
+        AND THE ROLE IS RESET BEFORE THE CONNECTION GOES BACK. This said asyncpg
+        resets session state on release, and it does run ``RESET ALL`` -- which
+        Postgres documents as leaving ``role`` alone. So every connection a turn
+        had published on went back to the pool still ``authenticated``, and the
+        next request to draw it failed its first statement with ``permission
+        denied for function set_config``: one successful streamed turn, then
+        500s. Found on a live database with ``set_config`` revoked; invisible
+        where ``authenticated`` could still call it.
         """
         _require_claims(claims)
         pool = self._require()
@@ -125,7 +133,10 @@ class PgClient:
             async def publish(channel: str, payload: str) -> None:
                 await conn.execute("select pg_notify($1, $2)", channel, payload)
 
-            yield publish
+            try:
+                yield publish
+            finally:
+                await _restore_login_role(conn)
 
     async def listen(self, channel: str, queue: asyncio.Queue) -> Any:
         """Hold a dedicated connection ``LISTEN``ing, pushing payloads onto ``queue``.
@@ -161,6 +172,22 @@ class PgClient:
         # the slot has to come back when it does. Accounting that depends on
         # every call site remembering is accounting that leaks.
         return _Listener(conn, self._listeners)
+
+
+async def _restore_login_role(conn: Any) -> None:
+    """Put a publisher's connection back as its login role, with no claims.
+
+    ``reset role`` first: any role may run it, and only the login role may
+    then clear the claims. A connection that cannot be proven reset is
+    terminated rather than returned, so the pool discards it instead of
+    handing the next caller somebody else's role and identity.
+    """
+    try:
+        await conn.execute("reset role")
+        await conn.execute("select set_config('request.jwt.claims', '', false)")
+    except Exception:
+        conn.terminate()
+        raise
 
 
 def _require_claims(claims: Any) -> None:
