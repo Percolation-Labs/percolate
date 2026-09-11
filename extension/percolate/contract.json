@@ -331,6 +331,7 @@
     {
       "admits": [
         "graph",
+        "lake",
         "p8ql",
         "sql",
         "workflow"
@@ -357,6 +358,7 @@
     {
       "admits": [
         "graph",
+        "lake",
         "p8ql",
         "sql",
         "workflow"
@@ -463,8 +465,21 @@
     },
     {
       "admits": [
+        "parquet",
+        "iceberg"
+      ],
+      "column": "format",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "content",
+      "table": "datasets",
+      "vocabulary": null
+    },
+    {
+      "admits": [
         "append",
-        "replace"
+        "replace",
+        "merge"
       ],
       "column": "mode",
       "enforced_by": "check",
