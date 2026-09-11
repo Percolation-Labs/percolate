@@ -1,3 +1,4 @@
+> **Percolate has moved to [get-percolate](https://github.com/Percolation-Labs/get-percolate)**, where it has evolved into a Postgres extension for AI workflows.
 
 <img src=".assets/images/proj_header.png"  />
 
