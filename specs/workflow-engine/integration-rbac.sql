@@ -461,6 +461,28 @@ returns boolean as $$
                     session_user, 'workflow.definitions'::regclass, 'insert'));
 $$ language sql stable security definer set search_path = pg_catalog, public;
 
+-- AND STARTING ONE IS THE THIRD SIDE, which may_define alone did not cover.
+--
+-- may_define bounds who may WRITE an unscoped read. Nothing bounded who may
+-- RUN one: start_workflow checks nobody, so a definition an admin wrote read
+-- every tenant's rows for whichever member started it. schema.sql's
+-- may_read_unscoped says why, with the tour run that found it. This is its
+-- rbac half: the run's owner, not the current caller -- a step executes long
+-- after the request that started it, on a connection with no claims.
+--
+-- An unknown run refuses rather than passes: the setting that names it is
+-- published by the engine, and a run id that resolves to nothing is not a
+-- system run.
+create or replace function workflow.may_read_unscoped(p_run_id uuid)
+returns boolean as $$
+    select coalesce(
+        (select r.owner_id is null
+                or rbac.has_permission(r.owner_id, 'workflows', 'update')
+           from workflow.runs r
+          where r.id = p_run_id),
+        false);
+$$ language sql stable security definer set search_path = pg_catalog, public;
+
 -- The authorization check, and then the cascade -- which is the unchecked form
 -- below, called rather than repeated. The first version inlined the same four
 -- statements here, so the cascade existed twice and the tree walk reached the
@@ -810,6 +832,7 @@ revoke execute on function workflow.schedule_workflow(text, text, text, jsonb, t
 revoke execute on function workflow.set_schedule_enabled(text, boolean) from public;
 revoke execute on function workflow.unschedule_workflow(text) from public;
 revoke execute on function workflow.may_define() from public;
+revoke execute on function workflow.may_read_unscoped(uuid) from public;
 -- workflow.register_artifact() is the eleventh and it is NOT revoked here:
 -- content loads after the engine, so naming it in this file fails the install
 -- with "function does not exist". The revoke belongs beside its definition in

@@ -40,6 +40,16 @@ create or replace function workflow.p8ql(p_query text)
 returns jsonb as $$
 declare v_out jsonb;
 begin
+    -- EVERY MODE, NOT ONLY SQL. Inside a step this runs as the engine owner, so
+    -- a SEARCH or a TEXT reads every tenant's chunks exactly as a statement
+    -- would -- the SQL-mode check below never saw them, and `ask_uploads`
+    -- answered a member of one org from another org's runbook
+    -- (workflow-engine/schema.sql, may_read_unscoped). The same nested-`if`
+    -- rule applies: the direct call must not evaluate a function
+    -- `authenticated` cannot execute.
+    if nullif(current_setting('workflow.current_run_id', true), '') is not null then
+        perform workflow.assert_unscoped_read();
+    end if;
     v_out := aiq.query(p_query);
     if v_out->>'mode' = 'SQL' then
         -- AND THE POLICY THAT TURNS THE TRADE OFF HAS TO REACH THIS DOOR TOO.
@@ -101,14 +111,21 @@ begin
 end;
 $$ language plpgsql;
 
+-- plpgsql rather than sql for the one guard it now carries, which is the
+-- one-argument form's: this is the arity `ask_uploads` reaches through.
 create or replace function workflow.p8ql(p_query text, p_embedding jsonb)
 returns jsonb as $$
-    select aiq.query(p_query,
+begin
+    if nullif(current_setting('workflow.current_run_id', true), '') is not null then
+        perform workflow.assert_unscoped_read();
+    end if;
+    return aiq.query(p_query,
         case when p_embedding is null or p_embedding = 'null'::jsonb then null
              else (select array_agg((v #>> '{}')::real order by ord)
                    from jsonb_array_elements(p_embedding) with ordinality t(v, ord))::vector
         end);
-$$ language sql;
+end;
+$$ language plpgsql;
 
 grant execute on function workflow.p8ql(text) to authenticated, worker;
 grant execute on function workflow.p8ql(text, jsonb) to authenticated, worker;

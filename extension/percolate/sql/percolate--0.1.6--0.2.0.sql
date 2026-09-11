@@ -2754,7 +2754,9 @@ $$ language plpgsql;
 -- SECURITY DEFINER, so a statement here reads across tenants. Anyone who may
 -- define a workflow may therefore read anything in the database. That is a
 -- deliberate trade for the beta -- expressiveness over isolation, taken with
--- eyes open -- and the two things that make it survivable are below.
+-- eyes open -- and the three things that make it survivable are below. The
+-- third, may_read_unscoped, keeps the trade to the people this sentence names:
+-- a run reads with the owner's privilege only for someone who may define a workflow.
 --
 -- READS CANNOT WRITE, AND THE DATABASE ENFORCES IT, not a parser. A statement
 -- without `write: true` runs with transaction_read_only on, which is the same
@@ -2779,8 +2781,9 @@ $$ language plpgsql;
 -- the claims without the role switch changes nothing, because an owner
 -- bypasses RLS whatever the claims say. So scoping needs the statement
 -- executed OUTSIDE this call stack: the worker claiming it, or a loopback
--- connection. roadmap.md §6 carries both routes, what each costs, and the
--- trigger -- a second tenant sharing a deployment.
+-- connection. roadmap.md §6 carries both routes and what each costs. Its
+-- trigger, a second tenant sharing a deployment, has been met: orgs are
+-- tenants, and one deployment holds several.
 --
 -- The registry does not go away and is not deprecated. It keeps the two jobs it
 -- was always better at than gatekeeping: a per-function timeout, and a
@@ -2799,6 +2802,55 @@ as $$
     -- is a policy somebody can UPDATE from inside the system it constrains.
     select lower(coalesce(nullif(current_setting('percolate.sql_policy', true), ''), 'open'));
 $$;
+
+-- WHO A RUN MAY READ FOR -- the question an unscoped read asks before it runs.
+--
+-- The trade above is stated in terms of who may DEFINE a workflow, and that is
+-- the wrong half of it. Defining is gated (may_define, below). STARTING is not,
+-- and a statement or a p8ql query runs as the engine owner whoever started the
+-- run. So a workflow somebody privileged defined read across every tenant for
+-- anybody signed in: the dev stack's `ask_uploads` SEARCHes uploaded chunks, and
+-- the tour (scenarios/tour, act 8) had a member of another org start it and get
+-- back a runbook her own token could not open. `sql_policy = 'registered'` did
+-- not help, because p8ql's retrieval modes are a registered function and run
+-- under either policy.
+--
+-- The rule: an unscoped read runs for a run only when whoever started it could
+-- have written the same read themselves -- may define a workflow -- or when
+-- nobody did (a system run). That keeps the trade exactly as wide as the
+-- paragraph above claims. The reads it refuses come back when a step can run
+-- under its starter's identity, which is roadmap.md §6.
+--
+-- Standalone the engine has no identity model, so this is `true` and
+-- integration-rbac.sql shadows it: the stub-and-shadow shape may_define uses.
+create or replace function workflow.may_read_unscoped(p_run_id uuid)
+returns boolean as $$
+    select true;
+$$ language sql stable;
+
+-- Every path that runs a read as the engine owner on a run's behalf calls this:
+-- run_sql (a step's statement, a matrix's `rows:` statement) and workflow.p8ql.
+-- The run is the one published in workflow.current_run_id. With none set the
+-- caller is not inside a step, and there is nobody to read for.
+create or replace function workflow.assert_unscoped_read()
+returns void as $$
+declare
+    v_run uuid := nullif(current_setting('workflow.current_run_id', true), '')::uuid;
+begin
+    if v_run is not null and not workflow.may_read_unscoped(v_run) then
+        raise exception
+            'run % was started by someone who may not define workflows, and this '
+            'step runs as the engine owner, past row-level security', v_run
+            using detail = 'Running it would hand them rows their own queries cannot see.',
+                  hint   = 'Start it as someone holding workflows:update, or as the system. '
+                           'A step that must serve anyone should call a registered function '
+                           'that scopes itself to the run''s owner.';
+    end if;
+end;
+$$ language plpgsql stable;
+
+revoke execute on function workflow.may_read_unscoped(uuid) from public;
+revoke execute on function workflow.assert_unscoped_read() from public;
 
 -- Dropped rather than left beside the new signature: `create or replace` with
 -- an added parameter makes a SECOND function, and the old three-argument one
@@ -2838,6 +2890,10 @@ begin
     if coalesce(btrim(p_statement), '') = '' then
         raise exception 'this sql step carries an empty statement';
     end if;
+
+    -- Writes included: a write as the engine owner is the larger version of
+    -- the same act.
+    perform workflow.assert_unscoped_read();
 
     perform set_config('statement_timeout', greatest(p_timeout_ms, 1)::text, true);
 
@@ -4614,6 +4670,7 @@ declare
     v_bad_ord   bigint;
     v_bad_type  text;
     v_bad_col   text;
+    v_prev_run  text;
 begin
     select * into t from workflow.tasks where id = p_task_id;
     -- run_after is checked here and not in execute_sql_step's equivalent, and
@@ -4685,6 +4742,15 @@ begin
                 'function) or `items` (a literal list)', t.step_key;
         end if;
 
+        -- THE ROW SOURCE RUNS FOR THIS RUN, and publishes it the way
+        -- execute_sql_step does. It did not, so everything keyed on
+        -- workflow.current_run_id was blind here: a `rows: {function: p8ql}`
+        -- skipped assert_unscoped_read, and a row function could not tell its
+        -- own run from a run id typed into its arguments. Restored after; an
+        -- error unwinds it with the subtransaction.
+        v_prev_run := coalesce(nullif(current_setting('workflow.current_run_id', true), ''), '');
+        perform set_config('workflow.current_run_id', t.run_id::text, true);
+
         if v_spec ? 'items' then
             v_rows := v_spec->'items';
         elsif v_spec #> '{rows}' ? 'statement' then
@@ -4703,6 +4769,7 @@ begin
             v_rows := workflow.call_step_function(
                 v_spec#>>'{rows,function}', v_spec#>'{rows,args}', t.run_id, t.input->'item');
         end if;
+        perform set_config('workflow.current_run_id', v_prev_run, true);
 
         if v_rows is null or jsonb_typeof(v_rows) <> 'array' then
             raise exception
@@ -11176,6 +11243,28 @@ returns boolean as $$
                     session_user, 'workflow.definitions'::regclass, 'insert'));
 $$ language sql stable security definer set search_path = pg_catalog, public;
 
+-- AND STARTING ONE IS THE THIRD SIDE, which may_define alone did not cover.
+--
+-- may_define bounds who may WRITE an unscoped read. Nothing bounded who may
+-- RUN one: start_workflow checks nobody, so a definition an admin wrote read
+-- every tenant's rows for whichever member started it. schema.sql's
+-- may_read_unscoped says why, with the tour run that found it. This is its
+-- rbac half: the run's owner, not the current caller -- a step executes long
+-- after the request that started it, on a connection with no claims.
+--
+-- An unknown run refuses rather than passes: the setting that names it is
+-- published by the engine, and a run id that resolves to nothing is not a
+-- system run.
+create or replace function workflow.may_read_unscoped(p_run_id uuid)
+returns boolean as $$
+    select coalesce(
+        (select r.owner_id is null
+                or rbac.has_permission(r.owner_id, 'workflows', 'update')
+           from workflow.runs r
+          where r.id = p_run_id),
+        false);
+$$ language sql stable security definer set search_path = pg_catalog, public;
+
 -- The authorization check, and then the cascade -- which is the unchecked form
 -- below, called rather than repeated. The first version inlined the same four
 -- statements here, so the cascade existed twice and the tree walk reached the
@@ -11525,6 +11614,7 @@ revoke execute on function workflow.schedule_workflow(text, text, text, jsonb, t
 revoke execute on function workflow.set_schedule_enabled(text, boolean) from public;
 revoke execute on function workflow.unschedule_workflow(text) from public;
 revoke execute on function workflow.may_define() from public;
+revoke execute on function workflow.may_read_unscoped(uuid) from public;
 -- workflow.register_artifact() is the eleventh and it is NOT revoked here:
 -- content loads after the engine, so naming it in this file fails the install
 -- with "function does not exist". The revoke belongs beside its definition in
@@ -16097,6 +16187,16 @@ create or replace function workflow.p8ql(p_query text)
 returns jsonb as $$
 declare v_out jsonb;
 begin
+    -- EVERY MODE, NOT ONLY SQL. Inside a step this runs as the engine owner, so
+    -- a SEARCH or a TEXT reads every tenant's chunks exactly as a statement
+    -- would -- the SQL-mode check below never saw them, and `ask_uploads`
+    -- answered a member of one org from another org's runbook
+    -- (workflow-engine/schema.sql, may_read_unscoped). The same nested-`if`
+    -- rule applies: the direct call must not evaluate a function
+    -- `authenticated` cannot execute.
+    if nullif(current_setting('workflow.current_run_id', true), '') is not null then
+        perform workflow.assert_unscoped_read();
+    end if;
     v_out := aiq.query(p_query);
     if v_out->>'mode' = 'SQL' then
         -- AND THE POLICY THAT TURNS THE TRADE OFF HAS TO REACH THIS DOOR TOO.
@@ -16158,14 +16258,21 @@ begin
 end;
 $$ language plpgsql;
 
+-- plpgsql rather than sql for the one guard it now carries, which is the
+-- one-argument form's: this is the arity `ask_uploads` reaches through.
 create or replace function workflow.p8ql(p_query text, p_embedding jsonb)
 returns jsonb as $$
-    select aiq.query(p_query,
+begin
+    if nullif(current_setting('workflow.current_run_id', true), '') is not null then
+        perform workflow.assert_unscoped_read();
+    end if;
+    return aiq.query(p_query,
         case when p_embedding is null or p_embedding = 'null'::jsonb then null
              else (select array_agg((v #>> '{}')::real order by ord)
                    from jsonb_array_elements(p_embedding) with ordinality t(v, ord))::vector
         end);
-$$ language sql;
+end;
+$$ language plpgsql;
 
 grant execute on function workflow.p8ql(text) to authenticated, worker;
 grant execute on function workflow.p8ql(text, jsonb) to authenticated, worker;
