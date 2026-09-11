@@ -73,7 +73,10 @@ class WorkerAgentAuthTest(unittest.IsolatedAsyncioTestCase):
             build_request(self.spec(body="{{env.P8_AGENT_SIGNING_KEY}}"), self.context())
 
     def test_arbitrary_destination_receives_only_its_explicit_credential(self):
-        with patch.dict("os.environ", {"EXTERNAL_KEY":"external-key"}):
+        # Bound by the operator: a credential with no binding for the
+        # destination is refused (tests/test_credential_origins.py).
+        with patch.dict("os.environ", {"EXTERNAL_KEY":"external-key",
+                                       "P8_CREDENTIAL_ORIGINS":'{"EXTERNAL_KEY": "https://external.example"}'}):
             request, _ = build_request(self.spec(url="https://external.example/api", credential_ref="EXTERNAL_KEY"), self.context())
         self.assertEqual(request["headers"]["Authorization"], "Bearer external-key")
         # Even a URL that resolves to the runtime is not eligible unless it is

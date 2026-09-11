@@ -15,7 +15,10 @@ Pointing it at a local server is a URL, not a code path:
 
 which is the same "one S3-compatible client, always" reasoning the Content
 Server uses for storage -- one client, different configuration, never two code
-paths to keep in step.
+paths to keep in step. The operator binds the credential to that origin
+(``P8_CREDENTIAL_ORIGINS='{"LOCAL_NOOP": ["http://whisper:9000"]}'``), because
+the endpoint and the credential name are both POLICY, and policy is writable
+by whoever uploads (see ``transcribe`` below).
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ from typing import Any
 
 import httpx
 
-from ..core import credential as resolve_credential
+from ..core import credential_for
 from .policy import TranscribePolicy
 
 __all__ = ["transcribe"]
@@ -53,7 +56,15 @@ def transcribe(data: bytes, name: str, policy: TranscribePolicy) -> tuple[str, d
     if policy.prompt:
         form["prompt"] = policy.prompt
 
-    headers = {"Authorization": "Bearer " + resolve_credential(policy.credential)}
+    # BOTH HALVES OF THIS CAME FROM THE UPLOADER. `endpoint` and `credential`
+    # are fields of the merged ingest policy, and its upload layer is
+    # `content.resources.metadata.ingest_policy` -- the `p_metadata` argument
+    # of `content.register_upload`, which any signed-in user may call. So an
+    # upload could say `credential: P8_S3_SECRET` and `endpoint:` their own
+    # host, and this line sent the worker's storage secret there. The binding
+    # is the operator's (P8_CREDENTIAL_ORIGINS), checked before anything is
+    # read or sent.
+    headers = {"Authorization": "Bearer " + credential_for(policy.credential, policy.endpoint)}
     with httpx.Client(timeout=300.0) as client:
         r = client.post(policy.endpoint, headers=headers, data=form, files=files)
         if r.status_code >= 400:

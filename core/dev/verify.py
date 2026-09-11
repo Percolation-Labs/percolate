@@ -105,7 +105,7 @@ async def main() -> None:
     settings = Settings.from_env()
     client = PgClient(settings)
     await client.connect()
-    repo = PgRepository(client, UUID(settings.user_id))
+    repo = PgRepository(client, {"sub": str(UUID(settings.user_id))})
 
     session = await repo.create_session(Session(title="verify"))
     queue: asyncio.Queue = asyncio.Queue()
@@ -132,7 +132,7 @@ async def main() -> None:
     # Every run in the session, not one hop of children: a sub-agent may itself
     # delegate, and a test that assumes depth 1 fails the day the model chooses
     # to go deeper — which is exactly the day you want it not to.
-    async with client.as_user(repo.user_id) as conn:
+    async with client.as_user(repo.claims) as conn:
         run_rows = await conn.fetch(
             "select id from agentic.runs_api where session_id = $1", session.id
         )
@@ -236,7 +236,7 @@ async def main() -> None:
           bool(cited) and all(m.role == "assistant" for m in cited),
           f"{sum(len(m.citations) for m in cited)} citations on {len(cited)} row(s)")
 
-    async with client.as_user(repo.user_id) as conn:
+    async with client.as_user(repo.claims) as conn:
         known = await conn.fetch("select chunk_id, resource_id from demo.chunks")
     known_chunks = {str(r["chunk_id"]) for r in known}
     all_citations = [c for m in cited for c in m.citations]
@@ -317,7 +317,7 @@ async def main() -> None:
     check("a turn streams identically through the mounted prefix",
           events[:1] == ["RUN_STARTED"] and events[-1:] == ["RUN_FINISHED"],
           f"{len(events)} frames, {events[0] if events else '-'} … {events[-1] if events else '-'}")
-    async with client.as_user(repo.user_id) as conn:
+    async with client.as_user(repo.claims) as conn:
         mounted_rows = await conn.fetchval(
             "select count(*) from agentic.messages_api where session_id = $1",
             UUID(mounted_session),
@@ -395,10 +395,10 @@ async def main() -> None:
     # Read as the real `authenticated` role with another user's claims, exactly
     # as PostgREST does per request. An ad-hoc role or a superuser would prove
     # nothing: both bypass the policies this is checking.
-    async with client.as_user(UUID("bbbbbbbb-0000-0000-0000-000000000002")) as conn:
+    async with client.as_user({"sub": "bbbbbbbb-0000-0000-0000-000000000002"}) as conn:
         their_sessions = await conn.fetchval("select count(*) from agentic.sessions_api")
         their_messages = await conn.fetchval("select count(*) from agentic.messages_api")
-    async with client.as_user(repo.user_id) as conn:
+    async with client.as_user(repo.claims) as conn:
         my_sessions = await conn.fetchval("select count(*) from agentic.sessions_api")
     check("the owner sees their conversations", my_sessions > 0, f"{my_sessions} sessions")
     check("another user sees none of them",
@@ -449,7 +449,7 @@ async def main() -> None:
     # else's work, and an assertion that races is worse than no assertion.
     summary = scheduled = None
     for _ in range(60):
-        async with client.as_user(repo.user_id) as conn:
+        async with client.as_user(repo.claims) as conn:
             scheduled = await conn.fetchrow(
                 "select * from agentic.runs_api where trigger_kind = 'scheduled' "
                 "and session_id = $1 order by created_at desc limit 1",

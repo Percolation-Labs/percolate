@@ -101,7 +101,7 @@ class EventSink:
         if client is None:
             yield
             return
-        async with client.publisher(getattr(self.repo, "user_id", None)) as publish:
+        async with client.publisher(getattr(self.repo, "claims", None)) as publish:
             self._publish = publish
             try:
                 yield

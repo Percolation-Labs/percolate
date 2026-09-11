@@ -32,6 +32,7 @@ import os
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request, Response
@@ -39,7 +40,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .contracts import ChatRequest, RequestContext, RunError, Session, to_sse
 from .db import PgClient, PgRepository
-from .gateway import caller_id
+from .gateway import caller_claims, user_id_of
 from .runtime import EventSink, channel, relay
 from .sequencer import TurnSequencer
 from .settings import Settings
@@ -97,18 +98,21 @@ def router() -> APIRouter:
     """The two endpoints, ready to mount under any prefix."""
     api = APIRouter()
 
-    def _identity(request: Request) -> tuple[UUID | None, RequestContext]:
+    def _identity(request: Request) -> tuple[dict[str, Any] | None, RequestContext]:
         """Who is calling, and what ambient context they brought.
 
         Identity comes from the bearer token, verified with the same secret
-        PostgREST uses (``gateway.caller_id``) — never from a header a client
-        can set. Ambient context comes from ``X-P8-*`` (``brief.md`` §5.1 item
-        4) and is trusted only for what it is: context, not authorization.
+        PostgREST uses (``gateway.caller_claims``) — never from a header a
+        client can set. What comes back is the verified claims, whole, and the
+        repository hands them to the database unchanged: a token narrowed to
+        one org stays narrowed here. Ambient context comes from ``X-P8-*``
+        (``brief.md`` §5.1 item 4) and is trusted only for what it is: context,
+        not authorization.
         """
         headers = dict(request.headers)
-        user_id = caller_id(headers)
+        claims = caller_claims(headers)
         context = RequestContext.from_headers(headers)
-        return user_id, context.model_copy(update={"user_id": user_id})
+        return claims, context.model_copy(update={"user_id": user_id_of(claims)})
 
     @api.post("/tools/{name}/sync")
     async def sync_tools(name: str, request: Request) -> dict:
@@ -116,10 +120,10 @@ def router() -> APIRouter:
         from .tools.auth import caller_credentials
 
         client, settings = _state(request)
-        user_id, _ = _identity(request)
-        if user_id is None:
+        claims, _ = _identity(request)
+        if claims is None:
             raise HTTPException(401, "a verified bearer token is required")
-        repo = PgRepository(client, user_id)
+        repo = PgRepository(client, claims)
         server = await repo.get_tool_server(name)
         if server is None:
             raise HTTPException(404, "tool server not found")
@@ -187,11 +191,11 @@ def router() -> APIRouter:
         which the answer exists and the caller cannot see it yet.
         """
         client, settings = _state(request)
-        user_id, context = _identity(request)
-        if user_id is None:
+        claims, context = _identity(request)
+        if claims is None:
             raise HTTPException(401, "a verified bearer token is required")
 
-        repo = PgRepository(client, user_id)
+        repo = PgRepository(client, claims)
         session = await _resume_or_open(repo, body, request)
 
         if not body.stream:
@@ -214,10 +218,10 @@ def router() -> APIRouter:
     async def events(session_id: UUID, request: Request) -> StreamingResponse:
         """Relay a session's stream to an observer. Nothing is run."""
         client, _settings = _state(request)
-        user_id, _ = _identity(request)
-        if user_id is None:
+        claims, _ = _identity(request)
+        if claims is None:
             raise HTTPException(401, "a verified bearer token is required")
-        repo = PgRepository(client, user_id)
+        repo = PgRepository(client, claims)
         if await repo.session_messages(session_id) is None:  # pragma: no cover
             raise HTTPException(404, "no such session")
 

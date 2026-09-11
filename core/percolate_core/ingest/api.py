@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
@@ -15,7 +14,8 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..core import as_service, credential
+from ..core import as_service, credential_for
+from ..core.credentials import origin as credential_origin
 from ..worker.templates import TerminalError
 
 
@@ -74,10 +74,13 @@ def compare_value(value: str, kind: str):
 
 
 def origin(url: str) -> tuple:
-    p=urlsplit(url)
-    if p.scheme not in ('http','https') or not p.hostname or p.username or p.password or p.fragment:
-        raise TerminalError('Use an HTTP(S) endpoint without embedded credentials or a fragment.')
-    return p.scheme,p.hostname,p.port or (443 if p.scheme=='https' else 80)
+    # core.credentials.origin is the one parser; this adds only the fragment
+    # rule, which is about source configuration rather than about origins.
+    try:
+        if urlsplit(url).fragment: raise ValueError
+        return credential_origin(url)
+    except ValueError:
+        raise TerminalError('Use an HTTP(S) endpoint without embedded credentials or a fragment.') from None
 
 
 def with_params(url: str, values: dict) -> str:
@@ -96,12 +99,10 @@ def request_headers(c: APIConfig) -> dict:
         if not c.credential_ref: raise TerminalError('Name a worker credential for this source.')
         # Operator binds credential references to API origins, so a source
         # configuration cannot send a worker's provider key to another host.
-        try: allowed=json.loads((os.environ.get('P8_INGEST_CREDENTIAL_ORIGINS') or '{}')).get(c.credential_ref,[])
-        except (ValueError,AttributeError): raise TerminalError('P8_INGEST_CREDENTIAL_ORIGINS must map credential names to allowed origins.') from None
-        if isinstance(allowed,str): allowed=[allowed]
-        if origin(c.url) not in [origin(v) for v in allowed]:
-            raise TerminalError(f"Allow this API origin for {c.credential_ref} in the worker's P8_INGEST_CREDENTIAL_ORIGINS configuration.")
-        secret=credential(c.credential_ref)
+        # The binding is core.credentials' -- the one every sender uses --
+        # which still reads P8_INGEST_CREDENTIAL_ORIGINS, the name this module
+        # introduced, beside P8_CREDENTIAL_ORIGINS.
+        secret=credential_for(c.credential_ref,c.url)
         if c.auth_type=='bearer': headers['Authorization']='Bearer '+secret
         else:
             if not c.auth_header or any(ch in c.auth_header for ch in '\r\n:'): raise TerminalError('Choose a valid authentication header name.')

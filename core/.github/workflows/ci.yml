@@ -76,6 +76,17 @@ jobs:
       - name: Tool identity and persisted execution
         run: python -m unittest discover -s tests -p test_tool_auth.py
 
+      # A token's claims reach the database whole and before the role switch
+      # (REM-44, REM-48), and a credential reaches only the origin it is bound
+      # to (REM-49). The worker and API-ingest files are here because the
+      # binding changed what they assert; none of them was run by CI before.
+      - name: Caller claims stay whole, credentials stay on their origin
+        run: |
+          for t in test_caller_identity.py test_credential_origins.py \
+                   test_worker_agent_auth.py test_worker_row_templates.py test_api_ingest.py; do
+            python -m unittest discover -s tests -p "$t" || exit 1
+          done
+
       # These three exist because the dependency moves under us. `result.usage`
       # changed from a METHOD to an ATTRIBUTE between two pydantic-ai versions
       # this package has shipped against, and a serialised budget is a

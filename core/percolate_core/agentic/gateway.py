@@ -24,15 +24,11 @@ Run it: ``percolate agent gateway`` (defaults to ``127.0.0.1:8765``).
 from __future__ import annotations
 
 import asyncio
-import base64
-import hashlib
-import hmac
-import json
 import os
-import time
 from typing import Any
 from uuid import UUID
 
+from ..core.identity import claims_from_jwt
 from .contracts import ChatRequest, InboundMessage, RequestContext
 from .db import connected
 from .runtime import EventSink, inbound_delegation
@@ -40,68 +36,57 @@ from .runtime.budget import Budget
 from .runtime.delegation import TOOL_PREFIX
 from .settings import Settings
 
-LEEWAY_SECONDS = 30
-"""Clock skew tolerance on `exp`/`nbf`, matching what JWT verifiers conventionally
-allow. Not a grace period for expired sessions — thirty seconds, not thirty
-minutes."""
 
-
-def caller_id(headers: dict[str, str]) -> UUID | None:
+def caller_claims(headers: dict[str, str]) -> dict[str, Any] | None:
     """Who is making this call, from the bearer token — verified, not trusted.
 
-    The same HS256 JWT ``user-rbac`` mints and PostgREST verifies, checked here
-    with the same shared secret. Reading ``sub`` without verifying the signature
-    would have been three lines shorter and would have turned the gateway into
-    an authentication bypass for every agent in the database, which is not a
-    shortcut an experiment gets to take either.
+    Returns the verified payload WHOLE, and ``None`` for no identity. It
+    returned only ``sub``, and everything below it rebuilt ``{"sub": ...}``
+    from that: a token carrying ``orgs: [A]`` reached the database with no
+    ``orgs`` claim, which ``rbac.current_org_ids()`` reads as every org the
+    user belongs to. The Content Server, handed the same token, kept it to A.
 
-    Falls back to the ``X-P8-User-Id`` header only when no secret is configured
-    at all — a local, no-auth loop — and that fallback is why the gateway must
-    never be exposed without ``P8_JWT_SECRET`` set.
+    Verified by ``core.identity.claims_from_jwt`` — the one verifier, the one
+    the Content Server uses. This file carried its own HS256/``exp``/``nbf``
+    check beside it; two verifiers of one token are two answers waiting to
+    differ, and the difference is authorisation. A bad signature, a foreign
+    algorithm or an expired token is ``None`` here rather than an exception:
+    every caller turns ``None`` into its own refusal (401, ``PermissionError``).
+
+    With NO ``P8_JWT_SECRET`` at all this is the local no-auth dev loop: the
+    ``X-P8-User-Id`` header names the user and becomes ``{"sub": <id>}``. The
+    Content Server has no such mode (it answers 500 when asked to verify
+    without a secret), which is why the gateway must never be exposed without
+    the secret set. With a secret configured the header is ignored.
     """
     secret = os.getenv("P8_JWT_SECRET")
     lower = {k.lower(): v for k, v in headers.items()}
-    token = lower.get("authorization", "").removeprefix("Bearer ").strip()
 
     if not secret:
         raw = lower.get("x-p8-user-id")
-        return UUID(raw) if raw else None
+        try:
+            return {"sub": str(UUID(raw))} if raw else None
+        except ValueError:
+            return None
+
+    token = lower.get("authorization", "").removeprefix("Bearer ").strip()
     if not token:
         return None
-
     try:
-        header_b64, payload_b64, signature_b64 = token.split(".")
-        header = json.loads(_b64url_decode(header_b64))
-        # Pin the algorithm from *our* side. A verifier that trusts the token's
-        # own header is the classic JWT confusion bug; even where HS256-only
-        # verification makes it unexploitable, checking is one line.
-        if header.get("alg") != "HS256":
-            return None
-        signing_input = f"{header_b64}.{payload_b64}".encode()
-        expected = hmac.new(secret.encode(), signing_input, hashlib.sha256).digest()
-        if not hmac.compare_digest(expected, _b64url_decode(signature_b64)):
-            return None
-        claims = json.loads(_b64url_decode(payload_b64))
-    except (ValueError, KeyError):
+        claims = claims_from_jwt(token, secret)
+    except ValueError:
         return None
+    # A token that names nobody authenticates nobody, and one whose `sub` is
+    # not a user id would fail later as a cast error inside the database.
+    return claims if user_id_of(claims) is not None else None
 
-    # A valid signature is not a valid token. Verifying the HMAC and skipping
-    # `exp` makes every token this system ever issued permanent — and makes this
-    # runtime *weaker* than the PostgREST it sits beside, which rejects the same
-    # token. Found by presenting a 24-hour-stale token: PostgREST 401, this 200.
-    now = time.time()
-    exp, nbf = claims.get("exp"), claims.get("nbf")
-    if exp is not None and now >= float(exp) + LEEWAY_SECONDS:
+
+def user_id_of(claims: dict[str, Any] | None) -> UUID | None:
+    """The ``sub`` of verified claims as a UUID, or None."""
+    try:
+        return UUID(str(claims["sub"])) if claims and claims.get("sub") else None
+    except ValueError:
         return None
-    if nbf is not None and now < float(nbf) - LEEWAY_SECONDS:
-        return None
-
-    sub = claims.get("sub")
-    return UUID(sub) if sub else None
-
-
-def _b64url_decode(segment: str) -> bytes:
-    return base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4))
 
 
 def build_server(settings: Settings | None = None) -> Any:
@@ -273,12 +258,12 @@ async def run_scheduled(
     from .sequencer import TurnSequencer
 
     context = RequestContext.from_headers(headers)
-    user_id = caller_id(headers)
-    if user_id is None:
+    claims = caller_claims(headers)
+    if claims is None:
         raise PermissionError("a verified caller is required")
-    context = context.model_copy(update={"user_id": user_id})
+    context = context.model_copy(update={"user_id": user_id_of(claims)})
 
-    async with connected(settings, user_id) as repo:
+    async with connected(settings, claims) as repo:
         if session_id is not None and not prompt:
             prompt = await _window_to_summarize(repo, settings, session_id, for_agent)
 
@@ -336,12 +321,12 @@ async def run_delegated(
     from .sequencer import TurnSequencer
 
     context, session_id, parent_run_id, delegated_by = inbound_delegation(headers)
-    user_id = caller_id(headers)
-    if user_id is None:
+    claims = caller_claims(headers)
+    if claims is None:
         raise PermissionError("a verified caller is required")
-    context = context.model_copy(update={"user_id": user_id})
+    context = context.model_copy(update={"user_id": user_id_of(claims)})
 
-    async with connected(settings, user_id) as repo:
+    async with connected(settings, claims) as repo:
         parent = await repo.get_run(parent_run_id) if parent_run_id else None
         authorization = next((v for k, v in headers.items() if k.lower() == "authorization"), None)
         sequencer = TurnSequencer(repo, settings, sink=EventSink(repo), caller_authorization=authorization)
