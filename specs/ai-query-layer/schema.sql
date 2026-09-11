@@ -3746,7 +3746,7 @@ begin
             'agents', coalesce((select jsonb_agg(jsonb_build_object(
                     'name', a.name, 'model', a.model) order by a.name)
                 from agentic.agents a
-                where nullif(current_setting('request.jwt.claims', true), '') is null
+                where rbac.is_operator()
                    or rbac.may_read(a.owner_id, a.org_id, a.visibility)), '[]'::jsonb),
             -- What an `embed:` step -- and therefore a SEMANTIC or SEARCH
             -- `p8ql:` step, which compiles to one -- may name. It belongs in

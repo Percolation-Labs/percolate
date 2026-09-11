@@ -334,7 +334,7 @@ as $$
             -- `session_user` for the reason may_author records -- it is a
             -- reserved expression, not a function in a schema, and qualifying
             -- it fails to parse.
-            or (rbac.current_user_id() is null
+            or (rbac.is_operator()
                 and pg_catalog.has_table_privilege(session_user, 'content.resources', 'insert')));
 $$;
 

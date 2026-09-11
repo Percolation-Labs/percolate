@@ -169,7 +169,7 @@ returns jsonb as $$
       -- claimless arm is the worker's embed fan-out, which carries no person.
       and exists (select 1 from content.resources r
                   where r.id = p_resource_id
-                    and (nullif(current_setting('request.jwt.claims', true), '') is null
+                    and (rbac.is_operator()
                          or rbac.may_read(r.owner_id, r.org_id, r.visibility)));
 $$ language sql stable security definer set search_path = pg_catalog, public;
 
@@ -199,7 +199,7 @@ returns jsonb as $$
       -- same reason.
       and exists (select 1 from content.resources r
                   where r.id = p_resource_id
-                    and (nullif(current_setting('request.jwt.claims', true), '') is null
+                    and (rbac.is_operator()
                          or rbac.may_read(r.owner_id, r.org_id, r.visibility)));
 $$ language sql stable security definer set search_path = pg_catalog, public;
 

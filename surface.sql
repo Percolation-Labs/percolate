@@ -555,6 +555,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('user-rbac','function','rbac.adopt_shared_org','regclass','makes one table''s org_id NOT NULL, defaulted and backfilled -- the one home for the migration, called by add_scope_columns and by the two tables that do not take it'),
 ('user-rbac','function','rbac.may_read','uuid,uuid,text','the scope rule as a function, for SECURITY DEFINER callers that check one row rather than filter a table'),
 ('user-rbac','function','rbac.may_write','uuid,uuid,text','the WITH CHECK half: own the row, belong to the org, and do not say org without one'),
+('user-rbac','function','rbac.is_operator','','the one rule for "no person behind this call": no claims, on a login that is not a door a person arrives through. Every write policy evaluates it as the caller, so every caller role must be able to'),
 ('user-rbac','function','rbac.scope_predicate','','the single home of the read expression every scoped policy is generated from'),
 ('user-rbac','function','rbac.scope_write_predicate','','the same for the write half'),
 ('user-rbac','function','rbac.add_scope_columns','regclass,text','a module adopts scope with this and add_scope_policy, not with hand-written DDL'),

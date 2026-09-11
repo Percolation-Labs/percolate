@@ -991,7 +991,7 @@ language sql stable security definer
 set search_path = pg_catalog, public
 as $$
     select rbac.has_permission(rbac.current_user_id(), p_resource, 'update')
-        or (rbac.current_user_id() is null
+        or (rbac.is_operator()
             -- `session_user` is a reserved SQL expression, not a function
             -- in a schema: qualifying it the way this file qualifies
             -- everything else fails to parse ("missing FROM-clause entry for

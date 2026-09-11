@@ -61,7 +61,21 @@ insert into workflow.definitions (name, spec) values
 ('t_sr_secret', '{"steps":[{"key":"q","kind":"sql","queue":"none",
     "input":{"statement":"select v from t_sr_secret"}}]}'),
 ('t_sr_write', '{"steps":[{"key":"q","kind":"sql","queue":"none",
-    "input":{"statement":"insert into t_sr_notes values (null, ''written'')", "write":true}}]}');
+    "input":{"statement":"insert into t_sr_notes values (null, ''written'')", "write":true}}]}'),
+-- §4b's: a write the person may make, and three that would change who they are.
+('t_sr_log_ok', '{"steps":[{"key":"q","kind":"sql","queue":"none",
+    "input":{"statement":"insert into t_sr_log select body from t_sr_notes", "write":true}}]}'),
+('t_sr_set_claims', '{"steps":[{"key":"q","kind":"sql","queue":"none",
+    "input":{"statement":"set local request.jwt.claims = ''{\"sub\":\"15151515-0000-4000-8000-00000000000a\"}''", "write":true}}]}'),
+('t_sr_do_claims', '{"steps":[{"key":"q","kind":"sql","queue":"none",
+    "input":{"statement":"do $x$ begin set local request.jwt.claims = ''{\"sub\":\"15151515-0000-4000-8000-00000000000a\"}''; insert into t_sr_log select body from t_sr_notes; end $x$", "write":true}}]}'),
+('t_sr_two_statements', '{"steps":[{"key":"q","kind":"sql","queue":"none",
+    "input":{"statement":"insert into t_sr_log values (''first''); set local request.jwt.claims = ''{\"sub\":\"15151515-0000-4000-8000-00000000000a\"}''", "write":true}}]}');
+
+-- Where §4b's writes land: a person may insert, and what they insert is what
+-- they could read -- so a row saying `admin note` means the step read as admin.
+create table t_sr_log (body text);
+grant insert on t_sr_log to authenticated;
 
 -- Start a workflow as a given caller (null = the system) and report its only
 -- step: status, the bodies it read, how many matrix children it made, the error.
@@ -151,6 +165,43 @@ begin
         raise exception 'a member''s run wrote where the member could not (step %, error %)',
             r.status, coalesce(r.err, '(none)');
     end if;
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 4b. A WRITE STEP CANNOT CHANGE WHOSE STEP IT IS (REM-64).
+--
+-- The claims are set by execute_for and the statement runs as api_viewer,
+-- which holds no set_config -- but a write step is EXECUTED, not wrapped, so a
+-- SET, a DO block issuing one, or a second statement after an innocent first
+-- would rewrite who the step acts for. Each is attempted by the member; each
+-- must fail before anything is written, and the member's ordinary write must
+-- still succeed and still report its row count. `admin note` in t_sr_log would
+-- mean a step read as the admin.
+-- ---------------------------------------------------------------------
+do $$
+declare r record; v_name text;
+begin
+    select * into r from pg_temp.run_as('15151515-0000-4000-8000-00000000000b', 't_sr_log_ok');
+    if r.status is distinct from 'succeeded'
+       or (select t.output->'result'->>'rows_affected' from workflow.tasks t
+            join workflow.runs ru on ru.id = t.run_id
+            join workflow.definitions d on d.id = ru.workflow_def_id
+           where d.name = 't_sr_log_ok' order by t.created_at desc limit 1) is distinct from '1' then
+        raise exception 'a member''s own write step no longer runs, or no longer reports its count (step %, error %)',
+            r.status, coalesce(r.err, '(none)');
+    end if;
+    foreach v_name in array array['t_sr_set_claims', 't_sr_do_claims', 't_sr_two_statements'] loop
+        select * into r from pg_temp.run_as('15151515-0000-4000-8000-00000000000b', v_name);
+        if r.status is distinct from 'failed' or coalesce(r.err, '') not like '%must be one INSERT, UPDATE, DELETE or MERGE%' then
+            raise exception '% ran for a member (step %, error %) -- a write step changed whose step it was',
+                v_name, r.status, coalesce(r.err, '(none)');
+        end if;
+    end loop;
+    if (select string_agg(body, ',' order by body) from t_sr_log) is distinct from 'member note' then
+        raise exception 't_sr_log holds [%], where only the member''s own read should have landed',
+            (select string_agg(body, ',' order by body) from t_sr_log);
+    end if;
+    raise notice 'workflow/15: a write step is one INSERT, UPDATE, DELETE or MERGE -- a SET, a DO block or a second statement is refused';
 end $$;
 
 -- ---------------------------------------------------------------------

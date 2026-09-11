@@ -456,7 +456,7 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 create or replace function workflow.may_define()
 returns boolean as $$
     select rbac.has_permission(rbac.current_user_id(), 'workflows', 'update')
-        or (rbac.current_user_id() is null
+        or (rbac.is_operator()
             and pg_catalog.has_table_privilege(
                     session_user, 'workflow.definitions'::regclass, 'insert'));
 $$ language sql stable security definer set search_path = pg_catalog, public;
@@ -532,10 +532,42 @@ declare
     v_count bigint;
 begin
     if p_write then
-        if p_params is not null then execute p_statement using p_params;
-        else                         execute p_statement;
-        end if;
-        get diagnostics v_count = row_count;
+        -- ONE STATEMENT THAT CANNOT CHANGE WHOSE STEP THIS IS, and Postgres's
+        -- grammar decides, not a pattern. A read is wrapped as a subquery
+        -- below, where nothing but a query parses. A write used to be executed
+        -- as written, so `SET LOCAL request.jwt.claims = ...`, a DO block that
+        -- issues one, or a second statement after an innocent first ran as
+        -- api_viewer and rewrote who the step acts for -- and SET is a
+        -- statement, not a function a grant can take away (REM-64).
+        --
+        -- So a write is wrapped too: the body of a data-modifying CTE, which
+        -- parses only as ONE INSERT, UPDATE, DELETE or MERGE, and whose count
+        -- is the row count the step reports. PREPARE was tried first and is
+        -- not enough: plpgsql's EXECUTE runs a string of several statements
+        -- one after another, USING or not, so `prepare x as insert ...; set
+        -- local ...` prepared the insert and ran the SET (measured, and
+        -- workflow/15 §4b is the case). Trailing semicolons are dropped, since
+        -- an author writes them and a CTE body cannot hold one. A system run
+        -- does not come through here: it runs as the engine, the operator's
+        -- trade (run_sql).
+        begin
+            if p_params is not null then
+                execute format('with p8_write as (%s returning 1) select count(*) from p8_write',
+                               regexp_replace(p_statement, '[[:space:];]+$', ''))
+                into v_count using p_params;
+            else
+                execute format('with p8_write as (%s returning 1) select count(*) from p8_write',
+                               regexp_replace(p_statement, '[[:space:];]+$', ''))
+                into v_count;
+            end if;
+        exception when syntax_error then
+            raise exception
+                'a write step run for a person must be one INSERT, UPDATE, DELETE or MERGE '
+                'statement without its own RETURNING, and this is not (%)', sqlerrm
+                using errcode = 'syntax_error',
+                      hint = 'a SET, a DO block or a second statement would change whose '
+                             'rows the step acts on; write the change as one statement';
+        end;
         return jsonb_build_object('rows_affected', v_count);
     elsif p_params is not null then
         execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
@@ -837,7 +869,10 @@ begin
     select pg_get_userbyid(c.relowner) into v_tbl_owner
       from pg_class c join pg_namespace n on n.oid = c.relnamespace
      where n.nspname = 'workflow' and c.relname = 'schedules';
-    if pg_has_role(session_user, v_tbl_owner, 'member') then
+    -- AND NOBODY IS BEHIND IT (rbac.is_operator). Membership alone returned
+    -- early with a person's claims in force, so a session that could become
+    -- the owner skipped the owner check below even when acting for someone.
+    if rbac.is_operator() and pg_has_role(session_user, v_tbl_owner, 'member') then
         return;
     end if;
 

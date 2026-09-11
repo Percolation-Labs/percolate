@@ -892,8 +892,41 @@ $fn$ language sql immutable;
 -- would say that a null org is acceptable and is the exact ambiguity this
 -- change removes. It is also the only form that stays cheap: shared_org_id()
 -- is immutable and argument-free, so the planner folds it to a literal once.
+-- WHO IS NOBODY: the one rule for "there is no person behind this call".
+--
+-- Every row rule has an arm for the operator -- a migration, a seed, the
+-- engine's own system run, the worker -- and it used to be spelled four ways:
+-- "no claims" here and in may_write, may_access_org and default_visibility;
+-- "no user id and the login can write the table" in may_define, may_author
+-- and may_upload; "the login can become the table's owner" in
+-- assert_schedule_access; "no run executing" in a package. Four spellings of
+-- one fact is how one of them drifts
+-- (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §3, REM-44).
+--
+-- Two conditions, and both are now things a caller cannot fake:
+--   * no claims. Since user-rbac/roles.sql §6 only the roles that set identity
+--     on someone's behalf hold set_config, so a signed-in caller cannot clear
+--     their own claims to become nobody -- which, before, made every one of
+--     these arms a door;
+--   * a login that is not one of the doors a person arrives through. PostgREST
+--     and every percolate-core service a person talks to log in as
+--     `authenticator`, the role that switches into authenticated or web_anon.
+--     A request that reaches the database that way with no claims is an
+--     anonymous person, not an operator -- and was counted as one. DIRECT
+--     membership is read from pg_auth_members rather than pg_has_role, which
+--     answers yes for a superuser about every role and would make the psql
+--     session a person.
+create or replace function rbac.is_operator() returns boolean as $$
+    select nullif(current_setting('request.jwt.claims', true), '') is null
+       and not exists (
+           select 1 from pg_catalog.pg_auth_members m
+            where m.member = (select oid from pg_catalog.pg_roles where rolname = session_user)
+              and m.roleid in (select oid from pg_catalog.pg_roles
+                                where rolname in ('authenticated', 'web_anon')));
+$$ language sql stable parallel safe set search_path = pg_catalog, public;
+
 create or replace function rbac.scope_write_predicate() returns text as $fn$
-    select $q$(nullif(current_setting('request.jwt.claims', true), '') is null
+    select $q$((select rbac.is_operator())
        or ((owner_id is null or owner_id = (select rbac.current_user_id()))
            and (org_id = rbac.shared_org_id()
                 or org_id in (select rbac.current_org_ids()))
@@ -940,7 +973,7 @@ $$ language sql stable parallel safe;
 create or replace function rbac.may_write(
     p_owner_id uuid, p_org_id uuid, p_visibility text
 ) returns boolean as $$
-    select nullif(current_setting('request.jwt.claims', true), '') is null
+    select rbac.is_operator()
         or ((p_owner_id is null or p_owner_id = rbac.current_user_id())
             and (rbac.is_shared_org(p_org_id)
                  or p_org_id in (select rbac.current_org_ids()))
@@ -968,7 +1001,7 @@ $$ language sql stable parallel safe;
 -- was standing in for.
 create or replace function rbac.may_access_org(p_org_id uuid)
 returns boolean as $$
-    select nullif(current_setting('request.jwt.claims', true), '') is null
+    select rbac.is_operator()
         or rbac.is_shared_org(p_org_id)
         or p_org_id in (select rbac.current_org_ids());
 $$ language sql stable parallel safe;
@@ -1015,7 +1048,7 @@ returns text as $$
         -- configuration -- the seeded agents, the sample corpus, a migration.
         -- These are for everyone by construction, and it is the only case
         -- where "for everyone" is not a decision somebody should have to make.
-        when nullif(current_setting('request.jwt.claims', true), '') is null then 'public'
+        when rbac.is_operator() then 'public'
         else 'private'
     end;
 $$ language sql stable parallel safe;
@@ -2128,6 +2161,8 @@ grant execute on function rbac.current_user_id() to web_anon, authenticated;
 grant execute on function rbac.current_org_ids() to web_anon, authenticated, api_viewer, worker;
 grant execute on function rbac.may_read(uuid, uuid, text) to web_anon, authenticated, api_viewer, worker;
 grant execute on function rbac.may_write(uuid, uuid, text) to web_anon, authenticated, api_viewer, worker;
+-- Every write policy calls it, and a policy runs as the caller.
+grant execute on function rbac.is_operator() to web_anon, authenticated, api_viewer, worker, scheduler;
 grant execute on function rbac.may_access_org(uuid) to web_anon, authenticated, api_viewer, worker;
 -- THE SENTINEL TRIO, and they are on this list for a reason that only shows up
 -- from the caller's seat.
