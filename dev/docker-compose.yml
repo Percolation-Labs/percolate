@@ -92,11 +92,12 @@ services:
     volumes:
       # NOTHING IS MOUNTED AT /docker-entrypoint-initdb.d, and that is a
       # deletion rather than an omission. This file used to bind-mount ./init
-      # over that directory, which REPLACES it -- so the image's own
-      # `image-init/00-percolate.sh` never ran here, and `init/00-extensions.sql`,
-      # `init/01-percolate.sql` and `init/07-build-stamp.sh` existed to restate
-      # what it does. One bootstrap, two homes, and the dev stack was the one
-      # place that did not exercise the shipped path.
+      # over that directory, which REPLACES it -- so the image's own hook
+      # (`image-init/`) never ran here, and init/ carried three files that
+      # restated what it does. One bootstrap, two homes, and the dev stack was
+      # the one place that did not exercise the shipped path. Those three files
+      # are gone now; `image-init/00-superuser.sql` is the one copy, and every
+      # script that stands up a database runs it.
       #
       # It also broke a from-zero start outright. initdb runs whatever is in
       # that directory against the extension the IMAGE ships, and `:19` is a
@@ -113,9 +114,10 @@ services:
       # TREE's schema and samples arrive afterwards through `dev/reload.sh` --
       # install this tree's extension FIRST, then apply init/02..09 -- which is
       # what `dev/ci-database.sh` has always done and what `dev/stacks.sh up`
-      # now does for any new database. The init/ files are still there and are
-      # still used by `dev/release-rehearsal.sh`, which mounts the directory at
-      # a LOCALLY BUILT image, where the versions do match.
+      # now does for any new database. The init/ samples are also mounted, one
+      # file at a time beside the image's own hook, by
+      # `dev/release-rehearsal.sh`, at a LOCALLY BUILT image where the versions
+      # do match.
       #
       # MOUNTED AT /var/lib/postgresql, NOT .../data, and on 18+ that is the
       # difference between a stack that starts and one that restart-loops --

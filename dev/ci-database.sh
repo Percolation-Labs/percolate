@@ -97,23 +97,16 @@ OFFERED=$(docker exec "$CONTAINER" psql -U p8 -d postgres -tAc \
     "select default_version from pg_available_extensions where name='percolate'")
 [ "$OFFERED" = "$V" ] || { echo "image offers percolate $OFFERED, tree is $V" >&2; exit 1; }
 
-# `set role app_owner` is load-bearing: an extension creates its objects as
-# whoever runs it, so a superuser here leaves every RLS policy inert while
-# reporting success.
+# The superuser step is the image's own file, from THIS tree: the published
+# image ran its older copy at initdb, and a tree that adds a grant needs it run
+# again. Then `set role app_owner`, without which none of it holds: an
+# extension creates its objects as whoever runs it, so a superuser here leaves
+# every RLS policy inert while reporting success.
+docker cp dev/image-init/00-superuser.sql "$CONTAINER:/tmp/00-superuser.sql" >/dev/null
 docker exec -i "$CONTAINER" psql -U p8 -d "$DB" -v ON_ERROR_STOP=1 -q <<'SQL'
 drop extension if exists percolate cascade;
-create extension if not exists pgcrypto;
-create extension if not exists pg_trgm;
-create extension if not exists vector;
+\i /tmp/00-superuser.sql
 create extension if not exists pg_cron;
-create extension if not exists percolate_parser;
-do $$ begin execute format('grant create on database %I to app_owner', current_database()); end $$;
-grant create, usage on schema public to app_owner;
--- bootstrap.sql's grant, for an image built before it (0.2.0)
-grant authenticated to api_viewer;
--- and its set_config revoke, per database (specs/user-rbac/roles.sql §6)
-revoke execute on function pg_catalog.set_config(text, text, boolean) from public;
-grant execute on function pg_catalog.set_config(text, text, boolean) to authenticator, app_owner, worker, scheduler;
 set role app_owner;
 create extension percolate cascade;
 reset role;

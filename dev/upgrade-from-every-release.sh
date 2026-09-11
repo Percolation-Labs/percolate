@@ -14,8 +14,9 @@
 #
 # So: one database per tag, installed from that tag's own SQL, carrying a
 # finished workflow run -- the row the status rename exists for -- then
-# upgraded with this tree's script, after the superuser lines an upgrader runs
-# (dev/upgrade-with-data.sh rehearses that the update refuses without them).
+# upgraded with this tree's script, in a database that has had the superuser
+# file an upgrader runs (dev/image-init/00-superuser.sql; dev/upgrade-with-data.sh
+# rehearses that the update refuses without it).
 # Lean by design: it asks "does every path RUN and keep its rows", and leaves
 # "does it converge" and "does the data survive administration" to the other
 # two, which ask them of the newest tag in depth.
@@ -47,6 +48,7 @@ done
 q() { docker exec -i "$C" psql -U p8 -d "$1" -v ON_ERROR_STOP=1 -q "${@:2}"; }
 docker cp "extension/percolate/sql/percolate--$V.sql" "$C:$EXT/" >/dev/null
 docker cp extension/percolate/percolate.control "$C:$EXT/" >/dev/null
+docker cp dev/image-init/00-superuser.sql "$C:/tmp/00-superuser.sql" >/dev/null
 
 failed=0
 for old in $TAGS; do
@@ -63,10 +65,11 @@ for old in $TAGS; do
     docker cp "$up" "$C:$EXT/" >/dev/null
 
     q percolate -c "create database $db" >/dev/null
-    q "$db" -c "create extension if not exists pgcrypto; create extension if not exists pg_trgm;
-                create extension if not exists vector; create extension if not exists percolate_parser;
-                grant create on database $db to app_owner;
-                grant create, usage on schema public to app_owner;" >/dev/null
+    # The image's superuser step, once, before the old install: every statement
+    # in it was already true of a database 0.1.x installed into, or is one the
+    # old release never reached for (it installs as app_owner, which keeps
+    # set_config), so running it first is the order a new database gets.
+    q "$db" -f /tmp/00-superuser.sql >/dev/null
     if ! out=$(q "$db" -c "set client_min_messages = warning" -c "set role app_owner" \
                    -c "create extension percolate version '$old'" 2>&1); then
         echo "  $old: its own release no longer installs on the $PREV image:"
@@ -79,10 +82,6 @@ steps:
   - id: now
     sql: {function: p8ql, args: ['SELECT now()']}
 \$y\$)" -c "select workflow.start_workflow('upg','{}'::jsonb)" >/dev/null
-    q "$db" -c "set client_min_messages = warning;
-                grant authenticated to api_viewer;
-                revoke execute on function pg_catalog.set_config(text, text, boolean) from public;
-                grant execute on function pg_catalog.set_config(text, text, boolean) to authenticator, app_owner, worker, scheduler;" >/dev/null
     if out=$(q "$db" -c "set client_min_messages = warning" -c "set role app_owner" \
                  -c "alter extension percolate update to '$V'" 2>&1); then
         got=$(q "$db" -tAc "select extversion from pg_extension where extname='percolate'")

@@ -75,47 +75,45 @@ for f in "percolate--$V.sql" "percolate--$PREV--$V.sql"; do
 done
 docker cp extension/percolate/percolate.control "$UPGC:/usr/share/postgresql/19/extension/" >/dev/null
 
-# THE UPGRADE'S ONE SUPERUSER STEP, rehearsed the way an upgrader meets it. From
-# 0.2.0 a workflow step runs as the person who started its run through api_viewer,
-# which needs authenticated's grants -- a cluster-level grant an extension
-# cannot make. A cluster bootstrapped earlier lacks it, and the update must
-# REFUSE and name the line rather than install a build whose workflows fail on
-# their first read. So: the refusal first, then the line, then the update.
-if [ "$(docker exec "$UPGC" psql -U p8 -d percolate -tAc \
-        "select pg_has_role('api_viewer','authenticated','member')")" != "t" ]; then
+# THE UPGRADE'S SUPERUSER STEP, rehearsed the way an upgrader meets it: the
+# update refuses, naming what is missing, and then the image's own
+# 00-superuser.sql -- the file an upgrader runs -- lets it through. Two refusals,
+# because the preflight names one missing grant at a time and each is its own
+# door:
+#
+#   * From 0.2.0 a workflow step runs as the person who started its run through
+#     api_viewer, which needs authenticated's grants -- a cluster-level grant an
+#     extension cannot make. Without it the workflows of every upgraded
+#     database fail on their first read.
+#   * Until 0.2.0 any role could call set_config, so a signed-in caller could
+#     write someone else's id into request.jwt.claims (user-rbac/roles.sql §6).
+#     The revoke is per database, so an upgraded database has not had it.
+#
+# The first refusal is answered by hand, with the one statement it names, only
+# to reach the second; the superuser file then does both.
+refuses() {  # $1 the text the refusal must contain, $2 what is missing
+    local out
     if out=$(docker exec "$UPGC" psql -U p8 -d percolate -v ON_ERROR_STOP=1 -q \
                -c "set role app_owner; alter extension percolate update;" 2>&1); then
-        echo "the update ran on a cluster without 'grant authenticated to api_viewer';" \
-             "its preflight should have refused" >&2
+        echo "the update ran on a database where $2; its preflight should have refused" >&2
         exit 1
     fi
-    echo "$out" | grep -q "grant authenticated to api_viewer" || {
-        echo "the update refused, but not with the line an upgrader must run:" >&2
+    echo "$out" | grep -qF "$1" || {
+        echo "the update refused, but not with the statement an upgrader must run:" >&2
         echo "$out" >&2; exit 1; }
+}
+if [ "$(docker exec "$UPGC" psql -U p8 -d percolate -tAc \
+        "select pg_has_role('api_viewer','authenticated','member')")" != "t" ]; then
+    refuses "grant authenticated to api_viewer" "api_viewer is not a member of authenticated"
     docker exec "$UPGC" psql -U p8 -d percolate -v ON_ERROR_STOP=1 -q \
         -c "grant authenticated to api_viewer;"
 fi
-
-# THE SECOND SUPERUSER STEP, rehearsed the same way. Until 0.2.0 any role could
-# call set_config, so a signed-in caller could write someone else's id into
-# request.jwt.claims (user-rbac/roles.sql §6). The revoke is per database and
-# needs a superuser, so an upgraded database has not had it -- and the update
-# must refuse, naming the statement, rather than finish with the door open.
 if [ "$(docker exec "$UPGC" psql -U p8 -d percolate -tAc \
         "select has_function_privilege('authenticated','pg_catalog.set_config(text,text,boolean)','execute')")" = "t" ]; then
-    if out=$(docker exec "$UPGC" psql -U p8 -d percolate -v ON_ERROR_STOP=1 -q \
-               -c "set role app_owner; alter extension percolate update;" 2>&1); then
-        echo "the update ran on a database where authenticated can still call set_config;" \
-             "its preflight should have refused" >&2
-        exit 1
-    fi
-    echo "$out" | grep -q "revoke execute on function pg_catalog.set_config" || {
-        echo "the update refused, but not with the statement an upgrader must run:" >&2
-        echo "$out" >&2; exit 1; }
-    docker exec "$UPGC" psql -U p8 -d percolate -v ON_ERROR_STOP=1 -q \
-        -c "revoke execute on function pg_catalog.set_config(text, text, boolean) from public;
-            grant execute on function pg_catalog.set_config(text, text, boolean) to authenticator, app_owner, worker, scheduler;"
+    refuses "pg_catalog.set_config(text, text, boolean) from public" "authenticated can still call set_config"
 fi
+docker cp dev/image-init/00-superuser.sql "$UPGC:/tmp/00-superuser.sql" >/dev/null
+docker exec "$UPGC" psql -U p8 -d percolate -v ON_ERROR_STOP=1 -q -f /tmp/00-superuser.sql
 
 docker exec "$UPGC" psql -U p8 -d percolate -v ON_ERROR_STOP=1 -q \
     -c "set role app_owner; alter extension percolate update;"

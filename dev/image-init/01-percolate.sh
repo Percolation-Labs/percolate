@@ -1,85 +1,32 @@
 #!/bin/bash
-# Baked into percolationlabs/percolate-postgres:19 and run once at initdb.
+# Baked into percolationlabs/percolate-postgres:19 and run once at initdb,
+# after 00-superuser.sql has made the roles and the per-database grants.
 #
 # WHY THIS IS IN THE IMAGE. Without it the image ships an extension that is
 # available and not installed, so `docker run` gives you a Postgres with
 # nothing in it and the first thing every user does is find and copy a
-# bootstrap script. The bootstrap is four statements and two of them are
+# bootstrap script. The bootstrap is a few statements and two of them are
 # subtle, which is exactly what belongs in an image rather than in everybody's
 # compose file.
 #
-# A SHELL script, not .sql, because the role passwords have to come from the
-# environment: initdb runs .sql files through psql with no variables set, so a
-# .sql version can only hard-code them.
+# TWO FILES, AND ONLY THE FIRST IS THE SUPERUSER'S. 00-superuser.sql is the
+# one copy of the superuser step, which every dev script also runs; this is
+# what the image does after it: install the system as app_owner, start the
+# clock, close template1, stamp the build. It used to carry its own copy of
+# the roles and grants, which is how #24's misordered grant reached it.
 #
-# dev/ shadows this. dev/docker-compose.yml bind-mounts ./init over
-# /docker-entrypoint-initdb.d, which REPLACES the directory, so the harness
-# keeps its own seeded variant and this never runs twice.
+# A SHELL script, not .sql, for two reasons: template1 is a second database,
+# and the build stamp may legitimately be absent on a hand-assembled image,
+# which psql has no clean way to skip.
+#
+# The whole directory is the hook: dev/Dockerfile.pg19 copies it over
+# /docker-entrypoint-initdb.d, k8s/kind/up.sh puts it in the ConfigMap it
+# mounts there, and to try a change without building anything, mount
+# dev/image-init over that directory of any published image.
 set -e
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-AUTH_PW="${P8_AUTHENTICATOR_PASSWORD:-authpass}"
-WORKER_PW="${P8_WORKER_PASSWORD:-workerpass}"
-
-if [ -z "${P8_AUTHENTICATOR_PASSWORD:-}" ] || [ -z "${P8_WORKER_PASSWORD:-}" ]; then
-    echo "percolate: WARNING -- using the default 'authpass'/'workerpass' role passwords." >&2
-    echo "percolate: set P8_AUTHENTICATOR_PASSWORD and P8_WORKER_PASSWORD for anything" >&2
-    echo "percolate: reachable by anyone else. They are printed in this image's source." >&2
-fi
-
-psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
-     -v auth_pw="$AUTH_PW" -v worker_pw="$WORKER_PW" <<'EOSQL'
--- 1. Roles. Cluster-level, so a non-superuser cannot create them -- which is
---    the whole reason this cannot be left to CREATE EXTENSION.
---
---    Neither app_owner nor api_viewer may ever be a superuser: a superuser
---    bypasses RLS unconditionally, and app_owner is about to own every table.
---    percolate.control sets superuser = false and the extension's preflight
---    refuses the superuser case rather than installing broken.
-create role app_owner nologin;
-create role api_viewer nologin;
-grant api_viewer to app_owner;          -- so app_owner can hand it the views
-create role web_anon nologin;
-create role authenticated nologin;
-create role authenticator noinherit login password :'auth_pw';
-grant web_anon to authenticator;
-grant authenticated to authenticator;
--- After `create role authenticated`, not before it: this line used to sit two
--- above it, and under ON_ERROR_STOP the image's first start stopped here.
-grant authenticated to api_viewer;      -- so a workflow step can read as the person it runs for
-
--- The worker and the Content Server connect as themselves and hold NO table
--- grants -- every interaction is a SECURITY DEFINER function call. That is
--- what makes "bring your own worker" safe to offer: a compromised worker can
--- claim and complete tasks, and nothing else.
-create role worker login password :'worker_pw';
-
--- LOGIN, unlike the spec's default: pg_cron runs each job over a libpq
--- connection as the job's username, so a NOLOGIN scheduler means "cron job N
--- connection failed" once a minute with the job still showing active. No
--- password -- the connection is loopback inside the container, which pg_hba
--- trusts -- and no table grants, since all three jobs are SECURITY DEFINER.
-create role scheduler login;
-
--- 1b. Nobody a person can become may rewrite who they are: set_config writes
---     request.jwt.claims, which every row rule takes to be the caller. Per
---     database, because a function's ACL lives in that database's pg_proc --
---     template1 is closed below the heredoc so a database created later starts
---     the same way. CREATE EXTENSION percolate refuses to run without it.
---     (specs/user-rbac/roles.sql §6)
-revoke execute on function pg_catalog.set_config(text, text, boolean) from public;
-grant execute on function pg_catalog.set_config(text, text, boolean)
-    to authenticator, app_owner, worker, scheduler;
-
--- 2. The extensions a non-superuser cannot install.
-create extension if not exists vector;
-create extension if not exists percolate_parser;
-
--- 3. Room for app_owner to create things.
-do $$ begin
-    execute format('grant create on database %I to app_owner', current_database());
-end $$;
-grant create, usage on schema public to app_owner;
-
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<'EOSQL'
 -- 4. The whole system, installed BY app_owner so it owns what it creates.
 set role app_owner;
 create extension percolate cascade;
@@ -143,14 +90,12 @@ begin
 end $$;
 EOSQL
 
-# template1 gets the same set_config revoke as the database above, so a
-# database somebody creates later -- `createdb`, CREATE DATABASE -- already has
-# it, and CREATE EXTENSION percolate there does not stop to ask for it.
-psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname template1 -q <<'EOSQL'
-revoke execute on function pg_catalog.set_config(text, text, boolean) from public;
-grant execute on function pg_catalog.set_config(text, text, boolean)
-    to authenticator, app_owner, worker, scheduler;
-EOSQL
+# template1 runs the same superuser file, so a database somebody creates later
+# -- `createdb`, CREATE DATABASE -- already has set_config closed, and CREATE
+# EXTENSION percolate there does not stop to ask for it. The file knows when
+# it is in a template and stops after the revoke.
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname template1 -q \
+     -f "$HERE/00-superuser.sql"
 
 # Provenance, applied after the extension that defines the recorder. Tolerated
 # if absent so a hand-assembled image still starts -- an unstamped build
