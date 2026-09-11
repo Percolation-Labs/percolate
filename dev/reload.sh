@@ -172,8 +172,18 @@ done
 
 echo "==> auditing"
 docker cp "$ROOT/surface.sql" "$CONTAINER:/tmp/surface.sql" >/dev/null
-docker exec -i "$CONTAINER" psql -U "$SUPERUSER" -d "$DB" -f /tmp/surface.sql 2>&1 \
-  | grep -iE 'SURFACE (COMPLETE|INCOMPLETE)|ROUND TRIP (COMPLETE|INCOMPLETE)|^ERROR' || true
+# THE EXIT CODE, AND `ERROR:` ANYWHERE ON THE LINE -- the init loop above
+# learned this and the audit had not. The filter here was `^ERROR` piped into
+# `|| true`: psql prints `psql:/tmp/surface.sql:1057: ERROR: …`, so the pattern
+# never matched and the status was discarded, and a reload whose audit failed
+# still said "is current". Found when a new function was reachable by
+# `authenticated` and undeclared: surface.sql refused it, and reload.sh
+# reported success three times in a row.
+AUDIT=$(docker exec -i "$CONTAINER" psql -U "$SUPERUSER" -d "$DB" -v ON_ERROR_STOP=1 \
+          -f /tmp/surface.sql 2>&1) && AUDIT_OK=1 || AUDIT_OK=0
+printf '%s\n' "$AUDIT" \
+  | grep -E 'SURFACE (COMPLETE|INCOMPLETE|CLOSED)|ROUND TRIP (COMPLETE|INCOMPLETE)|ERROR:' || true
+[ "$AUDIT_OK" = 1 ] || { echo "==> the audit FAILED against $DB -- see above" >&2; exit 1; }
 
 echo
 echo "==> $DB is current. Connect with:"
