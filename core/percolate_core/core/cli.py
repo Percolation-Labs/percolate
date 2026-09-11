@@ -340,6 +340,9 @@ def sample_load(
             f"{manifest['name']} needs {', '.join(missing)} in this process's environment.\n"
             "  The corpus is embedded by the real pipeline rather than shipped as\n"
             "  literal vectors, so loading it costs one embedding call per chunk.\n"
+            "  The stack's ingest worker makes that call, so it needs the key too:\n"
+            "  on compose, set it where `docker compose up` runs (its shell or the\n"
+            "  .env beside docker-compose.yml) before the stack starts.\n"
             "  Set the key, or pass --skip-documents to load everything else.",
             fg=typer.colors.RED,
             err=True,
@@ -380,7 +383,7 @@ def sample_load(
         upload_token = None  # minted below, once we know the user id
 
     async def _run() -> None:
-        nonlocal upload_token
+        nonlocal upload_token, stalled, still_ingesting
         yaml = samples._yaml()
         conn = await _connect(target_dsn)
         try:
@@ -496,12 +499,20 @@ def sample_load(
                                 f"  upload token covers {len(orgs)} org(s), "
                                 f"and {as_email} is a member of each"
                             )
-                    done = await _upload_documents(where, content_url, upload_token, yaml)
+                    done, pending = await _upload_documents(
+                        conn, where, content_url, upload_token, yaml)
+                    for line in done:
+                        typer.echo(f"  {line}")
+                    stalled, finished = await _first_embed_verdict(conn, pending)
+                    still_ingesting = 0 if finished else len(pending)
+                    continue
                 for line in done:
                     typer.echo(f"  {line}")
         finally:
             await conn.close()
 
+    stalled: str | None = None
+    still_ingesting = 0
     try:
         asyncio.run(_run())
     except samples.SampleError as err:
@@ -509,25 +520,103 @@ def sample_load(
         raise typer.Exit(1)
 
     typer.echo("")
+    if stalled:
+        # THE KEY THE CHECK ABOVE ASKED FOR IS NOT THE KEY THAT EMBEDS. This
+        # process only uploads; the ingest worker makes the embedding call, and
+        # it reads LLM_API_KEY from ITS OWN environment -- on compose, the
+        # shell or .env that `docker compose up` ran from. A key exported after
+        # the stack came up passed the gate above and embedded nothing: every
+        # embed task retried on `credential_ref 'LLM_API_KEY' is not set` and
+        # failed for good while this command printed "loaded". Reported here,
+        # from the first failed attempt, rather than left for a SEARCH that
+        # returns nothing.
+        typer.secho(f"loaded, but the corpus is not embedding: {stalled}", fg=typer.colors.RED, err=True)
+        typer.secho(
+            "  The ingest worker makes that call and reads the key from its own\n"
+            "  environment. On compose, restart it with the key set:\n"
+            "    LLM_API_KEY=sk-... docker compose up -d\n"
+            "  (or put it in the .env beside docker-compose.yml), then run this\n"
+            "  command again -- it replaces documents whose ingestion failed.",
+            err=True,
+        )
+        raise typer.Exit(1)
     if skip_documents:
         # No documents were posted, so nothing is queued on `ingest` and the
         # embed-watch below would show an empty result forever. Point at the
         # thing that is actually loaded instead.
         typer.echo("loaded (documents skipped). Load the corpus later with the same "
                    "command and no --skip-documents, once LLM_API_KEY is set.")
+    elif not wants_documents:
+        typer.echo("loaded.")
+    elif not still_ingesting:
+        typer.echo("loaded, and every document is embedded.")
     else:
         typer.echo("loaded. The corpus embeds asynchronously -- watch it with:")
         typer.echo("  select step_key, status, attempts from workflow.tasks where queue = 'ingest';")
 
 
-async def _upload_documents(where: Any, content_url: str, token: str, yaml: Any) -> list[str]:
+def _token_subject(token: str) -> str | None:
+    """The `sub` of a token, read without verifying it.
+
+    Used only to find the rows this same caller uploaded on an earlier run, and
+    the Content Server verifies the token properly on every upload.
+    """
+    import base64
+    import json
+
+    try:
+        body = token.split(".")[1]
+        return json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4))).get("sub")
+    except (IndexError, ValueError):
+        return None
+
+
+async def _earlier_uploads(conn: Any, owner: str, channel: str, title: str) -> list[Any]:
+    """What an earlier run of this load left for one document.
+
+    Matched on the uploader, the channel and the title, so nothing another
+    user uploaded can match. Not on the org: a title is unique within a
+    sample's index, and a document whose `org:` was edited is exactly the
+    earlier version a re-run should replace.
+    """
+    return await conn.fetch(
+        """
+        select r.id::text as id, f.checksum, w.status as ingest
+          from content.resources r
+          join content.channels c on c.id = r.channel_id
+          left join content.files f on f.id = r.file_id
+          left join workflow.runs w on w.external_id = 'ingest:' || r.id::text
+         where r.owner_id = $1::uuid and c.name = $2 and r.title = $3
+        """,
+        owner, channel, title,
+    )
+
+
+async def _upload_documents(conn: Any, where: Any, content_url: str, token: str,
+                            yaml: Any) -> tuple[list[str], list[str]]:
     """POST each document to the Content Server, as any uploader would.
 
     Through the real endpoint rather than an INSERT, because that is the whole
     claim being demonstrated: a file arrives and becomes chunks, vectors and
     graph nodes with nothing else run by hand. An INSERT into
     content.resource_chunks would skip precisely the part worth showing.
+
+    A SECOND RUN REPLACES WHAT DID NOT WORK AND LEAVES WHAT DID. Every run used
+    to post every document again, and an upload is a new resource every time,
+    so a re-run -- the documented way to pick up an edit, and the obvious
+    response to a load whose embeddings failed for want of a key -- either
+    duplicated the corpus or, on an extension that keyed documents by title,
+    failed every parse on `idx_node_keys_canonical`. The rows this caller
+    uploaded before are therefore looked up first: identical bytes whose
+    ingestion is running or finished are kept, and anything else under the
+    same title -- a failed ingest, an older version, a duplicate from an
+    earlier run -- is deleted before the upload that replaces it.
+
+    Returns the lines to print and the ids of the resources whose ingestion is
+    still to finish: everything it uploaded, and anything it kept mid-retry.
     """
+    import hashlib
+
     import httpx
 
     # Imported here as well as in the caller: this function reaches for
@@ -542,14 +631,55 @@ async def _upload_documents(where: Any, content_url: str, token: str, yaml: Any)
     if entries is None:
         entries = [{"file": p.name, "title": p.stem} for p in sorted(where.glob("*.md"))]
 
-    done = []
+    owner = _token_subject(token)
+    done: list[str] = []
+    pending: list[str] = []
     async with httpx.AsyncClient(timeout=60) as client:
+        # WAIT FOR THE CONTENT SERVER, then post. Run straight after
+        # `docker compose up`, the published port accepts a connection before
+        # uvicorn is listening behind it, and the first upload died on
+        # `ReadError` after every earlier step had written. Probing /health
+        # rather than retrying the POST, because a POST that failed mid-read
+        # may already have registered the document.
+        base = content_url.rstrip("/")
+        for _ in range(30):
+            try:
+                if (await client.get(f"{base}/health", timeout=5)).status_code == 200:
+                    break
+            except httpx.TransportError:
+                pass
+            await asyncio.sleep(2)
+        else:
+            raise samples.SampleError(
+                f"the Content Server at {base} did not answer /health for a minute "
+                "-- is the stack up, and is --content-url its published port?")
         for e in entries:
             body = (where / e["file"]).read_bytes()
+            title = e.get("title", e["file"])
+            earlier = await _earlier_uploads(
+                conn, owner, e.get("channel", "uploads"), title) if owner else []
+            checksum = hashlib.sha256(body).hexdigest()
+            keep = next((r for r in earlier if r["checksum"] == checksum
+                         and r["ingest"] in ("running", "succeeded")), None)
+            stale = [r["id"] for r in earlier if r is not keep]
+            if stale:
+                # As app_owner, which this connection already is: the loader
+                # removes only rows it uploaded, and their chunks cascade.
+                await conn.execute(
+                    "delete from content.resources where id = any($1::uuid[])", stale)
+            if keep is not None:
+                done.append(f"unchanged {e['file']} -> {keep['id']}"
+                            + (f" (removed {len(stale)} stale)" if stale else ""))
+                if keep["ingest"] == "running":
+                    # Still retrying, possibly on the very key this run is
+                    # about to report missing -- so it is watched like an
+                    # upload rather than counted as done.
+                    pending.append(keep["id"])
+                continue
             headers = {
                 "Authorization": f"Bearer {token}",
                 "Content-Type": e.get("content_type", "text/markdown"),
-                "x-p8-title": e.get("title", e["file"]),
+                "x-p8-title": title,
             }
             if e.get("channel"):
                 headers["x-p8-channel"] = e["channel"]
@@ -560,5 +690,47 @@ async def _upload_documents(where: Any, content_url: str, token: str, yaml: Any)
                 raise samples.SampleError(
                     f"uploading {e['file']} failed: HTTP {r.status_code} {r.text[:200]}"
                 )
-            done.append(f"uploaded {e['file']} -> {r.json().get('resource_id')}")
-    return done
+            resource_id = r.json().get("resource_id")
+            pending.append(resource_id)
+            done.append(f"uploaded {e['file']} -> {resource_id}"
+                        + (f" (replaced {len(stale)})" if stale else ""))
+    return done, pending
+
+
+async def _first_embed_verdict(conn: Any, resource_ids: list[str],
+                               wait_seconds: float = 20.0) -> tuple[str | None, bool]:
+    """Wait briefly for these uploads to embed, or for the first credential error.
+
+    Returns (error, finished): the error text when an embed task has already
+    failed on a missing credential, and whether every embed task succeeded
+    within `wait_seconds`. Neither is a timeout's business -- the load has done
+    its part by then, and ingestion is asynchronous by design. Only a
+    credential error is reported, because it is the one failure that retrying
+    cannot fix and a fresh stack produces by default.
+    """
+    if not resource_ids:
+        return None, True
+    runs = [f"ingest:{i}" for i in resource_ids]
+    deadline = asyncio.get_running_loop().time() + wait_seconds
+    while True:
+        rows = await conn.fetch(
+            """
+            select t.status, t.error::text as error
+              from workflow.tasks t join workflow.runs w on w.id = t.run_id
+             where w.external_id = any($1::text[]) and t.step_key = 'embed'
+            """,
+            runs,
+        )
+        for row in rows:
+            if row["error"] and "credential_ref" in row["error"]:
+                import json
+
+                try:
+                    return json.loads(row["error"]).get("error", row["error"]), False
+                except ValueError:
+                    return row["error"], False
+        if rows and all(r["status"] == "succeeded" for r in rows):
+            return None, True
+        if asyncio.get_running_loop().time() > deadline:
+            return None, False
+        await asyncio.sleep(1.0)

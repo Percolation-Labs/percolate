@@ -222,10 +222,23 @@ async def apply_sources(conn: Any, doc: dict[str, Any]) -> list[str]:
         # Looked up rather than ON CONFLICT for the original reason, which the
         # NOT NULL does not change: matching the existing row is what makes a
         # second load a no-op instead of a duplicate.
+        #
+        # AND ON EITHER SCHEMA. A published extension older than the shared-org
+        # row has no rbac.shared_org_id() and keeps the shared tier as NULL, so
+        # naming the function outright failed this step with
+        # `function rbac.shared_org_id() does not exist` against the image
+        # install.md pins -- a CLI newer than the database it is pointed at,
+        # which pip produces by default. Resolved once, then compared with
+        # IS NOT DISTINCT FROM, which reads a NULL and a row id the same way.
+        shared = await conn.fetchval(
+            "select case when to_regprocedure('rbac.shared_org_id()') is not null"
+            " then 'shared' end")
+        if shared:
+            shared = await conn.fetchval("select rbac.shared_org_id()::text")
         exists = await conn.fetchval(
             "select 1 from content.channels where name = $1"
-            "   and org_id = coalesce($2::uuid, rbac.shared_org_id())",
-            c["name"], c.get("org"),
+            "   and org_id is not distinct from coalesce($2::uuid, $3::uuid)",
+            c["name"], c.get("org"), shared,
         )
         if not exists:
             # The column is OMITTED when the document omits it, so the DEFAULT

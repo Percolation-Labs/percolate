@@ -191,6 +191,22 @@ class TurnSequencer:
             )
             citations = self.attribute_citations(execution)
             messages = await self.persist(run, execution, citations)
+            # A STRUCTURED ANSWER NEVER STREAMS, so it is sent once here. With a
+            # structured_output_schema pydantic-ai returns the answer through
+            # an output tool, which map_stream_event neither turns into text nor
+            # reports as a function call. The stream carried RUN_STARTED, two
+            # MESSAGE_PERSISTED, a TEXT_MESSAGE_END with no START and
+            # RUN_FINISHED(result=null): a 200 with no answer in it, while
+            # stream:false returned the same turn's JSON as
+            # choices.0.message.content. This sends the text that turn
+            # persisted, so both paths return the same answer.
+            if not self._text_started and execution.text:
+                common = {"run_id": run.id, "thread_id": run.session_id}
+                self._text_started = True
+                await self.sink.emit(TextMessageStart(message_id=self.message_id, **common))
+                await self.sink.emit(
+                    TextMessageContent(message_id=self.message_id, delta=execution.text, **common)
+                )
             await self.sink.emit(
                 TextMessageEnd(
                     run_id=run.id,
