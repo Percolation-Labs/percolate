@@ -2341,6 +2341,187 @@ end;
 $$ language plpgsql;
 
 -- ------------------------------------------------------------
+-- 10a-ii. A deleted row takes its vectors with it.
+--
+-- Deleting a resource cascades to its chunks, and until this section the
+-- vectors stayed. Found on 0.1.6, and measured on 0.2.0 before this section:
+-- delete a resource with two embedded chunks, and both chunks go while their
+-- rows in each aiq.emb_<model> remain --
+-- ranked by nothing, because semantic_in() joins them away, and still handed
+-- to anyone who selects the space directly (§10's open exposure, now about
+-- content that no longer exists). record_chunks() made the same orphans on
+-- every re-ingest, because it replaces a resource's chunks with new ids.
+--
+-- WHY A TRIGGER ON THE SOURCE AND NOT A FOREIGN KEY ON THE SPACE. A space
+-- holds every registered corpus that was embedded with its model: `chunks`
+-- (content.resource_chunks) and `skills` (agentic.skills) ship registered,
+-- and a deployment may add its own table to aiq.semantic_sources. A chunk_id
+-- is therefore an id from one of several tables, and a foreign key names one
+-- table. So the rule is attached to each registered source table instead:
+-- after a delete, the ids it removed are removed from every space. The spaces
+-- are listed when the delete happens, which is why a model registered after
+-- its source needs nothing done to it.
+--
+-- Deleting by id alone, without asking which source a vector came from,
+-- assumes nothing the space's key does not already assume: chunk_id is its
+-- primary key, so two sources sharing an id would already be sharing one
+-- vector.
+--
+-- TRUNCATE fires no delete trigger and carries no transition table, so a
+-- truncated source is reconciled by the sweep below rather than by id.
+-- ------------------------------------------------------------
+
+-- The sweep: every vector whose id is in no registered source table.
+--
+-- It runs once in this body, which is how a database upgraded from a version
+-- without the triggers loses the orphans it already has, and again after a
+-- TRUNCATE. It is SECURITY DEFINER so it can delete from the spaces, and that
+-- makes the refusal below necessary rather than cautious: the anti-join reads
+-- each source as this function's owner, and a source the owner cannot read
+-- in full would make every row it cannot see look deleted. So it does nothing
+-- unless every registered source exists, has an `id`, and is readable without
+-- a row policy getting in the way.
+create or replace function aiq.forget_orphan_vectors()
+returns int as $$
+declare
+    v_live  text;
+    v_tbl   text;
+    v_n     int;
+    v_total int := 0;
+begin
+    if exists (
+        select 1
+          from aiq.semantic_sources s
+          left join pg_class c on c.oid = to_regclass(s.source_table)
+         where c.oid is null
+            or not exists (select 1 from pg_attribute a
+                            where a.attrelid = c.oid and a.attname = 'id'
+                              and not a.attisdropped)
+            or not has_table_privilege(c.oid, 'select')
+            or (c.relrowsecurity
+                and (c.relforcerowsecurity or not pg_has_role(c.relowner, 'usage'))))
+    then
+        raise warning 'aiq.forget_orphan_vectors: skipped -- a registered semantic '
+                      'source is missing, has no id column, or is not fully readable '
+                      'by %, so a vector could not be told apart from an orphan',
+                      current_user;
+        return 0;
+    end if;
+
+    select string_agg(format('not exists (select 1 from %s s where s.id = e.chunk_id)',
+                             to_regclass(s.source_table)), ' and ')
+      into v_live
+      from aiq.semantic_sources s;
+    -- No source registered: nothing to compare against, which is not the same
+    -- as every vector being an orphan.
+    if v_live is null then
+        return 0;
+    end if;
+
+    for v_tbl in
+        select 'emb_' || replace(m.name, '-', '_')
+          from aiq.embedding_models m
+         where to_regclass('aiq.' || quote_ident('emb_' || replace(m.name, '-', '_'))) is not null
+    loop
+        execute format('delete from aiq.%I e where %s', v_tbl, v_live);
+        get diagnostics v_n = row_count;
+        v_total := v_total + v_n;
+    end loop;
+    return v_total;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+revoke execute on function aiq.forget_orphan_vectors() from public;
+
+-- The trigger each source table carries. Statement-level over a transition
+-- table, so a resource with three hundred chunks costs one DELETE per space
+-- rather than three hundred.
+--
+-- SECURITY DEFINER because the role deleting the row may hold no grant on the
+-- spaces -- a user removing their own skill under RLS, say -- and removing the
+-- vector of a row that was just deleted is no more authority than the delete.
+create or replace function aiq.forget_vectors()
+returns trigger as $$
+declare
+    v_tbl text;
+begin
+    if tg_op = 'TRUNCATE' then
+        perform aiq.forget_orphan_vectors();
+        return null;
+    end if;
+    for v_tbl in
+        select 'emb_' || replace(m.name, '-', '_')
+          from aiq.embedding_models m
+         where to_regclass('aiq.' || quote_ident('emb_' || replace(m.name, '-', '_'))) is not null
+    loop
+        execute format('delete from aiq.%I e using gone g where e.chunk_id = g.id', v_tbl);
+    end loop;
+    return null;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+revoke execute on function aiq.forget_vectors() from public;
+
+-- Registering a source attaches the two triggers to its table, so every way of
+-- registering one -- the inserts in integration.sql and agentic/schema.sql, a
+-- fixture, a deployment's own INSERT -- gets them without calling anything.
+--
+-- Creating a trigger needs ownership of the table. A source whose table the
+-- registrar does not own, or which does not exist yet, is still registered and
+-- gets a WARNING naming what it lacks: refusing the registration would make
+-- the corpus unsearchable, and refusing the upgrade that replays this would
+-- stop a database on a row it cannot change.
+create or replace function aiq.attach_forget_vectors()
+returns trigger as $$
+declare
+    v_rel regclass := to_regclass(new.source_table);
+begin
+    if v_rel is null then
+        raise warning 'semantic source % names %, which does not exist -- its '
+                      'vectors will outlive its rows until it is registered again',
+                      new.name, new.source_table;
+        return null;
+    end if;
+    execute format('create or replace trigger trg_forget_vectors after delete on %s '
+                   'referencing old table as gone for each statement '
+                   'execute function aiq.forget_vectors()', v_rel);
+    execute format('create or replace trigger trg_forget_vectors_truncate after truncate on %s '
+                   'for each statement execute function aiq.forget_vectors()', v_rel);
+    return null;
+exception when insufficient_privilege then
+    raise warning 'semantic source %: % cannot put a trigger on % (%) -- its '
+                  'vectors will outlive its rows. Register it as the table''s owner.',
+                  new.name, current_user, v_rel, sqlerrm;
+    return null;
+end;
+$$ language plpgsql;
+
+revoke execute on function aiq.attach_forget_vectors() from public;
+
+create or replace trigger trg_semantic_source_forgets
+    after insert or update of source_table on aiq.semantic_sources
+    for each row execute function aiq.attach_forget_vectors();
+
+-- AN UPGRADE BRINGS ITS EXISTING SOURCES AND SPACES INTO LINE HERE. On a fresh
+-- install both statements find nothing: no source is registered yet and no
+-- space exists. On a database from before this section, the update re-fires
+-- the trigger above for every source already registered, and the sweep removes
+-- the vectors earlier deletes left behind.
+update aiq.semantic_sources set source_table = source_table;
+
+-- A WARNING rather than a notice, because CREATE and ALTER EXTENSION run their
+-- script with client_min_messages raised to warning: a notice here was measured
+-- reaching nobody, on an upgrade that had just deleted two rows.
+do $$
+declare v_n int;
+begin
+    v_n := aiq.forget_orphan_vectors();
+    if v_n > 0 then
+        raise warning 'aiq: removed % vector(s) whose rows had already been deleted', v_n;
+    end if;
+end $$;
+
+-- ------------------------------------------------------------
 -- 10b. Embedding a CORPUS, in batches, and why that is not the `embed:` step.
 --
 -- `embed:` is one text per call, and for a query that is exactly right: embed

@@ -12,11 +12,63 @@
 -- That last line is the load-bearing one. Extension objects are owned by
 -- whoever runs the script, and superusers bypass RLS unconditionally -- so
 -- installing this as a superuser would leave every policy below inert.
--- user-rbac's own guard refuses that case rather than allowing it silently.
+-- The preflight below refuses that case instead of installing it.
 --
 -- Roles are NOT created here: they are cluster-level, and a non-superuser
--- cannot CREATE ROLE. See specs/user-rbac/roles.sql, applied once by a DBA.
+-- cannot CREATE ROLE. get-percolate's bootstrap.sql creates them (and
+-- specs/user-rbac/roles.sql is this repository's copy of the same step).
 -- ============================================================
+
+-- ------------------------------------------------------------
+-- PREFLIGHT: the roles this script grants to, and who is running it.
+--
+-- The first statement, because it has to come before anything that names a
+-- role. On a cluster with no Percolate roles, `CREATE EXTENSION percolate
+-- CASCADE` as postgres stopped at the first GRANT with `role "authenticated"
+-- does not exist` -- measured at line 194 of the 0.1.6 script and line 374 of
+-- 0.2.0 before this block -- and the superuser refusal that would have
+-- explained the situation was in user-rbac/schema.sql, ten thousand lines
+-- further down, where a clean cluster never got to.
+--
+-- Roles first, then the superuser: told only "not as a superuser", a reader on
+-- a clean cluster runs SET ROLE app_owner and gets `role "app_owner" does not
+-- exist`. Both messages name get-percolate's bootstrap.sql, which is the file a
+-- reader has; roles.sql and the spec files are in this private repository.
+--
+-- The list is bootstrap.sql's. `authenticator` is granted nothing below and is
+-- checked anyway: it is the role PostgREST logs in as, and an install that
+-- succeeds without it is an API that cannot start.
+-- ------------------------------------------------------------
+do $preflight$
+declare
+    v_missing text;
+begin
+    select string_agg(t.r, ', ' order by t.ord) into v_missing
+      from unnest(array['app_owner', 'api_viewer', 'web_anon', 'authenticated',
+                        'authenticator', 'worker', 'scheduler'])
+           with ordinality as t(r, ord)
+     where not exists (select 1 from pg_roles where rolname = t.r);
+    if v_missing is not null then
+        raise exception
+            'percolate needs cluster roles this cluster does not have: %. Roles '
+            'belong to the cluster, so an extension cannot create them. Run '
+            'bootstrap.sql once as a superuser -- it creates the roles and then '
+            'installs percolate as app_owner: '
+            'https://github.com/Percolation-Labs/get-percolate/blob/main/bootstrap.sql',
+            v_missing;
+    end if;
+
+    if (select rolsuper from pg_roles where rolname = current_user) then
+        raise exception
+            'REFUSING TO LOAD: current_user (%) is a cluster superuser. '
+            'Superusers bypass RLS unconditionally, so the owner-privileged views '
+            'below would return ALL rows to every caller. Install it as app_owner '
+            '(SET ROLE app_owner; CREATE EXTENSION percolate CASCADE;), which is '
+            'what bootstrap.sql does: '
+            'https://github.com/Percolation-Labs/get-percolate/blob/main/bootstrap.sql',
+            current_user;
+    end if;
+end $preflight$;
 
 -- ------------------------------------------------------------
 -- WHAT THIS BUILD WAS MADE FROM.
@@ -10152,18 +10204,14 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 --
 -- This fails loudly at load time rather than deploying a schema whose central
 -- security guarantee is silently inert.
-do $$
-begin
-    if (select rolsuper from pg_roles where rolname = current_user) then
-        raise exception
-            'REFUSING TO LOAD: current_user (%) is a cluster superuser. '
-            'Superusers bypass RLS unconditionally, so the owner-privileged '
-            'views below (users_api, refresh_tokens_api, api_keys_api) would '
-            'silently return ALL rows to every caller. Apply roles.sql first, '
-            'then load this file as app_owner (psql -c ''set role app_owner;'' '
-            '-f schema.sql).', current_user;
-    end if;
-end $$;
+--
+-- THE ASSERTION IS NO LONGER IN THIS FILE. It is the first statement of the
+-- generated extension script (the PREFLIGHT in extension/percolate/build-sql.py),
+-- with a check that the roles exist beside it. Here it came after the first
+-- GRANT to a Percolate role, which workflow-engine/schema.sql makes long before
+-- this file loads, so on a cluster without the roles that GRANT failed first and
+-- this refusal was never reached. The check at the end of this section still
+-- catches a SET ROLE partway through.
 
 -- PostgREST needs USAGE on every schema it exposes -- rbac for this
 -- module's own objects, public for anything not yet namespaced (and for
@@ -10561,8 +10609,8 @@ begin
     end if;
 
     -- The owner must still be non-superuser at this point (a superuser owner
-    -- silently disables RLS everywhere). Belt and braces with the assertion at
-    -- the top of §9 -- cheap, and catches a SET ROLE mid-file.
+    -- disables RLS everywhere). Belt and braces with the preflight at the top
+    -- of the generated script -- cheap, and catches a SET ROLE mid-file.
     if (select rolsuper from pg_roles where rolname = current_user) then
         raise exception 'schema owner (%) is a superuser -- every RLS guarantee here is inert', current_user;
     end if;
@@ -13796,6 +13844,187 @@ begin
 
 end;
 $$ language plpgsql;
+
+-- ------------------------------------------------------------
+-- 10a-ii. A deleted row takes its vectors with it.
+--
+-- Deleting a resource cascades to its chunks, and until this section the
+-- vectors stayed. Found on 0.1.6, and measured on 0.2.0 before this section:
+-- delete a resource with two embedded chunks, and both chunks go while their
+-- rows in each aiq.emb_<model> remain --
+-- ranked by nothing, because semantic_in() joins them away, and still handed
+-- to anyone who selects the space directly (§10's open exposure, now about
+-- content that no longer exists). record_chunks() made the same orphans on
+-- every re-ingest, because it replaces a resource's chunks with new ids.
+--
+-- WHY A TRIGGER ON THE SOURCE AND NOT A FOREIGN KEY ON THE SPACE. A space
+-- holds every registered corpus that was embedded with its model: `chunks`
+-- (content.resource_chunks) and `skills` (agentic.skills) ship registered,
+-- and a deployment may add its own table to aiq.semantic_sources. A chunk_id
+-- is therefore an id from one of several tables, and a foreign key names one
+-- table. So the rule is attached to each registered source table instead:
+-- after a delete, the ids it removed are removed from every space. The spaces
+-- are listed when the delete happens, which is why a model registered after
+-- its source needs nothing done to it.
+--
+-- Deleting by id alone, without asking which source a vector came from,
+-- assumes nothing the space's key does not already assume: chunk_id is its
+-- primary key, so two sources sharing an id would already be sharing one
+-- vector.
+--
+-- TRUNCATE fires no delete trigger and carries no transition table, so a
+-- truncated source is reconciled by the sweep below rather than by id.
+-- ------------------------------------------------------------
+
+-- The sweep: every vector whose id is in no registered source table.
+--
+-- It runs once in this body, which is how a database upgraded from a version
+-- without the triggers loses the orphans it already has, and again after a
+-- TRUNCATE. It is SECURITY DEFINER so it can delete from the spaces, and that
+-- makes the refusal below necessary rather than cautious: the anti-join reads
+-- each source as this function's owner, and a source the owner cannot read
+-- in full would make every row it cannot see look deleted. So it does nothing
+-- unless every registered source exists, has an `id`, and is readable without
+-- a row policy getting in the way.
+create or replace function aiq.forget_orphan_vectors()
+returns int as $$
+declare
+    v_live  text;
+    v_tbl   text;
+    v_n     int;
+    v_total int := 0;
+begin
+    if exists (
+        select 1
+          from aiq.semantic_sources s
+          left join pg_class c on c.oid = to_regclass(s.source_table)
+         where c.oid is null
+            or not exists (select 1 from pg_attribute a
+                            where a.attrelid = c.oid and a.attname = 'id'
+                              and not a.attisdropped)
+            or not has_table_privilege(c.oid, 'select')
+            or (c.relrowsecurity
+                and (c.relforcerowsecurity or not pg_has_role(c.relowner, 'usage'))))
+    then
+        raise warning 'aiq.forget_orphan_vectors: skipped -- a registered semantic '
+                      'source is missing, has no id column, or is not fully readable '
+                      'by %, so a vector could not be told apart from an orphan',
+                      current_user;
+        return 0;
+    end if;
+
+    select string_agg(format('not exists (select 1 from %s s where s.id = e.chunk_id)',
+                             to_regclass(s.source_table)), ' and ')
+      into v_live
+      from aiq.semantic_sources s;
+    -- No source registered: nothing to compare against, which is not the same
+    -- as every vector being an orphan.
+    if v_live is null then
+        return 0;
+    end if;
+
+    for v_tbl in
+        select 'emb_' || replace(m.name, '-', '_')
+          from aiq.embedding_models m
+         where to_regclass('aiq.' || quote_ident('emb_' || replace(m.name, '-', '_'))) is not null
+    loop
+        execute format('delete from aiq.%I e where %s', v_tbl, v_live);
+        get diagnostics v_n = row_count;
+        v_total := v_total + v_n;
+    end loop;
+    return v_total;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+revoke execute on function aiq.forget_orphan_vectors() from public;
+
+-- The trigger each source table carries. Statement-level over a transition
+-- table, so a resource with three hundred chunks costs one DELETE per space
+-- rather than three hundred.
+--
+-- SECURITY DEFINER because the role deleting the row may hold no grant on the
+-- spaces -- a user removing their own skill under RLS, say -- and removing the
+-- vector of a row that was just deleted is no more authority than the delete.
+create or replace function aiq.forget_vectors()
+returns trigger as $$
+declare
+    v_tbl text;
+begin
+    if tg_op = 'TRUNCATE' then
+        perform aiq.forget_orphan_vectors();
+        return null;
+    end if;
+    for v_tbl in
+        select 'emb_' || replace(m.name, '-', '_')
+          from aiq.embedding_models m
+         where to_regclass('aiq.' || quote_ident('emb_' || replace(m.name, '-', '_'))) is not null
+    loop
+        execute format('delete from aiq.%I e using gone g where e.chunk_id = g.id', v_tbl);
+    end loop;
+    return null;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+revoke execute on function aiq.forget_vectors() from public;
+
+-- Registering a source attaches the two triggers to its table, so every way of
+-- registering one -- the inserts in integration.sql and agentic/schema.sql, a
+-- fixture, a deployment's own INSERT -- gets them without calling anything.
+--
+-- Creating a trigger needs ownership of the table. A source whose table the
+-- registrar does not own, or which does not exist yet, is still registered and
+-- gets a WARNING naming what it lacks: refusing the registration would make
+-- the corpus unsearchable, and refusing the upgrade that replays this would
+-- stop a database on a row it cannot change.
+create or replace function aiq.attach_forget_vectors()
+returns trigger as $$
+declare
+    v_rel regclass := to_regclass(new.source_table);
+begin
+    if v_rel is null then
+        raise warning 'semantic source % names %, which does not exist -- its '
+                      'vectors will outlive its rows until it is registered again',
+                      new.name, new.source_table;
+        return null;
+    end if;
+    execute format('create or replace trigger trg_forget_vectors after delete on %s '
+                   'referencing old table as gone for each statement '
+                   'execute function aiq.forget_vectors()', v_rel);
+    execute format('create or replace trigger trg_forget_vectors_truncate after truncate on %s '
+                   'for each statement execute function aiq.forget_vectors()', v_rel);
+    return null;
+exception when insufficient_privilege then
+    raise warning 'semantic source %: % cannot put a trigger on % (%) -- its '
+                  'vectors will outlive its rows. Register it as the table''s owner.',
+                  new.name, current_user, v_rel, sqlerrm;
+    return null;
+end;
+$$ language plpgsql;
+
+revoke execute on function aiq.attach_forget_vectors() from public;
+
+create or replace trigger trg_semantic_source_forgets
+    after insert or update of source_table on aiq.semantic_sources
+    for each row execute function aiq.attach_forget_vectors();
+
+-- AN UPGRADE BRINGS ITS EXISTING SOURCES AND SPACES INTO LINE HERE. On a fresh
+-- install both statements find nothing: no source is registered yet and no
+-- space exists. On a database from before this section, the update re-fires
+-- the trigger above for every source already registered, and the sweep removes
+-- the vectors earlier deletes left behind.
+update aiq.semantic_sources set source_table = source_table;
+
+-- A WARNING rather than a notice, because CREATE and ALTER EXTENSION run their
+-- script with client_min_messages raised to warning: a notice here was measured
+-- reaching nobody, on an upgrade that had just deleted two rows.
+do $$
+declare v_n int;
+begin
+    v_n := aiq.forget_orphan_vectors();
+    if v_n > 0 then
+        raise warning 'aiq: removed % vector(s) whose rows had already been deleted', v_n;
+    end if;
+end $$;
 
 -- ------------------------------------------------------------
 -- 10b. Embedding a CORPUS, in batches, and why that is not the `embed:` step.
@@ -17884,8 +18113,9 @@ create or replace trigger trg_resources_touch before update on content.resources
 --
 -- Embeddings live in aiq.emb_<model>, keyed by chunk_id -- one table per
 -- MODEL, not per dimension (ai-query-layer/schema.sql §10). No FK is possible
--- in that direction because the embedding table is generic and does not know
--- this schema; integration.sql adds the reconciliation instead.
+-- in that direction because one space holds ids from every registered corpus;
+-- registering this table as the `chunks` source (integration.sql) puts the
+-- trigger on it that deletes a chunk's vectors with the chunk (§10a-ii there).
 -- ------------------------------------------------------------
 create table if not exists content.resource_chunks (
     id           uuid primary key default uuidv7(),
@@ -18952,6 +19182,58 @@ select workflow.register_step_function(
 select workflow.register_step_function(
     'content_drift', 'content.check_drift', array[]::text[], 60000,
     'Report orphaned files and unchunked resources');
+
+-- ------------------------------------------------------------
+-- 5a. An ingest run that fails leaves its resource 'failed', not 'pending'.
+--
+-- schema.sql §3 gives a resource that failed to parse the status 'failed', so
+-- that it is visible rather than missing. Nothing wrote it. The status moves
+-- to 'ready' or 'stored' inside record_ingest(), which only a parse that
+-- succeeded calls; a parse that raised never got there, and the resource
+-- stayed 'pending' after its run had ended. Found on 0.1.6, and reproduced on
+-- 0.2.0 with two uploads naming one uri: the second parse failed terminally on
+-- idx_node_keys_canonical, its run went to 'failed', and the resource read
+-- 'pending' from then on -- which check_drift() reports an hour later as a
+-- workflow that never finished, about a workflow that had.
+--
+-- The run is where the failure is recorded, so this is a trigger on
+-- workflow.runs. It recognises an ingest run by the two facts
+-- register_upload() writes onto it together: external_id is
+-- 'ingest:' || resource_id, and the input carries that resource_id. A run
+-- started any other way does not carry both, and is left alone.
+--
+-- ONLY 'pending' MOVES. A run can fail after its parse succeeded -- the embed
+-- or graph branch failing on a missing key -- and that resource already has
+-- chunks TEXT can search. Its status says whether it is retrievable, and it
+-- is; the failure stays on the run, next to the step that failed. A cancelled
+-- run leaves its resource as unchunked as a failed one does, so it is treated
+-- the same way.
+--
+-- SECURITY DEFINER because a run's status is written by whichever path ended
+-- it -- the worker's fail_task(), a user's cancel_run(), a matrix gate -- and
+-- the resource has to be updated whichever one it was.
+create or replace function content.fail_resource_of_ingest_run()
+returns trigger as $$
+begin
+    if new.external_id = 'ingest:' || (new.input->>'resource_id')
+       and pg_input_is_valid(new.input->>'resource_id', 'uuid') then
+        update content.resources
+           set status = 'failed', updated_at = now()
+         where id = (new.input->>'resource_id')::uuid
+           and status = 'pending';
+    end if;
+    return null;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+revoke execute on function content.fail_resource_of_ingest_run() from public;
+
+create or replace trigger trg_ingest_run_fails_resource
+    after update of status on workflow.runs
+    for each row
+    when (old.status = 'running' and new.status in ('failed', 'cancelled')
+          and new.external_id like 'ingest:%')
+    execute function content.fail_resource_of_ingest_run();
 
 -- ------------------------------------------------------------
 -- 5b. Workflow artifacts -- the fourth output class, given a home.

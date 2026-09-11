@@ -604,4 +604,68 @@ begin
     raise notice 'content: no definer function is reachable by web_anon, and the worker-only three are worker-only';
 end $$;
 
+-- ---------------------------------------------------------------------
+-- 9. A PARSE THAT FAILS FOR GOOD LEAVES ITS RESOURCE 'failed', NOT 'pending'.
+--
+-- Found on 0.1.6: a parse that failed terminally on a duplicate key ended its
+-- run, and its resource read 'pending' from then on, because only a parse that
+-- succeeds reaches the code that sets a status. Driven through the calls the
+-- worker makes -- claim_task, record_ingest, complete_task, fail_task -- on a
+-- queue of its own, so no fixture task is claimed by mistake. Three uploads:
+-- one parse succeeds, one fails for good, one fails and will be retried.
+-- ---------------------------------------------------------------------
+do $$
+declare
+    v_ch  uuid;
+    v_ok  uuid; v_dead uuid; v_retry uuid;
+    r     record;
+    v_seen int := 0;
+begin
+    perform content.install_ingest_workflow(null, 't_fail_q', 't_ingest_fail');
+    insert into content.channels (name, kind, config, visibility)
+    values ('t-fail-uploads', 'file_upload', '{"ingest_workflow": "t_ingest_fail"}', 'public')
+    returning id into v_ch;
+    v_ok    := content.register_upload('t-fail-uploads', 't-fail-ok',    'b', 't-fail/ok',    1, 'text/plain', 'parses');
+    v_dead  := content.register_upload('t-fail-uploads', 't-fail-dead',  'b', 't-fail/dead',  1, 'text/plain', 'fails for good');
+    v_retry := content.register_upload('t-fail-uploads', 't-fail-retry', 'b', 't-fail/retry', 1, 'text/plain', 'fails once');
+
+    -- Claim all three, then act on each by the resource its run names.
+    perform workflow.claim_task('t_fail_q', 't-fail-worker') from generate_series(1, 3);
+    for r in
+        select t.id as task, (run.input->>'resource_id')::uuid as res
+          from workflow.tasks t join workflow.runs run on run.id = t.run_id
+         where t.queue = 't_fail_q' and t.status = 'running'
+    loop
+        v_seen := v_seen + 1;
+        if r.res = v_ok then
+            perform content.record_ingest(v_ok, '{"mode": "text", "chunks": [{"content": "parsed"}]}');
+            perform workflow.complete_task(r.task, '{"result": {"ok": true}}');
+        elsif r.res = v_dead then
+            perform workflow.fail_task(r.task,
+                '{"error": "duplicate key value violates unique constraint", "terminal": true}', true);
+        else
+            perform workflow.fail_task(r.task, '{"error": "connection reset"}', false);
+        end if;
+    end loop;
+    if v_seen <> 3 then
+        raise exception 'expected to claim three parse tasks on t_fail_q, claimed %', v_seen;
+    end if;
+
+    for r in
+        select res.title, res.status, run.status as run_status
+          from content.resources res
+          join workflow.runs run on run.external_id = 'ingest:' || res.id::text
+         where res.channel_id = v_ch
+    loop
+        if (r.title, r.run_status, r.status) not in (('parses', 'succeeded', 'ready'),
+                                                      ('fails for good', 'failed', 'failed'),
+                                                      ('fails once', 'running', 'pending')) then
+            raise exception 'upload "%": run %, resource % -- a run that ended for good must '
+                            'not leave its resource pending, and one that will retry must',
+                            r.title, r.run_status, r.status;
+        end if;
+    end loop;
+    raise notice 'content: a terminally failed parse fails its resource; success and retry are untouched';
+end $$;
+
 rollback;

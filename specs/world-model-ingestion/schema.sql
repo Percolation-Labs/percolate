@@ -183,8 +183,9 @@ create or replace trigger trg_resources_touch before update on content.resources
 --
 -- Embeddings live in aiq.emb_<model>, keyed by chunk_id -- one table per
 -- MODEL, not per dimension (ai-query-layer/schema.sql §10). No FK is possible
--- in that direction because the embedding table is generic and does not know
--- this schema; integration.sql adds the reconciliation instead.
+-- in that direction because one space holds ids from every registered corpus;
+-- registering this table as the `chunks` source (integration.sql) puts the
+-- trigger on it that deletes a chunk's vectors with the chunk (§10a-ii there).
 -- ------------------------------------------------------------
 create table if not exists content.resource_chunks (
     id           uuid primary key default uuidv7(),

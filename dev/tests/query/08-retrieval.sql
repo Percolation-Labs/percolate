@@ -334,4 +334,44 @@ begin
     raise notice 'query/08: the dialect routes all three, and asks for the vector it needs';
 end $$;
 
+-- ---------------------------------------------------------------------
+-- 6. A DELETED RESOURCE TAKES ITS VECTORS WITH IT, IN EVERY SPACE.
+--
+-- The cascade removed the chunks and left their rows in aiq.emb_<model>, since
+-- a space carries no foreign key (ai-query-layer/schema.sql §10a-ii says why
+-- it cannot). Found on 0.1.6. The resource deleted here owns c2 and c6, and
+-- both are embedded in both fixture spaces, so the assertion covers two models
+-- and a multi-row delete. Rolled back with the rest of this file.
+-- ---------------------------------------------------------------------
+do $$
+declare v_before int; v_after int; v jsonb;
+begin
+    select count(*) into v_before from (
+        select chunk_id from aiq.emb_demo_quad_a
+        union all select chunk_id from aiq.emb_demo_quad_b) e
+     where e.chunk_id in ('33330000-0000-0000-0000-000000000002',
+                          '33330000-0000-0000-0000-000000000006');
+    if v_before <> 4 then
+        raise exception 'the fixture should embed c2 and c6 in both spaces (4 rows), found %', v_before;
+    end if;
+
+    delete from content.resources where id = '22220000-0000-0000-0000-000000000002';
+
+    select count(*) into v_after from (
+        select chunk_id from aiq.emb_demo_quad_a
+        union all select chunk_id from aiq.emb_demo_quad_b) e
+     where e.chunk_id in ('33330000-0000-0000-0000-000000000002',
+                          '33330000-0000-0000-0000-000000000006');
+    if v_after <> 0 then
+        raise exception '% vector(s) outlived the chunks they describe', v_after;
+    end if;
+
+    -- ...and the rest of the space still answers.
+    v := aiq.query('SEMANTIC "anything" FROM chunks LIMIT 3', '[1,0,0,0]');
+    if v->'rows'->0->>'chunk_id' <> '33330000-0000-0000-0000-000000000001' then
+        raise exception 'SEMANTIC stopped ranking what was left: %', v->'rows';
+    end if;
+    raise notice 'query/08: deleting a resource removed its 4 vectors from both spaces';
+end $$;
+
 rollback;

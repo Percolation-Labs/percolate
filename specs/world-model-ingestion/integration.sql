@@ -197,6 +197,58 @@ select workflow.register_step_function(
     'Report orphaned files and unchunked resources');
 
 -- ------------------------------------------------------------
+-- 5a. An ingest run that fails leaves its resource 'failed', not 'pending'.
+--
+-- schema.sql §3 gives a resource that failed to parse the status 'failed', so
+-- that it is visible rather than missing. Nothing wrote it. The status moves
+-- to 'ready' or 'stored' inside record_ingest(), which only a parse that
+-- succeeded calls; a parse that raised never got there, and the resource
+-- stayed 'pending' after its run had ended. Found on 0.1.6, and reproduced on
+-- 0.2.0 with two uploads naming one uri: the second parse failed terminally on
+-- idx_node_keys_canonical, its run went to 'failed', and the resource read
+-- 'pending' from then on -- which check_drift() reports an hour later as a
+-- workflow that never finished, about a workflow that had.
+--
+-- The run is where the failure is recorded, so this is a trigger on
+-- workflow.runs. It recognises an ingest run by the two facts
+-- register_upload() writes onto it together: external_id is
+-- 'ingest:' || resource_id, and the input carries that resource_id. A run
+-- started any other way does not carry both, and is left alone.
+--
+-- ONLY 'pending' MOVES. A run can fail after its parse succeeded -- the embed
+-- or graph branch failing on a missing key -- and that resource already has
+-- chunks TEXT can search. Its status says whether it is retrievable, and it
+-- is; the failure stays on the run, next to the step that failed. A cancelled
+-- run leaves its resource as unchunked as a failed one does, so it is treated
+-- the same way.
+--
+-- SECURITY DEFINER because a run's status is written by whichever path ended
+-- it -- the worker's fail_task(), a user's cancel_run(), a matrix gate -- and
+-- the resource has to be updated whichever one it was.
+create or replace function content.fail_resource_of_ingest_run()
+returns trigger as $$
+begin
+    if new.external_id = 'ingest:' || (new.input->>'resource_id')
+       and pg_input_is_valid(new.input->>'resource_id', 'uuid') then
+        update content.resources
+           set status = 'failed', updated_at = now()
+         where id = (new.input->>'resource_id')::uuid
+           and status = 'pending';
+    end if;
+    return null;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+revoke execute on function content.fail_resource_of_ingest_run() from public;
+
+create or replace trigger trg_ingest_run_fails_resource
+    after update of status on workflow.runs
+    for each row
+    when (old.status = 'running' and new.status in ('failed', 'cancelled')
+          and new.external_id like 'ingest:%')
+    execute function content.fail_resource_of_ingest_run();
+
+-- ------------------------------------------------------------
 -- 5b. Workflow artifacts -- the fourth output class, given a home.
 --
 -- workflow-engine/outputs.md: a step produces rows, a validated assistant

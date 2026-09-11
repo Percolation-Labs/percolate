@@ -310,11 +310,63 @@ HEADER = f"""-- ============================================================
 -- That last line is the load-bearing one. Extension objects are owned by
 -- whoever runs the script, and superusers bypass RLS unconditionally -- so
 -- installing this as a superuser would leave every policy below inert.
--- user-rbac's own guard refuses that case rather than allowing it silently.
+-- The preflight below refuses that case instead of installing it.
 --
 -- Roles are NOT created here: they are cluster-level, and a non-superuser
--- cannot CREATE ROLE. See specs/user-rbac/roles.sql, applied once by a DBA.
+-- cannot CREATE ROLE. get-percolate's bootstrap.sql creates them (and
+-- specs/user-rbac/roles.sql is this repository's copy of the same step).
 -- ============================================================
+
+-- ------------------------------------------------------------
+-- PREFLIGHT: the roles this script grants to, and who is running it.
+--
+-- The first statement, because it has to come before anything that names a
+-- role. On a cluster with no Percolate roles, `CREATE EXTENSION percolate
+-- CASCADE` as postgres stopped at the first GRANT with `role "authenticated"
+-- does not exist` -- measured at line 194 of the 0.1.6 script and line 374 of
+-- 0.2.0 before this block -- and the superuser refusal that would have
+-- explained the situation was in user-rbac/schema.sql, ten thousand lines
+-- further down, where a clean cluster never got to.
+--
+-- Roles first, then the superuser: told only "not as a superuser", a reader on
+-- a clean cluster runs SET ROLE app_owner and gets `role "app_owner" does not
+-- exist`. Both messages name get-percolate's bootstrap.sql, which is the file a
+-- reader has; roles.sql and the spec files are in this private repository.
+--
+-- The list is bootstrap.sql's. `authenticator` is granted nothing below and is
+-- checked anyway: it is the role PostgREST logs in as, and an install that
+-- succeeds without it is an API that cannot start.
+-- ------------------------------------------------------------
+do $preflight$
+declare
+    v_missing text;
+begin
+    select string_agg(t.r, ', ' order by t.ord) into v_missing
+      from unnest(array['app_owner', 'api_viewer', 'web_anon', 'authenticated',
+                        'authenticator', 'worker', 'scheduler'])
+           with ordinality as t(r, ord)
+     where not exists (select 1 from pg_roles where rolname = t.r);
+    if v_missing is not null then
+        raise exception
+            'percolate needs cluster roles this cluster does not have: %. Roles '
+            'belong to the cluster, so an extension cannot create them. Run '
+            'bootstrap.sql once as a superuser -- it creates the roles and then '
+            'installs percolate as app_owner: '
+            'https://github.com/Percolation-Labs/get-percolate/blob/main/bootstrap.sql',
+            v_missing;
+    end if;
+
+    if (select rolsuper from pg_roles where rolname = current_user) then
+        raise exception
+            'REFUSING TO LOAD: current_user (%) is a cluster superuser. '
+            'Superusers bypass RLS unconditionally, so the owner-privileged views '
+            'below would return ALL rows to every caller. Install it as app_owner '
+            '(SET ROLE app_owner; CREATE EXTENSION percolate CASCADE;), which is '
+            'what bootstrap.sql does: '
+            'https://github.com/Percolation-Labs/get-percolate/blob/main/bootstrap.sql',
+            current_user;
+    end if;
+end $preflight$;
 
 -- ------------------------------------------------------------
 -- WHAT THIS BUILD WAS MADE FROM.

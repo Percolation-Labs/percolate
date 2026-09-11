@@ -2040,18 +2040,14 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 --
 -- This fails loudly at load time rather than deploying a schema whose central
 -- security guarantee is silently inert.
-do $$
-begin
-    if (select rolsuper from pg_roles where rolname = current_user) then
-        raise exception
-            'REFUSING TO LOAD: current_user (%) is a cluster superuser. '
-            'Superusers bypass RLS unconditionally, so the owner-privileged '
-            'views below (users_api, refresh_tokens_api, api_keys_api) would '
-            'silently return ALL rows to every caller. Apply roles.sql first, '
-            'then load this file as app_owner (psql -c ''set role app_owner;'' '
-            '-f schema.sql).', current_user;
-    end if;
-end $$;
+--
+-- THE ASSERTION IS NO LONGER IN THIS FILE. It is the first statement of the
+-- generated extension script (the PREFLIGHT in extension/percolate/build-sql.py),
+-- with a check that the roles exist beside it. Here it came after the first
+-- GRANT to a Percolate role, which workflow-engine/schema.sql makes long before
+-- this file loads, so on a cluster without the roles that GRANT failed first and
+-- this refusal was never reached. The check at the end of this section still
+-- catches a SET ROLE partway through.
 
 -- PostgREST needs USAGE on every schema it exposes -- rbac for this
 -- module's own objects, public for anything not yet namespaced (and for
@@ -2449,8 +2445,8 @@ begin
     end if;
 
     -- The owner must still be non-superuser at this point (a superuser owner
-    -- silently disables RLS everywhere). Belt and braces with the assertion at
-    -- the top of §9 -- cheap, and catches a SET ROLE mid-file.
+    -- disables RLS everywhere). Belt and braces with the preflight at the top
+    -- of the generated script -- cheap, and catches a SET ROLE mid-file.
     if (select rolsuper from pg_roles where rolname = current_user) then
         raise exception 'schema owner (%) is a superuser -- every RLS guarantee here is inert', current_user;
     end if;
