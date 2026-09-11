@@ -20,10 +20,9 @@
 --      that used to be mandatory is still there for a deployment that wants it.
 --
 -- WHAT IS DELIBERATELY NOT ASSERTED: that a statement cannot read another
--- tenant's rows. It can, for the runs this file starts, which have no owner. A
--- step runs as the engine owner, RLS does not apply to it, and anyone who may
--- define a workflow may read anything. That is the stated trade of the open
--- policy. Who else a run may read FOR is 15-unscoped-reads.sql: nobody.
+-- tenant's rows. The runs this file starts have no owner -- no person started
+-- them -- so they keep the engine's reach. A run a person starts runs as that
+-- person, which is 15-steps-read-as-starter.sql.
 
 \set ON_ERROR_STOP on
 

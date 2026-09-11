@@ -110,6 +110,8 @@ create extension if not exists vector;
 create extension if not exists percolate_parser;
 do \$\$ begin execute format('grant create on database %I to app_owner', current_database()); end \$\$;
 grant create, usage on schema public to app_owner;
+-- bootstrap.sql's grant, for an image built before it (0.2.0)
+grant authenticated to api_viewer;
 set role app_owner;
 create extension percolate cascade;
 reset role;

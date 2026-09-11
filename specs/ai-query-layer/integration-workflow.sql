@@ -29,36 +29,57 @@
 -- and getting a green run with no rows.
 --
 -- So the note is honoured rather than returned: the statement goes through
--- aiq.sql_passthrough, which is SECURITY INVOKER and read-only-enforced. That
--- keeps the property the note was protecting -- inside a step the invoker is
--- the engine owner, so the query is as expressive as the rest of the step
--- path; called directly by an authenticated user it runs as THEM, under RLS.
+-- aiq.sql_passthrough, which is SECURITY INVOKER and read-only-enforced, so it
+-- runs as whoever invoked this function -- inside a person's step that is the
+-- person (see the re-entry below), called directly it is the caller, under RLS.
 -- Routing it through the DEFINER workflow.run_sql instead would have handed
 -- every caller of this function an owner-privileged read of the whole database,
 -- which is the escalation this collection has fixed twice already.
+
+-- Is the code running right now the engine, with the table owner's reach? True
+-- inside a step, false inside execute_for (api_viewer) and false for a person
+-- calling p8ql directly. Read from the catalog rather than naming a role, so
+-- it holds on a deployment that renamed app_owner.
+create or replace function workflow.acting_as_engine()
+returns boolean as $$
+    select current_user = pg_get_userbyid(
+        (select relowner from pg_class where oid = 'workflow.runs'::regclass));
+$$ language sql stable;
+-- api_viewer, not authenticated: only a step evaluates it, and inside
+-- execute_for the step is api_viewer. A person's direct call never reaches it.
+grant execute on function workflow.acting_as_engine() to api_viewer;
+
 create or replace function workflow.p8ql(p_query text)
 returns jsonb as $$
-declare v_out jsonb;
+declare v_out jsonb; v_for uuid;
 begin
-    -- EVERY MODE, NOT ONLY SQL. Inside a step this runs as the engine owner, so
-    -- a SEARCH or a TEXT reads every tenant's chunks exactly as a statement
-    -- would -- the SQL-mode check below never saw them, and `ask_uploads`
-    -- answered a member of one org from another org's runbook
-    -- (workflow-engine/schema.sql, may_read_unscoped). The same nested-`if`
-    -- rule applies: the direct call must not evaluate a function
-    -- `authenticated` cannot execute.
+    -- EVERY MODE RUNS AS THE PERSON WHO STARTED THE RUN. Called from a step,
+    -- this function's invoker is the engine owner, which bypasses RLS -- so a
+    -- SEARCH or a TEXT read every tenant's chunks, and `ask_uploads` answered a
+    -- member of one org from another org's runbook (scenarios/tour, act 8).
+    -- Now, inside a person's run, the query re-enters through
+    -- workflow.execute_for as that person, and runs there under RLS; inside
+    -- execute_for the invoker is no longer the engine owner, so it does not
+    -- re-enter twice. A system run keeps the engine's reach.
+    --
+    -- Nested `if`s, for the rule the SQL-mode guard below records: the direct
+    -- call must not evaluate a function `authenticated` cannot execute.
     if nullif(current_setting('workflow.current_run_id', true), '') is not null then
-        perform workflow.assert_unscoped_read();
+      if workflow.acting_as_engine() then
+        v_for := workflow.run_owner_of(current_setting('workflow.current_run_id')::uuid);
+        if v_for is not null then
+            return workflow.execute_for(v_for, 'select workflow.p8ql($1->>''q'') as r',
+                                        false, jsonb_build_object('q', p_query))->0->'r';
+        end if;
+      end if;
     end if;
     v_out := aiq.query(p_query);
     if v_out->>'mode' = 'SQL' then
         -- AND THE POLICY THAT TURNS THE TRADE OFF HAS TO REACH THIS DOOR TOO.
         --
-        -- workflow-engine/schema.sql states the trade plainly: inside a step,
-        -- SQL runs as the engine owner and "anyone who may define a workflow
-        -- may therefore read anything in the database", deliberate for the
-        -- beta, with `percolate.sql_policy = 'registered'` as the lever that
-        -- refuses statements on a deployment that will not take it.
+        -- `percolate.sql_policy = 'registered'` is the lever that refuses SQL
+        -- a step carries itself, on a deployment that wants only reviewed
+        -- functions to run.
         --
         -- That lever did not cover this path. `sql: "select ..."` is refused at
         -- define time by check_spec_before_insert; `p8ql: "select ..."` is not
@@ -76,12 +97,11 @@ begin
         -- outlives the change, so refusing only at define time would leave
         -- every workflow authored before the lock still able to run.
         --
-        -- ONLY INSIDE A STEP. `workflow.current_run_id` is set by
-        -- execute_sql_step and by nothing else, so it is the signal for "the
-        -- invoker is the engine owner". Called directly by an authenticated
-        -- user this function is SECURITY INVOKER running as THEM under RLS --
-        -- which is safe, is what the grant below is for, and is not what the
-        -- policy is about.
+        -- ONLY INSIDE A STEP. `workflow.current_run_id` is set by the engine
+        -- while a step executes, so it is the signal for "a workflow author
+        -- wrote this". Called directly by an authenticated user this function
+        -- is SECURITY INVOKER running as THEM under RLS, which is what the
+        -- grant below is for and is not what the policy is about.
         -- TWO NESTED `if`s, NOT ONE `and`, and that is not style.
         -- `workflow.sql_policy()` is not granted to `authenticated`, and
         -- plpgsql evaluates a whole condition as a single SELECT -- so both
@@ -95,11 +115,10 @@ begin
           if workflow.sql_policy() = 'registered' then
             raise exception
                 'this step carries plain SQL, and percolate.sql_policy is '
-                '''registered'' on this deployment -- inside a step it would run '
-                'as the engine owner, which is the read this policy exists to '
-                'refuse. Register the query as a step function and name it with '
-                'sql: {function: ...}, or run the SQL directly, where it is '
-                'scoped to you.';
+                '''registered'' on this deployment, which runs only functions '
+                'somebody registered. Register the query as a step function and '
+                'name it with sql: {function: ...}, or run the SQL directly, '
+                'where it is scoped to you.';
           end if;
         end if;
         return jsonb_build_object(
@@ -111,13 +130,20 @@ begin
 end;
 $$ language plpgsql;
 
--- plpgsql rather than sql for the one guard it now carries, which is the
+-- plpgsql rather than sql for the re-entry it now carries, which is the
 -- one-argument form's: this is the arity `ask_uploads` reaches through.
 create or replace function workflow.p8ql(p_query text, p_embedding jsonb)
 returns jsonb as $$
+declare v_for uuid;
 begin
     if nullif(current_setting('workflow.current_run_id', true), '') is not null then
-        perform workflow.assert_unscoped_read();
+      if workflow.acting_as_engine() then
+        v_for := workflow.run_owner_of(current_setting('workflow.current_run_id')::uuid);
+        if v_for is not null then
+            return workflow.execute_for(v_for, 'select workflow.p8ql($1->>''q'', $1->''e'') as r',
+                                        false, jsonb_build_object('q', p_query, 'e', p_embedding))->0->'r';
+        end if;
+      end if;
     end if;
     return aiq.query(p_query,
         case when p_embedding is null or p_embedding = 'null'::jsonb then null

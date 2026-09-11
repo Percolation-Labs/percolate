@@ -182,6 +182,12 @@ begin
                                           coalesce(p_manifest->'extractors'->'provides','[]'::jsonb)));
 end $$;
 
+-- Operator-only. It is SECURITY DEFINER and installs agents, tool servers,
+-- sources and workflows, and it carried Postgres's PUBLIC default until
+-- 2026-09-11 -- dev/tests/rbac/04 listed six schemas and this one was not among
+-- them. packages/apply.py calls it as app_owner, which owns it.
+revoke execute on function percolate.apply_package(jsonb) from public;
+
 comment on function percolate.apply_package(jsonb) is
     'Install a package: vocabulary, sources, the plugin half, then workflows. '
     'Order is forced by existing constraints, not chosen. See specs/packages.';

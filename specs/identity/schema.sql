@@ -9,6 +9,21 @@
 -- someone reads first.
 create schema if not exists percolate;
 
+-- NOTHING THIS ROLE CREATES IS EVERYBODY'S BY DEFAULT. Postgres grants EXECUTE
+-- to PUBLIC on every new function, and every function here that is SECURITY
+-- DEFINER runs as the owner of every table, past RLS. The collection used to
+-- take that default away one schema at a time -- `revoke ... on all functions
+-- in schema X` -- which covers only the functions that already exist when it
+-- runs and only the schemas someone listed. Three holes came through that gap:
+-- percolate.apply_package, and every function of the pgvector-watch package,
+-- which a signed-in person could call through aiq.sql_passthrough to read any
+-- org's issues (2026-09-11). So the default is changed once, here, FIRST, for
+-- everything the installing role creates afterwards -- the rest of this script,
+-- every later upgrade, and every package applied as app_owner. A function a
+-- caller may use says so with a grant naming them. dev/tests/rbac/04 asserts it
+-- across every schema.
+alter default privileges revoke execute on functions from public;
+
 -- ------------------------------------------------------------
 -- 1. A deterministic UUID, so a derived row has the same id every time.
 --
@@ -51,6 +66,12 @@ returns uuid language sql immutable strict parallel safe as $$
     select percolate.uuidv5('6ba7b810-9dad-11d1-80b4-00c04fd430c8'::uuid,
                             'percolationlabs.ai/' || p_kind);
 $$;
+
+-- Everybody's, by design: pure arithmetic over their arguments, and a client
+-- that has never heard of percolate-core must be able to compute the same id.
+-- Said with a grant now that nothing is everybody's by default.
+grant execute on function percolate.uuidv5(uuid, text) to public;
+grant execute on function percolate.id_namespace(text) to public;
 
 -- ------------------------------------------------------------
 -- 2. What a NULL means, declared rather than guessed.

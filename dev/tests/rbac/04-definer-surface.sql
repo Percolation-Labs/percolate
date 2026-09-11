@@ -39,9 +39,15 @@ begin
       into v_bad
       from pg_proc p
       join pg_namespace n on n.oid = p.pronamespace
-     where n.nspname in ('workflow','aiq','rbac','content','agentic','wm')
+     -- EVERY SCHEMA, by owner rather than by a list. The list named six
+     -- schemas, and percolate.apply_package lived in a seventh. And the ACL is
+     -- read with its default filled in: a function never granted
+     -- anything has a NULL proacl, which MEANS "PUBLIC may execute", and
+     -- aclexplode(NULL) returns no rows -- so the most common case of the hole
+     -- was the one this check could not see.
+     where p.proowner = (select relowner from pg_class where oid = 'workflow.runs'::regclass)
        and p.prosecdef
-       and exists (select 1 from aclexplode(p.proacl) a
+       and exists (select 1 from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
                     where a.grantee = 0 and a.privilege_type = 'EXECUTE');
 
     if v_bad is not null then
@@ -201,6 +207,35 @@ begin
         raise exception 'an authorized caller could not define a workflow';
     end if;
     raise notice 'rbac/04: a caller holding workflows:update still can';
+end $$;
+
+-- ---------------------------------------------------------------------
+-- AND WHAT IS CREATED AFTER THE INSTALL STARTS CLOSED.
+--
+-- Section 1 checks what exists. A package applied later (packages/apply.py,
+-- as app_owner) creates functions nobody enumerated -- pgvector-watch shipped
+-- ten SECURITY DEFINER functions with the PUBLIC default, and a signed-in
+-- person could call pgw.lake_issues through aiq.sql_passthrough to read any
+-- org's issues. identity/schema.sql now changes the install role's default
+-- once, first. This is that default, observed on a function made the way a
+-- package makes one: a new schema, created by app_owner.
+-- ---------------------------------------------------------------------
+do $$
+declare v_owner name := pg_get_userbyid(
+            (select relowner from pg_class where oid = 'workflow.runs'::regclass));
+begin
+    execute format('set local role %I', v_owner);
+    create schema t_pkg_probe;
+    create function t_pkg_probe.f() returns int language sql security definer as 'select 1';
+    reset role;
+    if has_function_privilege('public', 't_pkg_probe.f()', 'execute')
+       or has_function_privilege('authenticated', 't_pkg_probe.f()', 'execute') then
+        raise exception
+            'a SECURITY DEFINER function % created after install is executable by '
+            'everybody -- the install role''s default privileges are not in force',
+            't_pkg_probe.f()';
+    end if;
+    raise notice 'rbac/04: a function a package creates later is nobody''s until granted';
 end $$;
 
 rollback;

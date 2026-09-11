@@ -121,6 +121,21 @@ begin
             v_missing;
     end if;
 
+    -- A workflow step acting for a person runs as api_viewer with their claims
+    -- (workflow-engine integration-rbac.sql, execute_for), so api_viewer needs
+    -- what a signed-in person holds. A cluster bootstrapped before 0.2.0 does
+    -- not have that grant, and without it a person's workflow fails on its
+    -- first read with "permission denied" -- so say so here, with the line.
+    if not pg_has_role('api_viewer', 'authenticated', 'member') then
+        raise exception
+            'percolate needs api_viewer to be a member of authenticated, and on this '
+            'cluster it is not. Run once as a superuser: grant authenticated to '
+            'api_viewer; -- a workflow step runs as the person who started its run, through '
+            'api_viewer, and needs their grants to do it. bootstrap.sql does this '
+            'from 0.2.0: '
+            'https://github.com/Percolation-Labs/get-percolate/blob/main/bootstrap.sql';
+    end if;
+
     if (select rolsuper from pg_roles where rolname = current_user) then
         raise exception
             'REFUSING TO LOAD: current_user (%) is a cluster superuser. '
@@ -204,6 +219,21 @@ $fn$;
 -- someone reads first.
 create schema if not exists percolate;
 
+-- NOTHING THIS ROLE CREATES IS EVERYBODY'S BY DEFAULT. Postgres grants EXECUTE
+-- to PUBLIC on every new function, and every function here that is SECURITY
+-- DEFINER runs as the owner of every table, past RLS. The collection used to
+-- take that default away one schema at a time -- `revoke ... on all functions
+-- in schema X` -- which covers only the functions that already exist when it
+-- runs and only the schemas someone listed. Three holes came through that gap:
+-- percolate.apply_package, and every function of the pgvector-watch package,
+-- which a signed-in person could call through aiq.sql_passthrough to read any
+-- org's issues (2026-09-11). So the default is changed once, here, FIRST, for
+-- everything the installing role creates afterwards -- the rest of this script,
+-- every later upgrade, and every package applied as app_owner. A function a
+-- caller may use says so with a grant naming them. dev/tests/rbac/04 asserts it
+-- across every schema.
+alter default privileges revoke execute on functions from public;
+
 -- ------------------------------------------------------------
 -- 1. A deterministic UUID, so a derived row has the same id every time.
 --
@@ -246,6 +276,12 @@ returns uuid language sql immutable strict parallel safe as $$
     select percolate.uuidv5('6ba7b810-9dad-11d1-80b4-00c04fd430c8'::uuid,
                             'percolationlabs.ai/' || p_kind);
 $$;
+
+-- Everybody's, by design: pure arithmetic over their arguments, and a client
+-- that has never heard of percolate-core must be able to compute the same id.
+-- Said with a grant now that nothing is everybody's by default.
+grant execute on function percolate.uuidv5(uuid, text) to public;
+grant execute on function percolate.id_namespace(text) to public;
 
 -- ------------------------------------------------------------
 -- 2. What a NULL means, declared rather than guessed.
@@ -2583,11 +2619,10 @@ end $$;
 --      authoring a workflow never widened what could be executed. That is a
 --      sound boundary and it made every QUESTION a pipeline wanted to ask into
 --      an owner-only registration, which is why `percolate.sql_policy` now
---      chooses -- `open` (a step may carry its own SQL, running as the engine
---      owner) or `registered` (the old rule). See "SQL a step wrote itself"
---      above for what open mode trades away and roadmap.md §6 for the mode
---      that would close it without the friction. Under either policy a READ
---      cannot write: transaction_read_only decides that, not the policy.
+--      chooses -- `open` (a step may carry its own SQL, running with the reach
+--      of whoever started the run) or `registered` (the old rule). See "SQL a
+--      step wrote itself" above for whose reach that is. Under either policy a
+--      READ cannot write: transaction_read_only decides that, not the policy.
 --   2. A SUBTRANSACTION per step. A failing step fails ITSELF -- it must not
 --      abort the transaction of whichever worker happened to complete the
 --      preceding task. Without this, one bad SQL step would roll back an
@@ -2749,14 +2784,22 @@ $$ language plpgsql;
 --     - id: quarters
 --       sql: "select fy, fp, val from sec.facts where cik = '{{run.cik}}'"
 --
--- WHAT THIS COSTS, STATED PLAINLY. Workflow SQL runs as the engine owner:
--- app_owner owns every table and bypasses RLS, and execute_sql_step is
--- SECURITY DEFINER, so a statement here reads across tenants. Anyone who may
--- define a workflow may therefore read anything in the database. That is a
--- deliberate trade for the beta -- expressiveness over isolation, taken with
--- eyes open -- and the three things that make it survivable are below. The
--- third, may_read_unscoped, keeps the trade to the people this sentence names:
--- a run reads with the owner's privilege only for someone who may define a workflow.
+-- WHOSE REACH A STATEMENT HAS. The person's who started the run. A step
+-- executes inside execute_sql_step, which is SECURITY DEFINER and owned by
+-- app_owner, the owner of every table -- so a statement run there directly
+-- would read every tenant's rows past RLS. It is not run there directly: when
+-- the run has an owner, run_sql hands the statement to workflow.execute_for,
+-- which runs it with that person's identity and under RLS, as if they had
+-- typed it themselves (execute_for below says how). A run nobody started -- a
+-- schedule, a system pass -- has no person to act for and keeps the engine's
+-- reach; that is the operator's own trade.
+--
+-- It was not always so, and the history is the argument for it. The first
+-- version ran every statement as app_owner and defended it as "anyone who may
+-- define a workflow may read anything". Defining was gated; STARTING was not,
+-- so a workflow an admin wrote read every tenant for whoever ran it. The tour
+-- (scenarios/tour, act 8) had a member of one org start `ask_uploads` and get
+-- another org's runbook back from its SEARCH step.
 --
 -- READS CANNOT WRITE, AND THE DATABASE ENFORCES IT, not a parser. A statement
 -- without `write: true` runs with transaction_read_only on, which is the same
@@ -2765,25 +2808,15 @@ $$ language plpgsql;
 -- transaction is a guarantee. The keyword check beside it is a courtesy that
 -- turns a transaction abort into a sentence.
 --
--- AND THE OLD BOUNDARY IS STILL THERE, one setting away:
+-- AND AUTHORING CAN STILL BE NARROWED, one setting away:
 --
 --     alter database <db> set percolate.sql_policy = 'registered';
 --
 --   open       (default)  a step may carry a statement, or name a function
 --   registered            statements are refused; only the allow-list runs
 --
--- A third mode -- `scoped`, where a statement runs under the run owner's
--- identity so RLS applies -- is the one that would make this safe as a
--- production default, and it cannot be built here. Tried: Postgres refuses
--- `SET ROLE` anywhere inside a SECURITY DEFINER call stack, and
--- execute_sql_step must be SECURITY DEFINER because it writes task rows --
--- `cannot set parameter "role" within security-definer function`. Replaying
--- the claims without the role switch changes nothing, because an owner
--- bypasses RLS whatever the claims say. So scoping needs the statement
--- executed OUTSIDE this call stack: the worker claiming it, or a loopback
--- connection. roadmap.md §6 carries both routes and what each costs. Its
--- trigger, a second tenant sharing a deployment, has been met: orgs are
--- tenants, and one deployment holds several.
+-- That narrows what an author may WRITE. Whose rows a statement sees is the
+-- paragraph above, under either policy.
 --
 -- The registry does not go away and is not deprecated. It keeps the two jobs it
 -- was always better at than gatekeeping: a per-function timeout, and a
@@ -2803,54 +2836,31 @@ as $$
     select lower(coalesce(nullif(current_setting('percolate.sql_policy', true), ''), 'open'));
 $$;
 
--- WHO A RUN MAY READ FOR -- the question an unscoped read asks before it runs.
+-- THE TWO HOOKS A STEP'S STATEMENT GOES THROUGH, stub-and-shadow like
+-- may_define. Standalone the engine has no people, so no run has an owner to
+-- act for and every statement keeps the engine's reach. integration-rbac.sql
+-- shadows both once the identity plane is installed: run_owner_of reads
+-- runs.owner_id, and execute_for runs the statement as that person.
 --
--- The trade above is stated in terms of who may DEFINE a workflow, and that is
--- the wrong half of it. Defining is gated (may_define, below). STARTING is not,
--- and a statement or a p8ql query runs as the engine owner whoever started the
--- run. So a workflow somebody privileged defined read across every tenant for
--- anybody signed in: the dev stack's `ask_uploads` SEARCHes uploaded chunks, and
--- the tour (scenarios/tour, act 8) had a member of another org start it and get
--- back a runbook her own token could not open. `sql_policy = 'registered'` did
--- not help, because p8ql's retrieval modes are a registered function and run
--- under either policy.
---
--- The rule: an unscoped read runs for a run only when whoever started it could
--- have written the same read themselves -- may define a workflow -- or when
--- nobody did (a system run). That keeps the trade exactly as wide as the
--- paragraph above claims. The reads it refuses come back when a step can run
--- under its starter's identity, which is roadmap.md §6.
---
--- Standalone the engine has no identity model, so this is `true` and
--- integration-rbac.sql shadows it: the stub-and-shadow shape may_define uses.
-create or replace function workflow.may_read_unscoped(p_run_id uuid)
-returns boolean as $$
-    select true;
+-- The run is the one execute_sql_step (or expand_matrix, for a row source)
+-- publishes in workflow.current_run_id, never an argument: an argument is text
+-- a workflow author wrote, and naming somebody else's run would borrow their
+-- reach.
+create or replace function workflow.run_owner_of(p_run_id uuid)
+returns uuid as $$
+    select null::uuid;
 $$ language sql stable;
 
--- Every path that runs a read as the engine owner on a run's behalf calls this:
--- run_sql (a step's statement, a matrix's `rows:` statement) and workflow.p8ql.
--- The run is the one published in workflow.current_run_id. With none set the
--- caller is not inside a step, and there is nobody to read for.
-create or replace function workflow.assert_unscoped_read()
-returns void as $$
-declare
-    v_run uuid := nullif(current_setting('workflow.current_run_id', true), '')::uuid;
+create or replace function workflow.execute_for(
+    p_user uuid, p_statement text, p_write boolean, p_params jsonb)
+returns jsonb as $$
 begin
-    if v_run is not null and not workflow.may_read_unscoped(v_run) then
-        raise exception
-            'run % was started by someone who may not define workflows, and this '
-            'step runs as the engine owner, past row-level security', v_run
-            using detail = 'Running it would hand them rows their own queries cannot see.',
-                  hint   = 'Start it as someone holding workflows:update, or as the system. '
-                           'A step that must serve anyone should call a registered function '
-                           'that scopes itself to the run''s owner.';
-    end if;
+    raise exception 'no identity plane is installed, so there is nobody to run % for', p_user;
 end;
-$$ language plpgsql stable;
+$$ language plpgsql;
 
-revoke execute on function workflow.may_read_unscoped(uuid) from public;
-revoke execute on function workflow.assert_unscoped_read() from public;
+revoke execute on function workflow.run_owner_of(uuid) from public;
+revoke execute on function workflow.execute_for(uuid, text, boolean, jsonb) from public;
 
 -- Dropped rather than left beside the new signature: `create or replace` with
 -- an added parameter makes a SECOND function, and the old three-argument one
@@ -2875,6 +2885,10 @@ declare
     -- Only bind when there is something to bind: EXECUTE refuses USING against
     -- a statement with no placeholders ("too many parameters specified").
     v_bind  boolean := p_params is not null and p_params <> '{}'::jsonb;
+    -- Who this statement runs for: the owner of the run being executed, or
+    -- nobody (a system run, or the engine standalone). See "WHOSE REACH".
+    v_for   uuid := workflow.run_owner_of(
+                        nullif(current_setting('workflow.current_run_id', true), '')::uuid);
 begin
     if v_pol = 'registered' then
         raise exception
@@ -2891,18 +2905,18 @@ begin
         raise exception 'this sql step carries an empty statement';
     end if;
 
-    -- Writes included: a write as the engine owner is the larger version of
-    -- the same act.
-    perform workflow.assert_unscoped_read();
-
     perform set_config('statement_timeout', greatest(p_timeout_ms, 1)::text, true);
 
     if p_write then
-        -- A write says so in the document. This is not a security control --
-        -- the step runs as the owner either way -- but a plan that cannot tell
-        -- a question from a mutation is a plan nobody can review, and every
-        -- reader of a definition deserves to see which steps change the
-        -- database.
+        -- A write says so in the document. That is not the security control --
+        -- whose reach the write has is, and for a person's run it is theirs, so
+        -- it succeeds only where they could have written the same rows -- but a
+        -- plan that cannot tell a question from a mutation is a plan nobody can
+        -- review, and every reader of a definition deserves to see which steps
+        -- change the database.
+        if v_for is not null then
+            return workflow.execute_for(v_for, p_statement, true, case when v_bind then p_params end);
+        end if;
         if v_bind then execute p_statement using p_params;
         else           execute p_statement;
         end if;
@@ -2940,7 +2954,11 @@ begin
     -- a syntax error's worth of confusion for something that was neither.
     begin
         perform set_config('transaction_read_only', 'on', true);
-        if v_bind then
+        if v_for is not null then
+            -- Inside the same unwound subtransaction, so the identity
+            -- execute_for sets is unwound with the read-only flag.
+            v_out := workflow.execute_for(v_for, p_statement, false, case when v_bind then p_params end);
+        elsif v_bind then
             execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
             into v_out using p_params;
         else
@@ -4744,9 +4762,10 @@ begin
 
         -- THE ROW SOURCE RUNS FOR THIS RUN, and publishes it the way
         -- execute_sql_step does. It did not, so everything keyed on
-        -- workflow.current_run_id was blind here: a `rows: {function: p8ql}`
-        -- skipped assert_unscoped_read, and a row function could not tell its
-        -- own run from a run id typed into its arguments. Restored after; an
+        -- workflow.current_run_id was blind here: a `rows:` statement or a
+        -- `rows: {function: p8ql}` read with the engine's reach instead of the
+        -- starter's, and a row function could not tell its own run from a run
+        -- id typed into its arguments. Restored after; an
         -- error unwinds it with the subtransaction.
         v_prev_run := coalesce(nullif(current_setting('workflow.current_run_id', true), ''), '');
         perform set_config('workflow.current_run_id', t.run_id::text, true);
@@ -11243,27 +11262,109 @@ returns boolean as $$
                     session_user, 'workflow.definitions'::regclass, 'insert'));
 $$ language sql stable security definer set search_path = pg_catalog, public;
 
--- AND STARTING ONE IS THE THIRD SIDE, which may_define alone did not cover.
+-- A STEP'S STATEMENT RUNS AS THE PERSON WHO STARTED THE RUN -- the rbac half
+-- of schema.sql's "WHOSE REACH A STATEMENT HAS".
 --
--- may_define bounds who may WRITE an unscoped read. Nothing bounded who may
--- RUN one: start_workflow checks nobody, so a definition an admin wrote read
--- every tenant's rows for whichever member started it. schema.sql's
--- may_read_unscoped says why, with the tour run that found it. This is its
--- rbac half: the run's owner, not the current caller -- a step executes long
--- after the request that started it, on a connection with no claims.
---
--- An unknown run refuses rather than passes: the setting that names it is
--- published by the engine, and a run id that resolves to nothing is not a
--- system run.
-create or replace function workflow.may_read_unscoped(p_run_id uuid)
-returns boolean as $$
-    select coalesce(
-        (select r.owner_id is null
-                or rbac.has_permission(r.owner_id, 'workflows', 'update')
-           from workflow.runs r
-          where r.id = p_run_id),
-        false);
+-- WHO. The run's owner, stamped from the verified JWT at start (set_run_owner,
+-- below). Not the current caller: a step executes long after the request that
+-- started it, often on a worker's connection with no claims at all. Orgs are
+-- not captured, because rbac.current_org_ids() derives them from org_members
+-- by user id -- so a person removed from an org loses that org's rows at their
+-- run's next step, the same "revocation is immediate" the read path promises.
+create or replace function workflow.run_owner_of(p_run_id uuid)
+returns uuid as $$
+    select owner_id from workflow.runs where id = p_run_id;
 $$ language sql stable security definer set search_path = pg_catalog, public;
+
+-- WHAT THIS DOES NOT CLOSE, and the debt it owes. `request.jwt.claims` is a
+-- setting any role can write with set_config, so an author's statement can set
+-- it and read as someone else -- the whole-database class REM-44 is about
+-- (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §2). This
+-- function narrows the step path from "runs as app_owner, RLS bypassed" to
+-- "runs as the run's owner, under RLS", which is strictly less; it does not
+-- make the principal unforgeable. When REM-44 lands a trusted `rbac.principal()`,
+-- the identity-set here (raw set_config) moves onto it, and the guard below
+-- keys on that rather than on current_user. Until then, an author already had
+-- app_owner's reach, so this is a reduction and not a new door.
+--
+-- HOW, and why this is possible at all when the roadmap said it was not.
+--
+-- execute_sql_step is SECURITY DEFINER owned by app_owner, which owns every
+-- table and so bypasses RLS. Postgres refuses `SET ROLE` anywhere in a
+-- SECURITY DEFINER stack, so the step cannot become the person. What it CAN do
+-- is call another SECURITY DEFINER function, and that switches identity to the
+-- callee's owner. This function is owned by api_viewer -- the role that already
+-- owns every *_api view for exactly this reason: it is not the table owner, so
+-- RLS applies to it, and the claims decide whose rows it sees. With the claims
+-- set to the run's owner, a statement here sees what that person would see
+-- through PostgREST, no more. (api_viewer holds authenticated's grants by
+-- membership -- roles.sql / bootstrap.sql -- so it can read what they can.)
+--
+-- Replaying the claims WITHOUT changing identity would change nothing, since
+-- an owner bypasses RLS whatever the claims say -- which is why the role
+-- switch, done by ownership rather than SET ROLE, is the whole mechanism.
+--
+-- NOBODY BUT THE ENGINE MAY CALL IT. It takes a user id and a statement, so a
+-- caller who could reach it could read as anyone. EXECUTE is granted to
+-- app_owner alone, and nobody is a member of api_viewer but app_owner.
+--
+-- The claims are restored on BOTH exit paths, in this function's own exception
+-- handler, and NOT left to the caller's subtransaction. The caller's abort does
+-- roll the set_config back -- but `tick()` and an autorun cascade run several
+-- sql tasks in one transaction, and a design where the identity outlives a
+-- failing step until something else happens to unwind it is one set_config away
+-- from the next task in that tick running as the previous run's owner. So this
+-- restores and re-raises itself, and the restore does not depend on who calls
+-- it. (Regression covered in dev/tests/workflow/15: two owners in one
+-- transaction, the first failing.)
+create or replace function workflow.execute_for(
+    p_user uuid, p_statement text, p_write boolean, p_params jsonb)
+returns jsonb as $$
+declare
+    v_prev  text := current_setting('request.jwt.claims', true);
+    v_out   jsonb;
+    v_count bigint;
+begin
+    if p_user is null then
+        raise exception 'execute_for was given nobody to run as';
+    end if;
+    perform set_config('request.jwt.claims',
+        json_build_object('sub', p_user, 'role', 'authenticated')::text, true);
+    begin
+        if p_write then
+            if p_params is not null then execute p_statement using p_params;
+            else                         execute p_statement;
+            end if;
+            get diagnostics v_count = row_count;
+            v_out := jsonb_build_object('rows_affected', v_count);
+        elsif p_params is not null then
+            execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
+            into v_out using p_params;
+        else
+            execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
+            into v_out;
+        end if;
+    exception when others then
+        perform set_config('request.jwt.claims', coalesce(v_prev, ''), true);
+        raise;
+    end;
+    perform set_config('request.jwt.claims', coalesce(v_prev, ''), true);
+    return coalesce(v_out, '[]'::jsonb);
+end;
+$$ language plpgsql volatile security definer set search_path = pg_catalog, public;
+
+-- Handed to api_viewer the way the *_api views are (section (c)): app_owner is a
+-- member of api_viewer, and the new owner needs CREATE on the schema for the
+-- moment of the transfer.
+grant create on schema workflow to api_viewer;
+alter function workflow.execute_for(uuid, text, boolean, jsonb) owner to api_viewer;
+revoke create on schema workflow from api_viewer;
+revoke execute on function workflow.execute_for(uuid, text, boolean, jsonb) from public;
+grant execute on function workflow.execute_for(uuid, text, boolean, jsonb) to app_owner;
+
+-- workflow.p8ql runs inside execute_for when a person's step calls it, and its
+-- SQL-mode guard asks the policy there. It reads one setting.
+grant execute on function workflow.sql_policy() to api_viewer;
 
 -- The authorization check, and then the cascade -- which is the unchecked form
 -- below, called rather than repeated. The first version inlined the same four
@@ -11614,7 +11715,7 @@ revoke execute on function workflow.schedule_workflow(text, text, text, jsonb, t
 revoke execute on function workflow.set_schedule_enabled(text, boolean) from public;
 revoke execute on function workflow.unschedule_workflow(text) from public;
 revoke execute on function workflow.may_define() from public;
-revoke execute on function workflow.may_read_unscoped(uuid) from public;
+revoke execute on function workflow.run_owner_of(uuid) from public;
 -- workflow.register_artifact() is the eleventh and it is NOT revoked here:
 -- content loads after the engine, so naming it in this file fails the install
 -- with "function does not exist". The revoke belongs beside its definition in
@@ -16176,36 +16277,57 @@ end $$;
 -- and getting a green run with no rows.
 --
 -- So the note is honoured rather than returned: the statement goes through
--- aiq.sql_passthrough, which is SECURITY INVOKER and read-only-enforced. That
--- keeps the property the note was protecting -- inside a step the invoker is
--- the engine owner, so the query is as expressive as the rest of the step
--- path; called directly by an authenticated user it runs as THEM, under RLS.
+-- aiq.sql_passthrough, which is SECURITY INVOKER and read-only-enforced, so it
+-- runs as whoever invoked this function -- inside a person's step that is the
+-- person (see the re-entry below), called directly it is the caller, under RLS.
 -- Routing it through the DEFINER workflow.run_sql instead would have handed
 -- every caller of this function an owner-privileged read of the whole database,
 -- which is the escalation this collection has fixed twice already.
+
+-- Is the code running right now the engine, with the table owner's reach? True
+-- inside a step, false inside execute_for (api_viewer) and false for a person
+-- calling p8ql directly. Read from the catalog rather than naming a role, so
+-- it holds on a deployment that renamed app_owner.
+create or replace function workflow.acting_as_engine()
+returns boolean as $$
+    select current_user = pg_get_userbyid(
+        (select relowner from pg_class where oid = 'workflow.runs'::regclass));
+$$ language sql stable;
+-- api_viewer, not authenticated: only a step evaluates it, and inside
+-- execute_for the step is api_viewer. A person's direct call never reaches it.
+grant execute on function workflow.acting_as_engine() to api_viewer;
+
 create or replace function workflow.p8ql(p_query text)
 returns jsonb as $$
-declare v_out jsonb;
+declare v_out jsonb; v_for uuid;
 begin
-    -- EVERY MODE, NOT ONLY SQL. Inside a step this runs as the engine owner, so
-    -- a SEARCH or a TEXT reads every tenant's chunks exactly as a statement
-    -- would -- the SQL-mode check below never saw them, and `ask_uploads`
-    -- answered a member of one org from another org's runbook
-    -- (workflow-engine/schema.sql, may_read_unscoped). The same nested-`if`
-    -- rule applies: the direct call must not evaluate a function
-    -- `authenticated` cannot execute.
+    -- EVERY MODE RUNS AS THE PERSON WHO STARTED THE RUN. Called from a step,
+    -- this function's invoker is the engine owner, which bypasses RLS -- so a
+    -- SEARCH or a TEXT read every tenant's chunks, and `ask_uploads` answered a
+    -- member of one org from another org's runbook (scenarios/tour, act 8).
+    -- Now, inside a person's run, the query re-enters through
+    -- workflow.execute_for as that person, and runs there under RLS; inside
+    -- execute_for the invoker is no longer the engine owner, so it does not
+    -- re-enter twice. A system run keeps the engine's reach.
+    --
+    -- Nested `if`s, for the rule the SQL-mode guard below records: the direct
+    -- call must not evaluate a function `authenticated` cannot execute.
     if nullif(current_setting('workflow.current_run_id', true), '') is not null then
-        perform workflow.assert_unscoped_read();
+      if workflow.acting_as_engine() then
+        v_for := workflow.run_owner_of(current_setting('workflow.current_run_id')::uuid);
+        if v_for is not null then
+            return workflow.execute_for(v_for, 'select workflow.p8ql($1->>''q'') as r',
+                                        false, jsonb_build_object('q', p_query))->0->'r';
+        end if;
+      end if;
     end if;
     v_out := aiq.query(p_query);
     if v_out->>'mode' = 'SQL' then
         -- AND THE POLICY THAT TURNS THE TRADE OFF HAS TO REACH THIS DOOR TOO.
         --
-        -- workflow-engine/schema.sql states the trade plainly: inside a step,
-        -- SQL runs as the engine owner and "anyone who may define a workflow
-        -- may therefore read anything in the database", deliberate for the
-        -- beta, with `percolate.sql_policy = 'registered'` as the lever that
-        -- refuses statements on a deployment that will not take it.
+        -- `percolate.sql_policy = 'registered'` is the lever that refuses SQL
+        -- a step carries itself, on a deployment that wants only reviewed
+        -- functions to run.
         --
         -- That lever did not cover this path. `sql: "select ..."` is refused at
         -- define time by check_spec_before_insert; `p8ql: "select ..."` is not
@@ -16223,12 +16345,11 @@ begin
         -- outlives the change, so refusing only at define time would leave
         -- every workflow authored before the lock still able to run.
         --
-        -- ONLY INSIDE A STEP. `workflow.current_run_id` is set by
-        -- execute_sql_step and by nothing else, so it is the signal for "the
-        -- invoker is the engine owner". Called directly by an authenticated
-        -- user this function is SECURITY INVOKER running as THEM under RLS --
-        -- which is safe, is what the grant below is for, and is not what the
-        -- policy is about.
+        -- ONLY INSIDE A STEP. `workflow.current_run_id` is set by the engine
+        -- while a step executes, so it is the signal for "a workflow author
+        -- wrote this". Called directly by an authenticated user this function
+        -- is SECURITY INVOKER running as THEM under RLS, which is what the
+        -- grant below is for and is not what the policy is about.
         -- TWO NESTED `if`s, NOT ONE `and`, and that is not style.
         -- `workflow.sql_policy()` is not granted to `authenticated`, and
         -- plpgsql evaluates a whole condition as a single SELECT -- so both
@@ -16242,11 +16363,10 @@ begin
           if workflow.sql_policy() = 'registered' then
             raise exception
                 'this step carries plain SQL, and percolate.sql_policy is '
-                '''registered'' on this deployment -- inside a step it would run '
-                'as the engine owner, which is the read this policy exists to '
-                'refuse. Register the query as a step function and name it with '
-                'sql: {function: ...}, or run the SQL directly, where it is '
-                'scoped to you.';
+                '''registered'' on this deployment, which runs only functions '
+                'somebody registered. Register the query as a step function and '
+                'name it with sql: {function: ...}, or run the SQL directly, '
+                'where it is scoped to you.';
           end if;
         end if;
         return jsonb_build_object(
@@ -16258,13 +16378,20 @@ begin
 end;
 $$ language plpgsql;
 
--- plpgsql rather than sql for the one guard it now carries, which is the
+-- plpgsql rather than sql for the re-entry it now carries, which is the
 -- one-argument form's: this is the arity `ask_uploads` reaches through.
 create or replace function workflow.p8ql(p_query text, p_embedding jsonb)
 returns jsonb as $$
+declare v_for uuid;
 begin
     if nullif(current_setting('workflow.current_run_id', true), '') is not null then
-        perform workflow.assert_unscoped_read();
+      if workflow.acting_as_engine() then
+        v_for := workflow.run_owner_of(current_setting('workflow.current_run_id')::uuid);
+        if v_for is not null then
+            return workflow.execute_for(v_for, 'select workflow.p8ql($1->>''q'', $1->''e'') as r',
+                                        false, jsonb_build_object('q', p_query, 'e', p_embedding))->0->'r';
+        end if;
+      end if;
     end if;
     return aiq.query(p_query,
         case when p_embedding is null or p_embedding = 'null'::jsonb then null
@@ -25463,6 +25590,10 @@ grant usage on schema percolate to web_anon, authenticated, api_viewer;
 grant select on percolate.types to web_anon, authenticated, api_viewer;
 grant execute on function percolate.enums() to web_anon, authenticated, api_viewer;
 grant execute on function percolate.contract() to web_anon, authenticated, api_viewer;
+-- The three roles above are the audience. A database installed before 0.2.0
+-- also gave these to PUBLIC by default; this makes the two agree.
+revoke execute on function percolate.enums() from public;
+revoke execute on function percolate.contract() from public;
 
 
 -- ============================================================
@@ -25653,6 +25784,12 @@ begin
                                        'extractors', jsonb_array_length(
                                           coalesce(p_manifest->'extractors'->'provides','[]'::jsonb)));
 end $$;
+
+-- Operator-only. It is SECURITY DEFINER and installs agents, tool servers,
+-- sources and workflows, and it carried Postgres's PUBLIC default until
+-- 2026-09-11 -- dev/tests/rbac/04 listed six schemas and this one was not among
+-- them. packages/apply.py calls it as app_owner, which owns it.
+revoke execute on function percolate.apply_package(jsonb) from public;
 
 comment on function percolate.apply_package(jsonb) is
     'Install a package: vocabulary, sources, the plugin half, then workflows. '
