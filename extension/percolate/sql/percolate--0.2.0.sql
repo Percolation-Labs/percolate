@@ -3192,7 +3192,11 @@ begin
             -- statement that does not parse will fail identically on every
             -- retry; a deadlock or timeout will not. 42601 is a syntax error in
             -- SQL the author wrote, which is the new member of that set.
-            sqlstate in ('42883','42P01','42601','P0001'));
+            -- 42501 is the refused policy this comment already claimed and the
+            -- list did not have: an authorization refusal -- from RLS, from a
+            -- missing grant, or from one of this extension's own `not
+            -- authorized` raises -- is the same answer on the fifth attempt.
+            sqlstate in ('42501','42883','42P01','42601','P0001'));
         return true;
     end;
 end;
@@ -3414,7 +3418,8 @@ begin
     if not workflow.may_define() then
         raise exception
             'not authorized to define workflows'
-            using detail = 'A workflow step may carry its own SQL, which runs as the '
+            using errcode = 'insufficient_privilege',
+                  detail = 'A workflow step may carry its own SQL, which runs as the '
                            'engine owner and is not subject to row-level security, so '
                            'defining one is an authoring privilege rather than a read.',
                   hint   = 'Grant the caller a role holding workflows:update, or set '
@@ -3941,7 +3946,8 @@ begin
     end if;
 
     raise exception 'not authorized to % schedule "%"', p_action, p_name
-        using hint = 'workflow-engine/integration-rbac.sql installs the '
+        using errcode = 'insufficient_privilege',
+              hint = 'workflow-engine/integration-rbac.sql installs the '
                      'owner-and-permission check this default stands in for';
 end;
 $$ language plpgsql stable security definer set search_path = pg_catalog, public;
@@ -5208,9 +5214,10 @@ begin
     exception when others then
         perform workflow.fail_task(p_task_id,
             jsonb_build_object('error', sqlerrm, 'sqlstate', sqlstate),
-            -- A malformed spec, an unregistered function or a blown ceiling
-            -- fails identically on every retry. A deadlock or timeout does not.
-            sqlstate in ('42883','42P01','P0001'));
+            -- A malformed spec, an unregistered function, a blown ceiling or
+            -- a caller the database refused (42501) fails identically on every
+            -- retry. A deadlock or timeout does not.
+            sqlstate in ('42501','42883','42P01','P0001'));
         return 0;
     end;
 end;
@@ -9669,7 +9676,9 @@ begin
                         where m.org_id = p_org_id
                           and m.user_id = rbac.current_user_id()
                           and m.role = 'admin')) then
-        raise exception 'not authorized to administer this org';
+        raise exception 'not authorized to administer this org'
+            using errcode = 'insufficient_privilege',
+                  hint = 'needs orgs:admin, or the admin role in that org';
     end if;
     insert into rbac.org_members (org_id, user_id, role)
     values (p_org_id, p_user_id, p_role)
@@ -9710,7 +9719,9 @@ begin
                         where m.org_id = p_org_id
                           and m.user_id = rbac.current_user_id()
                           and m.role = 'admin')) then
-        raise exception 'not authorized to administer this org';
+        raise exception 'not authorized to administer this org'
+            using errcode = 'insufficient_privilege',
+                  hint = 'needs orgs:admin, or the admin role in that org';
     end if;
     delete from rbac.org_members where org_id = p_org_id and user_id = p_user_id;
     insert into rbac.auth_events (user_id, event_type, detail)
@@ -10293,7 +10304,9 @@ create or replace function rbac.grant_role(p_target_user_id uuid, p_role text)
 returns void as $$
 begin
     if not rbac.has_permission(rbac.current_user_id(), 'users', 'admin') then
-        raise exception 'not authorized to grant roles';
+        raise exception 'not authorized to grant roles'
+            using errcode = 'insufficient_privilege',
+                  hint = 'needs users:admin';
     end if;
     insert into rbac.user_roles (user_id, role) values (p_target_user_id, p_role)
     on conflict do nothing;
@@ -11364,7 +11377,9 @@ begin
     if rbac.has_permission(rbac.current_user_id(), 'workflow_runs', p_action) then
         return;
     end if;
-    raise exception 'not authorized to % run %', p_action, p_run_id;
+    raise exception 'not authorized to % run %', p_action, p_run_id
+        using errcode = 'insufficient_privilege',
+              hint = 'needs workflow_runs:' || p_action || ', or ownership of the run';
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
@@ -11823,7 +11838,8 @@ begin
             return;
         end if;
         raise exception 'not authorized to create schedule "%"', p_name
-            using hint = 'authenticate first: a schedule needs an owner';
+            using errcode = 'insufficient_privilege',
+                  hint = 'authenticate first: a schedule needs an owner';
     end if;
 
     if v_owner is not null and v_owner = v_caller then
@@ -11832,7 +11848,9 @@ begin
     if rbac.has_permission(v_caller, 'workflow_schedules', p_action) then
         return;
     end if;
-    raise exception 'not authorized to % schedule "%"', p_action, p_name;
+    raise exception 'not authorized to % schedule "%"', p_action, p_name
+        using errcode = 'insufficient_privilege',
+              hint = 'needs workflow_schedules:' || p_action || ', or ownership of the schedule';
 end;
 $$ language plpgsql stable security definer set search_path = pg_catalog, public;
 
@@ -18769,7 +18787,9 @@ create or replace function content.assert_org_write(p_org_id uuid, p_what text)
 returns void as $$
 begin
     if not rbac.may_access_org(p_org_id) then
-        raise exception 'not authorized to % for that organization', p_what;
+        raise exception 'not authorized to % for that organization', p_what
+            using errcode = 'insufficient_privilege',
+                  hint = 'the token must carry that org, and the caller must be a member';
     end if;
 end;
 $$ language plpgsql stable security definer set search_path = pg_catalog, public;
@@ -21330,7 +21350,9 @@ begin
         end if;
     end if;
     if not agentic.may_author('agents', 'agentic.agents'::regclass) then
-        raise exception 'not authorized to author agents';
+        raise exception 'not authorized to author agents'
+            using errcode = 'insufficient_privilege',
+                  hint = 'needs agents:update';
     end if;
 
     -- THE TOOL BINDING IS SHAPE-CHECKED HERE, because the near-miss spellings
@@ -21604,7 +21626,9 @@ declare
     v_row agentic.tool_servers;
 begin
     if not agentic.may_author('tool_servers', 'agentic.tool_servers'::regclass) then
-        raise exception 'not authorized to register tool servers';
+        raise exception 'not authorized to register tool servers'
+            using errcode = 'insufficient_privilege',
+                  hint = 'needs tool_servers:update';
     end if;
 
     insert into agentic.tool_servers (name, kind, url, credential_ref,
@@ -21717,7 +21741,9 @@ declare
     v_row agentic.skills;
 begin
     if not agentic.may_author('skills', 'agentic.skills'::regclass) then
-        raise exception 'not authorized to author skills';
+        raise exception 'not authorized to author skills'
+            using errcode = 'insufficient_privilege',
+                  hint = 'needs skills:update';
     end if;
 
     insert into agentic.skills (name, description, when_to_use, content,
@@ -21977,7 +22003,9 @@ begin
             'what makes the rows removable later.';
     end if;
     if not agentic.may_author('plugins', 'agentic.plugins'::regclass) then
-        raise exception 'not authorized to install plugins';
+        raise exception 'not authorized to install plugins'
+            using errcode = 'insufficient_privilege',
+                  hint = 'needs plugins:update';
     end if;
 
     -- A KEY THIS FUNCTION DOES NOT READ IS A MISTAKE, NOT AN EXTENSION, and on

@@ -2809,7 +2809,11 @@ begin
             -- statement that does not parse will fail identically on every
             -- retry; a deadlock or timeout will not. 42601 is a syntax error in
             -- SQL the author wrote, which is the new member of that set.
-            sqlstate in ('42883','42P01','42601','P0001'));
+            -- 42501 is the refused policy this comment already claimed and the
+            -- list did not have: an authorization refusal -- from RLS, from a
+            -- missing grant, or from one of this extension's own `not
+            -- authorized` raises -- is the same answer on the fifth attempt.
+            sqlstate in ('42501','42883','42P01','42601','P0001'));
         return true;
     end;
 end;
@@ -3031,7 +3035,8 @@ begin
     if not workflow.may_define() then
         raise exception
             'not authorized to define workflows'
-            using detail = 'A workflow step may carry its own SQL, which runs as the '
+            using errcode = 'insufficient_privilege',
+                  detail = 'A workflow step may carry its own SQL, which runs as the '
                            'engine owner and is not subject to row-level security, so '
                            'defining one is an authoring privilege rather than a read.',
                   hint   = 'Grant the caller a role holding workflows:update, or set '
@@ -3558,7 +3563,8 @@ begin
     end if;
 
     raise exception 'not authorized to % schedule "%"', p_action, p_name
-        using hint = 'workflow-engine/integration-rbac.sql installs the '
+        using errcode = 'insufficient_privilege',
+              hint = 'workflow-engine/integration-rbac.sql installs the '
                      'owner-and-permission check this default stands in for';
 end;
 $$ language plpgsql stable security definer set search_path = pg_catalog, public;
@@ -4825,9 +4831,10 @@ begin
     exception when others then
         perform workflow.fail_task(p_task_id,
             jsonb_build_object('error', sqlerrm, 'sqlstate', sqlstate),
-            -- A malformed spec, an unregistered function or a blown ceiling
-            -- fails identically on every retry. A deadlock or timeout does not.
-            sqlstate in ('42883','42P01','P0001'));
+            -- A malformed spec, an unregistered function, a blown ceiling or
+            -- a caller the database refused (42501) fails identically on every
+            -- retry. A deadlock or timeout does not.
+            sqlstate in ('42501','42883','42P01','P0001'));
         return 0;
     end;
 end;

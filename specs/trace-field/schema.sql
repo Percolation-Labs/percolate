@@ -392,7 +392,9 @@ begin
             'identity. A process cannot anchor.';
     end if;
     if not rbac.may_access_org((p_spec->>'org_id')::uuid) then
-        raise exception 'not authorized to anchor for that organization';
+        raise exception 'not authorized to anchor for that organization'
+            using errcode = 'insufficient_privilege',
+                  hint = 'the token must carry that org, and the caller must be a member';
     end if;
 
     insert into workflow.anchors (act, locus_kind, locus, rationale, org_id)
