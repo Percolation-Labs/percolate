@@ -3,7 +3,7 @@ import {read,rpc,config,claims} from './api.js';
 import {READS} from './reads.js';
 import {page,head} from './views.js';
 import {draftStore,sameInput} from './drafts.js';
-import {API_DEFAULTS,GITHUB_EXAMPLE,recentNewsExample,apiSourcePackage,apiPackageText} from './api-source-authoring.js';
+import {API_CHOICES,API_DEFAULTS,GITHUB_EXAMPLE,recentNewsExample,apiSourcePackage,apiPackageText} from './api-source-authoring.js';
 import {suggestAPI} from './api-source-assist.js';
 import {HELP_AGENT} from './query-assist.js';
 import {workspaceTabs,collectionWorkspace,contextualHelp} from './workspace.js';
@@ -18,6 +18,10 @@ export async function apiSources(requestedId){
  let workspace=null,collection=null,editRevision=0;
  const fields={},list=h('div',{class:'source-list'}),out=h('div',{role:'status'}),preview=h('div'),activity=h('div',{class:'source-activity',role:'region','aria-label':'Ingestion results',tabindex:-1}),context=h('div',{class:'source-context'}),draftNote=h('span',{class:'hint'});
  const input=(key,label,opts={},hint)=>{fields[key]=h(opts.rows?'textarea':'input',{class:'control','aria-label':label,...opts});return field(label,fields[key],hint);};
+ // The values come from API_CHOICES; only the wording and its order live here.
+ // A value with no wording yet is still offered, under its own name, and wording
+ // for a value the contract no longer admits is dropped.
+ const choices=(key,labels)=>[...Object.keys(labels).filter(v=>API_CHOICES[key].includes(v)),...API_CHOICES[key].filter(v=>!(v in labels))].map(v=>[v,labels[v]??v]);
  const dropdown=(key,label,options)=>{fields[key]=h('select',{class:'control','aria-label':label},options.map(([value,label])=>h('option',{value},label)));return field(label,fields[key]);};
  const raw=()=>Object.fromEntries(Object.entries(fields).map(([k,v])=>[k,v.value]));
  const settings=()=>{const s={};for(const [k,v] of Object.entries(fields)){if(k==='queue')continue;try{s[k]=jsonFields.has(k)?JSON.parse(v.value||'{}'):numberFields.has(k)?Number(v.value):v.value;}catch(_){throw Error(k+' is not valid JSON. Use an object with double-quoted names and values.');}}return s;};
@@ -33,15 +37,15 @@ export async function apiSources(requestedId){
    input('description','What will this feed support?',{rows:2,placeholder:'Keep a current issue feed for a repeatable triage workflow.'}),
    h('div',{class:'source-fields'},input('records_path','Records path',{},'Use $ for a top-level array, or a dot path such as data.items.'),input('id_path','Stable record ID',{},'The same ID updates the existing record rather than creating a duplicate.')));
  const watermark=h('div',{class:'form-stack'},
-   dropdown('watermark_type','Watermark type',[['timestamp','Updated timestamp'],['number','Increasing number'],['none','No incremental filter']]),
+   dropdown('watermark_type','Watermark type',choices('watermark_type',{timestamp:'Updated timestamp',number:'Increasing number',none:'No incremental filter'})),
    h('div',{class:'source-fields'},input('watermark_field','Watermark field',{},'Field in each record, for example updated_at.'),input('watermark_param','Watermark request parameter',{},'API filter parameter, for example since.')),
    h('div',{class:'source-fields'},input('initial_watermark','Start from',{placeholder:'Optional ISO timestamp with timezone'}),input('overlap_seconds','Overlap in seconds',{type:'number',min:0,max:604800})),
    h('p',{class:'document-help'},'Timestamp overlap re-reads a short window to catch boundary updates. Records are deduplicated by ID. Progress advances after all pages complete.'));
- const paging=h('div',{class:'form-stack'},dropdown('pagination','Pagination',[['link_header','HTTP Link header (rel=next)'],['next_url','Next URL in response'],['page_token','Page token in response'],['page','Page numbers'],['none','Single response']]),
+ const paging=h('div',{class:'form-stack'},dropdown('pagination','Pagination',choices('pagination',{link_header:'HTTP Link header (rel=next)',next_url:'Next URL in response',page_token:'Page token in response',page:'Page numbers',none:'Single response'})),
    h('div',{class:'source-fields'},input('next_path','Next URL or token path'),input('page_param','Page or token parameter')),
    h('div',{class:'source-fields'},input('page_size','Records per page',{type:'number',min:1,max:1000}),input('page_size_param','Page size parameter')),
    input('max_pages','Maximum pages per run',{type:'number',min:1,max:100},'A capped run saves its next page. Pull again to continue without advancing the watermark early.'));
- const authentication=h('div',{class:'form-stack'},dropdown('auth_type','Authentication',[['none','No authentication'],['bearer','Bearer token'],['header','API key header']]),
+ const authentication=h('div',{class:'form-stack'},dropdown('auth_type','Authentication',choices('auth_type',{none:'No authentication',bearer:'Bearer token',header:'API key header'})),
    h('div',{class:'source-fields'},input('credential_ref','Credential reference',{placeholder:'GITHUB_TOKEN'}),input('auth_header','Authentication header',{placeholder:'X-API-Key'})),
    h('p',{class:'document-help'},'Use a credential name, never its value. The worker must have that credential and allow it for this API origin.'));
  const mappings=h('div',{class:'form-stack'},input('mappings','Record transformations',{rows:8,class:'control mono'},'Map output names to source fields, for example {"issue_id":"id","author":"user.login"}. Optional casts: {"path":"state","cast":"lowercase"}. An empty object keeps all fields.'),

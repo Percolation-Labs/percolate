@@ -1,3 +1,9 @@
+// A copy of content.api_source in the database's percolate.types, which is the
+// one home of these defaults and choices (REM-61): the database stores and pulls
+// by that type, so a default that differed here would mean a different source
+// depending on who saved it. tests/test_api_source_contract.py holds this copy
+// to percolate_core/contract.json.
+export const API_CHOICES={auth_type:['none','bearer','header'],pagination:['none','link_header','next_url','page_token','page'],watermark_type:['none','timestamp','number']};
 export const API_DEFAULTS={name:'',description:'',url:'',params:{},headers:{},auth_type:'none',credential_ref:'',auth_header:'X-API-Key',
   records_path:'$',id_path:'id',watermark_type:'timestamp',watermark_field:'updated_at',watermark_param:'since',initial_watermark:'',overlap_seconds:60,
   pagination:'link_header',next_path:'next',page_param:'page',page_size_param:'per_page',page_size:100,max_pages:5,mappings:{}};
@@ -23,14 +29,14 @@ export function apiSourcePackage(id,settings,queue='ingest'){
   if(!['http:','https:'].includes(url.protocol)||url.username||url.password||url.hash)throw Error('The endpoint cannot contain embedded credentials or a fragment.');
   for(const key of ['params','headers','mappings'])if(!s[key]||typeof s[key]!=='object'||Array.isArray(s[key]))throw Error(key+' must be a JSON object.');
   if([...Object.keys(s.params),...url.searchParams.keys()].some(k=>/^(access_token|api_key|token|password)$/i.test(k))||Object.keys(s.headers).some(k=>/^(authorization|cookie|x-api-key|api-key)$/i.test(k)))throw Error('Use a credential reference for authentication. Remove literal tokens and authentication headers.');
-  if(!['none','bearer','header'].includes(s.auth_type))throw Error('Choose no authentication, bearer token or API key header.');
+  if(!API_CHOICES.auth_type.includes(s.auth_type))throw Error('Choose no authentication, bearer token or API key header.');
   if(s.auth_type!=='none'&&!/^[A-Z][A-Z0-9_]*$/.test(s.credential_ref))throw Error('Name the worker credential, for example GITHUB_TOKEN. Do not paste its value.');
-  if(!['none','timestamp','number'].includes(s.watermark_type))throw Error('Choose a timestamp, numeric or no watermark.');
+  if(!API_CHOICES.watermark_type.includes(s.watermark_type))throw Error('Choose a timestamp, numeric or no watermark.');
   if(s.watermark_type!=='none'&&(!s.watermark_field||!s.watermark_param))throw Error('Choose the record watermark field and the request parameter that filters updates.');
   if(s.initial_watermark&&s.watermark_type==='timestamp'&&(!/(Z|[+-]\d\d:\d\d)$/.test(s.initial_watermark)||!Number.isFinite(Date.parse(s.initial_watermark))))throw Error('Include a timezone in the initial timestamp, such as 2026-01-01T00:00:00Z.');
   if(s.initial_watermark&&s.watermark_type==='number'&&!Number.isFinite(Number(s.initial_watermark)))throw Error('The initial numeric watermark must be a number.');
   if(!s.id_path.trim())throw Error('Choose a stable record ID field for deduplication.');
-  if(!['none','link_header','next_url','page_token','page'].includes(s.pagination))throw Error('Choose a supported pagination method.');
+  if(!API_CHOICES.pagination.includes(s.pagination))throw Error('Choose a supported pagination method.');
   if(['next_url','page_token'].includes(s.pagination)&&!s.next_path.trim())throw Error('Enter the field containing the next URL or page token.');
   for(const [k,min,max] of [['page_size',1,1000],['max_pages',1,100],['overlap_seconds',0,604800]])if(!Number.isInteger(s[k])||s[k]<min||s[k]>max)throw Error(k+' must be a whole number from '+min+' to '+max+'.');
   if(Object.values(s.params).some(v=>!['string','number','boolean'].includes(typeof v)||typeof v==='number'&&!Number.isInteger(v)))throw Error('Query parameter values must be text, whole numbers or booleans.');
