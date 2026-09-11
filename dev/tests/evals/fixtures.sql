@@ -190,23 +190,23 @@ end $$;
 -- tenant legitimately sees -- a marketed drug is not one customer's secret.
 insert into calder.sponsors (id, name, code, parent_id, is_active, org_id, blurb) values
     -- The shared tier.
-    ('51000000-0000-0000-0000-000000000001','Novara Group','NVRA',null,true,null,
+    ('51000000-0000-0000-0000-000000000001','Novara Group','NVRA',null,true,rbac.shared_org_id(),
      'the parent, reachable from a signal only at depth 3'),
     ('51000000-0000-0000-0000-000000000002','Altimer Therapeutics','ALTM',
-     '51000000-0000-0000-0000-000000000001',true,null,
+     '51000000-0000-0000-0000-000000000001',true,rbac.shared_org_id(),
      'makes the hub product; a Novara subsidiary'),
-    ('51000000-0000-0000-0000-000000000003','Beringer Pharma','BRNG',null,true,null,
+    ('51000000-0000-0000-0000-000000000003','Beringer Pharma','BRNG',null,true,rbac.shared_org_id(),
      'makes the second product in the interaction pair'),
     ('51000000-0000-0000-0000-000000000004','Cyrene Biologics','CYRN',
-     '51000000-0000-0000-0000-000000000001',true,null,
+     '51000000-0000-0000-0000-000000000001',true,rbac.shared_org_id(),
      'a second Novara subsidiary -- the shape that makes a walk find one node two ways'),
     -- No edges at all. A seed with no neighbours must return zero rows rather
     -- than erroring, and must not be confused with a key that did not resolve.
-    ('51000000-0000-0000-0000-000000000005','Quillon Bio','QUIL',null,true,null,
+    ('51000000-0000-0000-0000-000000000005','Quillon Bio','QUIL',null,true,rbac.shared_org_id(),
      'deliberately unconnected'),
     -- EXCLUDED by the inclusion predicate. No node, no key, and therefore
     -- cannot be an edge endpoint however hard a scenario tries.
-    ('51000000-0000-0000-0000-000000000006','Harrow Labs','HRRW',null,false,null,
+    ('51000000-0000-0000-0000-000000000006','Harrow Labs','HRRW',null,false,rbac.shared_org_id(),
      'wound up -- must never appear in aiq.nodes'),
     -- The two tenants. Active AND org-scoped: tenancy and inclusion are
     -- orthogonal, and a fixture that conflated them could not say which one
@@ -221,13 +221,13 @@ on conflict (id) do update set
 
 insert into calder.products (id, name, inn, sponsor_id, withdrawn, org_id) values
     ('52000000-0000-0000-0000-000000000001','Tolvaxa','tolvaxen',
-     '51000000-0000-0000-0000-000000000002',false,null),
+     '51000000-0000-0000-0000-000000000002',false,rbac.shared_org_id()),
     ('52000000-0000-0000-0000-000000000002','Beriflor','beriflor',
-     '51000000-0000-0000-0000-000000000003',false,null),
+     '51000000-0000-0000-0000-000000000003',false,rbac.shared_org_id()),
     ('52000000-0000-0000-0000-000000000003','Cyranix','cyranix',
-     '51000000-0000-0000-0000-000000000004',false,null),
+     '51000000-0000-0000-0000-000000000004',false,rbac.shared_org_id()),
     ('52000000-0000-0000-0000-000000000004','Dolmirase','dolmirase',
-     '51000000-0000-0000-0000-000000000002',true,null),
+     '51000000-0000-0000-0000-000000000002',true,rbac.shared_org_id()),
     ('52000000-0000-0000-0000-000000000005','Westrelin','westrelin',
      '51000000-0000-0000-0000-000000000007',false,'aa000000-0000-0000-0000-0000000000a1'),
     ('52000000-0000-0000-0000-000000000006','Ostavir','ostavir',
@@ -237,17 +237,17 @@ on conflict (id) do update set
     withdrawn = excluded.withdrawn, org_id = excluded.org_id;
 
 insert into calder.sites (id, name, city, country, org_id) values
-    ('53000000-0000-0000-0000-000000000001','Ravensbourne Clinical Unit','London','GB',null),
-    ('53000000-0000-0000-0000-000000000002','Sankt Eriks Trial Centre','Stockholm','SE',null),
-    ('53000000-0000-0000-0000-000000000003','Mercy Valley Research','Denver','US',null)
+    ('53000000-0000-0000-0000-000000000001','Ravensbourne Clinical Unit','London','GB',rbac.shared_org_id()),
+    ('53000000-0000-0000-0000-000000000002','Sankt Eriks Trial Centre','Stockholm','SE',rbac.shared_org_id()),
+    ('53000000-0000-0000-0000-000000000003','Mercy Valley Research','Denver','US',rbac.shared_org_id())
 on conflict (id) do update set
     name = excluded.name, city = excluded.city, country = excluded.country,
     org_id = excluded.org_id;
 
 insert into calder.investigators (id, full_name, speciality, org_id) values
-    ('54000000-0000-0000-0000-000000000001','Ines Okonkwo','hepatology',null),
-    ('54000000-0000-0000-0000-000000000002','Rafael Bittencourt','cardiology',null),
-    ('54000000-0000-0000-0000-000000000003','Yun-Seo Park','nephrology',null),
+    ('54000000-0000-0000-0000-000000000001','Ines Okonkwo','hepatology',rbac.shared_org_id()),
+    ('54000000-0000-0000-0000-000000000002','Rafael Bittencourt','cardiology',rbac.shared_org_id()),
+    ('54000000-0000-0000-0000-000000000003','Yun-Seo Park','nephrology',rbac.shared_org_id()),
     ('54000000-0000-0000-0000-000000000004','Halvard Nystrom','hepatology',
      'aa000000-0000-0000-0000-0000000000a1')
 on conflict (id) do update set
@@ -257,17 +257,17 @@ on conflict (id) do update set
 insert into calder.signals (id, title, opened_on, severity, org_id) values
     -- The hub's signals. Four against one product is what makes the product a
     -- hub and makes "which product is the desk busiest about" a real question.
-    ('56000000-0000-0000-0000-000000000001','SIG-114 hepatic injury','2026-06-02','urgent',null),
-    ('56000000-0000-0000-0000-000000000002','SIG-118 QT prolongation','2026-06-19','elevated',null),
-    ('56000000-0000-0000-0000-000000000003','SIG-121 rash cluster','2026-07-03','routine',null),
-    ('56000000-0000-0000-0000-000000000004','SIG-130 renal impairment','2026-07-22','elevated',null),
+    ('56000000-0000-0000-0000-000000000001','SIG-114 hepatic injury','2026-06-02','urgent',rbac.shared_org_id()),
+    ('56000000-0000-0000-0000-000000000002','SIG-118 QT prolongation','2026-06-19','elevated',rbac.shared_org_id()),
+    ('56000000-0000-0000-0000-000000000003','SIG-121 rash cluster','2026-07-03','routine',rbac.shared_org_id()),
+    ('56000000-0000-0000-0000-000000000004','SIG-130 renal impairment','2026-07-22','elevated',rbac.shared_org_id()),
     -- Against a different product, so a walk from the hub does not reach
     -- everything and "expand until you find it" has somewhere to fail.
-    ('56000000-0000-0000-0000-000000000005','SIG-140 photosensitivity','2026-08-04','routine',null),
+    ('56000000-0000-0000-0000-000000000005','SIG-140 photosensitivity','2026-08-04','routine',rbac.shared_org_id()),
     -- The ambiguity case. Its short key is 'altimer', which is ALSO the short
     -- key of sponsor ALTM -- graph-identity.md's Bakhmut shape, one string
     -- naming two nodes of two types.
-    ('56000000-0000-0000-0000-000000000006','Altimer recall notice','2026-08-11','urgent',null),
+    ('56000000-0000-0000-0000-000000000006','Altimer recall notice','2026-08-11','urgent',rbac.shared_org_id()),
     ('56000000-0000-0000-0000-000000000007','SIG-151 infusion reaction','2026-08-20','elevated',
      'aa000000-0000-0000-0000-0000000000a1')
 on conflict (id) do update set
@@ -301,7 +301,7 @@ select ('57000000-0000-0000-0000-0000000000' || lpad(g::text, 2, '0'))::uuid,
        case when g % 4 = 0 then 'recovered' else 'ongoing' end,
        'case narrative ' || g,
        false,
-       null
+       rbac.shared_org_id()
 from generate_series(1, 60) g
 on conflict (id) do nothing;
 
@@ -312,6 +312,37 @@ insert into rbac.users (id, email, status) values
     ('55000000-0000-0000-0000-000000000002','analyst@calder.example','active'),
     ('55000000-0000-0000-0000-000000000003','orgb.user@ostara.example','active')
 on conflict (id) do update set email = excluded.email, status = excluded.status;
+
+-- WHAT THESE PEOPLE MAY DO, and why the rows are here rather than in a claim.
+-- A scenario states its caller as `claims:`, and a claim says who somebody is,
+-- never what they may do: membership is read from rbac.org_members and
+-- permissions from rbac.user_roles, so a token cannot widen itself (REM-44).
+-- Without these rows every authoring journey in this file stopped at
+-- `not authorized to define workflows` -- a permission model the fixture
+-- predates, not a finding.
+--
+-- The officer authors and decides; the analyst is an ordinary member, which is
+-- what makes "the analyst may not decide this escalation" a real refusal
+-- rather than an accident of having no rows. Tenant B's user is an ordinary
+-- member of the other tenant, so the cross-tenant scenarios compare two people
+-- who each legitimately hold their own side.
+insert into rbac.user_roles (user_id, role) values
+    ('55000000-0000-0000-0000-000000000001','admin'),
+    ('55000000-0000-0000-0000-000000000002','member'),
+    ('55000000-0000-0000-0000-000000000003','member')
+on conflict do nothing;
+
+do $$
+begin
+    if to_regclass('rbac.org_members') is null then
+        return;
+    end if;
+    insert into rbac.org_members (org_id, user_id, role) values
+        ('aa000000-0000-0000-0000-0000000000a1','55000000-0000-0000-0000-000000000001','admin'),
+        ('aa000000-0000-0000-0000-0000000000a1','55000000-0000-0000-0000-000000000002','member'),
+        ('bb000000-0000-0000-0000-0000000000b1','55000000-0000-0000-0000-000000000003','admin')
+    on conflict (org_id, user_id) do nothing;
+end $$;
 
 -- ============================================================================
 -- 3. Registration: five entity types, four different key expressions.
@@ -410,7 +441,11 @@ insert into aiq.relation_types (src_type, relation, dst_type, inverse_label, des
      'the safety signal names this product'),
     ('signal','implicates','sponsor','implicated_in',
      'one relation NAME, two catalogue triples -- what makes TYPE cross types'),
-    ('investigator','works_at','site','staffs','current appointment'),
+    -- The inverse is null so this triple INHERITS the shipped term's
+    -- (person works_at company / employs). aiq.check_relation_term refuses a
+    -- second inverse for one relation name, because symmetry and the inverse
+    -- describe the relation rather than the triple.
+    ('investigator','works_at','site',null,'current appointment'),
     ('site','trials','product','trialled_at','an active trial site for this product'),
     ('product','interacts_with','product','interacts_with',
      'symmetric; stored once, walked both ways'),
@@ -438,8 +473,12 @@ on conflict (src_type, relation, dst_type) do update
 -- must be able to be WRONG at the first two widths, or the scenario proves
 -- nothing.
 -- ============================================================================
+-- `coalesce(..., rbac.shared_org_id())`: aiq.edges.org_id is NOT NULL with the
+-- shared tier as its default, and an explicit null defeats a default. The rows
+-- below say null for "reference data every tenant sees", which is that tier.
 insert into aiq.edges (src_id, dst_id, relation, weight, provenance, org_id)
-select s.id, d.id, v.relation, v.weight::real, v.provenance::jsonb, v.org_id::uuid
+select s.id, d.id, v.relation, v.weight::real, v.provenance::jsonb,
+       coalesce(v.org_id::uuid, rbac.shared_org_id())
 from (values
     -- The three-hop chain, weakening as it goes so path_weight orders it.
     ('signal','56000000-0000-0000-0000-000000000001','implicates','product','52000000-0000-0000-0000-000000000001',1.00,'{"source":"case series"}',null),
@@ -514,11 +553,11 @@ create table if not exists calder.chunks (
 
 insert into calder.chunks (id, resource, ordinal, content, org_id) values
     ('58000000-0000-0000-0000-000000000001','psur-tolvaxen',0,
-     'Batch LOT-4471B accounted for eleven of the hepatic injury reports in the period.',null),
+     'Batch LOT-4471B accounted for eleven of the hepatic injury reports in the period.',rbac.shared_org_id()),
     ('58000000-0000-0000-0000-000000000002','psur-tolvaxen',1,
-     'Liver enzyme elevation was observed more often than the label anticipates.',null),
+     'Liver enzyme elevation was observed more often than the label anticipates.',rbac.shared_org_id()),
     ('58000000-0000-0000-0000-000000000003','site-audit-ravensbourne',0,
-     'Cold chain storage and consent documentation were satisfactory throughout the visit.',null),
+     'Cold chain storage and consent documentation were satisfactory throughout the visit.',rbac.shared_org_id()),
     ('58000000-0000-0000-0000-000000000004','westmark-internal',0,
      'Westmark exposure to LOT-4471B now covers two open studies.',
      'aa000000-0000-0000-0000-0000000000a1'),
@@ -526,7 +565,7 @@ insert into calder.chunks (id, resource, ordinal, content, org_id) values
      'Ostara reports no hepatic findings across its generic portfolio this quarter.',
      'bb000000-0000-0000-0000-0000000000b1'),
     ('58000000-0000-0000-0000-000000000006','guidance-note',0,
-     'A signal is a reported association that requires evaluation, not a confirmed causal relationship.',null)
+     'A signal is a reported association that requires evaluation, not a confirmed causal relationship.',rbac.shared_org_id())
 on conflict (id) do update set content = excluded.content, org_id = excluded.org_id;
 
 -- Lexical: adds the generated tsvector column and its GIN index to our table.
@@ -581,14 +620,21 @@ grant select on calder.chunks, calder.sponsors, calder.products, calder.sites,
 -- rolled-back scenario; the resources and chunks a scenario creates through
 -- them do not.
 -- ============================================================================
-insert into content.channels (id, name, kind, config, org_id) values
+-- rbac.shared_org_id() rather than null, for the reason the edges above use it:
+-- these are the shared tier, and content.channels.org_id is NOT NULL.
+-- `public`, and it is what makes these usable at all: content.channels gained a
+-- visibility column defaulting to `private`, and a private channel with no
+-- owner is readable by nobody -- so every upload journey in this file stopped
+-- at `no channel named pv-reports for this org`. These two are the fixture's
+-- shared furniture, which is what public means.
+insert into content.channels (id, name, kind, config, org_id, visibility) values
     ('11110000-0000-0000-0000-0000000000c1','pv-reports','file_upload',
-     '{"description":"PSUR and case narrative uploads"}'::jsonb, null),
+     '{"description":"PSUR and case narrative uploads"}'::jsonb, rbac.shared_org_id(), 'public'),
     ('11110000-0000-0000-0000-0000000000c2','pv-registry','http_pull',
      '{"description":"a regulator record feed","url":"http://p8-faultsrv:8099/empty"}'::jsonb,
-     null)
+     rbac.shared_org_id(), 'public')
 on conflict (id) do update set name = excluded.name, kind = excluded.kind,
-    config = excluded.config;
+    config = excluded.config, visibility = excluded.visibility;
 
 -- ============================================================================
 -- 9. Step functions -- the allow-list a `sql:` step and a `matrix: rows:` may

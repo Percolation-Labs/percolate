@@ -923,8 +923,8 @@ scenarios:
         select workflow.start_workflow('ev_hitl01','{}'::jsonb) as run_id;
     check:
       - name: the evidence step ran with no worker
-        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='gather'"
-        is: "done"
+        sql: "select workflow.is_success(status) from workflow.tasks where run_id=(select run_id from ctx) and step_key='gather'"
+        is: "true"
         because: "a `sql` step runs inside Postgres; if it needed a process the whole point of parking cheaply would be lost"
       - name: the run is waiting on the person, explicitly
         sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='officer'"
@@ -991,8 +991,8 @@ scenarios:
         is: "55000000-0000-0000-0000-000000000001"
         because: "a run with owner_id null is not owned by everyone -- it takes an explicit permission to act on, so an unowned human-in-the-loop run can never be closed"
       - name: and the owner's signal landed
-        sql: "select status from workflow.tasks_api where run_id=(select run_id from ctx) and step_key='officer'"
-        is: "done"
+        sql: "select workflow.is_success(status) from workflow.tasks_api where run_id=(select run_id from ctx) and step_key='officer'"
+        is: "true"
         because: "authority follows provenance: whoever created the run is who may answer its questions"
 
   - id: hitl-04
@@ -1043,8 +1043,8 @@ scenarios:
           reopening this way twice. The merge is now one function with three
           callers, so the enumeration is a grep rather than a memory.
       - name: so the acting step runs rather than failing
-        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='land'"
-        is: "done"
+        sql: "select workflow.is_success(status) from workflow.tasks where run_id=(select run_id from ctx) and step_key='land'"
+        is: "true"
         because: "an author who wrote the documented idiom gets a failed run whose error names a template they wrote correctly"
       - name: and the decision is recorded
         sql: "select count(*) from calder.escalations where decision='escalate'"
@@ -1252,8 +1252,8 @@ scenarios:
       select workflow.promote_due_timers();
     check:
       - name: the timer fired
-        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and kind='timer'"
-        is: "done"
+        sql: "select workflow.is_success(status) from workflow.tasks where run_id=(select run_id from ctx) and kind='timer'"
+        is: "true"
         because: "ageing the row rather than sleeping an hour is what makes this testable at all -- a test that takes an hour is a test nobody runs"
       - name: and the person is now being asked
         sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='officer'"
@@ -2048,8 +2048,8 @@ scenarios:
         select workflow.start_workflow('ev_f2g10','{}'::jsonb) as run_id;
     check:
       - name: the run completed with no worker anywhere
-        sql: "select status from workflow.runs where id=(select run_id from ctx)"
-        is: "completed"
+        sql: "select workflow.is_success(status) from workflow.runs where id=(select run_id from ctx)"
+        is: "true"
         because: "both steps are `sql`, executed inside Postgres -- if this needed a process, 'a document becomes answerable' would need a deployment"
       - name: the walk reached the document the extractor landed
         sql: |
@@ -2111,8 +2111,8 @@ scenarios:
         is: "0"
         because: "a fan-out over rows the query was written to exclude is a wrong answer with a green run and somebody else's rate limit spent on it"
       - name: and the children exist in the transaction that completed the parent
-        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='fan'"
-        is: "done"
+        sql: "select workflow.is_success(status) from workflow.tasks where run_id=(select run_id from ctx) and step_key='fan'"
+        is: "true"
         because: "Argo's controller leaves a window in which the parent is done and the children do not exist, so a crash strands the fan-out with nothing to resume from. That transaction boundary -- not the syntax -- is the difference"
 
   - id: coll-02
@@ -2318,8 +2318,8 @@ scenarios:
         select workflow.start_workflow('ev_coll06b','{}'::jsonb) as run_id;
     check:
       - name: it expanded
-        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='fan'"
-        is: "done"
+        sql: "select workflow.is_success(status) from workflow.tasks where run_id=(select run_id from ctx) and step_key='fan'"
+        is: "true"
         because: "refusing this too would make partition_by a sort with a misleading name -- the guarantee it buys is exactly that the partitioned column means something inside the child"
       - name: and each child's url names its own partition
         sql: "select count(distinct input->>'url') from workflow.tasks where run_id=(select run_id from ctx) and step_key like 'fan[%'"
@@ -2365,8 +2365,8 @@ scenarios:
       select workflow.complete_task((select id from kids where n=3), '{"status":200,"result":{}}'::jsonb);
     check:
       - name: the aggregate still ran
-        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='tally'"
-        is: "done"
+        sql: "select workflow.is_success(status) from workflow.tasks where run_id=(select run_id from ctx) and step_key='tally'"
+        is: "true"
         because: "under a pure AND-join one 404 cancels the report -- a 404 from a registry is not a failure of the pipeline, it is what registries look like"
       - name: and it can see which child failed
         sql: "select output#>>'{result,failed}' from workflow.tasks where run_id=(select run_id from ctx) and step_key='tally'"
@@ -2408,12 +2408,12 @@ scenarios:
       select workflow.complete_task((select id from kids where n=3), '{"status":200,"result":{}}'::jsonb);
     check:
       - name: the aggregate did not produce a number
-        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='tally'"
-        isnt: "done"
+        sql: "select workflow.is_success(status) from workflow.tasks where run_id=(select run_id from ctx) and step_key='tally'"
+        is: "false"
         because: "a `sql` successor auto-runs inside the statement that marks it ready, so checking the floor after release produces output from a task that was then cancelled -- the gate has to be evaluated before the release"
       - name: and the run says it failed
-        sql: "select status from workflow.runs where id=(select run_id from ctx)"
-        isnt: "completed"
+        sql: "select workflow.is_success(status) from workflow.runs where id=(select run_id from ctx)"
+        is: "false"
         because: "a run over a quarter of the data reporting `completed` is this whole suite's subject in one row"
 
   - id: coll-09
@@ -2457,8 +2457,8 @@ scenarios:
         is: "3"
         because: "min_success is a transport floor by design, and saying so is the point -- whether the content is useful is the aggregate's job"
       - name: and the aggregate is the one that can tell
-        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='tally'"
-        is: "done"
+        sql: "select workflow.is_success(status) from workflow.tasks where run_id=(select run_id from ctx) and step_key='tally'"
+        is: "true"
         because: "the engine handing four empty bodies to a report that then says 'nothing changed' is correct; the engine deciding that for it would make an empty poll an incident"
 
   - id: coll-10
@@ -3084,8 +3084,8 @@ scenarios:
         is: "failed"
         because: "a 404 stays a 404; retrying it is the pure-waste case the terminal classification exists for"
       - name: the successor never runs
-        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='report'"
-        isnt: "done"
+        sql: "select workflow.is_success(status) from workflow.tasks where run_id=(select run_id from ctx) and step_key='report'"
+        is: "false"
         because: "a report written over a fetch that failed is confidently wrong, and the run is green either way unless the cascade stops it"
       - name: and the run says failed
         sql: "select status from workflow.runs where id=(select run_id from ctx)"
@@ -3207,8 +3207,8 @@ scenarios:
         is: "(none)"
         because: "the reaped task carries no output, so there is nothing for a successor to read early -- the fence has to hold before the zombie reports, not after"
       - name: the successor did not consume a stale answer
-        sql: "select status from workflow.tasks where run_id=(select run_id from ctx) and step_key='report'"
-        isnt: "done"
+        sql: "select workflow.is_success(status) from workflow.tasks where run_id=(select run_id from ctx) and step_key='report'"
+        is: "false"
         because: "the real failure is not the duplicate work -- it is that a stale answer is published, the successor consumes it, and the live holder's real answer then overwrites the same key AFTER the read. One template resolves to two values over one run, both workers did the work, and nothing is logged"
 
   - id: recov-06
@@ -3265,8 +3265,8 @@ scenarios:
         is: "2"
         because: "one per completed saga step; a compensation created for a step that never ran undoes something that never happened"
       - name: and the run says compensated, not completed
-        sql: "select status from workflow.runs where id=(select run_id from ctx)"
-        isnt: "completed"
+        sql: "select workflow.is_success(status) from workflow.runs where id=(select run_id from ctx)"
+        is: "false"
         because: "a saga that rolled back and reported success is the exact distinction this status exists for, and it was once reported complete before any compensation had run"
 
   - id: recov-07

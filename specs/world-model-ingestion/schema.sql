@@ -142,8 +142,10 @@ create table if not exists content.resources (
     --     where status = 'ready'. Machine-generated step output is exactly
     --     the data-plane volume graph-identity.md's inclusion policy keeps
     --     out of the node registry -- the same argument that excludes chunks.
-    status       text not null default 'pending'
-                     check (status in ('pending','ready','stored','failed','superseded')),
+    -- The CHECK is the drop-then-add below, and only there, for the reason
+    -- given with it: written in both places, the two copies are what an
+    -- existing installation and a fresh one differ by (REM-52).
+    status       text not null default 'pending',
     metadata     jsonb not null default '{}'::jsonb,
     org_id       uuid,
     ingested_at  timestamptz not null default now(),

@@ -335,7 +335,11 @@ revoke execute on function content.fail_resource_of_ingest_run() from public;
 create or replace trigger trg_ingest_run_fails_resource
     after update of status on workflow.runs
     for each row
-    when (old.status = 'running' and new.status in ('failed', 'cancelled')
+    -- Finished without succeeding, asked of the vocabulary rather than spelled
+    -- out here: a state added to workflow.lifecycle_states reaches this trigger
+    -- without anybody remembering this file (REM-52).
+    when (old.status = 'running'
+          and workflow.is_terminal(new.status) and not workflow.is_success(new.status)
           and new.external_id like 'ingest:%')
     execute function content.fail_resource_of_ingest_run();
 

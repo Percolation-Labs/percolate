@@ -202,8 +202,10 @@ async def start(conn, name: str, step_input: dict, run_input: dict | None = None
 async def wait(conn, run: str, seconds: int = 180) -> tuple[str, dict]:
     deadline = time.time() + seconds
     while time.time() < deadline:
-        status = await conn.fetchval("select status from workflow.runs where id = $1::uuid", run)
-        if status in ("succeeded", "failed", "cancelled"):
+        # Terminal by the vocabulary, not by a list written here (REM-52).
+        status, done = await conn.fetchrow(
+            "select status, workflow.is_terminal(status) from workflow.runs where id = $1::uuid", run)
+        if done:
             row = await conn.fetchrow(
                 "select output::text, error from workflow.tasks where run_id = $1::uuid "
                 "order by created_at desc limit 1", run)
@@ -523,7 +525,9 @@ async def main() -> int:
                            QUEUE, run)
         deadline = time.time() + 120
         while time.time() < deadline:
-            if await conn.fetchval("select status from workflow.runs where id = $1::uuid", run) in ("succeeded", "failed"):
+            # Including cancelled, which this loop used to wait out in full.
+            if await conn.fetchval(
+                    "select workflow.is_terminal(status) from workflow.runs where id = $1::uuid", run):
                 break
             await asyncio.sleep(0.5)
         rows = await conn.fetch("select step_key, status, output::text, error::text from workflow.tasks "

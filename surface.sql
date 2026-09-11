@@ -174,6 +174,13 @@ insert into expected (subsystem, kind, name, detail, why) values
 -- The lifecycle vocabulary, declared because three tables now reference it
 -- and a missing one would take every status write with it.
 ('workflow-engine','table','workflow.lifecycle_states',null,'schema.sql: one home for the words every status column references'),
+-- Readable to anyone who can read a status, because the alternative is what
+-- every caller did instead: write the terminal set down again. A client polling
+-- a run asks the database whether it has finished (REM-52).
+('workflow-engine','function','workflow.is_terminal','text',
+     'schema.sql: has this run, task or step finished -- asked of the vocabulary rather than of a list beside it'),
+('workflow-engine','function','workflow.is_success','text',
+     'schema.sql: ...and did it do what it was asked. A failed run also completed'),
 ('workflow-engine','table','workflow.runs',null,'spec.md §2'),
 ('workflow-engine','table','workflow.tasks',null,'spec.md §2'),
 ('workflow-engine','table','workflow.step_functions',null,'schema.sql §17: the operations a deployment blesses -- a timeout and a description each, and the whole surface under sql_policy = registered'),
