@@ -695,9 +695,10 @@ fn build(bf: &BuildFilter) -> Snapshot {
     // WHICH RELATION THE EDGES COME FROM, asked before the cursors open rather
     // than inside them. `aiq.edge_periods` is the correct source (see the edge
     // query below) and it costs an anti-join per row: measured at 3.94M edges,
-    // 410 ms off the table against 1,130 ms off the view, which is ~19% of the
-    // 3.8 s a full build takes -- paid by every deployment to describe an event
-    // that has not happened on any of them yet.
+    // 285 ms off the table against 1,030 ms off the view (median of three, on a
+    // loaded machine), which is ~19% of the 3.8 s graph-algorithms.md §R1
+    // records for a full build -- paid by every deployment, to describe an
+    // event that has happened on none of them yet.
     //
     // So: no undone retraction anywhere means every edge has exactly one belief
     // period and the periods ARE the rows. The probe is one index lookup, it
