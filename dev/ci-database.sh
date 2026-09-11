@@ -61,10 +61,26 @@ V=$(sed -n "s/^default_version = '\(.*\)'/\1/p" extension/percolate/percolate.co
 # for `:19-$V` breaks on every push until the release that creates it exists.
 PUB=$(git tag --list 'v*' | sed 's/^v//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
       | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
-IMAGE="percolationlabs/percolate-postgres:19-${PUB:-}"
-[ -n "$PUB" ] || IMAGE="percolationlabs/percolate-postgres:19"
-[ "$PUB" = "$V" ] && echo "tree is $V, which is published" \
-                  || echo "tree is $V (unreleased); testing its SQL on the ${PUB:-mutable :19} image"
+if [ -n "${IMAGE:-}" ]; then
+    # THE PARSER, WHEN THE BRANCH IS THE PARSER. The header says this script
+    # does not build one, which left a branch that changes
+    # extension/percolate_parser/ with no way to ask these gates about its own
+    # compiled code: the published image carries the .so from the last release.
+    # So the image is overridable, and
+    #
+    #     TAG=percolate-postgres:mine dev/build-image.sh
+    #     IMAGE=percolate-postgres:mine CONTAINER=p8-mine DB=p8mine dev/ci-database.sh
+    #
+    # is the pair -- this tree's parser under this tree's schema -- in two
+    # commands rather than none. CI passes nothing and gets the published
+    # image, which is the run it is meant to be reporting on.
+    echo "tree is $V, on $IMAGE (an image override; CI uses the published one)"
+else
+    IMAGE="percolationlabs/percolate-postgres:19-${PUB:-}"
+    [ -n "$PUB" ] || IMAGE="percolationlabs/percolate-postgres:19"
+    [ "$PUB" = "$V" ] && echo "tree is $V, which is published" \
+                      || echo "tree is $V (unreleased); testing its SQL on the ${PUB:-mutable :19} image"
+fi
 
 # EVERYTHING THE TREE CAN GET WRONG, BEFORE ANYTHING DOCKER CAN. This block used
 # to sit after the readiness loop, and the ordering was the defect rather than
