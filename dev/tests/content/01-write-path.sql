@@ -290,19 +290,22 @@ begin
             '"not yours" and "no such thing" answer differently: % vs %', v_msg1, v_msg2;
     end if;
 
+    -- THE MESSAGE, NOT THE SQLSTATE, is what tells the designed refusal from a
+    -- bare permission denial here: REM-67 gave assert_org_write's raise
+    -- errcode 42501, which is also what a missing GRANT raises, so the arm
+    -- above (`when insufficient_privilege then raise`) would now pass a table
+    -- privilege off as the tenancy check working.
     begin
         perform content.register_upload('t-uploads','t-plant','b','k/p',1,null,'planted',null,a);
         raise exception 'org B planted a resource in org A''s org';
-    exception when insufficient_privilege then raise;
-    when others then
-        if sqlerrm like '%planted a resource%' then raise; end if;
+    exception when others then
+        if sqlerrm not like 'not authorized to % for that organization' then raise; end if;
     end;
     begin
         perform content.register_fetched('t-feed','t-plant-2','planted',null,a);
         raise exception 'org B registered a fetched item into org A''s org';
-    exception when insufficient_privilege then raise;
-    when others then
-        if sqlerrm like '%registered a fetched%' then raise; end if;
+    exception when others then
+        if sqlerrm not like 'not authorized to % for that organization' then raise; end if;
     end;
 
     -- org B writing its OWN org is unaffected -- a check that refuses everyone
