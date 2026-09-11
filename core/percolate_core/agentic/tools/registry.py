@@ -57,6 +57,19 @@ class ResolvedToolset:
         }
 
 
+class DiscoveryFailed(RuntimeError):
+    """The tool server could not be asked for its tools. Nothing was written.
+
+    Named so that a caller can tell the two halves of a sync apart. The HTTP
+    endpoint treated *every* exception from here as the upstream server
+    failing, so `agentic.upsert_tool_server` refusing the caller — the second
+    half, reached only because discovery had succeeded — arrived as `502 Tool
+    discovery failed (RaiseError)`, blaming the one participant that had done
+    its job. Carries the failure's type name only: an upstream error body can
+    quote the request it answered, credentials included.
+    """
+
+
 async def sync_server(repo: Repository, server: ToolServer) -> ToolServer:
     """Discover a server's tools and cache them on its row.
 
@@ -67,9 +80,17 @@ async def sync_server(repo: Repository, server: ToolServer) -> ToolServer:
     Shell: the flow is real (pick provider by kind → list_tools → write back),
     the providers underneath are stubs. Staleness handling is an open question
     (§9) and is *not* silently decided here.
+
+    Two participants, so two kinds of failure: discovery is the tool server's
+    and is raised as ``DiscoveryFailed``; the write is the database's, and its
+    errors — a refusal of the caller above all — travel untouched to the layer
+    that knows what they mean (``core/refusal.py``).
     """
     provider = PROVIDERS[server.kind]
-    server.cached_tools = await provider.list_tools(server)
+    try:
+        server.cached_tools = await provider.list_tools(server)
+    except Exception as exc:
+        raise DiscoveryFailed(type(exc).__name__) from exc
     return await repo.upsert_tool_server(server)
 
 

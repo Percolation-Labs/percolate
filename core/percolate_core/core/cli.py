@@ -32,6 +32,8 @@ from typing import Any
 
 import typer
 
+from .refusal import refusal
+
 app = typer.Typer(help="Bootstrap the first identity, and sign tokens.", no_args_is_help=True)
 
 
@@ -168,7 +170,12 @@ def bootstrap(
                 "alter extension percolate update;` -- or use a percolate-core "
                 "before 0.1.7, which did the inserts itself.", err=True)
             raise typer.Exit(1) from None
-        if type(exc).__name__ != "RaiseError":
+        # A REFUSAL IS ALSO A DESIGNED ANSWER, and this arm used to miss it:
+        # matching `RaiseError` matches SQLSTATE P0001 only, so a database that
+        # refuses the DSN's role -- "permission denied for function
+        # bootstrap_admin", 42501 -- got the traceback this arm exists to
+        # avoid. core/refusal.py is the same rule the HTTP surfaces use.
+        if type(exc).__name__ != "RaiseError" and refusal(exc) is None:
             raise
         # .message, not str(exc): asyncpg's __str__ already appends "HINT: ..."
         # to the message, so formatting the hint as well printed it twice.
