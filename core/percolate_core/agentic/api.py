@@ -32,12 +32,15 @@ import os
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.routing import APIRoute
 
+from ..core.refusal import STATUS as REFUSED_STATUS, refusal
 from .contracts import ChatRequest, RequestContext, RunError, Session, to_sse
 from .db import PgClient, PgRepository
 from .gateway import caller_claims, user_id_of
@@ -94,9 +97,41 @@ def _state(request: Request) -> tuple[PgClient, Settings]:
     return client, app.state.percolate_agent_settings
 
 
+class RefusedRoute(APIRoute):
+    """A database refusal is a 403 here, on every endpoint of this router.
+
+    ONE MAPPING, at the boundary, rather than a `try` per endpoint. Every
+    authorization rule this runtime obeys lives in Postgres (`brief.md` §10.2),
+    so any statement any endpoint runs can come back refused -- a turn refused
+    by `agentic.start_run`, a sync refused by `agentic.upsert_tool_server`, a
+    read refused by a grant. Each of those reached the caller as its own kind
+    of wrong answer: a bare 500 for the turn, and `502 Tool discovery failed
+    (RaiseError)` for the sync, blaming a tool server that had just answered.
+
+    A route class rather than an exception handler because this router is
+    *mountable*: handlers belong to the host app, and a host that mounted this
+    router would have had to know to install ours. The route class travels with
+    the router (`core/refusal.py` has the rule itself).
+    """
+
+    def get_route_handler(self):
+        handle = super().get_route_handler()
+
+        async def refusals_are_403(request: Request) -> Response:
+            try:
+                return await handle(request)
+            except Exception as exc:
+                refused = refusal(exc)
+                if refused is None:
+                    raise
+                return JSONResponse(refused.body(), status_code=REFUSED_STATUS)
+
+        return refusals_are_403
+
+
 def router() -> APIRouter:
     """The two endpoints, ready to mount under any prefix."""
-    api = APIRouter()
+    api = APIRouter(route_class=RefusedRoute)
 
     def _identity(request: Request) -> tuple[dict[str, Any] | None, RequestContext]:
         """Who is calling, and what ambient context they brought.
@@ -116,7 +151,7 @@ def router() -> APIRouter:
 
     @api.post("/tools/{name}/sync")
     async def sync_tools(name: str, request: Request) -> dict:
-        from .tools import sync_server
+        from .tools import DiscoveryFailed, sync_server
         from .tools.auth import caller_credentials
 
         client, settings = _state(request)
@@ -130,9 +165,13 @@ def router() -> APIRouter:
         try:
             with caller_credentials(request.headers.get("authorization"), settings.tool_auth_origins):
                 synced = await sync_server(repo, server)
-        except Exception as exc:
-            # Do not return upstream headers or credential-bearing error text.
-            raise HTTPException(502, f"Tool discovery failed ({type(exc).__name__}); catalogue was not updated") from None
+        except DiscoveryFailed as exc:
+            # 502 IS ABOUT THE TOOL SERVER, and only the tool server. Catching
+            # every exception here made the database refusing this caller a
+            # verdict on a service that had already answered -- see
+            # DiscoveryFailed. Its text is the failure's type name, because
+            # upstream error bodies quote requests and requests carry tokens.
+            raise HTTPException(502, f"Tool discovery failed ({exc}); catalogue was not updated") from None
         return {"name": synced.name, "tools": [t.name for t in synced.cached_tools]}
 
     @api.get("/_build")
@@ -201,8 +240,11 @@ def router() -> APIRouter:
         if not body.stream:
             return await _completion(repo, settings, body, context, session, request.headers.get("authorization"))
 
+        stream = await _start_stream(
+            client, repo, settings, body, context, session, request.headers.get("authorization")
+        )
         return StreamingResponse(
-            _run_and_stream(client, repo, settings, body, context, session, request.headers.get("authorization")),
+            _forward(stream, session),
             media_type="text/event-stream",
             headers={
                 # The session is in the response headers as well as in every
@@ -370,7 +412,17 @@ async def _completion(
     )
 
 
-async def _run_and_stream(
+@dataclass
+class _Stream:
+    """A turn that has started, and the listener carrying its events."""
+
+    conn: Any
+    queue: asyncio.Queue
+    turn: asyncio.Task
+    first: dict[str, Any] | None
+
+
+async def _start_stream(
     client: PgClient,
     repo: PgRepository,
     settings: Settings,
@@ -378,23 +430,80 @@ async def _run_and_stream(
     context: RequestContext,
     session: Session,
     authorization: str | None = None,
-) -> AsyncIterator[str]:
-    """Start listening, start the turn, forward until the turn is done.
+) -> _Stream:
+    """Start listening, start the turn, and wait for the turn to say anything.
 
     The order matters: ``LISTEN`` is established *before* the run starts, or the
     first events are published to nobody. And the events forwarded here come off
     the channel, not out of the sequencer — which is why a delegated sub-run
     executing in the gateway process appears in this stream at all.
+
+    THE STATUS CODE IS DECIDED HERE, before the response begins, which is why
+    this is not inside the generator. Starlette sends the 200 as soon as a
+    ``StreamingResponse`` is returned, so everything that happens afterwards
+    can only be said *in* the stream — a caller refused `agents:invoke` got a
+    200 and a RUN_ERROR frame, while the same refusal on the non-streaming
+    path was a bare 500. So the generator is not built until the turn has
+    either published its first event — it is running, and anything later is
+    genuinely mid-stream — or ended. A turn the database refused before it
+    published anything raises here, and the route class answers 403.
+
+    The wait costs one NOTIFY round trip, and nothing else: RUN_STARTED is
+    emitted the moment ``agentic.start_run`` returns, and it is the stream's
+    first byte either way.
     """
     queue: asyncio.Queue = asyncio.Queue()
     conn = await client.listen(channel(session.id), queue)
-    sequencer = TurnSequencer(repo, settings, sink=EventSink(repo), caller_authorization=authorization)
-    turn = asyncio.create_task(
-        sequencer.run_turn(
-            body.model_copy(update={"session_id": session.id}), context
-        )
-    )
+    turn: asyncio.Task | None = None
     try:
+        sequencer = TurnSequencer(repo, settings, sink=EventSink(repo), caller_authorization=authorization)
+        turn = asyncio.create_task(
+            sequencer.run_turn(
+                body.model_copy(update={"session_id": session.id}), context
+            )
+        )
+        first = await _first_event(queue, turn)
+        failure = turn.exception() if turn.done() and not turn.cancelled() else None
+        if first is None and failure is not None and refusal(failure) is not None:
+            raise failure
+        return _Stream(conn, queue, turn, first)
+    except BaseException:
+        _unwatched(turn)
+        await conn.close()
+        raise
+
+
+async def _first_event(queue: asyncio.Queue, turn: asyncio.Task) -> dict[str, Any] | None:
+    """The turn's first published event, or None if it ended without one.
+
+    Whichever comes first. A cancelled getter leaves the queue alone — an item
+    already delivered stays in it for the relay to pick up — so this cannot
+    swallow the event it was waiting for.
+    """
+    getter: asyncio.Future = asyncio.ensure_future(queue.get())
+    try:
+        await asyncio.wait({getter, turn}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        if not getter.done():
+            getter.cancel()
+    return getter.result() if getter.done() and not getter.cancelled() else None
+
+
+def _unwatched(turn: asyncio.Task | None) -> None:
+    """A client that disconnects mid-turn does not cancel the run — the rows
+    still land, which is the point of rows being the record. But nobody is left
+    to await the task, so retrieve its exception rather than let it surface as
+    "Task exception was never retrieved" at some later GC."""
+    if turn is not None and not turn.done():
+        turn.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
+
+async def _forward(stream: _Stream, session: Session) -> AsyncIterator[str]:
+    """Forward the started turn's events until it is done."""
+    conn, queue, turn = stream.conn, stream.queue, stream.turn
+    try:
+        if stream.first is not None:
+            yield to_sse(stream.first)
         drain_until: float | None = None
         loop = asyncio.get_running_loop()
         while True:
@@ -414,17 +523,20 @@ async def _run_and_stream(
                 continue
             yield to_sse(payload)
 
-        if turn.exception() is not None:
+        if turn.done() and not turn.cancelled() and turn.exception() is not None:
             error = turn.exception()
+            # A REFUSAL THAT ARRIVES MID-STREAM cannot change the status line,
+            # so it is said in the stream instead — as the database said it,
+            # message and hint, rather than as a Python type name. That is the
+            # sentence a person can act on ("needs agents:invoke").
+            refused = refusal(error)
             yield to_sse(
-                RunError(thread_id=session.id, message=f"{type(error).__name__}: {error}")
+                RunError(
+                    thread_id=session.id,
+                    message=str(refused) if refused else f"{type(error).__name__}: {error}",
+                )
             )
     finally:
-        # A client that disconnects mid-turn does not cancel the run — the rows
-        # still land, which is the point of rows being the record. But nobody is
-        # left to await the task, so retrieve its exception rather than let it
-        # surface as "Task exception was never retrieved" at some later GC.
-        if not turn.done():
-            turn.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+        _unwatched(turn)
         await conn.close()
 

@@ -22,9 +22,11 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 
 from .. import __version__
 from ..core import as_caller, claims_from_jwt, optional
+from ..core.refusal import STATUS as REFUSED_STATUS, refusal
 from . import storage
 
 routes = APIRouter()
@@ -94,8 +96,16 @@ async def upload(request: Request,
                 content_type, x_p8_title, f"s3://{storage.bucket()}/{key}",
                 UUID(x_p8_org) if x_p8_org else None, "{}", None, trace_id)
     except Exception as e:
-        # The database's message is the useful one (an unknown channel names
-        # itself); passing it through beats a generic 500.
+        # A REFUSAL IS NOT A BAD REQUEST. `content.register_upload` raises
+        # "not authorized to upload content", hint "needs resources:create",
+        # and the request that got it was well formed -- the caller may not
+        # make it. One rule for that, shared with the agent runtime and the
+        # CLI (core/refusal.py); everything else the database says is still a
+        # 400, because its message is the useful one (an unknown channel names
+        # itself) and passing it through beats a generic 500.
+        refused = refusal(e)
+        if refused is not None:
+            return JSONResponse(refused.body(), status_code=REFUSED_STATUS)
         raise HTTPException(400, str(e).split("\n")[0])
 
     return {"resource_id": str(resource_id), "checksum": checksum, "bytes": len(data)}

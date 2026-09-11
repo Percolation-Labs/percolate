@@ -16,10 +16,12 @@ from .identity import (
     pool,
     set_pool,
 )
+from .refusal import Refusal, refusal
 
 __all__ = [
     "ConfigError",
     "CredentialRefused",
+    "Refusal",
     "TerminalError",
     "as_caller",
     "as_service",
@@ -31,6 +33,7 @@ __all__ = [
     "open_pool",
     "optional",
     "pool",
+    "refusal",
     "required",
     "set_pool",
 ]
