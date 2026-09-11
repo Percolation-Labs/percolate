@@ -1331,6 +1331,14 @@ scenarios:
     claims: '{"sub":"55000000-0000-0000-0000-000000000002","orgs":[]}'
     setup: |
       set local role app_owner;
+      -- AUTHORING IS A SEAT, and this scenario's seat is the analyst who must
+      -- be refused. `workflow.define_yaml` reads `rbac.may_define`, which
+      -- reads the CLAIMS and not the role (REM-44): so `set local role
+      -- app_owner` alone left the analyst's `sub` in place and the setup died
+      -- at `not authorized to define workflows` -- a red line about
+      -- scaffolding, on a scenario whose subject is who may SIGNAL. The
+      -- officer is the admin in the fixture and is who writes the document.
+      set local request.jwt.claims = '{"sub":"55000000-0000-0000-0000-000000000001","orgs":["aa000000-0000-0000-0000-0000000000a1"]}';
       select workflow.define_yaml($y$
       name: ev_hitl12
       steps:
@@ -1465,9 +1473,20 @@ scenarios:
     claims: '{"sub":"55000000-0000-0000-0000-000000000001","orgs":["aa000000-0000-0000-0000-0000000000a1"]}'
     setup: |
       set local role app_owner;
-      insert into content.channels (id, name, kind, config)
+      -- org_id AND visibility, for the reason the fixture's own two channels
+      -- carry them: content.channels gained a `visibility` column defaulting
+      -- to `private` and an `org_id` that is NOT NULL with the shared org as
+      -- its default (REM-38/39). A private channel with no owner is readable
+      -- by nobody, so `register_upload` could not RESOLVE this channel and
+      -- refused with `no channel named pv-broken for this org` -- a real
+      -- refusal of the wrong thing. Had this scenario been written the other
+      -- way round, that refusal would have been read as the guarantee holding
+      -- and an accepted-then-abandoned upload would have gone unnoticed.
+      -- Shared and public is what a fixture channel is.
+      insert into content.channels (id, name, kind, config, org_id, visibility)
       values ('11110000-0000-0000-0000-0000000000c9','pv-broken','file_upload',
-              '{"ingest_workflow":"no_such_workflow"}'::jsonb);
+              '{"ingest_workflow":"no_such_workflow"}'::jsonb,
+              rbac.shared_org_id(), 'public');
       set local role authenticated;
     check:
       - name: the upload is refused rather than accepted and lost
@@ -1541,9 +1560,15 @@ scenarios:
     catches: [silent-success, never-executed]
     role: app_owner
     setup: |
+      -- `rbac.shared_org_id()`, not a literal null. `org_id` on this table is
+      -- NOT NULL with that function as its DEFAULT since REM-38/39, and a
+      -- default does not fill a column an insert names explicitly -- so the
+      -- literal null that used to mean "the shared tier" now raises a
+      -- not-null violation before the scenario reaches its assertion.
       insert into content.resources (id, channel_id, title, status, org_id)
       values ('39990000-0000-0000-0000-0000000000d1',
-              '11110000-0000-0000-0000-0000000000c1','Never parsed','ready',null);
+              '11110000-0000-0000-0000-0000000000c1','Never parsed','ready',
+              rbac.shared_org_id());
     check:
       - name: drift reports it, by id and by kind
         sql: "select count(*) from content.check_drift() d where d.id='39990000-0000-0000-0000-0000000000d1'"
@@ -1759,14 +1784,30 @@ scenarios:
     mechanism: "aiq.land_graph -- the resolver decides residence; the model only names and connects"
     catches: [wrong-answer-not-error, two-registrations]
     role: app_owner
+    # A DOCUMENT IS NAMED BY ITS URI, NEVER BY ITS TITLE, and the four
+    # file-to-graph scenarios in this file that said otherwise (f2g-01, -02,
+    # -03, -10) were written before that was true. `integration.sql` registers
+    # `document` with `coalesce(n.uri, n.external_id, n.id::text)` as the
+    # canonical key and keeps the title as the SUMMARY, because a label is
+    # never an identity (specs/identity/spec.md §5): `title` was the key first,
+    # a canonical key is UNIQUE, and two spec sections both headed "run it"
+    # stopped an ingest of 797 documents with a duplicate-key error raised
+    # inside a projection trigger naming neither of them.
+    #
+    # So a document node named by title resolves to nothing and lands `soft`,
+    # correctly -- which is what these four were reporting, one assertion
+    # downstream. They now name the uri, which is also what the corpus in
+    # `dev/tests/init/` does (`memo://finance/q3`), and assert exactly what
+    # they always asserted. Corrected 2026-09-12 under REM-75.
     setup: |
-      insert into content.resources (id, channel_id, title, status, metadata)
+      insert into content.resources (id, channel_id, title, uri, status, metadata)
       values ('39990000-0000-0000-0000-0000000000f1',
               '11110000-0000-0000-0000-0000000000c1',
-              'Tolvaxen PSUR 2026','ready','{"doctype":"psur"}'::jsonb);
+              'Tolvaxen PSUR 2026','psur://calder/tolvaxen-2026',
+              'ready','{"doctype":"psur"}'::jsonb);
       create temp table r as select aiq.land_graph($g${
         "nodes": [
-          {"k":"document","n":"Tolvaxen PSUR 2026"},
+          {"k":"document","n":"psur://calder/tolvaxen-2026"},
           {"k":"product", "n":"tolvaxen"},
           {"k":"sponsor", "n":"ALTM"}
         ],
@@ -1800,12 +1841,14 @@ scenarios:
     catches: [wrong-answer-not-error]
     role: app_owner
     setup: |
-      insert into content.resources (id, channel_id, title, status)
+      -- The uri is the document's key, not the title. See f2g-01.
+      insert into content.resources (id, channel_id, title, uri, status)
       values ('39990000-0000-0000-0000-0000000000f2',
-              '11110000-0000-0000-0000-0000000000c1','PSUR with an unknown kind','ready');
+              '11110000-0000-0000-0000-0000000000c1','PSUR with an unknown kind',
+              'psur://calder/unknown-kind','ready');
       create temp table r as select aiq.land_graph($g${
         "nodes": [
-          {"k":"document","n":"PSUR with an unknown kind"},
+          {"k":"document","n":"psur://calder/unknown-kind"},
           {"k":"adverse_event","n":"hepatic injury","a":{"grade":"3"}}
         ],
         "edges": [{"s":0,"t":1,"r":"mentions"}]}$g$::jsonb,
@@ -1832,15 +1875,18 @@ scenarios:
     catches: [wrong-answer-not-error]
     role: app_owner
     setup: |
-      insert into content.resources (id, channel_id, title, status) values
-        ('39990000-0000-0000-0000-0000000000f3','11110000-0000-0000-0000-0000000000c1','PSUR one','ready'),
-        ('39990000-0000-0000-0000-0000000000f4','11110000-0000-0000-0000-0000000000c1','Inspection report two','ready');
+      -- The uri is the document's key, not the title. See f2g-01.
+      insert into content.resources (id, channel_id, title, uri, status) values
+        ('39990000-0000-0000-0000-0000000000f3','11110000-0000-0000-0000-0000000000c1',
+         'PSUR one','psur://calder/one','ready'),
+        ('39990000-0000-0000-0000-0000000000f4','11110000-0000-0000-0000-0000000000c1',
+         'Inspection report two','inspection://calder/two','ready');
       select aiq.land_graph($g${
-        "nodes": [{"k":"document","n":"PSUR one"},{"k":"sponsor","n":"ALTM"}],
+        "nodes": [{"k":"document","n":"psur://calder/one"},{"k":"sponsor","n":"ALTM"}],
         "edges": [{"s":0,"t":1,"r":"mentions"}]}$g$::jsonb,
         '39990000-0000-0000-0000-0000000000f3'::uuid);
       select aiq.land_graph($g${
-        "nodes": [{"k":"document","n":"Inspection report two"},{"k":"sponsor","n":"ALTM"}],
+        "nodes": [{"k":"document","n":"inspection://calder/two"},{"k":"sponsor","n":"ALTM"}],
         "edges": [{"s":0,"t":1,"r":"mentions"}]}$g$::jsonb,
         '39990000-0000-0000-0000-0000000000f4'::uuid);
     check:
@@ -1925,23 +1971,49 @@ scenarios:
 
   - id: f2g-06
     category: file-to-graph
-    title: The relation vocabulary is closed, and says why
+    title: An invented relation costs that edge and not the document
     asks: "The extractor invented a relation."
-    mechanism: "aiq.graph_vocabulary -- a closed set; graph-index.md §5.3"
-    catches: [wrong-answer-not-error, version-skew]
+    mechanism: "aiq.graph_vocabulary -- a closed set; graph-index.md §4.4 and §5.3"
+    catches: [wrong-answer-not-error, version-skew, silent-success]
     role: app_owner
+    # THIS SCENARIO ASSERTED A `raise`. THE RAISE WAS THEN REMOVED, AS A
+    # DECISION, AND THE DECISION IS RECORDED IN graph-index.md §4.4.
+    # §5.3's argument is untouched -- the vocabulary is still closed and the
+    # edge is still not written -- but aborting the transaction threw away
+    # every node and every valid edge the document had produced: measured on a
+    # four-node, five-edge payload with one invented relation, 4 nodes and 4
+    # good edges lost (graph-index.md §4.4). An invented relation is the same
+    # species of model artefact as a self-edge and now gets the same treatment:
+    # dropped, and NAMED in the receipt as a name rather than a count, because
+    # "3 edges dropped" sends a reader to the extractor with nothing to look
+    # for.
+    #
+    # So the assertion is inverted rather than softened, and it is a harder one
+    # than it replaces: the bad edge is absent, the receipt says which name was
+    # bad, and the two good nodes are IN the graph. A scenario asserting only
+    # the refusal would pass over the regression the change was made to fix.
+    # Rewritten 2026-09-12 under REM-75.
     setup: |
-      insert into content.resources (id, channel_id, title, status)
-      values ('39990000-0000-0000-0000-0000000000f8','11110000-0000-0000-0000-0000000000c1','Invented','ready');
+      insert into content.resources (id, channel_id, title, uri, status)
+      values ('39990000-0000-0000-0000-0000000000f8','11110000-0000-0000-0000-0000000000c1',
+              'Invented','psur://calder/invented','ready');
+      create temp table r as select aiq.land_graph($g${
+        "nodes": [{"k":"product","n":"tolvaxen"},{"k":"sponsor","n":"ALTM"}],
+        "edges": [{"s":0,"t":1,"r":"causes_harm_to"}]}$g$::jsonb,
+        '39990000-0000-0000-0000-0000000000f8'::uuid) as receipt;
     check:
-      - name: refused, and told why the set is closed
-        sql: |
-          select aiq.land_graph($g${
-            "nodes": [{"k":"product","n":"tolvaxen"},{"k":"sponsor","n":"ALTM"}],
-            "edges": [{"s":0,"t":1,"r":"causes_harm_to"}]}$g$::jsonb,
-            '39990000-0000-0000-0000-0000000000f8'::uuid)
-        raises: "not in aiq.graph_vocabulary"
-        because: "an extractor that can emit anything cannot be checked, costed, or swapped for a cheaper one -- and a graph that accumulates typos-as-relations cannot be queried by TYPE at all"
+      - name: the invented relation is named in the receipt, not counted
+        sql: "select (select receipt from r)#>>'{edges_dropped_unknown_relation,0}'"
+        is: "causes_harm_to"
+        because: "an extractor that can emit anything cannot be checked, costed, or swapped for a cheaper one -- and a graph that accumulates typos-as-relations cannot be queried by TYPE at all. The name is what somebody takes back to the extractor"
+      - name: and the edge was not written
+        sql: "select (select receipt from r)->>'edges_new'"
+        is: "0"
+        because: "the vocabulary being closed is the guarantee; dropping rather than raising changes the BLAST RADIUS of a violation and nothing about whether the edge lands"
+      - name: and the document's two good nodes survived it
+        sql: "select (select receipt from r)#>>'{residence,pg}'"
+        is: "2"
+        because: "THIS IS WHY THE RAISE WENT. A whole document's extraction discarded for one invented relation is a hole in a graph that still answers questions -- and the model reaches for an out-of-vocabulary name on roughly 1% of edges, so it is a hole per hundred edges"
 
   - id: f2g-07
     category: file-to-graph
@@ -2029,10 +2101,12 @@ scenarios:
     catches: [silent-success, never-executed]
     role: app_owner
     setup: |
-      insert into content.resources (id, channel_id, title, status)
-      values ('39990000-0000-0000-0000-0000000000fc','11110000-0000-0000-0000-0000000000c1','PSUR for the pipeline','ready');
+      -- The uri is the document's key, not the title. See f2g-01.
+      insert into content.resources (id, channel_id, title, uri, status)
+      values ('39990000-0000-0000-0000-0000000000fc','11110000-0000-0000-0000-0000000000c1',
+              'PSUR for the pipeline','psur://calder/pipeline','ready');
       select aiq.land_graph($g${
-        "nodes": [{"k":"document","n":"PSUR for the pipeline"},{"k":"product","n":"tolvaxen"}],
+        "nodes": [{"k":"document","n":"psur://calder/pipeline"},{"k":"product","n":"tolvaxen"}],
         "edges": [{"s":0,"t":1,"r":"mentions"}]}$g$::jsonb,
         '39990000-0000-0000-0000-0000000000fc'::uuid);
       select workflow.define_yaml($y$
@@ -2453,7 +2527,14 @@ scenarios:
       end $c$;
     check:
       - name: every empty 200 counted as a success
-        sql: "select output#>>'{result,done}' from workflow.tasks where run_id=(select run_id from ctx) and step_key='tally'"
+        # `succeeded`, not `done`. `calder.tally_children` returns
+        # {children, succeeded, failed} and has never returned a `done` key --
+        # `done` appeared once in this whole file and nowhere in the fixture, so
+        # this assertion read null against every possible outcome and could not
+        # pass. It is the shape `dev/assertion-audit.py` exists for, one file
+        # over: an assertion whose SUBJECT is missing does not report that, it
+        # reports the guarantee. Found 2026-09-12 by making this suite a gate.
+        sql: "select output#>>'{result,succeeded}' from workflow.tasks where run_id=(select run_id from ctx) and step_key='tally'"
         is: "3"
         because: "min_success is a transport floor by design, and saying so is the point -- whether the content is useful is the aggregate's job"
       - name: and the aggregate is the one that can tell
@@ -3372,10 +3453,20 @@ scenarios:
         is: "1"
         because: "any second decrement of pending_deps releases a dependent early, and re-completing a task is the easiest way to reach it"
       - name: and it does not vanish -- the refusal is recorded
+        # READ THE STATUS FROM THE ROW, NOT FROM A LITERAL. This said `already
+        # done` and could not pass: `workflow.lease_violation` formats `task is
+        # already %s` from the task's own status, and the terminal spelling has
+        # been `succeeded` since REM-52 moved what finished means into the
+        # vocabulary. A literal here is a dead assertion the next rename makes
+        # again -- so the check joins the event to the task and asserts the
+        # refusal names that task's OWN status, which stays true whatever the
+        # vocabulary spells it. Corrected 2026-09-12 under REM-75.
         sql: |
-          select detail->>'why' from workflow.task_events
-          where task_id=(select id from t) and detail->>'event'='lease_violation'
-        matches: "already done"
+          select e.detail->>'why' ~ ('already ' || tk.status)
+          from workflow.task_events e
+          join workflow.tasks tk on tk.id = e.task_id
+          where e.task_id=(select id from t) and e.detail->>'event'='lease_violation'
+        is: "true"
         because: >-
           It is a no-op rather than an exception, deliberately -- but a
           completion that vanishes SILENTLY is indistinguishable from a worker
