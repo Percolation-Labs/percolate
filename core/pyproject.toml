@@ -38,6 +38,12 @@ ingest = [
 # Tabular is separate because a deployment that never uploads a CSV should not
 # carry pyarrow (~120MB) and duckdb (~45MB) to find that out.
 tabular = ["pyarrow>=17", "duckdb>=1.0"]
+# The lake worker (lake.md): DuckDB with Iceberg, spatial and vss, reading and
+# writing object storage. Floor 1.5 because that is what was measured -- Iceberg
+# writes, MERGE into Iceberg and GEOMETRY carrying its CRS through Parquet all
+# came from runs on 1.5.5. `content` for boto3, which deletes staged objects:
+# DuckDB can write to S3 and cannot delete from it.
+lake = ["percolate-core[content]", "pyarrow>=17", "duckdb>=1.5"]
 # The pool manager. `p8 pool render` needs none of this -- it is a pure function
 # of a row, and keeping it in the base install is what lets anyone review a
 # manifest without a cluster client. The extra is for the reconcile loop.
@@ -96,7 +102,7 @@ otel = [
 providers = [
     "pydantic-ai-slim[anthropic,google,groq,mistral,cohere,huggingface,bedrock]>=2.38,<3",
 ]
-all = ["percolate-core[content,agent,providers,ingest,tabular,otel]"]
+all = ["percolate-core[content,agent,providers,ingest,tabular,lake,otel]"]
 
 [project.scripts]
 percolate = "percolate_core.cli:app"
