@@ -20,12 +20,38 @@ export function h(tag, attrs = {}, ...kids) {
 
 export const chip = (text, kind = "") => h("span", { class: "chip " + kind }, h("i", { class: "dot" }), text);
 
+/* `status()` chips several vocabularies -- a run's or task's lifecycle state, a
+ * run's compensation_state, a user's account status, a pool's phase -- so the
+ * wording below is per-state styling, not a list of what a status may be.
+ *
+ * What it cannot be is the only answer: a lifecycle state added to
+ * workflow.lifecycle_states and not remembered here used to chip as neutral
+ * grey, which is how `quota_exceeded` -- a run that stopped because a budget
+ * ran out -- read as nothing in particular. setStatusVocabulary() is filled at
+ * boot from that table, and a state this map has never heard of is styled by
+ * what the table says it IS: finished well, finished badly, or still going
+ * (REM-52). */
+const VOCAB = new Map();
+
+export function setStatusVocabulary(rows) {
+  VOCAB.clear();
+  for (const r of rows || []) VOCAB.set(r.state, r);
+}
+
 const STATUS_CLASS = {
   succeeded: "succeeded", running: "running", failed: "failed", cancelled: "cancelled",
   pending: "pending", ready: "ready", waiting_external: "waiting", compensating: "compensating",
   active: "succeeded", pending_verification: "pending", suspended: "cancelled",
 };
-export const status = (s) => chip(s || "—", STATUS_CLASS[s] || "");
+
+export function statusClass(s) {
+  if (STATUS_CLASS[s]) return STATUS_CLASS[s];
+  const v = VOCAB.get(s);
+  if (!v) return "";
+  return v.is_success ? "succeeded" : v.is_terminal ? "failed" : "running";
+}
+
+export const status = (s) => chip(s || "—", statusClass(s));
 
 export function table(cols, rows, render) {
   return h("table", { class: "data" },

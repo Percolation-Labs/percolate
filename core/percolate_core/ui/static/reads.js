@@ -131,6 +131,12 @@ export const READS = {
   refreshSessions: { screen: "Keys", schema: "rbac", view: "refresh_tokens_api",
     q: "select=id,device_label,issued_at,expires_at,revoked_at&order=issued_at.desc" },
   orgs: { screen: "Settings", schema: "rbac", view: "orgs", q: "select=id,slug,name&order=slug" },
+  /* The status vocabulary itself, read once at boot so a state nobody wrote a
+     colour for is still chipped by what it means (ui.js setStatusVocabulary).
+     A contract rather than an inline fetch so the Surface audit executes it:
+     the screens' one weakest dependency is the one nothing was checking. */
+  lifecycleStates: { screen: "Settings", schema: "workflow", view: "lifecycle_states",
+    q: "select=state,is_terminal,is_success,note&order=state" },
   visibilities: { screen: "Settings", schema: "rbac", view: "visibilities",
     q: "select=scope,rank,requires_org,description&order=rank" },
   /* `event_type` and `at`: the columns rbac.auth_events actually has. */

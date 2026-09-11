@@ -154,5 +154,40 @@ class ContractTableTest(unittest.TestCase):
                     "panel is empty, and it names the object the way reads.js does.")
 
 
+class StatusVocabularyTest(unittest.TestCase):
+    """A status the chip map never heard of is still shown for what it is.
+
+    `quota_exceeded` -- an agent run that stopped because a budget ran out --
+    was added to workflow.lifecycle_states and not to this map, and chipped as
+    neutral grey beside a run that succeeded. The map is per-state styling for
+    several vocabularies (lifecycle state, compensation_state, a user's account
+    status), so the fix is not another entry in it: an unknown state is styled
+    by what workflow.lifecycle_states says it is (REM-52).
+    """
+
+    def classes(self, vocabulary, states):
+        script = (
+            f"const ui=await import({json.dumps((STATIC / 'ui.js').as_uri())});"
+            f"ui.setStatusVocabulary({json.dumps(vocabulary)});"
+            f"console.log(JSON.stringify({json.dumps(states)}.map(s=>ui.statusClass(s))));")
+        return _node_json(script)
+
+    def test_an_unlisted_terminal_state_reads_as_finished_not_as_nothing(self):
+        vocabulary = [
+            {"state": "quota_exceeded", "is_terminal": True, "is_success": False},
+            {"state": "succeeded", "is_terminal": True, "is_success": True},
+            {"state": "waiting_external", "is_terminal": False, "is_success": False},
+        ]
+        self.assertEqual(
+            self.classes(vocabulary, ["quota_exceeded", "succeeded", "cancelled", "active"]),
+            ["failed", "succeeded", "cancelled", "succeeded"],
+            "an unknown lifecycle state must take its styling from the table, and a "
+            "state the map does style -- including the other vocabularies -- must keep it")
+
+    def test_without_the_vocabulary_the_page_renders_as_before(self):
+        """The read needs a token and may be refused. Colour is not correctness."""
+        self.assertEqual(self.classes([], ["quota_exceeded", "succeeded"]), ["", "succeeded"])
+
+
 if __name__ == "__main__":
     unittest.main()
