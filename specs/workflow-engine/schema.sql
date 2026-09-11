@@ -2139,11 +2139,10 @@ $$ language plpgsql stable security definer set search_path = pg_catalog, public
 -- THIS IS NOT THE LAST WORD, and reading it as one is how fifty functions
 -- below this line kept PUBLIC's EXECUTE. `create or replace function` after a
 -- revoke gets the default back, and this file goes on for another five
--- thousand lines. The statement that actually holds the invariant is the last
--- one in `world-model-ingestion/ingestion.sql` -- the last file in
--- build-sql.py's ORDER -- with the check that fails the install if it stops
--- holding. This line states the intent where a reader of this file will look
--- for it; that one makes it true.
+-- thousand lines. The statement that actually holds the invariant is
+-- `identity/closing.sql`, which build-sql.py emits after everything else, with
+-- the check that fails the install if it stops holding. This line states the
+-- intent where a reader of this file will look for it; that one makes it true.
 revoke execute on all functions in schema workflow from public;
 
 grant usage on schema workflow to worker, scheduler, authenticated;

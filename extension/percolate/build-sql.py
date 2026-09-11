@@ -244,6 +244,15 @@ ORDER = [
     ("identity/declarations.sql",               "what each table IS and what each nullable column's NULL MEANS -- statements about every schema above, so they can only be made after those tables exist. The mechanism they use ships first; see identity/schema.sql"),
 ]
 
+# THE LAST THING IN THE SCRIPT, and not an ORDER entry. It holds
+# the PUBLIC-EXECUTE revoke and its invariant, which are true only if nothing
+# is defined after them. That block used to end world-model-ingestion/
+# ingestion.sql, "the last file in ORDER", and six files were then added after
+# it (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §4). A
+# position in a list is a position somebody can append past; main() emits this
+# after the compiled types, so there is no later.
+CLOSING = ("identity/closing.sql", "the PUBLIC-EXECUTE revoke and its invariant over every schema the extension owns -- emitted after everything, so nothing can be defined after it")
+
 # Every specs/*/*.sql file is either in ORDER above or named here, with the
 # reason. Nothing may be in neither -- main() asserts it.
 #
@@ -507,7 +516,7 @@ def check_every_spec_is_accounted_for() -> None:
     says so. That is not hypothetical; it is what happened to
     world-model-ingestion/connectors.sql.
     """
-    shipped = {rel for rel, _ in ORDER}
+    shipped = {rel for rel, _ in ORDER} | {CLOSING[0]}
     known = shipped | set(NOT_SHIPPED)
     # `specs/migrations/` is NOT a subsystem and has its own consumer:
     # write_upgrades() prepends every `<from>--<to>.sql` hop to the generated
@@ -753,11 +762,12 @@ def main() -> int:
     check_every_spec_is_accounted_for()
     parts = [HEADER]
     sigs_by_file = []
-    for rel, why in ORDER:
+
+    def emit(rel: str, why: str) -> bool:
         src = ROOT / "specs" / rel
         if not src.exists():
             print(f"missing: {src}", file=sys.stderr)
-            return 1
+            return False
         # Required extensions are declared in percolate.control, so the schema
         # files no longer create them and cannot disagree about versions.
         raw = src.read_text()
@@ -771,10 +781,19 @@ def main() -> int:
             f"-- {rel}\n--   {why}\n"
             f"-- ============================================================\n")
         parts.append(body)
+        return True
+
+    for rel, why in ORDER:
+        if not emit(rel, why):
+            return 1
 
     # After every schema file, because percolate.enums() reads percolate.types for the enums
     # that live inside declared shapes, and the table has to exist first.
     parts.append(compile_types())
+
+    # And after THAT, the closing invariant -- see CLOSING.
+    if not emit(*CLOSING):
+        return 1
 
     report_cross_file_redefinitions(sigs_by_file)
 

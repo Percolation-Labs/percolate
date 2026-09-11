@@ -2033,7 +2033,8 @@ with provided as (
       from pg_proc p
       join pg_namespace n on n.oid = p.pronamespace
      where p.prolang = (select oid from pg_language where lanname = 'plpgsql')
-       and n.nspname in ('aiq', 'content', 'workflow', 'agentic')
+       -- every schema the extension owns, not the four this once named (REM-45)
+       and n.nspname in (select percolate.extension_schemas())
 ), callers as (
     -- The SQL half's own entry points, with whether the CALLING ROLE may
     -- execute them. `present` and `callable by me` are different facts and the
@@ -2050,7 +2051,7 @@ with provided as (
            bool_and(has_function_privilege(current_user, p.oid, 'execute')) as callable
       from pg_proc p
       join pg_namespace n on n.oid = p.pronamespace
-     where n.nspname in ('aiq', 'content', 'workflow', 'agentic')
+     where n.nspname in (select percolate.extension_schemas())
      group by 1
 ), crossings as (
     -- A call with arguments. `[^)]` after the paren is what separates a call

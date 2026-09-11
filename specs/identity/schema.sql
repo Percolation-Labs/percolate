@@ -25,6 +25,67 @@ create schema if not exists percolate;
 alter default privileges revoke execute on functions from public;
 
 -- ------------------------------------------------------------
+-- 0. Which schemas are this extension's, read from the catalog.
+--
+-- Every gate that asks a question "across the extension" used to answer this
+-- with a list typed at the point of use: 25 to 40 copies in about seven
+-- spellings. rbac/04 and rbac/05 named `wm`, which does not exist, and not
+-- `percolate`; surface.sql's function arm left out `percolate` while its
+-- relation arm had it; upgrade-converges.sh had eight copies and none had
+-- `percolate`, so no percolate.* object or grant had ever been compared; the
+-- PUBLIC-EXECUTE invariant at the end of the install named five schemas and
+-- missed the sixth (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md
+-- §4, REM-45). A schema added next year would have been missing from all of
+-- them, and none of them would have said so.
+--
+-- Postgres already records the answer. CREATE EXTENSION and ALTER EXTENSION
+-- UPDATE write an 'e' dependency from every object the script creates to the
+-- extension, schemas included, so this reads pg_depend and restates nothing.
+--
+-- IT REFUSES RATHER THAN ANSWER EMPTY. A script loaded with `psql -f` is not
+-- an install and records no membership, and every gate that reads this would
+-- then walk no schemas and pass having looked at nothing. One refusal here
+-- covers every caller, instead of a guard in front of each of them.
+--
+-- A gate that must also cover something the extension does not own -- `public`,
+-- a package's schema, a hand-loaded NOT_SHIPPED file -- adds it beside this
+-- call with its reason, so the exception is visible where it is made.
+--
+-- SECURITY INVOKER and everybody's: it reads nothing a caller could not read
+-- from pg_depend directly, and the gates run as p8, app_owner and the roles a
+-- person becomes. dev/lib/extension-schemas.sh carries the same query for a
+-- database older than this function, and compares the two wherever both exist.
+create or replace function percolate.extension_schemas()
+returns setof name
+language plpgsql stable parallel safe as $$
+begin
+    return query
+    select n.nspname
+      from pg_catalog.pg_depend d
+      join pg_catalog.pg_namespace n on n.oid = d.objid
+     where d.classid = 'pg_catalog.pg_namespace'::pg_catalog.regclass
+       and d.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass
+       and d.refobjid = (select x.oid from pg_catalog.pg_extension x
+                          where x.extname = 'percolate')
+       and d.deptype = 'e'
+     order by 1;
+    if not found then
+        raise exception 'no schema belongs to the percolate extension in this database'
+            using detail = 'Membership is recorded by CREATE EXTENSION and ALTER EXTENSION '
+                           'UPDATE. A script run with psql -f records none, and a gate '
+                           'reading an empty set of schemas checks nothing.',
+                  hint   = 'Install with CREATE EXTENSION percolate.';
+    end if;
+end;
+$$;
+
+comment on function percolate.extension_schemas() is
+    'Every schema the percolate extension owns, from pg_depend. What a gate '
+    'reads instead of a list of schema names.';
+
+grant execute on function percolate.extension_schemas() to public;
+
+-- ------------------------------------------------------------
 -- 1. A deterministic UUID, so a derived row has the same id every time.
 --
 -- RFC 4122 §4.3 v5: SHA-1 over (namespace || name), first 16 octets, version
@@ -163,7 +224,7 @@ with t as (
     select n.nspname as sch, c.relname as tbl, c.oid
     from pg_class c join pg_namespace n on n.oid = c.relnamespace
     where c.relkind in ('r','p')
-      and n.nspname in ('aiq','rbac','workflow','content','agentic','percolate')),
+      and n.nspname in (select percolate.extension_schemas())),
 pk as (
     select t.sch, t.tbl, t.oid,
            -- ::text because array_agg over attname gives name[], and name[] has

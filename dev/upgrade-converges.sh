@@ -45,6 +45,7 @@ CONTAINER="${CONTAINER:-p8-experiment-pg19}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 cd "$REPO"
+. "$HERE/lib/extension-schemas.sh"
 
 VERSION=$(sed -n "s/^default_version = '\(.*\)'/\1/p" extension/percolate/percolate.control)
 [ -n "$VERSION" ] || { echo "no default_version in percolate.control" >&2; exit 1; }
@@ -92,6 +93,23 @@ echo "==> comparing a fresh $VERSION against $FROM upgraded to $VERSION"
 # Both databases get the image's own superuser step, so the only difference
 # between them is the one this file measures.
 docker cp dev/image-init/00-superuser.sql "$CONTAINER:/tmp/00-superuser.sql" >/dev/null
+
+# THROUGH CREATE EXTENSION, BOTH OF THEM, and not `psql -f` of the scripts,
+# which is how this used to build them. A raw load creates the same objects and
+# records none of them as the extension's, so pg_depend is empty and
+# percolate.extension_schemas() -- which every gate now reads instead of a
+# typed list of schemas -- answers nothing; this check would have compared two
+# empty sets and reported CONVERGES. It is also not what an upgrader does: they
+# run ALTER EXTENSION UPDATE, which is what the second database now does too.
+# The files go into the extension directory the way dev/upgrade-from-every-
+# release.sh puts them there, the old one from the tag.
+EXT=/usr/share/postgresql/19/extension
+chmod 644 "$OLD_SQL"   # mktemp makes it 0600 and docker cp keeps the mode
+docker cp "$OLD_SQL" "$CONTAINER:$EXT/percolate--$FROM.sql" >/dev/null
+docker cp "$NEW_SQL" "$CONTAINER:$EXT/" >/dev/null
+docker cp "$UPG_SQL" "$CONTAINER:$EXT/" >/dev/null
+docker cp extension/percolate/percolate.control "$CONTAINER:$EXT/" >/dev/null
+
 mk() {
     docker exec -i "$CONTAINER" psql -U p8 -d postgres -q \
         -c "set client_min_messages = warning;" \
@@ -117,18 +135,18 @@ load() {
     local out
     if ! out=$(docker exec -i "$CONTAINER" psql -U p8 -d "$1" -v ON_ERROR_STOP=1 -q \
                    -c "set client_min_messages = warning;" \
-                   -c "set role app_owner;" -f - < "$2" 2>&1); then
-        echo "==> FAILED to load $2 into $1:" >&2
-        echo "$out" | grep -E '^psql.*(ERROR|FATAL)' | tail -5 >&2
+                   -c "set role app_owner;" -c "$2" 2>&1); then
+        echo "==> FAILED in $1: $2" >&2
+        echo "$out" | grep -E '(ERROR|FATAL)' | tail -5 >&2
         return 1
     fi
 }
 
 mk p8conv_fresh
 mk p8conv_upg
-load p8conv_fresh "$NEW_SQL"
-load p8conv_upg   "$OLD_SQL"
-load p8conv_upg   "$UPG_SQL"
+load p8conv_fresh "create extension percolate version '$VERSION'"
+load p8conv_upg   "create extension percolate version '$FROM'"
+load p8conv_upg   "alter extension percolate update to '$VERSION'"
 
 # EVERY AXIS A REPLAY CAN GET WRONG, not just the ones that have gone wrong.
 #
@@ -137,28 +155,40 @@ load p8conv_upg   "$UPG_SQL"
 # a preserved grant is none of those. Policies carry their USING clause because
 # a policy that was edited rather than dropped-and-recreated keeps the old
 # predicate. Columns carry their default, constraints their definition.
-SNAP="
+#
+# OVER EVERY SCHEMA THE DATABASE SAYS IS THE EXTENSION'S, passed in as $1 from
+# dev/lib/extension-schemas.sh, and asked of each database separately. The eight
+# lists this replaced each named five schemas and none named percolate, so
+# percolate.apply_package -- which reached real databases with a NULL ACL --
+# was a function this check had never looked at. The schema names are compared
+# too, so a schema one database has and the other does not is a difference even
+# when it is empty.
+snap() {
+    local S=$1
+    printf '%s' "
+select 'sch '||s from $S x(s)
+union all
 select 'fn  '||n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')'
        ||' acl='||coalesce(p.proacl::text,'DEFAULT')||' secdef='||p.prosecdef
        ||' cfg='||coalesce(array_to_string(p.proconfig,','),'-')||' md5='||md5(p.prosrc)
   from pg_proc p join pg_namespace n on n.oid=p.pronamespace
- where n.nspname in ('rbac','workflow','aiq','content','agentic')
+ where n.nspname in $S
 union all
 select 'pol '||schemaname||'.'||tablename||'.'||policyname||' '||cmd
        ||' '||coalesce(qual,'-')||' '||coalesce(with_check,'-')
-  from pg_policies where schemaname in ('rbac','workflow','aiq','content','agentic')
+  from pg_policies where schemaname in $S
 union all
 select 'col '||table_schema||'.'||table_name||'.'||column_name||' '||data_type
        ||' null='||is_nullable||' def='||coalesce(column_default,'-')
   from information_schema.columns
- where table_schema in ('rbac','workflow','aiq','content','agentic')
+ where table_schema in $S
 union all
 select 'con '||n.nspname||'.'||c.conname||' '||pg_get_constraintdef(c.oid)
   from pg_constraint c join pg_namespace n on n.oid=c.connamespace
- where n.nspname in ('rbac','workflow','aiq','content','agentic')
+ where n.nspname in $S
 union all
 select 'idx '||schemaname||'.'||indexname||' '||indexdef
-  from pg_indexes where schemaname in ('rbac','workflow','aiq','content','agentic')
+  from pg_indexes where schemaname in $S
 union all
 -- relkind is the char type rather than text, and concatenating it is ambiguous
 -- in PG19 (operator is not unique ... could not choose a best candidate), so it
@@ -168,12 +198,12 @@ union all
 select 'rel '||n.nspname||'.'||c.relname||' kind='||c.relkind::text
        ||' owner='||pg_get_userbyid(c.relowner)||' rls='||c.relrowsecurity
   from pg_class c join pg_namespace n on n.oid=c.relnamespace
- where n.nspname in ('rbac','workflow','aiq','content','agentic')
+ where n.nspname in $S
    and c.relkind in ('r','v','m')
 union all
 select 'acl '||table_schema||'.'||table_name||' '||grantee||' '||privilege_type
   from information_schema.role_table_grants
- where table_schema in ('rbac','workflow','aiq','content','agentic')
+ where table_schema in $S
 union all
 -- TRIGGERS, added after this script reported 2133 objects unchanged across a
 -- commit that ADDED ONE. Everything above describes tables and the functions
@@ -199,13 +229,16 @@ select 'trg '||n.nspname||'.'||c.relname||'.'||t.tgname
   join pg_namespace n on n.oid = c.relnamespace
   join pg_proc p on p.oid = t.tgfoid
  where not t.tgisinternal
-   and n.nspname in ('rbac','workflow','aiq','content','agentic')
+   and n.nspname in $S
 order by 1;"
+}
 
 fresh=$(mktemp); upg=$(mktemp)
 trap 'rm -f "$OLD_SQL" "$fresh" "$upg"' EXIT
-docker exec -i "$CONTAINER" psql -U p8 -d p8conv_fresh -tAc "$SNAP" > "$fresh"
-docker exec -i "$CONTAINER" psql -U p8 -d p8conv_upg   -tAc "$SNAP" > "$upg"
+S_FRESH=$(ext_schemas docker exec -i "$CONTAINER" psql -U p8 -d p8conv_fresh)
+S_UPG=$(ext_schemas docker exec -i "$CONTAINER" psql -U p8 -d p8conv_upg)
+docker exec -i "$CONTAINER" psql -U p8 -d p8conv_fresh -tAc "$(snap "$S_FRESH")" > "$fresh"
+docker exec -i "$CONTAINER" psql -U p8 -d p8conv_upg   -tAc "$(snap "$S_UPG")" > "$upg"
 
 docker exec -i "$CONTAINER" psql -U p8 -d postgres -q \
     -c "drop database if exists p8conv_fresh;" -c "drop database if exists p8conv_upg;" >/dev/null

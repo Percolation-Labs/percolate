@@ -24,6 +24,7 @@
 # tables inert while reporting success.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+. dev/lib/extension-schemas.sh
 
 # Named after the database container this run grades, not a fixed name. The
 # cleanup removes it by name, and on 2026-09-11 three sessions ran this gate
@@ -123,6 +124,11 @@ docker exec "$UPGC" psql -U p8 -d percolate -v ON_ERROR_STOP=1 -q -f /tmp/00-sup
 docker exec "$UPGC" psql -U p8 -d percolate -v ON_ERROR_STOP=1 -q \
     -c "set role app_owner; alter extension percolate update;"
 
+# The schemas the superuser-ownership assertion below walks: every one the
+# upgraded database says is the extension's. It named five by hand, and a
+# superuser-owned percolate.* object would have passed.
+S=$(ext_schemas docker exec "$UPGC" psql -U p8 -d percolate)
+
 # WHAT THE LAST TWO ASSERTIONS ARE FOR. Everything above them asks whether the
 # upgrade PRESERVED something. They ask whether it REMOVED something, which is
 # the half a replay is bad at: `create or replace function` keeps the existing
@@ -206,7 +212,7 @@ do \$\$ begin
 
   if exists (select 1 from pg_class c join pg_namespace n on n.oid=c.relnamespace
              join pg_roles r on r.oid=c.relowner
-             where n.nspname in ('rbac','workflow','aiq','content','agentic') and r.rolsuper)
+             where n.nspname in $S and r.rolsuper)
     then raise exception 'an object is owned by a superuser -- RLS is inert on it'; end if;
   if has_function_privilege('web_anon',
        'rbac.request_password_reset(text,text,interval)', 'execute')

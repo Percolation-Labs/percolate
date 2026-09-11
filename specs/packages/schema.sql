@@ -181,9 +181,11 @@ begin
         perform percolate.check_package_schema(n.nspname)
            from pg_class c join pg_namespace n on n.oid = c.relnamespace
           where c.oid = v_tbl
-            and not exists (select 1 from pg_depend dep
-                             where dep.classid = 'pg_namespace'::regclass and dep.objid = n.oid
-                               and dep.refclassid = 'pg_extension'::regclass and dep.deptype = 'e');
+            -- "not ours" through percolate.extension_schemas(), which reads the
+            -- same pg_depend rows this asked for itself. One home, because a
+            -- second spelling of which schemas are the extension's is what
+            -- REM-45 was.
+            and n.nspname not in (select percolate.extension_schemas());
 
         -- THE ROW'S OWN SCOPE, UNLESS THE MANIFEST SAYS OTHERWISE. With no
         -- `org:` this passed 'null', and register_entity_table reads a null org

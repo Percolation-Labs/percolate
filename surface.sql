@@ -102,6 +102,8 @@ insert into expected (subsystem, kind, name, detail, why) values
  'spec.md §3: a deterministic id, so a derived row has the same id every time. RFC 4122 v5, verified against the published vector for DNS/python.org'),
 ('identity','function','percolate.id_namespace','text',
  'spec.md §3: the namespace for a kind of derived id, itself a v5 under the RFC DNS namespace so it is reproducible rather than a magic constant'),
+('identity','function','percolate.extension_schemas','',
+ 'schema.sql §0: every schema the extension owns, read from pg_depend -- what each gate reads instead of a typed list of schema names. Everybody''s: it reads nothing a caller could not read from pg_depend directly'),
 ('identity','table','percolate.null_means',null,
  'spec.md §4: whether a nullable column''s NULL is a VALUE or an ABSENCE. A unique index over an absence is correctly NULLS DISTINCT and over a value is not, and nothing else in the schema distinguishes them'),
 ('identity','table','percolate.table_kinds',null,
@@ -865,7 +867,7 @@ select v.schemaname || '.' || v.viewname as api_view,
     on x.api_view    = v.schemaname || '.' || v.viewname
    and x.column_name = c.column_name
  where v.viewname like '%\_api'
-   and v.schemaname in ('agentic','aiq','workflow','content','rbac');
+   and v.schemaname in (select percolate.extension_schemas());
 
 \echo
 \echo '=== ROUND TRIP: READ PATH ==='
@@ -1010,16 +1012,21 @@ with caller as (select unnest(array['authenticated','web_anon']) as r)
 -- rbac.role_permissions, readable by every authenticated user with no RLS.
 -- None of them was a breach. The gate not being able to SEE them was, because
 -- the next one might be.
+--
+-- The same hole was open one level up, in which SCHEMAS the two arms walked:
+-- each typed its own list, the function arm's lacked `percolate` while the
+-- relation arm's had it, and both named `trace`, which does not ship. Both read
+-- percolate.extension_schemas() now (REM-45).
 select case c.relkind when 'v' then 'view' when 'm' then 'view' else 'table' end as kind,
        n.nspname || '.' || c.relname as name
   from pg_class c join pg_namespace n on n.oid = c.relnamespace
  where c.relkind in ('r','p','v','m')
-   and n.nspname in ('agentic','workflow','content','aiq','rbac','trace','percolate')
+   and n.nspname in (select percolate.extension_schemas())
    and exists (select 1 from caller where has_table_privilege(caller.r, c.oid, 'select'))
 union
 select 'function', n.nspname || '.' || p.proname
   from pg_proc p join pg_namespace n on n.oid = p.pronamespace
- where n.nspname in ('agentic','workflow','content','aiq','rbac','trace')
+ where n.nspname in (select percolate.extension_schemas())
    and exists (select 1 from caller where has_function_privilege(caller.r, p.oid, 'execute'));
 
 \echo

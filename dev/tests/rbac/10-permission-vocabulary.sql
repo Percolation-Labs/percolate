@@ -56,7 +56,7 @@ begin
           from (
             select p.oid::regprocedure::text as src, p.prosrc as body
               from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-             where n.nspname in ('rbac','workflow','agentic','aiq','content','percolate')
+             where n.nspname in (select percolate.extension_schemas())
             union all
             select 'policy ' || policyname || ' on ' || schemaname || '.' || tablename,
                    coalesce(qual,'') || ' ' || coalesce(with_check,'')

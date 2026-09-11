@@ -22,6 +22,9 @@
 -- check: "no policy reads as an oversight, a policy that says `true` reads as a
 -- decision". Sections 1 and 2 below make every table and every view state which
 -- one it is.
+--
+-- "Every" is percolate.extension_schemas(). All three sections here named `wm`,
+-- which does not exist, and not `percolate` (REM-45).
 
 \set ON_ERROR_STOP on
 
@@ -70,7 +73,12 @@ declare
         -- The lifecycle vocabulary. One home for the words every status column
         -- references, identical for every tenant, and unreadable it would mean
         -- a caller could not name the state they are filtering on.
-        'workflow.lifecycle_states'
+        'workflow.lifecycle_states',
+        -- The published contract's declared payload shapes, compiled in from
+        -- specs/contract/types and granted to web_anon by design: a client
+        -- learns what it would have to send before it has credentials. This
+        -- file could not see it while its schema list lacked `percolate`.
+        'percolate.types'
     ];
 begin
     select string_agg(n.nspname || '.' || c.relname, E'\n       ' order by 1)
@@ -78,7 +86,7 @@ begin
       from pg_class c
       join pg_namespace n on n.oid = c.relnamespace
      where c.relkind = 'r'
-       and n.nspname in ('rbac','workflow','aiq','content','agentic','wm')
+       and n.nspname in (select percolate.extension_schemas())
        and not exists (select 1 from pg_policy p where p.polrelid = c.oid)
        and (has_table_privilege('authenticated', c.oid, 'select')
             or has_table_privilege('web_anon', c.oid, 'select'))
@@ -162,7 +170,7 @@ begin
       from pg_class c
       join pg_namespace n on n.oid = c.relnamespace
      where c.relkind = 'r'
-       and n.nspname in ('rbac','workflow','aiq','content','agentic','wm')
+       and n.nspname in (select percolate.extension_schemas())
        and exists (select 1 from pg_policy p
                     where p.polrelid = c.oid and p.polcmd in ('r','*'))
        and not has_table_privilege('authenticated', c.oid, 'select')
@@ -254,7 +262,11 @@ declare
         'workflow.v_decision_history', 'workflow.v_compensation_status',
         -- The extractor fleet as an operations surface, mirroring the shape
         -- content.v_connectors will have when connectors.sql ships.
-        'agentic.v_extractors'
+        'agentic.v_extractors',
+        -- identity/schema.sql's guess at each table's kind, for whoever is
+        -- writing percolate.table_kinds rows: a tool for the schema's author,
+        -- not a read surface. Unseen here until this file read `percolate`.
+        'percolate.table_kind_proposal'
     ];
 begin
     select string_agg(n.nspname || '.' || c.relname, ', ' order by 1)
@@ -262,7 +274,7 @@ begin
       from pg_class c
       join pg_namespace n on n.oid = c.relnamespace
      where c.relkind = 'v'
-       and n.nspname in ('rbac','workflow','aiq','content','agentic','wm')
+       and n.nspname in (select percolate.extension_schemas())
        and not exists (select 1 from aclexplode(c.relacl) a
                         where a.grantee <> c.relowner and a.privilege_type = 'SELECT')
        and n.nspname || '.' || c.relname <> all (v_operator_only);
