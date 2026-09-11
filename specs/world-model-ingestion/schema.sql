@@ -535,7 +535,9 @@ create or replace function content.record_chunks(p_resource_id uuid, p_chunks js
 returns int as $$
 declare
     v_count int;
+    v_owner uuid;
     v_org   uuid;
+    v_vis   text;
 begin
     -- The org is READ OFF THE RESOURCE, never taken as an argument: this
     -- function's only parameter that identifies a tenant is the resource id,
@@ -548,8 +550,17 @@ begin
     -- v_found` leaves v_found NULL on no rows, `if not NULL` is false, and the
     -- first version of this check fell straight through it into a foreign-key
     -- error that named the missing row.
-    select r.org_id into v_org from content.resources r where r.id = p_resource_id;
-    if not found or not rbac.may_access_org(v_org) then
+    --
+    -- THE ROW'S RULE, not the org's. This asked rbac.may_access_org(org), which
+    -- answers "may this person act in that tenancy" -- and on the shared tier,
+    -- or for a co-member's private upload, that is yes, so anyone who could
+    -- name a resource could replace its chunks. content.resolve_file made the
+    -- same move in 75abb1d and this, its sibling, was left behind
+    -- (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §1).
+    -- may_write carries the claimless arm the worker relies on.
+    select r.owner_id, r.org_id, r.visibility into v_owner, v_org, v_vis
+      from content.resources r where r.id = p_resource_id;
+    if not found or not rbac.may_write(v_owner, v_org, v_vis) then
         raise exception 'no such resource, or it is not yours';
     end if;
 
@@ -802,69 +813,14 @@ begin
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
--- The row set an `embed:` matrix fans out over.
---
--- This function is named in workflow-engine/YAML.md §matrix as the example of
--- per-row embedding -- `rows: {function: chunks_to_embed, args: [...]}` -- and
--- it did not exist. The documented pipeline could not have run.
---
--- It returns only what the embed call needs (id and text), because every row
--- is copied verbatim onto the child task it produces: a column added here is
--- a column stored N times.
---
--- SECURITY DEFINER WITH ITS OWN CHECK, and it got here the hard way. It was
--- SECURITY INVOKER while its only caller was matrix expansion, which runs
--- inside the engine's own definer context and therefore reads as the schema
--- owner. The moment the batching embed step began calling it from the WORKER
--- -- which holds no table grants at all, by design -- every call failed with
--- "permission denied for table resource_chunks", five times per resource.
---
--- So it is definer, and because it is also granted to `authenticated` it does
--- its own authorization rather than relying on the grant: a definer function
--- that returned any resource's chunks to anyone holding its id would hand a
--- tenant's corpus to whoever guessed a uuid. The predicate is the one
--- rbac.may_access_org states, so there is one rule and not a second copy of
--- it -- and a claimless connection (a worker, a migration) is exempt exactly
--- as it is everywhere else in this schema.
---
--- It returns only what an embed call needs, id and text, because in the
--- fan-out shape every row is copied verbatim onto the child task it produces:
--- a column added here is a column stored N times.
-create or replace function content.chunks_to_embed(p_resource_id uuid)
-returns jsonb as $$
-    select coalesce(jsonb_agg(jsonb_build_object('chunk_id', c.id, 'content', c.content)
-                              order by c.ordinal), '[]'::jsonb)
-    from content.resource_chunks c
-    where c.resource_id = p_resource_id
-      and exists (select 1 from content.resources r
-                  where r.id = p_resource_id and rbac.may_access_org(r.org_id));
-$$ language sql stable security definer set search_path = pg_catalog, public;
-
--- The row set the GRAPH indexer fans out over.
---
--- Named `windows_to_index` because that is what graph-index.md §6.2 calls it,
--- and like chunks_to_embed it is a function the design used as an example and
--- nobody had written. A window is a chunk here: the chunker already split the
--- document on the most semantically significant boundary that fits a budget,
--- and cutting it a second way for the extractor would mean two answers to
--- "which span produced this" for the same document.
---
--- It carries THREE fields where chunks_to_embed carries two, and the extra two
--- are what aiq.land_graph_fanout reads off each child to attribute a landed
--- graph -- `resource_id` and `window_ordinal` -- so a node can be traced back
--- to the passage that named it. Same reason the embed rows are minimal: every
--- row is copied verbatim onto the child task it creates.
-create or replace function content.windows_to_index(p_resource_id uuid)
-returns jsonb as $$
-    select coalesce(jsonb_agg(jsonb_build_object(
-               'resource_id',    c.resource_id,
-               'window_ordinal', c.ordinal,
-               'content',        c.content) order by c.ordinal), '[]'::jsonb)
-    from content.resource_chunks c
-    where c.resource_id = p_resource_id
-      and exists (select 1 from content.resources r
-                  where r.id = p_resource_id and rbac.may_access_org(r.org_id));
-$$ language sql stable security definer set search_path = pg_catalog, public;
+-- content.chunks_to_embed and content.windows_to_index are defined in
+-- world-model-ingestion/integration.sql, beside content.resolve_file, for the
+-- reason resolve_file is: they ask rbac.may_read of the resource's owner_id
+-- and visibility, which rbac.add_scope_columns adds there. Both are LANGUAGE
+-- SQL, so their bodies are checked when they are created, and here the
+-- columns do not exist yet -- a fresh load failed on `column r.owner_id does
+-- not exist` (CREATE EXTENSION does not check bodies, which is why only
+-- dev/upgrade-converges.sh saw it). Their history is with them there.
 
 -- ------------------------------------------------------------
 -- 7b. Datasets — the tabular path, which is not the chunking path.

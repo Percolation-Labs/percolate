@@ -232,6 +232,9 @@ grant execute on function aiq.lookup_many(text[], boolean, int) to authenticated
 grant execute on function aiq.graph_neighbors(uuid, text, int) to authenticated;
 grant execute on function aiq.graph_walk(uuid, int, text, int) to authenticated;
 grant execute on function aiq.semantic_in(text, vector, text, int) to authenticated;
+-- semantic_in's one setting, set as the owner because its caller holds no
+-- set_config (schema.sql, above semantic_in). api_viewer has it by membership.
+grant execute on function aiq.set_scan_order(text) to authenticated;
 grant execute on function aiq.lexical(text, text, int) to authenticated;
 grant execute on function aiq.search(text, text, vector, text, int, int) to authenticated;
 grant execute on function aiq.sql_passthrough(text) to authenticated;

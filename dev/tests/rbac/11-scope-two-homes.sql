@@ -105,10 +105,9 @@ begin
                                      else 'nobody@test.com' end;
 
         if v_caller = 'claimless' then
-            perform set_config('request.jwt.claims', '', true);
+            execute format('set local request.jwt.claims = %L', '');
         else
-            perform set_config('request.jwt.claims',
-                               json_build_object('sub', v_sub)::text, true);
+            execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', v_sub)::text, ''));
         end if;
 
         select string_agg(id::text, ',' order by id) into v_by_fn
@@ -136,8 +135,7 @@ begin
 
     -- And the answer is not trivially "everything" or "nothing" -- a comparison
     -- of two broken sides passes.
-    perform set_config('request.jwt.claims',
-        json_build_object('sub', (select id from rbac.users where email = 'homes-member@test.com'))::text, true);
+    execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', (select id from rbac.users where email = 'homes-member@test.com'))::text, ''));
     set local role authenticated;
     if (select count(*) from public.scope_homes_probe) not between 1 and 12 then
         raise exception 'the member sees % of 13 rows -- the fixture is not discriminating',
@@ -172,7 +170,7 @@ declare
     v_next    int := 100;
 begin
     select id into v_sub from rbac.users where email = 'homes-member@test.com';
-    perform set_config('request.jwt.claims', json_build_object('sub', v_sub)::text, true);
+    execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', v_sub)::text, ''));
 
     for r in
         select * from (values

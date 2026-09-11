@@ -217,12 +217,11 @@ begin
         v_owner := gen_random_uuid();
         insert into rbac.users (id, email) values (v_owner, 'bx-owner@test.com');
         update workflow.runs set owner_id = v_owner where id = v_run;
-        perform set_config('request.jwt.claims',
-            json_build_object('sub', v_owner::text)::text, true);
+        execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', v_owner::text)::text, ''));
     end if;
 
     v_rows := workflow.matrix_rows(v_fan);
-    perform set_config('request.jwt.claims', '', true);
+    execute format('set local request.jwt.claims = %L', '');
 
     if jsonb_array_length(v_rows) <> 100 then
         raise exception
@@ -902,13 +901,12 @@ begin
     if to_regprocedure('workflow.assert_run_access(uuid,text)') is not null then
         insert into rbac.users (id, email) values (v_owner, 'batch-order@test.com');
         update workflow.runs set owner_id = v_owner where id = v_run;
-        perform set_config('request.jwt.claims',
-            json_build_object('sub', v_owner::text)::text, true);
+        execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', v_owner::text)::text, ''));
     end if;
 
     select string_agg(e->>'n', ' ') into v_seq
     from jsonb_array_elements(workflow.matrix_rows(v_fan)) e;
-    perform set_config('request.jwt.claims', '', true);
+    execute format('set local request.jwt.claims = %L', '');
 
     if v_seq is distinct from '0 1 2 3 4 5 6 7 8 9 10 11' then
         raise exception

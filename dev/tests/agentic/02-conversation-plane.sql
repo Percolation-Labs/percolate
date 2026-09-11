@@ -47,8 +47,7 @@ select agentic.upsert_agent($j${"name": "conv_probe", "system_prompt": "a probe"
 do $$
 declare v_s agentic.sessions; v_parent agentic.runs; v_child agentic.runs;
 begin
-    perform set_config('request.jwt.claims',
-        '{"sub":"c1a11111-0000-0000-0000-00000000c001"}', true);
+    execute format('set local request.jwt.claims = %L', '{"sub":"c1a11111-0000-0000-0000-00000000c001"}');
 
     v_s := agentic.create_session('a probe conversation');
     if v_s.id is null then raise exception 'create_session returned no session'; end if;
@@ -85,8 +84,7 @@ declare
     v_mine uuid := 'aaaa1111-0000-0000-0000-0000000000aa';
     v_n int; v_first text; v_seq_ok boolean;
 begin
-    perform set_config('request.jwt.claims',
-        '{"sub":"c1a11111-0000-0000-0000-00000000c001"}', true);
+    execute format('set local request.jwt.claims = %L', '{"sub":"c1a11111-0000-0000-0000-00000000c001"}');
     v_s   := agentic.create_session('turn ordering');
     v_run := agentic.start_run('conv_probe', v_s.id);
 
@@ -122,14 +120,12 @@ end $$;
 do $$
 declare v_s agentic.sessions; v_run agentic.runs; v_refused boolean := false;
 begin
-    perform set_config('request.jwt.claims',
-        '{"sub":"c1a11111-0000-0000-0000-00000000c001"}', true);
+    execute format('set local request.jwt.claims = %L', '{"sub":"c1a11111-0000-0000-0000-00000000c001"}');
     v_s   := agentic.create_session('mine');
     v_run := agentic.start_run('conv_probe', v_s.id);
 
     -- now somebody else, holding the uuid
-    perform set_config('request.jwt.claims',
-        '{"sub":"c1a22222-0000-0000-0000-00000000c002"}', true);
+    execute format('set local request.jwt.claims = %L', '{"sub":"c1a22222-0000-0000-0000-00000000c002"}');
     begin
         perform agentic.persist_turn(jsonb_build_array(jsonb_build_object(
             'run_id', v_run.id, 'session_id', v_s.id,
@@ -156,8 +152,7 @@ end $$;
 do $$
 declare v_s agentic.sessions; v_run agentic.runs; v_done agentic.runs;
 begin
-    perform set_config('request.jwt.claims',
-        '{"sub":"c1a11111-0000-0000-0000-00000000c001"}', true);
+    execute format('set local request.jwt.claims = %L', '{"sub":"c1a11111-0000-0000-0000-00000000c001"}');
     v_s   := agentic.create_session('finishing');
     v_run := agentic.start_run('conv_probe', v_s.id);
     v_done := agentic.finish_run(v_run.id, 'succeeded');
@@ -180,8 +175,7 @@ end $$;
 do $$
 declare v_ag agentic.agents; v_refused boolean := false; v_before int;
 begin
-    perform set_config('request.jwt.claims',
-        '{"sub":"c1a11111-0000-0000-0000-00000000c001"}', true);
+    execute format('set local request.jwt.claims = %L', '{"sub":"c1a11111-0000-0000-0000-00000000c001"}');
     -- kebab-case: skills_name_check demands it, while agents next door accept
     -- snake_case. Two sibling objects in one schema with different naming rules
     -- is a trap the audit surfaced by making this test fail on its first run.

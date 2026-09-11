@@ -530,8 +530,7 @@ begin
     -- Alice creates a schedule as herself. The owner comes from the JWT via
     -- the trigger, never from an argument -- there is no owner parameter to
     -- pass, which is the point.
-    perform set_config('request.jwt.claims',
-        json_build_object('sub', v_alice::text)::text, true);
+    execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', v_alice::text)::text, ''));
     perform workflow.schedule_workflow('t_alices', 't_authz_wf', '0 3 * * *');
 
     -- Read through the api view, never the base table: `authenticated` holds
@@ -541,8 +540,7 @@ begin
     end if;
 
     -- Mallory, authenticated but unprivileged, must not be able to touch it.
-    perform set_config('request.jwt.claims',
-        json_build_object('sub', v_mallory::text)::text, true);
+    execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', v_mallory::text)::text, ''));
 
     begin
         perform workflow.unschedule_workflow('t_alices');
@@ -577,8 +575,7 @@ begin
     -- Back as Alice: her schedule is exactly as she left it. Checked from HER
     -- side because RLS means Mallory cannot see it to check -- which is the
     -- other half of the guarantee.
-    perform set_config('request.jwt.claims',
-        json_build_object('sub', v_alice::text)::text, true);
+    execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', v_alice::text)::text, ''));
     if (select cron_expr from workflow.schedules_api where name = 't_alices') is distinct from '0 3 * * *' then
         raise exception 'the schedule was modified despite the check';
     end if;
@@ -587,8 +584,7 @@ begin
     end if;
 
     -- Leave the session as Mallory for the RLS assertions below.
-    perform set_config('request.jwt.claims',
-        json_build_object('sub', v_mallory::text)::text, true);
+    execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', v_mallory::text)::text, ''));
 end $$;
 
 \echo

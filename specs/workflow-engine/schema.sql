@@ -2940,8 +2940,19 @@ create or replace trigger trg_autorun_sql_steps
     after update of status on workflow.tasks
     for each row execute function workflow.autorun_sql_steps();
 
-grant execute on function workflow.execute_sql_step(uuid) to worker, authenticated;
-grant execute on function workflow.drain_sql_steps(uuid, int) to worker, authenticated;
+-- WORKER ONLY, and nobody else needs them: the engine reaches both from inside
+-- its own SECURITY DEFINER functions (start_workflow, the autorun trigger,
+-- tick), where the grant is not consulted. They used to be granted to
+-- `authenticated` as well, and neither asks whose run a task belongs to -- so
+-- any signed-in person could make another tenant's ready steps run when THEY
+-- chose, a write step included, by naming a task or a run; the output stays in
+-- the run, but the act is the owner's. drain_sql_steps also reaches
+-- start_child_workflow, which is meant to be the engine's alone (REM-46). The
+-- revoke is spelled out because a grant already made survives a replay.
+grant execute on function workflow.execute_sql_step(uuid) to worker;
+grant execute on function workflow.drain_sql_steps(uuid, int) to worker;
+revoke execute on function workflow.execute_sql_step(uuid) from authenticated;
+revoke execute on function workflow.drain_sql_steps(uuid, int) from authenticated;
 -- The allow-list is readable by `authenticated` for discoverability: a user
 -- authoring a `sql` step should be able to see which functions are callable
 -- without guessing. It is NOT granted to `worker`, and that omission is the

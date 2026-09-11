@@ -135,8 +135,7 @@ begin
       ('33333333-3333-3333-3333-333333333333', 'carol@test.com'),
       ('44444444-4444-4444-4444-444444444444', 'dave@test.com');
 
-    perform set_config('request.jwt.claims',
-        '{"sub":"33333333-3333-3333-3333-333333333333"}', true);
+    execute format('set local request.jwt.claims = %L', '{"sub":"33333333-3333-3333-3333-333333333333"}');
 
     -- The base table, as its own owner: ownership bypasses RLS, so the
     -- perfectly-correct claims above decide nothing at all.

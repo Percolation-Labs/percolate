@@ -207,8 +207,7 @@ do $$
 declare v_n int; v_keys text;
 begin
     set local role authenticated;
-    perform set_config('request.jwt.claims',
-        '{"sub":"22222222-2222-2222-2222-222222222222","orgs":["a0000000-0000-0000-0000-00000000000b"]}', true);
+    execute format('set local request.jwt.claims = %L', '{"sub":"22222222-2222-2222-2222-222222222222","orgs":["a0000000-0000-0000-0000-00000000000b"]}');
 
     select count(*), coalesce(string_agg(key, ', ' order by key), '')
       into v_n, v_keys

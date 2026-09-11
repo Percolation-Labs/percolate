@@ -43,6 +43,8 @@ docker exec "$CONTAINER" psql -U p8 -d "$REF_DB" -q \
         create extension if not exists pg_trgm;
         create extension if not exists vector;
         create extension if not exists percolate_parser;
+        revoke execute on function pg_catalog.set_config(text, text, boolean) from public;
+        grant execute on function pg_catalog.set_config(text, text, boolean) to authenticator, app_owner, worker, scheduler;
         grant create on database $REF_DB to app_owner;
         grant create, usage on schema public to app_owner;" >/dev/null
 docker exec -i "$CONTAINER" psql -U p8 -d "$REF_DB" -v ON_ERROR_STOP=1 -q \

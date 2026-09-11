@@ -372,6 +372,41 @@ begin
             'https://github.com/Percolation-Labs/get-percolate/blob/main/bootstrap.sql';
     end if;
 
+    -- Nobody a person can become may rewrite who they are. Every row rule in
+    -- this script reads the caller from `request.jwt.claims`, and a role that
+    -- can call set_config can put anybody's id there: through
+    -- aiq.sql_passthrough it took one SELECT (user-rbac/roles.sql §6,
+    -- meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md). The revoke
+    -- needs a superuser and a function's ACL lives in each database, so this
+    -- script can only refuse where it has not been done -- including on the
+    -- upgrade of a database that predates the rule, which would otherwise
+    -- complete with the door open.
+    select string_agg(t.r, ', ' order by t.r) into v_missing
+      from unnest(array['authenticated', 'web_anon', 'api_viewer']) as t(r)
+     where has_function_privilege(t.r, 'pg_catalog.set_config(text, text, boolean)', 'execute');
+    if v_missing is not null then
+        raise exception
+            'percolate refuses to install where % can call set_config: a signed-in '
+            'caller could rewrite request.jwt.claims and act as anyone. Run once as a '
+            'superuser, in this database: revoke execute on function '
+            'pg_catalog.set_config(text, text, boolean) from public; grant execute on '
+            'function pg_catalog.set_config(text, text, boolean) to authenticator, '
+            'app_owner, worker, scheduler; -- bootstrap.sql does this from 0.2.0: '
+            'https://github.com/Percolation-Labs/get-percolate/blob/main/bootstrap.sql',
+            v_missing;
+    end if;
+    -- The other half of the same two statements: a revoke without the grant
+    -- takes set_config from the owner too, and every function that sets a
+    -- step's run or a step's caller would then fail at run time, not here.
+    if not has_function_privilege(current_user, 'pg_catalog.set_config(text, text, boolean)', 'execute') then
+        raise exception
+            'percolate refuses to install: % cannot call set_config, and the functions '
+            'that set a workflow step''s run and caller need it. Run once as a '
+            'superuser: grant execute on function pg_catalog.set_config(text, text, '
+            'boolean) to authenticator, app_owner, worker, scheduler;',
+            current_user;
+    end if;
+
     if (select rolsuper from pg_roles where rolname = current_user) then
         raise exception
             'REFUSING TO LOAD: current_user (%) is a cluster superuser. '
@@ -475,8 +510,9 @@ def check_every_spec_is_accounted_for() -> None:
     shipped = {rel for rel, _ in ORDER}
     known = shipped | set(NOT_SHIPPED)
     # `specs/migrations/` is NOT a subsystem and has its own consumer:
-    # write_upgrades() prepends `<old>--<new>.sql` to the generated upgrade
-    # script, for the part of a version change a replay cannot express. Left in
+    # write_upgrades() prepends every `<from>--<to>.sql` hop to the generated
+    # upgrade scripts, for the part of a version change a replay cannot express,
+    # and migration_hops() refuses one nothing would read. Left in
     # this glob, the first migration anybody wrote made the build refuse to run
     # -- "in neither ORDER nor NOT_SHIPPED" -- which is this check firing on a
     # file it was never about. Found by writing one.
@@ -539,8 +575,20 @@ def write_upgrades(body: str) -> None:
     on disk to hop through, so it needs a direct path.
 
     What this cannot express is destructive change -- a dropped column, a
-    renamed table, a backfill. Those go in `specs/migrations/<old>--<new>.sql`,
-    which is prepended when it exists.
+    renamed table, a backfill. Those go in `specs/migrations/<from>--<to>.sql`,
+    one file per hop, and EVERY hop between the old version and this one is
+    prepended, oldest first.
+
+    Every hop, and not only the one named `<old>--<VERSION>`, which is what this
+    used to look up: a database at 0.1.2 needs 0.1.2->0.1.3's status rename and
+    0.1.3->0.1.4's policy and column renames as much as 0.1.6->0.2.0's, and
+    looking up the exact pair gave it none of them. Five of the six 0.2.0
+    upgrade scripts failed on a released database -- measured on 0.1.5 and
+    0.1.2, `column "recall_count" does not exist` -- while both upgrade gates
+    tested only the newest tag
+    (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §2.4).
+    A hop is prepended when it starts at or after the old version, so a
+    database that already took a hop on an earlier upgrade never replays it.
     """
     # Leftovers first, so the remedy --check prints actually converges. --check
     # refuses an upgrade path to a version this tree no longer ships, and the
@@ -557,19 +605,63 @@ def write_upgrades(body: str) -> None:
     if not prior:
         print("no released versions in git tags -- no upgrade scripts written")
         return
-    mig_dir = ROOT / "specs" / "migrations"
+    hops = migration_hops(prior)
     written = []
     for old in prior:
-        delta_path = mig_dir / f"{old}--{VERSION}.sql"
-        head = ""
-        if delta_path.exists():
-            head = (f"-- from specs/migrations/{delta_path.name}: the part of this\n"
-                    f"-- upgrade that a replay cannot express.\n"
-                    + delta_path.read_text().rstrip() + "\n\n")
         dest = ROOT / f"extension/percolate/sql/percolate--{old}--{VERSION}.sql"
-        dest.write_text(head + body)
-        written.append(f"{old}->{VERSION}" + (" (+delta)" if head else ""))
+        dest.write_text(upgrade_script(old, body, hops))
+        n = len(hops_from(old, hops))
+        written.append(f"{old}->{VERSION}" + (f" (+{n} hop{'s' * (n != 1)})" if n else ""))
     print(f"wrote {len(written)} upgrade script(s): {', '.join(written)}")
+
+
+def vkey(v: str) -> tuple:
+    return tuple(int(x) for x in v.split("."))
+
+
+def hops_from(old: str, hops: list) -> list:
+    """The hops a database at `old` still has to take: those starting at or
+    after it. One it took on an earlier upgrade starts before it."""
+    return [h for h in hops if vkey(h[0]) >= vkey(old)]
+
+
+def upgrade_script(old: str, body: str, hops: list) -> str:
+    """The whole of percolate--<old>--<VERSION>.sql. ONE function, called by the
+    writer and by --check, which used to carry its own copy of the exact-pair
+    lookup -- so fixing the writer alone would have left --check approving the
+    scripts the writer no longer makes."""
+    head = "".join(
+        f"-- from specs/migrations/{p.name}: the part of the {a} -> {b} hop\n"
+        f"-- that a replay cannot express.\n" + p.read_text().rstrip() + "\n\n"
+        for a, b, p in hops_from(old, hops))
+    return head + body
+
+
+def migration_hops(prior: list) -> list:
+    """specs/migrations/<from>--<to>.sql, oldest hop first -- and a refusal for
+    any file no upgrade script would read.
+
+    A migration nobody reads is a fix that never runs, and it looks exactly like
+    one that does: that is how 0.1.2->0.1.3 and 0.1.3->0.1.4 sat in the tree
+    while every 0.2.0 upgrade script left them out. So a file that is not
+    `X.Y.Z--X.Y.Z.sql`, runs backwards, or ends past this version stops the
+    build rather than being skipped.
+    """
+    hops = []
+    for p in sorted((ROOT / "specs" / "migrations").glob("*.sql")):
+        m = re.fullmatch(r"(\d+\.\d+\.\d+)--(\d+\.\d+\.\d+)\.sql", p.name)
+        if not m:
+            raise SystemExit(f"specs/migrations/{p.name}: not named <from>--<to>.sql, "
+                             "so no upgrade script would read it")
+        a, b = m.groups()
+        if vkey(a) >= vkey(b) or vkey(b) > vkey(VERSION):
+            raise SystemExit(f"specs/migrations/{p.name}: a hop from {a} to {b} is not "
+                             f"one an upgrade to {VERSION} can take, so nothing would read it")
+        if prior and vkey(a) < min(vkey(v) for v in prior):
+            raise SystemExit(f"specs/migrations/{p.name}: starts before the oldest released "
+                             f"version this tree writes an upgrade from, so nothing would read it")
+        hops.append((a, b, p))
+    return sorted(hops, key=lambda h: vkey(h[0]))
 
 
 def sql_str(s):
@@ -705,15 +797,16 @@ def main() -> int:
         # something that is not this version. Checking only the file somebody
         # remembered to look at is how the parser stayed stale for a day.
         stale = []
-        for old_v in released_versions():
+        prior = released_versions()
+        hops = migration_hops(prior)
+        for old_v in prior:
             up = ROOT / f"extension/percolate/sql/percolate--{old_v}--{VERSION}.sql"
-            delta = ROOT / "specs" / "migrations" / f"{old_v}--{VERSION}.sql"
             if not up.exists():
                 stale.append(f"{up.name} is missing")
             elif not up.read_text().endswith(body):
                 stale.append(f"{up.name} does not end with the current schema")
-            elif delta.exists() and delta.read_text().rstrip() not in up.read_text():
-                stale.append(f"{up.name} is missing its migrations/{delta.name} delta")
+            elif up.read_text() != upgrade_script(old_v, body, hops):
+                stale.append(f"{up.name} does not carry the migration hops from {old_v}")
         # AND THE OPPOSITE FAILURE: a script that should no longer be there.
         #
         # Everything above asks whether the files that must exist do. Nothing

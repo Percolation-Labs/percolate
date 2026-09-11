@@ -112,6 +112,9 @@ do \$\$ begin execute format('grant create on database %I to app_owner', current
 grant create, usage on schema public to app_owner;
 -- bootstrap.sql's grant, for an image built before it (0.2.0)
 grant authenticated to api_viewer;
+-- and its set_config revoke, per database (specs/user-rbac/roles.sql §6)
+revoke execute on function pg_catalog.set_config(text, text, boolean) from public;
+grant execute on function pg_catalog.set_config(text, text, boolean) to authenticator, app_owner, worker, scheduler;
 set role app_owner;
 create extension percolate cascade;
 reset role;

@@ -97,12 +97,14 @@ def seat(role, claims):
     seat that can see the row. Making the seat explicit per statement is what
     stops that from being an ordering trick nobody can see.
     """
+    # A SET statement, not set_config(): the seat is usually authenticated,
+    # and the roles a person can become no longer hold set_config
+    # (specs/user-rbac/roles.sql §6).
     out = ["set local role %s;" % role]
     if claims is not None:
         if not isinstance(claims, str):
             claims = json.dumps(claims)
-        out.append("select set_config('request.jwt.claims', %s, true);"
-                   % sql_literal(claims))
+        out.append("set local request.jwt.claims = %s;" % sql_literal(claims))
     return out
 
 

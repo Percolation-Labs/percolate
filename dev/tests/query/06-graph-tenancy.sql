@@ -214,7 +214,12 @@ begin
       -- that reads as the caller).
       and p.proname not like 'schema%'
       and p.proname not in ('render_facet','facet_examples','verify_example',
-                            'capture_schema_revisions')
+                            'capture_schema_revisions',
+      -- ...and set_scan_order, which reads and returns no row at all: it sets
+      -- hnsw.iterative_scan for semantic_in, as the owner, because a caller no
+      -- longer holds set_config (user-rbac/roles.sql §6). It takes a value,
+      -- never a parameter name, so it is not set_config under another name.
+                            'set_scan_order')
       -- ...and only functions a USER can actually reach. The rule this section
       -- asserts is integration-rbac's: "every SECURITY DEFINER function
       -- reachable by an end user MUST do its own authorization check.

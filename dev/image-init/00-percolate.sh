@@ -38,12 +38,14 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
 create role app_owner nologin;
 create role api_viewer nologin;
 grant api_viewer to app_owner;          -- so app_owner can hand it the views
-grant authenticated to api_viewer;      -- so a workflow step can read as the person it runs for
 create role web_anon nologin;
 create role authenticated nologin;
 create role authenticator noinherit login password :'auth_pw';
 grant web_anon to authenticator;
 grant authenticated to authenticator;
+-- After `create role authenticated`, not before it: this line used to sit two
+-- above it, and under ON_ERROR_STOP the image's first start stopped here.
+grant authenticated to api_viewer;      -- so a workflow step can read as the person it runs for
 
 -- The worker and the Content Server connect as themselves and hold NO table
 -- grants -- every interaction is a SECURITY DEFINER function call. That is
@@ -57,6 +59,16 @@ create role worker login password :'worker_pw';
 -- password -- the connection is loopback inside the container, which pg_hba
 -- trusts -- and no table grants, since all three jobs are SECURITY DEFINER.
 create role scheduler login;
+
+-- 1b. Nobody a person can become may rewrite who they are: set_config writes
+--     request.jwt.claims, which every row rule takes to be the caller. Per
+--     database, because a function's ACL lives in that database's pg_proc --
+--     template1 is closed below the heredoc so a database created later starts
+--     the same way. CREATE EXTENSION percolate refuses to run without it.
+--     (specs/user-rbac/roles.sql §6)
+revoke execute on function pg_catalog.set_config(text, text, boolean) from public;
+grant execute on function pg_catalog.set_config(text, text, boolean)
+    to authenticator, app_owner, worker, scheduler;
 
 -- 2. The extensions a non-superuser cannot install.
 create extension if not exists vector;
@@ -129,6 +141,15 @@ begin
                      current_database();
     end if;
 end $$;
+EOSQL
+
+# template1 gets the same set_config revoke as the database above, so a
+# database somebody creates later -- `createdb`, CREATE DATABASE -- already has
+# it, and CREATE EXTENSION percolate there does not stop to ask for it.
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname template1 -q <<'EOSQL'
+revoke execute on function pg_catalog.set_config(text, text, boolean) from public;
+grant execute on function pg_catalog.set_config(text, text, boolean)
+    to authenticator, app_owner, worker, scheduler;
 EOSQL
 
 # Provenance, applied after the extension that defines the recorder. Tolerated

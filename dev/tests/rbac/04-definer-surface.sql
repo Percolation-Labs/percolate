@@ -154,8 +154,7 @@ begin
     end if;
 
     set local role authenticated;
-    perform set_config('request.jwt.claims',
-        '{"sub":"dddddddd-0000-0000-0000-00000000000d"}', true);
+    execute format('set local request.jwt.claims = %L', '{"sub":"dddddddd-0000-0000-0000-00000000000d"}');
 
     -- The refusal must be THE refusal. `when others then null` would have
     -- passed this file against a may_define() that did not exist at all --
@@ -197,8 +196,7 @@ begin
     values ('dddddddd-0000-0000-0000-00000000000d', 'admin') on conflict do nothing;
 
     set local role authenticated;
-    perform set_config('request.jwt.claims',
-        '{"sub":"dddddddd-0000-0000-0000-00000000000d"}', true);
+    execute format('set local request.jwt.claims = %L', '{"sub":"dddddddd-0000-0000-0000-00000000000d"}');
     v_id := workflow.define_yaml(
         E'name: t_definer_probe\nsteps:\n  - id: q\n    sql: {statement: "select 1"}\n');
     reset role;

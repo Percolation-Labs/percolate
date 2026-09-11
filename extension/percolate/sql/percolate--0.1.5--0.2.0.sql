@@ -1,3 +1,66 @@
+-- from specs/migrations/0.1.6--0.2.0.sql: the part of the 0.1.6 -> 0.2.0 hop
+-- that a replay cannot express.
+-- 0.1.6 -> 0.2.0: the graph learns to forget on purpose.
+--
+-- The part of this upgrade a REPLAY CANNOT EXPRESS. Everything else is the
+-- schema re-applied, which converges because every statement in it runs twice.
+-- `create table if not exists` cannot narrow a column that already exists: an
+-- existing database's `aiq.edges.valid_from` is nullable with no default and
+-- full of nulls, and nothing in the replayed schema will change that.
+--
+-- WHY IT HAS TO CHANGE. `aiq.edges` has been bitemporal since it was written --
+-- `valid_from` and `valid_to` are both in the original CREATE -- and neither
+-- was ever populated. Across 9,502 edges in the dogfood instance the retraction
+-- rate was exactly 0.00% and every single `valid_from` was null. The pair was
+-- decorative.
+--
+-- That is the regime `research-notes/build-knit-dream-theory.pdf` §10 calls
+-- running the model in its known-broken state: an append-only knowledge graph
+-- has no depression term, and retraction is the balance condition the capacity
+-- result depends on. §14 turns it into a test -- if the retraction rate is
+-- zero, the condition is violated -- and ours was zero for the most banal
+-- possible reason, which is that the derivation DELETEd what it could no longer
+-- derive. A graph that forgets by deletion does not forget slowly; it forgets
+-- completely, leaving nothing to audit and nothing downstream able to tell
+-- that a relationship was once asserted.
+--
+-- ORDER MATTERS:
+--
+--   1. Backfill from `created_at`. It is when the row was first written, which
+--      is exactly when the edge was first asserted, and it is already correct
+--      for every historical row. Using now() here instead produces edges
+--      asserted after they were retracted -- measured, on the first attempt.
+--   2. Then the default, so every future writer dates itself.
+--   3. Then NOT NULL, which can only be added once no nulls remain.
+--
+-- Idempotent: the UPDATE matches nothing on a second run, and both ALTERs are
+-- no-ops once applied.
+--
+-- NO `set role` HERE, and the omission is deliberate rather than an oversight.
+-- This file is PREPENDED to the upgrade script, which loads as app_owner and
+-- refuses to load as a superuser at all. A `set role app_owner; ... reset role;`
+-- pair looks harmless and is not: `reset role` drops the session back to the
+-- superuser it started as, and every statement in the 10,000 lines that follow
+-- then runs as one -- which the schema's own guard catches and refuses, having
+-- been written for exactly that mistake. Neither existing migration sets a
+-- role; this one inherits the caller's, like they do.
+
+update aiq.edges set valid_from = created_at where valid_from is null;
+alter table aiq.edges alter column valid_from set default now();
+alter table aiq.edges alter column valid_from set not null;
+
+-- THE RECALL COUNTERS, for the same reason as valid_from above: `create table
+-- if not exists` cannot add a column to a table that already exists, and an
+-- upgraded database would carry the schema without them.
+--
+-- `aiq.edges_current` does not need repairing here because it is new in 0.2.0:
+-- an upgrade creates it fresh from the replayed schema, with the full column
+-- list. A database that already had it would need a DROP, since a view cannot
+-- be widened by `create or replace`.
+alter table aiq.edges add column if not exists recall_count     bigint not null default 0;
+alter table aiq.edges add column if not exists probe_count      bigint not null default 0;
+alter table aiq.edges add column if not exists last_recalled_at timestamptz;
+
 -- ============================================================
 -- percolate 0.2.0 -- the whole schema, as one extension script.
 --
@@ -71,6 +134,41 @@ begin
             'api_viewer, and needs their grants to do it. bootstrap.sql does this '
             'from 0.2.0: '
             'https://github.com/Percolation-Labs/get-percolate/blob/main/bootstrap.sql';
+    end if;
+
+    -- Nobody a person can become may rewrite who they are. Every row rule in
+    -- this script reads the caller from `request.jwt.claims`, and a role that
+    -- can call set_config can put anybody's id there: through
+    -- aiq.sql_passthrough it took one SELECT (user-rbac/roles.sql §6,
+    -- meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md). The revoke
+    -- needs a superuser and a function's ACL lives in each database, so this
+    -- script can only refuse where it has not been done -- including on the
+    -- upgrade of a database that predates the rule, which would otherwise
+    -- complete with the door open.
+    select string_agg(t.r, ', ' order by t.r) into v_missing
+      from unnest(array['authenticated', 'web_anon', 'api_viewer']) as t(r)
+     where has_function_privilege(t.r, 'pg_catalog.set_config(text, text, boolean)', 'execute');
+    if v_missing is not null then
+        raise exception
+            'percolate refuses to install where % can call set_config: a signed-in '
+            'caller could rewrite request.jwt.claims and act as anyone. Run once as a '
+            'superuser, in this database: revoke execute on function '
+            'pg_catalog.set_config(text, text, boolean) from public; grant execute on '
+            'function pg_catalog.set_config(text, text, boolean) to authenticator, '
+            'app_owner, worker, scheduler; -- bootstrap.sql does this from 0.2.0: '
+            'https://github.com/Percolation-Labs/get-percolate/blob/main/bootstrap.sql',
+            v_missing;
+    end if;
+    -- The other half of the same two statements: a revoke without the grant
+    -- takes set_config from the owner too, and every function that sets a
+    -- step's run or a step's caller would then fail at run time, not here.
+    if not has_function_privilege(current_user, 'pg_catalog.set_config(text, text, boolean)', 'execute') then
+        raise exception
+            'percolate refuses to install: % cannot call set_config, and the functions '
+            'that set a workflow step''s run and caller need it. Run once as a '
+            'superuser: grant execute on function pg_catalog.set_config(text, text, '
+            'boolean) to authenticator, app_owner, worker, scheduler;',
+            current_user;
     end if;
 
     if (select rolsuper from pg_roles where rolname = current_user) then
@@ -3288,8 +3386,19 @@ create or replace trigger trg_autorun_sql_steps
     after update of status on workflow.tasks
     for each row execute function workflow.autorun_sql_steps();
 
-grant execute on function workflow.execute_sql_step(uuid) to worker, authenticated;
-grant execute on function workflow.drain_sql_steps(uuid, int) to worker, authenticated;
+-- WORKER ONLY, and nobody else needs them: the engine reaches both from inside
+-- its own SECURITY DEFINER functions (start_workflow, the autorun trigger,
+-- tick), where the grant is not consulted. They used to be granted to
+-- `authenticated` as well, and neither asks whose run a task belongs to -- so
+-- any signed-in person could make another tenant's ready steps run when THEY
+-- chose, a write step included, by naming a task or a run; the output stays in
+-- the run, but the act is the owner's. drain_sql_steps also reaches
+-- start_child_workflow, which is meant to be the engine's alone (REM-46). The
+-- revoke is spelled out because a grant already made survives a replay.
+grant execute on function workflow.execute_sql_step(uuid) to worker;
+grant execute on function workflow.drain_sql_steps(uuid, int) to worker;
+revoke execute on function workflow.execute_sql_step(uuid) from authenticated;
+revoke execute on function workflow.drain_sql_steps(uuid, int) from authenticated;
 -- The allow-list is readable by `authenticated` for discoverability: a user
 -- authoring a `sql` step should be able to see which functions are callable
 -- without guessing. It is NOT granted to `worker`, and that omission is the
@@ -11213,16 +11322,23 @@ returns uuid as $$
     select owner_id from workflow.runs where id = p_run_id;
 $$ language sql stable security definer set search_path = pg_catalog, public;
 
--- WHAT THIS DOES NOT CLOSE, and the debt it owes. `request.jwt.claims` is a
--- setting any role can write with set_config, so an author's statement can set
--- it and read as someone else -- the whole-database class REM-44 is about
--- (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §2). This
--- function narrows the step path from "runs as app_owner, RLS bypassed" to
--- "runs as the run's owner, under RLS", which is strictly less; it does not
--- make the principal unforgeable. When REM-44 lands a trusted `rbac.principal()`,
--- the identity-set here (raw set_config) moves onto it, and the guard below
--- keys on that rather than on current_user. Until then, an author already had
--- app_owner's reach, so this is a reduction and not a new door.
+-- TWO FUNCTIONS, because the role that runs the statement must not be the role
+-- that says whose statement it is. `request.jwt.claims` is the caller for every
+-- row rule in the collection, and since REM-44 only authenticator, app_owner,
+-- worker and scheduler may write it (user-rbac/roles.sql §6). api_viewer is
+-- not among them, because it runs SQL a workflow's AUTHOR wrote, and an
+-- author's `select set_config('request.jwt.claims', ...)` inside a read step
+-- would otherwise read as anyone at all. So execute_for (app_owner) sets the
+-- claims and restores them; execute_as_viewer (api_viewer) runs the statement
+-- and cannot touch them. The first version was one function owned by
+-- api_viewer that did both, which needed api_viewer to hold set_config, which
+-- is the door.
+--
+-- What this still does not close: a WRITE step's statement is executed as a
+-- statement, so it can be `SET LOCAL request.jwt.claims = ...` or a DO block
+-- that issues one, and SET is not a function a grant can take away. That door
+-- is an author's, not a signed-in person's, and closing it needs the setting
+-- declared superuser-only by a C module (REM-64).
 --
 -- HOW, and why this is possible at all when the roadmap said it was not.
 --
@@ -11230,7 +11346,7 @@ $$ language sql stable security definer set search_path = pg_catalog, public;
 -- table and so bypasses RLS. Postgres refuses `SET ROLE` anywhere in a
 -- SECURITY DEFINER stack, so the step cannot become the person. What it CAN do
 -- is call another SECURITY DEFINER function, and that switches identity to the
--- callee's owner. This function is owned by api_viewer -- the role that already
+-- callee's owner. execute_as_viewer is owned by api_viewer -- the role that already
 -- owns every *_api view for exactly this reason: it is not the table owner, so
 -- RLS applies to it, and the claims decide whose rows it sees. With the claims
 -- set to the run's owner, a statement here sees what that person would see
@@ -11241,11 +11357,12 @@ $$ language sql stable security definer set search_path = pg_catalog, public;
 -- an owner bypasses RLS whatever the claims say -- which is why the role
 -- switch, done by ownership rather than SET ROLE, is the whole mechanism.
 --
--- NOBODY BUT THE ENGINE MAY CALL IT. It takes a user id and a statement, so a
--- caller who could reach it could read as anyone. EXECUTE is granted to
--- app_owner alone, and nobody is a member of api_viewer but app_owner.
+-- NOBODY BUT THE ENGINE MAY CALL EITHER. execute_for takes a user id and a
+-- statement, so a caller who could reach it could read as anyone. EXECUTE on
+-- both is granted to app_owner alone, and nobody is a member of api_viewer but
+-- app_owner.
 --
--- The claims are restored on BOTH exit paths, in this function's own exception
+-- The claims are restored on BOTH exit paths, in execute_for's own exception
 -- handler, and NOT left to the caller's subtransaction. The caller's abort does
 -- roll the set_config back -- but `tick()` and an autorun cascade run several
 -- sql tasks in one transaction, and a design where the identity outlives a
@@ -11254,38 +11371,26 @@ $$ language sql stable security definer set search_path = pg_catalog, public;
 -- restores and re-raises itself, and the restore does not depend on who calls
 -- it. (Regression covered in dev/tests/workflow/15: two owners in one
 -- transaction, the first failing.)
-create or replace function workflow.execute_for(
-    p_user uuid, p_statement text, p_write boolean, p_params jsonb)
+create or replace function workflow.execute_as_viewer(
+    p_statement text, p_write boolean, p_params jsonb)
 returns jsonb as $$
 declare
-    v_prev  text := current_setting('request.jwt.claims', true);
     v_out   jsonb;
     v_count bigint;
 begin
-    if p_user is null then
-        raise exception 'execute_for was given nobody to run as';
-    end if;
-    perform set_config('request.jwt.claims',
-        json_build_object('sub', p_user, 'role', 'authenticated')::text, true);
-    begin
-        if p_write then
-            if p_params is not null then execute p_statement using p_params;
-            else                         execute p_statement;
-            end if;
-            get diagnostics v_count = row_count;
-            v_out := jsonb_build_object('rows_affected', v_count);
-        elsif p_params is not null then
-            execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
-            into v_out using p_params;
-        else
-            execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
-            into v_out;
+    if p_write then
+        if p_params is not null then execute p_statement using p_params;
+        else                         execute p_statement;
         end if;
-    exception when others then
-        perform set_config('request.jwt.claims', coalesce(v_prev, ''), true);
-        raise;
-    end;
-    perform set_config('request.jwt.claims', coalesce(v_prev, ''), true);
+        get diagnostics v_count = row_count;
+        return jsonb_build_object('rows_affected', v_count);
+    elsif p_params is not null then
+        execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
+        into v_out using p_params;
+    else
+        execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
+        into v_out;
+    end if;
     return coalesce(v_out, '[]'::jsonb);
 end;
 $$ language plpgsql volatile security definer set search_path = pg_catalog, public;
@@ -11294,8 +11399,39 @@ $$ language plpgsql volatile security definer set search_path = pg_catalog, publ
 -- member of api_viewer, and the new owner needs CREATE on the schema for the
 -- moment of the transfer.
 grant create on schema workflow to api_viewer;
-alter function workflow.execute_for(uuid, text, boolean, jsonb) owner to api_viewer;
+alter function workflow.execute_as_viewer(text, boolean, jsonb) owner to api_viewer;
 revoke create on schema workflow from api_viewer;
+revoke execute on function workflow.execute_as_viewer(text, boolean, jsonb) from public;
+grant execute on function workflow.execute_as_viewer(text, boolean, jsonb) to app_owner;
+
+create or replace function workflow.execute_for(
+    p_user uuid, p_statement text, p_write boolean, p_params jsonb)
+returns jsonb as $$
+declare
+    v_prev text := current_setting('request.jwt.claims', true);
+    v_out  jsonb;
+begin
+    if p_user is null then
+        raise exception 'execute_for was given nobody to run as';
+    end if;
+    perform set_config('request.jwt.claims',
+        json_build_object('sub', p_user, 'role', 'authenticated')::text, true);
+    begin
+        v_out := workflow.execute_as_viewer(p_statement, p_write, p_params);
+    exception when others then
+        perform set_config('request.jwt.claims', coalesce(v_prev, ''), true);
+        raise;
+    end;
+    perform set_config('request.jwt.claims', coalesce(v_prev, ''), true);
+    return v_out;
+end;
+$$ language plpgsql volatile security definer set search_path = pg_catalog, public;
+
+-- OWNED BY app_owner, said explicitly. `create or replace` keeps an existing
+-- function's owner, and the first version of execute_for was api_viewer's, so a
+-- database upgraded from it would keep an execute_for that runs as api_viewer --
+-- which can no longer call set_config, and fails every person's sql step.
+alter function workflow.execute_for(uuid, text, boolean, jsonb) owner to app_owner;
 revoke execute on function workflow.execute_for(uuid, text, boolean, jsonb) from public;
 grant execute on function workflow.execute_for(uuid, text, boolean, jsonb) to app_owner;
 
@@ -14515,6 +14651,28 @@ revoke execute on function aiq.record_embeddings(text, jsonb) from public;
 -- caller who queries the space directly still sees chunk ids and raw vectors
 -- for content they cannot read. Closing that needs per-source policies on
 -- generated spaces, which is real machinery and is not built.
+-- THE ONE SETTING semantic_in CHANGES, changed on the caller's behalf.
+--
+-- semantic_in runs as its caller, so RLS filters the join by the caller's
+-- rows. It used to set hnsw.iterative_scan with set_config, and the caller no
+-- longer holds set_config: it was taken from every role a person can become,
+-- because the same call writes request.jwt.claims (user-rbac/roles.sql §6).
+-- A SET statement would do it without the function, and Postgres refuses a SET
+-- inside a STABLE function, which semantic_in is. So this does it, as the
+-- owner, for this one parameter and pgvector's three values of it, and nothing
+-- else -- a definer that took the parameter name as an argument would be
+-- set_config again under another name. The change is transaction-local and
+-- outlives this call, which is what semantic_in's restore relies on.
+create or replace function aiq.set_scan_order(p_value text)
+returns void as $$
+begin
+    if p_value is null or p_value not in ('off', 'relaxed_order', 'strict_order') then
+        raise exception 'hnsw.iterative_scan takes off, relaxed_order or strict_order, not %', p_value;
+    end if;
+    perform set_config('hnsw.iterative_scan', p_value, true);
+end;
+$$ language plpgsql volatile security definer set search_path = pg_catalog, public;
+
 drop function if exists aiq.semantic_in(vector, text, int);
 create or replace function aiq.semantic_in(
     p_source text, p_query vector, p_model text default null, p_limit int default 10
@@ -14616,10 +14774,11 @@ begin
     -- loads, not when the extension is created, so the parameter is still an
     -- unrecognised placeholder and only a superuser may name one. By this line
     -- vector_dims() above has loaded the module, so current_setting() answers
-    -- and an end-user role may set it.
+    -- and an end-user role may set it -- through aiq.set_scan_order, since the
+    -- caller no longer holds set_config itself.
     v_iter := current_setting('hnsw.iterative_scan', true);
     if v_iter is not null and v_iter <> 'strict_order' then
-        perform set_config('hnsw.iterative_scan', 'strict_order', true);
+        perform aiq.set_scan_order('strict_order');
     end if;
 
     return query execute format(
@@ -14634,7 +14793,7 @@ begin
     -- would silently change the index behaviour of every later vector query in
     -- the same transaction, including ones this layer did not write.
     if v_iter is not null and v_iter <> 'strict_order' then
-        perform set_config('hnsw.iterative_scan', v_iter, true);
+        perform aiq.set_scan_order(v_iter);
     end if;
 end;
 $$ language plpgsql stable security invoker;   -- caller's RLS, deliberately
@@ -14855,8 +15014,14 @@ begin
     -- back, so the read runs in one and the block is deliberately unwound --
     -- the rows are in a plpgsql variable by then, and a variable is not
     -- transactional.
+    --
+    -- A SET statement and not set_config(), because the caller here is a person
+    -- and a person no longer holds set_config: the same function writes
+    -- request.jwt.claims, and through this very passthrough it was how anyone
+    -- became anyone (user-rbac/roles.sql §6). SET needs no grant, and the
+    -- statement below cannot issue one -- it is wrapped as a subquery.
     begin
-        perform set_config('transaction_read_only', 'on', true);
+        set local transaction_read_only = on;
         execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
         into v_result;
         raise exception using errcode = 'P0001', message = '__aiq_readonly_done__';
@@ -15403,9 +15568,18 @@ begin
             'queues_note', 'Unioned from per-queue tuning config and queues tasks have '
                            'actually used. A worker polling a queue that has never had a '
                            'task is not visible: nothing in the database records it.',
+            -- The agents THIS CALLER may read, not every agent. This function
+            -- is SECURITY DEFINER, so the `agents_scoped` policy never runs
+            -- here and the row question has to be asked by name; it used to
+            -- list every agent's name and model to any signed-in caller -- the
+            -- probe 2e5995e removed from may_invoke, still open one function
+            -- over (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md).
+            -- A connection with no claims is an operator, as everywhere else.
             'agents', coalesce((select jsonb_agg(jsonb_build_object(
-                    'name', name, 'model', model) order by name)
-                from agentic.agents), '[]'::jsonb),
+                    'name', a.name, 'model', a.model) order by a.name)
+                from agentic.agents a
+                where nullif(current_setting('request.jwt.claims', true), '') is null
+                   or rbac.may_read(a.owner_id, a.org_id, a.visibility)), '[]'::jsonb),
             -- What an `embed:` step -- and therefore a SEMANTIC or SEARCH
             -- `p8ql:` step, which compiles to one -- may name. It belongs in
             -- THIS facet and not only in `graph`, on the rule the queues note
@@ -16116,6 +16290,9 @@ grant execute on function aiq.lookup_many(text[], boolean, int) to authenticated
 grant execute on function aiq.graph_neighbors(uuid, text, int) to authenticated;
 grant execute on function aiq.graph_walk(uuid, int, text, int) to authenticated;
 grant execute on function aiq.semantic_in(text, vector, text, int) to authenticated;
+-- semantic_in's one setting, set as the owner because its caller holds no
+-- set_config (schema.sql, above semantic_in). api_viewer has it by membership.
+grant execute on function aiq.set_scan_order(text) to authenticated;
 grant execute on function aiq.lexical(text, text, int) to authenticated;
 grant execute on function aiq.search(text, text, vector, text, int, int) to authenticated;
 grant execute on function aiq.sql_passthrough(text) to authenticated;
@@ -18732,7 +18909,9 @@ create or replace function content.record_chunks(p_resource_id uuid, p_chunks js
 returns int as $$
 declare
     v_count int;
+    v_owner uuid;
     v_org   uuid;
+    v_vis   text;
 begin
     -- The org is READ OFF THE RESOURCE, never taken as an argument: this
     -- function's only parameter that identifies a tenant is the resource id,
@@ -18745,8 +18924,17 @@ begin
     -- v_found` leaves v_found NULL on no rows, `if not NULL` is false, and the
     -- first version of this check fell straight through it into a foreign-key
     -- error that named the missing row.
-    select r.org_id into v_org from content.resources r where r.id = p_resource_id;
-    if not found or not rbac.may_access_org(v_org) then
+    --
+    -- THE ROW'S RULE, not the org's. This asked rbac.may_access_org(org), which
+    -- answers "may this person act in that tenancy" -- and on the shared tier,
+    -- or for a co-member's private upload, that is yes, so anyone who could
+    -- name a resource could replace its chunks. content.resolve_file made the
+    -- same move in 75abb1d and this, its sibling, was left behind
+    -- (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §1).
+    -- may_write carries the claimless arm the worker relies on.
+    select r.owner_id, r.org_id, r.visibility into v_owner, v_org, v_vis
+      from content.resources r where r.id = p_resource_id;
+    if not found or not rbac.may_write(v_owner, v_org, v_vis) then
         raise exception 'no such resource, or it is not yours';
     end if;
 
@@ -18999,69 +19187,14 @@ begin
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
--- The row set an `embed:` matrix fans out over.
---
--- This function is named in workflow-engine/YAML.md §matrix as the example of
--- per-row embedding -- `rows: {function: chunks_to_embed, args: [...]}` -- and
--- it did not exist. The documented pipeline could not have run.
---
--- It returns only what the embed call needs (id and text), because every row
--- is copied verbatim onto the child task it produces: a column added here is
--- a column stored N times.
---
--- SECURITY DEFINER WITH ITS OWN CHECK, and it got here the hard way. It was
--- SECURITY INVOKER while its only caller was matrix expansion, which runs
--- inside the engine's own definer context and therefore reads as the schema
--- owner. The moment the batching embed step began calling it from the WORKER
--- -- which holds no table grants at all, by design -- every call failed with
--- "permission denied for table resource_chunks", five times per resource.
---
--- So it is definer, and because it is also granted to `authenticated` it does
--- its own authorization rather than relying on the grant: a definer function
--- that returned any resource's chunks to anyone holding its id would hand a
--- tenant's corpus to whoever guessed a uuid. The predicate is the one
--- rbac.may_access_org states, so there is one rule and not a second copy of
--- it -- and a claimless connection (a worker, a migration) is exempt exactly
--- as it is everywhere else in this schema.
---
--- It returns only what an embed call needs, id and text, because in the
--- fan-out shape every row is copied verbatim onto the child task it produces:
--- a column added here is a column stored N times.
-create or replace function content.chunks_to_embed(p_resource_id uuid)
-returns jsonb as $$
-    select coalesce(jsonb_agg(jsonb_build_object('chunk_id', c.id, 'content', c.content)
-                              order by c.ordinal), '[]'::jsonb)
-    from content.resource_chunks c
-    where c.resource_id = p_resource_id
-      and exists (select 1 from content.resources r
-                  where r.id = p_resource_id and rbac.may_access_org(r.org_id));
-$$ language sql stable security definer set search_path = pg_catalog, public;
-
--- The row set the GRAPH indexer fans out over.
---
--- Named `windows_to_index` because that is what graph-index.md §6.2 calls it,
--- and like chunks_to_embed it is a function the design used as an example and
--- nobody had written. A window is a chunk here: the chunker already split the
--- document on the most semantically significant boundary that fits a budget,
--- and cutting it a second way for the extractor would mean two answers to
--- "which span produced this" for the same document.
---
--- It carries THREE fields where chunks_to_embed carries two, and the extra two
--- are what aiq.land_graph_fanout reads off each child to attribute a landed
--- graph -- `resource_id` and `window_ordinal` -- so a node can be traced back
--- to the passage that named it. Same reason the embed rows are minimal: every
--- row is copied verbatim onto the child task it creates.
-create or replace function content.windows_to_index(p_resource_id uuid)
-returns jsonb as $$
-    select coalesce(jsonb_agg(jsonb_build_object(
-               'resource_id',    c.resource_id,
-               'window_ordinal', c.ordinal,
-               'content',        c.content) order by c.ordinal), '[]'::jsonb)
-    from content.resource_chunks c
-    where c.resource_id = p_resource_id
-      and exists (select 1 from content.resources r
-                  where r.id = p_resource_id and rbac.may_access_org(r.org_id));
-$$ language sql stable security definer set search_path = pg_catalog, public;
+-- content.chunks_to_embed and content.windows_to_index are defined in
+-- world-model-ingestion/integration.sql, beside content.resolve_file, for the
+-- reason resolve_file is: they ask rbac.may_read of the resource's owner_id
+-- and visibility, which rbac.add_scope_columns adds there. Both are LANGUAGE
+-- SQL, so their bodies are checked when they are created, and here the
+-- columns do not exist yet -- a fresh load failed on `column r.owner_id does
+-- not exist` (CREATE EXTENSION does not check bodies, which is why only
+-- dev/upgrade-converges.sh saw it). Their history is with them there.
 
 -- ------------------------------------------------------------
 -- 7b. Datasets — the tabular path, which is not the chunking path.
@@ -19425,6 +19558,87 @@ returns table(bucket text, object_key text, content_type text, size_bytes bigint
       and rbac.may_read(r.owner_id, r.org_id, r.visibility);
 $$ language sql stable security definer set search_path = pg_catalog, public;
 
+-- AND chunks_to_embed / windows_to_index, for resolve_file's reason: they ask
+-- rbac.may_read of owner_id and visibility, which the add_scope_columns line
+-- above adds, and as LANGUAGE SQL their bodies are checked when created.
+-- Moved from schema.sql rather than duplicated.
+--
+-- The row set an `embed:` matrix fans out over.
+--
+-- This function is named in workflow-engine/YAML.md §matrix as the example of
+-- per-row embedding -- `rows: {function: chunks_to_embed, args: [...]}` -- and
+-- it did not exist. The documented pipeline could not have run.
+--
+-- It returns only what the embed call needs (id and text), because every row
+-- is copied verbatim onto the child task it produces: a column added here is
+-- a column stored N times.
+--
+-- SECURITY DEFINER WITH ITS OWN CHECK, and it got here the hard way. It was
+-- SECURITY INVOKER while its only caller was matrix expansion, which runs
+-- inside the engine's own definer context and therefore reads as the schema
+-- owner. The moment the batching embed step began calling it from the WORKER
+-- -- which holds no table grants at all, by design -- every call failed with
+-- "permission denied for table resource_chunks", five times per resource.
+--
+-- So it is definer, and because it is also granted to `authenticated` it does
+-- its own authorization rather than relying on the grant: a definer function
+-- that returned any resource's chunks to anyone holding its id would hand a
+-- tenant's corpus to whoever guessed a uuid. The predicate is the one
+-- rbac.may_read states for the row -- the read rule, whose single home it is,
+-- as content.resolve_file asks it. It was may_access_org, the ORG's rule,
+-- until 2026-09-11, which let a co-member or anyone on the shared tier read a
+-- private resource. A claimless connection (a worker, a migration) is exempt
+-- exactly as it is everywhere else in this schema.
+--
+-- It returns only what an embed call needs, id and text, because in the
+-- fan-out shape every row is copied verbatim onto the child task it produces:
+-- a column added here is a column stored N times.
+create or replace function content.chunks_to_embed(p_resource_id uuid)
+returns jsonb as $$
+    select coalesce(jsonb_agg(jsonb_build_object('chunk_id', c.id, 'content', c.content)
+                              order by c.ordinal), '[]'::jsonb)
+    from content.resource_chunks c
+    where c.resource_id = p_resource_id
+      -- The ROW's read rule, as content.resolve_file asks it -- not
+      -- may_access_org, which let anyone in the org, and on the shared tier
+      -- anyone at all, read a private resource's text by naming it. The
+      -- claimless arm is the worker's embed fan-out, which carries no person.
+      and exists (select 1 from content.resources r
+                  where r.id = p_resource_id
+                    and (nullif(current_setting('request.jwt.claims', true), '') is null
+                         or rbac.may_read(r.owner_id, r.org_id, r.visibility)));
+$$ language sql stable security definer set search_path = pg_catalog, public;
+
+-- The row set the GRAPH indexer fans out over.
+--
+-- Named `windows_to_index` because that is what graph-index.md §6.2 calls it,
+-- and like chunks_to_embed it is a function the design used as an example and
+-- nobody had written. A window is a chunk here: the chunker already split the
+-- document on the most semantically significant boundary that fits a budget,
+-- and cutting it a second way for the extractor would mean two answers to
+-- "which span produced this" for the same document.
+--
+-- It carries THREE fields where chunks_to_embed carries two, and the extra two
+-- are what aiq.land_graph_fanout reads off each child to attribute a landed
+-- graph -- `resource_id` and `window_ordinal` -- so a node can be traced back
+-- to the passage that named it. Same reason the embed rows are minimal: every
+-- row is copied verbatim onto the child task it creates.
+create or replace function content.windows_to_index(p_resource_id uuid)
+returns jsonb as $$
+    select coalesce(jsonb_agg(jsonb_build_object(
+               'resource_id',    c.resource_id,
+               'window_ordinal', c.ordinal,
+               'content',        c.content) order by c.ordinal), '[]'::jsonb)
+    from content.resource_chunks c
+    where c.resource_id = p_resource_id
+      -- The row's read rule, the same as chunks_to_embed above and for the
+      -- same reason.
+      and exists (select 1 from content.resources r
+                  where r.id = p_resource_id
+                    and (nullif(current_setting('request.jwt.claims', true), '') is null
+                         or rbac.may_read(r.owner_id, r.org_id, r.visibility)));
+$$ language sql stable security definer set search_path = pg_catalog, public;
+
 select rbac.add_scope_policy ('content.resources');
 
 alter table content.resource_chunks enable row level security;
@@ -19720,8 +19934,21 @@ join content.resources r
   on r.id = workflow.artifact_ref(t.output)
 left join content.files f on f.id = r.file_id;
 
+-- WORKER ONLY. It was granted to `authenticated` too, and it takes any task id
+-- and asks nothing about whose run that task is in: the resource it registers
+-- is keyed by (channel, task id), register_upload's conflict path hands back
+-- the EXISTING resource, and the update below repoints that resource at the
+-- caller's file. So a signed-in person who named another tenant's task could
+-- replace that task's artifact with bytes of their own, and copy its run,
+-- trace and step into their own row besides. Its one caller is the worker
+-- (percolate-core worker/artifacts.py), which connects as `worker`; for a
+-- worker-facing function the grant IS the authorization (integration-rbac.sql
+-- in the engine), and the grant said otherwise
+-- (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md, REM-46).
 grant execute on function workflow.register_artifact(uuid,text,text,text,bigint,text,text,uuid)
-    to worker, authenticated;
+    to worker;
+revoke execute on function workflow.register_artifact(uuid,text,text,text,bigint,text,text,uuid)
+    from authenticated;
 grant execute on function workflow.artifact(uuid) to worker, authenticated;
 grant select on workflow.v_artifacts to authenticated;
 

@@ -69,10 +69,9 @@ create function pg_temp.run_as(p_user uuid, p_name text)
 returns table (status text, bodies text, children int, err text) as $$
 declare v_run uuid; v_out jsonb;
 begin
-    perform set_config('request.jwt.claims',
-        case when p_user is null then '' else json_build_object('sub', p_user)::text end, true);
+    execute format('set local request.jwt.claims = %L', coalesce(case when p_user is null then '' else json_build_object('sub', p_user)::text end, ''));
     v_run := workflow.start_workflow(p_name, '{}'::jsonb);
-    perform set_config('request.jwt.claims', '', true);
+    execute format('set local request.jwt.claims = %L', '');
     select t.output->'result' into v_out from workflow.tasks t
      where t.run_id = v_run and t.step_key = 'q';
     -- p8ql answers {mode, rows}; a statement answers the rows themselves.
@@ -164,10 +163,10 @@ end $$;
 do $$
 declare v_before text; r record;
 begin
-    perform set_config('request.jwt.claims', '{"sub":"15151515-0000-4000-8000-00000000000b"}', true);
+    execute format('set local request.jwt.claims = %L', '{"sub":"15151515-0000-4000-8000-00000000000b"}');
     v_before := current_setting('request.jwt.claims', true);
     select * into r from pg_temp.run_as('15151515-0000-4000-8000-00000000000a', 't_sr_statement');
-    perform set_config('request.jwt.claims', v_before, true);  -- run_as clears it; restore ours
+    execute format('set local request.jwt.claims = %L', coalesce(v_before, ''));  -- run_as clears it; restore ours
     if current_user <> 'app_owner' then
         raise exception 'a step left the session running as %', current_user;
     end if;

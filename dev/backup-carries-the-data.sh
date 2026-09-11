@@ -43,6 +43,8 @@ create extension if not exists pgcrypto;
 create extension if not exists pg_trgm;
 create extension if not exists vector;
 create extension if not exists percolate_parser;
+revoke execute on function pg_catalog.set_config(text, text, boolean) from public;
+grant execute on function pg_catalog.set_config(text, text, boolean) to authenticator, app_owner, worker, scheduler;
 do $$ begin execute format('grant create on database %I to app_owner', current_database()); end $$;
 grant create, usage on schema public to app_owner;
 set role app_owner;

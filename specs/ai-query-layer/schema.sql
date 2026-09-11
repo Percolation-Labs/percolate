@@ -2819,6 +2819,28 @@ revoke execute on function aiq.record_embeddings(text, jsonb) from public;
 -- caller who queries the space directly still sees chunk ids and raw vectors
 -- for content they cannot read. Closing that needs per-source policies on
 -- generated spaces, which is real machinery and is not built.
+-- THE ONE SETTING semantic_in CHANGES, changed on the caller's behalf.
+--
+-- semantic_in runs as its caller, so RLS filters the join by the caller's
+-- rows. It used to set hnsw.iterative_scan with set_config, and the caller no
+-- longer holds set_config: it was taken from every role a person can become,
+-- because the same call writes request.jwt.claims (user-rbac/roles.sql §6).
+-- A SET statement would do it without the function, and Postgres refuses a SET
+-- inside a STABLE function, which semantic_in is. So this does it, as the
+-- owner, for this one parameter and pgvector's three values of it, and nothing
+-- else -- a definer that took the parameter name as an argument would be
+-- set_config again under another name. The change is transaction-local and
+-- outlives this call, which is what semantic_in's restore relies on.
+create or replace function aiq.set_scan_order(p_value text)
+returns void as $$
+begin
+    if p_value is null or p_value not in ('off', 'relaxed_order', 'strict_order') then
+        raise exception 'hnsw.iterative_scan takes off, relaxed_order or strict_order, not %', p_value;
+    end if;
+    perform set_config('hnsw.iterative_scan', p_value, true);
+end;
+$$ language plpgsql volatile security definer set search_path = pg_catalog, public;
+
 drop function if exists aiq.semantic_in(vector, text, int);
 create or replace function aiq.semantic_in(
     p_source text, p_query vector, p_model text default null, p_limit int default 10
@@ -2920,10 +2942,11 @@ begin
     -- loads, not when the extension is created, so the parameter is still an
     -- unrecognised placeholder and only a superuser may name one. By this line
     -- vector_dims() above has loaded the module, so current_setting() answers
-    -- and an end-user role may set it.
+    -- and an end-user role may set it -- through aiq.set_scan_order, since the
+    -- caller no longer holds set_config itself.
     v_iter := current_setting('hnsw.iterative_scan', true);
     if v_iter is not null and v_iter <> 'strict_order' then
-        perform set_config('hnsw.iterative_scan', 'strict_order', true);
+        perform aiq.set_scan_order('strict_order');
     end if;
 
     return query execute format(
@@ -2938,7 +2961,7 @@ begin
     -- would silently change the index behaviour of every later vector query in
     -- the same transaction, including ones this layer did not write.
     if v_iter is not null and v_iter <> 'strict_order' then
-        perform set_config('hnsw.iterative_scan', v_iter, true);
+        perform aiq.set_scan_order(v_iter);
     end if;
 end;
 $$ language plpgsql stable security invoker;   -- caller's RLS, deliberately
@@ -3159,8 +3182,14 @@ begin
     -- back, so the read runs in one and the block is deliberately unwound --
     -- the rows are in a plpgsql variable by then, and a variable is not
     -- transactional.
+    --
+    -- A SET statement and not set_config(), because the caller here is a person
+    -- and a person no longer holds set_config: the same function writes
+    -- request.jwt.claims, and through this very passthrough it was how anyone
+    -- became anyone (user-rbac/roles.sql §6). SET needs no grant, and the
+    -- statement below cannot issue one -- it is wrapped as a subquery.
     begin
-        perform set_config('transaction_read_only', 'on', true);
+        set local transaction_read_only = on;
         execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
         into v_result;
         raise exception using errcode = 'P0001', message = '__aiq_readonly_done__';
@@ -3707,9 +3736,18 @@ begin
             'queues_note', 'Unioned from per-queue tuning config and queues tasks have '
                            'actually used. A worker polling a queue that has never had a '
                            'task is not visible: nothing in the database records it.',
+            -- The agents THIS CALLER may read, not every agent. This function
+            -- is SECURITY DEFINER, so the `agents_scoped` policy never runs
+            -- here and the row question has to be asked by name; it used to
+            -- list every agent's name and model to any signed-in caller -- the
+            -- probe 2e5995e removed from may_invoke, still open one function
+            -- over (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md).
+            -- A connection with no claims is an operator, as everywhere else.
             'agents', coalesce((select jsonb_agg(jsonb_build_object(
-                    'name', name, 'model', model) order by name)
-                from agentic.agents), '[]'::jsonb),
+                    'name', a.name, 'model', a.model) order by a.name)
+                from agentic.agents a
+                where nullif(current_setting('request.jwt.claims', true), '') is null
+                   or rbac.may_read(a.owner_id, a.org_id, a.visibility)), '[]'::jsonb),
             -- What an `embed:` step -- and therefore a SEMANTIC or SEARCH
             -- `p8ql:` step, which compiles to one -- may name. It belongs in
             -- THIS facet and not only in `graph`, on the rule the queues note

@@ -363,8 +363,7 @@ begin
     foreach v_case in array array['auth0|abc123', 'someone@example.com', '',
                                   '1e0f2b8a-0000-4000-8000-00000000000', 'null']
     loop
-        perform set_config('request.jwt.claims',
-                           json_build_object('sub', v_case)::text, true);
+        execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', v_case)::text, ''));
         v_got := rbac.current_user_id();
         if v_got is not null then
             raise exception
@@ -375,8 +374,7 @@ begin
     end loop;
 
     -- And a real one still resolves, so the guard is a filter and not a wall.
-    perform set_config('request.jwt.claims',
-        '{"sub":"1e0f2b8a-0000-4000-8000-000000000001"}', true);
+    execute format('set local request.jwt.claims = %L', '{"sub":"1e0f2b8a-0000-4000-8000-000000000001"}');
     if rbac.current_user_id() <> '1e0f2b8a-0000-4000-8000-000000000001'::uuid then
         raise exception 'a valid uuid sub no longer resolves';
     end if;

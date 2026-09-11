@@ -319,9 +319,9 @@ begin
     v_alice := gen_random_uuid();
     insert into rbac.users (id, email) values (v_alice, 'recovery-alice@test.com');
     update workflow.runs set owner_id = v_alice where id = v_run;
-    perform set_config('request.jwt.claims', json_build_object('sub', v_alice::text)::text, true);
+    execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', v_alice::text)::text, ''));
     perform workflow.cancel_run(v_run);
-    perform set_config('request.jwt.claims', '', true);
+    execute format('set local request.jwt.claims = %L', '');
 
     if workflow.heartbeat_task(v_a, 'worker-C') then
         raise exception 'a worker on a CANCELLED run was told to keep working -- '
@@ -346,13 +346,13 @@ begin
     v_run := workflow.start_workflow('t_r_crash_8', '{}'::jsonb, 'authz');
     update workflow.runs set owner_id = v_alice where id = v_run;
 
-    perform set_config('request.jwt.claims', json_build_object('sub', v_mallory::text)::text, true);
+    execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', v_mallory::text)::text, ''));
     begin
         perform workflow.cancel_run(v_run);
-        perform set_config('request.jwt.claims', '', true);
+        execute format('set local request.jwt.claims = %L', '');
         raise exception 'PRIVILEGE ESCALATION: a stranger cancelled somebody else''s run';
     exception when others then
-        perform set_config('request.jwt.claims', '', true);
+        execute format('set local request.jwt.claims = %L', '');
         if sqlerrm like 'PRIVILEGE ESCALATION%' then raise; end if;
     end;
 
@@ -554,7 +554,7 @@ begin
     v_owner := gen_random_uuid();
     insert into rbac.users (id, email) values (v_owner, 'recovery-signaller@test.com');
     update workflow.runs set owner_id = v_owner where id = v_run;
-    perform set_config('request.jwt.claims', json_build_object('sub', v_owner::text)::text, true);
+    execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', v_owner::text)::text, ''));
 
     if (select status from workflow.tasks where id = v_await) is distinct from 'waiting_external' then
         raise exception 'a signal step did not park in waiting_external, it is %',
@@ -576,7 +576,7 @@ begin
     if (select status from workflow.tasks where run_id = v_run and step_key = 'then') is distinct from 'ready' then
         raise exception 'the signalled step did not release its successor';
     end if;
-    perform set_config('request.jwt.claims', '', true);
+    execute format('set local request.jwt.claims = %L', '');
     raise notice 'workflow/06: a signal step waits for the outside world and is '
                  'released by it, through the authorised path -- the '
                  'human-in-the-loop primitive, executed';

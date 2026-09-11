@@ -249,8 +249,7 @@ begin
         'name', 't_ab_user', 'system_prompt', 'hello', 'audience', 'user'));
 
     set local role authenticated;
-    perform set_config('request.jwt.claims',
-        '{"sub":"11111111-1111-1111-1111-111111111111"}', true);
+    execute format('set local request.jwt.claims = %L', '{"sub":"11111111-1111-1111-1111-111111111111"}');
 
     -- The filter works, for a role that is not the owner.
     select count(*) into v_pickable

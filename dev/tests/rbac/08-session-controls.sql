@@ -136,8 +136,7 @@ begin
     -- that has not been verified, whatever password it is given. That coupling
     -- is not written down anywhere else, and it is the reason this fixture
     -- needs the line below rather than being able to use a fresh signup.
-    perform set_config('request.jwt.claims',
-                       json_build_object('sub', v_id)::text, true);
+    execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', v_id)::text, ''));
     begin
         perform rbac.change_password('original-pw', 'rotated-pw');
         raise exception 'an unverified account rotated its password';
@@ -152,8 +151,7 @@ begin
 
     -- Wrong current password.
     begin
-        perform set_config('request.jwt.claims',
-                           json_build_object('sub', v_id)::text, true);
+        execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', v_id)::text, ''));
         perform rbac.change_password('not-the-password', 'attacker-pw');
     exception when others then
         v_refused := true;
@@ -169,8 +167,7 @@ begin
     end if;
 
     -- Right current password.
-    perform set_config('request.jwt.claims',
-                       json_build_object('sub', v_id)::text, true);
+    execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', v_id)::text, ''));
     perform rbac.change_password('original-pw', 'rotated-pw');
 
     if rbac.verify_password('pwprobe@test.com', 'rotated-pw') is null then

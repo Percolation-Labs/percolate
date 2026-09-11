@@ -195,23 +195,21 @@ begin
         where run_id = v_run and step_key = 'fan';
 
         -- The owner reads their own fan-out.
-        perform set_config('request.jwt.claims',
-            json_build_object('sub', v_owner::text)::text, true);
+        execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', v_owner::text)::text, ''));
         v_rows := workflow.matrix_rows(v_matrix);
         if jsonb_array_length(v_rows) = 0 then
             raise exception 'the owner cannot read their own recorded row set';
         end if;
 
         -- A stranger holding the same task id must not.
-        perform set_config('request.jwt.claims',
-            json_build_object('sub', v_stranger::text)::text, true);
+        execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', v_stranger::text)::text, ''));
         begin
             perform workflow.matrix_rows(v_matrix);
-            perform set_config('request.jwt.claims', '', true);
+            execute format('set local request.jwt.claims = %L', '');
             raise exception 'TENANT LEAK: a stranger holding a task id read another '
                             'run''s recorded row set';
         exception when others then
-            perform set_config('request.jwt.claims', '', true);
+            execute format('set local request.jwt.claims = %L', '');
             if sqlerrm like 'TENANT LEAK%' then raise; end if;
         end;
         raise notice 'workflow/04: matrix_rows is authorized by calling it -- the owner '

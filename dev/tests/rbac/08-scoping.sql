@@ -102,7 +102,7 @@ declare r record; v_got text;
 begin
     for r in select * from scope_expected loop
         set local role authenticated;
-        perform set_config('request.jwt.claims', r.claims, true);
+        execute format('set local request.jwt.claims = %L', coalesce(r.claims, ''));
         select coalesce(string_agg(label, ', ' order by label), '(nothing)')
           into v_got from scope_probe;
         reset role;
@@ -135,9 +135,8 @@ begin
     --     get org A's row. If this passes with the intersection removed, the
     --     org claim is authoritative and the table is decoration.
     set local role authenticated;
-    perform set_config('request.jwt.claims',
-        '{"sub":"22222222-2222-2222-2222-222222222222",'
-        '"orgs":["a0000000-0000-0000-0000-00000000000a"]}', true);
+    execute format('set local request.jwt.claims = %L', coalesce('{"sub":"22222222-2222-2222-2222-222222222222",'
+        '"orgs":["a0000000-0000-0000-0000-00000000000a"]}', ''));
     select coalesce(string_agg(label, ', ' order by label), '(nothing)')
       into v_got from scope_probe;
     reset role;
@@ -152,8 +151,7 @@ begin
     --     She must lose the org tier -- this is how a scoped API key or an
     --     agent token acts for a user with less than that user's full reach.
     set local role authenticated;
-    perform set_config('request.jwt.claims',
-        '{"sub":"cccc0000-0000-0000-0000-0000000000c3","orgs":[]}', true);
+    execute format('set local request.jwt.claims = %L', '{"sub":"cccc0000-0000-0000-0000-0000000000c3","orgs":[]}');
     select coalesce(string_agg(label, ', ' order by label), '(nothing)')
       into v_got from scope_probe;
     reset role;
@@ -169,8 +167,7 @@ begin
     --     (b) would be indistinguishable from a function that always returns
     --     nothing.
     set local role authenticated;
-    perform set_config('request.jwt.claims',
-        '{"sub":"cccc0000-0000-0000-0000-0000000000c3"}', true);
+    execute format('set local request.jwt.claims = %L', '{"sub":"cccc0000-0000-0000-0000-0000000000c3"}');
     select coalesce(string_agg(label, ', ' order by label), '(nothing)')
       into v_got from scope_probe;
     reset role;
@@ -195,8 +192,7 @@ declare v_ok boolean;
 begin
     -- (a) Writing into an org you do not belong to.
     set local role authenticated;
-    perform set_config('request.jwt.claims',
-        '{"sub":"22222222-2222-2222-2222-222222222222"}', true);
+    execute format('set local request.jwt.claims = %L', '{"sub":"22222222-2222-2222-2222-222222222222"}');
     v_ok := false;
     begin
         insert into scope_probe (label, owner_id, org_id, visibility)
@@ -214,8 +210,7 @@ begin
     --     escalation had -- a caller-supplied "who is this" -- arriving as a
     --     column rather than as an argument.
     set local role authenticated;
-    perform set_config('request.jwt.claims',
-        '{"sub":"22222222-2222-2222-2222-222222222222"}', true);
+    execute format('set local request.jwt.claims = %L', '{"sub":"22222222-2222-2222-2222-222222222222"}');
     v_ok := false;
     begin
         insert into scope_probe (label, owner_id, visibility)
@@ -300,8 +295,7 @@ begin
      where label = 'a-private';
 
     set local role authenticated;
-    perform set_config('request.jwt.claims',
-        '{"sub":"11111111-1111-1111-1111-111111111111"}', true);
+    execute format('set local request.jwt.claims = %L', '{"sub":"11111111-1111-1111-1111-111111111111"}');
     select count(*) into v_n from scope_probe where label = 'a-private';
     reset role;
     if v_n <> 0 then
@@ -309,8 +303,7 @@ begin
     end if;
 
     set local role authenticated;
-    perform set_config('request.jwt.claims',
-        '{"sub":"22222222-2222-2222-2222-222222222222"}', true);
+    execute format('set local request.jwt.claims = %L', '{"sub":"22222222-2222-2222-2222-222222222222"}');
     select count(*) into v_n from scope_probe where label = 'a-private';
     reset role;
     if v_n <> 1 then
@@ -339,8 +332,7 @@ begin
     set local role authenticated;
     -- the SAME token as section 1, still naming her subject: nothing about the
     -- credential changed, only the row
-    perform set_config('request.jwt.claims',
-        '{"sub":"cccc0000-0000-0000-0000-0000000000c3"}', true);
+    execute format('set local request.jwt.claims = %L', '{"sub":"cccc0000-0000-0000-0000-0000000000c3"}');
     select count(*) into v_n from scope_probe where label = 'a-org';
     reset role;
     if v_n <> 0 then

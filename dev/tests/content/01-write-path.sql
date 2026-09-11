@@ -81,8 +81,7 @@ begin
     -- own unreality fail, which is the test doing its job on itself. The file
     -- header already said the deployment sets a JWT per request; this block
     -- was the one place that did not.
-    perform set_config('request.jwt.claims',
-        json_build_object('sub', '11111111-1111-1111-1111-111111111111')::text, true);
+    execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', '11111111-1111-1111-1111-111111111111')::text, ''));
 
     v_res := content.register_upload('t-uploads', 't-sum-1', 'bucket', 'keys/one',
                                      4096, 'text/plain', 'Outage postmortem', null, a);
@@ -256,8 +255,7 @@ begin
     select org_a, org_b, res_a into a, b, v_res from t_ctx;
 
     set local role authenticated;
-    perform set_config('request.jwt.claims',
-        json_build_object('sub', '22222222-2222-2222-2222-222222222222', 'orgs', array[b])::text, true);
+    execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', '22222222-2222-2222-2222-222222222222', 'orgs', array[b])::text, ''));
 
     -- the read side was always right, and is asserted so the write assertions
     -- below cannot be satisfied by the caller simply seeing nothing
@@ -447,8 +445,7 @@ begin
     -- 1. A TENANT REGISTERS WITHOUT NAMING AN ORG. Allowed now -- the act the
     --    old rule refused -- because the row it produces is private.
     set local role authenticated;
-    perform set_config('request.jwt.claims',
-        json_build_object('sub', v_u, 'orgs', array[v_b])::text, true);
+    execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', v_u, 'orgs', array[v_b])::text, ''));
     v_res := content.register_upload('uploads', 't-null-1', 'bucket', 'k-null-1',
                                      42, 'text/markdown', 'planted');
     reset role;
@@ -479,8 +476,7 @@ begin
     end if;
     -- and prove it by reading, as org A, rather than by trusting the column
     set local role authenticated;
-    perform set_config('request.jwt.claims',
-        json_build_object('sub', '11111111-1111-1111-1111-111111111111')::text, true);
+    execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', '11111111-1111-1111-1111-111111111111')::text, ''));
     if exists (select 1 from content.resources where id = v_res) then
         reset role;
         raise exception
@@ -493,7 +489,7 @@ begin
     -- 3. THE SINGLE-TENANT DEPLOYMENT STILL WORKS. A token that names no org
     --    is not a tenant, and its uploads are simply its own.
     set local role authenticated;
-    perform set_config('request.jwt.claims', json_build_object('sub', v_u)::text, true);
+    execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', v_u)::text, ''));
     v_res := content.register_upload('uploads', 't-null-2', 'bucket', 'k-null-2',
                                      42, 'text/markdown', 'single tenant');
     reset role;
@@ -516,7 +512,7 @@ begin
     --    succeeded, which it does either way. Caught by asserting the
     --    visibility as well: the row came back `private`, which is the answer
     --    for a logged-in caller and not for a migration.
-    perform set_config('request.jwt.claims', '', true);
+    execute format('set local request.jwt.claims = %L', '');
     v_res := content.register_upload('uploads', 't-null-3', 'bucket', 'k-null-3',
                                      42, 'text/markdown', 'service');
     if v_res is null then
@@ -533,8 +529,7 @@ begin
     insert into content.channels (name, kind, org_id, visibility)
     values ('tenancy-probe-b', 'file_upload', v_b, 'org');
     set local role authenticated;
-    perform set_config('request.jwt.claims',
-        json_build_object('sub', v_u, 'orgs', array[v_b])::text, true);
+    execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', v_u, 'orgs', array[v_b])::text, ''));
     v_res := content.register_upload('tenancy-probe-b', 't-own-1', 'bucket', 'k-own-1',
                                      42, 'text/markdown', 'own', null, v_b);
     reset role;

@@ -11,12 +11,13 @@
 create role app_owner nologin;
 create role api_viewer nologin;
 grant api_viewer to app_owner;          -- so app_owner can hand it the views
-grant authenticated to api_viewer;      -- so a workflow step can read as the person it runs for
 create role web_anon nologin;
 create role authenticated nologin;
 create role authenticator noinherit login password 'authpass';
 grant web_anon to authenticator;
 grant authenticated to authenticator;
+-- After `create role authenticated`: two lines earlier, it stopped the init.
+grant authenticated to api_viewer;      -- so a workflow step can read as the person it runs for
 -- worker and the content server connect as themselves, so they need a login.
 -- They hold NO table grants -- every interaction is a SECURITY DEFINER function
 -- call -- which is what makes running them safe to hand to anyone.
@@ -28,6 +29,12 @@ create role worker login password 'workerpass';
 -- trusts. It holds no table grants -- all three jobs are SECURITY DEFINER
 -- function calls.
 create role scheduler login;
+
+-- 1b. Nobody a person can become may rewrite who they are (user-rbac/roles.sql
+--     §6). Per database; CREATE EXTENSION percolate refuses to run without it.
+revoke execute on function pg_catalog.set_config(text, text, boolean) from public;
+grant execute on function pg_catalog.set_config(text, text, boolean)
+    to authenticator, app_owner, worker, scheduler;
 
 -- 2. The extensions a non-superuser cannot install.
 create extension if not exists vector;

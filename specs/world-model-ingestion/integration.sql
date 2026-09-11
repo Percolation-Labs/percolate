@@ -122,6 +122,87 @@ returns table(bucket text, object_key text, content_type text, size_bytes bigint
       and rbac.may_read(r.owner_id, r.org_id, r.visibility);
 $$ language sql stable security definer set search_path = pg_catalog, public;
 
+-- AND chunks_to_embed / windows_to_index, for resolve_file's reason: they ask
+-- rbac.may_read of owner_id and visibility, which the add_scope_columns line
+-- above adds, and as LANGUAGE SQL their bodies are checked when created.
+-- Moved from schema.sql rather than duplicated.
+--
+-- The row set an `embed:` matrix fans out over.
+--
+-- This function is named in workflow-engine/YAML.md §matrix as the example of
+-- per-row embedding -- `rows: {function: chunks_to_embed, args: [...]}` -- and
+-- it did not exist. The documented pipeline could not have run.
+--
+-- It returns only what the embed call needs (id and text), because every row
+-- is copied verbatim onto the child task it produces: a column added here is
+-- a column stored N times.
+--
+-- SECURITY DEFINER WITH ITS OWN CHECK, and it got here the hard way. It was
+-- SECURITY INVOKER while its only caller was matrix expansion, which runs
+-- inside the engine's own definer context and therefore reads as the schema
+-- owner. The moment the batching embed step began calling it from the WORKER
+-- -- which holds no table grants at all, by design -- every call failed with
+-- "permission denied for table resource_chunks", five times per resource.
+--
+-- So it is definer, and because it is also granted to `authenticated` it does
+-- its own authorization rather than relying on the grant: a definer function
+-- that returned any resource's chunks to anyone holding its id would hand a
+-- tenant's corpus to whoever guessed a uuid. The predicate is the one
+-- rbac.may_read states for the row -- the read rule, whose single home it is,
+-- as content.resolve_file asks it. It was may_access_org, the ORG's rule,
+-- until 2026-09-11, which let a co-member or anyone on the shared tier read a
+-- private resource. A claimless connection (a worker, a migration) is exempt
+-- exactly as it is everywhere else in this schema.
+--
+-- It returns only what an embed call needs, id and text, because in the
+-- fan-out shape every row is copied verbatim onto the child task it produces:
+-- a column added here is a column stored N times.
+create or replace function content.chunks_to_embed(p_resource_id uuid)
+returns jsonb as $$
+    select coalesce(jsonb_agg(jsonb_build_object('chunk_id', c.id, 'content', c.content)
+                              order by c.ordinal), '[]'::jsonb)
+    from content.resource_chunks c
+    where c.resource_id = p_resource_id
+      -- The ROW's read rule, as content.resolve_file asks it -- not
+      -- may_access_org, which let anyone in the org, and on the shared tier
+      -- anyone at all, read a private resource's text by naming it. The
+      -- claimless arm is the worker's embed fan-out, which carries no person.
+      and exists (select 1 from content.resources r
+                  where r.id = p_resource_id
+                    and (nullif(current_setting('request.jwt.claims', true), '') is null
+                         or rbac.may_read(r.owner_id, r.org_id, r.visibility)));
+$$ language sql stable security definer set search_path = pg_catalog, public;
+
+-- The row set the GRAPH indexer fans out over.
+--
+-- Named `windows_to_index` because that is what graph-index.md §6.2 calls it,
+-- and like chunks_to_embed it is a function the design used as an example and
+-- nobody had written. A window is a chunk here: the chunker already split the
+-- document on the most semantically significant boundary that fits a budget,
+-- and cutting it a second way for the extractor would mean two answers to
+-- "which span produced this" for the same document.
+--
+-- It carries THREE fields where chunks_to_embed carries two, and the extra two
+-- are what aiq.land_graph_fanout reads off each child to attribute a landed
+-- graph -- `resource_id` and `window_ordinal` -- so a node can be traced back
+-- to the passage that named it. Same reason the embed rows are minimal: every
+-- row is copied verbatim onto the child task it creates.
+create or replace function content.windows_to_index(p_resource_id uuid)
+returns jsonb as $$
+    select coalesce(jsonb_agg(jsonb_build_object(
+               'resource_id',    c.resource_id,
+               'window_ordinal', c.ordinal,
+               'content',        c.content) order by c.ordinal), '[]'::jsonb)
+    from content.resource_chunks c
+    where c.resource_id = p_resource_id
+      -- The row's read rule, the same as chunks_to_embed above and for the
+      -- same reason.
+      and exists (select 1 from content.resources r
+                  where r.id = p_resource_id
+                    and (nullif(current_setting('request.jwt.claims', true), '') is null
+                         or rbac.may_read(r.owner_id, r.org_id, r.visibility)));
+$$ language sql stable security definer set search_path = pg_catalog, public;
+
 select rbac.add_scope_policy ('content.resources');
 
 alter table content.resource_chunks enable row level security;
@@ -417,8 +498,21 @@ join content.resources r
   on r.id = workflow.artifact_ref(t.output)
 left join content.files f on f.id = r.file_id;
 
+-- WORKER ONLY. It was granted to `authenticated` too, and it takes any task id
+-- and asks nothing about whose run that task is in: the resource it registers
+-- is keyed by (channel, task id), register_upload's conflict path hands back
+-- the EXISTING resource, and the update below repoints that resource at the
+-- caller's file. So a signed-in person who named another tenant's task could
+-- replace that task's artifact with bytes of their own, and copy its run,
+-- trace and step into their own row besides. Its one caller is the worker
+-- (percolate-core worker/artifacts.py), which connects as `worker`; for a
+-- worker-facing function the grant IS the authorization (integration-rbac.sql
+-- in the engine), and the grant said otherwise
+-- (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md, REM-46).
 grant execute on function workflow.register_artifact(uuid,text,text,text,bigint,text,text,uuid)
-    to worker, authenticated;
+    to worker;
+revoke execute on function workflow.register_artifact(uuid,text,text,text,bigint,text,text,uuid)
+    from authenticated;
 grant execute on function workflow.artifact(uuid) to worker, authenticated;
 grant select on workflow.v_artifacts to authenticated;
 

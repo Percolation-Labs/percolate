@@ -76,7 +76,7 @@ do $$ declare a jsonb; b jsonb; begin
   raise exception 'Alice''s SCHEMA "lake" is missing her dataset or its CRS: %', a; end if;
  if exists (select 1 from jsonb_array_elements(a->'datasets') d where d->>'name' = 'l06_payroll') then
   raise exception 'SCHEMA "lake" showed Alice another tenant''s dataset'; end if;
- perform set_config('request.jwt.claims', '{"sub":"b0b0b0b0-0000-4000-8000-0000000000b6"}', true);
+ execute format('set local request.jwt.claims = %L', '{"sub":"b0b0b0b0-0000-4000-8000-0000000000b6"}');
  b := aiq.query('SCHEMA "lake" FROM l06')->'schema'->'doc'->'datasets';
  if (select array_agg(d->>'name') from jsonb_array_elements(b->'datasets') d) is distinct from array['l06_payroll'] then
   raise exception 'Bob''s SCHEMA "lake" FROM l06 should be his one dataset: %', b; end if;

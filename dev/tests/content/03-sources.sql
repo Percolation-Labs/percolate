@@ -73,7 +73,7 @@ do $$ declare a uuid; b uuid; resource uuid; result jsonb; begin
  perform set_config('workflow.current_run_id',a::text,true);
  result := content.source_passages(resource);
  if result->'rows'->0->>'content' <> 'Owned evidence.' then raise exception 'owner evidence missing';end if;
- perform set_config('request.jwt.claims','{"sub":"22222222-2222-2222-2222-222222222222"}',true);
+ execute format('set local request.jwt.claims = %L', '{"sub":"22222222-2222-2222-2222-222222222222"}');
  b := workflow.start_workflow('source_faaa0000000040008000000000000001',jsonb_build_object('resource_id',resource,'owner_id','11111111-1111-1111-1111-111111111111'));
  perform set_config('workflow.current_run_id',b::text,true);
  begin

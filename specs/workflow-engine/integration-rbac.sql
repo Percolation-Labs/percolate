@@ -475,16 +475,23 @@ returns uuid as $$
     select owner_id from workflow.runs where id = p_run_id;
 $$ language sql stable security definer set search_path = pg_catalog, public;
 
--- WHAT THIS DOES NOT CLOSE, and the debt it owes. `request.jwt.claims` is a
--- setting any role can write with set_config, so an author's statement can set
--- it and read as someone else -- the whole-database class REM-44 is about
--- (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §2). This
--- function narrows the step path from "runs as app_owner, RLS bypassed" to
--- "runs as the run's owner, under RLS", which is strictly less; it does not
--- make the principal unforgeable. When REM-44 lands a trusted `rbac.principal()`,
--- the identity-set here (raw set_config) moves onto it, and the guard below
--- keys on that rather than on current_user. Until then, an author already had
--- app_owner's reach, so this is a reduction and not a new door.
+-- TWO FUNCTIONS, because the role that runs the statement must not be the role
+-- that says whose statement it is. `request.jwt.claims` is the caller for every
+-- row rule in the collection, and since REM-44 only authenticator, app_owner,
+-- worker and scheduler may write it (user-rbac/roles.sql §6). api_viewer is
+-- not among them, because it runs SQL a workflow's AUTHOR wrote, and an
+-- author's `select set_config('request.jwt.claims', ...)` inside a read step
+-- would otherwise read as anyone at all. So execute_for (app_owner) sets the
+-- claims and restores them; execute_as_viewer (api_viewer) runs the statement
+-- and cannot touch them. The first version was one function owned by
+-- api_viewer that did both, which needed api_viewer to hold set_config, which
+-- is the door.
+--
+-- What this still does not close: a WRITE step's statement is executed as a
+-- statement, so it can be `SET LOCAL request.jwt.claims = ...` or a DO block
+-- that issues one, and SET is not a function a grant can take away. That door
+-- is an author's, not a signed-in person's, and closing it needs the setting
+-- declared superuser-only by a C module (REM-64).
 --
 -- HOW, and why this is possible at all when the roadmap said it was not.
 --
@@ -492,7 +499,7 @@ $$ language sql stable security definer set search_path = pg_catalog, public;
 -- table and so bypasses RLS. Postgres refuses `SET ROLE` anywhere in a
 -- SECURITY DEFINER stack, so the step cannot become the person. What it CAN do
 -- is call another SECURITY DEFINER function, and that switches identity to the
--- callee's owner. This function is owned by api_viewer -- the role that already
+-- callee's owner. execute_as_viewer is owned by api_viewer -- the role that already
 -- owns every *_api view for exactly this reason: it is not the table owner, so
 -- RLS applies to it, and the claims decide whose rows it sees. With the claims
 -- set to the run's owner, a statement here sees what that person would see
@@ -503,11 +510,12 @@ $$ language sql stable security definer set search_path = pg_catalog, public;
 -- an owner bypasses RLS whatever the claims say -- which is why the role
 -- switch, done by ownership rather than SET ROLE, is the whole mechanism.
 --
--- NOBODY BUT THE ENGINE MAY CALL IT. It takes a user id and a statement, so a
--- caller who could reach it could read as anyone. EXECUTE is granted to
--- app_owner alone, and nobody is a member of api_viewer but app_owner.
+-- NOBODY BUT THE ENGINE MAY CALL EITHER. execute_for takes a user id and a
+-- statement, so a caller who could reach it could read as anyone. EXECUTE on
+-- both is granted to app_owner alone, and nobody is a member of api_viewer but
+-- app_owner.
 --
--- The claims are restored on BOTH exit paths, in this function's own exception
+-- The claims are restored on BOTH exit paths, in execute_for's own exception
 -- handler, and NOT left to the caller's subtransaction. The caller's abort does
 -- roll the set_config back -- but `tick()` and an autorun cascade run several
 -- sql tasks in one transaction, and a design where the identity outlives a
@@ -516,38 +524,26 @@ $$ language sql stable security definer set search_path = pg_catalog, public;
 -- restores and re-raises itself, and the restore does not depend on who calls
 -- it. (Regression covered in dev/tests/workflow/15: two owners in one
 -- transaction, the first failing.)
-create or replace function workflow.execute_for(
-    p_user uuid, p_statement text, p_write boolean, p_params jsonb)
+create or replace function workflow.execute_as_viewer(
+    p_statement text, p_write boolean, p_params jsonb)
 returns jsonb as $$
 declare
-    v_prev  text := current_setting('request.jwt.claims', true);
     v_out   jsonb;
     v_count bigint;
 begin
-    if p_user is null then
-        raise exception 'execute_for was given nobody to run as';
-    end if;
-    perform set_config('request.jwt.claims',
-        json_build_object('sub', p_user, 'role', 'authenticated')::text, true);
-    begin
-        if p_write then
-            if p_params is not null then execute p_statement using p_params;
-            else                         execute p_statement;
-            end if;
-            get diagnostics v_count = row_count;
-            v_out := jsonb_build_object('rows_affected', v_count);
-        elsif p_params is not null then
-            execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
-            into v_out using p_params;
-        else
-            execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
-            into v_out;
+    if p_write then
+        if p_params is not null then execute p_statement using p_params;
+        else                         execute p_statement;
         end if;
-    exception when others then
-        perform set_config('request.jwt.claims', coalesce(v_prev, ''), true);
-        raise;
-    end;
-    perform set_config('request.jwt.claims', coalesce(v_prev, ''), true);
+        get diagnostics v_count = row_count;
+        return jsonb_build_object('rows_affected', v_count);
+    elsif p_params is not null then
+        execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
+        into v_out using p_params;
+    else
+        execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
+        into v_out;
+    end if;
     return coalesce(v_out, '[]'::jsonb);
 end;
 $$ language plpgsql volatile security definer set search_path = pg_catalog, public;
@@ -556,8 +552,39 @@ $$ language plpgsql volatile security definer set search_path = pg_catalog, publ
 -- member of api_viewer, and the new owner needs CREATE on the schema for the
 -- moment of the transfer.
 grant create on schema workflow to api_viewer;
-alter function workflow.execute_for(uuid, text, boolean, jsonb) owner to api_viewer;
+alter function workflow.execute_as_viewer(text, boolean, jsonb) owner to api_viewer;
 revoke create on schema workflow from api_viewer;
+revoke execute on function workflow.execute_as_viewer(text, boolean, jsonb) from public;
+grant execute on function workflow.execute_as_viewer(text, boolean, jsonb) to app_owner;
+
+create or replace function workflow.execute_for(
+    p_user uuid, p_statement text, p_write boolean, p_params jsonb)
+returns jsonb as $$
+declare
+    v_prev text := current_setting('request.jwt.claims', true);
+    v_out  jsonb;
+begin
+    if p_user is null then
+        raise exception 'execute_for was given nobody to run as';
+    end if;
+    perform set_config('request.jwt.claims',
+        json_build_object('sub', p_user, 'role', 'authenticated')::text, true);
+    begin
+        v_out := workflow.execute_as_viewer(p_statement, p_write, p_params);
+    exception when others then
+        perform set_config('request.jwt.claims', coalesce(v_prev, ''), true);
+        raise;
+    end;
+    perform set_config('request.jwt.claims', coalesce(v_prev, ''), true);
+    return v_out;
+end;
+$$ language plpgsql volatile security definer set search_path = pg_catalog, public;
+
+-- OWNED BY app_owner, said explicitly. `create or replace` keeps an existing
+-- function's owner, and the first version of execute_for was api_viewer's, so a
+-- database upgraded from it would keep an execute_for that runs as api_viewer --
+-- which can no longer call set_config, and fails every person's sql step.
+alter function workflow.execute_for(uuid, text, boolean, jsonb) owner to app_owner;
 revoke execute on function workflow.execute_for(uuid, text, boolean, jsonb) from public;
 grant execute on function workflow.execute_for(uuid, text, boolean, jsonb) to app_owner;
 

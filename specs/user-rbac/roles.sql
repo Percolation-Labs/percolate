@@ -161,3 +161,45 @@ create role scheduler nologin;
 create role pool_manager nologin;
 create role keda_scaler  nologin;
 
+-- ------------------------------------------------------------
+-- 6. WHO MAY SAY WHO THE CALLER IS. Per DATABASE, not per cluster.
+--
+--    Every row rule in this collection reads the caller from one setting:
+--    rbac.current_user_id() is `request.jwt.claims ->> 'sub'`, and
+--    current_org_ids() narrows by its `orgs`. PostgREST writes that setting
+--    from a JWT it has verified. So does percolate-core. And until
+--    2026-09-11, so could anybody else: `set_config` is executable by PUBLIC,
+--    aiq.sql_passthrough is granted to `authenticated` and runs any SELECT,
+--    and `select set_config('request.jwt.claims', '{"sub":"<alice>"}', true)`
+--    is a SELECT. Measured on the tour stack: carol read 24 nodes as herself
+--    and 229 -- alice's count -- after writing alice's id into the setting.
+--    `workflow.current_run_id`, which the step functions trust, fell the same
+--    way. (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §3.)
+--
+--    The fix is not a check in any of the ~50 functions that read the
+--    setting; it is that the roles a person can become cannot write it. Only
+--    the roles that set it on someone else's behalf keep `set_config`:
+--    authenticator (PostgREST, and every service that connects as it),
+--    app_owner (the SECURITY DEFINER functions that set a step's run and a
+--    step's caller), worker and scheduler. authenticated, web_anon and
+--    api_viewer lose it -- and a service must therefore set the claims BEFORE
+--    it switches into one of them, which is the order PostgREST already uses.
+--
+--    `SET LOCAL x = ...` is a statement, not a function, and is not covered.
+--    That is sufficient for every door a person has: PostgREST exposes only
+--    functions, and the passthrough wraps its argument as a subquery, where a
+--    SET cannot appear. A workflow WRITE step can still issue one as
+--    api_viewer; that door belongs to authors, and closing it needs the
+--    setting defined superuser-only by a C module (REM-64).
+--
+--    Function ACLs live in each database's own pg_proc, so this runs in
+--    EVERY database percolate is installed into -- before CREATE EXTENSION,
+--    which refuses to proceed while authenticated can still call it (the
+--    preflight at the top of the generated script, written by
+--    extension/percolate/build-sql.py). Run it in template1 too and every
+--    database created afterwards starts closed.
+-- ------------------------------------------------------------
+revoke execute on function pg_catalog.set_config(text, text, boolean) from public;
+grant execute on function pg_catalog.set_config(text, text, boolean)
+    to authenticator, app_owner, worker, scheduler;
+

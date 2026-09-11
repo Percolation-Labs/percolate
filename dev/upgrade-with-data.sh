@@ -96,6 +96,27 @@ if [ "$(docker exec "$UPGC" psql -U p8 -d percolate -tAc \
         -c "grant authenticated to api_viewer;"
 fi
 
+# THE SECOND SUPERUSER STEP, rehearsed the same way. Until 0.2.0 any role could
+# call set_config, so a signed-in caller could write someone else's id into
+# request.jwt.claims (user-rbac/roles.sql §6). The revoke is per database and
+# needs a superuser, so an upgraded database has not had it -- and the update
+# must refuse, naming the statement, rather than finish with the door open.
+if [ "$(docker exec "$UPGC" psql -U p8 -d percolate -tAc \
+        "select has_function_privilege('authenticated','pg_catalog.set_config(text,text,boolean)','execute')")" = "t" ]; then
+    if out=$(docker exec "$UPGC" psql -U p8 -d percolate -v ON_ERROR_STOP=1 -q \
+               -c "set role app_owner; alter extension percolate update;" 2>&1); then
+        echo "the update ran on a database where authenticated can still call set_config;" \
+             "its preflight should have refused" >&2
+        exit 1
+    fi
+    echo "$out" | grep -q "revoke execute on function pg_catalog.set_config" || {
+        echo "the update refused, but not with the statement an upgrader must run:" >&2
+        echo "$out" >&2; exit 1; }
+    docker exec "$UPGC" psql -U p8 -d percolate -v ON_ERROR_STOP=1 -q \
+        -c "revoke execute on function pg_catalog.set_config(text, text, boolean) from public;
+            grant execute on function pg_catalog.set_config(text, text, boolean) to authenticator, app_owner, worker, scheduler;"
+fi
+
 docker exec "$UPGC" psql -U p8 -d percolate -v ON_ERROR_STOP=1 -q \
     -c "set role app_owner; alter extension percolate update;"
 

@@ -26,9 +26,9 @@ begin
     -- Sessions are created AS the caller: agentic.sessions.owner_id comes from
     -- the claims, so the fixture has to wear the identity rather than set the
     -- column.
-    perform set_config('request.jwt.claims', json_build_object('sub', c.u1)::text, true);
+    execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', c.u1)::text, ''));
     insert into agentic.sessions (owner_id) values (c.u1) returning id into c.s1;
-    perform set_config('request.jwt.claims', json_build_object('sub', c.u2)::text, true);
+    execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', c.u2)::text, ''));
     insert into agentic.sessions (owner_id) values (c.u2) returning id into c.s2;
     update t_ctx set s1 = c.s1, s2 = c.s2;
 end $$;
@@ -40,7 +40,7 @@ do $$
 declare c t_ctx%rowtype; n int;
 begin
     select * into c from t_ctx;
-    perform set_config('request.jwt.claims', json_build_object('sub', c.u1)::text, true);
+    execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', c.u1)::text, ''));
 
     perform agentic.upsert_summary(c.s1, 'first summary');
     perform agentic.upsert_summary(c.s1, 'second summary');
@@ -68,7 +68,7 @@ do $$
 declare c t_ctx%rowtype;
 begin
     select * into c from t_ctx;
-    perform set_config('request.jwt.claims', json_build_object('sub', c.u1)::text, true);
+    execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', c.u1)::text, ''));
     begin
         perform agentic.upsert_summary(c.s2, 'not mine to write');
         raise exception 'a caller summarised a session that is not theirs';
@@ -108,7 +108,7 @@ do $$
 declare c t_ctx%rowtype; r jsonb;
 begin
     select * into c from t_ctx;
-    perform set_config('request.jwt.claims', json_build_object('sub', c.u1)::text, true);
+    execute format('set local request.jwt.claims = %L', coalesce(json_build_object('sub', c.u1)::text, ''));
     perform agentic.upsert_summary(c.s1, 'the real rolling summary');
 
     -- A delegated run. Must not write.
