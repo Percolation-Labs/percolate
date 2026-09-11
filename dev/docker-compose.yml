@@ -407,7 +407,10 @@ services:
     # would notice, by failing for a reason nothing in the tree records. MinIO
     # publishes only dated RELEASE tags, so this is its equivalent of a
     # version; move it deliberately, the way percolate-core's pin moves.
-    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    # From quay.io, MinIO's own registry: on 2026-09-11 Docker Hub began
+    # answering "pull access denied ... repository does not exist" for
+    # minio/minio, and the same tag here is the same image id (14cea493...).
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
     container_name: ${P8_STACK:-p8-dev}-minio
     command: server /data --console-address ":9001"
     environment:
