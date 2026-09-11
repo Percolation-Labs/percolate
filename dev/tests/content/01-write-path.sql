@@ -151,6 +151,28 @@ begin
     raise notice 'content/01: one checksum is one file, one external_id is one resource, a re-poll is a no-op';
 end $$;
 
+-- The same bytes uploaded twice into one org are two DOCUMENTS, and both must
+-- become answerable. The Content Server derives the object key from the
+-- checksum, so both resources carry the same `uri` -- and the document node's
+-- canonical key was `coalesce(uri, external_id, id)`, so the second one to
+-- reach `ready` died in the projection trigger on idx_node_keys_canonical and
+-- its ingest run failed terminally. Found by scenarios/tour re-uploading its
+-- runbook. The bytes' address is the file's identity, not the document's.
+do $$
+declare a uuid; v_1 uuid; v_2 uuid;
+begin
+    select org_a into a from t_ctx;
+    v_1 := content.register_upload('t-uploads','t-same','p8-content','objects/aa/t-same',10,'text/plain','copy one','s3://p8-content/objects/aa/t-same',a);
+    v_2 := content.register_upload('t-uploads','t-same','p8-content','objects/aa/t-same',10,'text/plain','copy two','s3://p8-content/objects/aa/t-same',a);
+    if v_1 = v_2 then raise exception 'two uploads with no external_id collapsed into one resource'; end if;
+    perform content.record_chunks(v_1, '[{"content":"identical bytes, first upload"}]'::jsonb);
+    perform content.record_chunks(v_2, '[{"content":"identical bytes, second upload"}]'::jsonb);
+    if (select count(*) from aiq.nodes where entity_type = 'document' and entity_id in (v_1, v_2)) <> 2 then
+        raise exception 'the same bytes uploaded twice did not yield two document nodes';
+    end if;
+    raise notice 'content/01: the same bytes uploaded twice are two documents, both answerable';
+end $$;
+
 -- ---------------------------------------------------------------------
 -- 3. A channel naming a workflow that does not exist takes the upload with it.
 --

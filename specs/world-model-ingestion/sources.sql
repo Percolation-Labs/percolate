@@ -34,7 +34,12 @@ begin
             raise exception 'Only the owner can update this source. Create a new source instead.' using errcode='42501';
         end if;
         if p_updated_at is distinct from v_old.updated_at then
-            raise exception 'This source changed since you opened it. Reopen it before saving; your draft is still available.' using errcode='40001';
+            -- PT409, NOT 40001. PostgREST runs every request in a transaction that
+            -- retries on serialization_failure, so a deterministic 40001 is an
+            -- infinite loop: the browser waits forever and the database takes
+            -- about five thousand rollbacks a second (measured, scenarios/tour).
+            -- PT409 is PostgREST's own convention for "answer with HTTP 409".
+            raise exception 'This source changed since you opened it. Reopen it before saving; your draft is still available.' using errcode='PT409';
         end if;
     elsif exists(select 1 from workflow.definitions where name=v_workflow) then
         raise exception 'That workflow name is already in use. Create a new source.';

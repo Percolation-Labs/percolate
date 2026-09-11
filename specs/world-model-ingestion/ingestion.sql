@@ -173,6 +173,20 @@ grant execute on function aiq.extractor_call(text, text, text, text, text) to au
 --     dropped HERE, before upsert_graph sees it, and COUNTED in the receipt --
 --     which keeps their invariant exactly as written: what reaches upsert_graph
 --     is coherent, and nothing is lost silently.
+-- A model's answer, as jsonb. The one thing a JSON parser accepts and jsonb
+-- does not is the NUL escape: `\u0000` is valid JSON and jsonb refuses it
+-- ("unsupported Unicode escape sequence"), because a Postgres text value
+-- cannot hold a NUL. Models do emit it -- scenarios/tour's extractor wrote one
+-- into a quote from a GitHub issue -- and in a fan-in that casts each child's
+-- answer, one such window used to fail the landing of the whole document.
+-- Stripping it changes no meaning a Postgres row could have held.
+create or replace function content.model_json(p_text text)
+returns jsonb language sql immutable parallel safe
+set search_path = pg_catalog as $$
+    select replace(p_text, '\u0000', '')::jsonb
+$$;
+revoke all on function content.model_json(text) from public;
+
 create or replace function content.land_graph_windows(p_matrix_task uuid)
 returns jsonb as $$
 declare
@@ -216,7 +230,7 @@ begin
         -- (1) above: the model's answer arrives as a string.
         if jsonb_typeof(v_child.payload) = 'string' then
             begin
-                v_graph := (v_child.payload #>> '{}')::jsonb;
+                v_graph := content.model_json(v_child.payload #>> '{}');
             exception when others then
                 raise exception
                     'child % returned text that is not JSON, so there is no graph to '

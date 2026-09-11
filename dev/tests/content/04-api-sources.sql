@@ -59,6 +59,11 @@ do $$ declare c content.channels; s content.source_state; begin
  begin
   perform content.save_api_source(c.id,c.name,jsonb_set(c.config,'{api,url}','"https://other.test"'),'t-api-source',c.updated_at);raise exception 'configuration changed with live progress';
  exception when raise_exception then if sqlerrm not like 'This source has saved progress%' then raise;end if;end;
+ -- A stale draft is refused as PT409 (HTTP 409), never 40001: PostgREST retries
+ -- serialization_failure forever, so 40001 here hung every client that sent one.
+ begin
+  perform content.save_api_source(c.id,c.name,c.config,'t-api-source',null);raise exception 'stale draft accepted';
+ exception when sqlstate 'PT409' then null;end;
  perform content.reset_source_progress(c.id);
  if (select count(*) from content.source_records where source_id=c.id)<>1 then raise exception 'reset deleted data';end if;
 end $$;

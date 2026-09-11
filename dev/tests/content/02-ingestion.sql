@@ -668,4 +668,32 @@ begin
     raise notice 'content: a terminally failed parse fails its resource; success and retry are untouched';
 end $$;
 
+-- A model answer carrying the NUL escape still lands. `\u0000` is valid JSON
+-- that jsonb refuses, and land_graph_windows cast each child's answer directly,
+-- so one such window failed the whole document's graph landing (the tour's
+-- extractor produced one from a real GitHub issue).
+do $$
+declare v jsonb;
+begin
+    begin
+        perform ('{"n":"a\u0000b"}')::jsonb;
+        raise exception 'jsonb accepted the NUL escape -- the premise of content.model_json changed';
+    exception when untranslatable_character or invalid_text_representation then null;
+    end;
+    v := content.model_json('{"nodes":[{"k":"x","n":"a\u0000b"}],"edges":[]}');
+    if v->'nodes'->0->>'n' is distinct from 'ab' then
+        raise exception 'model_json did not strip the NUL escape: %', v;
+    end if;
+    begin
+        perform content.model_json('not json');
+        raise exception 'model_json accepted text that is not JSON';
+    exception when invalid_text_representation then null;
+    end;
+    if not exists (select 1 from pg_proc where oid = 'content.land_graph_windows(uuid)'::regprocedure
+                     and prosrc like '%content.model_json(%') then
+        raise exception 'land_graph_windows does not parse child answers through content.model_json';
+    end if;
+    raise notice 'content: a model answer with a NUL escape parses, and the graph fan-in uses the parser that allows it';
+end $$;
+
 rollback;

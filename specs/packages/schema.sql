@@ -102,7 +102,27 @@ begin
             set inverse_label = excluded.inverse_label;
         v_n := v_n + 1;
     end loop;
-    if v_n > 0 then perform aiq.register_graph_vocabulary(); end if;
+    -- INTO THE MACHINE VOCABULARY, TOO, or the package cannot write its own
+    -- relations. A package is mostly derivation (brief.md §8) and its knit and
+    -- dream stages write edges through aiq.upsert_graph, which drops any
+    -- relation that is not in aiq.graph_vocabulary. This used to call
+    -- register_graph_vocabulary() with no payload -- the REFRESH form, which
+    -- widens the cross product of relations already in the vocabulary and adds
+    -- none -- so every relation a package declared was an authored triple its
+    -- own derivations could never land: scenarios/tour's knit wrote 0 of its
+    -- edges, each named in the receipt as an unknown relation. The inverse
+    -- label travels with it, so a model reaching for `affected_by` is flipped
+    -- onto `affects` rather than dropped.
+    if v_n > 0 then
+        perform aiq.register_graph_vocabulary((
+            select jsonb_agg(jsonb_build_object(
+                       'relation', r.relation, 'inverse_label', r.inverse_label,
+                       'description', r.description))
+              from (select e->>1 as relation, min(e->>3) as inverse_label,
+                           min(coalesce(e->>4, 'declared by package ' || v_name)) as description
+                      from jsonb_array_elements(p_manifest->'relations') e
+                     group by e->>1) r));
+    end if;
     v_out := v_out || jsonb_build_object('relations', v_n);
 
     -- 2. SOURCES.

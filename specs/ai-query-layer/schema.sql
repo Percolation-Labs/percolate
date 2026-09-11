@@ -648,6 +648,24 @@ begin
             p_source_table, v_other;
     end if;
 
+    -- THE TABLE MUST HAVE `id uuid`, and saying so HERE is the difference
+    -- between a registration error and a broken table. The projection below
+    -- writes `n.id` into aiq.nodes.entity_id (uuid), so a table keyed any other
+    -- way registered cleanly, printed nothing, and then refused EVERY insert
+    -- from then on -- `column n.id does not exist`, raised inside a generated
+    -- trigger that names neither the entity type nor this function. Found by
+    -- scenarios/tour, whose package keyed its tables by their natural keys.
+    if to_regclass(p_source_table) is not null and not exists (
+        select 1 from pg_attribute
+         where attrelid = to_regclass(p_source_table) and attname = 'id'
+           and atttypid = 'uuid'::regtype and not attisdropped) then
+        raise exception
+            '% has no `id uuid` column, and an entity table needs one: it is what '
+            'aiq.nodes.entity_id points at. Add `id uuid not null default gen_random_uuid() unique` '
+            'and keep the natural key in the key expression (%).',
+            p_source_table, p_key_expr;
+    end if;
+
     insert into aiq.entity_registry
         (entity_type, source_table, key_expr, summary_expr, org_expr,
          visibility_expr, include_where)
