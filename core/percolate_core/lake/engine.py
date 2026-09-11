@@ -69,7 +69,8 @@ class Lake:
 
     The SAME variables the Content Server reads (content/storage.py), so a
     deployment configures object storage once. The catalog's credential is a
-    NAME (P8_LAKE_CATALOG_TOKEN_REF), resolved here and never stored.
+    NAME (P8_LAKE_CATALOG_TOKEN_REF), resolved here and never stored, and sent
+    only to an origin P8_CREDENTIAL_ORIGINS binds it to (``core.credentials``).
     """
     endpoint: str
     key: str
@@ -216,8 +217,11 @@ def seal(con, allowed: list[str]) -> list[str]:
 def _catalog_headers(cfg: Lake) -> dict[str, str]:
     if not cfg.catalog_token_ref:
         return {}
-    from ..core import credential
-    return {"Authorization": "Bearer " + credential(cfg.catalog_token_ref)}
+    # Through the one resolver like every other sender, although both halves
+    # here are the operator's own environment: a credential that some senders
+    # bind and others do not is a rule nobody can state.
+    from ..core import credential_for
+    return {"Authorization": "Bearer " + credential_for(cfg.catalog_token_ref, cfg.catalog_url or "")}
 
 
 def _require_catalog(cfg: Lake | None) -> Lake:
@@ -270,8 +274,9 @@ def attach_catalog(con, cfg: Lake | None, alias: str = "ice") -> str:
     cfg = _require_catalog(cfg)
     auth = "authorization_type 'none'"
     if cfg.catalog_token_ref:
-        from ..core import credential
-        con.execute(f"create secret p8_catalog (type iceberg, token {q(credential(cfg.catalog_token_ref))})")
+        from ..core import credential_for
+        token = credential_for(cfg.catalog_token_ref, cfg.catalog_url or "")
+        con.execute(f"create secret p8_catalog (type iceberg, token {q(token)})")
         auth = "secret p8_catalog"
     con.execute(f"attach {q(cfg.warehouse)} as {alias} "
                 f"(type iceberg, endpoint {q(cfg.catalog_url)}, {auth}, "

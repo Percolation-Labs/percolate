@@ -224,12 +224,28 @@ Environment only. Credentials by **reference**, never by value:
 `credential_ref: "LLM_API_KEY"` on a task names a variable this process
 resolves, so `workflow.tasks` stays inspectable and replayable.
 
+A credential is sent only to an origin the operator bound it to. The row that
+names a credential does not choose where it goes: an upload's ingest policy
+names a transcription endpoint, and any signed-in user writes that. Every
+sender (http_call, embedding, transcription, API ingestion, the lake catalog)
+refuses, before any request, a credential with no binding for the destination:
+
+```bash
+P8_CREDENTIAL_ORIGINS='{"LLM_API_KEY": ["https://api.openai.com"], "P8_API_KEY": "http://agent:8080"}'
+```
+
+`{{env.X}}` in a workflow reads only `P8_AGENT_URL`, `LLM_URL` and the names in
+`P8_TEMPLATE_ENV`, and never a bound credential: a template chooses where to
+send, and a secret goes by `credential_ref`.
+
 | | Used by |
 |---|---|
 | `P8_DSN` | all |
 | `P8_JWT_SECRET` | services verifying bearer tokens (same secret PostgREST uses) |
 | `P8_QUEUE`, `P8_WORKER_ID`, `P8_POLL_SECONDS` | worker |
 | `P8_S3_ENDPOINT`, `P8_S3_KEY`, `P8_S3_SECRET`, `P8_BUCKET` | content |
+| `P8_CREDENTIAL_ORIGINS` | worker, ingest, lake: JSON map, credential name to origin(s). `P8_INGEST_CREDENTIAL_ORIGINS` (same shape) is still read and merged |
+| `P8_TEMPLATE_ENV` | worker: comma-separated extra variables `{{env.X}}` may read |
 
 ### Tracing — OpenTelemetry, off unless pointed somewhere
 

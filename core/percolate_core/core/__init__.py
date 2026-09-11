@@ -5,7 +5,8 @@ boto3, FastAPI or pydantic-ai belongs in the subpackage that needs it, so
 `pip install p8` for someone writing their own worker stays tiny.
 """
 
-from .config import ConfigError, credential, dsn, optional, required
+from .config import ConfigError, TerminalError, credential, dsn, optional, required
+from .credentials import CredentialRefused, credential_for
 from .identity import (
     as_caller,
     as_service,
@@ -18,11 +19,14 @@ from .identity import (
 
 __all__ = [
     "ConfigError",
+    "CredentialRefused",
+    "TerminalError",
     "as_caller",
     "as_service",
     "claims_from_jwt",
     "close_pool",
     "credential",
+    "credential_for",
     "dsn",
     "open_pool",
     "optional",

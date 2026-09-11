@@ -27,7 +27,7 @@ from typing import Any
 
 import httpx
 
-from ..core import as_service, credential
+from ..core import as_service, credential_for
 from ..worker.templates import TerminalError
 
 __all__ = ["embed_resource", "embed_texts"]
@@ -94,9 +94,12 @@ def embed_texts(spec: dict[str, Any], texts: list[str],
                 batch_size: int = DEFAULT_BATCH,
                 max_chars: int = DEFAULT_MAX_CHARS) -> tuple[list[list[float]], int]:
     """(vectors in input order, requests made). `spec` is aiq.embed_batch_call's."""
-    token = credential(spec["credential_ref"]) if spec.get("credential_ref") else None
-    headers = {"Authorization": "Bearer " + token} if token else {}
     url, method = spec["url"], spec.get("method", "POST")
+    # The url and the credential NAME are two columns of the registry, written
+    # separately; the binding between them is the operator's, not the row's.
+    token = (credential_for(spec["credential_ref"], url)
+             if spec.get("credential_ref") else None)
+    headers = {"Authorization": "Bearer " + token} if token else {}
     vectors: list[list[float] | None] = [None] * len(texts)
     requests = 0
 

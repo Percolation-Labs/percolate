@@ -25,7 +25,7 @@ from typing import Any
 
 import httpx
 
-from ..core import credential
+from ..core import credential_for
 from .templates import TerminalError, dig, resolve_task
 from .agent_auth import agent_authorization
 
@@ -49,11 +49,19 @@ def build_request(spec: dict, ctx: dict) -> tuple[dict, dict]:
     # credential_ref is a NAME resolved from this process's environment. The
     # database stores only the reference, so a dump of workflow.tasks never
     # contains a secret and a task stays inspectable and replayable.
+    #
+    # Resolved against the RESOLVED url, through credential_for: the row names
+    # the credential and, separately, where to send it -- and the url can carry
+    # {{run.*}} and {{steps.*}}, which are whatever started the run and
+    # whatever the last step returned. Resolving the name alone let those pick
+    # the destination of the worker's secret. The operator's
+    # P8_CREDENTIAL_ORIGINS says where each one may go; nothing on the row can.
     if authorization := agent_authorization(original, spec, ctx.get("_agent_caller")):
         headers = {k: v for k, v in headers.items() if k.lower() != "authorization"}
         headers["Authorization"] = authorization
     elif ref := spec.get("credential_ref"):
-        headers["Authorization"] = f"{spec.get('auth_scheme', 'Bearer')} {credential(ref)}"
+        headers["Authorization"] = (
+            f"{spec.get('auth_scheme', 'Bearer')} {credential_for(ref, spec['url'])}")
 
     return {
         "method": spec.get("method", "GET").upper(),

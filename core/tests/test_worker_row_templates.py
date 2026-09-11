@@ -35,6 +35,8 @@ class RowTextTest(unittest.TestCase):
     def setUp(self):
         self.env = patch.dict("os.environ", {
             "LLM_URL": "https://model.example", "LLM_API_KEY": "sk-test",
+            # The operator's binding; without it the key goes nowhere.
+            "P8_CREDENTIAL_ORIGINS": '{"LLM_API_KEY": ["https://model.example"]}',
             "P8_JWT_SECRET": "the-signing-secret"}, clear=True)
         self.env.start()
         self.addCleanup(self.env.stop)

@@ -7,8 +7,8 @@ task input a lie about what was sent.
 
 The database has its own resolver for `sql` steps (`workflow.resolve_args`),
 deliberately narrower: no {{env.*}}, because the database has no business
-reading the deployment's environment. This one has it, because credentials and
-endpoints live here.
+reading the deployment's environment. This one has it, because endpoints live
+here -- and only endpoints: see TEMPLATE_ENV below.
 """
 
 from __future__ import annotations
@@ -18,11 +18,39 @@ import os
 import re
 from typing import Any
 
+# Re-exported: TerminalError moved to core so core.credentials can raise one.
+from ..core.config import TerminalError
+from ..core.credentials import bound_names
+
 TEMPLATE = re.compile(r"\{\{\s*([a-zA-Z0-9_.\[\]]+)\s*\}\}")
 
+TEMPLATE_ENV = ("P8_AGENT_URL", "LLM_URL")
+"""The environment variables a template may read before ``P8_TEMPLATE_ENV``
+adds to them: the two the compiler and the specs' own examples emit.
 
-class TerminalError(Exception):
-    """A failure that will recur identically on every retry."""
+AN ALLOW-LIST, because {{env.X}} read ANY variable and could put it anywhere in
+a request: `body: {k: "{{env.P8_S3_SECRET}}"}` beside a `url` on the author's
+own host sent the storage secret there, and no origin binding could see it,
+because it never went through a credential_ref. A secret is sent by
+`credential_ref`, which `core.credentials.credential_for` binds to an origin; a
+template says where to send, not what to send. A deployment that templates
+another endpoint lists it in `P8_TEMPLATE_ENV` (comma-separated).
+"""
+
+
+def _template_env(name: str) -> str | None:
+    """``os.environ[name]`` if a template may read it; TerminalError if not."""
+    extra = {n.strip() for n in os.environ.get("P8_TEMPLATE_ENV", "").split(",") if n.strip()}
+    # A name bound as a credential is refused even when listed: listing it
+    # would route the secret around the origin binding it was given.
+    if name not in (set(TEMPLATE_ENV) | extra) or name in bound_names():
+        raise TerminalError(
+            f"template {{{{env.{name}}}}} is not readable by a workflow: templates "
+            "read P8_AGENT_URL, LLM_URL and the names in P8_TEMPLATE_ENV, never a "
+            "bound credential. Send a secret with credential_ref (bound to an "
+            "origin by P8_CREDENTIAL_ORIGINS); list a non-secret endpoint in "
+            "P8_TEMPLATE_ENV.")
+    return os.environ.get(name)
 
 
 def dig(obj: Any, path: str) -> Any:
@@ -70,7 +98,7 @@ def resolve(value: Any, ctx: dict) -> Any:
         if head in sources:
             found = dig(sources[head], rest)
         elif head == "env":
-            found = os.environ.get(rest)
+            found = _template_env(rest)
         else:
             raise TerminalError(
                 f"unknown template namespace '{head}' in {{{{{ref}}}}}"
