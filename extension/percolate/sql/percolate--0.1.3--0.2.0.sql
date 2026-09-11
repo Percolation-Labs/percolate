@@ -387,6 +387,67 @@ create schema if not exists percolate;
 alter default privileges revoke execute on functions from public;
 
 -- ------------------------------------------------------------
+-- 0. Which schemas are this extension's, read from the catalog.
+--
+-- Every gate that asks a question "across the extension" used to answer this
+-- with a list typed at the point of use: 25 to 40 copies in about seven
+-- spellings. rbac/04 and rbac/05 named `wm`, which does not exist, and not
+-- `percolate`; surface.sql's function arm left out `percolate` while its
+-- relation arm had it; upgrade-converges.sh had eight copies and none had
+-- `percolate`, so no percolate.* object or grant had ever been compared; the
+-- PUBLIC-EXECUTE invariant at the end of the install named five schemas and
+-- missed the sixth (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md
+-- §4, REM-45). A schema added next year would have been missing from all of
+-- them, and none of them would have said so.
+--
+-- Postgres already records the answer. CREATE EXTENSION and ALTER EXTENSION
+-- UPDATE write an 'e' dependency from every object the script creates to the
+-- extension, schemas included, so this reads pg_depend and restates nothing.
+--
+-- IT REFUSES RATHER THAN ANSWER EMPTY. A script loaded with `psql -f` is not
+-- an install and records no membership, and every gate that reads this would
+-- then walk no schemas and pass having looked at nothing. One refusal here
+-- covers every caller, instead of a guard in front of each of them.
+--
+-- A gate that must also cover something the extension does not own -- `public`,
+-- a package's schema, a hand-loaded NOT_SHIPPED file -- adds it beside this
+-- call with its reason, so the exception is visible where it is made.
+--
+-- SECURITY INVOKER and everybody's: it reads nothing a caller could not read
+-- from pg_depend directly, and the gates run as p8, app_owner and the roles a
+-- person becomes. dev/lib/extension-schemas.sh carries the same query for a
+-- database older than this function, and compares the two wherever both exist.
+create or replace function percolate.extension_schemas()
+returns setof name
+language plpgsql stable parallel safe as $$
+begin
+    return query
+    select n.nspname
+      from pg_catalog.pg_depend d
+      join pg_catalog.pg_namespace n on n.oid = d.objid
+     where d.classid = 'pg_catalog.pg_namespace'::pg_catalog.regclass
+       and d.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass
+       and d.refobjid = (select x.oid from pg_catalog.pg_extension x
+                          where x.extname = 'percolate')
+       and d.deptype = 'e'
+     order by 1;
+    if not found then
+        raise exception 'no schema belongs to the percolate extension in this database'
+            using detail = 'Membership is recorded by CREATE EXTENSION and ALTER EXTENSION '
+                           'UPDATE. A script run with psql -f records none, and a gate '
+                           'reading an empty set of schemas checks nothing.',
+                  hint   = 'Install with CREATE EXTENSION percolate.';
+    end if;
+end;
+$$;
+
+comment on function percolate.extension_schemas() is
+    'Every schema the percolate extension owns, from pg_depend. What a gate '
+    'reads instead of a list of schema names.';
+
+grant execute on function percolate.extension_schemas() to public;
+
+-- ------------------------------------------------------------
 -- 1. A deterministic UUID, so a derived row has the same id every time.
 --
 -- RFC 4122 §4.3 v5: SHA-1 over (namespace || name), first 16 octets, version
@@ -525,7 +586,7 @@ with t as (
     select n.nspname as sch, c.relname as tbl, c.oid
     from pg_class c join pg_namespace n on n.oid = c.relnamespace
     where c.relkind in ('r','p')
-      and n.nspname in ('aiq','rbac','workflow','content','agentic','percolate')),
+      and n.nspname in (select percolate.extension_schemas())),
 pk as (
     select t.sch, t.tbl, t.oid,
            -- ::text because array_agg over attname gives name[], and name[] has
@@ -2702,11 +2763,10 @@ $$ language plpgsql stable security definer set search_path = pg_catalog, public
 -- THIS IS NOT THE LAST WORD, and reading it as one is how fifty functions
 -- below this line kept PUBLIC's EXECUTE. `create or replace function` after a
 -- revoke gets the default back, and this file goes on for another five
--- thousand lines. The statement that actually holds the invariant is the last
--- one in `world-model-ingestion/ingestion.sql` -- the last file in
--- build-sql.py's ORDER -- with the check that fails the install if it stops
--- holding. This line states the intent where a reader of this file will look
--- for it; that one makes it true.
+-- thousand lines. The statement that actually holds the invariant is
+-- `identity/closing.sql`, which build-sql.py emits after everything else, with
+-- the check that fails the install if it stops holding. This line states the
+-- intent where a reader of this file will look for it; that one makes it true.
 revoke execute on all functions in schema workflow from public;
 
 grant usage on schema workflow to worker, scheduler, authenticated;
@@ -14221,7 +14281,8 @@ with provided as (
       from pg_proc p
       join pg_namespace n on n.oid = p.pronamespace
      where p.prolang = (select oid from pg_language where lanname = 'plpgsql')
-       and n.nspname in ('aiq', 'content', 'workflow', 'agentic')
+       -- every schema the extension owns, not the four this once named (REM-45)
+       and n.nspname in (select percolate.extension_schemas())
 ), callers as (
     -- The SQL half's own entry points, with whether the CALLING ROLE may
     -- execute them. `present` and `callable by me` are different facts and the
@@ -14238,7 +14299,7 @@ with provided as (
            bool_and(has_function_privilege(current_user, p.oid, 'execute')) as callable
       from pg_proc p
       join pg_namespace n on n.oid = p.pronamespace
-     where n.nspname in ('aiq', 'content', 'workflow', 'agentic')
+     where n.nspname in (select percolate.extension_schemas())
      group by 1
 ), crossings as (
     -- A call with arguments. `[^)]` after the paren is what separates a call
@@ -16162,10 +16223,18 @@ returns jsonb as $$
             -- is the one thing a naming convention cannot be reasoned out of.
             --
             -- Scoped explicitly, because this function is SECURITY DEFINER and
-            -- therefore does NOT get the RLS that protects aiq.nodes: the
-            -- predicate below is the nodes_org_scoped policy written out by
-            -- hand. Without it the facet would be a cross-tenant key
-            -- disclosure dressed as documentation.
+            -- therefore does NOT get the RLS that protects aiq.nodes. Without it
+            -- the facet would be a cross-tenant key disclosure dressed as
+            -- documentation.
+            --
+            -- THE ROW'S QUESTION, rbac.may_read, and not the org's. This was
+            -- "the nodes_org_scoped policy written out by hand", and the policy
+            -- moved on to owner and visibility while the hand copy stayed on
+            -- the org: every node on the shared tier qualified, private or not,
+            -- so anybody signed in was shown up to three canonical keys of
+            -- other people's private nodes of each type. The sibling of
+            -- 75abb1d's resolve_file fix, found by declaring how each reachable
+            -- definer authorizes (dev/tests/rbac/14, REM-46).
             'entity_types', coalesce((select jsonb_agg(jsonb_build_object(
                     'entity_type', r.entity_type, 'source_table', r.source_table,
                     'key_expr', r.key_expr, 'include_where', r.include_where,
@@ -16176,8 +16245,7 @@ returns jsonb as $$
                                 join aiq.nodes n on n.id = nk.node_id
                                where n.entity_type = r.entity_type
                                  and nk.kind = 'canonical'
-                                 and (n.org_id = rbac.shared_org_id()
-                                      or n.org_id in (select rbac.current_org_ids()))
+                                 and rbac.may_read(n.owner_id, n.org_id, n.visibility)
                                order by nk.key
                                limit 3) k), '[]'::jsonb))
                     order by r.entity_type)
@@ -21350,6 +21418,24 @@ begin
         raise exception 'cannot write messages into a run that is not yours';
     end if;
 
+    -- AND THE SESSION, which the check above never looked at. A row may carry
+    -- a session_id with no run (a summary) or beside a run of the caller's, and
+    -- messages_via_run shows a session's owner every row naming it -- so a
+    -- signed-in caller could put a summary, which is read back into the next
+    -- turn's context, into anyone's conversation by knowing its id. Measured on
+    -- a CI database before this: bob wrote `planted by bob` into alice's private
+    -- session and alice read it back. start_run and upsert_summary already
+    -- refuse a session that is not the caller's; this was the third door
+    -- (found declaring how each reachable definer authorizes, REM-46).
+    if exists (select 1 from jsonb_array_elements(p_rows) as r
+                where r->>'session_id' is not null
+                  and not exists (select 1 from agentic.sessions s
+                                   where s.id = (r->>'session_id')::uuid
+                                     and s.owner_id = rbac.current_user_id()))
+    then
+        raise exception 'cannot write messages into a session that is not yours';
+    end if;
+
     return query
     insert into agentic.messages (id, run_id, session_id, role, content, tool_calls,
                                   tool_call_id, is_error, error_kind, citations)
@@ -22096,6 +22182,18 @@ as $$
 declare
     v_skills text[];
 begin
+    -- THE AUTHORITY FIRST, before the agent is so much as looked up. This read
+    -- `no agent named %` to anybody and took a row lock for them, so a caller
+    -- with no right to author anything could learn which agent names exist
+    -- and hold one agent's row until their transaction ended -- the probe
+    -- 2e5995e closed in may_invoke, open here (REM-46). upsert_agent would
+    -- have refused them further down; the answer they got first was the leak.
+    if not agentic.may_author('agents', 'agentic.agents'::regclass) then
+        raise exception 'not authorized to author agents'
+            using errcode = 'insufficient_privilege',
+                  hint = 'needs agents:update';
+    end if;
+
     -- Not upsert_agent's job to notice: called with {name, skills} for an
     -- agent that does not exist, it would happily CREATE one with an empty
     -- prompt and no tools -- an agent that resolves by name and can do
@@ -22145,6 +22243,13 @@ as $$
 declare
     v_skills text[];
 begin
+    -- First, for attach_skill's reason.
+    if not agentic.may_author('agents', 'agentic.agents'::regclass) then
+        raise exception 'not authorized to author agents'
+            using errcode = 'insufficient_privilege',
+                  hint = 'needs agents:update';
+    end if;
+
     select a.skills into v_skills
       from agentic.agents a where a.name = p_agent
       for update;
@@ -24883,79 +24988,9 @@ begin
 end $$;
 
 
--- ============================================================
--- THE LAST WORD ON PUBLIC EXECUTE, for every schema this extension owns.
---
--- Postgres grants EXECUTE on a new function to PUBLIC unless somebody takes it
--- away, and user-rbac 9(a) states the rule that follows as a structural one
--- for the whole collection: "a new function added later is unreachable via
--- REST until someone deliberately grants it. Deny-by-default, not
--- allow-by-omission."
---
--- IT DID NOT HOLD. Four of the five schemas revoke mid-file and then keep
--- defining functions -- `workflow-engine/schema.sql` revokes at its 9(b) and
--- defines FIFTY more functions below it in the same file; `aiq` revokes in
--- `integration-rbac.sql` and again in `graph-algorithms.sql`, and then
--- `world-model-ingestion/graph.sql` adds fourteen projection triggers,
--- `resolve_ref` and `graph_schema` after both. Measured on a clean install:
--- FORTY-SIX functions across `workflow` and `aiq` still carried EXECUTE for
--- PUBLIC, including `workflow.p8ql`, `workflow.plan_graph`,
--- `workflow.lint_spec` and `workflow.resolve_statement`.
---
--- Not a live leak, for the same accidental reason `agentic` 9's own header
--- gives about the three IT had missed: `web_anon` holds USAGE on neither
--- schema, and the three that are SECURITY DEFINER are two trigger functions
--- and a read-only capability probe. An accident of grant ordering is not a
--- control -- user-rbac 1 says exactly that, about set_password, and says
--- "never trust that again".
---
--- SO THE REVOKE MOVES TO WHERE NOTHING CAN BE DEFINED AFTER IT. This is the
--- last file in build-sql.py's ORDER, and its last statement. A revoke placed
--- beside the definitions it covers is the readable shape and it is the shape
--- that failed four times, because a file goes on being edited after the line
--- that was its end; there is no "later" than here.
---
--- REVOKE ... FROM PUBLIC removes only PUBLIC's own grant, so every
--- role-specific grant made above -- in this file and in the eleven before it
--- -- survives untouched. That is what makes one statement per schema safe
--- rather than a re-grant exercise.
---
--- The per-file revokes above are kept and are not redundant: they state the
--- intent at the point of definition, and they are what a reader of one file
--- sees. This is what makes the intent true.
--- ============================================================
-revoke execute on all functions in schema workflow from public;
-revoke execute on all functions in schema rbac     from public;
-revoke execute on all functions in schema aiq      from public;
-revoke execute on all functions in schema content  from public;
-revoke execute on all functions in schema agentic  from public;
-
--- And the check that makes forgetting it a load-time failure rather than a
--- quiet one, generalised from the one `agentic/schema.sql` 10(c) added for a
--- single schema. `proacl is null` matters as much as the explode: a function
--- nobody has touched has a NULL ACL, which MEANS the default, which means
--- PUBLIC holds EXECUTE -- a check that only inspected non-null ACLs would pass
--- every function it is written to catch.
-do $$
-declare v_bad text;
-begin
-    select string_agg(n.nspname || '.' || p.proname, ', ' order by n.nspname, p.proname)
-      into v_bad
-      from pg_proc p
-      join pg_namespace n on n.oid = p.pronamespace
-     where n.nspname in ('workflow','rbac','aiq','content','agentic')
-       and (p.proacl is null
-            or exists (select 1 from aclexplode(p.proacl) a
-                        where a.grantee = 0 and a.privilege_type = 'EXECUTE'));
-    if v_bad is not null then
-        raise exception
-            'PUBLIC EXECUTE INVARIANT VIOLATED: % still carries EXECUTE for PUBLIC. '
-            'Every function this extension ships is deny-by-default; add the schema '
-            'to the revoke block above this check, then grant the callers it is '
-            'meant to have.', v_bad;
-    end if;
-    raise notice 'no function in workflow, rbac, aiq, content or agentic is executable by PUBLIC';
-end $$;
+-- The PUBLIC-EXECUTE revoke and its invariant used to end this file, as "the
+-- last file in build-sql.py's ORDER". Six files were later added after it, so
+-- it moved to identity/closing.sql, which build-sql.py emits after everything.
 
 
 -- ============================================================
@@ -26201,13 +26236,15 @@ declare
     ];
 begin
     foreach t in array deployment_tables loop
-        -- Guarded on extension membership for the reason the registrations
-        -- this replaced carried: pg_extension_config_dump() raises outside
-        -- CREATE EXTENSION / ALTER EXTENSION UPDATE, and this schema is loaded
-        -- raw by dev/upgrade-converges.sh, which installs the old version from
-        -- a git tag and cannot go through CREATE EXTENSION at all. The 'e'
-        -- dependency is recorded as each object is created, so by this point
-        -- the table already belongs to the extension being installed.
+        -- Guarded on extension membership: pg_extension_config_dump() raises
+        -- outside CREATE EXTENSION / ALTER EXTENSION UPDATE. The guard was
+        -- written for dev/upgrade-converges.sh, which loaded the script raw;
+        -- it and dev/currency.sh install through CREATE EXTENSION now, so that
+        -- percolate.extension_schemas() has membership to read, and a raw load
+        -- is refused at the end by identity/closing.sql if it gets that far.
+        -- The guard costs nothing on the real path: the 'e' dependency is
+        -- recorded as each object is created, so by this point the table
+        -- already belongs to the extension being installed.
         if exists (select 1 from pg_catalog.pg_depend d
                     where d.classid = 'pg_class'::regclass
                       and d.objid = t::regclass
@@ -26420,9 +26457,11 @@ begin
         perform percolate.check_package_schema(n.nspname)
            from pg_class c join pg_namespace n on n.oid = c.relnamespace
           where c.oid = v_tbl
-            and not exists (select 1 from pg_depend dep
-                             where dep.classid = 'pg_namespace'::regclass and dep.objid = n.oid
-                               and dep.refclassid = 'pg_extension'::regclass and dep.deptype = 'e');
+            -- "not ours" through percolate.extension_schemas(), which reads the
+            -- same pg_depend rows this asked for itself. One home, because a
+            -- second spelling of which schemas are the extension's is what
+            -- REM-45 was.
+            and n.nspname not in (select percolate.extension_schemas());
 
         -- THE ROW'S OWN SCOPE, UNLESS THE MANIFEST SAYS OTHERWISE. With no
         -- `org:` this passed 'null', and register_entity_table reads a null org
@@ -26768,3 +26807,124 @@ on conflict (name) do update
        schema = excluded.schema,
        implemented = excluded.implemented,
        why = excluded.why;
+
+
+-- ============================================================
+-- identity/closing.sql
+--   the PUBLIC-EXECUTE revoke and its invariant over every schema the extension owns -- emitted after everything, so nothing can be defined after it
+-- ============================================================
+
+-- ============================================================
+-- THE INSTALL'S LAST WORD ON PUBLIC EXECUTE, for every schema this extension
+-- owns.
+--
+-- Postgres grants EXECUTE on a new function to PUBLIC unless somebody takes it
+-- away, and user-rbac 9(a) makes the opposite a rule for the whole collection:
+-- a function nobody has granted is unreachable over REST. Deny-by-default, not
+-- allow-by-omission.
+--
+-- IT DID NOT HOLD, twice, and both times for the same reason: the revoke was
+-- written as the end of something that went on growing.
+--
+--   * Four of the five schemas once revoked mid-file and then kept defining
+--     functions. Measured on a clean install: forty-six functions across
+--     `workflow` and `aiq` still carried EXECUTE for PUBLIC, among them
+--     `workflow.p8ql` and `workflow.resolve_statement`. So the revoke moved to
+--     the end of world-model-ingestion/ingestion.sql, "the last file in
+--     build-sql.py's ORDER", with a comment saying "there is no later than
+--     here".
+--   * Six files were then added to ORDER after it -- sources, api-sources,
+--     lake, contract, packages, identity/declarations -- and it named five
+--     schemas typed by hand, so `percolate` was never in it at all.
+--     percolate.apply_package reached a database with a NULL ACL and no
+--     authorization check (meta/postmortems/2026-09-11-fixed-at-the-copy-that-
+--     failed.md §2 and §4).
+--
+-- So this is not an ORDER entry. build-sql.py appends it after everything else
+-- it emits, including the compiled contract types, and nothing can be listed
+-- after it. And it asks percolate.extension_schemas() which schemas are the
+-- extension's rather than carrying a list, so a seventh schema is covered by
+-- existing.
+--
+-- identity/schema.sql's `alter default privileges` means a fresh install
+-- creates nothing PUBLIC can execute, so on a fresh install the revoke below
+-- finds nothing to do. It is here for the UPGRADE: `create or replace
+-- function` keeps a function's existing ACL, so a database installed before
+-- that line carries PUBLIC grants on every function it already had.
+-- ============================================================
+do $$
+declare
+    -- EVERYBODY'S BY DESIGN, each with `grant ... to public` where it is
+    -- defined and the reason beside the grant. Named rather than inferred:
+    -- nothing in the catalog tells an explicit grant to PUBLIC from the default
+    -- one, so a function is public here because this line says so, and the
+    -- check below holds this list to the catalog in both directions.
+    v_public constant text[] := array[
+        'percolate.uuidv5(uuid,text)',          -- RFC 4122 arithmetic over its arguments
+        'percolate.id_namespace(text)',         -- the same, for a named namespace
+        'percolate.extension_schemas()'         -- a read of pg_depend
+    ];
+    r         record;
+    v_bad     text;
+    v_missing text;
+begin
+    -- A script loaded with `psql -f` is not an install: nothing belongs to the
+    -- extension, and the revoke and the check below would both be about an
+    -- empty set. percolate.extension_schemas() refuses that case itself, by
+    -- name, the first time it is read here.
+
+    -- Per function rather than `revoke ... on all functions in schema`, because
+    -- the schema-wide form would also take away the grants to public above.
+    for r in
+        select p.oid::regprocedure as fn
+          from pg_catalog.pg_proc p
+         where p.pronamespace in (select n.oid from pg_catalog.pg_namespace n
+                                   where n.nspname in (select percolate.extension_schemas()))
+           and p.oid::regprocedure::text <> all (v_public)
+           and exists (select 1 from pg_catalog.aclexplode(
+                                   coalesce(p.proacl, pg_catalog.acldefault('f', p.proowner))) a
+                        where a.grantee = 0 and a.privilege_type = 'EXECUTE')
+    loop
+        execute format('revoke execute on function %s from public', r.fn);
+    end loop;
+
+    -- And the check, which is not the loop restated: a REVOKE by a role that
+    -- does not own the function is a WARNING, not an error, so a function some
+    -- other role owns would survive the loop and report nothing. The ACL is read
+    -- with its default filled in, because a function nobody has touched has a
+    -- NULL proacl, which MEANS PUBLIC may execute, and aclexplode(NULL) is empty.
+    select string_agg(p.oid::regprocedure::text, ', ' order by 1)
+      into v_bad
+      from pg_catalog.pg_proc p
+     where p.pronamespace in (select n.oid from pg_catalog.pg_namespace n
+                               where n.nspname in (select percolate.extension_schemas()))
+       and p.oid::regprocedure::text <> all (v_public)
+       and exists (select 1 from pg_catalog.aclexplode(
+                               coalesce(p.proacl, pg_catalog.acldefault('f', p.proowner))) a
+                    where a.grantee = 0 and a.privilege_type = 'EXECUTE');
+    if v_bad is not null then
+        raise exception
+            'PUBLIC EXECUTE INVARIANT VIOLATED: % still carries EXECUTE for PUBLIC. '
+            'Every function this extension ships is deny-by-default; revoke it from '
+            'public and grant the callers it is meant to have.', v_bad;
+    end if;
+
+    -- The other direction: every function named public above exists and IS
+    -- public. Without it the list could go on naming a signature that was
+    -- renamed or revoked years ago, and read as a decision.
+    select string_agg(f, ', ' order by f)
+      into v_missing
+      from unnest(v_public) f
+     where to_regprocedure(f) is null
+        or not has_function_privilege('public', to_regprocedure(f), 'execute');
+    if v_missing is not null then
+        raise exception
+            'declared everybody''s at the end of the install, and not: %. Either the '
+            'function changed its signature or its grant to public is gone; fix this '
+            'list or the grant.', v_missing;
+    end if;
+
+    raise notice 'no function in %, beyond the % declared everybody''s, is executable by PUBLIC',
+        (select string_agg(s, ', ' order by s) from percolate.extension_schemas() s),
+        array_length(v_public, 1);
+end $$;

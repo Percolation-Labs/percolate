@@ -492,13 +492,15 @@ declare
     ];
 begin
     foreach t in array deployment_tables loop
-        -- Guarded on extension membership for the reason the registrations
-        -- this replaced carried: pg_extension_config_dump() raises outside
-        -- CREATE EXTENSION / ALTER EXTENSION UPDATE, and this schema is loaded
-        -- raw by dev/upgrade-converges.sh, which installs the old version from
-        -- a git tag and cannot go through CREATE EXTENSION at all. The 'e'
-        -- dependency is recorded as each object is created, so by this point
-        -- the table already belongs to the extension being installed.
+        -- Guarded on extension membership: pg_extension_config_dump() raises
+        -- outside CREATE EXTENSION / ALTER EXTENSION UPDATE. The guard was
+        -- written for dev/upgrade-converges.sh, which loaded the script raw;
+        -- it and dev/currency.sh install through CREATE EXTENSION now, so that
+        -- percolate.extension_schemas() has membership to read, and a raw load
+        -- is refused at the end by identity/closing.sql if it gets that far.
+        -- The guard costs nothing on the real path: the 'e' dependency is
+        -- recorded as each object is created, so by this point the table
+        -- already belongs to the extension being installed.
         if exists (select 1 from pg_catalog.pg_depend d
                     where d.classid = 'pg_class'::regclass
                       and d.objid = t::regclass

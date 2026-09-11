@@ -34,15 +34,26 @@ SCRIPT="$HERE/../extension/percolate/sql/percolate--$VERSION.sql"
 [ -f "$SCRIPT" ] || { echo "missing $SCRIPT -- run extension/percolate/build-sql.py" >&2; exit 1; }
 
 q() { docker exec -i "$CONTAINER" psql -U p8 -d "$1" -tAqc "$2"; }
+. "$HERE/lib/extension-schemas.sh"
 
+# THROUGH CREATE EXTENSION, not `psql -f`, which is how the reference used to be
+# built. A raw load records nothing in pg_depend as the extension's, so
+# percolate.extension_schemas() is empty there and the comparison below would
+# walk no schemas on the reference side and report every function in the
+# target as ORPHAN. The script and control file go into the image's extension
+# directory, which is what dev/reload.sh already does to this container.
 echo "==> building a pristine reference database from $(basename "$SCRIPT")"
+EXT=/usr/share/postgresql/19/extension
+docker cp "$SCRIPT" "$CONTAINER:$EXT/" >/dev/null
+docker cp "$HERE/../extension/percolate/percolate.control" "$CONTAINER:$EXT/" >/dev/null
 docker exec "$CONTAINER" psql -U p8 -d postgres -q \
     -c "drop database if exists $REF_DB;" -c "create database $REF_DB;" >/dev/null
 docker cp "$HERE/image-init/00-superuser.sql" "$CONTAINER:/tmp/00-superuser.sql" >/dev/null
 docker exec "$CONTAINER" psql -U p8 -d "$REF_DB" -v ON_ERROR_STOP=1 -q \
     -f /tmp/00-superuser.sql >/dev/null
 docker exec -i "$CONTAINER" psql -U p8 -d "$REF_DB" -v ON_ERROR_STOP=1 -q \
-    -c "set role app_owner;" -f - < "$SCRIPT" >/dev/null
+    -c "set client_min_messages = warning;" -c "set role app_owner;" \
+    -c "create extension percolate version '$VERSION'" >/dev/null
 
 # The comparable identity of a function is its schema, name, argument types,
 # body, security mode and search_path -- not its OID, and not its comments.
@@ -50,30 +61,31 @@ docker exec -i "$CONTAINER" psql -U p8 -d "$REF_DB" -v ON_ERROR_STOP=1 -q \
 # reverting to INVOKER is a privilege change that a body-only diff would miss,
 # and it is exactly what rbac.has_permission's recursion turned on.
 #
-# EVERY SCHEMA THE EXTENSION CREATES, and `agentic` was missing from this list
-# for its whole life -- sixteen shipped functions, the entire conversation
-# plane, invisible to the one check whose job is noticing that a body has
-# fallen behind its spec. It is the newest of the five and the list was written
-# before it existed, which is the ordinary way a hand-maintained enumeration
-# goes wrong. Checked against the source of truth with:
-#
-#     grep -o '^create schema if not exists [a-z_]*' \
-#          extension/percolate/sql/percolate--*.sql | sort -u
+# EVERY SCHEMA THE EXTENSION OWNS, as each database reports it through
+# dev/lib/extension-schemas.sh -- the target may be older than
+# percolate.extension_schemas(), and the library falls back to the same
+# pg_depend query there. The typed list this replaced was missing `agentic` for
+# its whole life (sixteen shipped functions invisible to the one check whose
+# job is noticing a stale body) and then `percolate` (apply_package among them).
 #
 # `tradecraft` and `extract` are NOT shipped (build-sql.py's NOT_SHIPPED) and
-# stay in deliberately: a dev database that loaded one by hand should be told
-# so, and the reference database never has them, so they can only ever surface
-# as ORPHAN -- which is the report those files want.
-SNAP="select n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')'
+# stay in by name: a dev database that loaded one by hand should
+# be told so, and the reference database never has them, so they can only ever
+# surface as ORPHAN -- which is the report those files want.
+snap() {
+    printf '%s' "select n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')'
              ||E'\t'||md5(p.prosrc)
              ||E'\t'||p.prosecdef
              ||E'\t'||coalesce(array_to_string(p.proconfig,','),'-')
       from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-      where n.nspname in ('workflow','rbac','aiq','content','agentic','tradecraft','extract')
+      where n.nspname in $1 or n.nspname in ('tradecraft','extract')
       order by 1;"
+}
+S_REF=$(ext_schemas docker exec -i "$CONTAINER" psql -U p8 -d "$REF_DB")
+S_TGT=$(ext_schemas docker exec -i "$CONTAINER" psql -U p8 -d "$TARGET_DB")
 
-ref=$(q "$REF_DB" "$SNAP")
-tgt=$(q "$TARGET_DB" "$SNAP")
+ref=$(q "$REF_DB" "$(snap "$S_REF")")
+tgt=$(q "$TARGET_DB" "$(snap "$S_TGT")")
 
 echo "==> comparing $TARGET_DB against the specs ($(printf '%s' "$ref" | wc -l | tr -d ' ') functions declared)"
 drift=0

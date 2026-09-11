@@ -139,6 +139,38 @@ begin
     raise notice 'agentic/02: holding a run id is not authority to write into it';
 end $$;
 
+-- ...AND NEITHER IS A SESSION'S.
+--
+-- The check above looked only at run_id, so a row naming somebody else's
+-- session and no run -- a summary, the one role allowed to be runless, and the
+-- one read back into the next turn's context -- went straight in. Measured
+-- before persist_turn learned to refuse it: bob's summary landed in alice's
+-- private session and alice read it back (REM-46). The owner writing into her
+-- own session is §2 above.
+do $$
+declare v_s agentic.sessions; v_refused text; v_n int;
+begin
+    execute format('set local request.jwt.claims = %L', '{"sub":"c1a11111-0000-0000-0000-00000000c001"}');
+    v_s := agentic.create_session('mine, and nobody else''s');
+
+    execute format('set local request.jwt.claims = %L', '{"sub":"c1a22222-0000-0000-0000-00000000c002"}');
+    begin
+        perform agentic.persist_turn(jsonb_build_array(jsonb_build_object(
+            'session_id', v_s.id, 'role', 'summary', 'content', 'planted')));
+    exception when others then
+        v_refused := sqlerrm;
+    end;
+    select count(*) into v_n from agentic.messages where session_id = v_s.id;
+    if v_n <> 0 then
+        raise exception 'another user wrote % message(s) into a session they do not own', v_n;
+    end if;
+    if v_refused is null or v_refused not like '%session that is not yours%' then
+        raise exception 'the write into another user''s session was not refused for that reason: %',
+            coalesce(v_refused, 'it was not refused');
+    end if;
+    raise notice 'agentic/02: holding a session id is not authority to write into it';
+end $$;
+
 -- ---------------------------------------------------------------------
 -- 4. finish_run RECORDS THE OUTCOME.
 --
@@ -207,6 +239,41 @@ begin
         raise exception 'a failed attach created an agent';
     end if;
     raise notice 'agentic/02: attaches compose, detach removes, and neither invents an agent';
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 6. ...AND A CALLER WHO MAY NOT AUTHOR AGENTS IS REFUSED BEFORE ANYTHING ELSE.
+--
+-- Both functions looked the agent up first, so a caller with no agents:update
+-- heard "no agent named %" for a name that does not exist and a different
+-- refusal for one that does: which agents exist, answered to anybody, the
+-- probe 2e5995e closed in may_invoke (REM-46). The refusal has to be the same
+-- sentence either way. §5 above is the author being served.
+-- ---------------------------------------------------------------------
+do $$
+declare v_msg text; f text; a text;
+begin
+    execute format('set local request.jwt.claims = %L', '{"sub":"c1a22222-0000-0000-0000-00000000c002"}');
+    if rbac.has_permission('c1a22222-0000-0000-0000-00000000c002', 'agents', 'update') then
+        raise exception 'the second fixture user holds agents:update -- this needs one who does not';
+    end if;
+    foreach f in array array['attach', 'detach'] loop
+        foreach a in array array['conv_probe', 'no_such_agent_here'] loop
+            v_msg := null;
+            begin
+                if f = 'attach' then perform agentic.attach_skill(a, 'probe-skill-b');
+                else                 perform agentic.detach_skill(a, 'probe-skill-b');
+                end if;
+            exception when others then
+                v_msg := sqlerrm;
+            end;
+            if v_msg is distinct from 'not authorized to author agents' then
+                raise exception '%_skill(%) by a caller who may not author agents answered: %',
+                    f, a, coalesce(v_msg, 'nothing -- it succeeded');
+            end if;
+        end loop;
+    end loop;
+    raise notice 'agentic/02: attach and detach refuse a non-author the same way whether or not the agent exists';
 end $$;
 
 rollback;

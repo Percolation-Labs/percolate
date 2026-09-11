@@ -2033,7 +2033,8 @@ with provided as (
       from pg_proc p
       join pg_namespace n on n.oid = p.pronamespace
      where p.prolang = (select oid from pg_language where lanname = 'plpgsql')
-       and n.nspname in ('aiq', 'content', 'workflow', 'agentic')
+       -- every schema the extension owns, not the four this once named (REM-45)
+       and n.nspname in (select percolate.extension_schemas())
 ), callers as (
     -- The SQL half's own entry points, with whether the CALLING ROLE may
     -- execute them. `present` and `callable by me` are different facts and the
@@ -2050,7 +2051,7 @@ with provided as (
            bool_and(has_function_privilege(current_user, p.oid, 'execute')) as callable
       from pg_proc p
       join pg_namespace n on n.oid = p.pronamespace
-     where n.nspname in ('aiq', 'content', 'workflow', 'agentic')
+     where n.nspname in (select percolate.extension_schemas())
      group by 1
 ), crossings as (
     -- A call with arguments. `[^)]` after the paren is what separates a call
@@ -3974,10 +3975,18 @@ returns jsonb as $$
             -- is the one thing a naming convention cannot be reasoned out of.
             --
             -- Scoped explicitly, because this function is SECURITY DEFINER and
-            -- therefore does NOT get the RLS that protects aiq.nodes: the
-            -- predicate below is the nodes_org_scoped policy written out by
-            -- hand. Without it the facet would be a cross-tenant key
-            -- disclosure dressed as documentation.
+            -- therefore does NOT get the RLS that protects aiq.nodes. Without it
+            -- the facet would be a cross-tenant key disclosure dressed as
+            -- documentation.
+            --
+            -- THE ROW'S QUESTION, rbac.may_read, and not the org's. This was
+            -- "the nodes_org_scoped policy written out by hand", and the policy
+            -- moved on to owner and visibility while the hand copy stayed on
+            -- the org: every node on the shared tier qualified, private or not,
+            -- so anybody signed in was shown up to three canonical keys of
+            -- other people's private nodes of each type. The sibling of
+            -- 75abb1d's resolve_file fix, found by declaring how each reachable
+            -- definer authorizes (dev/tests/rbac/14, REM-46).
             'entity_types', coalesce((select jsonb_agg(jsonb_build_object(
                     'entity_type', r.entity_type, 'source_table', r.source_table,
                     'key_expr', r.key_expr, 'include_where', r.include_where,
@@ -3988,8 +3997,7 @@ returns jsonb as $$
                                 join aiq.nodes n on n.id = nk.node_id
                                where n.entity_type = r.entity_type
                                  and nk.kind = 'canonical'
-                                 and (n.org_id = rbac.shared_org_id()
-                                      or n.org_id in (select rbac.current_org_ids()))
+                                 and rbac.may_read(n.owner_id, n.org_id, n.visibility)
                                order by nk.key
                                limit 3) k), '[]'::jsonb))
                     order by r.entity_type)

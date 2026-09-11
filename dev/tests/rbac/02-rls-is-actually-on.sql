@@ -50,7 +50,11 @@ begin
     join pg_namespace n on n.oid = c.relnamespace
     where c.relkind = 'v'
       and c.relname like '%\_api'
-      and n.nspname in ('rbac','workflow','aiq','content','public')
+      -- Every schema the extension owns (REM-45: this read four, and not
+      -- agentic or percolate), plus `public`, which it does not own and which
+      -- is on every role's search_path, so an _api view there is reachable
+      -- by name from anywhere.
+      and (n.nspname in (select percolate.extension_schemas()) or n.nspname = 'public')
       and pg_get_userbyid(c.relowner) <> 'api_viewer';
     if v_bad is not null then
         raise exception '%_api views are not owned by api_viewer (%) -- an '
@@ -76,7 +80,7 @@ begin
     for r in
         select n.nspname, c.relname, c.relrowsecurity, c.relforcerowsecurity
         from pg_class c join pg_namespace n on n.oid = c.relnamespace
-        where c.relkind = 'r' and n.nspname in ('rbac','workflow','aiq','content')
+        where c.relkind = 'r' and n.nspname in (select percolate.extension_schemas())
           and exists (select 1 from pg_policy p where p.polrelid = c.oid)
     loop
         if not r.relrowsecurity then
@@ -107,7 +111,7 @@ begin
     into v_bad
     from information_schema.role_table_grants
     where grantee in ('worker','scheduler')
-      and table_schema in ('rbac','workflow','aiq','content');
+      and table_schema in (select percolate.extension_schemas());
     if v_bad is not null then
         raise exception 'a service role holds direct table grants: %', v_bad;
     end if;
@@ -303,7 +307,7 @@ begin
         join pg_attribute a on a.attrelid = c.oid and a.attname = 'visibility'
                            and not a.attisdropped
         where c.relkind = 'r'
-          and n.nspname in ('rbac','workflow','aiq','content','agentic')
+          and n.nspname in (select percolate.extension_schemas())
         order by 1, 2
     loop
         -- The generated read policy is <table>_scoped, and its expression is
@@ -351,7 +355,7 @@ begin
       join pg_attribute a on a.attrelid = c.oid and a.attname = 'visibility'
                          and not a.attisdropped
      where c.relkind = 'r'
-       and n.nspname in ('rbac','workflow','aiq','content','agentic')
+       and n.nspname in (select percolate.extension_schemas())
        and not exists (select 1 from pg_trigger t
                         where t.tgrelid = c.oid and not t.tgisinternal
                           and t.tgfoid = 'rbac.enforce_visibility'::regproc);

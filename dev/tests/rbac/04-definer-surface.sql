@@ -88,7 +88,9 @@ begin
       into v_bad
       from pg_proc p
       join pg_namespace n on n.oid = p.pronamespace
-     where n.nspname in ('workflow','aiq','rbac','content','agentic','wm')
+     -- Read from pg_depend. The list this replaced named `wm`, which does not
+     -- exist, and not `percolate`, which holds apply_package (REM-45).
+     where n.nspname in (select percolate.extension_schemas())
        and p.prosecdef
        and has_function_privilege('web_anon', p.oid, 'execute')
        and has_schema_privilege('web_anon', n.nspname, 'usage')
@@ -254,7 +256,9 @@ begin
     select string_agg(n.nspname || '.' || p.proname, ', ' order by 1)
       into v_bad
       from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-     where n.nspname in ('rbac', 'workflow', 'content', 'aiq', 'agentic', 'percolate', 'public')
+     -- `public` as well: the extension does not own it and still defines
+     -- functions there (public.touch_updated_at), and PostgREST exposes it.
+     where (n.nspname in (select percolate.extension_schemas()) or n.nspname = 'public')
        and (has_function_privilege('authenticated', p.oid, 'execute')
             or has_function_privilege('web_anon', p.oid, 'execute'))
        and p.prosrc ~* $re$errcode\s*=\s*'40001'|raise\s+serialization_failure$re$;

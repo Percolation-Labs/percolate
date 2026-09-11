@@ -15,11 +15,13 @@
 \set ON_ERROR_STOP on
 \pset pager off
 
+-- Every schema is percolate.extension_schemas(), read from pg_depend, rather
+-- than the list of six this file carried five times (REM-45).
 create temporary view p8_tables as
 select n.nspname as sch, c.relname as tbl, c.oid
 from pg_class c join pg_namespace n on n.oid = c.relnamespace
 where c.relkind in ('r','p')
-  and n.nspname in ('aiq','rbac','workflow','content','agentic','percolate');
+  and n.nspname in (select percolate.extension_schemas());
 
 \echo ''
 \echo '=== 1. EVERY TABLE DECLARES WHAT KIND OF THING IT IS ==='
@@ -108,7 +110,10 @@ order by 1, 2, 3, 4;
 \echo '    will not compare equal to a correctly generated v5.'
 select n.nspname || '.' || p.proname as fn
 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-where n.nspname in ('aiq','rbac','workflow','content','agentic','percolate','selfmodel')
+-- `selfmodel` by name as well: it is the self-model application's schema, not
+-- the extension's, and it derives ids too, so a database carrying it is held to
+-- the same rule. Absent, it matches nothing.
+where (n.nspname in (select percolate.extension_schemas()) or n.nspname = 'selfmodel')
   -- COMMENTS STRIPPED FIRST. The unstripped version matched the note that
   -- documents this very fix -- `md5(...)::uuid` written in prose inside the
   -- function that had already been corrected. A source-scanning check that
@@ -134,7 +139,7 @@ join pg_attribute a on a.attrelid = c.oid and a.attname = 'org_id'
                    and not a.attisdropped
 left join pg_attrdef d on d.adrelid = c.oid and d.adnum = a.attnum
 where c.relkind in ('r','p')
-  and n.nspname in ('aiq','rbac','workflow','content','agentic','percolate')
+  and n.nspname in (select percolate.extension_schemas())
   -- rbac.org_members is the one table whose org_id is the tenancy itself
   -- rather than a scope on a row: it has always been NOT NULL, it must NOT
   -- default to the shared org (org_members_not_shared forbids that row), and a
@@ -186,7 +191,7 @@ begin
         or (m.means = 'absence' and u.nnd);
 
     select count(*) into v4 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-     where n.nspname in ('aiq','rbac','workflow','content','agentic','percolate','selfmodel')
+     where (n.nspname in (select percolate.extension_schemas()) or n.nspname = 'selfmodel')
        and regexp_replace(p.prosrc, '--[^\n]*', '', 'g')
            ~ 'md5\s*\([^)]*\)\s*::\s*uuid';
 
@@ -197,7 +202,7 @@ begin
                          and not a.attisdropped
       left join pg_attrdef d on d.adrelid = c.oid and d.adnum = a.attnum
      where c.relkind in ('r','p')
-       and n.nspname in ('aiq','rbac','workflow','content','agentic','percolate')
+       and n.nspname in (select percolate.extension_schemas())
        and not (n.nspname = 'rbac' and c.relname = 'org_members')
        and (not a.attnotnull
             or coalesce(pg_get_expr(d.adbin, d.adrelid), '') !~ 'shared_org_id');

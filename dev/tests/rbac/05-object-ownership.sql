@@ -25,6 +25,12 @@
 --
 -- So this is not a restatement of the role check. It is the assertion that
 -- nothing has since been created by the wrong hand.
+--
+-- "These schemas" are percolate.extension_schemas(), which reads `percolate`
+-- where the list typed here five times did not (REM-45), plus `tradecraft` and
+-- `extract` by name: build-sql.py does not ship them, so the extension never
+-- owns them, and a dev database that loaded one by hand is exactly where a
+-- superuser-owned object comes from.
 
 \set ON_ERROR_STOP on
 
@@ -44,17 +50,17 @@ begin
       into v_bad
     from (
         select 'table' as kind, schemaname||'.'||tablename as name, tableowner as owner
-          from pg_tables where schemaname in (
-              'workflow','rbac','aiq','content','agentic','tradecraft','extract')
+          from pg_tables where (schemaname in (select percolate.extension_schemas())
+                 or schemaname in ('tradecraft','extract'))
         union all
         select 'view', schemaname||'.'||viewname, viewowner
-          from pg_views where schemaname in (
-              'workflow','rbac','aiq','content','agentic','tradecraft','extract')
+          from pg_views where (schemaname in (select percolate.extension_schemas())
+                 or schemaname in ('tradecraft','extract'))
         union all
         select 'function', n.nspname||'.'||p.proname, pg_get_userbyid(p.proowner)
           from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-         where n.nspname in (
-              'workflow','rbac','aiq','content','agentic','tradecraft','extract')
+         where (n.nspname in (select percolate.extension_schemas())
+                or n.nspname in ('tradecraft','extract'))
     ) o
     where exists (select 1 from pg_roles r where r.rolname = o.owner and r.rolsuper);
 
@@ -90,12 +96,12 @@ begin
       into v_bad
     from (
         select schemaname||'.'||tablename as name, tableowner as owner
-          from pg_tables where schemaname in (
-              'workflow','rbac','aiq','content','agentic','tradecraft','extract')
+          from pg_tables where (schemaname in (select percolate.extension_schemas())
+                 or schemaname in ('tradecraft','extract'))
         union all
         select schemaname||'.'||viewname, viewowner
-          from pg_views where schemaname in (
-              'workflow','rbac','aiq','content','agentic','tradecraft','extract')
+          from pg_views where (schemaname in (select percolate.extension_schemas())
+                 or schemaname in ('tradecraft','extract'))
     ) o
     where owner not in ('app_owner', 'api_viewer');
 

@@ -909,6 +909,24 @@ begin
         raise exception 'cannot write messages into a run that is not yours';
     end if;
 
+    -- AND THE SESSION, which the check above never looked at. A row may carry
+    -- a session_id with no run (a summary) or beside a run of the caller's, and
+    -- messages_via_run shows a session's owner every row naming it -- so a
+    -- signed-in caller could put a summary, which is read back into the next
+    -- turn's context, into anyone's conversation by knowing its id. Measured on
+    -- a CI database before this: bob wrote `planted by bob` into alice's private
+    -- session and alice read it back. start_run and upsert_summary already
+    -- refuse a session that is not the caller's; this was the third door
+    -- (found declaring how each reachable definer authorizes, REM-46).
+    if exists (select 1 from jsonb_array_elements(p_rows) as r
+                where r->>'session_id' is not null
+                  and not exists (select 1 from agentic.sessions s
+                                   where s.id = (r->>'session_id')::uuid
+                                     and s.owner_id = rbac.current_user_id()))
+    then
+        raise exception 'cannot write messages into a session that is not yours';
+    end if;
+
     return query
     insert into agentic.messages (id, run_id, session_id, role, content, tool_calls,
                                   tool_call_id, is_error, error_kind, citations)
@@ -1655,6 +1673,18 @@ as $$
 declare
     v_skills text[];
 begin
+    -- THE AUTHORITY FIRST, before the agent is so much as looked up. This read
+    -- `no agent named %` to anybody and took a row lock for them, so a caller
+    -- with no right to author anything could learn which agent names exist
+    -- and hold one agent's row until their transaction ended -- the probe
+    -- 2e5995e closed in may_invoke, open here (REM-46). upsert_agent would
+    -- have refused them further down; the answer they got first was the leak.
+    if not agentic.may_author('agents', 'agentic.agents'::regclass) then
+        raise exception 'not authorized to author agents'
+            using errcode = 'insufficient_privilege',
+                  hint = 'needs agents:update';
+    end if;
+
     -- Not upsert_agent's job to notice: called with {name, skills} for an
     -- agent that does not exist, it would happily CREATE one with an empty
     -- prompt and no tools -- an agent that resolves by name and can do
@@ -1704,6 +1734,13 @@ as $$
 declare
     v_skills text[];
 begin
+    -- First, for attach_skill's reason.
+    if not agentic.may_author('agents', 'agentic.agents'::regclass) then
+        raise exception 'not authorized to author agents'
+            using errcode = 'insufficient_privilege',
+                  hint = 'needs agents:update';
+    end if;
+
     select a.skills into v_skills
       from agentic.agents a where a.name = p_agent
       for update;
