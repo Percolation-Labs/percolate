@@ -22,6 +22,7 @@ something — file it as a spec gap, don't add a side channel.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
@@ -100,14 +101,26 @@ class PgRepository:
     is enforced by the database rather than by this file's good behaviour.
     """
 
-    def __init__(self, client: PgClient, user_id: UUID | None = None) -> None:
+    def __init__(self, client: PgClient, claims: Mapping[str, Any] | None = None) -> None:
+        # The verified token payload, kept whole and handed to every
+        # transaction as it arrived. Holding only the user id is what let the
+        # agent runtime drop `orgs` and act across every org the user belongs
+        # to -- see PgClient.as_user.
         self.client = client
-        self.user_id = user_id
+        self.claims = claims
+
+    @property
+    def user_id(self) -> UUID | None:
+        """The caller's id, for the places that need a value rather than RLS
+        (a ``RequestContext``, the quota check). Derived, never stored beside
+        the claims, so the two cannot disagree."""
+        sub = (self.claims or {}).get("sub")
+        return UUID(str(sub)) if sub else None
 
     # --- agents & tool servers -------------------------------------------
 
     async def get_agent(self, name: str) -> AgentSpec | None:
-        async with self.client.as_user(self.user_id) as conn:
+        async with self.client.as_user(self.claims) as conn:
             row = await conn.fetchrow(
                 "select * from agentic.agents_api where name = $1", name
             )
@@ -115,12 +128,12 @@ class PgRepository:
 
     async def get_agent_by_id(self, agent_id: UUID) -> AgentSpec | None:
         """Used to resolve ``summarizer_agent_id`` (``brief.md`` §3)."""
-        async with self.client.as_user(self.user_id) as conn:
+        async with self.client.as_user(self.claims) as conn:
             row = await conn.fetchrow("select * from agentic.agents_api where id = $1", agent_id)
         return _agent(row)
 
     async def list_agents(self) -> list[AgentSpec]:
-        async with self.client.as_user(self.user_id) as conn:
+        async with self.client.as_user(self.claims) as conn:
             rows = await conn.fetch("select * from agentic.agents_api order by name")
         return [a for a in (_agent(r) for r in rows) if a is not None]
 
@@ -152,21 +165,21 @@ class PgRepository:
         payload = agent.model_dump(
             mode="json", exclude={"id", "created_at", "updated_at"}, exclude_unset=True
         )
-        async with self.client.as_user(self.user_id) as conn:
+        async with self.client.as_user(self.claims) as conn:
             row = await conn.fetchrow("select * from agentic.upsert_agent($1::jsonb)", payload)
         result = _agent(row)
         assert result is not None
         return result
 
     async def get_tool_server(self, name: str) -> ToolServer | None:
-        async with self.client.as_user(self.user_id) as conn:
+        async with self.client.as_user(self.claims) as conn:
             row = await conn.fetchrow(
                 "select * from agentic.tool_servers_api where name = $1", name
             )
         return _tool_server(row)
 
     async def list_tool_servers(self) -> list[ToolServer]:
-        async with self.client.as_user(self.user_id) as conn:
+        async with self.client.as_user(self.claims) as conn:
             rows = await conn.fetch("select * from agentic.tool_servers_api order by name")
         return [s for s in (_tool_server(r) for r in rows) if s is not None]
 
@@ -190,7 +203,7 @@ class PgRepository:
         payload = server.model_dump(
             mode="json", exclude={"id", "created_at", "updated_at"}, exclude_unset=True
         )
-        async with self.client.as_user(self.user_id) as conn:
+        async with self.client.as_user(self.claims) as conn:
             row = await conn.fetchrow(
                 "select * from agentic.upsert_tool_server($1::jsonb)", payload
             )
@@ -201,7 +214,7 @@ class PgRepository:
     # --- sessions, runs, messages ----------------------------------------
 
     async def create_session(self, session: Session) -> Session:
-        async with self.client.as_user(self.user_id) as conn:
+        async with self.client.as_user(self.claims) as conn:
             row = await conn.fetchrow("select * from agentic.create_session($1)", session.title)
         return Session(**{k: row[k] for k in SESSION_COLUMNS})
 
@@ -220,7 +233,7 @@ class PgRepository:
         literal tuple, twice, forty lines apart, with only one of them reached
         by a first turn.
         """
-        async with self.client.as_user(self.user_id) as conn:
+        async with self.client.as_user(self.claims) as conn:
             row = await conn.fetchrow("select * from agentic.sessions_api where id = $1", session_id)
         if row is None:
             return None
@@ -234,7 +247,7 @@ class PgRepository:
         tree and the span tree are the same tree (``brief.md`` §7), and letting a
         client assert its own depth or parent span would let the two drift.
         """
-        async with self.client.as_user(self.user_id) as conn:
+        async with self.client.as_user(self.claims) as conn:
             row = await conn.fetchrow(
                 "select * from agentic.start_run($1, $2, $3, $4, $5, $6, $7, $8)",
                 run.agent_name,
@@ -257,14 +270,14 @@ class PgRepository:
     ) -> Run:
         """``agentic.finish_run(...)``. ``quota_exceeded`` arrives here like any
         other terminal status, leaving partial rows untouched (``brief.md`` §5.1)."""
-        async with self.client.as_user(self.user_id) as conn:
+        async with self.client.as_user(self.claims) as conn:
             row = await conn.fetchrow(
                 "select * from agentic.finish_run($1, $2, $3::jsonb)", run_id, status, state
             )
         return _run(row)
 
     async def get_run(self, run_id: UUID) -> Run | None:
-        async with self.client.as_user(self.user_id) as conn:
+        async with self.client.as_user(self.claims) as conn:
             row = await conn.fetchrow("select * from agentic.runs_api where id = $1", run_id)
         return _run(row) if row else None
 
@@ -276,7 +289,7 @@ class PgRepository:
         Gate 3 tests it that way. A recursive CTE here would be this runtime
         growing a second graph-query mechanism.
         """
-        async with self.client.as_user(self.user_id) as conn:
+        async with self.client.as_user(self.claims) as conn:
             rows = await conn.fetch(
                 "select * from agentic.runs_api where parent_run_id = $1 order by created_at",
                 parent_run_id,
@@ -299,7 +312,7 @@ class PgRepository:
             })
             for m in messages
         ]
-        async with self.client.as_user(self.user_id) as conn:
+        async with self.client.as_user(self.claims) as conn:
             rows = await conn.fetch("select * from agentic.persist_turn($1::jsonb)", payload)
         return [_message(r) for r in rows]
 
@@ -312,7 +325,7 @@ class PgRepository:
         out, and having the unbounded read live under an obviously different name
         is most of what stops it being called by accident.
         """
-        async with self.client.as_user(self.user_id) as conn:
+        async with self.client.as_user(self.claims) as conn:
             rows = await conn.fetch(
                 "select * from agentic.messages_api where session_id = $1 order by seq",
                 session_id,
@@ -336,7 +349,7 @@ class PgRepository:
         policy bound — tool rows interleave with turns, and the slice, not this
         query, decides what the model sees.
         """
-        async with self.client.as_user(self.user_id) as conn:
+        async with self.client.as_user(self.claims) as conn:
             rows = await conn.fetch(
                 """
                 select * from (
@@ -365,7 +378,7 @@ class PgRepository:
         return [_message(r) for r in rows]
 
     async def message_count(self, session_id: UUID) -> int:
-        async with self.client.as_user(self.user_id) as conn:
+        async with self.client.as_user(self.claims) as conn:
             return await conn.fetchval(
                 "select count(*) from agentic.messages_api where session_id = $1", session_id
             )
@@ -391,7 +404,7 @@ class PgRepository:
                 "reference and let the relay read it back (workflow-engine's "
                 "payload_ref discipline)"
             )
-        async with self.client.as_user(self.user_id) as conn:
+        async with self.client.as_user(self.claims) as conn:
             await conn.execute("select pg_notify($1, $2)", channel, payload)
 
     # --- neighbouring systems --------------------------------------------
@@ -405,7 +418,7 @@ class PgRepository:
         exactly the duplication ``spec-driven-development`` §5 forbids, and a
         silent local implementation would make the gap invisible.
         """
-        async with self.client.as_user(self.user_id) as conn:
+        async with self.client.as_user(self.claims) as conn:
             exists = await conn.fetchval(
                 "select to_regprocedure('rbac.has_quota_remaining(uuid, text)') is not null"
             )
@@ -425,7 +438,7 @@ class PgRepository:
         which then gets ``workflow-engine``'s retries, rate limits and
         observability for free. The trace id is propagated, never restarted.
         """
-        async with self.client.as_user(self.user_id) as conn:
+        async with self.client.as_user(self.claims) as conn:
             return await conn.fetchval(
                 "select workflow.start_workflow($1, $2::jsonb, null, $3)",
                 name,
@@ -446,7 +459,7 @@ class PgRepository:
         a worker. Borrowing that role for exactly this call is cheaper and more
         honest than widening either system's grants.
         """
-        async with self.client.as_user(self.user_id, role="worker") as conn:
+        async with self.client.as_user(self.claims, role="worker") as conn:
             await conn.execute("select workflow.complete_task($1, $2::jsonb)", task_id, output)
 
     async def call_chained_action(self, target: str, payload: dict[str, Any]) -> Any:
@@ -468,7 +481,7 @@ class PgRepository:
         # string concatenation.
         if not _QUALIFIED_NAME.fullmatch(target):
             raise LookupError(f"chained action {target!r} is not a qualified function name")
-        async with self.client.as_user(self.user_id) as conn:
+        async with self.client.as_user(self.claims) as conn:
             known = await conn.fetchval(
                 "select to_regprocedure($1) is not null", f"{target}(jsonb)"
             )

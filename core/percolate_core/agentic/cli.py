@@ -174,7 +174,11 @@ def repo_for_cli() -> Any:
             "  `percolate auth bootstrap` prints the id it creates, and an\n"
             "  existing one is `select id from rbac.users where email = '...'`."
         )
-    return connected(settings, UUID(settings.user_id))
+    # The CLI has no token to verify, so its claims are the operator's own
+    # statement of who it runs as, and only `sub`: with no `orgs` claim RLS
+    # scopes it to every org that user belongs to, which is what a person at
+    # their own terminal is.
+    return connected(settings, {"sub": str(UUID(settings.user_id))})
 
 
 @app.command("list")

@@ -17,10 +17,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
-from uuid import UUID
 
 from ...core import identity
 from ..settings import Settings
@@ -71,22 +70,28 @@ class PgClient:
 
     @asynccontextmanager
     async def as_user(
-        self, user_id: UUID | None, role: str = "authenticated"
+        self, claims: Mapping[str, Any] | None, role: str = identity.ROLE
     ) -> AsyncIterator[Any]:
-        """One transaction, as ``role``, carrying the user's claims.
+        """One transaction, as ``role``, carrying the caller's verified claims.
 
         Delegates to ``core.identity.as_caller`` rather than repeating it: that
         function is the collection's one implementation of "whose RLS applies",
         and a second copy here is how the two drift into authorising
-        differently. This wrapper exists only to turn a ``user_id`` into the
-        claim shape the rest of this subpackage already speaks.
+        differently.
+
+        ``claims`` is the verified token payload, passed through WHOLE. This
+        took a ``user_id`` and rebuilt ``{"sub": ...}`` from it, which dropped
+        every other claim -- and ``rbac.current_org_ids()`` reads a missing
+        ``orgs`` claim as "every org this user belongs to". A token narrowed
+        to one org was narrowed on the Content Server and widened to all of
+        them here, by a wrapper whose only job was to change the shape.
         """
-        claims = {"sub": str(user_id)} if user_id else None
+        _require_claims(claims)
         async with identity.as_caller(claims, role=role) as conn:
             yield conn
 
     @asynccontextmanager
-    async def publisher(self, user_id: UUID | None) -> AsyncIterator[Any]:
+    async def publisher(self, claims: Mapping[str, Any] | None) -> AsyncIterator[Any]:
         """One connection, held for a turn, for publishing AG-UI events.
 
         ``as_user`` is the right shape for a read or a write — one transaction,
@@ -103,14 +108,18 @@ class PgClient:
         statement. asyncpg resets session state when the connection returns to
         the pool, which is what makes the session-level ``set role`` safe.
 
-        Claims while the connection is still ``authenticator``, THEN the role,
-        because ``authenticated`` may not call ``set_config`` (see
+        The same claims ``as_user`` sets, whole, and in the same order: claims
+        while the connection is still ``authenticator``, THEN the role, because
+        ``authenticated`` may not call ``set_config`` (see
         ``core.identity.as_caller``).
         """
+        _require_claims(claims)
         pool = self._require()
         async with pool.acquire() as conn:
-            claims = json.dumps({"sub": str(user_id)}) if user_id else "{}"
-            await conn.execute("select set_config('request.jwt.claims', $1, false)", claims)
+            await conn.execute(
+                "select set_config('request.jwt.claims', $1, false)",
+                json.dumps(dict(claims)) if claims else "{}",
+            )
             await conn.execute(f"set role {identity.ROLE}")
 
             async def publish(channel: str, payload: str) -> None:
@@ -152,6 +161,20 @@ class PgClient:
         # the slot has to come back when it does. Accounting that depends on
         # every call site remembering is accounting that leaks.
         return _Listener(conn, self._listeners)
+
+
+def _require_claims(claims: Any) -> None:
+    """Refuse a user id where the claims belong.
+
+    Both methods took a ``UUID`` until the claims had to travel whole, and a
+    caller still passing one would otherwise reach ``dict(claims)`` and fail
+    with a message about UUIDs not being iterable.
+    """
+    if claims is not None and not isinstance(claims, Mapping):
+        raise TypeError(
+            "pass the verified token claims (a mapping with 'sub' and any "
+            f"'orgs'), not {type(claims).__name__}"
+        )
 
 
 class _Listener:

@@ -1,8 +1,8 @@
 """Postgres access: a small client, and the single repository seam over it."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from uuid import UUID
+from typing import Any
 
 from ..settings import Settings
 from .client import PgClient
@@ -11,9 +11,10 @@ from .repository import PgRepository, Repository
 
 @asynccontextmanager
 async def connected(
-    settings: Settings, user_id: UUID | None = None
+    settings: Settings, claims: Mapping[str, Any] | None = None
 ) -> AsyncIterator[PgRepository]:
-    """A pool, a repository scoped to one user, and a guaranteed close.
+    """A pool, a repository scoped to one caller's verified claims, and a
+    guaranteed close.
 
     Every short-lived caller (the CLI, the gateway's request handlers) wants
     exactly this, and each of them growing its own ten-line version is how a
@@ -26,7 +27,7 @@ async def connected(
     client = PgClient(settings, owns_pool=False)
     await client.connect()
     try:
-        yield PgRepository(client, user_id)
+        yield PgRepository(client, claims)
     finally:
         await client.close()
 
