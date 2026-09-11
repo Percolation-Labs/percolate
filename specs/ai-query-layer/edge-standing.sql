@@ -64,7 +64,8 @@ select e.id, e.relation,
        e.weight, e.recall_count, e.probe_count,
        e.valid_from::date as asserted, e.last_recalled_at,
        case
-           when e.valid_to is not null                    then 'retracted'
+           when not aiq.edge_is_current(e.valid_from, e.valid_to, now())
+                                                          then 'retracted'
            when e.recall_count = 0 and e.probe_count > 0  then 'only ever probed'
            when e.recall_count = 0                        then 'never used'
            else 'load-bearing' end as standing

@@ -255,8 +255,8 @@ begin
         set weight = excluded.weight, provenance = excluded.provenance,
             valid_to = null;
 
-    select count(*) into n_dep from aiq.edges
-     where relation = 'depends_on' and valid_to is null;
+    select count(*) into n_dep from aiq.edges_current
+     where relation = 'depends_on';
 
     return jsonb_build_object('objects', n_obj, 'depends_on', n_dep);
 end $$;

@@ -77,11 +77,15 @@ $$;
 create or replace view aiq.source_reliability with (security_invoker = true) as
 select coalesce(provenance->>'from', provenance->>'kind', 'unknown') as source,
        'edge'::text                                  as channel,
-       count(*) filter (where valid_to is null)      as confirmations,
-       count(*) filter (where valid_to is not null)  as corrections,
-       aiq.reliability(count(*) filter (where valid_to is null),
-                       count(*) filter (where valid_to is not null)) as reliability
-  from aiq.edges
+       count(*) filter (where h)                     as confirmations,
+       count(*) filter (where not h)                 as corrections,
+       aiq.reliability(count(*) filter (where h),
+                       count(*) filter (where not h)) as reliability
+  -- aiq.edge_is_current, the one currency rule (schema.sql), rather than a
+  -- fifth spelling of it. `valid_to is null` scored an edge retracted for a
+  -- future date as a correction today (REM-51).
+  from (select provenance, aiq.edge_is_current(valid_from, valid_to, now()) as h
+          from aiq.edges) e
  group by 1
 having count(*) > 0;
 

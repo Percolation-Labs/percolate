@@ -194,13 +194,39 @@ begin
         if v_msg not like '%not resolvable%' then raise; end if;
     end;
 
-    -- 3d. Both directions of the link, from one view.
+    -- 3d. Both directions of the link, from one view, READ AS A PERSON.
+    --
+    -- The run above is started by a worker and is ownerless, so nobody may
+    -- read it -- and this assertion passed anyway, because
+    -- workflow.v_artifacts was owner-privileged and owned by the owner of the
+    -- tables it reads, which is RLS bypassed
+    -- (meta/postmortems/2026-09-11-owner-privileged-views.md). It is owned by
+    -- api_viewer now and answers per caller, so the run gets the owner a real
+    -- one has and the view is read as them. An assertion about a join that
+    -- only holds where no policy applies was asserting the bypass.
+    insert into rbac.users (id, email)
+    values ('55555555-5555-5555-5555-555555555555', 'artifacts@test.com')
+    on conflict (id) do nothing;
+    update workflow.runs set owner_id = '55555555-5555-5555-5555-555555555555'
+     where id = v_run;
+    perform set_config('request.jwt.claims',
+        '{"sub":"55555555-5555-5555-5555-555555555555"}', true);
+
     if not exists (select 1 from workflow.v_artifacts
                    where run_id = v_run and task_id = v_task
                      and resource_id = v_res and step_key = 'render'
                      and object_key = 'artifacts/probe/report.bin') then
         raise exception 'v_artifacts does not join the task to what it produced';
     end if;
+
+    -- ...and not to somebody else. The same query, one claim different.
+    perform set_config('request.jwt.claims',
+        '{"sub":"66666666-6666-6666-6666-666666666666"}', true);
+    if exists (select 1 from workflow.v_artifacts where run_id = v_run) then
+        raise exception 'v_artifacts showed another user''s run to a caller who '
+            'cannot read it -- the view is bypassing RLS again';
+    end if;
+    perform set_config('request.jwt.claims', '', true);
 
     -- 3e. THE TWO COLLISIONS THAT MADE 'stored' A STATUS OF ITS OWN.
     --

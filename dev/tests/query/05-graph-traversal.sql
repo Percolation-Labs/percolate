@@ -37,7 +37,8 @@ end $$;
 -- relation and a CTE walk on edges return the same id pairs for a fixture."
 -- D8/invariant 7 say the property graph is a read-only view over those same
 -- rows -- so any disagreement means it has become a second copy, which is the
--- one thing the whole design refuses.
+-- one thing the whole design refuses. The rows are aiq.edges_current's: the
+-- graph is declared over the edges that hold (REM-51), not the history.
 -- ---------------------------------------------------------------------
 do $$
 declare v_pgq int; v_tbl int;
@@ -47,20 +48,20 @@ begin
             match (a is node) -[e is related]-> (b is node)
             columns (a.id as a_id, b.id as b_id))
         except
-        select src_id, dst_id from aiq.edges) x;
+        select src_id, dst_id from aiq.edges_current) x;
     select count(*) into v_tbl from (
-        select src_id, dst_id from aiq.edges
+        select src_id, dst_id from aiq.edges_current
         except
         select a_id, b_id from graph_table (aiq.knowledge_graph
             match (a is node) -[e is related]-> (b is node)
             columns (a.id as a_id, b.id as b_id))) y;
     if v_pgq <> 0 or v_tbl <> 0 then
         raise exception
-            'GRAPH_TABLE and aiq.edges disagree (% pairs only in the graph, % '
-            'only in the table) -- the property graph has stopped being a view '
-            'over the edge table', v_pgq, v_tbl;
+            'GRAPH_TABLE and aiq.edges_current disagree (% pairs only in the graph, % '
+            'only in the view) -- the property graph has stopped being a view '
+            'over the current edges', v_pgq, v_tbl;
     end if;
-    raise notice 'query/05: the property graph and the edge table return the same pairs';
+    raise notice 'query/05: the property graph and aiq.edges_current return the same pairs';
 end $$;
 
 -- The property graph has no writers, ever (invariant 7). It is catalog
@@ -605,18 +606,15 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
--- 14. TEMPORAL VALIDITY IS STORED AND NOT READ -- ON PURPOSE, FOR NOW.
+-- 14. A RETRACTED EDGE IS NOT TRAVERSED. (Inverted, as this section asked.)
 --
--- `edges.valid_from` / `valid_to` are in graph-identity.md's edge table and no
--- read path filters on them: an edge whose validity expired a year ago is
--- still traversed. That is a genuine gap rather than a design decision, and it
--- is recorded in graph-identity.md ("Temporal validity") rather than left for
--- someone to discover.
---
--- This assertion pins the CURRENT behaviour so that implementing the filter is
--- a deliberate act that updates the document, rather than a quiet change of
--- meaning for every existing caller. It is expected to be inverted, not
--- deleted, on the day the filter lands.
+-- This section pinned the opposite: `valid_from` / `valid_to` were stored and
+-- no read path here filtered on them, recorded as a gap in graph-identity.md
+-- "Temporal validity", with the instruction to invert the assertion rather than
+-- delete it on the day the filter landed. It landed with REM-51: the property
+-- graph is declared over aiq.edges_current, and graph_neighbors and graph_walk
+-- read it, so all three apply aiq.edge_is_current. query/15 asserts the same
+-- for every other read path, including the compiled ones.
 -- ---------------------------------------------------------------------
 do $$
 declare v_acme uuid; v_before int; v_after int;
@@ -625,14 +623,15 @@ begin
     select count(*) into v_before from aiq.graph_neighbors(v_acme, 'competes_with');
     update aiq.edges set valid_to = now() - interval '1 year' where relation = 'competes_with';
     select count(*) into v_after from aiq.graph_neighbors(v_acme, 'competes_with');
-    if v_after <> v_before then
-        raise exception
-            'traversal has started filtering on valid_to (% -> %). That is very '
-            'likely an improvement -- update graph-identity.md "Temporal '
-            'validity" and invert this assertion rather than deleting it, so the '
-            'document and the engine change together', v_before, v_after;
+    if v_before = 0 then
+        raise exception 'the fixture gives ACME no competes_with neighbours, so this proves nothing';
     end if;
-    raise notice 'query/05: temporal validity is stored, not read (documented gap)';
+    if v_after <> 0 then
+        raise exception
+            'graph_neighbors returned % competes_with edges after every one was retracted '
+            '(% before) -- traversal has stopped applying aiq.edge_is_current', v_after, v_before;
+    end if;
+    raise notice 'query/05: retracted edges are not traversed (% neighbours before, 0 after)', v_before;
 end $$;
 
 rollback;

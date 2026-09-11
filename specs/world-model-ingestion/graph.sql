@@ -919,7 +919,16 @@ begin
                 'attrs',       nullif(v_e->'a','{}'::jsonb),
                 'at',          to_char(now(),'YYYY-MM-DD"T"HH24:MI:SSOF')))));
 
-        select count(*), count(*) filter (where valid_to is not null)
+        -- A REVIVAL is an edge that was NOT CURRENT when this upsert arrived,
+        -- through aiq.edge_is_current rather than a fifth spelling of it. Note
+        -- that this counts an edge retracted earlier in this same transaction,
+        -- which trg_record_edge_retraction deliberately does not record as a
+        -- hole: the receipt reports the state the upsert found, and the hole
+        -- records a period during which nobody believed the edge. A derivation
+        -- that retires and revives at one now() produces the first and not the
+        -- second, and both readings are right for what they are for.
+        select count(*),
+               count(*) filter (where not aiq.edge_is_current(valid_from, valid_to, now()))
           into v_before, v_retracted
           from aiq.edges
          where src_id = v_ids[v_s+1] and dst_id = v_ids[v_t+1] and relation = v_rel;

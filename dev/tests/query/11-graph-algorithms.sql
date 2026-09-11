@@ -155,16 +155,20 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
--- 6. THE TEMPORAL FILTER IS APPLIED, WHICH NO OTHER READ PATH DOES.
+-- 6. THE TEMPORAL FILTER IS APPLIED, WITH OR WITHOUT as_of.
 --
--- graph-identity.md records valid_from/valid_to as stored-and-never-read, and
--- pins that behaviour for `graph_neighbors`, `graph_walk` and `GRAPH_TABLE` in
--- `05` §14. This surface is the exception, so the exception is asserted here:
--- an edge whose validity has expired must disappear from an as_of walk and
--- must still be there without one.
+-- This asserted that a walk WITHOUT as_of still crossed an expired edge --
+-- "the default must still traverse it" -- which was the defect, pinned
+-- (REM-51): every caller that did not name a time got the graph's whole
+-- history, retractions included, while aiq.edges_current hid them from every
+-- SQL reader. The default is now the statement's now(). An explicit as_of
+-- from before the retraction still crosses it, which is the half that makes
+-- retraction history rather than deletion.
 -- ---------------------------------------------------------------------
 do $$
-declare v_before jsonb; v_after jsonb; v_edge uuid;
+declare
+    v_default jsonb; v_now jsonb; v_before jsonb; v_edge uuid;
+    v_from timestamptz; v_to timestamptz;
 begin
     select e.id into v_edge
       from aiq.edges e
@@ -175,23 +179,39 @@ begin
         raise exception 'the fixture no longer has the acme->ndlr edge this assertion is about';
     end if;
 
-    update aiq.edges set valid_to = now() - interval '1 day' where id = v_edge;
+    -- valid_from too, not only valid_to: `v_before` below reads the graph as
+    -- of before the retraction, and on a fresh database the fixture was loaded
+    -- minutes ago, so "two days ago" was before the edge existed at all.
+    select valid_from, valid_to into v_from, v_to from aiq.edges where id = v_edge;
+    update aiq.edges
+       set valid_from = now() - interval '3 days', valid_to = now() - interval '1 day'
+     where id = v_edge;
     perform aiq.graph_snapshot(true);
 
-    v_before := aiq.graph_paths('acme', 'ndlr', 1);
-    v_after  := aiq.graph_paths('acme', 'ndlr', 1, p_as_of => now());
+    v_default := aiq.graph_paths('acme', 'ndlr', 1);
+    v_now     := aiq.graph_paths('acme', 'ndlr', 1, p_as_of => now());
+    v_before  := aiq.graph_paths('acme', 'ndlr', 1, p_as_of => now() - interval '2 days');
 
-    if jsonb_array_length(v_before->'paths') = 0 then
-        raise exception 'without as_of the expired edge vanished -- the default must still traverse it';
+    if jsonb_array_length(v_default->'paths') > 0
+       and (v_default->'paths'->0->>'hops')::int = 1 then
+        raise exception 'without as_of the expired edge was still traversed';
     end if;
-    if (v_before->'paths'->0->>'hops')::int <> 1 then
-        raise exception 'without as_of the direct edge was not used';
+    if jsonb_array_length(v_now->'paths') > 0
+       and (v_now->'paths'->0->>'hops')::int = 1 then
+        raise exception 'with as_of now the expired edge was still traversed';
     end if;
-    if jsonb_array_length(v_after->'paths') > 0
-       and (v_after->'paths'->0->>'hops')::int = 1 then
-        raise exception 'with as_of the expired edge was still traversed';
+    if jsonb_array_length(v_before->'paths') = 0
+       or (v_before->'paths'->0->>'hops')::int <> 1 then
+        raise exception 'as of before its expiry the direct edge was not used -- '
+            'retraction must remain readable as history';
     end if;
-    raise notice 'query/11: as_of excludes an expired edge that the default walk still uses';
+    -- PUT THE FIXTURE BACK. It did not need to before: a retracted edge was
+    -- still traversed, so nothing downstream could tell. Now §9 reads the same
+    -- triangle and counts its edges, and a section that leaves one retracted
+    -- hands the next one a different graph (REM-51).
+    update aiq.edges set valid_from = v_from, valid_to = v_to where id = v_edge;
+    perform aiq.graph_snapshot(true);
+    raise notice 'query/11: an expired edge is excluded by default and by as_of now, and used as of before';
 end $$;
 
 -- ---------------------------------------------------------------------

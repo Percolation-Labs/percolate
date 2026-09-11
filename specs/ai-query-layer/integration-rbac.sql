@@ -120,6 +120,15 @@ drop policy if exists edges_via_endpoints on aiq.edges;
 create policy edges_via_endpoints on aiq.edges for select
   using (exists (select 1 from aiq.nodes s where s.id = aiq.edges.src_id)
      and exists (select 1 from aiq.nodes d where d.id = aiq.edges.dst_id));
+-- An edge's retraction history is visible exactly when the edge is, by the
+-- same inheritance. It carries no org of its own to gate on, and the schema's
+-- blanket `grant select on all tables in schema aiq` reaches it, so without
+-- this a caller could list the edge ids and dates of every tenant's
+-- retractions.
+alter table aiq.edge_retractions enable row level security;
+drop policy if exists edge_retractions_via_edge on aiq.edge_retractions;
+create policy edge_retractions_via_edge on aiq.edge_retractions for select
+  using (exists (select 1 from aiq.edges e where e.id = aiq.edge_retractions.edge_id));
 
 -- A resolution inherits from the SURVIVOR only, and the asymmetry is the point.
 -- Gating on both constituents would hide the merge from a caller who can see
@@ -231,6 +240,11 @@ grant execute on function aiq.lookup(text, boolean, int) to authenticated;
 grant execute on function aiq.lookup_many(text[], boolean, int) to authenticated;
 grant execute on function aiq.graph_neighbors(uuid, text, int) to authenticated;
 grant execute on function aiq.graph_walk(uuid, int, text, int) to authenticated;
+-- aiq.edges_current is security_invoker and calls this, so a reader of the
+-- view needs it. Without the grant the view, and every GRAPH query through the
+-- property graph over it, fails for exactly the roles it is granted to.
+grant execute on function aiq.edge_is_current(timestamptz, timestamptz, timestamptz)
+    to authenticated, api_viewer;
 grant execute on function aiq.semantic_in(text, vector, text, int) to authenticated;
 -- semantic_in's one setting, set as the owner because its caller holds no
 -- set_config (schema.sql, above semantic_in). api_viewer has it by membership.

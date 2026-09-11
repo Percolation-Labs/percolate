@@ -12611,12 +12611,39 @@ create index if not exists idx_edges_relation on aiq.edges (relation);
 -- the recall counters above were invisible through this view until it was
 -- recreated, and a function that plainly selected one failed with "column does
 -- not exist".
-create or replace view aiq.edges_current as
+--
+-- ONE RULE FOR "DOES THIS EDGE HOLD AT t", and it is this function. There
+-- were four: this view said `valid_to is null or valid_to > now()`, catalogue,
+-- reliability, standing and the ingestion upsert said `valid_to is null`, the
+-- compiled traversals applied a window only when a caller passed `as_of`, and
+-- graph_neighbors, graph_walk and the property graph applied none -- so a
+-- retracted edge went on answering every walk and every GRAPH query while
+-- this view, the one place anybody looked, correctly hid it (REM-51).
+-- Immutable and SQL, so the planner inlines it and a view that calls it costs
+-- what the predicate written out would.
+create or replace function aiq.edge_is_current(
+    p_valid_from timestamptz, p_valid_to timestamptz, p_at timestamptz)
+returns boolean language sql immutable parallel safe as $$
+    select (p_valid_from is null or p_valid_from <= p_at)
+       and (p_valid_to   is null or p_valid_to   >  p_at)
+$$;
+comment on function aiq.edge_is_current(timestamptz, timestamptz, timestamptz) is
+    'Whether an edge with this validity holds at p_at. The one currency rule: '
+    'every read of "edges that hold" goes through it.';
+
+-- SECURITY INVOKER, and it was not. The view ran as its owner, app_owner owns
+-- aiq.edges, and a table's owner bypasses its policies -- so `authenticated`
+-- reading this view saw every org's edges. Recorded as a hazard in
+-- meta/postmortems/2026-09-08-what-the-move-made-visible.md §2 and left,
+-- because every edge then carried the shared org and no leak could be shown;
+-- the two-tenant sample shows it (15 edges through this view, 14 through the
+-- table, as org A). meta/postmortems/2026-09-11-owner-privileged-views.md.
+create or replace view aiq.edges_current with (security_invoker = true) as
     select id, src_id, dst_id, relation, weight, valid_from, valid_to,
            provenance, org_id, created_at,
            recall_count, probe_count, last_recalled_at
       from aiq.edges
-     where valid_to is null or valid_to > now();
+     where aiq.edge_is_current(valid_from, valid_to, now());
 
 -- Called by a read path with the edges it actually traversed. Not a trigger: a
 -- SELECT does not fire one, and making every read a write would be a worse
@@ -12687,6 +12714,221 @@ grant  update (recall_count, probe_count, last_recalled_at)
 comment on view aiq.edges_current is
     'Edges currently asserted. Read this rather than aiq.edges unless you '
     'specifically want retracted history.';
+
+-- ------------------------------------------------------------
+-- 4b. Belief periods: an edge that was retracted and re-asserted.
+--
+-- Edge identity is (src, dst, relation), so a retraction and the re-assertion
+-- after it land on ONE row, and one row holds one interval. The revival sets
+-- valid_to back to null and keeps the first valid_from, so the retraction
+-- disappears: an as-of read inside it saw the edge as believed throughout
+-- (REM-65; measured with an edge asserted, retracted four days later and
+-- re-asserted five days after that -- an as-of read on day six returned it).
+--
+-- THE ROW STAYS THE CURRENT FACT. What is added is the history a revival
+-- used to overwrite: one row here per retraction that was later undone, the
+-- interval during which the edge did NOT hold. An edge's belief periods are
+-- then its own [valid_from, valid_to) with these holes cut out of it, which
+-- aiq.edge_periods below spells out. Stored as the holes rather than the
+-- periods because almost every edge has none, so the table stays the size of
+-- the event it records rather than the size of the graph, and every existing
+-- reader of aiq.edges -- one row per triple, valid_from meaning "first
+-- asserted" -- is unchanged.
+--
+-- A current read never needs it. Every hole closed at a revival that has
+-- already happened, so "does this hold now" is still aiq.edge_is_current over
+-- the row alone; only an as-of read before now looks here.
+-- ------------------------------------------------------------
+create table if not exists aiq.edge_retractions (
+    edge_id      uuid not null references aiq.edges(id) on delete cascade,
+    retracted_at timestamptz not null,
+    revived_at   timestamptz not null,
+    primary key (edge_id, retracted_at),
+    check (revived_at > retracted_at)
+);
+comment on table aiq.edge_retractions is
+    'Retractions that were later undone: while [retracted_at, revived_at) the '
+    'edge did not hold. Written by trg_record_edge_retraction on every path '
+    'that revives an edge; read through aiq.edge_periods.';
+
+-- A TRIGGER, not a line in each writer. Edges are revived by the ingestion
+-- upsert, the catalogue refresh, the self-model's derivations and pgw's dream,
+-- and each spells the revival `on conflict ... do update set valid_to = null`
+-- in its own words -- the "fixed at the copy that failed" shape waiting to
+-- happen. A trigger is the one place every revival passes through, including
+-- the next writer nobody has written yet.
+--
+-- A retraction undone at the SAME instant is not a hole. A derivation that
+-- retires what it owns and revives what still derives (selfmodel.rederive,
+-- aiq.reconcile_edges) does both in one transaction at one now(), and the
+-- edge held throughout; `o.valid_to < now()` is what tells that apart from a
+-- fact that was genuinely withdrawn for a while.
+--
+-- SECURITY DEFINER because the statement that fires it may be a caller's:
+-- aiq.note_recall() updates aiq.edges as `authenticated`, and a trigger runs
+-- as whoever fired it. The write is the history of rows that caller could
+-- already update, so owner privilege adds reach over nothing but this table.
+create or replace function aiq.record_edge_retraction() returns trigger
+language plpgsql security definer set search_path = pg_catalog, public as $$
+begin
+    insert into aiq.edge_retractions (edge_id, retracted_at, revived_at)
+    select n.id, o.valid_to, now()
+      from new_rows n
+      join old_rows o on o.id = n.id
+     where o.valid_to is not null and n.valid_to is null
+       and o.valid_to < now()
+    on conflict (edge_id, retracted_at) do nothing;
+    return null;
+end $$;
+
+-- Statement-level with transition tables (D6), so a bulk revival is one
+-- INSERT ... SELECT. No column list: PG refuses transition tables on a trigger
+-- that has one, so this fires on the counter updates too and inserts nothing.
+create or replace trigger trg_record_edge_retraction
+    after update on aiq.edges
+    referencing old table as old_rows new table as new_rows
+    for each statement execute function aiq.record_edge_retraction();
+
+-- One row per BELIEF PERIOD. An edge with no undone retraction is its row; one
+-- with k of them is k+1 rows, the holes cut out. `aiq.edge_is_current(
+-- valid_from, valid_to, t)` over this view is the as-of read -- the same rule
+-- a current read applies to aiq.edges, at a different t -- and it is what the
+-- compiled snapshot is built from (graph-algorithms.md §7).
+--
+-- security_invoker for edges_current's reason: the caller's RLS on aiq.edges
+-- decides which edges have periods at all.
+create or replace view aiq.edge_periods with (security_invoker = true) as
+    select e.id as edge_id, e.src_id, e.dst_id, e.relation, e.weight, e.org_id,
+           e.valid_from, e.valid_to, e.provenance
+      from aiq.edges e
+     where not exists (select 1 from aiq.edge_retractions r where r.edge_id = e.id)
+    union all
+    -- the period that ends at each hole, starting where the previous hole ended
+    select e.id, e.src_id, e.dst_id, e.relation, e.weight, e.org_id,
+           coalesce(lag(r.revived_at) over (partition by r.edge_id
+                                            order by r.retracted_at),
+                    e.valid_from),
+           r.retracted_at, e.provenance
+      from aiq.edge_retractions r
+      join aiq.edges e on e.id = r.edge_id
+    union all
+    -- and the period after the last hole, which is the row's own
+    select e.id, e.src_id, e.dst_id, e.relation, e.weight, e.org_id,
+           l.revived_at, e.valid_to, e.provenance
+      from (select distinct on (edge_id) edge_id, revived_at
+              from aiq.edge_retractions
+             order by edge_id, retracted_at desc) l
+      join aiq.edges e on e.id = l.edge_id;
+comment on view aiq.edge_periods is
+    'One row per interval over which an edge was believed. Filter with '
+    'aiq.edge_is_current(valid_from, valid_to, t) for the edges that held at t.';
+
+-- ------------------------------------------------------------
+-- 4c. A derivation withdraws what IT said, and nothing else.
+--
+-- "Retire the derived edges you own, revive the ones that re-derive" was
+-- written three times -- selfmodel.rederive, selfmodel.rederive_decisions and
+-- pgw.land_dream -- and the three disagreed about what "own" means. The
+-- self-model retired by RELATION NAME across the whole database
+-- (`relation = any(v_managed)`, a list that includes `mentions`); pgw retired
+-- by theme within one org. pgw declares `issue mentions issue`, so a
+-- self-model refresh on a database holding both retracted pgw's edges and
+-- never revived them, because it does not derive them (REM-60). A relation
+-- name says what an edge means, not who asserted it. Provenance says who.
+--
+-- OWNERSHIP IS PROVENANCE. An edge belongs to agent A when A wrote it as a
+-- single writer (`provenance.agent`, the self-model's shape) or when A is one
+-- of its sources (`provenance.sources[].agent`, the shape aiq.upsert_graph
+-- writes). graph-index.md §7 then fixes what withdrawing means for an edge
+-- that several writers assert: it is a refcount, not a retraction. A's
+-- entries leave the sources list and the edge stays current on the others'
+-- word; only an edge nobody else asserts is retracted, and it keeps its
+-- provenance, because a retraction with its source stripped off cannot say
+-- whose belief ended.
+--
+-- TWO WAYS TO CALL IT, matching the two idioms already in use:
+--
+--   before re-deriving, p_run null: withdraw everything, then let the
+--   derivation's own inserts revive what still follows. Retire and revive
+--   happen at one now(), so trg_record_edge_retraction records no hole for an
+--   edge that held throughout.
+--
+--   after re-deriving, p_run = the run that just wrote: withdraw what this
+--   agent asserted in any OTHER run. For writers that stamp run_id, which
+--   aiq.upsert_graph does.
+--
+-- p_org and p_relations narrow it further; neither widens it past p_agent.
+-- ------------------------------------------------------------
+create or replace function aiq.retract_derived(
+    p_agent     text,
+    p_org       uuid   default null,
+    p_relations text[] default null,
+    p_run       text   default null
+) returns jsonb language plpgsql
+set search_path = pg_catalog, public as $$
+declare
+    v_now       timestamptz := now();
+    v_mine      jsonb := jsonb_build_array(jsonb_build_object('agent', p_agent));
+    v_this_run  jsonb := jsonb_build_array(jsonb_build_object('agent', p_agent, 'run_id', p_run));
+    v_withdrawn bigint;
+    v_retracted bigint;
+begin
+    if coalesce(p_agent, '') = '' then
+        raise exception 'aiq.retract_derived needs the agent whose edges it withdraws. '
+            'Without one every derived edge is in scope, which is the defect it exists '
+            'to prevent (REM-60).';
+    end if;
+
+    -- 1. Shared edges: take this agent's entries out, leave the edge standing.
+    --    First, so step 2 sees what is left and does not retract an edge
+    --    somebody else still asserts.
+    with shared as (
+        select e.id,
+               (select jsonb_agg(s)
+                  from jsonb_array_elements(e.provenance->'sources') s
+                 where s->>'agent' is distinct from p_agent) as rest
+          from aiq.edges e
+         where aiq.edge_is_current(e.valid_from, e.valid_to, v_now)
+           and (p_org is null or e.org_id = p_org)
+           and (p_relations is null or e.relation = any(p_relations))
+           and e.provenance->'sources' @> v_mine
+           and not (p_run is not null and e.provenance->'sources' @> v_this_run)
+    )
+    update aiq.edges e
+       set provenance = e.provenance || jsonb_build_object('sources', sh.rest)
+      from shared sh
+     where e.id = sh.id and sh.rest is not null;
+    get diagnostics v_withdrawn = row_count;
+
+    -- 2. Edges this agent alone asserts: retract, provenance intact.
+    update aiq.edges e
+       set valid_to = v_now
+     where aiq.edge_is_current(e.valid_from, e.valid_to, v_now)
+       and (p_org is null or e.org_id = p_org)
+       and (p_relations is null or e.relation = any(p_relations))
+       and (e.provenance->>'agent' = p_agent
+            or (e.provenance->'sources' @> v_mine
+                and not exists (select 1 from jsonb_array_elements(e.provenance->'sources') s
+                                 where s->>'agent' is distinct from p_agent)))
+       -- coalesce, not a bare comparison: `provenance->>'run_id'` is NULL on
+       -- every edge written in the sources shape, NULL = 'r1' is NULL, and
+       -- `not (… or NULL)` is NULL -- which a WHERE clause does not satisfy,
+       -- so the edges this argument exists to retract were the ones it
+       -- skipped. Found by dev/tests/query/15 §5; it is the same three-valued
+       -- trap the projection's eviction carries a comment about.
+       and not (p_run is not null
+                and (coalesce(e.provenance->>'run_id', '') = p_run
+                     or e.provenance->'sources' @> v_this_run));
+    get diagnostics v_retracted = row_count;
+
+    return jsonb_build_object('agent', p_agent, 'retracted', v_retracted,
+                              'withdrawn', v_withdrawn);
+end $$;
+comment on function aiq.retract_derived(text, uuid, text[], text) is
+    'Withdraw one agent''s derived edges: its entries leave shared edges, and '
+    'edges it alone asserts are retracted with provenance intact (REM-60).';
+revoke execute on function aiq.retract_derived(text, uuid, text[], text) from public;
+grant  execute on function aiq.retract_derived(text, uuid, text[], text) to worker;
 
 -- Enforce the catalogue, and enforce that both endpoints are real nodes
 -- (the FKs already do the latter; this makes the type-pair check real).
@@ -12769,13 +13011,21 @@ create or replace trigger trg_check_edge_catalogue
 -- `create ... if not exists`, so this is the only idempotent spelling.
 -- A property graph is a declaration over tables and holds no data of its
 -- own, so recreating it costs nothing.
+--
+-- OVER aiq.edges_current, NOT aiq.edges. Declared over the table, every
+-- GRAPH_TABLE match -- graph_neighbors' depth 1 and any caller writing PGQ by
+-- hand -- returned retracted edges, because the graph carried the history and
+-- nothing in a MATCH filters it (REM-51). PG19 accepts a view as an element
+-- table, and the view is security_invoker, so RLS still applies as the caller.
+-- History stays reachable through aiq.edges; "what holds now" is what a graph
+-- someone walks should mean.
 drop property graph if exists aiq.knowledge_graph;
 create property graph aiq.knowledge_graph
     vertex tables (
         aiq.nodes key (id) label node properties (id, entity_type, org_id, summary)
     )
     edge tables (
-        aiq.edges key (id)
+        aiq.edges_current key (id)
             source key (src_id) references nodes (id)
             destination key (dst_id) references nodes (id)
             label related properties (relation, weight, org_id)
@@ -12829,6 +13079,89 @@ alter table aiq.entity_registry
 -- be ambiguous with) and every upgrading database fails on the first
 -- registration. Found by dev/upgrade-converges.sh; the same drop is in front
 -- of content.register_upload for the same reason.
+-- THE PROJECTION, WRITTEN ONCE. The four statements that make aiq.nodes and
+-- aiq.node_keys agree with a registered table, generated from its registry row
+-- over a named row source: `new_rows` (the transition table) for the live
+-- trigger, the source table itself for aiq.rebuild_entity_type.
+--
+-- It was written twice, and the two copies disagreed in the way this file's
+-- own comments kept predicting ("two code paths that must agree, with nothing
+-- forcing them to" -- the `n`/`s` alias mismatch, then visibility_expr). The
+-- third disagreement was statement 4: the trigger deleted a renamed row's
+-- superseded canonical key and the rebuild did not, so a bulk load with the
+-- triggers off followed by a rebuild left the node with two canonical keys and
+-- the old name resolving forever (REM-51). Generating both from here is what
+-- makes a fourth disagreement unwritable.
+--
+-- An array of statements rather than one string, because the rebuild runs
+-- them with EXECUTE, which takes one command at a time.
+create or replace function aiq.projection_statements(
+    r aiq.entity_registry, p_rows text
+) returns text[] language plpgsql stable as $$
+begin
+    return array[
+        -- 1. Rows that belong: upsert identity.
+        -- rbac.org_or_shared() wraps the org expression at every one of the
+        -- sites that writes it, and the wrap is not decoration. aiq.nodes.org_id
+        -- is NOT NULL; org_expr is an expression over a table somebody else
+        -- owns, whose org column is nullable and whose null has always meant
+        -- "shared". Unwrapped, the first shared row a customer projects fails
+        -- the not-null constraint and the failure names our column rather than
+        -- their data.
+        --
+        -- visibility is projected on UPDATE for org_id's reason: the source row
+        -- is the truth, and a node left at the scope it had when it was first
+        -- projected would go on being readable after the row it mirrors
+        -- stopped being.
+        format($q$
+            insert into aiq.nodes (entity_type, entity_id, org_id, summary, visibility)
+            select %1$L, n.id, rbac.org_or_shared(%2$s), %3$s, %4$s from %5$s n where %6$s
+            on conflict (entity_type, entity_id) do update
+                set summary = excluded.summary, org_id = excluded.org_id,
+                    visibility = excluded.visibility, updated_at = now()
+        $q$, r.entity_type, r.org_expr, r.summary_expr, r.visibility_expr,
+             p_rows, r.include_where),
+
+        -- 2. Rows that no longer belong: evict. coalesce(..., false) rather
+        --    than `not (...)` because a predicate that evaluates to NULL is not
+        --    satisfied, and three-valued logic here would put the stale node
+        --    back exactly where it was.
+        format($q$
+            delete from aiq.nodes nd
+            where nd.entity_type = %1$L
+              and nd.entity_id in (select n.id from %2$s n
+                                    where not coalesce((%3$s), false))
+        $q$, r.entity_type, p_rows, r.include_where),
+
+        -- 3. The canonical key. DO UPDATE, not DO NOTHING: org_id scopes the
+        --    canonical-key unique index, so leaving a stale copy on an
+        --    existing key row silently corrupts that scoping after a tenancy
+        --    change.
+        format($q$
+            insert into aiq.node_keys (node_id, entity_type, key, kind, org_id)
+            select nd.id, %1$L, lower(trim(%2$s)), 'canonical', rbac.org_or_shared(%3$s)
+            from %4$s n
+            join aiq.nodes nd on nd.entity_type = %1$L and nd.entity_id = n.id
+            where %5$s
+            on conflict (node_id, key, kind) do update set org_id = excluded.org_id
+        $q$, r.entity_type, r.key_expr, r.org_expr, p_rows, r.include_where),
+
+        -- 4. Superseded canonical keys. Runs AFTER the insert, so a key_expr
+        --    that evaluates to NULL aborts on the not-null constraint above
+        --    rather than deleting the name the node had. Short keys and
+        --    aliases are editorial and are not touched: a rename is not a
+        --    reason to forget that somebody taught the graph a synonym.
+        format($q$
+            delete from aiq.node_keys k
+            using aiq.nodes nd, %3$s n
+            where k.node_id = nd.id
+              and nd.entity_type = %1$L and nd.entity_id = n.id
+              and k.kind = 'canonical'
+              and k.key is distinct from lower(trim(%2$s))
+        $q$, r.entity_type, r.key_expr, p_rows)
+    ];
+end $$;
+
 drop function if exists aiq.register_entity_table(text,text,text,text,text,text);
 
 create or replace function aiq.register_entity_table(
@@ -12860,6 +13193,7 @@ declare
     -- Confirmed by running it: identity for a whole table came back wrong,
     -- with nothing raised anywhere. entity_type is the registry's primary
     -- key, so it is the only name that cannot collide.
+    r       aiq.entity_registry;
     v_ins   text := quote_ident('project_' || p_entity_type || '_ins');
     v_del   text := quote_ident('project_' || p_entity_type || '_del');
     v_other text;
@@ -12941,64 +13275,18 @@ begin
     -- reported the node it had just created), and a rename left the old
     -- canonical key behind, so the previous name went on resolving forever
     -- and the node ended up with two keys each claiming to be the derived one.
+    --
+    -- The statements come from aiq.projection_statements(), the same place
+    -- aiq.rebuild_entity_type() takes them from (REM-51).
+    select * into r from aiq.entity_registry where entity_type = p_entity_type;
     execute format($f$
         create or replace function aiq.%1$s() returns trigger as $b$
         begin
-            -- 1. Rows that belong: upsert identity.
-            -- rbac.org_or_shared() wraps the org expression at every one of
-            -- the four sites that writes it, and the wrap is not decoration.
-            -- aiq.nodes.org_id is NOT NULL; %3$s is an expression over a table
-            -- somebody else owns, whose org column is nullable and whose null
-            -- has always meant "shared". Unwrapped, the first shared row a
-            -- customer projects fails the not-null constraint and the failure
-            -- names our column rather than their data.
-            insert into aiq.nodes (entity_type, entity_id, org_id, summary, visibility)
-            select %2$L, n.id, rbac.org_or_shared(%3$s), %4$s, %7$s from new_rows n where %5$s
-            on conflict (entity_type, entity_id) do update
-                -- visibility is projected on UPDATE for org_id's reason: the
-                -- source row is the truth, and a node left at the scope it had
-                -- when it was first projected would go on being readable after
-                -- the row it mirrors stopped being.
-                set summary = excluded.summary, org_id = excluded.org_id,
-                    visibility = excluded.visibility, updated_at = now();
-
-            -- 2. Rows that no longer belong: evict. coalesce(..., false)
-            --    rather than `not (...)` because a predicate that evaluates to
-            --    NULL is not satisfied, and three-valued logic here would put
-            --    the stale node back exactly where it was.
-            delete from aiq.nodes nd
-            where nd.entity_type = %2$L
-              and nd.entity_id in (select n.id from new_rows n
-                                    where not coalesce((%5$s), false));
-
-            -- 3. The canonical key.
-            insert into aiq.node_keys (node_id, entity_type, key, kind, org_id)
-            select nd.id, %2$L, lower(trim(%6$s)), 'canonical', rbac.org_or_shared(%3$s)
-            from new_rows n
-            join aiq.nodes nd on nd.entity_type = %2$L and nd.entity_id = n.id
-            where %5$s
-            -- DO UPDATE, not DO NOTHING: org_id scopes the canonical-key
-            -- unique index, so leaving a stale copy on an existing key row
-            -- silently corrupts that scoping after a tenancy change.
-            on conflict (node_id, key, kind) do update set org_id = excluded.org_id;
-
-            -- 4. Superseded canonical keys. Runs AFTER the insert, so a
-            --    key_expr that evaluates to NULL aborts on the not-null
-            --    constraint above rather than deleting the name the node had.
-            --    Short keys and aliases are editorial and are not touched:
-            --    a rename is not a reason to forget that somebody taught the
-            --    graph a synonym.
-            delete from aiq.node_keys k
-            using aiq.nodes nd, new_rows n
-            where k.node_id = nd.id
-              and nd.entity_type = %2$L and nd.entity_id = n.id
-              and k.kind = 'canonical'
-              and k.key is distinct from lower(trim(%6$s));
+            %2$s;
             return null;
         end;
         $b$ language plpgsql;
-    $f$, v_ins, p_entity_type, p_org_expr, p_summary_expr, p_include_where,
-        p_key_expr, v_vis);
+    $f$, v_ins, array_to_string(aiq.projection_statements(r, 'new_rows'), E';\n'));
 
     execute format($f$
         create or replace function aiq.%1$s() returns trigger as $b$
@@ -13074,38 +13362,24 @@ returns bigint as $$
 declare
     r aiq.entity_registry;
     v_count bigint;
+    v_stmt text;
 begin
     select * into r from aiq.entity_registry where entity_type = p_entity_type;
     if not found then raise exception 'entity type % not registered -- SCHEMA "graph" lists the registered ones', p_entity_type; end if;
 
-    -- visibility_expr is projected here as well as in the live trigger, and
-    -- the two agreeing is the whole point of both reading the registry row.
-    -- Omitting it here was a real bug for the length of one test run: a rebuild
-    -- left every node at the column default, so the sample graph came back
-    -- `private` and each tenant reported "a tenant cannot see its own node" --
-    -- from a rebuild that had just projected it correctly in every other
-    -- respect. Same class as the `n` / `s` alias mismatch this function
-    -- already carries a scar from: two code paths that must agree, with
-    -- nothing forcing them to.
-    execute format($q$
-        insert into aiq.nodes (entity_type, entity_id, org_id, summary, visibility)
-        select %1$L, n.id, rbac.org_or_shared(%2$s), %3$s, %6$s from %4$s n where %5$s
-        on conflict (entity_type, entity_id) do update
-            set summary = excluded.summary, org_id = excluded.org_id,
-                visibility = excluded.visibility, updated_at = now()
-    $q$, r.entity_type, r.org_expr, r.summary_expr, r.source_table,
-         r.include_where, r.visibility_expr);
+    -- THE LIVE TRIGGER'S STATEMENTS, over the whole table instead of the
+    -- transition table. This function carried its own copy of them and three
+    -- scars from the copies disagreeing: the `n`/`s` alias, visibility_expr
+    -- left at the column default, and -- found by REM-51 -- no statement 4, so
+    -- a rename made while the triggers were off (a bulk load) left the old
+    -- canonical key resolving after the rebuild that was meant to repair it.
+    foreach v_stmt in array aiq.projection_statements(r, r.source_table) loop
+        execute v_stmt;
+    end loop;
 
-    execute format($q$
-        insert into aiq.node_keys (node_id, entity_type, key, kind, org_id)
-        select nd.id, %1$L, lower(trim(%2$s)), 'canonical', rbac.org_or_shared(%3$s)
-        from %4$s n
-        join aiq.nodes nd on nd.entity_type = %1$L and nd.entity_id = n.id
-        where %5$s
-        on conflict (node_id, key, kind) do update set org_id = excluded.org_id
-    $q$, r.entity_type, r.key_expr, r.org_expr, r.source_table, r.include_where);
-
-    -- Evict nodes whose source row is gone or no longer satisfies inclusion.
+    -- The one statement the trigger has no need of: a source row that is GONE.
+    -- Live, the delete trigger removes its node; a bulk load that deleted rows
+    -- with the triggers off leaves nodes pointing at nothing.
     execute format($q$
         delete from aiq.nodes nd
         where nd.entity_type = %1$L
@@ -13326,7 +13600,11 @@ comment on table aiq.node_resolutions is
 -- (a into b, b into c) is legal and a caller asking "what is this now" means c
 -- rather than b. Cycles cannot arise -- resolve_nodes refuses one -- so this
 -- terminates without a depth cap.
-create or replace view aiq.node_current as
+--
+-- SECURITY INVOKER for edges_current's reason: owned by app_owner, which owns
+-- aiq.nodes, it listed every tenant's node ids to any caller (21 rows through
+-- the view, 19 through the table, as org A on the two-tenant sample).
+create or replace view aiq.node_current with (security_invoker = true) as
     with recursive step as (
         select n.id as node_id, n.id as current_id, 0 as hops
           from aiq.nodes n
@@ -13581,7 +13859,7 @@ create or replace function aiq.graph_neighbors(
             columns (a.id as a_id, b.id as b_id, e.relation as relation, e.weight as weight)
         ) g
         join aiq.nodes b on b.id = g.b_id
-        join aiq.edges e on e.src_id = g.a_id and e.dst_id = g.b_id and e.relation = g.relation
+        join aiq.edges_current e on e.src_id = g.a_id and e.dst_id = g.b_id and e.relation = g.relation
         left join lateral (select nk.key from aiq.node_keys nk
                             where nk.node_id = b.id and nk.kind = 'canonical'
                             limit 1) kb on true
@@ -13592,7 +13870,9 @@ create or replace function aiq.graph_neighbors(
         -- catalogue at read time (graph-identity.md "Edge table").
         select a.id, ka.key, a.entity_type, a.summary,
                coalesce(rt.inverse_label, e.relation || '_by'), e.weight, 'in'::text
-        from aiq.edges e
+        -- edges_current on BOTH branches. The reverse half read aiq.edges
+        -- raw, so an inbound edge answered after its retraction (REM-51).
+        from aiq.edges_current e
         join aiq.nodes a on a.id = e.src_id
         join aiq.nodes b2 on b2.id = e.dst_id
         left join aiq.relation_types rt
@@ -13674,7 +13954,9 @@ create or replace function aiq.graph_walk(
         select nx.id, nx.entity_type, nx.summary, w.depth + 1,
                w.rels || e.relation, w.seen || nx.id, (w.score * e.weight)::real
         from walk w
-        join aiq.edges e on (e.src_id = w.id or e.dst_id = w.id)
+        -- What holds now, not the history: this read aiq.edges, so a walk
+        -- went on crossing an edge its derivation had retracted (REM-51).
+        join aiq.edges_current e on (e.src_id = w.id or e.dst_id = w.id)
         join aiq.nodes nx on nx.id = case when e.src_id = w.id then e.dst_id else e.src_id end
         where w.depth < p_depth
           and not nx.id = any(w.seen)          -- cycle guard
@@ -16602,6 +16884,15 @@ drop policy if exists edges_via_endpoints on aiq.edges;
 create policy edges_via_endpoints on aiq.edges for select
   using (exists (select 1 from aiq.nodes s where s.id = aiq.edges.src_id)
      and exists (select 1 from aiq.nodes d where d.id = aiq.edges.dst_id));
+-- An edge's retraction history is visible exactly when the edge is, by the
+-- same inheritance. It carries no org of its own to gate on, and the schema's
+-- blanket `grant select on all tables in schema aiq` reaches it, so without
+-- this a caller could list the edge ids and dates of every tenant's
+-- retractions.
+alter table aiq.edge_retractions enable row level security;
+drop policy if exists edge_retractions_via_edge on aiq.edge_retractions;
+create policy edge_retractions_via_edge on aiq.edge_retractions for select
+  using (exists (select 1 from aiq.edges e where e.id = aiq.edge_retractions.edge_id));
 
 -- A resolution inherits from the SURVIVOR only, and the asymmetry is the point.
 -- Gating on both constituents would hide the merge from a caller who can see
@@ -16713,6 +17004,11 @@ grant execute on function aiq.lookup(text, boolean, int) to authenticated;
 grant execute on function aiq.lookup_many(text[], boolean, int) to authenticated;
 grant execute on function aiq.graph_neighbors(uuid, text, int) to authenticated;
 grant execute on function aiq.graph_walk(uuid, int, text, int) to authenticated;
+-- aiq.edges_current is security_invoker and calls this, so a reader of the
+-- view needs it. Without the grant the view, and every GRAPH query through the
+-- property graph over it, fails for exactly the roles it is granted to.
+grant execute on function aiq.edge_is_current(timestamptz, timestamptz, timestamptz)
+    to authenticated, api_viewer;
 grant execute on function aiq.semantic_in(text, vector, text, int) to authenticated;
 -- semantic_in's one setting, set as the owner because its caller holds no
 -- set_config (schema.sql, above semantic_in). api_viewer has it by membership.
@@ -18514,8 +18810,8 @@ begin
         set weight = excluded.weight, provenance = excluded.provenance,
             valid_to = null;
 
-    select count(*) into n_dep from aiq.edges
-     where relation = 'depends_on' and valid_to is null;
+    select count(*) into n_dep from aiq.edges_current
+     where relation = 'depends_on';
 
     return jsonb_build_object('objects', n_obj, 'depends_on', n_dep);
 end $$;
@@ -18610,11 +18906,15 @@ $$;
 create or replace view aiq.source_reliability with (security_invoker = true) as
 select coalesce(provenance->>'from', provenance->>'kind', 'unknown') as source,
        'edge'::text                                  as channel,
-       count(*) filter (where valid_to is null)      as confirmations,
-       count(*) filter (where valid_to is not null)  as corrections,
-       aiq.reliability(count(*) filter (where valid_to is null),
-                       count(*) filter (where valid_to is not null)) as reliability
-  from aiq.edges
+       count(*) filter (where h)                     as confirmations,
+       count(*) filter (where not h)                 as corrections,
+       aiq.reliability(count(*) filter (where h),
+                       count(*) filter (where not h)) as reliability
+  -- aiq.edge_is_current, the one currency rule (schema.sql), rather than a
+  -- fifth spelling of it. `valid_to is null` scored an edge retracted for a
+  -- future date as a correction today (REM-51).
+  from (select provenance, aiq.edge_is_current(valid_from, valid_to, now()) as h
+          from aiq.edges) e
  group by 1
 having count(*) > 0;
 
@@ -18698,7 +18998,8 @@ select e.id, e.relation,
        e.weight, e.recall_count, e.probe_count,
        e.valid_from::date as asserted, e.last_recalled_at,
        case
-           when e.valid_to is not null                    then 'retracted'
+           when not aiq.edge_is_current(e.valid_from, e.valid_to, now())
+                                                          then 'retracted'
            when e.recall_count = 0 and e.probe_count > 0  then 'only ever probed'
            when e.recall_count = 0                        then 'never used'
            else 'load-bearing' end as standing
@@ -19967,8 +20268,16 @@ select rbac.add_scope_columns('content.resources', 'public');
 
 -- AND NOW resolve_file, which needs the three columns the line above adds.
 -- Its home is here for that reason; schema.sql carries the pointer.
+--
+-- `checksum` is appended LAST, and the drop is what lets it be: a changed
+-- return type cannot be `create or replace`d. It is there so
+-- workflow.v_artifacts can take its file columns from here instead of reading
+-- content.files, which no end-user role may be granted (§ below); callers that
+-- select by name, like percolate-core's content server, are unaffected.
+drop function if exists content.resolve_file(uuid);
 create or replace function content.resolve_file(p_resource_id uuid)
-returns table(bucket text, object_key text, content_type text, size_bytes bigint) as $$
+returns table(bucket text, object_key text, content_type text, size_bytes bigint,
+              checksum text) as $$
     -- may_read, NOT may_access_org. The org rule answers "may this person
     -- touch this tenant"; it says nothing about the ROW, so a resource marked
     -- `private` was served to anybody who could reach its org -- and on the
@@ -19979,7 +20288,7 @@ returns table(bucket text, object_key text, content_type text, size_bytes bigint
     --
     -- Found by the self-model: content.resources is central (16 dependants),
     -- has broken twice, and this is the gap the graph pointed at.
-    select f.bucket, f.object_key, f.content_type, f.size_bytes
+    select f.bucket, f.object_key, f.content_type, f.size_bytes, f.checksum
     from content.resources r
     join content.files f on f.id = r.file_id
     where r.id = p_resource_id
@@ -20348,6 +20657,16 @@ $$ language plpgsql stable;
 
 -- Both directions of the link, as one join, so "what did this run produce" and
 -- "which step produced this file" are the same query read from either end.
+--
+-- DROPPED AND RECREATED, owned by api_viewer. It was owned by app_owner, the
+-- owner of workflow.tasks and content.resources, so it bypassed both tables'
+-- policies and joined every tenant's runs to every tenant's files for any
+-- signed-in reader. Owned by api_viewer the policies apply; and the file
+-- columns now come from content.resolve_file(), because api_viewer may not
+-- read content.files (the invariant below) and resolve_file is the scoped
+-- door to it. Recreated rather than replaced because its query changed shape,
+-- and nothing depends on it.
+drop view if exists workflow.v_artifacts;
 create or replace view workflow.v_artifacts as
 select t.run_id,
        t.id             as task_id,
@@ -20364,7 +20683,7 @@ select t.run_id,
 from workflow.tasks t
 join content.resources r
   on r.id = workflow.artifact_ref(t.output)
-left join content.files f on f.id = r.file_id;
+left join lateral content.resolve_file(r.id) f on true;
 
 -- WORKER ONLY. It was granted to `authenticated` too, and it takes any task id
 -- and asks nothing about whose run that task is in: the resource it registers
@@ -20382,6 +20701,15 @@ grant execute on function workflow.register_artifact(uuid,text,text,text,bigint,
 revoke execute on function workflow.register_artifact(uuid,text,text,text,bigint,text,text,uuid)
     from authenticated;
 grant execute on function workflow.artifact(uuid) to worker, authenticated;
+-- OWNED BY api_viewer (specs/README.md, "What it takes, concretely"); the
+-- view's header says why. It reads tasks and resources, resolves the rest
+-- through two functions, and needs exactly those.
+grant select on workflow.tasks, content.resources to api_viewer;
+grant execute on function workflow.artifact_ref(jsonb), content.resolve_file(uuid)
+    to api_viewer;
+grant create on schema workflow to api_viewer;
+alter view workflow.v_artifacts owner to api_viewer;
+revoke create on schema workflow from api_viewer;
 grant select on workflow.v_artifacts to authenticated;
 
 -- Registered so a downstream step can be handed an artifact by id and resolve
@@ -22697,6 +23025,12 @@ alter view agentic.tool_servers_api owner to api_viewer;
 alter view agentic.agents_api       owner to api_viewer;
 alter view agentic.skills_api       owner to api_viewer;
 alter view agentic.plugins_api      owner to api_viewer;
+-- agents_pickable too, and it was not: owned by app_owner, which owns
+-- agentic.agents, it bypassed agents_scoped and listed every tenant's private
+-- and org agents to every signed-in user. The column list keeps system_prompt
+-- out; only the owner decides which rows. meta/postmortems/
+-- 2026-09-11-owner-privileged-views.md.
+alter view agentic.agents_pickable  owner to api_viewer;
 revoke create on schema agentic from api_viewer;
 
 grant select on agentic.sessions_api, agentic.runs_api, agentic.messages_api,
@@ -22908,6 +23242,18 @@ as $$
                 'version', version, 'requires_tools', to_jsonb(requires_tools))))
               from agentic.skills), '{}'::jsonb));
 $$;
+
+-- OWNED BY api_viewer, so the policies apply to whoever reads them. The
+-- header above says "nothing here can show a caller a row it could not
+-- select directly" because agents and tool_servers carried `using (true)`
+-- policies; they now carry scope policies, and a view owned by app_owner (the
+-- tables' owner) skips those -- so v_plan_agents handed every tenant's private
+-- agents, system_prompt included, to any signed-in caller of plan_facet().
+-- The ownership is what makes the header's sentence true again.
+grant create on schema agentic to api_viewer;
+alter view agentic.v_plan_agents  owner to api_viewer;
+alter view agentic.v_plan_servers owner to api_viewer;
+revoke create on schema agentic from api_viewer;
 
 grant select on agentic.v_plan_agents, agentic.v_plan_servers to authenticated;
 grant execute on function agentic.plan_facet() to authenticated;
@@ -23923,7 +24269,16 @@ begin
                 'attrs',       nullif(v_e->'a','{}'::jsonb),
                 'at',          to_char(now(),'YYYY-MM-DD"T"HH24:MI:SSOF')))));
 
-        select count(*), count(*) filter (where valid_to is not null)
+        -- A REVIVAL is an edge that was NOT CURRENT when this upsert arrived,
+        -- through aiq.edge_is_current rather than a fifth spelling of it. Note
+        -- that this counts an edge retracted earlier in this same transaction,
+        -- which trg_record_edge_retraction deliberately does not record as a
+        -- hole: the receipt reports the state the upsert found, and the hole
+        -- records a period during which nobody believed the edge. A derivation
+        -- that retires and revives at one now() produces the first and not the
+        -- second, and both readings are right for what they are for.
+        select count(*),
+               count(*) filter (where not aiq.edge_is_current(valid_from, valid_to, now()))
           into v_before, v_retracted
           from aiq.edges
          where src_id = v_ids[v_s+1] and dst_id = v_ids[v_t+1] and relation = v_rel;
@@ -26197,6 +26552,12 @@ declare
         'agentic.tool_servers',
         'aiq.db_objects',
         'aiq.edges',
+        -- Which of an edge's retractions were later undone, so an as-of read
+        -- knows the periods nobody believed it. Deployment data by the same
+        -- argument as aiq.edges itself, and losing it in a restore does not
+        -- lose an edge: it silently makes every past as-of answer about that
+        -- edge wrong, in the confident direction.
+        'aiq.edge_retractions',
         'aiq.embedding_models',
         'aiq.lake_nodes',
         'aiq.node_keys',
