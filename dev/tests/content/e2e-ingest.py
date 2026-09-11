@@ -113,7 +113,7 @@ async def wait_for_runs(conn, run_ids: list[str], seconds: int = 240) -> dict[st
             "select id::text, status from workflow.runs where id = any($1::uuid[])",
             run_ids)
         status = {r["id"]: r["status"] for r in rows}
-        if all(s in ("completed", "failed", "cancelled") for s in status.values()):
+        if all(s in ("succeeded", "failed", "cancelled") for s in status.values()):
             return status
         await asyncio.sleep(2)
     return status
@@ -135,7 +135,7 @@ async def ask(conn, question: str, seconds: int = 120) -> tuple[str, list[dict]]
     ctx = await conn.fetchval("select context::text from workflow.runs where id = $1::uuid",
                               run_id)
     ctx = as_json(ctx)
-    if status.get(run_id) != "completed":
+    if status.get(run_id) != "succeeded":
         return f"<run {status.get(run_id)}: {await failure_detail(conn, run_id)}>", []
     rows = (ctx.get("retrieve") or {}).get("result", {}).get("rows", [])
     return (ctx.get("answer") or {}).get("result", ""), rows
@@ -228,7 +228,7 @@ async def main() -> int:
 
         print("\n=== ingestion ===", flush=True)
         status = await wait_for_runs(admin, run_ids)
-        bad = [rid for rid, s in status.items() if s != "completed"]
+        bad = [rid for rid, s in status.items() if s != "succeeded"]
         for rid in bad:
             print(f"    run {rid}: {status[rid]} -- {await failure_detail(admin, rid)}")
         check(not bad, "every ingestion run completed", f"{len(status)} runs")
