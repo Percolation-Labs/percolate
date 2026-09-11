@@ -110,6 +110,17 @@ create extension if not exists pg_cron;
 set role app_owner;
 create extension percolate cascade;
 reset role;
+
+-- THE CLOCK'S HISTORY STARTS HERE. The image scheduled the tick at initdb, so
+-- pg_cron was firing every minute while the lines above dropped and recreated
+-- the extension, and a tick that lands in that gap fails: "could not open
+-- relation with OID 17182 / compilation of PL/pgSQL function tick", measured
+-- at 20:57:00.35 on 2026-09-11 against an install that finished at
+-- 20:57:01.16, with every tick after it succeeding. workflow/03 counts the
+-- tick's failures over the last 15 minutes, so each build turned the suite red
+-- for a quarter of an hour. Runs from before this install are not about this
+-- build; the test's window stays as it is.
+delete from cron.job_run_details;
 SQL
 
 for f in dev/init/0[2-9]-*.sql; do
