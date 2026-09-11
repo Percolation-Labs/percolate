@@ -41,11 +41,11 @@ select coalesce((aiq_parse('LAKE FROM x select 1')->>'ok')::boolean, false) as l
 \if :lake_parser
 do $$ declare p jsonb; begin
  p := aiq_parse($q$LAKE FROM l06_sales, l06_sites select region, count(*) from l06_sales where region <> 'O''Neil, Ltd' group by 1$q$);
- if p->>'mode' <> 'LAKE' or p->'sources' <> '["l06_sales","l06_sites"]'::jsonb then
+ if p->>'mode' is distinct from 'LAKE' or p->'sources' is distinct from '["l06_sales","l06_sites"]'::jsonb then
   raise exception 'LAKE did not parse into its dataset list: %', p; end if;
- if p->>'arg' <> $q$select region, count(*) from l06_sales where region <> 'O''Neil, Ltd' group by 1$q$ then
+ if p->>'arg' is distinct from $q$select region, count(*) from l06_sales where region <> 'O''Neil, Ltd' group by 1$q$ then
   raise exception 'the LAKE statement was changed on the way through: %', p->>'arg'; end if;
- if (p->>'limit')::int <> 1000 then raise exception 'the row cap is not in the plan: %', p; end if;
+ if (p->>'limit')::int is distinct from 1000 then raise exception 'the row cap is not in the plan: %', p; end if;
 end $$;
 \endif
 
@@ -57,14 +57,14 @@ set local request.jwt.claims = '{"sub":"a1a1a1a1-0000-4000-8000-00000000a116"}';
 \if :lake_parser
 do $$ declare r jsonb; begin
  r := aiq.query('LAKE FROM l06_sales, l06_payroll, l06_nothing select * from l06_sales');
- if r->>'mode' <> 'LAKE' or (r->>'executed')::boolean then raise exception 'not a LAKE plan: %', r; end if;
- if jsonb_array_length(r->'datasets') <> 1 or r->'datasets'->0->>'name' <> 'l06_sales' then
+ if r->>'mode' is distinct from 'LAKE' or (r->>'executed')::boolean is distinct from false then raise exception 'not a LAKE plan: %', r; end if;
+ if jsonb_array_length(r->'datasets') is distinct from 1 or r->'datasets'->0->>'name' is distinct from 'l06_sales' then
   raise exception 'Alice''s plan resolved the wrong datasets: %', r->'datasets'; end if;
- if r->'unresolved' <> '["l06_payroll","l06_nothing"]'::jsonb then
+ if r->'unresolved' is distinct from '["l06_payroll","l06_nothing"]'::jsonb then
   raise exception 'another tenant''s dataset and a missing one must both be unresolved, alike: %', r->'unresolved'; end if;
  if r->'datasets'->0 ? 'bucket' or r->'datasets'->0 ? 'prefix' then
   raise exception 'a plan must not carry storage locations: %', r->'datasets'->0; end if;
- if r->'rows' <> '[]'::jsonb then raise exception 'Postgres executed a LAKE query'; end if;
+ if r->'rows' is distinct from '[]'::jsonb then raise exception 'Postgres executed a LAKE query'; end if;
 end $$;
 \endif
 
@@ -78,14 +78,14 @@ do $$ declare a jsonb; b jsonb; begin
   raise exception 'SCHEMA "lake" showed Alice another tenant''s dataset'; end if;
  perform set_config('request.jwt.claims', '{"sub":"b0b0b0b0-0000-4000-8000-0000000000b6"}', true);
  b := aiq.query('SCHEMA "lake" FROM l06')->'schema'->'doc'->'datasets';
- if (select array_agg(d->>'name') from jsonb_array_elements(b->'datasets') d) <> array['l06_payroll'] then
+ if (select array_agg(d->>'name') from jsonb_array_elements(b->'datasets') d) is distinct from array['l06_payroll'] then
   raise exception 'Bob''s SCHEMA "lake" FROM l06 should be his one dataset: %', b; end if;
 end $$;
 
 -- §4. dataset_uri refuses to hand an Iceberg table out as a glob.
 set local request.jwt.claims = '{"sub":"a1a1a1a1-0000-4000-8000-00000000a116"}';
 do $$ begin
- if content.dataset_uri('l06_sites') <> 'iceberg:o_a0000000000040008000000000000a6.l06_sites' then
+ if content.dataset_uri('l06_sites') is distinct from 'iceberg:o_a0000000000040008000000000000a6.l06_sites' then
   raise exception 'dataset_uri of an iceberg dataset: %', content.dataset_uri('l06_sites'); end if;
 end $$;
 
@@ -109,7 +109,7 @@ steps:
 $y$)->'workflow'->'spec'->'steps'->0;
  if sugar is distinct from by_hand then
   raise exception 'LAKE sugar and the hand-written step differ: % vs %', sugar, by_hand; end if;
- if sugar->>'kind' <> 'work' or sugar->>'queue' <> 'lake' then
+ if sugar->>'kind' is distinct from 'work' or sugar->>'queue' is distinct from 'lake' then
   raise exception 'a LAKE step must be lake work: %', sugar; end if;
  -- A non-LAKE p8ql step is untouched: still in-database.
  if p8_compile_workflow($y$
@@ -117,7 +117,7 @@ name: l06b
 steps:
   - id: q
     p8ql: 'LOOKUP "acme"'
-$y$)->'workflow'->'spec'->'steps'->0->>'kind' <> 'sql' then
+$y$)->'workflow'->'spec'->'steps'->0->>'kind' is distinct from 'sql' then
   raise exception 'an ordinary p8ql step stopped compiling to sql'; end if;
  bad := p8_compile_workflow($y$
 name: l06c
@@ -125,7 +125,7 @@ steps:
   - id: q
     p8ql: 'LAKE FROM l06_sales select * from l06_sales where region = ''{{run.region}}'''
 $y$);
- if (bad->>'ok')::boolean or bad->>'error' not like '%cannot carry a {{template}}%' then
+ if (bad->>'ok')::boolean is distinct from false or coalesce(bad->>'error', '') not like '%cannot carry a {{template}}%' then
   raise exception 'a template in a LAKE query must be refused at compile: %', bad; end if;
 end $$;
 
