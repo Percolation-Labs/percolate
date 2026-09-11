@@ -147,14 +147,23 @@ async def as_caller(claims: Mapping[str, Any] | None, role: str = ROLE):
     Depending on the DSN's user being the right one makes this seam's safety a
     property of somebody's connection string. ``specs/README.md`` calls that
     exact configuration out as the way RLS silently does nothing.
+
+    **Claims first, then the role**, and the order is the point. ``set_config``
+    is not executable by ``authenticated``, ``web_anon`` or ``api_viewer``
+    (``user-rbac/roles.sql``): while it was, any signed-in user could write
+    somebody else's ``sub`` into ``request.jwt.claims`` from inside
+    ``aiq.sql_passthrough`` and read as them. So the claims are written while
+    the connection is still its login role (``authenticator`` here, ``worker``
+    for the worker), and only then does the transaction become the caller.
+    That is the order PostgREST uses; the reverse is a permission error.
     """
     p = await pool()
     async with p.acquire() as conn, conn.transaction():
-        await conn.execute(f"set local role {role}")
         await conn.execute(
             "select set_config('request.jwt.claims', $1, true)",
             json.dumps(dict(claims)) if claims else "{}",
         )
+        await conn.execute(f"set local role {role}")
         yield conn
 
 

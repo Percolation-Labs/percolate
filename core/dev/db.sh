@@ -53,6 +53,16 @@ up)
                     grant app_owner to p8; grant worker to p8;
                     grant create on database $DB to app_owner;
                     grant create, usage on schema public to app_owner;"
+  # set_config closed to the roles a person can become, in THIS database:
+  # function ACLs live in each database's pg_proc, and this path loads spec
+  # files one by one, so it never runs the preflight the extension's generated
+  # script carries. While PUBLIC could call it, any signed-in user could write
+  # someone else's `sub` into request.jwt.claims and read as them. Repeated
+  # from user-rbac/roles.sql so a specs checkout from before 2026-09-11 is
+  # closed too; both statements are idempotent.
+  psql_super -q -c "revoke execute on function pg_catalog.set_config(text, text, boolean) from public;
+                    grant execute on function pg_catalog.set_config(text, text, boolean)
+                        to authenticator, app_owner, worker, scheduler;"
 
   echo "==> 2/6 workflow-engine/schema.sql (as app_owner)"
   load "$SPECS/workflow-engine/schema.sql" -c "set role app_owner;"

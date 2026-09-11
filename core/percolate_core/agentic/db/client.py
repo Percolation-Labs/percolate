@@ -102,12 +102,16 @@ class PgClient:
         autocommit per event. Four statements and a transaction become one
         statement. asyncpg resets session state when the connection returns to
         the pool, which is what makes the session-level ``set role`` safe.
+
+        Claims while the connection is still ``authenticator``, THEN the role,
+        because ``authenticated`` may not call ``set_config`` (see
+        ``core.identity.as_caller``).
         """
         pool = self._require()
         async with pool.acquire() as conn:
-            await conn.execute(f"set role {identity.ROLE}")
             claims = json.dumps({"sub": str(user_id)}) if user_id else "{}"
             await conn.execute("select set_config('request.jwt.claims', $1, false)", claims)
+            await conn.execute(f"set role {identity.ROLE}")
 
             async def publish(channel: str, payload: str) -> None:
                 await conn.execute("select pg_notify($1, $2)", channel, payload)
