@@ -82,3 +82,45 @@ def resolve(value: Any, ctx: dict) -> Any:
         return found if isinstance(found, str) else json.dumps(found)
 
     return TEMPLATE.sub(sub, value)
+
+
+# A fan-out child's own row, kept verbatim beside the substituted input
+# (workflow-engine §20a-bis). It is DATA -- whatever was in the table or the
+# uploaded document -- and is never a template.
+ROW_KEYS = ("item", "items", "batch", "braces")
+
+
+def restore_braces(value: Any, sentinel: str) -> Any:
+    if isinstance(value, dict):
+        return {k: restore_braces(v, sentinel) for k, v in value.items()}
+    if isinstance(value, list):
+        return [restore_braces(v, sentinel) for v in value]
+    if isinstance(value, str):
+        return value.replace(sentinel, "{")
+    return value
+
+
+def resolve_task(spec: dict, ctx: dict) -> dict:
+    """Resolve a task's input in ONE pass over what its author wrote.
+
+    A matrix child's input already carries its row's text, substituted by the
+    database at expansion. Resolving that text again is how a transcript that
+    quoted a workflow failed with `template {{env.LLM_URL}} resolved to
+    nothing` -- and how `{{env.<secret>}}` in an uploaded document would have
+    been sent to a model provider. So:
+
+      * the database escapes every `{` in row text with a per-child sentinel,
+        recorded as `braces`, and nothing in row text can open a template;
+      * the row snapshot (`item`, `items`, `batch`) is not resolved at all;
+      * after the one pass, the sentinel becomes `{` again, so the request
+        carries the row's text exactly.
+
+    An older database sends no sentinel and its row text is not escaped; an
+    older worker sends the sentinel instead of `{`. Both halves are needed.
+    """
+    if not isinstance(spec, dict):
+        return resolve(spec, ctx)
+    sentinel = spec.get("braces") if isinstance(spec.get("braces"), str) else None
+    out = {k: (v if k in ROW_KEYS else resolve(v, ctx)) for k, v in spec.items()}
+    out.pop("braces", None)
+    return restore_braces(out, sentinel) if sentinel else out
