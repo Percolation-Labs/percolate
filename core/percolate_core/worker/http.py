@@ -26,13 +26,13 @@ from typing import Any
 import httpx
 
 from ..core import credential
-from .templates import TerminalError, dig, resolve
+from .templates import TerminalError, dig, resolve_task
 from .agent_auth import agent_authorization
 
 
 def build_request(spec: dict, ctx: dict) -> tuple[dict, dict]:
     original = spec
-    spec = resolve(spec, ctx)
+    spec = resolve_task(spec, ctx)
     if not spec.get("url"):
         raise TerminalError("http_call task has no 'url'")
 
@@ -64,6 +64,21 @@ def build_request(spec: dict, ctx: dict) -> tuple[dict, dict]:
     }, spec
 
 
+# The error codes OpenAI-shaped APIs use for an account out of credit, as
+# opposed to a request rate that is too high (`rate_limit_exceeded`).
+QUOTA_CODES = {"insufficient_quota", "credit_balance_exhausted"}
+
+
+def quota_exhausted(r: httpx.Response) -> bool:
+    try:
+        err = r.json().get("error") or {}
+    except Exception:
+        return False
+    if not isinstance(err, dict):
+        return False
+    return bool({err.get("type"), err.get("code")} & QUOTA_CODES)
+
+
 async def http_call(spec: dict, ctx: dict) -> Any:
     req, spec = build_request(spec, ctx)
 
@@ -87,6 +102,14 @@ async def http_call(spec: dict, ctx: dict) -> Any:
         if 400 <= r.status_code < 500 and r.status_code not in (408, 429):
             raise TerminalError(
                 f"HTTP {r.status_code} (client error, not retryable): {detail}")
+        # A 429 that says the ACCOUNT has no credit is not a rate limit, and
+        # waiting does not fix it. Retried as one, 797 extraction tasks each
+        # queued five attempts against an account that could not succeed
+        # (dogfood backfill, 2026-09-11). Read from the provider's own error
+        # field, not from the message text.
+        if r.status_code == 429 and quota_exhausted(r):
+            raise TerminalError(
+                f"HTTP 429 (the provider account has no quota left; retrying will not help): {detail}")
         raise RuntimeError(f"HTTP {r.status_code}: {detail}")
 
     try:

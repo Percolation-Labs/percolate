@@ -36,7 +36,7 @@ from ..core import as_service
 from .artifacts import offload
 from .http import http_call
 from .agent_auth import uses_run_identity
-from .templates import TerminalError, resolve
+from .templates import TerminalError, resolve_task
 
 PERMANENT_DB_ERRORS = (
     # 23xxx -- unique, foreign key, check, not-null. The row is wrong.
@@ -113,7 +113,7 @@ async def run_once(queue: str, worker_id: str) -> bool:
         # an already-resolved value would turn that data into a missing
         # reference. One pass, at the layer that owns the shape.
         if kind == "work":
-            spec = resolve(spec, ctx)
+            spec = resolve_task(spec, ctx)
 
         ctx["_task_id"] = task_id
         ctx["_worker_id"] = worker_id
