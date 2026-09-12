@@ -189,7 +189,15 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with: {name: dist, path: dist/}
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      # PINNED BY COMMIT, not by `@release/v1`, and this is the one step in
+      # this repository where that distinction can cost something: a branch ref
+      # is "whatever that branch points at when the runner fetches it", and
+      # this job holds `id-token: write` -- the OIDC credential that publishes
+      # to PyPI as this project. A tag can be moved and a branch moves by
+      # design, so the only ref that names one reviewed tree is the SHA.
+      # Dependabot raises the bump as a PR (.github/dependabot.yml), so the pin
+      # is maintained rather than frozen.
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33   # v1.14.2
 
   # -------------------------------------------------------------------------
   # 4. The image, both architectures.
