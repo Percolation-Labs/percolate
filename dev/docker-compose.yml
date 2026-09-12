@@ -266,6 +266,27 @@ services:
   # Opt-in workbench: `dev/stacks.sh ui`. Published dependencies, working-tree
   # Python code; the Docker network preserves the seeded tool-server URLs.
   # Neither process gets a privileged DB login, and the UI gets no provider key.
+  #
+  # THIS ONE STAYS BEHIND THE PROFILE, and the gate has its own. `agent` was
+  # listed as the thing REM-10 should switch on -- "a service no gate starts is
+  # a check that was correct and was never invoked" -- and taking the profile
+  # off it would not have worked, for a reason that is visible two lines below:
+  # it mounts `../percolate-core/percolate_core` over `/src`. That path is a
+  # gitignored symlink into a sibling working tree. A CI checkout does not have
+  # it, docker would create an empty directory there, and `import
+  # percolate_core` would find the empty one first -- so the gate would start a
+  # runtime with no code in it and report whatever that does.
+  #
+  # The mount is the POINT of this service: it is the workbench, and editing
+  # `percolate_core/agentic/` and reloading the browser is what it is for. A
+  # service that is both the working-tree workbench and the CI gate would have
+  # to stop being one of them.
+  #
+  # So the gate starts its own, in `dev/tests/drive/agent-turn.sh`: the same
+  # image, no mount, attached to the database container's own network namespace
+  # -- which means it needs no compose stack, no published port and no sibling
+  # checkout, and `dev/ci-database.sh` builds exactly the bare container it
+  # wants. `dev/tests/agentic/06-a-turn.sql` is what asks for it.
   agent:
     profiles: [ui]
     image: *core-image

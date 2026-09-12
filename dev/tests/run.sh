@@ -152,6 +152,62 @@ stage_loads() {
     fi
 }
 
+# A FILE MAY ASK FOR A LIVE SERVICE, with `-- requires-service: <name>` on its
+# first lines -- the THIRD skip axis, and the first one that is not about the
+# database. `-- requires:` asks for a Postgres extension and `-- requires-parser:`
+# for a compiled version; neither can say "this needs a process running", and
+# one file needs to: agentic/06 drives a real turn over HTTP.
+#
+# POLARITY LIKE `-- requires:`, NOT LIKE `-- requires-parser:`. A missing
+# service is a skip locally and a FAILURE under REQUIRE_ALL, because the gate
+# can start one -- `dev/tests/drive/agent-turn.sh` runs the runtime in the
+# database container's own network namespace, needing no compose stack and no
+# published port. So in CI "the service was not there" is a broken gate rather
+# than an absent machine.
+#
+# NAMED WHEN SKIPPED, like every other skip here, and for the reason this file
+# already gives: a skip is a guarantee nobody checked.
+service_present() {   # service_present <name>
+    case "$1" in
+        agent)
+            # ASK THE SERVICE, not docker. A container that is `Up` and
+            # answering nothing is the exact failure get-percolate's compose
+            # records -- `agent serve` bound the container's own loopback,
+            # reported healthy, and served nothing on the published port.
+            docker exec "${AGENT_CONTAINER:-$CONTAINER-agent}" python -c "
+import urllib.request, sys
+try: urllib.request.urlopen('http://127.0.0.1:8080/_build', timeout=2)
+except Exception: sys.exit(1)" >/dev/null 2>&1 ;;
+        *) return 1 ;;
+    esac
+}
+
+# STARTING IT IS THE DRIVER'S JOB, not this file's, and the split is deliberate:
+# the driver already has to know the image, the DSN and the secret to drive a
+# turn, and a second copy of that here is the class of defect REM-56 is about.
+# This only decides whether a file runs.
+service_can_start() {  # service_can_start <name>
+    case "$1" in
+        agent) [ -z "$DSN" ] && command -v docker >/dev/null 2>&1 ;;
+        *) return 1 ;;
+    esac
+}
+
+# A FILE MAY ASK FOR SOMETHING TO BE DRIVEN FIRST, with `-- drives: <name>`,
+# which runs `drive/<name>.sh` and leaves its result in a table the file reads.
+# The same division as `-- loads:`: the shell does what SQL cannot, and the
+# assertions stay SQL. A driver writes evidence, never a verdict -- deciding
+# what the evidence means is the test's job and belongs in the file a reader
+# opens when it goes red.
+stage_drives() {
+    local f="$1" name
+    name=$(sed -n 's/^-- drives:[[:space:]]*//p' "$f" | head -1)
+    [ -n "$name" ] || return 0
+    local drv="$HERE/drive/$name.sh"
+    [ -x "$drv" ] || { echo "-- drives: names no such driver: tests/drive/$name.sh" >&2; return 1; }
+    CONTAINER="$CONTAINER" DB="$DB" "$drv"
+}
+
 # WHAT IS UNDER TEST, before anything is asserted about it.
 #
 # This banner exists because a run of this suite once failed on two parser bugs
@@ -261,6 +317,10 @@ skipped=0
 skipped_names=""
 deferred=0
 deferred_names=""
+core_deferred=0
+core_names=""
+svc_skipped=0
+svc_names=""
 for surface in ${SURFACES[@]}; do
     [ -d "$HERE/$surface" ] || { echo "no such surface: $surface" >&2; exit 2; }
     echo
@@ -303,6 +363,30 @@ for surface in ${SURFACES[@]}; do
             fi
             continue
         fi
+        # THE SERVICE AXIS, checked before anything is staged: staging for a
+        # file that is about to be skipped is work thrown away, and a driver
+        # that starts a container for a skipped file leaves one behind.
+        svc=$(sed -n 's/^-- requires-service:[[:space:]]*//p' "$f" | head -1)
+        if [ -n "$svc" ] && ! service_present "$svc" && ! service_can_start "$svc"; then
+            if [ -n "${REQUIRE_ALL:-}" ]; then
+                echo "FAILED"
+                echo "      needs the $svc service, which is not running and cannot be"
+                echo "      started here, and REQUIRE_ALL is set. In CI this gate starts"
+                echo "      its own: see dev/tests/drive/agent-turn.sh."
+                failed=1
+            else
+                echo "skipped (needs the $svc service)"
+                svc_skipped=$((svc_skipped + 1))
+                svc_names="$svc_names $surface/$(basename "$f")"
+            fi
+            continue
+        fi
+        if ! out=$(stage_drives "$f" 2>&1); then
+            echo "FAILED"
+            echo "$out" | sed 's/^/      /'
+            failed=1
+            continue
+        fi
         if ! out=$(stage_loads "$f" 2>&1); then
             echo "FAILED"
             echo "$out" | sed 's/^/      /'
@@ -314,6 +398,18 @@ for surface in ${SURFACES[@]}; do
             # -- defers the compiled ones one at a time rather than standing
             # down whole. It says so with a notice beginning DEFERRED:, and the
             # count below is what keeps that from being an invisible skip.
+            # THE CORE AXIS'S OWN MARKER, counted separately from the
+            # parser's. Both are "a guarantee nobody checked, with a stated
+            # condition for checking it", but they are bounded by different
+            # facts -- the parser one by pg_extension, this one by the
+            # percolate-core pin -- and folding them together would let a
+            # parser that has caught up clear a core deferral it says nothing
+            # about. Named in the summary either way.
+            n_core=$(printf '%s\n' "$out" | grep -c '^NOTICE:  CORE-DEFERRED:' || true)
+            if [ "${n_core:-0}" -gt 0 ]; then
+                core_deferred=$((core_deferred + n_core))
+                core_names="$core_names $surface/$(basename "$f")"
+            fi
             n_def=$(printf '%s\n' "$out" | grep -c '^NOTICE:  DEFERRED:' || true)
             if [ "${n_def:-0}" -gt 0 ] && ! parser_behind; then
                 echo "FAILED"
@@ -326,6 +422,8 @@ for surface in ${SURFACES[@]}; do
                 echo "ok ($n_def deferred)"
                 deferred=$((deferred + n_def))
                 deferred_names="$deferred_names $surface/$(basename "$f")"
+            elif [ "${n_core:-0}" -gt 0 ]; then
+                echo "ok ($n_core deferred to a newer core)"
             else
                 echo "ok"
             fi
@@ -345,6 +443,24 @@ if [ "$skipped" -ne 0 ]; then
     # reports green for something it never looked at.
     echo "$skipped file(s) skipped for a missing extension:$skipped_names"
     echo "  (REQUIRE_ALL=1 makes this a failure -- dev/check.sh sets it where the database has pg_cron)"
+fi
+if [ "$svc_skipped" -ne 0 ]; then
+    # Counted apart from the extension skips above, because the summary line
+    # for those names a cause -- "for a missing extension" -- that is not this
+    # one, and a skip reported under the wrong reason sends the reader to the
+    # wrong fix.
+    echo "$svc_skipped file(s) skipped for a service that is not running:$svc_names"
+    echo "  (REQUIRE_ALL=1 makes this a failure -- the gate starts its own; see dev/tests/drive/)"
+fi
+if [ "$core_deferred" -ne 0 ]; then
+    # Named like a skip and like a parser deferral, for the third time and the
+    # same reason. This one says which pin would clear it, because that is the
+    # only action available to a reader: the condition is a published version,
+    # not anything in this tree.
+    echo "$core_deferred assertion(s) deferred to a newer percolate-core:$core_names"
+    echo "  the pinned runtime and this tree's extension disagree about an"
+    echo "  ordering the assertion depends on; the file says which, and the"
+    echo "  deferral expires on its own when the pin moves."
 fi
 if [ "$deferred" -ne 0 ]; then
     # Named like a skip, and for the same reason: a deferred assertion is a
