@@ -669,6 +669,39 @@ create table if not exists workflow.definitions (
     unique (name, version)
 );
 
+-- WHICH VERSION A NAME MEANS, in one place, because three callers were each
+-- answering it and two of them answered it differently from the column above.
+--
+-- `deleted_at` says what it is for in its own comment -- "don't start new runs
+-- against this version" -- and nothing enforced that. plan_catalog, plan_graph,
+-- plan_document, plan_defects, plan_probe, definitions_api and
+-- aiq.schema_workflow all filter `deleted_at is null`; start_workflow resolved
+-- `order by version desc limit 1` with no filter, and start_child_workflow and
+-- schedule_workflow gated on a bare `exists`. So a retired latest version was
+-- hidden from every list and still started, which is the one outcome the column
+-- was added to prevent (REM-58).
+--
+-- Latent rather than live: nothing in core sets `deleted_at` today. That is the
+-- reason to fix it now and not the reason to leave it -- the defect is not
+-- reachable, so the fix cannot break a caller, and it stops being true the
+-- moment anybody retires a definition.
+--
+-- Returns the ROW, so start_workflow keeps taking `spec` from the same read
+-- that chose the version. Two reads could disagree under a concurrent publish.
+create or replace function workflow.current_definition(p_name text)
+returns workflow.definitions as $$
+    select d.* from workflow.definitions d
+     where d.name = p_name and d.deleted_at is null
+     order by d.version desc
+     limit 1;
+$$ language sql stable;
+
+comment on function workflow.current_definition(text) is
+    'The version of this workflow a new run should use: the highest that has '
+    'not been retired. The one answer -- start_workflow, start_child_workflow '
+    'and schedule_workflow all read it, so "listed" and "startable" cannot '
+    'drift apart.';
+
 -- ------------------------------------------------------------
 -- 1b. Static spec validation (research finding: WF-net soundness is
 --     decidable and cheap to check for free-choice/acyclic graphs;
@@ -1437,7 +1470,7 @@ begin
         end if;
     end if;
 
-    select * into v_def from workflow.definitions where name = p_name order by version desc limit 1;
+    v_def := workflow.current_definition(p_name);
     if v_def.id is null then
         raise exception 'no workflow_def found for name %', p_name;
     end if;
@@ -2118,7 +2151,9 @@ declare
     v_status text;
     v_ctx    jsonb;
 begin
-    if not exists (select 1 from workflow.definitions where name = p_workflow_name) then
+    -- STARTABLE, not merely present: the same question start_workflow asks one
+    -- call along, so this cannot admit a run that the starter then refuses.
+    if (workflow.current_definition(p_workflow_name)).id is null then
         raise exception
             'sub_workflow step names workflow %, which is not registered', p_workflow_name;
     end if;
@@ -4163,7 +4198,8 @@ begin
     -- last_error where nobody is looking.
     perform workflow.assert_schedule_access(p_name, 'create');
 
-    if not exists (select 1 from workflow.definitions where name = p_workflow) then
+    -- Startable, for the reason start_child_workflow gives above.
+    if (workflow.current_definition(p_workflow)).id is null then
         raise exception 'no workflow definition named "%"', p_workflow
             using hint = 'register it with workflow.define_yaml() first';
     end if;
@@ -6588,6 +6624,38 @@ comment on function workflow.validate_shape(jsonb, jsonb) is
 -- {{run.id}} with no such input key now says what to write instead, because
 -- the natural thing to type is the thing the reporter typed.
 -- ------------------------------------------------------------
+-- One id per (run, group), so one run can hold two independent conversations,
+-- and it is defined HERE rather than after run_meta because run_meta calls it.
+--
+-- percolate.uuidv5, not md5(...)::uuid. specs/identity/spec.md §3 bans the
+-- second and the comment inside run_meta already explained why -- md5 produces
+-- a value whose version nibble is 0, which is not a UUID and compares unequal
+-- to a correctly derived one computed anywhere else. `fa59c8e` moved run_meta
+-- and left its sibling behind, which is the postmortem's own class
+-- (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §1): a fix
+-- applied to one of two copies of one rule.
+--
+-- THE TWO WERE ALSO NOT THE SAME FUNCTION OF THEIR INPUTS, which is why this
+-- merges them rather than converting both. run_meta derived `$session` from
+-- `r.id::text`; run_session derived it from `run_id || ':' || group`, so even
+-- with the same hash the empty group would not have agreed with run_meta -- the
+-- trailing colon is a different string. Spelling the empty group as the bare
+-- run id keeps run_meta's published value EXACTLY as it is today, so no run's
+-- `$session` moves and there is nothing to migrate. A named group still gets
+-- its own id, which is what dev/tests/workflow/05 asserts.
+create or replace function workflow.run_session(p_run_id uuid, p_group text default '')
+returns uuid as $$
+    select percolate.uuidv5(
+        percolate.id_namespace('session'),
+        case when coalesce(p_group, '') = '' then p_run_id::text
+             else p_run_id::text || ':' || p_group end);
+$$ language sql immutable;
+
+comment on function workflow.run_session(uuid, text) is
+    'The conversation id for a run, derived rather than stored so a replay '
+    'converges on the same value. The empty group is the run''s own session and '
+    'is what run_meta publishes as $session.';
+
 create or replace function workflow.run_meta(p_run_id uuid)
 returns jsonb as $$
     select jsonb_build_object(
@@ -6602,22 +6670,15 @@ returns jsonb as $$
         -- stateless by omitting it. Derived rather than stored: the same run
         -- yields the same id on every resolution, including a replay, without a
         -- column that could drift from the run it belongs to.
-        -- percolate.uuidv5, not md5(...)::uuid: the requirement stated above
-        -- is exactly what a v5 is for, and the hand-rolled version produces a
-        -- value whose version nibble is 0 -- not a UUID at all, and unequal to
-        -- a correctly derived one computed anywhere else. specs/identity.
-        '$session',     percolate.uuidv5(percolate.id_namespace('session'),
-                                         r.id::text)::text)
+        -- workflow.run_session(), not a second copy of the derivation. It
+        -- was spelled out here and computed differently one function along,
+        -- which is the pair REM-58 collapsed; the value is unchanged.
+        '$session',     workflow.run_session(r.id)::text)
     from workflow.runs r
     join workflow.definitions d on d.id = r.workflow_def_id
     where r.id = p_run_id;
 $$ language sql stable security definer set search_path = pg_catalog, public;
 
--- One id per (run, group), so one run can hold two independent conversations.
-create or replace function workflow.run_session(p_run_id uuid, p_group text default '')
-returns uuid as $$
-    select md5(p_run_id::text || ':' || coalesce(p_group, ''))::uuid;
-$$ language sql immutable;
 
 -- workflow.resolve_args(jsonb,uuid,jsonb) is defined in section 20a.
 -- This section explains why it has the shape it does; the body is not repeated,
@@ -18680,7 +18741,16 @@ comment on function aiq.resolve_mention(text, text, real, text[]) is
 -- DIFFERENT PROMISES. So the graph knows a named surface and the row knows the
 -- signatures, and a claim anchored here is anchored to the name.
 create table if not exists aiq.db_objects (
-    id          uuid generated always as (md5(ident)::uuid) stored primary key,
+    -- percolate.uuidv5, not md5(ident)::uuid. specs/identity/spec.md §3 bans
+    -- the second: it produces a value whose version nibble is 0, which is not
+    -- a UUID and compares unequal to the same id derived correctly anywhere
+    -- else -- and `492e007` added this column two days after the ban, because
+    -- the check that enforces it reads pg_proc and a generated column is not a
+    -- function (REM-58). The ALTER below is what carries it to a database that
+    -- upgrades, since `create table if not exists` is a no-op there.
+    id          uuid generated always as
+                (percolate.uuidv5(percolate.id_namespace('db_object'), ident))
+                stored primary key,
     ident       text not null unique,      -- schema-qualified, or the bare name for a role
     nspname     text not null,             -- '' for a role, which has no schema
     objname     text not null,
@@ -18691,6 +18761,37 @@ create table if not exists aiq.db_objects (
     reachable   boolean not null default false,
     grantees    text[] not null default '{}'
 );
+
+-- AND THE SAME EXPRESSION ON A DATABASE THAT ALREADY HAS THE COLUMN, because
+-- the `create table if not exists` above does nothing there and the two would
+-- diverge -- exactly what dev/upgrade-converges.sh exists to catch.
+--
+-- `set expression` recomputes every row in place and keeps the primary key, so
+-- `ident` stays unique and the table stays consistent with itself. Guarded on
+-- the CURRENT expression rather than run unconditionally: it rewrites the
+-- table, and the schema is replayed on every upgrade.
+--
+-- aiq.nodes rows anchored to a db_object carry the old id in `entity_id`. They
+-- are re-derived by aiq.refresh_catalogue() and its graph sync, which run on a
+-- schedule and on demand -- the catalogue is a derivation of the live catalog,
+-- not a store -- so this leaves stale anchors until the next refresh rather
+-- than broken ones. Stated because it is a real window, not a no-op.
+do $$
+begin
+    if exists (
+        select 1 from pg_attrdef d
+          join pg_attribute a on a.attrelid = d.adrelid and a.attnum = d.adnum
+         where d.adrelid = 'aiq.db_objects'::regclass
+           and a.attname = 'id'
+           and pg_get_expr(d.adbin, d.adrelid) ilike '%md5%')
+    then
+        alter table aiq.db_objects
+            alter column id set expression as
+            (percolate.uuidv5(percolate.id_namespace('db_object'), ident));
+        raise notice 'aiq.db_objects.id re-derived as uuidv5 (was md5) -- '
+                     'run aiq.refresh_catalogue() to re-anchor aiq.nodes';
+    end if;
+end $$;
 
 -- NO org_id, AND THAT IS A DECISION. Sixteen tables in this extension carry one
 -- and this is not the seventeenth: a database's own catalogue is one shared
