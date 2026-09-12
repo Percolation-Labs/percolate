@@ -583,3 +583,107 @@ begin
 end $$;
 
 rollback;
+
+-- ---------------------------------------------------------------------
+-- 7. THE THREE PROPERTIES THE AUTOSCALER AND THE PUBLIC DOCS RELY ON.
+--
+-- REM-9 / specs/trace-field/brief.md §2, §3.2. These are not new mechanisms:
+-- §2 reads all three as structural, which is precisely the risk -- everything
+-- downstream appears to succeed whether or not they hold, so a field that runs
+-- and changes nothing looks from outside like one that works. Two of the three
+-- hold. The third does not, and the disagreement is the useful finding.
+-- ---------------------------------------------------------------------
+
+-- 7a. TWO WORKERS ON ONE QUEUE CLAIM DISJOINT SETS. `SKIP LOCKED` doing what
+-- §2 says, which nothing asserted. §6 above proves the LEASE case -- between
+-- two workers the live lease holder wins -- which is a different question:
+-- that is about one task and two claimants, this is about two workers not
+-- handing each other the same work.
+do $$
+declare
+    v_run uuid; v_a uuid; v_b uuid; v_overlap int;
+begin
+    insert into workflow.definitions (name, spec) values
+    ('t_disjoint', '{"steps":[
+        {"key":"a","kind":"work","queue":"qdis","input":{"n":1}},
+        {"key":"b","kind":"work","queue":"qdis","input":{"n":2}},
+        {"key":"c","kind":"work","queue":"qdis","input":{"n":3}},
+        {"key":"d","kind":"work","queue":"qdis","input":{"n":4}}
+     ]}');
+    v_run := workflow.start_workflow('t_disjoint', '{}'::jsonb);
+
+    -- Four ready tasks, two workers, two claims each.
+    select count(*) into v_overlap from workflow.tasks
+     where run_id = v_run and queue = 'qdis' and status = 'ready';
+    if v_overlap <> 4 then
+        raise exception 'the fixture did not produce four ready tasks, it produced %', v_overlap;
+    end if;
+
+    -- claim_task returns SETOF workflow.tasks, so take the id column.
+    select id into v_a from workflow.claim_task('qdis', 'worker-a');
+    select id into v_b from workflow.claim_task('qdis', 'worker-b');
+
+    if v_a is null or v_b is null then
+        raise exception 'a worker got nothing from a queue with four ready tasks (a=%, b=%)',
+            coalesce(v_a::text,'null'), coalesce(v_b::text,'null');
+    end if;
+    if v_a = v_b then
+        raise exception
+            'TWO WORKERS CLAIMED THE SAME TASK (%). SKIP LOCKED is what stops this, and '
+            'the whole pool model in the public scaling docs rests on it.', v_a;
+    end if;
+
+    -- And neither starved: a third claim still gets one of the remaining two.
+    if not exists (select 1 from workflow.claim_task('qdis', 'worker-a')) then
+        raise exception 'a worker was starved while two of four tasks were still ready';
+    end if;
+end $$;
+
+-- 7b. NOTHING WRITES TASK PRIORITY BEHIND THE SCHEDULER.
+--
+-- brief.md §3.2 says `priority` is an intensity column with no depositor yet.
+-- Asserted rather than assumed, because the whole trace-field design starts
+-- from that being true: a depositor added later has to be the FIRST writer, and
+-- if something already writes it, the field is measuring somebody else's
+-- numbers. Measured on this database: 0 rows, and the column default is 100
+-- with no `set priority` anywhere in the engine.
+do $$
+declare v_n bigint;
+begin
+    select count(*) into v_n from workflow.tasks where priority <> 100;
+    if v_n > 0 then
+        raise exception
+            'REFUTED: % task(s) carry a priority other than the default 100, so '
+            'something already writes it. brief.md §3.2 assumes no depositor exists '
+            'yet -- find the writer before adding one, and file it as a Bug.', v_n;
+    end if;
+end $$;
+
+-- 7c. WHAT IS DELIBERATELY NOT ASSERTED HERE, AND WHY -- because it is false.
+--
+-- REM-9's second property was "a task that fails and backs off stays visible to
+-- workflow.queue_depth() throughout, which is what makes backoff evaporation
+-- rather than rescheduling". It does not. Measured on this database, through
+-- the real path -- claim a `work` task with max_attempts 3, fail it, let
+-- fail_task take its retry branch:
+--
+--     status=ready  run_after in the future  attempts=1
+--     queue_depth before the failure: 1
+--     queue_depth after  the failure: 0
+--
+-- `workflow.queue_depth` is `status='running' or (status='ready' and run_after
+-- <= now())`, and a backing-off task is ready with run_after ahead of now, so
+-- it is counted by neither arm. The autoscaler's own probe therefore reports a
+-- queue with pending retries as empty, and scales the pool down while work is
+-- waiting to be redone.
+--
+-- No assertion here, in either direction: asserting the current behaviour would
+-- freeze a defect into the suite, and asserting the spec's behaviour would
+-- leave a red that is not this file's to fix. Filed as its own Bug -- the fix
+-- is a decision about what `queue_depth` is for, which is the autoscaler's
+-- question rather than the recovery suite's. REM-119.
+do $$ begin
+    raise notice 'workflow/06 §7: two workers claim disjoint sets and neither starves; '
+                 'nothing writes task priority. NOT asserted: a backing-off task is '
+                 'invisible to queue_depth -- measured, refuted, filed.';
+end $$;
