@@ -112,7 +112,10 @@ jobs:
       #     FROM postgres:19beta3-bookworm            <- mutable tag
       #     apt-get install ...                       <- unpinned
       #     rustup --default-toolchain stable         <- "stable" moves
-      #     cargo install cargo-pgrx --version 0.19.2 <- the only pinned one
+      #     cargo install cargo-pgrx --version $PGRX_VERSION  <- the only pinned
+      #                                                           one, and it is
+      #                                                           now passed in
+      #                                                           from Cargo.toml
       #
       # Cache on the Dockerfile alone and a moved base tag is a cache HIT: the
       # toolchain keeps being restored from a tarball built against headers
@@ -155,13 +158,39 @@ jobs:
         uses: actions/cache@v6
         with:
           path: /tmp/pgrx-builder.tar
-          key: pgrx-builder-image-${{ hashFiles('dev/Dockerfile.pgrx-builder') }}-${{ steps.base.outputs.digest }}
+          # Cargo.toml IS IN THE KEY because the pgrx pin lives there now and
+          # is passed into the build: keyed on the Dockerfile alone, bumping
+          # pgrx in the crate would restore an image carrying the previous
+          # cargo-pgrx, which is the same "cache hit on the wrong toolchain"
+          # this file's header is already about.
+          key: pgrx-builder-image-${{ hashFiles('dev/Dockerfile.pgrx-builder', 'extension/percolate_parser/Cargo.toml') }}-${{ steps.base.outputs.digest }}
+
+      # THE TWO NUMBERS, READ FROM THE CRATE THAT DECLARES THEM. `Cargo.toml`
+      # says which pgrx this builds against and which pg feature is default;
+      # this file restated the second twice in `cargo pgrx init --pg19` and
+      # `cargo pgrx test pg19`, and carried the first in a comment. A test run
+      # against a different major than the crate builds by default is green and
+      # meaningless.
+      - name: The pg major and the pgrx pin, read from Cargo.toml
+        id: pins
+        run: |
+          C=extension/percolate_parser/Cargo.toml
+          M=$(sed -n 's/^default *= *\["pg\([0-9][0-9]*\)"\].*/\1/p' "$C")
+          X=$(sed -n 's/^pgrx *= *"=\{0,1\}\([0-9][0-9.]*\)".*/\1/p' "$C")
+          [ -n "$M" ] && [ -n "$X" ] || {
+            echo "::error::could not read the pg major and the pgrx pin from $C" >&2
+            exit 1; }
+          echo "pg=$M"   >> "$GITHUB_OUTPUT"
+          echo "pgrx=$X" >> "$GITHUB_OUTPUT"
+          echo "pg$M, pgrx $X"
 
       - name: Build the pgrx toolchain image
         if: steps.toolchain.outputs.cache-hit != 'true'
         working-directory: dev
         run: |
-          docker build -f Dockerfile.pgrx-builder -t pgrx-builder .
+          docker build -f Dockerfile.pgrx-builder \
+            --build-arg PGRX_VERSION=${{ steps.pins.outputs.pgrx }} \
+            -t pgrx-builder .
           # Saved UNCOMPRESSED on purpose: actions/cache zstds it on the way up,
           # and compressing twice spends a minute to save nothing.
           docker save pgrx-builder -o /tmp/pgrx-builder.tar
@@ -174,6 +203,7 @@ jobs:
         run: |
           docker run --rm \
             -v "$GITHUB_WORKSPACE/extension/percolate_parser":/work \
+            -e PG=${{ steps.pins.outputs.pg }} \
             -w /work pgrx-builder bash -c '
               set -euo pipefail
               chown -R postgres:postgres /work /opt/cargo
@@ -182,8 +212,8 @@ jobs:
                 export PATH=/opt/cargo/bin:\$PATH
                 export PGRX_HOME=/work/.pgrx CARGO_TARGET_DIR=/work/target-test
                 cd /work
-                cargo pgrx init --pg19 /usr/bin/pg_config
-                cargo pgrx test pg19 --features pg_test --no-default-features"'
+                cargo pgrx init --pg$PG /usr/bin/pg_config
+                cargo pgrx test pg$PG --features pg_test --no-default-features"'
           # The container writes as root and postgres; the cache action reads it
           # back as the runner.
           sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/extension/percolate_parser"

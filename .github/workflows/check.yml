@@ -109,18 +109,48 @@ jobs:
       # No restore-keys, for parser-tests.yml's reason: an image restored under
       # a changed Dockerfile is the wrong toolchain, and it would surface as a
       # red test rather than as a cache miss.
+      #
+      # AND Cargo.toml IS IN THE KEY, because the pgrx pin moved into it. The
+      # toolchain image is now a function of the Dockerfile AND the version
+      # passed into it; keyed on the Dockerfile alone, bumping pgrx in the crate
+      # would be a cache HIT on an image carrying the previous cargo-pgrx --
+      # which compiles, and produces a .so the crate does not match. That is the
+      # exact failure the comment above is about, arriving through the change
+      # that was meant to give the pin one home.
       - name: Cache the pgrx toolchain image
         id: toolchain
         uses: actions/cache@v6
         with:
           path: /tmp/pgrx-builder.tar
-          key: pgrx-builder-image-${{ hashFiles('dev/Dockerfile.pgrx-builder') }}
+          key: pgrx-builder-image-${{ hashFiles('dev/Dockerfile.pgrx-builder', 'extension/percolate_parser/Cargo.toml') }}
+
+      # BOTH NUMBERS FROM THE CRATE THAT DECLARES THEM, once, so no step below
+      # spells either. `Cargo.toml` says which pgrx this builds against and
+      # which pg feature is default; every other line here used to restate one
+      # or the other -- `--pg19`, `--features pg19`, two `/…/19/…` paths and the
+      # toolchain build -- and `dev/build-image.sh` restated all of them again.
+      # This job's whole claim is that it produces the artefact the published
+      # container expects, which is false the moment one of those copies drifts.
+      - name: The pg major and the pgrx pin, read from Cargo.toml
+        id: pins
+        run: |
+          C=extension/percolate_parser/Cargo.toml
+          M=$(sed -n 's/^default *= *\["pg\([0-9][0-9]*\)"\].*/\1/p' "$C")
+          X=$(sed -n 's/^pgrx *= *"=\{0,1\}\([0-9][0-9.]*\)".*/\1/p' "$C")
+          [ -n "$M" ] && [ -n "$X" ] || {
+            echo "::error::could not read the pg major and the pgrx pin from $C" >&2
+            exit 1; }
+          echo "pg=$M"   >> "$GITHUB_OUTPUT"
+          echo "pgrx=$X" >> "$GITHUB_OUTPUT"
+          echo "pg$M, pgrx $X"
 
       - name: Build the pgrx toolchain image
         if: steps.toolchain.outputs.cache-hit != 'true'
         working-directory: dev
         run: |
-          docker build -f Dockerfile.pgrx-builder -t pgrx-builder .
+          docker build -f Dockerfile.pgrx-builder \
+            --build-arg PGRX_VERSION=${{ steps.pins.outputs.pgrx }} \
+            -t pgrx-builder .
           docker save pgrx-builder -o /tmp/pgrx-builder.tar
 
       - name: Load the pgrx toolchain image
@@ -136,11 +166,22 @@ jobs:
           docker run --rm \
             -v "$GITHUB_WORKSPACE/extension/percolate_parser":/work \
             -e PGRX_HOME=/work/.pgrx -e CARGO_TARGET_DIR=/work/target-ci \
+            -e PG=${{ steps.pins.outputs.pg }} \
             -w /work pgrx-builder bash -c '
               set -euo pipefail
-              cargo pgrx init --pg19 /usr/bin/pg_config >/dev/null 2>&1 || true
-              cargo pgrx package --features pg19 --no-default-features \
-                --pg-config /usr/bin/pg_config'
+              cargo pgrx init "--pg$PG" /usr/bin/pg_config >/dev/null 2>&1 || true
+              cargo pgrx package --features "pg$PG" --no-default-features \
+                --pg-config /usr/bin/pg_config
+              # WHERE THE ARTEFACTS LANDED, asked of the server rather than
+              # spelled here: pgrx writes the package under its own absolute
+              # pkglibdir and sharedir, so the collect step below used to carry
+              # two more copies of the major in two path literals. It now reads
+              # three files from one flat directory and knows nothing about
+              # Postgres layout.
+              cp "/work/target-ci/release/percolate_parser-pg$PG$(pg_config --pkglibdir)/percolate_parser.so" \
+                 /work/target-ci/
+              cp "/work/target-ci/release/percolate_parser-pg$PG$(pg_config --sharedir)/extension/"percolate_parser* \
+                 /work/target-ci/'
           sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/extension/percolate_parser"
 
       # The three files ci-database.sh's PARSER_DIST wants, in the layout it
@@ -148,10 +189,9 @@ jobs:
       # pgrx emits fails in the job that ran pgrx.
       - name: Collect the dist
         run: |
-          B=extension/percolate_parser/target-ci/release/percolate_parser-pg19
+          B=extension/percolate_parser/target-ci
           mkdir -p parser-dist
-          cp "$B/usr/lib/postgresql/19/lib/percolate_parser.so" parser-dist/
-          cp "$B"/usr/share/postgresql/19/extension/percolate_parser* parser-dist/
+          cp "$B"/percolate_parser* parser-dist/
           ls -l parser-dist
           grep default_version parser-dist/percolate_parser.control
 
@@ -196,24 +236,14 @@ jobs:
       - run: PARSER_DIST="$GITHUB_WORKSPACE/parser-dist" dev/ci-database.sh
       - run: dev/check.sh
 
-      # THE DEFERRALS MUST BE GONE. dev/tests/run.sh defers a compiled assertion
-      # only while pg_extension says the two halves disagree, and after the step
-      # above they agree -- so a run that still reports one means the artefact
-      # did not land and the suite passed without the assertions this job exists
-      # to run. Green-because-it-looked-nowhere is the failure this collection
-      # keeps finding; here is where it would hide.
-      - name: The halves agree, so nothing may still be deferred
-        run: |
-          P=$(docker exec "$CONTAINER" psql -U p8 -d "$DB" -tAc \
-              "select extversion from pg_catalog.pg_extension where extname='percolate_parser'")
-          S=$(docker exec "$CONTAINER" psql -U p8 -d "$DB" -tAc \
-              "select extversion from pg_catalog.pg_extension where extname='percolate'")
-          echo "percolate $S, percolate_parser $P"
-          [ "$P" = "$S" ] || {
-            echo "::error::the parser artefact did not land: percolate_parser is $P and" \
-                 "percolate is $S, so every compiled assertion deferred and this job" \
-                 "reported green on a suite that skipped them"
-            exit 1; }
+      # THE DEFERRALS GATE USED TO BE A STEP HERE, and it was the only gate in
+      # this file. `dev/check.sh` above opens with "THERE IS NO SECOND LIST" and
+      # this was one: `grep -c defer dev/check.sh` was 0 and `grep -n extversion
+      # dev/check.sh` was empty, so running every gate the way that file
+      # promises still did not run this one, on any machine. It is now
+      # `db_deferrals_gone` in `DB_GATES`, which the line above runs -- and
+      # `tree_no_gate_lives_only_in_ci` refuses the next one rather than
+      # trusting this comment to be read.
 
       - name: What the database said, if it failed
         if: failure()

@@ -7,7 +7,28 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$(cd .. && pwd)"
-TAG=${TAG:-percolationlabs/percolate-postgres:19}
+
+# THE POSTGRES MAJOR IS READ, NOT TYPED, and it is read from the file that
+# decides it. `extension/percolate_parser/Cargo.toml` names the pgrx feature
+# this crate builds by default; every other spelling of 19 in this script -- the
+# image tag, the `cargo pgrx init` flag, the `--features` flag, the path the
+# compiled .so is copied out of -- was an independent copy of that one decision,
+# and `specs/ai-query-layer/pg17-compat.md` is a live spec for changing it. A
+# major bump that misses one of them produces a .so built for one server and
+# installed into another's library directory, which is not a thing a test
+# catches: it is a load error on a user's machine.
+PGMAJOR=$(sed -n 's/^default *= *\["pg\([0-9][0-9]*\)"\].*/\1/p' \
+          "$ROOT/extension/percolate_parser/Cargo.toml")
+[ -n "$PGMAJOR" ] || {
+    echo "no default pgNN feature in extension/percolate_parser/Cargo.toml" >&2
+    exit 1; }
+TAG=${TAG:-percolationlabs/percolate-postgres:$PGMAJOR}
+
+PGRX_VERSION=$(sed -n 's/^pgrx *= *"=\{0,1\}\([0-9][0-9.]*\)".*/\1/p' \
+               "$ROOT/extension/percolate_parser/Cargo.toml")
+[ -n "$PGRX_VERSION" ] || {
+    echo "no pgrx version in extension/percolate_parser/Cargo.toml" >&2
+    exit 1; }
 
 # The version comes from percolate.control, which is where Postgres looks for
 # it -- not from a copy in this script that a release would have to remember.
@@ -51,17 +72,38 @@ for arch in $PLATFORMS; do
     echo "==> percolate_parser ($arch) is STALE -- ${stale#"$ROOT"/} is newer than it; rebuilding"
   fi
   echo "==> compiling percolate_parser for linux/$arch"
+  # THE pgrx PIN HAS ONE HOME TOO, and it is the crate's own dependency line.
+  # `cargo-pgrx` (the build tool) and `pgrx` (the crate) have to be the same
+  # version or the package step fails in a way that names neither; the tool's
+  # version was typed into Dockerfile.pgrx-builder, into get-percolate's
+  # parser.yml -- under a comment calling itself "one home for the pgrx pin" --
+  # and into a comment in parser-tests.yml, while the crate's was here. Four
+  # spellings of one number, none of them reading another.
   docker build -q --platform "linux/$arch" -f Dockerfile.pgrx-builder \
-    -t "pgrx-builder:$arch" . >/dev/null
+    --build-arg "PGRX_VERSION=$PGRX_VERSION" \
+    -t "pgrx-builder:$arch-$PGRX_VERSION" . >/dev/null
+  # THE .so IS FOUND BY ASKING THE SERVER, not by spelling its path here. pgrx
+  # writes the package under `<target>/release/percolate_parser-pg<N>` plus the
+  # server's own ABSOLUTE pkglibdir -- `/usr/lib/postgresql/19/lib` for the base
+  # this builds on -- so the path was two copies of the major in one string, in
+  # a script that had no way to notice either was wrong. `pg_config` knows,
+  # inside the container, where its own libraries go; it is asked, and the
+  # result is copied to a fixed name the host reads. The host now knows nothing
+  # about Postgres's directory layout, which is the half that kept drifting.
   docker run --rm --platform "linux/$arch" \
     -v "$ROOT/extension/percolate_parser":/work \
     -v "$PWD/pgrx-home-$arch":/pgrxhome \
     -e PGRX_HOME=/pgrxhome -e "CARGO_TARGET_DIR=/work/target-$arch" \
-    -w /work "pgrx-builder:$arch" bash -c \
-    'cargo pgrx init --pg19 /usr/bin/pg_config >/dev/null 2>&1 || true
-     cargo pgrx package --features pg19 --no-default-features --pg-config /usr/bin/pg_config' \
+    -e "PGMAJOR=$PGMAJOR" -e "ARCH=$arch" \
+    -w /work "pgrx-builder:$arch-$PGRX_VERSION" bash -c '
+     set -e
+     cargo pgrx init "--pg$PGMAJOR" /usr/bin/pg_config >/dev/null 2>&1 || true
+     cargo pgrx package "--features" "pg$PGMAJOR" --no-default-features \
+       --pg-config /usr/bin/pg_config
+     cp "/work/target-$ARCH/release/percolate_parser-pg$PGMAJOR$(pg_config --pkglibdir)/percolate_parser.so" \
+        "/work/target-$ARCH/percolate_parser.so"' \
     | tail -2
-  cp "$ROOT/extension/percolate_parser/target-$arch/release/percolate_parser-pg19/usr/lib/postgresql/19/lib/percolate_parser.so" \
+  cp "$ROOT/extension/percolate_parser/target-$arch/percolate_parser.so" \
      "dist/percolate_parser-$arch.so"
   # The .so's OWN provenance, written when it is compiled and read back at
   # stamp time. Without this the stamp below would give the parser whatever
@@ -74,7 +116,7 @@ for arch in $PLATFORMS; do
     > "dist/percolate_parser-$arch.sha"
 done
 
-B="$ROOT/extension/percolate_parser/target-$(docker version -f '{{.Server.Arch}}')/release/percolate_parser-pg19"
+B="$ROOT/extension/percolate_parser/target-$(docker version -f '{{.Server.Arch}}')/release/percolate_parser-pg$PGMAJOR"
 
 # the glob must catch percolate_parser--<version>.sql, whose name has no dot
 # immediately after the stem -- "percolate_parser.*" silently misses it
@@ -84,7 +126,7 @@ B="$ROOT/extension/percolate_parser/target-$(docker version -f '{{.Server.Arch}}
 # dist/ is an ordinary state (the .so survives in git-ignored dist/, the build
 # tree does not), and it made the script abort on a `cp` for files that were
 # already sitting in dist/ from the run that produced them.
-if [ -d "$B/usr/share/postgresql/19/extension" ]; then
+if [ -d "$B/usr/share/postgresql/$PGMAJOR/extension" ]; then
   # Clear before copying, for the same reason the percolate script is cleared
   # below: dist/ is not rebuilt from scratch, so after a version bump it holds
   # BOTH percolate_parser--<old>.sql and --<new>.sql, and the Dockerfile's glob
@@ -92,7 +134,7 @@ if [ -d "$B/usr/share/postgresql/19/extension" ]; then
   # not an error Postgres reports -- it is an offer, and one half of it is a
   # version nobody meant to ship.
   rm -f dist/percolate_parser--*.sql
-  cp "$B"/usr/share/postgresql/19/extension/percolate_parser* dist/
+  cp "$B"/usr/share/postgresql/$PGMAJOR/extension/percolate_parser* dist/
 elif [ ! -f "dist/percolate_parser--$VERSION.sql" ] || [ ! -f dist/percolate_parser.control ]; then
   echo "no parser build tree at $B and dist/ has no percolate_parser SQL --" >&2
   echo "run with REBUILD_PARSER=1 to compile it" >&2

@@ -35,6 +35,19 @@ name: p8-dev
 # replaces it.
 x-credential-origins: &credential-origins '${P8_CREDENTIAL_ORIGINS:-{"LLM_API_KEY":["https://api.openai.com"]}}'
 
+# THE CORE IMAGE, ONCE. Seven services ran this image and each named it in
+# full, so following a percolate-core release meant seven identical edits in
+# this file and about thirty across the tree -- and a missed one is invisible,
+# because a compose file pinning the previous release is perfectly valid and
+# starts perfectly well. `versions.toml` states the number the tree follows and
+# `dev/references.sh` §3 now checks every literal against it; this anchor is
+# the other half, so there is one line here to change rather than seven.
+#
+# `${P8_CORE_IMAGE:-...}` as well as the anchor, because the dev loop wants to
+# run a locally built core against this stack without editing a tracked file --
+# which was previously done by editing all seven and remembering to undo it.
+x-core-image: &core-image '${P8_CORE_IMAGE:-percolationlabs/percolate-core:0.1.8}'
+
 services:
   db:
     # Pulled, not built. The image carries PG19 + pgvector + both Percolate
@@ -235,7 +248,7 @@ services:
   # transaction, so RLS sees the user rather than the service.
   # ---------------------------------------------------------------------
   worker:
-    image: percolationlabs/percolate-core:0.1.8
+    image: *core-image
     container_name: ${P8_STACK:-p8-dev}-worker
     depends_on:
       db:
@@ -255,7 +268,7 @@ services:
   # Neither process gets a privileged DB login, and the UI gets no provider key.
   agent:
     profiles: [ui]
-    image: percolationlabs/percolate-core:0.1.8
+    image: *core-image
     container_name: ${P8_STACK:-p8-dev}-agent
     command: ["agent", "serve"]
     environment:
@@ -281,7 +294,7 @@ services:
 
   ui:
     profiles: [ui]
-    image: percolationlabs/percolate-core:0.1.8
+    image: *core-image
     container_name: ${P8_STACK:-p8-dev}-ui
     command: ["ui", "serve", "--port", "8082"]
     environment:
@@ -306,7 +319,7 @@ services:
   # service and any pending work on its ingest queue remain independently run.
   ui-content:
     profiles: [ui]
-    image: percolationlabs/percolate-core:0.1.8
+    image: *core-image
     container_name: ${P8_STACK:-p8-dev}-ui-content
     command: ["content", "serve"]
     environment:
@@ -326,7 +339,7 @@ services:
 
   ui-ingest:
     profiles: [ui]
-    image: percolationlabs/percolate-core:0.1.8
+    image: *core-image
     container_name: ${P8_STACK:-p8-dev}-ui-ingest
     command: ["ingest", "serve", "--queue", "ingest-ui", "--id", "ui-ingest-1"]
     environment:
@@ -346,7 +359,7 @@ services:
 
   ui-worker:
     profiles: [ui]
-    image: percolationlabs/percolate-core:0.1.8
+    image: *core-image
     container_name: ${P8_STACK:-p8-dev}-ui-worker
     command: ["worker", "--queue", "ui-workflows", "--id", "ui-workflows-1"]
     environment:
@@ -361,7 +374,7 @@ services:
       - ./.stacks/ui-agent-signing-key:/run/secrets/agent-signing-key:ro
 
   content:
-    image: percolationlabs/percolate-core:0.1.8
+    image: *core-image
     container_name: ${P8_STACK:-p8-dev}-content
     depends_on:
       db:

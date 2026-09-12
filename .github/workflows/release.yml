@@ -176,29 +176,42 @@ jobs:
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "publishing $V"
 
-      - name: The generated artifacts must match the specs they came from
-        # Covers the upgrade scripts too: a specs edit regenerated into
-        # percolate--<v>.sql but not into percolate--<old>--<v>.sql would ship
-        # existing databases an upgrade to the wrong schema.
-        run: python3 extension/percolate/build-sql.py --check
-
-      # AND EVERY NAME THE TREE WRITES DOWN STILL RESOLVES, which is the same
-      # question one step wider: the check above proves the generated SQL
-      # matches its specs, and this proves nothing else in the repository is
-      # still naming the file it replaced.
+      # EVERY TREE GATE, NOT TWO OF THEM -- the same list `check.sh` runs on
+      # every push, run here by the same command. There is no second list.
       #
       # It runs HERE, after the bump, because before it the tree is at the old
-      # version and consistent -- the whole class of defect this catches is
-      # created BY the bump. `dev/references.sh` already existed and already
-      # runs on push; it simply was not on this path, so 0.1.6 published with
-      # `k8s/kind/manifests/postgres.yaml` still mounting `percolate--0.1.5.sql`
-      # -- a kind cluster from that tree binds a path the image does not carry
-      # -- and main went red one commit after the release went green.
+      # version and perfectly consistent: the whole class of defect these catch
+      # is created BY the bump, and that is the one moment the tree is
+      # deliberately inconsistent for three steps.
+      #
+      # This used to be two named steps, `build-sql.py --check` and
+      # `dev/references.sh`, added one at a time to the workflow whose failure
+      # somebody happened to be looking at. Two of ten is how the most
+      # consequential write in the repository -- the one that renames the
+      # extension's generated SQL and every path that mounts it -- ended up the
+      # write subject to the fewest checks. `references.sh` was added after
+      # 0.1.6 published with `k8s/kind/manifests/postgres.yaml` still mounting
+      # `percolate--0.1.5.sql`, so main went red one commit after the release
+      # went green; its postmortem
+      # (`meta/postmortems/2026-09-06-the-release-ran-fewer-gates-than-a-push.md`)
+      # named the remaining eight as a known hole and said what to do about a
+      # second instance: "the fix is `check.sh --tree` wholesale rather than a
+      # third individual step". This is that.
       #
       # A gate that exists and is not on the release path is a gate the release
       # does not have.
-      - name: Every name the tree writes down still resolves
-        run: dev/references.sh
+      #
+      # --tree ONLY, and the boundary is not laziness: the database half needs a
+      # container and a loaded database, which this job has neither of and which
+      # `check.yml`'s `database` job already runs against every push that
+      # reaches main. What was missing was never the expensive half.
+      #
+      # The environment this needs is the environment this job already had --
+      # `fetch-depth: 0` (check-version.sh asks whether HEAD is past a tag),
+      # python 3.12 and pyyaml -- which is why this is a swap rather than a
+      # cost.
+      - name: Every gate a push runs, on the tree this release is about to publish
+        run: dev/check.sh --tree
 
       # The bump lands on main WITHOUT a tag. That is a state the collection
       # already understands -- dev/check-version.sh calls it "unreleased" and
