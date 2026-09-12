@@ -43,6 +43,15 @@ cd "$(dirname "$0")/.."
 
 CONTAINER="${CONTAINER:-p8-ci}"
 DB="${DB:-p8ci}"
+# $PY, the same override dev/check.sh honours. Hard-coding `python3` cost two
+# sessions an hour each on one afternoon: on a machine where `python3` is
+# uv-managed, `python3 -m pip install` cannot write to it, so the preflight
+# below failed and this script exited 1 -- AFTER creating the container. Both
+# sessions were left with a database holding the IMAGE's extension rather than
+# the tree's, one of them measured a baseline against it, and the other reached
+# for a PATH shim instead of an override that should have existed. Two copies of
+# the same fact (which interpreter to use) with only one of them configurable.
+PY="${PY:-python3}"
 
 V=$(sed -n "s/^default_version = '\(.*\)'/\1/p" extension/percolate/percolate.control)
 [ -n "$V" ] || { echo "percolate.control has no default_version" >&2; exit 1; }
@@ -56,6 +65,38 @@ IMAGE="percolationlabs/percolate-postgres:19-${PUB:-}"
 [ -n "$PUB" ] || IMAGE="percolationlabs/percolate-postgres:19"
 [ "$PUB" = "$V" ] && echo "tree is $V, which is published" \
                   || echo "tree is $V (unreleased); testing its SQL on the ${PUB:-mutable :19} image"
+
+# EVERYTHING THE TREE CAN GET WRONG, BEFORE ANYTHING DOCKER CAN. This block used
+# to sit after the readiness loop, and the ordering was the defect rather than
+# the commands: a machine that cannot install PyYAML got a running container and
+# a created database first, then `exit 1`. That leaves the worst possible state
+# -- a container that looks ready and holds the IMAGE's published extension, not
+# this tree's -- and it reports failure while doing so, so anyone who reads the
+# container instead of the exit code measures the wrong extension. One session
+# did exactly that and discarded the baseline; another nearly filed it as a
+# regression.
+#
+# Generating the SQL needs no database, so it belongs on this side of the line.
+# Failing here costs nothing and leaves nothing behind.
+#
+# `$PY -m pip`, never bare `pip`. The two are not the same command: `pip` is a
+# script that may be absent (a Homebrew python3 ships none on PATH) or may
+# belong to a DIFFERENT interpreter, so the install lands where build-sql.py
+# cannot see it. Measured: bare `pip` exited 127 with `pip: command not found`,
+# this script stopped having copied nothing into the container, and the database
+# it reported was one nobody had installed the tree's extension into.
+#
+# And the fallback is FATAL when it fails, which it was not before: `|| pip
+# install` with the script under `set -e` still let a 127 through as the last
+# statement's status in some shells, and a build step that cannot install its
+# own build dependency must not continue as though it had.
+"$PY" -c 'import yaml' 2>/dev/null || {
+    "$PY" -m pip install --quiet pyyaml || {
+        echo "cannot install PyYAML for $(command -v "$PY") -- build-sql.py needs it" >&2
+        echo "  $PY -m pip install pyyaml      # or run inside a venv" >&2
+        echo "  PY=/usr/bin/python3 $0         # or point PY at an interpreter that has it" >&2
+        exit 1; }; }
+"$PY" extension/percolate/build-sql.py >/dev/null
 
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 # POSTGRES_DB is the TEST database, not `postgres`: the image bootstraps into
@@ -94,12 +135,6 @@ done
 # install` with the script under `set -e` still let a 127 through as the last
 # statement's status in some shells, and a build step that cannot install its
 # own build dependency must not continue as though it had.
-python3 -c 'import yaml' 2>/dev/null || {
-    python3 -m pip install --quiet pyyaml || {
-        echo "cannot install PyYAML for $(command -v python3) -- build-sql.py needs it" >&2
-        echo "  python3 -m pip install pyyaml     # or run inside a venv" >&2
-        exit 1; }; }
-python3 extension/percolate/build-sql.py >/dev/null
 
 # The control file goes in WITH the script. `create extension percolate`
 # installs whatever default_version the IMAGE's control file names, so copying
