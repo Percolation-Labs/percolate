@@ -113,19 +113,50 @@ banner() {
     else
         echo "under test: this build records no provenance (percolate_build is empty)"
     fi
+
+    # THE TWO HALVES, BY VERSION, and the note when they disagree.
+    #
+    # percolate_build can be empty, and on the published image it carries no
+    # parser row at all -- so the banner above can be silent about the one
+    # drift that makes a traversal assertion fail for a reason that is not a
+    # defect. The extension versions are always there.
+    #
+    # This note lives HERE, once. It was three copies of a paragraph attached
+    # to three RAISEs in query/11 and query/15, which is the shape this
+    # collection keeps writing postmortems about: the next edit fixes the copy
+    # somebody happened to hit. The long-form explanation of WHY the halves
+    # drift is query/11's preamble, also once.
+    local vers
+    vers=$(db_query "select string_agg(extname || ' ' || extversion, ', ' order by extname)
+                       from pg_catalog.pg_extension
+                      where extname in ('percolate', 'percolate_parser')")
+    [ -n "$vers" ] && echo "  $vers"
+    if [ -n "$vers" ] && ! db_query "select (select extversion from pg_catalog.pg_extension where extname='percolate')
+                                          = (select extversion from pg_catalog.pg_extension where extname='percolate_parser')" \
+         | grep -q '^t$'; then
+        echo "  these two disagree: the compiled half and the extension SQL ship as"
+        echo "  separate files and drift apart independently, so a traversal assertion"
+        echo "  may fail because the .so predates the schema rather than because the"
+        echo "  graph is wrong. dev/build-image.sh rebuilds it; a parser release clears it."
+    fi
+}
+
+# One way to ask the database a scalar, whichever of the two connection modes
+# this run is using. banner() and have_ext() each had their own copy of the
+# if/else, and the third caller is what made it worth naming.
+db_query() {
+    if [ -n "$DSN" ]; then
+        psql "$DSN" -tAc "$1" 2>/dev/null || true
+    else
+        docker exec -i "$CONTAINER" psql -U p8 -d "$DB" -tAc "$1" 2>/dev/null || true
+    fi
 }
 banner
 
 # Is <extension> installed on the database under test? Asked once per name and
 # cached, because the answer cannot change mid-run.
 have_ext() {
-    local ext="$1"
-    local sql="select 1 from pg_extension where extname = '$ext'"
-    if [ -n "$DSN" ]; then
-        psql "$DSN" -tAc "$sql" 2>/dev/null | grep -q 1
-    else
-        docker exec -i "$CONTAINER" psql -U p8 -d "$DB" -tAc "$sql" 2>/dev/null | grep -q 1
-    fi
+    db_query "select 1 from pg_extension where extname = '$1'" | grep -q 1
 }
 
 failed=0

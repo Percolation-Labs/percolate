@@ -90,18 +90,7 @@ begin
 
     v := aiq.graph_paths('acme', 'ndlr', 1, 1, 250, 'competes_with');
     if jsonb_array_length(v->'paths') <> 0 then
-        raise exception 'graph_paths with no as_of crossed a retracted edge: %', v->'paths'
-            using hint = 'The compiled half and the extension SQL ship as separate '
-                'files and drift apart independently (see this suite''s query/11 '
-                'preamble). If the percolate_parser .so on this database predates '
-                'REM-51, that is the cause rather than a defect in the graph: it '
-                'clears on the next parser release, or now with dev/build-image.sh. '
-                'Installed: percolate_parser ' ||
-                coalesce((select extversion from pg_extension where extname='percolate_parser'), '?') ||
-                ', percolate ' ||
-                coalesce((select extversion from pg_extension where extname='percolate'), '?') ||
-                coalesce((select ', parser built at ' || commit_sha from public.percolate_build
-                           where component = 'parser'), '');
+        raise exception 'graph_paths with no as_of crossed a retracted edge: %', v->'paths';
     end if;
     select count(*) into n from aiq.related(array['acme'], 25, 'competes_with', 250, null, true) r
      where r.node_id = v_ndlr;
@@ -228,18 +217,7 @@ begin
     if jsonb_array_length(v->'paths') <> 1 then raise exception 'as of while believed: absent'; end if;
     v := aiq.graph_paths('acme', 'ndlr', 1, 1, 250, 'partners_with', t0 - interval '4 days');
     if jsonb_array_length(v->'paths') <> 0 then
-        raise exception 'as of inside the retraction the edge was still crossed (REM-65)'
-            using hint = 'The compiled half and the extension SQL ship as separate '
-                'files and drift apart independently (see this suite''s query/11 '
-                'preamble). If the percolate_parser .so on this database predates '
-                'REM-51, that is the cause rather than a defect in the graph: it '
-                'clears on the next parser release, or now with dev/build-image.sh. '
-                'Installed: percolate_parser ' ||
-                coalesce((select extversion from pg_extension where extname='percolate_parser'), '?') ||
-                ', percolate ' ||
-                coalesce((select extversion from pg_extension where extname='percolate'), '?') ||
-                coalesce((select ', parser built at ' || commit_sha from public.percolate_build
-                           where component = 'parser'), '');
+        raise exception 'as of inside the retraction the edge was still crossed (REM-65)';
     end if;
     v := aiq.graph_paths('acme', 'ndlr', 1, 1, 250, 'partners_with');
     if jsonb_array_length(v->'paths') <> 1 then raise exception 'now, after the revival: absent'; end if;

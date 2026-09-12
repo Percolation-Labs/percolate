@@ -194,18 +194,7 @@ begin
 
     if jsonb_array_length(v_default->'paths') > 0
        and (v_default->'paths'->0->>'hops')::int = 1 then
-        raise exception 'without as_of the expired edge was still traversed'
-            using hint = 'The compiled half and the extension SQL ship as separate '
-                'files and drift apart independently (see this suite''s query/11 '
-                'preamble). If the percolate_parser .so on this database predates '
-                'REM-51, that is the cause rather than a defect in the graph: it '
-                'clears on the next parser release, or now with dev/build-image.sh. '
-                'Installed: percolate_parser ' ||
-                coalesce((select extversion from pg_extension where extname='percolate_parser'), '?') ||
-                ', percolate ' ||
-                coalesce((select extversion from pg_extension where extname='percolate'), '?') ||
-                coalesce((select ', parser built at ' || commit_sha from public.percolate_build
-                           where component = 'parser'), '');
+        raise exception 'without as_of the expired edge was still traversed';
     end if;
     if jsonb_array_length(v_now->'paths') > 0
        and (v_now->'paths'->0->>'hops')::int = 1 then
