@@ -27304,6 +27304,21 @@ declare
         -- Neither is a vocabulary the extension can recreate.
         'content.source_records',
         'content.source_state',
+        -- THE CHANNEL ITS RESOURCES POINT AT. Every other table in this schema
+        -- was here and this one was not, so pg_dump carried every
+        -- content.resources row and none of the channels they reference --
+        -- measured: 6 channels in the database, 0 COPY lines, resources
+        -- dumped. A restore either fails on channel_id or comes back without
+        -- the sources somebody configured.
+        --
+        -- It has extension-seeded rows too (`uploads`, `workflow_artifacts`),
+        -- which is exactly why it was missed: the gate's rule was "empty on a
+        -- from-zero install and unregistered", and a table holding BOTH the
+        -- extension's rows and the deployment's is never empty. Registering it
+        -- is right anyway -- pg_extension_config_dump carries the rows that
+        -- are there, and the two seeded ones are recreated by the install with
+        -- `on conflict do nothing`, so they do not double.
+        'content.channels',
         'public.percolate_build',
         'rbac.api_keys',
         'rbac.auth_events',
@@ -27315,6 +27330,13 @@ declare
         'rbac.roles',
         'rbac.user_roles',
         'rbac.users',
+        -- THE SAME DEFECT, AND THE WORSE HALF OF IT. workflow.runs below IS
+        -- registered and carries a foreign key to workflow.definitions, which
+        -- was not -- so a dump held every run and none of the definitions they
+        -- name. Every workflow anybody authored with define_yaml was absent
+        -- from every backup. Found by the sibling sweep this file's own header
+        -- asks for, not by anybody noticing a restore.
+        'workflow.definitions',
         'workflow.queue_config',
         'workflow.rate_limits',
         'workflow.runs',
