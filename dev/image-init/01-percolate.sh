@@ -72,7 +72,18 @@ begin
                     'select workflow.reap_stale_tasks()',   current_database(), 'scheduler');
         perform cron.schedule_in_database('workflow-timers', '* * * * *',
                     'select workflow.promote_due_timers()', current_database(), 'scheduler');
-        raise notice 'percolate: pg_cron scheduled -- tick, reaper and timers are live';
+        -- A FOURTH JOB, BECAUSE NOTHING DELETED A FINISHED RUN (REM-109).
+        -- workflow.purge_completed existed and was scheduled nowhere, so every
+        -- deployment kept every run and every task_event for ever. That is not
+        -- only disk: scale.md finding 2 shows queue_depth -- the autoscaler's
+        -- own probe -- degrades with the live-to-total row ratio, so at ~10k
+        -- tasks/day the thing that decides how many workers to run gets slower
+        -- for three months and then matters. Daily rather than per-minute: it
+        -- is a retention pass, and its own defaults (30 days, 50 runs a batch)
+        -- bound one run of it.
+        perform cron.schedule_in_database('workflow-purge',  '17 3 * * *',
+                    'select workflow.purge_completed()',    current_database(), 'scheduler');
+        raise notice 'percolate: pg_cron scheduled -- tick, reaper, timers and purge are live';
     elsif coalesce(current_setting('shared_preload_libraries', true), '') like '%pg_cron%'
     then
         raise notice 'percolate: pg_cron is preloaded but cron.database_name is %, not '

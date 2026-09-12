@@ -130,6 +130,9 @@ if [ "$CRON_DB" = "$DB" ]; then
 select cron.schedule('workflow-tick',   '* * * * *', 'select workflow.tick()');
 select cron.schedule('workflow-reaper', '* * * * *', 'select workflow.reap_stale_tasks()');
 select cron.schedule('workflow-timers', '* * * * *', 'select workflow.promote_due_timers()');
+-- The retention pass, so a dev database that is reloaded rarely behaves like
+-- a deployment rather than like an archive (REM-109).
+select cron.schedule('workflow-purge',  '17 3 * * *', 'select workflow.purge_completed()');
 update cron.job set username = 'scheduler'
  where jobname in ('workflow-tick','workflow-reaper','workflow-timers');
 SQL
