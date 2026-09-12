@@ -758,6 +758,15 @@ create table if not exists workflow.lifecycle_states (
     note        text not null
 );
 
+-- `do update`, NOT `do nothing`, because these rows are the EXTENSION's
+-- (REM-68). The schema is replayed on every upgrade, so `do nothing` means a
+-- corrected value reaches fresh installs only and every existing database keeps
+-- the old one forever -- silently, because dev/upgrade-converges.sh compares
+-- OBJECTS and cannot see a row. Whose rows these are is not a judgement call:
+-- specs/contract/schema.sql §4's `deployment_tables` is the list, and this
+-- table is not on it. Tables that ARE on it -- rbac.role_permissions, roles --
+-- keep `do nothing`, because a deployment may edit them and an update would
+-- overwrite somebody's change on every upgrade.
 insert into workflow.lifecycle_states (state, is_terminal, is_success, note) values
     ('pending',          false, false, 'created, not yet eligible to run'),
     ('ready',            false, false, 'eligible: dependencies satisfied, awaiting a claim'),
@@ -767,7 +776,10 @@ insert into workflow.lifecycle_states (state, is_terminal, is_success, note) val
     ('failed',           true,  false, 'finished, and did not'),
     ('cancelled',        true,  false, 'stopped deliberately before finishing'),
     ('quota_exceeded',   true,  false, 'stopped because a budget ran out, not because it broke')
-on conflict (state) do nothing;
+on conflict (state) do update
+    set is_terminal = excluded.is_terminal,
+        is_success  = excluded.is_success,
+        note        = excluded.note;
 
 grant select on workflow.lifecycle_states to authenticated, api_viewer;
 
@@ -819,6 +831,39 @@ create table if not exists workflow.definitions (
     deleted_at  timestamptz,
     unique (name, version)
 );
+
+-- WHICH VERSION A NAME MEANS, in one place, because three callers were each
+-- answering it and two of them answered it differently from the column above.
+--
+-- `deleted_at` says what it is for in its own comment -- "don't start new runs
+-- against this version" -- and nothing enforced that. plan_catalog, plan_graph,
+-- plan_document, plan_defects, plan_probe, definitions_api and
+-- aiq.schema_workflow all filter `deleted_at is null`; start_workflow resolved
+-- `order by version desc limit 1` with no filter, and start_child_workflow and
+-- schedule_workflow gated on a bare `exists`. So a retired latest version was
+-- hidden from every list and still started, which is the one outcome the column
+-- was added to prevent (REM-58).
+--
+-- Latent rather than live: nothing in core sets `deleted_at` today. That is the
+-- reason to fix it now and not the reason to leave it -- the defect is not
+-- reachable, so the fix cannot break a caller, and it stops being true the
+-- moment anybody retires a definition.
+--
+-- Returns the ROW, so start_workflow keeps taking `spec` from the same read
+-- that chose the version. Two reads could disagree under a concurrent publish.
+create or replace function workflow.current_definition(p_name text)
+returns workflow.definitions as $$
+    select d.* from workflow.definitions d
+     where d.name = p_name and d.deleted_at is null
+     order by d.version desc
+     limit 1;
+$$ language sql stable;
+
+comment on function workflow.current_definition(text) is
+    'The version of this workflow a new run should use: the highest that has '
+    'not been retired. The one answer -- start_workflow, start_child_workflow '
+    'and schedule_workflow all read it, so "listed" and "startable" cannot '
+    'drift apart.';
 
 -- ------------------------------------------------------------
 -- 1b. Static spec validation (research finding: WF-net soundness is
@@ -1588,7 +1633,7 @@ begin
         end if;
     end if;
 
-    select * into v_def from workflow.definitions where name = p_name order by version desc limit 1;
+    v_def := workflow.current_definition(p_name);
     if v_def.id is null then
         raise exception 'no workflow_def found for name %', p_name;
     end if;
@@ -2269,7 +2314,9 @@ declare
     v_status text;
     v_ctx    jsonb;
 begin
-    if not exists (select 1 from workflow.definitions where name = p_workflow_name) then
+    -- STARTABLE, not merely present: the same question start_workflow asks one
+    -- call along, so this cannot admit a run that the starter then refuses.
+    if (workflow.current_definition(p_workflow_name)).id is null then
         raise exception
             'sub_workflow step names workflow %, which is not registered', p_workflow_name;
     end if;
@@ -4347,7 +4394,8 @@ begin
     -- last_error where nobody is looking.
     perform workflow.assert_schedule_access(p_name, 'create');
 
-    if not exists (select 1 from workflow.definitions where name = p_workflow) then
+    -- Startable, for the reason start_child_workflow gives above.
+    if (workflow.current_definition(p_workflow)).id is null then
         raise exception 'no workflow definition named "%"', p_workflow
             using hint = 'register it with workflow.define_yaml() first';
     end if;
@@ -6772,6 +6820,38 @@ comment on function workflow.validate_shape(jsonb, jsonb) is
 -- {{run.id}} with no such input key now says what to write instead, because
 -- the natural thing to type is the thing the reporter typed.
 -- ------------------------------------------------------------
+-- One id per (run, group), so one run can hold two independent conversations,
+-- and it is defined HERE rather than after run_meta because run_meta calls it.
+--
+-- percolate.uuidv5, not md5(...)::uuid. specs/identity/spec.md §3 bans the
+-- second and the comment inside run_meta already explained why -- md5 produces
+-- a value whose version nibble is 0, which is not a UUID and compares unequal
+-- to a correctly derived one computed anywhere else. `fa59c8e` moved run_meta
+-- and left its sibling behind, which is the postmortem's own class
+-- (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §1): a fix
+-- applied to one of two copies of one rule.
+--
+-- THE TWO WERE ALSO NOT THE SAME FUNCTION OF THEIR INPUTS, which is why this
+-- merges them rather than converting both. run_meta derived `$session` from
+-- `r.id::text`; run_session derived it from `run_id || ':' || group`, so even
+-- with the same hash the empty group would not have agreed with run_meta -- the
+-- trailing colon is a different string. Spelling the empty group as the bare
+-- run id keeps run_meta's published value EXACTLY as it is today, so no run's
+-- `$session` moves and there is nothing to migrate. A named group still gets
+-- its own id, which is what dev/tests/workflow/05 asserts.
+create or replace function workflow.run_session(p_run_id uuid, p_group text default '')
+returns uuid as $$
+    select percolate.uuidv5(
+        percolate.id_namespace('session'),
+        case when coalesce(p_group, '') = '' then p_run_id::text
+             else p_run_id::text || ':' || p_group end);
+$$ language sql immutable;
+
+comment on function workflow.run_session(uuid, text) is
+    'The conversation id for a run, derived rather than stored so a replay '
+    'converges on the same value. The empty group is the run''s own session and '
+    'is what run_meta publishes as $session.';
+
 create or replace function workflow.run_meta(p_run_id uuid)
 returns jsonb as $$
     select jsonb_build_object(
@@ -6786,22 +6866,15 @@ returns jsonb as $$
         -- stateless by omitting it. Derived rather than stored: the same run
         -- yields the same id on every resolution, including a replay, without a
         -- column that could drift from the run it belongs to.
-        -- percolate.uuidv5, not md5(...)::uuid: the requirement stated above
-        -- is exactly what a v5 is for, and the hand-rolled version produces a
-        -- value whose version nibble is 0 -- not a UUID at all, and unequal to
-        -- a correctly derived one computed anywhere else. specs/identity.
-        '$session',     percolate.uuidv5(percolate.id_namespace('session'),
-                                         r.id::text)::text)
+        -- workflow.run_session(), not a second copy of the derivation. It
+        -- was spelled out here and computed differently one function along,
+        -- which is the pair REM-58 collapsed; the value is unchanged.
+        '$session',     workflow.run_session(r.id)::text)
     from workflow.runs r
     join workflow.definitions d on d.id = r.workflow_def_id
     where r.id = p_run_id;
 $$ language sql stable security definer set search_path = pg_catalog, public;
 
--- One id per (run, group), so one run can hold two independent conversations.
-create or replace function workflow.run_session(p_run_id uuid, p_group text default '')
-returns uuid as $$
-    select md5(p_run_id::text || ':' || coalesce(p_group, ''))::uuid;
-$$ language sql immutable;
 
 -- workflow.resolve_args(jsonb,uuid,jsonb) is defined in section 20a.
 -- This section explains why it has the shape it does; the body is not repeated,
@@ -15265,13 +15338,26 @@ create table if not exists aiq.embedding_providers (
     notes            text
 );
 
+-- `do update`, NOT `do nothing`, because these rows are the EXTENSION's
+-- (REM-68). The schema is replayed on every upgrade, so `do nothing` means a
+-- corrected value reaches fresh installs only and every existing database keeps
+-- the old one forever -- silently, because dev/upgrade-converges.sh compares
+-- OBJECTS and cannot see a row. Whose rows these are is not a judgement call:
+-- specs/contract/schema.sql §4's `deployment_tables` is the list, and this
+-- table is not on it. Tables that ARE on it -- rbac.role_permissions, roles --
+-- keep `do nothing`, because a deployment may edit them and an update would
+-- overwrite somebody's change on every upgrade.
 insert into aiq.embedding_providers (provider, request_template, response_path, notes) values
     ('ollama', '{"model": "{{model}}", "prompt": "{{text}}"}'::jsonb, 'embedding',
      'POST /api/embeddings -- one vector, at the top level under "embedding".'),
     ('openai', '{"model": "{{model}}", "input": "{{text}}"}'::jsonb, 'data.0.embedding',
      'POST /v1/embeddings -- a list, because the API embeds a batch; a single '
      'text still comes back as data[0]. Needs credential_ref on the model row.')
-on conflict (provider) do nothing;
+on conflict (provider) do update
+    set request_template = excluded.request_template,
+        response_path    = excluded.response_path,
+        method           = excluded.method,
+        notes            = excluded.notes;
 
 -- Each registered model gets its own storage table + HNSW index, generated
 -- from the registry so the dimension and operator class can never drift from
@@ -19104,7 +19190,16 @@ comment on function aiq.resolve_mention(text, text, real, text[]) is
 -- DIFFERENT PROMISES. So the graph knows a named surface and the row knows the
 -- signatures, and a claim anchored here is anchored to the name.
 create table if not exists aiq.db_objects (
-    id          uuid generated always as (md5(ident)::uuid) stored primary key,
+    -- percolate.uuidv5, not md5(ident)::uuid. specs/identity/spec.md §3 bans
+    -- the second: it produces a value whose version nibble is 0, which is not
+    -- a UUID and compares unequal to the same id derived correctly anywhere
+    -- else -- and `492e007` added this column two days after the ban, because
+    -- the check that enforces it reads pg_proc and a generated column is not a
+    -- function (REM-58). The ALTER below is what carries it to a database that
+    -- upgrades, since `create table if not exists` is a no-op there.
+    id          uuid generated always as
+                (percolate.uuidv5(percolate.id_namespace('db_object'), ident))
+                stored primary key,
     ident       text not null unique,      -- schema-qualified, or the bare name for a role
     nspname     text not null,             -- '' for a role, which has no schema
     objname     text not null,
@@ -19115,6 +19210,37 @@ create table if not exists aiq.db_objects (
     reachable   boolean not null default false,
     grantees    text[] not null default '{}'
 );
+
+-- AND THE SAME EXPRESSION ON A DATABASE THAT ALREADY HAS THE COLUMN, because
+-- the `create table if not exists` above does nothing there and the two would
+-- diverge -- exactly what dev/upgrade-converges.sh exists to catch.
+--
+-- `set expression` recomputes every row in place and keeps the primary key, so
+-- `ident` stays unique and the table stays consistent with itself. Guarded on
+-- the CURRENT expression rather than run unconditionally: it rewrites the
+-- table, and the schema is replayed on every upgrade.
+--
+-- aiq.nodes rows anchored to a db_object carry the old id in `entity_id`. They
+-- are re-derived by aiq.refresh_catalogue() and its graph sync, which run on a
+-- schedule and on demand -- the catalogue is a derivation of the live catalog,
+-- not a store -- so this leaves stale anchors until the next refresh rather
+-- than broken ones. Stated because it is a real window, not a no-op.
+do $$
+begin
+    if exists (
+        select 1 from pg_attrdef d
+          join pg_attribute a on a.attrelid = d.adrelid and a.attnum = d.adnum
+         where d.adrelid = 'aiq.db_objects'::regclass
+           and a.attname = 'id'
+           and pg_get_expr(d.adbin, d.adrelid) ilike '%md5%')
+    then
+        alter table aiq.db_objects
+            alter column id set expression as
+            (percolate.uuidv5(percolate.id_namespace('db_object'), ident));
+        raise notice 'aiq.db_objects.id re-derived as uuidv5 (was md5) -- '
+                     'run aiq.refresh_catalogue() to re-anchor aiq.nodes';
+    end if;
+end $$;
 
 -- NO org_id, AND THAT IS A DECISION. Sixteen tables in this extension carry one
 -- and this is not the seventeenth: a database's own catalogue is one shared
@@ -20816,10 +20942,26 @@ select aiq.register_entity_table(
     $$n.status = 'ready'$$
 );
 
+-- `do update`, NOT `do nothing`, because these rows are the EXTENSION's
+-- (REM-68). The schema is replayed on every upgrade, so `do nothing` means a
+-- corrected value reaches fresh installs only and every existing database keeps
+-- the old one forever -- silently, because dev/upgrade-converges.sh compares
+-- OBJECTS and cannot see a row. Whose rows these are is not a judgement call:
+-- specs/contract/schema.sql §4's `deployment_tables` is the list, and this
+-- table is not on it. Tables that ARE on it -- rbac.role_permissions, roles --
+-- keep `do nothing`, because a deployment may edit them and an update would
+-- overwrite somebody's change on every upgrade.
+--
+-- Only the two rows named here are the extension's. A package or an application
+-- that registers its own relation type is a different statement and is
+-- untouched by this one, which is what makes `do update` safe on a table whose
+-- rows have more than one author.
 insert into aiq.relation_types (src_type, relation, dst_type, inverse_label, description) values
   ('document','derived_from','document','source_of','a document produced from another'),
   ('document','supersedes','document','superseded_by','a newer revision of the same thing')
-on conflict do nothing;
+on conflict (src_type, relation, dst_type) do update
+    set inverse_label = excluded.inverse_label,
+        description   = excluded.description;
 
 -- ------------------------------------------------------------
 -- 3. Tenancy.
@@ -20850,6 +20992,56 @@ on conflict do nothing;
 select rbac.add_scope_columns('content.channels', 'public');
 select rbac.add_scope_policy ('content.channels');
 select rbac.add_scope_columns('content.resources', 'public');
+
+-- ------------------------------------------------------------
+-- A ROW NOBODY CAN EVER READ IS REFUSED HERE, because writing it has now been
+-- a bug three times in three different files.
+--
+-- `visibility = 'private'` with no owner is not a narrow row; it is a dead
+-- one. rbac.may_read(null, org, 'private') is NULL on every arm -- not public,
+-- not the caller's, not an org scope -- so the row is invisible to every
+-- caller including the one that wrote it, and the policy these two tables
+-- carry is exactly those three arms and nothing else.
+--
+-- The three instances, all reported as the same sentence:
+--
+--   REM-75  content.register_fetched wrote it, and the poller's own next
+--           select found nothing.
+--   REM-74  the self-model's content.sql created its channel without it.
+--   REM-83  percolate.apply_package, above, for a package-declared source.
+--
+-- Each was repaired at the call site, which is why there were three. By
+-- meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §6 the third
+-- occurrence buys a gate rather than a fourth repair, and by
+-- challenge-the-process §9 the gate belongs at the lowest layer that can
+-- refuse it -- which is the table.
+--
+-- NOT VALID, and that is the substance rather than a performance note. It
+-- refuses every NEW row while leaving existing ones alone, so an upgrade of a
+-- database that already carries dead rows does not fail -- and, more to the
+-- point, nothing here has to decide what those rows should have been. Turning
+-- a private row public is a disclosure, and a migration is the wrong place to
+-- make one on somebody's behalf. The dead rows stay dead and visible to an
+-- operator who goes looking; only the fourth instance is refused.
+--
+-- These two tables and not the other twelve that take add_scope_columns:
+-- agentic.agents/plugins/skills/tool_servers, workflow.runs and
+-- workflow.schedules each carry an extra `rbac.has_permission(...)` arm on
+-- their read policy, so a private ownerless row there is reachable by an
+-- administrator and is not dead. aiq.nodes, aiq.soft_nodes, aiq.lake_nodes,
+-- content.datasets, agentic.runs and agentic.sessions have the three-arm
+-- policy and DO have the same dead shape; they are not constrained here
+-- because no instance has been observed on them and each wants its own look at
+-- what writes it. Recorded on REM-83 rather than done silently.
+--
+-- Dropped before added: a CHECK has no IF NOT EXISTS, and build-sql.py's
+-- idempotency check refuses the pair written the other way round.
+alter table content.channels  drop constraint if exists channels_readable_by_somebody;
+alter table content.channels  add  constraint channels_readable_by_somebody
+    check (not (visibility = 'private' and owner_id is null)) not valid;
+alter table content.resources drop constraint if exists resources_readable_by_somebody;
+alter table content.resources add  constraint resources_readable_by_somebody
+    check (not (visibility = 'private' and owner_id is null)) not valid;
 
 -- AND NOW resolve_file, which needs the three columns the line above adds.
 -- Its home is here for that reason; schema.sql carries the pointer.
@@ -27933,9 +28125,33 @@ begin
             select v_e->>'name','http_pull',v_e->'config',rbac.current_user_id(),'private'
             where not exists(select 1 from content.channels where name=v_e->>'name' and org_id=rbac.shared_org_id());
         else
-        insert into content.channels (name, kind, config)
+        -- owner_id AND visibility, for the third time in three files, and the
+        -- CHECK below is what stops there being a fourth.
+        --
+        -- Omitted, the columns default to `private` and null -- and
+        -- rbac.may_read(null, shared_org, 'private') is NULL, so the channel
+        -- this just declared is readable by nobody. content.register_fetched
+        -- filters it out of its own lookup and reports "no channel named % for
+        -- this org" about a channel that is right there, which is the sentence
+        -- REM-75 earned on `workflow_artifacts` and REM-74 earned again on the
+        -- self-model's channel. Measured here before the fix:
+        --
+        --     => select percolate.apply_package('{... "sources": [...] }');
+        --     => select content.register_fetched('rem83_feed','item-1');
+        --     ERROR:  no channel named rem83_feed for this org
+        --
+        -- rbac.default_visibility() rather than a literal, because a package
+        -- install has two shapes and they want different answers: an operator
+        -- installing deployment configuration gets `public` with no owner, and
+        -- a signed-in installer (packages/apply.py --owner) gets `private`
+        -- against their own owner_id. Both are readable; a constant would be
+        -- right for one of them. It is the same call the API branch's sibling
+        -- and content.register_upload already make, so this is not a third
+        -- spelling of the rule.
+        insert into content.channels (name, kind, config, owner_id, visibility)
         select v_e->>'name', coalesce(v_e->>'kind','manual'),
-               coalesce(v_e->'config','{}'::jsonb)
+               coalesce(v_e->'config','{}'::jsonb),
+               rbac.current_user_id(), rbac.default_visibility()
         where not exists (select 1 from content.channels c
                            where c.name = v_e->>'name'
                              and c.org_id = rbac.shared_org_id());
@@ -28089,7 +28305,20 @@ from percolate.table_kind_proposal
 -- for whoever owns them. A guess written here would be indistinguishable
 -- from a decision, which is the failure the view was built to avoid.
 where proposed_kind is not null
-on conflict (schema_name, table_name) do nothing;
+-- `do update` for the reason percolate.null_means twenty lines above already
+-- does it (REM-68): the schema is replayed on every upgrade, so `do nothing`
+-- means a re-reviewed kind reaches fresh installs only and every existing
+-- database keeps the old one forever, invisibly -- dev/upgrade-converges.sh
+-- compares objects, not rows. percolate.table_kinds is not on
+-- specs/contract/schema.sql §4's `deployment_tables`, so these rows are the
+-- extension's to correct.
+--
+-- Safe on a table whose rows have more than one author because the SELECT is
+-- already scoped: percolate.table_kind_proposal reads only
+-- percolate.extension_schemas(), so an application's own declaration is not a
+-- row this statement can name.
+on conflict (schema_name, table_name) do update
+    set kind = excluded.kind, why = excluded.why;
 
 -- The abstentions, declared one at a time, which is what the view asks for:
 -- "Read it, disagree with it, then write the row."
@@ -28103,7 +28332,9 @@ on conflict (schema_name, table_name) do nothing;
 insert into percolate.table_kinds (schema_name, table_name, kind, why) values
  ('content','source_state','natural',
   'a sidecar keyed by content.channels(id); same shape as the aiq.emb_* tables')
-on conflict (schema_name, table_name) do nothing;
+-- `do update`, same reason as the statement above, and here it names one row.
+on conflict (schema_name, table_name) do update
+    set kind = excluded.kind, why = excluded.why;
 
 -- ------------------------------------------------------------
 -- 5. ENFORCE THE KEY DEFAULT, on upgrades as well as fresh installs.

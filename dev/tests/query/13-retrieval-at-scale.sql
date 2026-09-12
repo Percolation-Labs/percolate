@@ -80,13 +80,19 @@ insert into rbac.org_members (org_id, user_id, role)
 insert into content.channels (id, name, kind, org_id, visibility)
     values ('11110000-0000-0000-0000-0000000000aa','scaletest','manual',
             rbac.shared_org_id(),'public');
-insert into content.resources (id, channel_id, external_id, uri, title, status, org_id, visibility) values
+-- THE CROWD HAS AN OWNER, and the comment above already said so -- "a
+-- resource nobody but the OWNER may read". It was written with owner_id left
+-- null, which is not a narrow row but a dead one: private with no owner is
+-- readable by nobody at all, and content.resources now refuses that pair
+-- (REM-83). alice, who is not a member of the scaletest org, is the owner the
+-- comment meant: §1-§3 run as bob and must still see none of these 2000 rows.
+insert into content.resources (id, channel_id, external_id, uri, title, status, org_id, visibility, owner_id) values
     ('33330000-0000-0000-0000-00000000aa01','11110000-0000-0000-0000-0000000000aa',
      'st-crowd','memo://scaletest/crowd','the crowd','ready',
-     rbac.shared_org_id(),'private'),
+     rbac.shared_org_id(),'private','11111111-1111-1111-1111-111111111111'),
     ('33330000-0000-0000-0000-00000000aa02','11110000-0000-0000-0000-0000000000aa',
      'st-mine','memo://scaletest/mine','the tenant''s own','ready',
-     'cccc0000-0000-0000-0000-00000000000a','org');
+     'cccc0000-0000-0000-0000-00000000000a','org',null);
 
 insert into content.resource_chunks (id, resource_id, ordinal, content)
 select ('55550000-0000-0000-0000-'||lpad(n::text,12,'0'))::uuid,
