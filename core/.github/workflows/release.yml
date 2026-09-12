@@ -73,11 +73,11 @@ jobs:
       # of this ordering die in `actions/checkout` before it built anything.
       sha: ${{ steps.sha.outputs.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0     # tags, so the duplicate check below can see them
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with: {python-version: "3.12"}
 
       # An unreleased version in the tree is a release that did not finish, not
@@ -153,10 +153,10 @@ jobs:
     needs: version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.publish && needs.version.outputs.sha || github.ref }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with: {python-version: "3.12"}
       - run: pip install build twine
       - run: python -m build
@@ -169,7 +169,7 @@ jobs:
         # bump, so this tree is still on the previous version by design.
         if: inputs.publish
         run: ls dist/ | grep -q "percolate_core-${{ needs.version.outputs.version }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with: {name: dist, path: dist/}
 
   # -------------------------------------------------------------------------
@@ -187,7 +187,7 @@ jobs:
     permissions:
       id-token: write        # OIDC -- there is no PyPI token in this repo
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with: {name: dist, path: dist/}
       # PINNED BY COMMIT, not by `@release/v1`, and this is the one step in
       # this repository where that distinction can cost something: a branch ref
@@ -213,17 +213,17 @@ jobs:
     needs: [version, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.publish && needs.version.outputs.sha || github.ref }}
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         if: inputs.publish
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           platforms: linux/amd64,linux/arm64
           push: ${{ inputs.publish }}
@@ -258,9 +258,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with: {name: dist, path: dist/}
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.version.outputs.tag }}
           files: dist/*
@@ -329,12 +329,12 @@ jobs:
       # result, so the review a human was providing is done by two checks that
       # do not get tired.
       # -------------------------------------------------------------------
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: ${{ vars.CHART_REPO || 'Percolation-Labs/get-percolate' }}
           token: ${{ secrets.P8_RELEASE_TOKEN }}
           path: get-percolate
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with: {python-version: "3.12"}   # tomllib is stdlib from 3.11
 
       - name: Point the chart and the docs at ${{ needs.version.outputs.version }}
@@ -404,7 +404,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           # THE COMMIT THAT WAS BUILT, which is what `build` and `image` already
