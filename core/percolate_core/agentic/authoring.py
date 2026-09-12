@@ -76,6 +76,13 @@ def to_json_schema(agent: AgentSpec) -> dict[str, Any]:
     doc["properties"] = schema.get("properties", {})
     if schema.get("required"):
         doc["required"] = schema["required"]
+    # Back out at the top level, where pydantic puts them: a contract whose
+    # properties hold a `$ref` needs its `$defs` in the same document or the
+    # round trip -- `agent show` edited and pushed back -- emits a schema that
+    # points at nothing.
+    for key in ("$defs", "additionalProperties"):
+        if schema.get(key) is not None:
+            doc[key] = schema[key]
 
     if agent.chained_action:
         doc["chained_action"] = agent.chained_action.model_dump()
@@ -88,12 +95,26 @@ def to_json_schema(agent: AgentSpec) -> dict[str, Any]:
 
 
 def from_json_schema(doc: dict[str, Any]) -> AgentSpec:
-    """The inverse: a schema document back into the row it describes.
+    """The inverse: a schema document as the typed spec it describes.
 
     ``description`` is the system prompt and ``properties`` is the structured
     output — the two mappings that make "no ``prompt`` key" work. Everything
     else is agent config sitting at the same level, exactly where
     ``json_schema_extra`` puts it.
+
+    **THIS IS NOT THE WRITE PATH** (``brief.md`` §6.1, REM-70). It exists so a
+    document can become a typed object *in this process*, with no database
+    anywhere — which is the whole of ``from_model_class`` and of the in-memory
+    repository. A row that is really stored is translated by
+    ``agentic.agent_document_to_row`` in the extension, because three loaders
+    each holding their own version of this mapping is how the same extractor came
+    to install differently depending on which tool applied it. So: parse a
+    document for your own use, and send the *document* to the database.
+
+    It is also lossier than the database's, necessarily and only in one
+    direction: ``AgentSpec`` does not model ``category``, ``audience``, ``tags``,
+    ``skills``, ``plugin`` or the scope columns, so those survive only by never
+    being translated here.
     """
     properties = doc.get("properties") or {}
     output = (
@@ -105,6 +126,16 @@ def from_json_schema(doc: dict[str, Any]) -> AgentSpec:
         if properties
         else None
     )
+    # `$defs` TRAVELS WITH THE SCHEMA, because a nested pydantic model emits
+    # `{"$ref": "#/$defs/Claim"}` into `properties` and the definitions beside
+    # it. Dropped — which is what this did — the stored contract carries a `$ref`
+    # pointing at nothing, and no provider can validate a response against it.
+    # `agentic.agent_document_to_row` keeps it for the same reason; the two agree
+    # on this document, which is asserted in `tests/smoke.py`.
+    if output is not None:
+        for key in ("$defs", "additionalProperties"):
+            if doc.get(key) is not None:
+                output[key] = doc[key]
     return AgentSpec(
         name=doc.get("name") or doc.get("title", ""),
         system_prompt=doc.get("description", ""),

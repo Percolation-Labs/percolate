@@ -24,9 +24,11 @@ from typing import Any
 from uuid import UUID
 
 import typer
+import yaml
 from rich.console import Console
 from rich.table import Table
 
+from ..core import agent_document
 from . import authoring, phases
 from .contracts import ChatRequest, InboundMessage, RequestContext, ToolServer
 from .db import PgClient, connected
@@ -222,12 +224,35 @@ def agent_push(path: Path) -> None:
     migration, not a deploy" — and the upsert is gated inside the database on
     ``rbac.has_permission(uid, 'agents', 'update')``, so pushing as a user
     without that permission fails in Postgres, not here.
+
+    THE DOCUMENT GOES TO THE DATABASE WHOLE (``brief.md`` §6.1, REM-70). It used
+    to be parsed into an ``AgentSpec`` here and the model's fields sent, which
+    translated it a second time and dropped, silently and in this process, every
+    column ``AgentSpec`` does not model: ``category`` — which is what makes an
+    agent an extractor — ``audience``, ``tags`` and ``skills``. Pushing a
+    documented extractor therefore installed a `general` agent. It is parsed
+    below only to be *checked* before anything is sent, so a malformed document
+    is a sentence rather than a SQL error.
     """
-    spec = authoring.load(path, text=sys.stdin.read() if str(path) == "-" else None)
+    text = sys.stdin.read() if str(path) == "-" else Path(path).read_text()
+    doc = yaml.safe_load(text)
+    if not isinstance(doc, dict):
+        console.print("[red]an agent is a JSON Schema document — a mapping, not a list[/red]")
+        raise typer.Exit(code=1)
+    authoring.from_json_schema(doc)  # reads as an agent at all; sent as written
 
     async def _run() -> None:
         async with repo_for_cli() as repo:
-            stored = await repo.upsert_agent(spec)
+            # An extension older than the document translation accepts this and
+            # stores an agent with an empty prompt, reporting success. Asked
+            # before the write, in the words of the one place that explains it.
+            if agent_document.is_document(doc) and not await repo.translates_agent_documents():
+                console.print(
+                    f"[red]{path} is a JSON Schema document, and "
+                    f"{agent_document.NEEDS_TRANSLATION}[/red]"
+                )
+                raise typer.Exit(code=1)
+            stored = await repo.upsert_agent_document(doc)
             console.print(f"[green]upserted[/green] {stored.name} ({stored.id})")
 
     asyncio.run(_run())
