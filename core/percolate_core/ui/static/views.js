@@ -55,9 +55,14 @@ export async function tryRead(fn, fallback) {
   catch (e) { return fallback(e instanceof ApiError ? e : new ApiError(0, { message: String(e) }, "")); }
 }
 
-/* The definitions map. runs_api carries workflow_def_id and no name, so every
-   screen that labels a run needs this. One fetch, cached for the page load --
-   the upstream fix is a `name` column on runs_api, and then this goes.
+/* The definitions map. `runs_api` carries `name` now (REM-62), so labelling a
+   run no longer needs this -- but two things still do, and they are why it did
+   not go away entirely:
+
+     - a run started by a data source is labelled with the SOURCE's name, not
+       the generated `source_<uuid>` workflow it runs, and that correspondence
+       lives on the channel row;
+     - the run detail screen prints the definition's VERSION beside the name.
 
    A FAILED load is not cached and carries its error out. It used to do
    neither: the empty result was cached as though it were an answer, so one
@@ -76,7 +81,17 @@ export async function defs() {
   if (!r.error) { DEFS = d; DEFS_ACCOUNT = account; }
   return d;
 }
-export const wfName = (d, id) => { const name = d.byId.get(id)?.name; return d.sourceNames?.get(name) || name || short(id); };
+/* The run's own name, with the source overlay on top of it. The fallback to
+   the definitions map is for a caller that has an id and no row -- and to
+   short(id), because a run whose definition has been deleted still has to
+   render as something. */
+export const wfName = (d, run) => {
+  const name = typeof run === "object" && run
+    ? (run.name ?? d.byId.get(run.workflow_def_id)?.name)
+    : d.byId.get(run)?.name;
+  const id = typeof run === "object" && run ? run.workflow_def_id : run;
+  return d.sourceNames?.get(name) || name || short(id);
+};
 
 /* task_events.detail carries every field the trigger recorded, most of them
    null on a normal transition. Printing them makes every row read the same. */
@@ -137,7 +152,7 @@ export async function overview() {
         : table(["Run", "Workflow", "Status", "External id", "Started"], runsRes.rows, (r) =>
             h("tr", {},
               h("td", { class: "mono" }, h("a", { href: "#/run/" + r.id }, short(r.id))),
-              h("td", {}, wfName(d, r.workflow_def_id)),
+              h("td", {}, wfName(d, r)),
               h("td", {}, status(r.status)),
               h("td", { class: "mono" }, r.external_id || "-"),
               h("td", { class: "mono" }, fmtTime(r.created_at)))),
@@ -188,7 +203,7 @@ export async function runs() {
         table(["Run", "Workflow", "Status", "Compensation", "External id", "Started", "Finished"], res.rows, (r) =>
           h("tr", {},
             h("td", { class: "mono" }, h("a", { href: "#/run/" + r.id }, short(r.id))),
-            h("td", {}, wfName(d, r.workflow_def_id)),
+            h("td", {}, wfName(d, r)),
             h("td", {}, status(r.status)),
             h("td", {}, r.compensation_state === "none" ? h("span", { class: "chip" }, "none") : status(r.compensation_state)),
             h("td", { class: "mono" }, r.external_id || "-"),
@@ -260,7 +275,7 @@ export async function run(id) {
     } }, "Cancel run"), out);
 
   const done = tasks.filter((t) => t.status === "succeeded").length;
-  node.querySelector("h1").textContent = r ? wfName(d, r.workflow_def_id) : "Run unavailable";
+  node.querySelector("h1").textContent = r ? wfName(d, r) : "Run unavailable";
   node.append(repeat);
   const failed = tasks.filter(t => t.status === "failed");
   if (failed.length) node.append(h("div", {class:"note rose", role:"alert"},
@@ -268,7 +283,7 @@ export async function run(id) {
       t.step_key + ": " + (typeof t.error === "string" ? t.error : t.error?.message || t.error?.detail || t.error?.error || JSON.stringify(t.error || "The step failed.")))),
     h("p", {}, "Check the failed step below. Correct its inputs or configuration, then use Run again to start a fresh run.")));
   node.append(h("div", { class: "grid g4" },
-    statOf(runRes, "Workflow", h("span",{class:"stat-name"},r ? wfName(d, r.workflow_def_id) : "-"), def ? "v" + def.version : ""),
+    statOf(runRes, "Workflow", h("span",{class:"stat-name"},r ? wfName(d, r) : "-"), def ? "v" + def.version : ""),
     statOf(taskRes, "Tasks", done + " / " + tasks.length, "succeeded / total"),
     statOf(taskRes, "Retries", tasks.reduce((a, t) => a + Math.max(0, (t.attempts || 1) - 1), 0),
            "attempts beyond the first"),
@@ -355,8 +370,6 @@ export async function run(id) {
 /* -- Workflows --------------------------------------------- */
 export async function workflows() {
   const d = await defs();
-  const latest = new Map();
-  for (const row of d.rows || []) latest.set(row.name, Math.max(latest.get(row.name) || 0, row.version));
   const node = page(head(d.error ? "definitions unavailable" : (d.rows || []).length + " definitions",
     "Workflows",
     "Combine sources, queries and agents into repeatable jobs. Run them with new inputs and package their definitions for reuse.",
@@ -372,8 +385,11 @@ export async function workflows() {
         h("td", { class: "pill-row" }, (w.step_kinds || []).map((k) => h("span", { class: "chip kind" }, k))),
         h("td", { class: "mono" }, (w.queues || []).join(", ") || "default"),
         h("td", { class: "mono" }, fmtTime(w.created_at)),
+        /* `is_latest` is the view's answer. It used to be a max() over the
+           rows this page happened to have read, which is a claim about a
+           page rather than about the database. */
         h("td", {}, iconAction("play", "Start a run of " + w.name,
-          { disabled: latest.get(w.name) !== w.version, onclick: async (e) => {
+          { disabled: !w.is_latest, onclick: async (e) => {
           const button = e.currentTarget;
           button.closest("tr").after(h("tr", {}, h("td", {colspan:7}, runForm(w.name))));
           button.disabled = true;

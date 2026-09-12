@@ -52,15 +52,15 @@ export const READS = {
     q: "select=id,ordinal,content,token_count&order=ordinal" },
   /* -- workflow ------------------------------------------------------- */
   definitions: { screen: "Workflows", schema: "workflow", view: "definitions_api",
-    q: "select=id,name,version,step_count,step_kinds,queues,created_at&order=name" },
+    q: "select=id,name,version,step_count,step_kinds,queues,created_at,is_latest&order=name" },
   runsByStatus: { screen: "Overview", schema: "workflow", view: "runs_by_status_api",
     q: "select=status,n" },
   tasksByStatus: { screen: "Queues", schema: "workflow", view: "tasks_by_status_api",
     q: "select=queue,status,n&order=queue" },
   recentRuns: { screen: "Overview", schema: "workflow", view: "runs_api",
-    q: "select=id,status,external_id,created_at,workflow_def_id&order=created_at.desc" },
+    q: "select=id,status,external_id,created_at,workflow_def_id,name&order=created_at.desc" },
   runs: { screen: "Runs", schema: "workflow", view: "runs_api",
-    q: "select=id,status,compensation_state,external_id,created_at,completed_at,workflow_def_id"
+    q: "select=id,status,compensation_state,external_id,created_at,completed_at,workflow_def_id,name"
        + "&order=created_at.desc" },
   /* No projection, and that is the contract: the Run panel prints the whole
      row as JSON, so pinning columns here would hide the ones added later --
@@ -111,9 +111,11 @@ export const READS = {
     q: "select=pattern,note&order=pattern" },
 
   /* -- rbac ----------------------------------------------------------- */
+  /* `roles` and `org_roles` are columns now. The screen used to read three
+     views and join them in the browser; the numbers on it are checkable only
+     when they come from one read (REM-62). */
   users: { screen: "Users", schema: "rbac", view: "users_api",
-    q: "select=id,email,status,created_at&order=email" },
-  userRoles: { screen: "Users", schema: "rbac", view: "user_roles", q: "select=user_id,role" },
+    q: "select=id,email,status,created_at,roles,org_roles&order=email" },
   roleNames: { screen: "Users", schema: "rbac", view: "roles", q: "select=name&order=name" },
   roles: { screen: "Roles", schema: "rbac", view: "roles",
     q: "select=name,grants_all,description&order=name" },
@@ -121,8 +123,6 @@ export const READS = {
     q: "select=resource,action,checked_by&order=resource,action" },
   rolePermissions: { screen: "Roles", schema: "rbac", view: "role_permissions",
     q: "select=role,resource,action" },
-  orgMembers: { screen: "Users · Settings", schema: "rbac", view: "org_members",
-    q: "select=org_id,user_id,role" },
   /* `label`, not `name`: rbac.api_keys_api has always published `label`. */
   apiKeys: { screen: "Keys", schema: "rbac", view: "api_keys_api",
     q: "select=id,label,scopes,created_at,last_used_at,revoked_at&order=created_at.desc" },
@@ -130,7 +130,8 @@ export const READS = {
      is why the ordering belongs in the contract the audit executes. */
   refreshSessions: { screen: "Keys", schema: "rbac", view: "refresh_tokens_api",
     q: "select=id,device_label,issued_at,expires_at,revoked_at&order=issued_at.desc" },
-  orgs: { screen: "Settings", schema: "rbac", view: "orgs", q: "select=id,slug,name&order=slug" },
+  orgs: { screen: "Settings", schema: "rbac", view: "orgs_api",
+    q: "select=id,slug,name,member_count&order=slug" },
   /* The status vocabulary itself, read once at boot so a state nobody wrote a
      colour for is still chipped by what it means (ui.js setStatusVocabulary).
      A contract rather than an inline fetch so the Surface audit executes it:
@@ -159,7 +160,7 @@ export const READS = {
     q: "select=name,kind,cached_tools,synced_at&order=name" },
   plugins: { screen: "Agents", schema: "agentic", view: "plugins_api", q: "select=name&order=name" },
   chatSessions: { screen: "Chat", schema: "agentic", view: "sessions_api",
-    q: "select=id,title,created_at&order=created_at.desc" },
+    q: "select=id,title,created_at,message_count,run_count,last_message_at&order=created_at.desc" },
   messages: { screen: "Chat", schema: "agentic", view: "messages_api",
     q: "select=role,content,tool_calls,is_error,seq,created_at&order=seq" },
   messageSeqs: { screen: "Chat", schema: "agentic", view: "messages_api", q: "select=seq" },
@@ -175,4 +176,12 @@ export const READS = {
 export const PROBES = [
   { schema: "workflow", view: "pools", absent: "specs/workflow-engine/pools.sql is not shipped with the extension",
     why: "written by the pool toggle (PATCH); never read as a list" },
+  /* Both were joined into Users and Settings in the browser until REM-62 put
+     the answers on `users_api` and `orgs_api`. They stay in the audit because
+     those columns are built out of them: if either becomes unreadable, the
+     columns go quietly empty rather than loudly absent. */
+  { schema: "rbac", view: "user_roles",
+    why: "aggregated into rbac.users_api.roles; no screen reads it directly" },
+  { schema: "rbac", view: "org_members",
+    why: "aggregated into rbac.users_api.org_roles and rbac.orgs_api.member_count" },
 ];

@@ -121,16 +121,15 @@ export async function agents() {
 
 /* -- Users ------------------------------------------------- */
 export async function users() {
-  const [us, rs, roles, orgs] = await Promise.all([
+  /* Two reads, not four. `users_api` carries `roles` and `org_roles`, so the
+     role columns on this screen are the database's answer rather than three
+     views joined in a browser -- which is what made them uncheckable
+     (browser-ui.md §3; REM-62). `roleNames` stays: it fills the grant control,
+     which is a list of what COULD be granted, not of what is. */
+  const [us, roles] = await Promise.all([
     tryRead(() => read(READS.users), (e) => ({ rows: [], error: e })),
-    tryRead(() => read(READS.userRoles), (e) => ({ rows: [], error: e })),
     tryRead(() => read(READS.roleNames), (e) => ({ rows: [], error: e })),
-    tryRead(() => read(READS.orgMembers), (e) => ({ rows: [], error: e })),
   ]);
-  const roleOf = {};
-  (rs.rows || []).forEach((r) => { (roleOf[r.user_id] = roleOf[r.user_id] || []).push(r.role); });
-  const orgsOf = {};
-  (orgs.rows || []).forEach((r) => { (orgsOf[r.user_id] = orgsOf[r.user_id] || []).push(r.role); });
 
   const node = page(head(countOf(us, (us.rows || []).length, "visible"), "Users",
     "Inspect workspace members, their roles and their access."));
@@ -140,8 +139,8 @@ export async function users() {
       : table(["Email", "Roles", "Org roles", "Status", "Created", "Grant"], us.rows || [], (u) =>
           h("tr", {},
             h("td", {}, u.email, h("span", { class: "sub" }, short(u.id))),
-            h("td", { class: "pill-row" }, (roleOf[u.id] || []).map((r) => h("span", { class: "chip accent" }, r))),
-            h("td", { class: "pill-row" }, (orgsOf[u.id] || []).map((r) => h("span", { class: "chip" }, r))),
+            h("td", { class: "pill-row" }, (u.roles || []).map((r) => h("span", { class: "chip accent" }, r))),
+            h("td", { class: "pill-row" }, Object.values(u.org_roles || {}).map((r) => h("span", { class: "chip" }, r))),
             h("td", {}, status(u.status)),
             h("td", { class: "mono" }, fmtTime(u.created_at)),
             h("td", {}, (() => {
@@ -275,9 +274,8 @@ export async function keys() {
 
 /* -- Settings ---------------------------------------------- */
 export async function settings() {
-  const [orgs, mem, vis, states] = await Promise.all([
+  const [orgs, vis, states] = await Promise.all([
     tryRead(() => read(READS.orgs), (e) => ({ rows: [], error: e })),
-    tryRead(() => read(READS.orgMembers), (e) => ({ rows: [], error: e })),
     tryRead(() => read(READS.visibilities), (e) => ({ rows: [], error: e })),
     tryRead(() => read(READS.lifecycleStates), (e) => ({ rows: [], error: e })),
   ]);
@@ -305,11 +303,15 @@ export async function settings() {
         setEndpoint("content", content.value.replace(/\/$/, ""));
         out.replaceChildren(h("div", { class: "note" }, "Saved to localStorage."));
       } }, "Save"), out)),
-    panel("Orgs", "rbac.orgs",
-      orgs.error ? gap("rbac.orgs", orgs.error.message, "schema")
+    panel("Orgs", "rbac.orgs_api",
+      orgs.error ? gap("rbac.orgs_api", orgs.error.message, "schema")
+        /* `member_count` is a column. It used to be a filter over every
+           org_members row this caller could see, per org -- a group-by in a
+           browser, and a number that was silently wrong whenever RLS hid a
+           membership. */
         : table(["Slug", "Name", "Members"], orgs.rows || [], (o) =>
             h("tr", {}, h("td", { class: "mono" }, o.slug), h("td", {}, o.name),
-              h("td", { class: "num" }, (mem.rows || []).filter((m) => m.org_id === o.id).length))))));
+              h("td", { class: "num" }, o.member_count))))));
 
   node.append(panel("Run status vocabulary", "workflow.lifecycle_states - what each word means, and which of them are finished",
     states.error ? gap("workflow.lifecycle_states", states.error.message, "schema")
@@ -585,9 +587,18 @@ export async function chat() {
     sessions.error ? gap("sessions_api", sessions.error.message, "schema")
       : ((sessions.rows || []).length
           ? (sessions.rows || []).map((sess) => {
+              /* How much is in a session, from `sessions_api` rather than
+                 from opening it. The list could not say before without
+                 fetching every session's messages, so it said nothing
+                 (REM-62). `last_message_at` is the age that matters: a
+                 session created last week and answered an hour ago is not a
+                 week old. */
               const node = h("div", { class: "thread-item" },
                 h("strong", {}, sess.title || "(untitled)"),
-                h("div", { class: "meta" }, h("span", {}, fmtTime(sess.created_at)),
+                h("div", { class: "meta" },
+                  h("span", {}, fmtTime(sess.last_message_at || sess.created_at)),
+                  h("span", {}, (sess.message_count ?? 0) + " message" + (sess.message_count === 1 ? "" : "s")
+                    + (sess.run_count ? " · " + sess.run_count + " run" + (sess.run_count === 1 ? "" : "s") : "")),
                   h("span", { class: "mono" }, short(sess.id))));
               node.addEventListener("click", () => openSession(sess, node));
               return node;
