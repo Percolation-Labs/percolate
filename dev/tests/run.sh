@@ -24,6 +24,26 @@
 # failure the rest of this collection keeps finding: locally the file is
 # skipped and named, in CI it must run.
 #
+# A FILE MAY ALSO DECLARE THE COMPILED PARSER IT NEEDS, with
+# `-- requires-parser: <version>`, and a MIXED file may defer one assertion at a
+# time with a notice beginning `DEFERRED:`. Both exist for the window PACKAGING
+# calls "where main is red on purpose": the extension SQL and the .so ship as
+# separate files, so between a parser change and the next image every compiled
+# assertion fails for a reason that is not this commit's.
+#
+# The polarity is the OPPOSITE of `-- requires:` above and the difference is the
+# point. REQUIRE_ALL does not promote these to failures, because CI runs the
+# published image deliberately. What bounds them instead is the database: a
+# deferral is honoured only while pg_extension says `percolate` and
+# `percolate_parser` disagree. When the image catches up they agree, every
+# deferral turns back into the assertion it was hiding, and a file declaring a
+# parser that is NOT behind fails. Nobody has to remember to remove one.
+#
+# Prefer the notice to the file-level line wherever a file is not entirely
+# compiled: `-- requires-parser:` stands the whole file down, and query/15's
+# sections 2 to 5 are pure SQL that would then stop running in CI for a reason
+# that has nothing to do with them.
+#
 # DB exists because the two halves of the inner loop did not compose. reload.sh
 # builds `p8reload` by default and this file only ever asked `p8experiment`, so
 # testing the edit you just made meant either reloading over the stack's own
@@ -215,9 +235,32 @@ have_ext() {
     db_query "select 1 from pg_extension where extname = '$1'" | grep -q 1
 }
 
+# THE TWO HALVES, READ ONCE. Every deferral below is legal only while the
+# compiled parser is behind the extension SQL -- which is the normal state
+# between a parser change and the next image, and is deliberate (PACKAGING.md,
+# "the window where main is red on purpose"). It is not a state a test file
+# gets to assume: when the halves agree, a deferral is hiding a real failure,
+# and the checks below turn it back into one. That is what stops this becoming
+# a permanent mute, which is the only reason a declared failure is safe at all.
+PARSER_VER=$(db_query "select extversion from pg_catalog.pg_extension where extname='percolate_parser'")
+SCHEMA_VER=$(db_query "select extversion from pg_catalog.pg_extension where extname='percolate'")
+
+parser_behind() {
+    [ -n "$PARSER_VER" ] && [ -n "$SCHEMA_VER" ] && [ "$PARSER_VER" != "$SCHEMA_VER" ]
+}
+
+# sort -V rather than a numeric compare per component: the versions here are
+# plain x.y.z today and this stays right if one ever carries a suffix.
+parser_at_least() {
+    [ -n "$PARSER_VER" ] || return 1
+    [ "$(printf '%s\n%s\n' "$1" "$PARSER_VER" | sort -V | head -1)" = "$1" ]
+}
+
 failed=0
 skipped=0
 skipped_names=""
+deferred=0
+deferred_names=""
 for surface in ${SURFACES[@]}; do
     [ -d "$HERE/$surface" ] || { echo "no such surface: $surface" >&2; exit 2; }
     echo
@@ -238,6 +281,28 @@ for surface in ${SURFACES[@]}; do
             fi
             continue
         fi
+        # A FILE MAY DECLARE THE PARSER IT NEEDS. Unlike `-- requires:` above,
+        # REQUIRE_ALL does NOT turn this into a failure, because CI runs the
+        # published image on purpose and the published image is where the lag
+        # lives. The bound is the other way round: the declaration is honoured
+        # only while the halves disagree, so it expires by itself on the day the
+        # image catches up rather than on the day somebody remembers.
+        want=$(sed -n 's/^-- requires-parser:[[:space:]]*//p' "$f" | head -1)
+        if [ -n "$want" ] && ! parser_at_least "$want"; then
+            if parser_behind; then
+                echo "deferred (parser $PARSER_VER, needs $want)"
+                deferred=$((deferred + 1))
+                deferred_names="$deferred_names $surface/$(basename "$f")"
+            else
+                echo "FAILED"
+                echo "      declares \`-- requires-parser: $want\` and the loaded parser is"
+                echo "      $PARSER_VER, with the extension SQL also at $SCHEMA_VER. The halves"
+                echo "      agree, so there is no lag to defer to and this declaration is"
+                echo "      hiding whatever the file would have said. Remove it, or fix the file."
+                failed=1
+            fi
+            continue
+        fi
         if ! out=$(stage_loads "$f" 2>&1); then
             echo "FAILED"
             echo "$out" | sed 's/^/      /'
@@ -245,8 +310,26 @@ for surface in ${SURFACES[@]}; do
             continue
         fi
         if out=$(run_sql "$f" 2>&1); then
-            echo "ok"
-            echo "$out" | grep '^NOTICE:' | sed 's/^NOTICE:  /      /' || true
+            # A file with a mixed section -- some assertions SQL, some compiled
+            # -- defers the compiled ones one at a time rather than standing
+            # down whole. It says so with a notice beginning DEFERRED:, and the
+            # count below is what keeps that from being an invisible skip.
+            n_def=$(printf '%s\n' "$out" | grep -c '^NOTICE:  DEFERRED:' || true)
+            if [ "${n_def:-0}" -gt 0 ] && ! parser_behind; then
+                echo "FAILED"
+                printf '%s\n' "$out" | grep '^NOTICE:  DEFERRED:' | sed 's/^NOTICE:  /      /'
+                echo "      and the halves agree ($PARSER_VER), so nothing here may defer."
+                failed=1
+                continue
+            fi
+            if [ "${n_def:-0}" -gt 0 ]; then
+                echo "ok ($n_def deferred)"
+                deferred=$((deferred + n_def))
+                deferred_names="$deferred_names $surface/$(basename "$f")"
+            else
+                echo "ok"
+            fi
+            printf '%s\n' "$out" | grep '^NOTICE:' | sed 's/^NOTICE:  /      /' || true
         else
             echo "FAILED"
             echo "$out" | sed 's/^/      /'
@@ -262,6 +345,14 @@ if [ "$skipped" -ne 0 ]; then
     # reports green for something it never looked at.
     echo "$skipped file(s) skipped for a missing extension:$skipped_names"
     echo "  (REQUIRE_ALL=1 makes this a failure -- dev/check.sh sets it where the database has pg_cron)"
+fi
+if [ "$deferred" -ne 0 ]; then
+    # Named like a skip, and for the same reason: a deferred assertion is a
+    # guarantee nobody checked. The difference is that this one says what would
+    # make it run, and the run above refuses it the moment that is true.
+    echo "$deferred assertion(s)/file(s) deferred to a newer parser:$deferred_names"
+    echo "  the compiled half is $PARSER_VER and the extension SQL is $SCHEMA_VER."
+    echo "  dev/build-image.sh rebuilds the .so; a parser release clears this."
 fi
 if [ "$failed" -ne 0 ]; then
     # Repeated here rather than only in the banner: see halves_note's header.

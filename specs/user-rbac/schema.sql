@@ -2416,7 +2416,33 @@ create policy visibilities_are_the_contract on rbac.visibilities for select
 -- reads session state regardless of whose privileges are active for the
 -- column check.
 create or replace view rbac.users_api as
-  select id, email, status, created_at, updated_at from rbac.users;
+  select u.id, u.email, u.status, u.created_at, u.updated_at,
+         -- The Users screen read three views and joined them in JavaScript.
+         -- Aggregated here instead: the numbers on that screen are now a thing
+         -- a test can execute (browser-ui.md §3, and `percolate-ui/README.md`'s
+         -- "never client-side group-bys").
+         --
+         -- APPENDED, and that position is forced rather than chosen: `create or
+         -- replace view` may only add columns at the end. A fresh install never
+         -- sees the difference; every upgrading database does.
+         coalesce((select array_agg(ur.role order by ur.role)
+                     from rbac.user_roles ur where ur.user_id = u.id), '{}') as roles,
+         coalesce((select jsonb_object_agg(om.org_id, om.role)
+                     from rbac.org_members om where om.user_id = u.id), '{}'::jsonb) as org_roles
+    from rbac.users u;
+
+-- Orgs with the number of people in them. The Settings screen was counting
+-- `org_members` rows client-side per org, which is a group-by in a browser.
+--
+-- EVERY COLUMN OF `rbac.orgs`, not the three the screen happens to draw. A view
+-- named `<table>_api` is the read surface for that table, and `surface.sql`
+-- enforces it: a column that is in neither the view nor `api_exclusions` is
+-- silently unreachable, which is the state that check exists to end. It caught
+-- this one -- `created_at` and `updated_at` were missing from the first version.
+create or replace view rbac.orgs_api as
+  select o.id, o.slug, o.name, o.created_at, o.updated_at,
+         (select count(*) from rbac.org_members m where m.org_id = o.id) as member_count
+    from rbac.orgs o;
 create or replace view rbac.refresh_tokens_api as
   select id, user_id, device_label, issued_at, expires_at, revoked_at from rbac.refresh_tokens;
 create or replace view rbac.api_keys_api as
@@ -2456,10 +2482,17 @@ grant create on schema rbac to api_viewer;
 alter view rbac.users_api owner to api_viewer;
 alter view rbac.refresh_tokens_api owner to api_viewer;
 alter view rbac.api_keys_api owner to api_viewer;
+-- INSIDE this block, not after it. The transfer needs CREATE on the schema,
+-- which the line above grants and the line below takes back; an `alter view`
+-- placed after the revoke is refused with "permission denied for schema rbac"
+-- on a fresh install, while passing every test on a database where the view
+-- already exists and is already owned correctly.
+alter view rbac.orgs_api owner to api_viewer;
 
 revoke create on schema rbac from api_viewer;
 
 grant select on rbac.users_api to authenticated;
+grant select on rbac.orgs_api to authenticated;
 grant select on rbac.refresh_tokens_api to authenticated;
 grant select on rbac.api_keys_api to authenticated;
 -- No grant on the base tables themselves to web_anon or authenticated --

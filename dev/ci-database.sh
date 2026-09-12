@@ -33,11 +33,18 @@
 #     published one. The image supplies the compiled parser and the roles; the
 #     SQL under test is yours.
 #
-# WHAT IT DOES NOT DO. It does not build the parser. The image carries a
-# compiled .so, so a change under extension/percolate_parser/ is NOT tested by
-# anything this script produces -- `parser-tests.yml` covers the crate's own
-# tests, and the pair of "this tree's parser against this tree's schema" needs
-# dev/build-image.sh. Saying so is the difference between a gap and a lie.
+# WHAT IT DOES NOT DO. It does not BUILD the parser -- a pgrx toolchain is
+# minutes and this script is seconds. It will INSTALL one it is handed, through
+# PARSER_DIST (see the block above the extension install), which is how
+# .github/workflows/check.yml now tests the pair without every developer paying
+# for the toolchain: its `parser` job compiles the crate and this script takes
+# the artefact. dev/build-image.sh writes the same three files into dev/dist, so
+#
+#     REBUILD_PARSER=1 dev/build-image.sh && PARSER_DIST=dev/dist dev/ci-database.sh
+#
+# is the local form of what CI does. With PARSER_DIST unset nothing changes and
+# the image's own .so is used, which is what every local run did before and is
+# still right for asking "does this schema work on the published parser".
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -51,7 +58,12 @@ DB="${DB:-p8ci}"
 # the tree's, one of them measured a baseline against it, and the other reached
 # for a PATH shim instead of an override that should have existed. Two copies of
 # the same fact (which interpreter to use) with only one of them configurable.
-PY="${PY:-python3}"
+# One picker, in dev/lib/python.sh, rather than the install-or-explain block
+# that used to live below: the "install pyyaml into it" step moved in there, so
+# a runner still gets the cheap answer and a laptop gets a venv instead of an
+# error. Three scripts asking this question three ways is what that file ends.
+. "$(cd "$(dirname "$0")" && pwd)/lib/python.sh"
+PY="$(percolate_python)" || exit 1
 
 V=$(sed -n "s/^default_version = '\(.*\)'/\1/p" extension/percolate/percolate.control)
 [ -n "$V" ] || { echo "percolate.control has no default_version" >&2; exit 1; }
@@ -106,12 +118,6 @@ fi
 # install` with the script under `set -e` still let a 127 through as the last
 # statement's status in some shells, and a build step that cannot install its
 # own build dependency must not continue as though it had.
-"$PY" -c 'import yaml' 2>/dev/null || {
-    "$PY" -m pip install --quiet pyyaml || {
-        echo "cannot install PyYAML for $(command -v "$PY") -- build-sql.py needs it" >&2
-        echo "  $PY -m pip install pyyaml      # or run inside a venv" >&2
-        echo "  PY=/usr/bin/python3 $0         # or point PY at an interpreter that has it" >&2
-        exit 1; }; }
 "$PY" extension/percolate/build-sql.py >/dev/null
 
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
@@ -152,6 +158,50 @@ done
 # statement's status in some shells, and a build step that cannot install its
 # own build dependency must not continue as though it had.
 
+# THE COMPILED HALF, WHEN SOMEBODY HAS BUILT ONE. This script's header says it
+# does not build the parser, and it still does not -- but it will INSTALL one it
+# is handed, which is what lets CI test the pair without every developer paying
+# for a pgrx toolchain.
+#
+# PARSER_DIST names a directory holding what `cargo pgrx package` produced:
+# percolate_parser.so, percolate_parser--<version>.sql and the control file.
+# dev/build-image.sh writes exactly that into dev/dist, and .github's parser job
+# uploads the same three as an artifact. Unset, nothing here changes and the
+# image's own .so is used, which is the behaviour every local run has today.
+#
+# BEFORE the install block below, because `create extension percolate cascade`
+# creates percolate_parser as a dependency and takes whatever default_version
+# the control file in the container names at that moment. Copying afterwards
+# would leave the old extension row pointing at a new .so -- the two halves
+# disagreeing in the one direction nothing detects, since dev/tests/run.sh reads
+# the VERSION to decide what to defer.
+if [ -n "${PARSER_DIST:-}" ]; then
+    [ -d "$PARSER_DIST" ] || { echo "PARSER_DIST=$PARSER_DIST is not a directory" >&2; exit 1; }
+    PV=$(sed -n "s/^default_version = '\(.*\)'/\1/p" "$PARSER_DIST/percolate_parser.control")
+    [ -n "$PV" ] || { echo "no default_version in $PARSER_DIST/percolate_parser.control" >&2; exit 1; }
+    [ -f "$PARSER_DIST/percolate_parser--$PV.sql" ] || {
+        echo "$PARSER_DIST has no percolate_parser--$PV.sql for the version its control names" >&2
+        exit 1; }
+    [ -f "$PARSER_DIST/percolate_parser.so" ] || {
+        echo "$PARSER_DIST has no percolate_parser.so" >&2; exit 1; }
+    docker cp "$PARSER_DIST/percolate_parser.so" \
+              "$CONTAINER:/usr/lib/postgresql/19/lib/" >/dev/null
+    # The old script is REMOVED, not left beside the new one. Two installable
+    # versions of an extension is not an error Postgres reports -- it is an
+    # offer, and build-image.sh carries the same rm for the same reason.
+    docker exec "$CONTAINER" bash -c \
+        'rm -f /usr/share/postgresql/19/extension/percolate_parser--*.sql'
+    docker cp "$PARSER_DIST/percolate_parser--$PV.sql" \
+              "$CONTAINER:/usr/share/postgresql/19/extension/" >/dev/null
+    docker cp "$PARSER_DIST/percolate_parser.control" \
+              "$CONTAINER:/usr/share/postgresql/19/extension/" >/dev/null
+    POFFERED=$(docker exec "$CONTAINER" psql -U p8 -d postgres -tAc \
+        "select default_version from pg_available_extensions where name='percolate_parser'")
+    [ "$POFFERED" = "$PV" ] || {
+        echo "image offers percolate_parser $POFFERED after the copy, dist is $PV" >&2; exit 1; }
+    echo "==> percolate_parser $PV installed from $PARSER_DIST (the image's was replaced)"
+fi
+
 # The control file goes in WITH the script. `create extension percolate`
 # installs whatever default_version the IMAGE's control file names, so copying
 # only the script installs the image's version and reports a green run against
@@ -172,6 +222,18 @@ OFFERED=$(docker exec "$CONTAINER" psql -U p8 -d postgres -tAc \
 docker cp dev/image-init/00-superuser.sql "$CONTAINER:/tmp/00-superuser.sql" >/dev/null
 docker exec -i "$CONTAINER" psql -U p8 -d "$DB" -v ON_ERROR_STOP=1 -q <<'SQL'
 drop extension if exists percolate cascade;
+-- AND THE PARSER, which `drop ... cascade` above does NOT take: cascade drops
+-- what depends on percolate, and percolate_parser is what percolate depends ON.
+-- The image installs it at initdb, so without this line `create extension
+-- percolate cascade` below finds it already present and leaves it at the
+-- image's version -- whatever was just copied into the extension directory.
+-- Measured: run 34685340252 reported `percolate_parser 0.2.0 installed from
+-- ...`, pg_available_extensions offered 0.2.0, and pg_extension still said
+-- 0.1.6, so every compiled assertion deferred and dev/check.sh passed without
+-- them. Recreated unconditionally by the cascade below, at whatever the control
+-- file in the container names -- the image's own when PARSER_DIST is unset,
+-- which is exactly what every run did before.
+drop extension if exists percolate_parser cascade;
 \i /tmp/00-superuser.sql
 create extension if not exists pg_cron;
 set role app_owner;

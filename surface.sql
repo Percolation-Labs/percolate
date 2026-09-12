@@ -554,6 +554,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','view','aiq.nodes_api',null,'plan-graph.md: entities a caller may read, org-filtered'),
 ('ai-query-layer','view','aiq.edges_api',null,'plan-graph.md: the relations between them, same filter'),
 ('user-rbac','view','rbac.users_api',null,'spec.md §5: a directory that carries no password_hash'),
+('user-rbac','view','rbac.orgs_api',null,'spec.md §4: the orgs a caller can see, with how many people are in each -- the count is here so no screen computes it'),
 ('user-rbac','view','rbac.api_keys_api',null,'spec.md §5: a caller manages their own keys and sees no key_hash -- dev/tests/rbac/07'),
 ('user-rbac','view','rbac.refresh_tokens_api',null,'spec.md §5: sessions a caller may revoke, without the token_hash that would let anyone replay them'),
 ('workflow-engine','view','workflow.runs_api',null,'spec.md §4: run status over REST'),

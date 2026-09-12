@@ -12,10 +12,19 @@
 # So: the jobs below run `dev/ci-database.sh` and `dev/check.sh`, which are the
 # same two commands a developer runs. There is nothing here to fall behind.
 #
-# TWO JOBS, NOT ONE, and the split is by COST rather than by subject. The tree
-# job needs no Docker and finishes in seconds, so it fails fast on the cheap
-# mistakes; the database job pulls an image. They run in parallel, which is what
-# the two workflows were really buying.
+# SPLIT BY COST RATHER THAN BY SUBJECT. The tree job needs no Docker and
+# finishes in seconds, so it fails fast on the cheap mistakes; the database job
+# pulls an image; the parser job compiles Rust and the database job waits on it;
+# the self-model job is minutes. They run in parallel, which is what the two
+# workflows this replaced were really buying.
+#
+# THE PARSER JOB IS THE EXPENSIVE ONE AND IT BOUGHT SOMETHING. Before it, the
+# database job ran the PUBLISHED .so and refused any PR touching the crate --
+# honest, and it meant a parser change could not have a green check, so six
+# commits accumulated unshipped since v0.1.6 and the assertions that need them
+# never ran here. It compiles what parser-tests.yml already compiles, restoring
+# the same two caches by the same keys, and hands the database job a .so built
+# from this tree. What that job tests is now the PAIR.
 #
 # WHAT THIS COSTS, MEASURED. The suite is seven seconds; installing the
 # extension and seeding is two; the container is healthy in one. Most of the
@@ -65,11 +74,99 @@ jobs:
       - run: pip install --quiet pyyaml
       - run: dev/check.sh --tree
 
+  # THE COMPILED HALF, BUILT FROM THIS TREE.
+  #
+  # The database job used to refuse any PR touching extension/percolate_parser,
+  # because it runs the PUBLISHED .so and could not honestly claim to have
+  # tested a parser change. That refusal was correct and it made a parser change
+  # unmergeable on a green check; the standing cost is worse than it sounds,
+  # because six parser commits have accumulated since v0.1.6 and the assertions
+  # they need -- including query/11, whose stated purpose is that the compiled
+  # adjacency snapshot cannot serve one tenant's graph to another -- have not
+  # run against them in CI once.
+  #
+  # WHAT MAKES THIS AFFORDABLE, and it is not new work. parser-tests.yml already
+  # compiles this crate on this runner and already caches the two expensive
+  # things: the pgrx toolchain image (cargo-pgrx is compiled from source, 257s
+  # of a 343s cold job, and pgrx ships no binaries to fetch instead) and the
+  # crate's target directory. This job restores both by the same keys, so on a
+  # warm cache it is a cargo no-op plus a docker load. The keys are IDENTICAL to
+  # that workflow's on purpose -- two spellings of one cache key is the
+  # duplication this collection keeps finding, and here it would show up as a
+  # permanent cold build rather than as a wrong answer.
+  parser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache the crate build
+        uses: actions/cache@v4
+        with:
+          path: extension/percolate_parser/target-ci
+          key: parser-package-${{ hashFiles('dev/Dockerfile.pgrx-builder', 'extension/percolate_parser/Cargo.lock') }}
+          restore-keys: parser-package-
+
+      # No restore-keys, for parser-tests.yml's reason: an image restored under
+      # a changed Dockerfile is the wrong toolchain, and it would surface as a
+      # red test rather than as a cache miss.
+      - name: Cache the pgrx toolchain image
+        id: toolchain
+        uses: actions/cache@v4
+        with:
+          path: /tmp/pgrx-builder.tar
+          key: pgrx-builder-image-${{ hashFiles('dev/Dockerfile.pgrx-builder') }}
+
+      - name: Build the pgrx toolchain image
+        if: steps.toolchain.outputs.cache-hit != 'true'
+        working-directory: dev
+        run: |
+          docker build -f Dockerfile.pgrx-builder -t pgrx-builder .
+          docker save pgrx-builder -o /tmp/pgrx-builder.tar
+
+      - name: Load the pgrx toolchain image
+        if: steps.toolchain.outputs.cache-hit == 'true'
+        run: docker load -i /tmp/pgrx-builder.tar
+
+      # `package`, not `test`: parser-tests.yml runs the crate's own tests and
+      # this produces the artefact the database job installs. The same command
+      # dev/build-image.sh runs, against the same base image, so the ABI is the
+      # one the published container expects.
+      - name: cargo pgrx package
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE/extension/percolate_parser":/work \
+            -e PGRX_HOME=/work/.pgrx -e CARGO_TARGET_DIR=/work/target-ci \
+            -w /work pgrx-builder bash -c '
+              set -euo pipefail
+              cargo pgrx init --pg19 /usr/bin/pg_config >/dev/null 2>&1 || true
+              cargo pgrx package --features pg19 --no-default-features \
+                --pg-config /usr/bin/pg_config'
+          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/extension/percolate_parser"
+
+      # The three files ci-database.sh's PARSER_DIST wants, in the layout it
+      # wants them. Named here rather than in the consumer so a change to what
+      # pgrx emits fails in the job that ran pgrx.
+      - name: Collect the dist
+        run: |
+          B=extension/percolate_parser/target-ci/release/percolate_parser-pg19
+          mkdir -p parser-dist
+          cp "$B/usr/lib/postgresql/19/lib/percolate_parser.so" parser-dist/
+          cp "$B"/usr/share/postgresql/19/extension/percolate_parser* parser-dist/
+          ls -l parser-dist
+          grep default_version parser-dist/percolate_parser.control
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: parser-dist
+          path: parser-dist/
+          retention-days: 1
+
   database:
     runs-on: ubuntu-latest
     env:
       CONTAINER: p8-ci
       DB: p8ci
+    needs: parser
     steps:
       - uses: actions/checkout@v4
         with:
@@ -81,60 +178,42 @@ jobs:
           python-version: '3.12'
       - run: pip install --quiet pyyaml
 
-      # THE HONEST PART. The image carries a COMPILED parser and this job does
-      # not build one -- a pgrx build is minutes and the argument above is that
-      # this job is seconds. So a change to the Rust is NOT tested here, and
-      # saying so is the difference between a gap and a lie. `parser-tests.yml`
-      # runs the crate's own tests on the same paths, which closes half of it;
-      # the other half needs dev/build-image.sh.
-      - name: Refuse to imply the parser was tested
-        if: github.event_name == 'pull_request'
-        run: |
-          if git diff --name-only "origin/${{ github.base_ref }}...HEAD" \
-             | grep -q '^extension/percolate_parser/'; then
-            echo "::error::This branch changes extension/percolate_parser, and this job runs" \
-                 "the PUBLISHED .so -- it has not tested your parser change against this" \
-                 "tree's schema. parser-tests.yml runs the crate's own tests; for the pair," \
-                 "build and publish the image, or run dev/build-image.sh locally."
-            exit 1
-          fi
+      # THE COMPILED HALF, FROM THE `parser` JOB. This step is what replaced a
+      # refusal: the job used to fail outright on any PR touching
+      # extension/percolate_parser, because it ran the published .so and could
+      # not claim to have tested the change. It now runs the one this tree
+      # produced, so the pair -- this schema against this parser -- is what is
+      # under test, and query/11 and query/15 stop deferring.
+      #
+      # The image still supplies everything else, so this remains the seconds-
+      # long job its header describes; the minutes are the `parser` job's, in
+      # parallel with `tree`, on a cache parser-tests.yml already warms.
+      - uses: actions/download-artifact@v4
+        with:
+          name: parser-dist
+          path: parser-dist
 
-      - run: dev/ci-database.sh
+      - run: PARSER_DIST="$GITHUB_WORKSPACE/parser-dist" dev/ci-database.sh
       - run: dev/check.sh
 
-      # A red run whose cause is "the published parser predates a committed fix"
-      # is telling the truth and is unreadable without this. The job runs the .so
-      # from the last released image on purpose, so whenever the Rust has moved
-      # since that release some failures belong to the gap rather than to this
-      # commit. Reported, never suppressed: the moment a parser-ahead run is
-      # allowed to go green, the one signal that the published artifacts are
-      # behind their source is gone -- and that gap once cost a day while two
-      # committed parser fixes sat unshipped and the suite failed pointing at
-      # correct code.
-      - name: If it failed, say whether the published parser is behind
-        if: failure()
+      # THE DEFERRALS MUST BE GONE. dev/tests/run.sh defers a compiled assertion
+      # only while pg_extension says the two halves disagree, and after the step
+      # above they agree -- so a run that still reports one means the artefact
+      # did not land and the suite passed without the assertions this job exists
+      # to run. Green-because-it-looked-nowhere is the failure this collection
+      # keeps finding; here is where it would hide.
+      - name: The halves agree, so nothing may still be deferred
         run: |
-          PREV=$(git tag --list 'v*' | sed 's/^v//' \
-                 | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
-                 | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
-          [ -n "$PREV" ] || exit 0
-          CHANGED=$(git diff --name-only "v$PREV..HEAD" -- extension/percolate_parser/src \
-                                                          extension/percolate_parser/Cargo.toml \
-                    | wc -l | tr -d ' ')
-          [ "$CHANGED" = "0" ] && exit 0
-          {
-            echo "### The parser under test is older than this tree"
-            echo ""
-            echo "This job runs the compiled parser from \`:19-$PREV\`, and $CHANGED file(s)"
-            echo "under \`extension/percolate_parser/\` have changed since \`v$PREV\`:"
-            echo ""
-            git diff --name-only "v$PREV..HEAD" -- extension/percolate_parser/ | sed 's/^/- /'
-            echo ""
-            echo "Failures in the dialect or graph-algorithm tests are expected in that state"
-            echo "and clear when the next release ships the rebuilt \`.so\`. Failures anywhere"
-            echo "else are this commit's."
-          } >> "$GITHUB_STEP_SUMMARY"
-          echo "::notice::the published parser ($PREV) predates $CHANGED changed parser file(s) -- see the run summary"
+          P=$(docker exec "$CONTAINER" psql -U p8 -d "$DB" -tAc \
+              "select extversion from pg_catalog.pg_extension where extname='percolate_parser'")
+          S=$(docker exec "$CONTAINER" psql -U p8 -d "$DB" -tAc \
+              "select extversion from pg_catalog.pg_extension where extname='percolate'")
+          echo "percolate $S, percolate_parser $P"
+          [ "$P" = "$S" ] || {
+            echo "::error::the parser artefact did not land: percolate_parser is $P and" \
+                 "percolate is $S, so every compiled assertion deferred and this job" \
+                 "reported green on a suite that skipped them"
+            exit 1; }
 
       - name: What the database said, if it failed
         if: failure()
