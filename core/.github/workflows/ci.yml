@@ -115,6 +115,16 @@ jobs:
       - name: A hostile byte does not abort a write
         run: python -m unittest discover -s tests -p test_nul_at_the_boundary.py
 
+      # The caller's ambient context goes only where their token may (REM-148).
+      # `X-P8-User-Id` and `X-P8-Session-Id` were forwarded to every tool
+      # destination, so a registered third party echoed back a live user id
+      # while `outbound_headers` was correctly withholding the token from the
+      # same request. Half of an identity boundary is not one. Six of the
+      # thirteen cases are controls -- a bound first-party origin must still
+      # receive the context and the caller's token, or delegation breaks.
+      - name: The caller's context stops where their token stops
+        run: python -m unittest discover -s tests -p test_context_stops_where_the_token_stops.py
+
       # A summary is derived text and carries no more authority than the window
       # it replaced (REM-94). It was replayed as a SystemPromptPart, so anything
       # an attacker put in a retrieved chunk was restated by our own summarizer

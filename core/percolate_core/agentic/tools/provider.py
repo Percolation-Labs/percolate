@@ -47,6 +47,14 @@ class ToolProvider(Protocol):
         provider forwards it, not just the one delegation happens to use: a
         CRUD tool server has as much right to know the tenant as an agent does.
 
+        **Which destinations count as "a tool server" is decided one layer
+        down, and not here.** ``auth.py: outbound_headers`` drops the whole
+        ``X-P8-*`` block for any origin outside ``P8_TOOL_AUTH_ORIGINS``, the
+        same list that decides whether the caller's token goes. This paragraph
+        used to stop at the sentence above, and it read as a licence: a
+        registered third party echoed back a live user id and session id on
+        2026-09-12 while the token was being correctly withheld (REM-148).
+
         The classification is the load-bearing part (``brief.md`` §5.2): a
         server that responded with a failure produces ``error_kind =
         'tool_error'``; a server that could not be reached produces
