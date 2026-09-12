@@ -21922,6 +21922,210 @@ comment on function agentic.agent_call(text,text,text,text,text) is
     'caller''s input. The general form of aiq.extractor_call -- use this for any '
     'agent that is not a graph extractor, rather than assembling a body by hand.';
 
+-- ------------------------------------------------------------
+-- AN AGENT DOCUMENT BECOMES COLUMNS IN EXACTLY ONE PLACE, AND IT IS HERE.
+--
+-- `brief.md` §6 says an agent IS a JSON Schema document: there is no `prompt`
+-- key, the system prompt is the document's `description` -- the docstring of the
+-- model class -- and the output contract is its `properties`. An `agents` ROW
+-- spells those two `system_prompt` and `structured_output_schema`. Both forms
+-- are documented, and every worked example in the documentation authors the
+-- first one.
+--
+-- Until REM-70 every tool that read a document translated it itself, and each
+-- knew one dialect. `packages/apply.py` knew a package's `output_schema` (a file
+-- in the package directory) and nothing of `description`/`properties`;
+-- percolate-core's `core/samples.py` and `percolate agent push` knew
+-- `description`/`properties` and nothing of `output_schema`. Three
+-- implementations of one convention, and upsert_agent accepted whatever arrived
+-- and DROPPED the keys it did not read -- so a package manifest written the way
+-- the documentation authors an agent installed, returned success, and left an
+-- agent with an empty system prompt and no output contract. It existed, it
+-- resolved by name, and it could do nothing. Which is the same failure
+-- `upsert_agent`'s `excluded`-column bug produced, reached from outside instead
+-- of inside.
+--
+-- So: one translation, at the only layer every write path crosses (PostgREST,
+-- apply_plugin, apply_package, the samples loader, the CLI, psql), and A KEY
+-- THIS FUNCTION DOES NOT READ IS REFUSED RATHER THAN DROPPED. The refusal is
+-- the half that matters. Translating both dialects fixes the three loaders that
+-- exist; refusing the unknown key is what stops a fourth loader from shipping
+-- the same silence, because a client that fails to translate now fails loudly
+-- in its own test run instead of installing an empty agent in production.
+-- `apply_plugin` already refuses an unknown MANIFEST key for exactly this
+-- reason, one call up; the agent entry inside it went unchecked.
+--
+-- THE LOWEST LAYER THAT CAN REFUSE THIS. A trigger on `agentic.agents` cannot:
+-- below this function there is no document, only columns, and `description` and
+-- `properties` are not columns. This is where the document still exists, so this
+-- is where its grammar lives (`challenge-the-process`, "push the fact down").
+--
+-- WHAT STAYS OUTSIDE. `output_schema: schemas/motif.json` in a package manifest
+-- is a FILE REFERENCE, and resolving it is the one thing only the loader can do
+-- -- the database never sees the package directory, which is the same reason a
+-- skill's body is inlined by the client. So `apply.py` reads the file and sends
+-- the schema; it maps no document key onto a column, and `output_schema`
+-- reaching this function is a loader that forgot to resolve it, which is why it
+-- is named in the refusal below rather than silently ignored.
+create or replace function agentic.agent_document_to_row(p_doc jsonb)
+returns jsonb
+language plpgsql stable
+set search_path = pg_catalog, public
+as $$
+declare
+    v_row     jsonb;
+    v_schema  jsonb;
+    v_unknown text;
+    v_hint    text;
+    -- EVERY KEY THIS SCHEMA READS, in two closed lists, because closing only
+    -- one of them leaves the silence in place. If the columns were closed and
+    -- the schema keywords open, `systm_prompt` would be filed as a JSON Schema
+    -- keyword and dropped exactly as before.
+    --
+    -- The columns are spelled here rather than read out of the catalogue on
+    -- purpose: what makes a key readable is that the INSERT below names it, not
+    -- that the table has the column. A column the table gained and the INSERT
+    -- did not would otherwise be accepted here and dropped there -- the same
+    -- defect one layer in. `dev/tests/agentic/05-agent-document.sql` compares
+    -- this list against the table's writable columns, so the two cannot drift
+    -- without a named failure.
+    v_cols text[] := array[
+        'name', 'system_prompt', 'model', 'tools', 'skills',
+        'structured_output_schema', 'chained_action', 'summarizer_agent_id',
+        'context_policy', 'audience', 'category', 'tags',
+        'extracts_source', 'extracts_doctype', 'plugin',
+        'owner_id', 'org_id', 'visibility'];
+    -- The document half: what `model_json_schema()` puts at the top level.
+    -- `$defs` is in the list because a nested pydantic model emits `$ref`s into
+    -- it, and a `structured_output_schema` carrying a `$ref` with no `$defs` is
+    -- a schema no provider can validate against.
+    v_schema_keys text[] := array[
+        'type', 'title', 'description', 'properties', 'required',
+        '$defs', '$schema', 'additionalProperties'];
+begin
+    if p_doc is null or jsonb_typeof(p_doc) <> 'object' then
+        raise exception
+            'an agent is a JSON object -- a schema document (brief.md §6) or the '
+            'row shape -- and this is %.', coalesce(jsonb_typeof(p_doc), 'null');
+    end if;
+
+    -- The refusal NAMES the key and, where the key is a real spelling from
+    -- somewhere else, says where it belongs. "unknown key" with no sentence
+    -- after it is how an author concludes the format is broken rather than
+    -- their document.
+    select string_agg(k, ', ' order by k) into v_unknown
+      from jsonb_object_keys(p_doc) k
+     where not (k = any(v_cols)) and not (k = any(v_schema_keys));
+    if v_unknown is not null then
+        select string_agg(distinct h, ' ') into v_hint
+          from (values
+            ('output_schema',
+             '`output_schema` is a package manifest''s reference to a FILE in the '
+             'package; the loader that can see the package directory inlines it '
+             '(packages/apply.py) -- send the schema itself as `properties` or '
+             '`structured_output_schema`.'),
+            ('prompt',
+             'There is no `prompt` key (brief.md §6): the system prompt is the '
+             'document''s `description`, which is the docstring of the model class.'),
+            ('structured_output',
+             '`structured_output` is p8k8''s flag for treating `properties` as '
+             'thinking aides; this runtime gives `properties` one meaning, the '
+             'output contract (brief.md §6).'),
+            ('id', '`id`, `created_at` and `updated_at` are the database''s to '
+                   'assign, never the author''s (surface.sql''s write contract).'),
+            ('created_at', '`id`, `created_at` and `updated_at` are the database''s to '
+                           'assign, never the author''s (surface.sql''s write contract).'),
+            ('updated_at', '`id`, `created_at` and `updated_at` are the database''s to '
+                           'assign, never the author''s (surface.sql''s write contract).'),
+            ('functions',
+             'Tools are bound as `tools`: [{"server": "<name>", "tools": ["a","b"]}].')
+          ) as hints(k, h)
+         where p_doc ? hints.k;
+        raise exception
+            'agent %: key(s) this schema does not read: %. % An agent document '
+            'carries agent config -- % -- beside the schema keywords %. '
+            'Nothing was written: a key nobody reads is a narrowing the author '
+            'believes they have expressed, and dropping it is how an agent '
+            'installs with an empty prompt and reports success.',
+            coalesce(p_doc->>'name', p_doc->>'title', '(unnamed)'),
+            v_unknown, coalesce(v_hint, ''),
+            array_to_string(v_cols, ', '), array_to_string(v_schema_keys, ', ');
+    end if;
+
+    -- ONE FACT, ONE SPELLING. A document carrying both is an author who thinks
+    -- one of them is being read, and picking a winner here is how they find out
+    -- which in production.
+    if p_doc ? 'description' and p_doc ? 'system_prompt' then
+        raise exception
+            'agent %: carries both `description` and `system_prompt`, which are '
+            'the same fact in the two documented forms (brief.md §6). Send one.',
+            p_doc->>'name';
+    end if;
+    if p_doc ? 'properties' and p_doc ? 'structured_output_schema' then
+        raise exception
+            'agent %: carries both `properties` and `structured_output_schema`, '
+            'which are the same fact in the two documented forms (brief.md §6). '
+            'Send one.', p_doc->>'name';
+    end if;
+    -- A PATH WHERE A SCHEMA GOES is the package dialect arriving one key over,
+    -- and the only component that can resolve it is the one that can see the
+    -- package directory.
+    if jsonb_typeof(p_doc->'structured_output_schema') = 'string' then
+        raise exception
+            'agent %: `structured_output_schema` is the string %, which looks like '
+            'a file reference. The database never sees a package directory, so the '
+            'loader resolves it and sends the schema (packages/apply.py does this '
+            'for a manifest''s `output_schema`, as it does for a skill''s body).',
+            p_doc->>'name', p_doc->'structured_output_schema';
+    end if;
+    if p_doc ? 'type' and p_doc->>'type' <> 'object' then
+        raise exception
+            'agent %: an agent document describes an object -- `type` is %.',
+            p_doc->>'name', p_doc->'type';
+    end if;
+
+    -- The row is the document minus its schema half, plus the two translations.
+    v_row := p_doc;
+    v_row := v_row - 'type' - 'title' - 'description' - 'properties'
+                   - 'required' - '$defs' - '$schema' - 'additionalProperties';
+
+    -- `title` is the class name pydantic emits when `json_schema_extra` did not
+    -- set a name, so it is the fallback and never an override.
+    if not (v_row ? 'name') and p_doc ? 'title' then
+        v_row := v_row || jsonb_build_object('name', p_doc->>'title');
+    end if;
+    if p_doc ? 'description' then
+        v_row := v_row || jsonb_build_object('system_prompt', p_doc->>'description');
+    end if;
+
+    if jsonb_typeof(p_doc->'properties') = 'object'
+       and p_doc->'properties' <> '{}'::jsonb then
+        v_schema := jsonb_build_object('type', 'object',
+                                       'properties', p_doc->'properties');
+        if p_doc ? 'required'             then v_schema := v_schema || jsonb_build_object('required', p_doc->'required'); end if;
+        if p_doc ? '$defs'                then v_schema := v_schema || jsonb_build_object('$defs', p_doc->'$defs'); end if;
+        if p_doc ? 'additionalProperties' then v_schema := v_schema || jsonb_build_object('additionalProperties', p_doc->'additionalProperties'); end if;
+        v_row := v_row || jsonb_build_object('structured_output_schema', v_schema);
+    elsif p_doc ? 'required' or p_doc ? '$defs' or p_doc ? 'additionalProperties' then
+        -- Parts of a schema with no schema to be part of. Dropped, this is an
+        -- extractor whose `required` list nobody enforces.
+        raise exception
+            'agent %: carries % but no `properties`, so there is no output '
+            'contract for them to describe.', p_doc->>'name',
+            (select string_agg(k, ', ' order by k) from jsonb_object_keys(p_doc) k
+              where k in ('required', '$defs', 'additionalProperties'));
+    end if;
+
+    return v_row;
+end;
+$$;
+
+comment on function agentic.agent_document_to_row(jsonb) is
+    'The one translation from an agent DOCUMENT (brief.md §6: description is the '
+    'system prompt, properties are the output contract) to the agents row shape. '
+    'upsert_agent calls it, so every write path gets it and no loader translates. '
+    'A key it does not read is refused, never dropped.';
+
 create or replace function agentic.upsert_agent(p_spec jsonb)
 returns agentic.agents
 language plpgsql security definer
@@ -21934,6 +22138,16 @@ declare
     v_gap    text;
     v_cats   text;
 begin
+    -- FIRST, AND BEFORE ANY OTHER CHECK. Both documented forms of an agent
+    -- become the row shape here (see agent_document_to_row above), so every
+    -- check below -- category, the tool bindings, the pinned skills -- runs
+    -- against what will actually be stored rather than against whichever
+    -- dialect the caller happened to write. A document that cannot be
+    -- translated is refused before authorization is consulted on purpose: it is
+    -- a malformed request, not a forbidden one, and telling an author "not
+    -- authorized" about a typo sends them to the wrong person.
+    p_spec := agentic.agent_document_to_row(p_spec);
+
     -- CATEGORY IS A CLOSED VOCABULARY, so say so rather than letting the CHECK
     -- say it. A constraint violation names the constraint and not its contents:
     -- a consumer installing their own agent got `violates check constraint
@@ -23027,6 +23241,18 @@ grant execute on function agentic.persist_turn(jsonb) to authenticated;
 grant execute on function agentic.upsert_summary(uuid, text) to authenticated;
 grant execute on function agentic.apply_summary(jsonb) to authenticated;
 grant execute on function agentic.upsert_agent(jsonb) to authenticated;
+-- PUBLIC EXECUTE is the default for a new function and it is not what this one
+-- wants: the postmortem of 2026-09-11 §1 counted three separate fixes for a
+-- function born PUBLIC, so the revoke goes in beside the CREATE rather than
+-- being added later. Granted to `authenticated` because it reads no rows and
+-- writes nothing -- it is the grammar of a document, and an author who may
+-- write an agent may ask what their document becomes before they install it.
+-- That is also how a client detects whether the database it is talking to
+-- translates documents at all (percolate-core's samples pre-flight), which is
+-- the difference between a loud refusal and 0.1.x's empty agent.
+revoke execute on function agentic.agent_document_to_row(jsonb) from public;
+grant execute on function agentic.agent_document_to_row(jsonb)
+    to authenticated, app_owner;
 grant execute on function agentic.upsert_tool_server(jsonb) to authenticated;
 grant execute on function agentic.upsert_skill(jsonb) to authenticated;
 grant execute on function agentic.attach_skill(text, text, jsonb) to authenticated;

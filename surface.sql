@@ -462,6 +462,10 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('agentic','function','agentic.finish_run','uuid,text,jsonb','brief.md §3'),
 ('agentic','function','agentic.persist_turn','jsonb','brief.md §4: one call per turn, not N inserts'),
 ('agentic','function','agentic.upsert_agent','jsonb','brief.md §2: agents are declared, not deployed'),
+-- Reachable by `authenticated` and deliberately so: it reads no rows and writes
+-- nothing, and it is how a client asks what a document becomes -- and whether
+-- this database translates documents at all -- before installing one. REM-70.
+('agentic','function','agentic.agent_document_to_row','jsonb','brief.md §6: the ONE translation from an agent document to the row shape, so that no loader carries its own and a key nobody reads is refused rather than dropped'),
 ('agentic','function','agentic.upsert_tool_server','jsonb','brief.md §5.2'),
 ('agentic','column','agentic.tool_servers.default_headers',null,'reference/README §1: one url is not one OpenAPI document'),
 ('agentic','function','agentic.may_author','text,regclass','reference/README §5: the first agent is registered by a migration, not a user'),

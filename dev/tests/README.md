@@ -188,6 +188,7 @@ that produced it:
 | `rbac/10-permission-vocabulary.sql` | `permission_kinds` walked in both directions — every pair a live policy or function asks for by name is declared, and every declaration that names a policy names one that exists. Then the administrator: `bootstrap_admin` grants "everything" with a SELECT that runs once, so a pair declared afterwards was one nobody held. |
 | `rbac/11-scope-two-homes.sql` | The scope rule is written twice on purpose — generated into every policy, and as `may_read`/`may_write` for the SECURITY DEFINER callers that bypass RLS — and nothing compared them. Same identity, same rows, two doors, as sets rather than spot checks. |
 | `query/12-usage-examples.sql` | `USAGE.md`'s own surface, in the forms that document shows. Not a doc-sync mechanism — nothing here can read a Markdown file — but the coupling stated: change a signature and a test with that document's name on it breaks before a reader does. |
+| `agentic/05-agent-document.sql` | One agent, two documented spellings, and the layer that decides which columns they become. Written because three loaders each carried their own copy of that mapping and each knew one dialect, so the same extractor installed differently depending on which tool applied it — and `upsert_agent` dropped the keys it did not read, which is what made it silent. Half the file is the translation; the rest is that a key nobody reads is now *refused*, because that is what stops the fourth loader (REM-70). |
 
 ## The one test that is not SQL
 
