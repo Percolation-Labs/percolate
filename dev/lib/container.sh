@@ -113,9 +113,27 @@ require_named_container() {
 # `--tree` cannot produce 22, and "Every guarantee the specs make still holds"
 # is a database gate.
 #
-# So **a push from the shared checkout still rebuilds `p8dev`** -- the fix for
-# that shipped this afternoon and has not reached the only tree where the harm
+# So **a push from the shared checkout rebuilds `p8dev`** -- the fix for that
+# shipped this afternoon and has not reached the only tree where the harm
 # occurs, and cannot, because nothing pulls it. Eleven worktrees carry the fix;
-# the twelfth tree, the one everybody pushes from by habit, carries the version
-# it replaced. That makes this file's argument concrete twice over: the default
-# container, and the hook that reads it, are both stale there.
+# the twelfth, the one everybody pushes from by habit, carries the version it
+# replaced.
+#
+# THAT IS AN INCIDENT RATHER THAN AN ARGUMENT, which is what licenses this
+# guard at all -- meta/postmortems/README.md's bar for a new check is an
+# incident, not a risk. It happened at 18:01:09 on 2026-09-12. A push of eight
+# HTML files from the shared checkout ran the stale hook, `--reload` with no
+# CONTAINER rebuilt `p8dev` from a tree 121 commits behind, and the run then
+# failed `query/11` and `query/15`. Verified here independently of the report:
+#
+#     aiq.sql_passthrough in p8dev contains sql_passthrough_max_rows -> f
+#     origin/main's spec contains it (#93)                           -> yes
+#     the stale checkout's working copy                              -> absent
+#     p8dev's directory mtime                                        -> 18:01:09
+#
+# And the diagnosis was wrong in the direction that matters: the drift was read
+# as "a day of six sessions reloading into it" when it was one step old and
+# belonged to the session reading it. Baselining against a clean container
+# looked like proof of innocence and was only a different database -- the same
+# shape as the `grep -v` two paragraphs up, a correct technical move whose scope
+# removed the evidence. Nobody was careless; the careful path produces this.
