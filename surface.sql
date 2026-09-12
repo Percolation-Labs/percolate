@@ -187,6 +187,14 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('workflow-engine','table','workflow.tasks',null,'spec.md §2'),
 ('workflow-engine','table','workflow.step_functions',null,'schema.sql §17: the operations a deployment blesses -- a timeout and a description each, and the whole surface under sql_policy = registered'),
 ('workflow-engine','function','workflow.start_workflow','text,jsonb,text,text','spec.md §4'),
+-- The two halves of "whose run does this idempotency key resolve to" (REM-77).
+-- Granted to nobody -- both are called only from SECURITY DEFINER functions
+-- that own their own check -- so they are here because they must EXIST: the
+-- engine standalone ships reusable_run as a stub and integration-rbac.sql
+-- replaces it, and a database carrying only the stub is one where naming
+-- somebody else's external_id hands back their run.
+('workflow-engine','function','workflow.reusable_run','text','spec.md §4: an external_id matches only among the runs its caller may see'),
+('workflow-engine','function','workflow.may_access_run','uuid,text','integration-rbac.sql (e): the run row rule as a boolean, shared by assert_run_access and reusable_run'),
 ('workflow-engine','function','workflow.claim_task','text,text','spec.md: SKIP LOCKED claiming'),
 ('workflow-engine','function','workflow.get_task_context','uuid,text','§16: a worker must see its run input'),
 ('workflow-engine','function','workflow.complete_task','uuid,jsonb,text','spec.md §4'),
