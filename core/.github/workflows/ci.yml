@@ -102,6 +102,17 @@ jobs:
       - name: Untrusted input cannot widen what a caller may do
         run: python -m unittest discover -s tests -p test_untrusted_input_cannot_widen.py
 
+      # REM-91 item 6, the third leg of the same audit. A step's url is resolved
+      # from {{run.*}} and {{steps.*}}, so on the ingestion path it can carry
+      # text out of an uploaded document -- and the worker that fetches it sits
+      # beside Postgres, MinIO and PostgREST with P8_S3_KEY in its environment.
+      # credential_for binds where a NAMED secret may go and TEMPLATE_ENV stops
+      # {{env.X}} putting one in a body; neither says anything about an
+      # unauthenticated GET to a service that answers because the caller is on
+      # its network.
+      - name: The worker cannot be pointed back at its own network
+        run: python -m unittest discover -s tests -p test_worker_egress.py
+
       # content.api_source in the extension is the one home of an API source's
       # defaults and choices (REM-61); APIConfig and the UI's API_DEFAULTS are
       # copies, and a copy that drifts saves a different source.
