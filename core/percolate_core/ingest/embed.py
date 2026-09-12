@@ -22,6 +22,7 @@ provider knowledge and a second provider is a row rather than a branch.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -167,7 +168,20 @@ async def embed_resource(spec: dict[str, Any], ctx: dict[str, Any]) -> dict[str,
             "select aiq.embed_batch_call($1, $2::jsonb)::text",
             model, [r["content"] for r in rows[:1]]))
 
-    vectors, requests = embed_texts(call, [r["content"] for r in rows], batch_size)
+    # OFF THE EVENT LOOP. `embed_texts` is a synchronous `httpx.Client` loop,
+    # and called directly from this coroutine it blocked everything else in the
+    # process for the whole corpus: every concurrent agent turn, every SSE
+    # stream, every other task. Worst on a provider with no `batch` template,
+    # where it is one request per chunk -- a 300-chunk document is 300 blocking
+    # round trips -- but the batched path blocks too, just in fewer pieces.
+    #
+    # A thread rather than a rewrite to httpx.AsyncClient: the function is one
+    # code path shared by both providers on purpose ("a deployment on Ollama
+    # gets the same receipt, the same retry and the same code path, just
+    # slower"), and making it async would either duplicate it or make the
+    # synchronous callers async too. One line here keeps that property.
+    vectors, requests = await asyncio.to_thread(
+        embed_texts, call, [r["content"] for r in rows], batch_size)
 
     payload = [{"chunk_id": r["chunk_id"], "embedding": v}
                for r, v in zip(rows, vectors)]

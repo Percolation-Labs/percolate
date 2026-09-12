@@ -19,6 +19,7 @@ second implementation.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from collections.abc import Mapping
@@ -28,6 +29,47 @@ from typing import Any
 import asyncpg
 
 from .config import dsn as config_dsn
+
+
+def _acquire_seconds() -> float:
+    """How long to wait for a pooled connection before saying why.
+
+    Read per call rather than at import, so a host or a test can change it
+    without reimporting the module.
+    """
+    return float(os.getenv("P8_POOL_ACQUIRE_SECONDS", "10"))
+
+
+@asynccontextmanager
+async def acquired(p: asyncpg.Pool) -> Any:
+    """A pooled connection, or an error that explains the arithmetic.
+
+    BOUNDED, because the unbounded version deadlocks instead of failing. An
+    agent turn holds one connection for its whole lifetime -- ``publisher()``
+    keeps it so that a sixty-word answer is not sixty transactions -- and every
+    repository call *inside* that turn takes a second one. So a turn needs TWO
+    connections at once, and with ``P8_POOL_MAX`` at its old default of 8, eight
+    concurrent turns each held one and then waited forever for the other. Not
+    under load: by construction, at exactly the concurrency the pool size looks
+    like it supports.
+
+    A bare ``asyncio.TimeoutError`` would not tell anybody that, so it is caught
+    here and replaced with the sum. A deadlock becoming a timeout is an
+    improvement; the timeout becoming a sentence that names the two connections
+    is the part that saves the next person the afternoon.
+    """
+    try:
+        async with p.acquire(timeout=_acquire_seconds()) as conn:
+            yield conn
+    except asyncio.TimeoutError:
+        raise RuntimeError(
+            f"no pooled connection in {_acquire_seconds():g}s. An agent turn holds one "
+            "connection for its whole life and takes a second for every query inside "
+            "it, so the pool has to be about TWICE the number of turns you want at "
+            "once -- P8_POOL_MAX=16 supports eight. Raise it, or raise "
+            "P8_POOL_ACQUIRE_SECONDS if the wait is legitimate."
+        ) from None
+
 
 ROLE = os.getenv("P8_ROLE", "authenticated")
 """The role a request-scoped transaction assumes. `user-rbac/roles.sql` names it."""
@@ -160,7 +202,7 @@ async def as_caller(claims: Mapping[str, Any] | None, role: str = ROLE):
     That is the order PostgREST uses; the reverse is a permission error.
     """
     p = await pool()
-    async with p.acquire() as conn, conn.transaction():
+    async with acquired(p) as conn, conn.transaction():
         await conn.execute(
             "select set_config('request.jwt.claims', $1, true)",
             json.dumps(dict(claims)) if claims else "{}",
@@ -183,7 +225,7 @@ async def as_service(role: str = SERVICE_ROLE):
     ``worker`` role, which holds no table privileges at all.
     """
     p = await pool()
-    async with p.acquire() as conn, conn.transaction():
+    async with acquired(p) as conn, conn.transaction():
         await conn.execute(f"set local role {role}")
         yield conn
 

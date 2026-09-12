@@ -54,7 +54,28 @@ class Settings:
         if origin.strip()
     ))
     pool_min: int = field(default_factory=lambda: int(os.getenv("P8_POOL_MIN", "1")))
-    pool_max: int = field(default_factory=lambda: int(os.getenv("P8_POOL_MAX", "8")))
+    pool_max: int = field(default_factory=lambda: int(os.getenv("P8_POOL_MAX", "16")))
+    """TWO PER CONCURRENT TURN, so 16 supports eight people talking at once.
+
+    It was 8, which reads like eight turns and was four. A turn holds one
+    connection for its whole life (``db.client.PgClient.publisher``, so that a
+    sixty-word answer is not sixty transactions) and takes a second for every
+    query inside it. At 8, eight concurrent turns each held one and then waited
+    forever for the other -- a deadlock by construction, at exactly the
+    concurrency the number looks like it allows. ``core.identity.acquired`` now
+    bounds that wait and puts this arithmetic in the error.
+
+    THE PROCESS BUDGET, which is the number an operator actually needs:
+    ``max_listeners`` connections (64 by default, each a dedicated
+    ``asyncpg.connect`` OUTSIDE this pool, because a stream that went back to
+    the pool would stop listening) plus ``pool_max``. So one runtime process can
+    want 80 backends. Postgres defaults ``max_connections`` to 100 and reserves
+    3 for superusers, so **two of these processes do not fit a default
+    database** -- and ``workflow-engine/scale.md:281-290`` records the cluster
+    version of the same sum, where 30 pods x 4 connections locked the operator
+    out of their own database. Set ``max_connections``, or lower
+    ``P8_MAX_LISTENERS``, but do the addition first.
+    """
 
     # The identity the runtime authenticates as. In deployment this comes from
     # the inbound request's JWT, per request; for the CLI it is a setting so a

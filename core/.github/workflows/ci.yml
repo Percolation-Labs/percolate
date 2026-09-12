@@ -133,6 +133,15 @@ jobs:
       - name: The worker cannot be pointed back at its own network
         run: python -m unittest discover -s tests -p test_worker_egress.py
 
+      # REM-110. A turn holds one connection for its whole life and takes a
+      # second for every query inside it, so a pool of N serves N/2 turns --
+      # P8_POOL_MAX at 8 read like eight turns and was four, and the eighth
+      # deadlocked with no error and no load involved. The control is the part
+      # worth keeping: the same eight turns against the old size must FAIL, in
+      # bounded time, with the arithmetic in the message.
+      - name: Eight people can hold a conversation at once
+        run: python -m unittest discover -s tests -p test_pool_concurrency.py
+
       # content.api_source in the extension is the one home of an API source's
       # defaults and choices (REM-61); APIConfig and the UI's API_DEFAULTS are
       # copies, and a copy that drifts saves a different source.

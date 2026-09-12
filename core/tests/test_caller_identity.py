@@ -56,8 +56,17 @@ class RecordingConn:
 class RecordingPool:
     def __init__(self):
         self.conn = RecordingConn()
+        self.acquire_timeouts: list[float | None] = []
 
-    def acquire(self):
+    def acquire(self, *, timeout=None):
+        # `timeout` because the real asyncpg pool takes it and
+        # `core.identity.acquired` passes it: an agent turn holds one connection
+        # for its life and takes a second per query, so an unbounded acquire
+        # deadlocked at eight concurrent turns (REM-110). A double that does not
+        # accept an argument the caller always sends is testing a narrower
+        # interface than the one that runs.
+        self.acquire_timeouts.append(timeout)
+
         @asynccontextmanager
         async def held():
             yield self.conn

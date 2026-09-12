@@ -127,7 +127,10 @@ class PgClient:
         """
         _require_claims(claims)
         pool = self._require()
-        async with pool.acquire() as conn:
+        # Bounded, through the same helper as_caller uses: this is the acquire
+        # that HOLDS a connection for the turn, so it is the first half of the
+        # two-per-turn sum in `settings.pool_max`.
+        async with identity.acquired(pool) as conn:
             await conn.execute(
                 "select set_config('request.jwt.claims', $1, false)",
                 json.dumps(dict(claims)) if claims else "{}",
