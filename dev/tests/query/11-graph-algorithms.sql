@@ -805,5 +805,118 @@ begin
                  'clears `complete` like the other two';
 end $$;
 
+-- ---------------------------------------------------------------------
+-- 17. TWO ROUTES OUT OF ONE DOCUMENT ARE ONE WITNESS.
+--
+-- `support` is a corroboration count and `confidence` lifts the best path by
+-- noisy-OR over the paths that agree with it. Noisy-OR multiplies failure
+-- probabilities, which is a claim that the paths fail separately -- and two
+-- paths a model extracted from the SAME resource fail together, because if
+-- that resource is wrong both of them are.
+--
+-- The fixture is a diamond, seed -> {a, b} -> target, every edge at 0.6, so
+-- the best path is 0.36 either way round. The only thing that changes between
+-- the two halves below is which document the edges came from, and that is
+-- exactly what may not be invisible: two documents is evidence (support 2, the
+-- lift to 0.5904) and one document twice is not (support 1, and the answer
+-- stays at the best path).
+--
+-- Against the parser this fixed, BOTH halves returned support 2 and 0.5904.
+-- ---------------------------------------------------------------------
+do $$
+declare
+    v_ids uuid[]; v_s uuid; v_t uuid;
+    v_conf double precision; v_path double precision; v_naive double precision; v_sup int;
+    v_prov jsonb;
+begin
+    insert into aiq.relation_types (relation, src_type, dst_type)
+      values ('trust_rel','trustdoc','trustdoc') on conflict do nothing;
+    insert into aiq.nodes (entity_type, entity_id, summary)
+    select 'trustdoc', gen_random_uuid(), 'd'||i from generate_series(1,4) i;
+    select array_agg(id order by summary) into v_ids
+      from aiq.nodes where entity_type = 'trustdoc';
+    v_s := v_ids[1];   -- d1 = seed, d2 and d3 = the two routes, d4 = target
+    v_t := v_ids[4];
+    insert into aiq.node_keys (node_id, entity_type, key, kind)
+    values (v_s, 'trustdoc', 'zz_trust_seed', 'canonical');
+
+    -- One document per route: the two routes are two witnesses.
+    v_prov := jsonb_build_object('tier','machine','sources',
+                  jsonb_build_array(jsonb_build_object('resource_id','zz-doc-left')));
+    insert into aiq.edges (src_id, dst_id, relation, weight, provenance) values
+        (v_s, v_ids[2], 'trust_rel', 0.6, v_prov),
+        (v_ids[2], v_t, 'trust_rel', 0.6, v_prov);
+    v_prov := jsonb_build_object('tier','machine','sources',
+                  jsonb_build_array(jsonb_build_object('resource_id','zz-doc-right')));
+    insert into aiq.edges (src_id, dst_id, relation, weight, provenance) values
+        (v_s, v_ids[3], 'trust_rel', 0.6, v_prov),
+        (v_ids[3], v_t, 'trust_rel', 0.6, v_prov);
+
+    perform aiq.graph_snapshot(true);
+    select t.confidence, t.support, t.path_confidence, t.naive_confidence
+      into v_conf, v_sup, v_path, v_naive
+      from aiq.graph_trust(array['zz_trust_seed']) t
+     where t.node_id = v_t;
+    if v_sup is null then
+        raise exception 'the target is not in graph_trust''s answer at all';
+    end if;
+    -- NAMED, because a null here is not a failed comparison, it is an older
+    -- parser: the wrapper reads path_confidence and naive_confidence out of
+    -- p8_graph_trust's JSON, and a .so from before REM-66 returns neither --
+    -- so every `abs(v_path - x) > y` below would be null, would not fire, and
+    -- this section would pass against exactly the code it exists to catch.
+    if v_path is null or v_naive is null then
+        raise exception
+            'this percolate_parser does not return path_confidence or '
+            'naive_confidence from p8_graph_trust (percolate_parser %)',
+            (select extversion from pg_extension where extname = 'percolate_parser')
+        using hint = 'The SQL is ahead of the compiled parser in this image. '
+                     'Rebuild it: dev/build-image.sh, then run a container from '
+                     'that tag -- dev/README.md, "Changing the parser costs an image".';
+    end if;
+    if v_sup <> 2 then
+        raise exception 'two routes out of two documents gave support %, not 2', v_sup;
+    end if;
+    if abs(v_path - 0.36) > 0.001 then
+        raise exception 'the best path over two 0.6 edges is 0.36, and path_confidence is %',
+            v_path;
+    end if;
+    if abs(v_conf - 0.5904) > 0.001 then
+        raise exception 'two independent 0.36 routes lift to 0.5904, and confidence is %',
+            v_conf;
+    end if;
+
+    -- The same graph, said by one document. Nothing structural changed.
+    update aiq.edges set provenance = jsonb_build_object('tier','machine','sources',
+               jsonb_build_array(jsonb_build_object('resource_id','zz-doc-only')))
+     where relation = 'trust_rel';
+    perform aiq.graph_snapshot(true);
+    select t.confidence, t.support, t.path_confidence, t.naive_confidence
+      into v_conf, v_sup, v_path, v_naive
+      from aiq.graph_trust(array['zz_trust_seed']) t
+     where t.node_id = v_t;
+    if v_sup <> 1 then
+        raise exception
+            'both routes to the target were extracted from one resource, and support '
+            'says % of them are independent. support counts SOURCES, not paths '
+            '(graph-algorithms.md 5.4).', v_sup;
+    end if;
+    if abs(v_conf - v_path) > 1e-9 then
+        raise exception
+            'one document asserting two routes lifted confidence from % to %. '
+            'Noisy-OR over paths that fail together overstates belief by exactly '
+            'this much.', v_path, v_conf;
+    end if;
+    if abs(v_naive - 0.5904) > 0.001 then
+        raise exception
+            'naive_confidence is the pre-fix number and must still show the '
+            'overstatement it is kept to expose: expected 0.5904, got %', v_naive;
+    end if;
+
+    raise notice 'query/11: two routes out of one document are one witness '
+                 '(support 1, confidence %, and the old lift % beside it)',
+                 round(v_conf::numeric, 4), round(v_naive::numeric, 4);
+end $$;
+
 
 rollback;

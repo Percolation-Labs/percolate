@@ -386,6 +386,19 @@ struct Snapshot {
     ids: Vec<Uuid>,
     index: Map<Uuid, u32>,
     edges: Vec<Edge>,
+    /// WHICH SOURCE EACH EDGE RESTS ON, parallel to `edges`: the first
+    /// `provenance.sources[].resource_id`, or the tier for an edge with no
+    /// sources, interned to a u32. Two edges with the same root fail
+    /// together, because they are one document's word (REM-66).
+    ///
+    /// A parallel array rather than a field of `Edge`, and the difference is
+    /// half the cost: `Edge` is 30 bytes padded to 32, so a u32 inside it
+    /// rounds up to 40, while beside it the root costs exactly 4 bytes per
+    /// edge. Only `trust()` reads it, and only for the rows it returns.
+    roots: Vec<u32>,
+    /// How many distinct roots the snapshot holds. One means every path
+    /// rests on the same source and nothing can corroborate anything.
+    root_count: u32,
     out_off: Vec<u32>,
     out_eid: Vec<u32>,
     in_off: Vec<u32>,
@@ -435,6 +448,7 @@ impl Snapshot {
     }
     fn bytes(&self) -> usize {
         self.edges.len() * std::mem::size_of::<Edge>()
+            + self.roots.len() * 4
             + (self.out_eid.len() + self.in_eid.len()) * 4
             + (self.out_off.len() + self.in_off.len()) * 4
             + self.ids.len() * 16
@@ -720,6 +734,8 @@ fn build(bf: &BuildFilter) -> Snapshot {
             .ok()
             .flatten()
             .unwrap_or(false);
+    let mut roots: Vec<u32> = Vec::new();
+    let mut root_ids: Map<String, u32> = map();
 
     Spi::connect(|client| {
         let mut cur = client.open_cursor("select id from aiq.nodes", &[]);
@@ -766,7 +782,9 @@ fn build(bf: &BuildFilter) -> Snapshot {
         let q = format!(
             "select src_id, dst_id, relation, weight,
                     coalesce((extract(epoch from valid_from) * 1000000)::bigint, (-9223372036854775808)::bigint),
-                    coalesce((extract(epoch from valid_to)   * 1000000)::bigint,   9223372036854775807::bigint)
+                    coalesce((extract(epoch from valid_to)   * 1000000)::bigint,   9223372036854775807::bigint),
+                    coalesce('r:' || (provenance->'sources'->0->>'resource_id'),
+                             't:' || coalesce(provenance->>'tier', 'authored'))
                from {from}
               where ($1::text[] is null or relation = any($1::text[]))
                 and weight >= $2::real
@@ -806,7 +824,15 @@ fn build(bf: &BuildFilter) -> Snapshot {
                 let w = row.get::<f32>(4).ok().flatten().unwrap_or(1.0);
                 let vf = row.get::<i64>(5).ok().flatten().unwrap_or(T_MIN);
                 let vt = row.get::<i64>(6).ok().flatten().unwrap_or(T_MAX);
+                // The source root: see `Snapshot::roots`. An authored edge
+                // has no sources, so it rests on its tier, and every authored
+                // edge is one root -- an analyst's two assertions are not two
+                // independent witnesses either.
+                let key = row.get::<String>(7).ok().flatten().unwrap_or_default();
+                let next = root_ids.len() as u32;
+                let root = *root_ids.entry(key).or_insert(next);
                 edges.push(Edge { src: s, dst: d, rel: rid, w, vf, vt });
+                roots.push(root);
             }
             // Checked per batch rather than per row, and against the ARRIVING
             // size rather than a pre-count: a `count(*)` to decide whether to
@@ -818,7 +844,7 @@ fn build(bf: &BuildFilter) -> Snapshot {
             // and the id map add roughly a third), so the check charges for
             // them here rather than discovering them after the point of no
             // return.
-            let projected = edges.len() * std::mem::size_of::<Edge>() * 4 / 3
+            let projected = edges.len() * (std::mem::size_of::<Edge>() + 4) * 4 / 3
                 + ids.len() * 40;
             if projected > snapshot_max_bytes() {
                 error!(
@@ -876,6 +902,8 @@ fn build(bf: &BuildFilter) -> Snapshot {
         ids,
         index,
         edges,
+        root_count: root_ids.len() as u32,
+        roots,
         out_off,
         out_eid,
         in_off,
@@ -1717,13 +1745,79 @@ fn cliques(l: &Local, subset: &[u32], min_size: usize, b: &mut Budget) -> Vec<Ve
 // nothing downstream can currently tell them apart *after a traversal*, which
 // is exactly where the mixing happens.
 //
-// Two numbers, and they answer different questions. `confidence` is the
-// best single path, computed as max-product -- a Dijkstra in -ln(w) space, no
-// hop constant, because a long chain of certain edges should not be penalised
-// for its length. `support` is noisy-OR over the distinct neighbours that
-// carry belief into the node: two independent paths saying the same thing is
-// evidence, and a single path repeated is not.
+// Three numbers, and they answer different questions. `path_confidence` is
+// the best single path, computed as max-product -- a Dijkstra in -ln(w)
+// space, no hop constant, because a long chain of certain edges should not be
+// penalised for its length. `confidence` lifts that with noisy-OR over the neighbours
+// that carry belief into the node: two independent paths saying the same thing
+// is evidence, and a single path repeated is not.
+//
+// INDEPENDENT IS A CLAIM ABOUT SOURCES, and the snapshot used to carry none.
+// Noisy-OR multiplies the failure probabilities of the paths it combines,
+// which is only sound if they fail separately -- and two paths extracted from
+// ONE document fail together, because if the document is wrong both are. A
+// Python port of this function measured what that cost on the self-model
+// topology (3,253 nodes, 10,362 edges, 40 single-seed queries, Monte Carlo
+// connectivity over 4,000 samples as the oracle): with edges grouped into
+// documents that share a fate, 39-46% of the rows with support >= 2 came back
+// overconfident, by +0.16 to +0.20 on average and up to +0.65. With
+// independent edges the same lift was harmless, 1-2%.
+//
+// So the lift now runs over neighbours whose best paths rest on DISJOINT
+// source roots (`Snapshot::roots`), recovered from the parent pointers the
+// walk already writes, and `support` counts those. Greedy, best first: the
+// combination is a subset of the independent evidence rather than the largest
+// one, which is a lower bound on belief and never an overstatement of it.
+// Exact network reliability is #P-complete (Valiant 1979), so the two
+// available choices are a bound and a sampler, and a query is not a sampler.
+//
+// `naive_confidence` is what this function returned before, kept for one
+// release so a caller reading trust today can see the size of the correction
+// on their own graph rather than being told it.
 // ===========================================================================
+
+/// One returned node: the best path, the corroborated lift, and what the lift
+/// counted. `naive` is the pre-REM-66 value and goes away after one release.
+struct Trusted {
+    v: u32,
+    confidence: f64,
+    support: usize,
+    path: f64,
+    naive: f64,
+    /// How many neighbours the old lift combined, which is `support` without
+    /// the disjointness rule. Not returned by anything; it is what the
+    /// correlated-document test measures the old behaviour with.
+    #[allow(dead_code)]
+    naive_support: usize,
+}
+
+/// The source roots of the best path INTO `v`, following the parent edges the
+/// walk wrote. Appends to `out` and returns false if it could not finish --
+/// a parent chain longer than the guard, which `unwind` also refuses.
+///
+/// The chain cannot pass through the node being corroborated: every node on it
+/// has a distance no greater than `v`'s parent's, and a supporting neighbour is
+/// only counted when its distance is strictly smaller.
+fn path_roots(g: &Snapshot, sc: &Scratch, epoch: u32, v: u32, out: &mut Vec<u32>) -> bool {
+    let mut cur = v;
+    let mut guard = 0;
+    while sc.stamp[cur as usize] == epoch && sc.parent[cur as usize] != u32::MAX {
+        guard += 1;
+        if guard > 4096 {
+            return false;
+        }
+        let eid = sc.parent[cur as usize];
+        out.push(g.roots[eid as usize]);
+        let e = &g.edges[eid as usize];
+        cur = if e.dst == cur { e.src } else { e.dst };
+    }
+    true
+}
+
+/// How many supporting neighbours one returned row's corroboration will
+/// order and consider. A bound on the work at a hub, and a bound on belief in
+/// the safe direction -- see the selection in `trust()`.
+const CORROBORATE_CAP: usize = 32;
 
 #[allow(clippy::too_many_arguments)]
 fn trust(
@@ -1735,7 +1829,7 @@ fn trust(
     directed: bool,
     f: &Filter,
     b: &mut Budget,
-) -> (Vec<(u32, f64, usize)>, usize) {
+) -> (Vec<Trusted>, usize) {
     let epoch = sc.bump();
     let mut heap: BinaryHeap<QItem> = BinaryHeap::new();
     let mut buf: Vec<(u32, f32, u32)> = Vec::new();
@@ -1775,7 +1869,7 @@ fn trust(
         if !b.spend(scanned) {
             break;
         }
-        for &(u, w, _) in buf.iter() {
+        for &(u, w, eid) in buf.iter() {
             let nd = d - (w as f64).clamp(1.0e-6, 1.0).ln();
             if nd > max_cost {
                 continue;
@@ -1785,8 +1879,18 @@ fn trust(
                 sc.dist[u as usize] = f64::INFINITY;
                 touched.push(u);
             }
+            // NO `parent = MAX` on first touch, deliberately: the relax below
+            // always improves on an infinite distance, so it always writes a
+            // real parent, and the walk touches enough nodes on a heavy-tailed
+            // graph that one redundant scattered write per node is a
+            // measurable share of this function's p95.
             if nd < sc.dist[u as usize] {
                 sc.dist[u as usize] = nd;
+                // The edge this value came through, which is what makes the
+                // best path recoverable. The walk wrote no parent before
+                // REM-66 and the corroboration step had nothing to read, so
+                // it could not tell one document's two paths apart.
+                sc.parent[u as usize] = eid;
                 heap.push(QItem(nd, u));
             }
         }
@@ -1808,26 +1912,105 @@ fn trust(
     ranked.sort_by(|a, c| c.1.total_cmp(&a.1));
     ranked.truncate(top_k);
 
-    let mut out: Vec<(u32, f64, usize)> = Vec::with_capacity(ranked.len());
+    let mut out: Vec<Trusted> = Vec::with_capacity(ranked.len());
+    // One allocation for the whole pass rather than three per row: the roots
+    // already spoken for, and the candidate's own, cleared between rows.
+    let mut spoken_for: Set<u32> = set();
+    let mut mine: Vec<u32> = Vec::new();
+    let mut cands: Vec<(f64, u32, u32)> = Vec::new();
     for &(v, conf) in ranked.iter() {
         let scanned = nbrs(g, v, directed, f, &mut buf);
         b.spend(scanned);
-        let mut support = 0usize;
-        let mut none_of_them = 1.0f64;
-        for &(u, w, _) in buf.iter() {
+        cands.clear();
+        let mut naive_none = 1.0f64;
+        let mut naive_support = 0usize;
+        // The weakest candidate worth keeping. It starts below every
+        // confidence and rises once the list is full, so a hub's thousands of
+        // weak neighbours cost one comparison each rather than a slot in a
+        // list that then has to be ordered.
+        let mut weakest = -1.0f64;
+        for &(u, w, eid) in buf.iter() {
             if sc.stamp[u as usize] != epoch || u == v {
                 continue;
             }
             let cu = (-sc.dist[u as usize]).exp() * (w as f64).clamp(0.0, 1.0);
             if cu >= floor && sc.dist[u as usize] < sc.dist[v as usize] {
-                support += 1;
-                none_of_them *= 1.0 - cu.min(0.999);
+                naive_none *= 1.0 - cu.min(0.999);
+                naive_support += 1;
+                if cu <= weakest {
+                    continue;
+                }
+                cands.push((cu, u, eid));
+                // Compacted rather than sorted: one linear partition every
+                // CORROBORATE_CAP arrivals, which is amortised O(1) per
+                // candidate. Ordering all of them measured 16.5 ms at the p95
+                // against 10.3 ms for the single unsorted pass this replaced,
+                // on the 3.94M-edge fixture, where degree is heavy-tailed by
+                // construction and a returned row can be a hub with forty
+                // thousand supporting neighbours.
+                if cands.len() >= 2 * CORROBORATE_CAP {
+                    cands.select_nth_unstable_by(CORROBORATE_CAP - 1, |a, c| {
+                        c.0.total_cmp(&a.0)
+                    });
+                    cands.truncate(CORROBORATE_CAP);
+                    weakest = cands[CORROBORATE_CAP - 1].0;
+                }
             }
         }
+        // Dropping the weak tail can only LOWER the count: each dropped
+        // candidate contributes less than the weakest kept one, and a
+        // noisy-OR over 32 disjoint sources is saturated well past any weight
+        // worth returning. `naive_support` and `naive_confidence` above are
+        // computed over ALL of them, because they are what the old code did.
+        if cands.len() > CORROBORATE_CAP {
+            cands.select_nth_unstable_by(CORROBORATE_CAP - 1, |a, c| c.0.total_cmp(&a.0));
+            cands.truncate(CORROBORATE_CAP);
+        }
+        // Best first, so the row's own best path is taken before anything
+        // that would rule it out, and the greedy's first pick is the one the
+        // ranking was made on. The node ordinal breaks ties, because a result
+        // that depends on adjacency order is not reproducible.
+        cands.sort_unstable_by(|a, c| c.0.total_cmp(&a.0).then_with(|| a.1.cmp(&c.1)));
+        spoken_for.clear();
+        let mut support = 0usize;
+        let mut none_of_them = 1.0f64;
+        let mut steps = 0u64;
+        for &(cu, u, eid) in cands.iter() {
+            // The last hop first, because it is one array read and it settles
+            // the common case: on a graph whose edges all carry one tier --
+            // every authored edge does -- the second candidate is refused
+            // here and no path is walked at all.
+            let last = g.roots[eid as usize];
+            if spoken_for.contains(&last) {
+                continue;
+            }
+            mine.clear();
+            mine.push(last);
+            if !path_roots(g, sc, epoch, u, &mut mine) {
+                continue;
+            }
+            steps += mine.len() as u64;
+            // Disjoint from everything already counted, or it is the same
+            // document speaking twice and carries no new information. A root
+            // repeated WITHIN one path is fine -- one document asserting two
+            // hops of a route is still one thing that has to be right.
+            if mine.iter().any(|r| spoken_for.contains(r)) {
+                continue;
+            }
+            for &r in mine.iter() {
+                spoken_for.insert(r);
+            }
+            support += 1;
+            none_of_them *= 1.0 - cu.min(0.999);
+        }
+        // Charged, because a bound that is announced and not kept is the
+        // defect §8.3 of graph-algorithms.md records against this function.
+        b.spend(steps);
+        let naive = if cands.is_empty() { conf } else { conf.max(1.0 - naive_none) };
         let combined = if support == 0 { conf } else { conf.max(1.0 - none_of_them) };
-        out.push((v, combined, support));
+        out.push(Trusted { v, confidence: combined, support, path: conf, naive, naive_support });
     }
-    out.sort_by(|a, c| c.1.total_cmp(&a.1));
+    out.sort_by(|a, c| c.confidence.total_cmp(&a.confidence));
     (out, reached)
 }
 
@@ -2461,6 +2644,7 @@ fn snap_meta(g: &Snapshot) -> Value {
         "nodes": g.n(),
         "edges": g.m(),
         "relations": g.rel_names.len(),
+        "source_roots": g.root_count,
         "build_ms": (g.build_ms * 1000.0).round() / 1000.0,
         "built_at": g.built_at,
         "bytes": g.bytes(),
@@ -2707,10 +2891,12 @@ fn p8_graph_trust(
     let (out, reached) = trust(g, sc, &ords, floor, k.max(0) as usize, directed, &f, &mut b);
     let rows: Vec<Value> = out
         .iter()
-        .map(|&(v, c, s)| json!({
-            "node_id": g.ids[v as usize].to_string(),
-            "confidence": (c * 100000.0).round() / 100000.0,
-            "support": s
+        .map(|r| json!({
+            "node_id": g.ids[r.v as usize].to_string(),
+            "confidence": (r.confidence * 100000.0).round() / 100000.0,
+            "support": r.support,
+            "path_confidence": (r.path * 100000.0).round() / 100000.0,
+            "naive_confidence": (r.naive * 100000.0).round() / 100000.0
         }))
         .collect();
     let mut meta = b.meta();
@@ -3165,6 +3351,26 @@ mod tests {
     /// finishes or says it did not -- and a pure function deserves a test that
     /// runs in milliseconds without a database.
     fn path(n: usize) -> Snapshot {
+        let edges: Vec<Edge> = (0..n.saturating_sub(1))
+            .map(|i| Edge {
+                src: i as u32,
+                dst: i as u32 + 1,
+                rel: 0,
+                w: 1.0,
+                vf: T_MIN,
+                vt: T_MAX,
+            })
+            .collect();
+        let roots = vec![0u32; edges.len()];
+        snap(n, edges, roots)
+    }
+
+    /// The CSR an edge list becomes, as `build()` makes it -- the same counting
+    /// sort, without the two cursors. Every fixture below is a list of edges
+    /// and the source root of each, and this is what turns one into a graph the
+    /// algorithms can read.
+    fn snap(n: usize, edges: Vec<Edge>, roots: Vec<u32>) -> Snapshot {
+        assert_eq!(edges.len(), roots.len(), "one source root per edge");
         let ids: Vec<Uuid> = (0..n)
             .map(|i| {
                 let mut b = [0u8; 16];
@@ -3176,32 +3382,28 @@ mod tests {
         for (i, id) in ids.iter().enumerate() {
             index.insert(*id, i as u32);
         }
-        let edges: Vec<Edge> = (0..n.saturating_sub(1))
-            .map(|i| Edge {
-                src: i as u32,
-                dst: i as u32 + 1,
-                rel: 0,
-                w: 1.0,
-                vf: T_MIN,
-                vt: T_MAX,
-            })
-            .collect();
-        let (mut out_off, mut out_eid) = (Vec::with_capacity(n + 1), Vec::new());
-        for i in 0..n {
-            out_off.push(out_eid.len() as u32);
-            if i + 1 < n {
-                out_eid.push(i as u32);
-            }
+        let m = edges.len();
+        let mut out_off = vec![0u32; n + 1];
+        let mut in_off = vec![0u32; n + 1];
+        for e in &edges {
+            out_off[e.src as usize + 1] += 1;
+            in_off[e.dst as usize + 1] += 1;
         }
-        out_off.push(out_eid.len() as u32);
-        let (mut in_off, mut in_eid) = (Vec::with_capacity(n + 1), Vec::new());
         for i in 0..n {
-            in_off.push(in_eid.len() as u32);
-            if i > 0 {
-                in_eid.push(i as u32 - 1);
-            }
+            out_off[i + 1] += out_off[i];
+            in_off[i + 1] += in_off[i];
         }
-        in_off.push(in_eid.len() as u32);
+        let mut out_eid = vec![0u32; m];
+        let mut in_eid = vec![0u32; m];
+        let mut oc = out_off.clone();
+        let mut ic = in_off.clone();
+        for (i, e) in edges.iter().enumerate() {
+            out_eid[oc[e.src as usize] as usize] = i as u32;
+            oc[e.src as usize] += 1;
+            in_eid[ic[e.dst as usize] as usize] = i as u32;
+            ic[e.dst as usize] += 1;
+        }
+        let root_count = roots.iter().collect::<Set<_>>().len() as u32;
         Snapshot {
             identity: String::new(),
             counters: String::new(),
@@ -3210,6 +3412,8 @@ mod tests {
             ids,
             index,
             edges,
+            roots,
+            root_count,
             out_off,
             out_eid,
             in_off,
@@ -3281,6 +3485,424 @@ mod tests {
             Some(20),
             "two nodes 20 hops apart are well within any root's reach; the depth \
              ceiling costs exactness, not every answer"
+        );
+    }
+
+    // =======================================================================
+    // Trust propagation over correlated sources (REM-66)
+    //
+    // The defect is a probability claim, so the test is a measurement against
+    // an oracle rather than an expected value typed into an assertion. The
+    // oracle is Monte Carlo connectivity -- sample which documents are right,
+    // keep the edges that survive, ask whether the node is still reachable
+    // from the seed -- because exact network reliability is #P-complete
+    // (Valiant 1979) and a closed form to compare against does not exist.
+    //
+    // The fixture is the shape the ticket measured: heavy-tailed degree, most
+    // edges local to their source, and edges grouped into documents that are
+    // right or wrong TOGETHER. Everything is drawn from a seeded xorshift, so
+    // the graph, the documents and the samples are the same on every run and
+    // a failure is reproducible rather than a coin flip.
+    // =======================================================================
+
+    /// xorshift64*, ten lines, because a test whose fixture moves between runs
+    /// cannot be bisected. Not for anything that has to be unpredictable.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+        /// Uniform on [0, 1).
+        fn unit(&mut self) -> f64 {
+            (self.next() >> 11) as f64 / (1u64 << 53) as f64
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n.max(1) as u64) as usize
+        }
+    }
+
+    /// A graph whose edges came out of documents.
+    ///
+    /// `docs` of them, each right with probability U(0.3, 0.9) and carrying
+    /// ALL of its edges with it -- which is the property noisy-OR over
+    /// neighbours gets wrong. `docs >= m` gives every edge its own source,
+    /// which is the independent case the lift was sound for.
+    ///
+    /// Documents are graph-local (multi-source BFS from random centres)
+    /// because a document is a text about a neighbourhood, not a random
+    /// scattering of assertions: scattered, most pairs of paths would be
+    /// disjoint by accident and the defect would not show.
+    fn corpus(n: usize, m: usize, docs: usize, seed: u64) -> (Snapshot, Vec<f64>) {
+        let mut rng = Rng(seed);
+        let mut raw: Vec<(u32, u32)> = Vec::with_capacity(m);
+        for _ in 0..m {
+            // Degree as N*u^3: hubs, because a uniform graph has none and a
+            // walk on one never has two routes to compare.
+            let u = rng.unit();
+            let src = ((u * u * u) * n as f64) as usize % n;
+            let dst = if rng.unit() < 0.7 {
+                // Local to the source, which is what gives the graph
+                // communities and therefore paths that share a document.
+                (src + 1 + rng.below(40)) % n
+            } else {
+                rng.below(n)
+            };
+            if src != dst {
+                raw.push((src as u32, dst as u32));
+            }
+        }
+        // Which document each edge came from. One per edge when there are
+        // enough of them; otherwise the nearest centre to the edge's source.
+        let doc_of_edge: Vec<u32> = if docs >= raw.len() {
+            (0..raw.len() as u32).collect()
+        } else {
+            let mut adj: Vec<Vec<u32>> = vec![Vec::new(); n];
+            for &(s, d) in raw.iter() {
+                adj[s as usize].push(d);
+                adj[d as usize].push(s);
+            }
+            let mut label = vec![u32::MAX; n];
+            let mut q: Vec<u32> = Vec::new();
+            for c in 0..docs {
+                let v = rng.below(n);
+                if label[v] == u32::MAX {
+                    label[v] = c as u32;
+                    q.push(v as u32);
+                }
+            }
+            let mut head = 0;
+            while head < q.len() {
+                let v = q[head];
+                head += 1;
+                for &w in adj[v as usize].iter() {
+                    if label[w as usize] == u32::MAX {
+                        label[w as usize] = label[v as usize];
+                        q.push(w);
+                    }
+                }
+            }
+            // A node no centre reached is its own document rather than a
+            // shared null one: inventing correlation the fixture did not
+            // plant would make the test pass for the wrong reason.
+            let mut spare = docs as u32;
+            raw.iter()
+                .map(|&(s, _)| {
+                    if label[s as usize] == u32::MAX {
+                        spare += 1;
+                        spare - 1
+                    } else {
+                        label[s as usize]
+                    }
+                })
+                .collect()
+        };
+        let doc_count = doc_of_edge.iter().copied().max().unwrap_or(0) as usize + 1;
+        let reliability: Vec<f64> = (0..doc_count).map(|_| 0.3 + 0.6 * rng.unit()).collect();
+        // The weight IS the document's reliability, so the walk is reading the
+        // same number the oracle samples. An edge weight that did not match
+        // the fixture's own failure model would make every comparison below
+        // meaningless.
+        let edges: Vec<Edge> = raw
+            .iter()
+            .zip(doc_of_edge.iter())
+            .map(|(&(s, d), &doc)| Edge {
+                src: s,
+                dst: d,
+                rel: 0,
+                w: reliability[doc as usize] as f32,
+                vf: T_MIN,
+                vt: T_MAX,
+            })
+            .collect();
+        (snap(n, edges, doc_of_edge), reliability)
+    }
+
+    /// The oracle: P(v is reachable from the seed) when each document is right
+    /// with its own probability and takes all of its edges with it.
+    ///
+    /// One union-find per sample serves every query, which is what makes 4,000
+    /// samples over forty queries a test that runs in a second rather than a
+    /// minute: sampling the documents is the expensive part and the queries
+    /// are just lookups in the partition it produces.
+    fn connected_share(
+        g: &Snapshot,
+        reliability: &[f64],
+        queries: &[(u32, Vec<u32>)],
+        samples: usize,
+        seed: u64,
+    ) -> Vec<Vec<f64>> {
+        fn find(parent: &mut [u32], mut x: u32) -> u32 {
+            while parent[x as usize] != x {
+                parent[x as usize] = parent[parent[x as usize] as usize];
+                x = parent[x as usize];
+            }
+            x
+        }
+        let mut rng = Rng(seed);
+        let mut hits: Vec<Vec<u32>> = queries.iter().map(|(_, vs)| vec![0u32; vs.len()]).collect();
+        let mut parent = vec![0u32; g.n()];
+        let mut alive = vec![false; reliability.len()];
+        for _ in 0..samples {
+            for (d, a) in alive.iter_mut().enumerate() {
+                *a = rng.unit() < reliability[d];
+            }
+            for (i, p) in parent.iter_mut().enumerate() {
+                *p = i as u32;
+            }
+            for (i, e) in g.edges.iter().enumerate() {
+                if !alive[g.roots[i] as usize] {
+                    continue;
+                }
+                let (a, b) = (find(&mut parent, e.src), find(&mut parent, e.dst));
+                if a != b {
+                    parent[a.max(b) as usize] = a.min(b);
+                }
+            }
+            for (qi, (s, vs)) in queries.iter().enumerate() {
+                let root = find(&mut parent, *s);
+                for (i, &v) in vs.iter().enumerate() {
+                    if find(&mut parent, v) == root {
+                        hits[qi][i] += 1;
+                    }
+                }
+            }
+        }
+        hits.iter()
+            .map(|h| h.iter().map(|&c| c as f64 / samples as f64).collect())
+            .collect()
+    }
+
+    /// How far a claim may sit above the oracle before it is a claim the graph
+    /// does not support: three standard errors of the estimate, plus a fixed
+    /// 0.02 for the discretisation of a 4,000-sample mean.
+    fn tolerance(p: f64, samples: usize) -> f64 {
+        3.0 * (p * (1.0 - p) / samples as f64).sqrt() + 0.02
+    }
+
+    fn trust_rows(g: &Snapshot, seed: u32, top_k: usize) -> Vec<Trusted> {
+        let sc = scratch(g.n());
+        // What holds now, which is what every fixture edge does: `vf`/`vt` are
+        // the open interval, so the temporal filter REM-51 made unconditional
+        // keeps all of them.
+        let f = Filter::current();
+        let (rows, _) = trust(g, sc, &[seed], 0.01, top_k, false, &f, &mut roomy());
+        rows
+    }
+
+    /// Forty single-seed queries over one fixture, and what each returned.
+    fn sweep(g: &Snapshot, queries: usize, top_k: usize, seed: u64) -> Vec<(u32, Vec<Trusted>)> {
+        let mut rng = Rng(seed);
+        let mut out = Vec::new();
+        let mut tries = 0;
+        while out.len() < queries && tries < queries * 20 {
+            tries += 1;
+            let v = rng.below(g.n()) as u32;
+            if g.out(v).len() + g.inc(v).len() < 2 {
+                continue;
+            }
+            let rows = trust_rows(g, v, top_k);
+            if !rows.is_empty() {
+                out.push((v, rows));
+            }
+        }
+        out
+    }
+
+    /// THE FIXTURE THIS TICKET IS ABOUT. Edges grouped into documents that
+    /// share a fate, and `confidence` must not exceed what the graph actually
+    /// delivers.
+    ///
+    /// It fails against the trust() that shipped before REM-66. Returning the
+    /// lift over ALL supporting neighbours -- `naive_confidence`, which this
+    /// test also reads -- puts 26 of the 147 rows it lifts above the oracle by
+    /// more than the tolerance, by up to +0.57; the disjointness rule puts
+    /// none of them there. The third assertion below pins the first half of
+    /// that, so the fixture cannot lose its teeth and leave the first
+    /// assertion passing over a graph with no correlated evidence in it, with
+    /// nothing in the run saying so.
+    #[pg_test]
+    fn two_paths_out_of_one_document_are_not_two_witnesses() {
+        const SAMPLES: usize = 4000;
+        let (g, reliability) = corpus(3000, 10_000, 500, 0x5EED_1066);
+        let queries = sweep(&g, 40, 25, 0xC0FF_EE66);
+        assert!(
+            queries.len() >= 30,
+            "the fixture answered {} of 40 queries -- too few to measure anything",
+            queries.len()
+        );
+        let nodes: Vec<(u32, Vec<u32>)> = queries
+            .iter()
+            .map(|(s, rows)| (*s, rows.iter().map(|r| r.v).collect()))
+            .collect();
+        let oracle = connected_share(&g, &reliability, &nodes, SAMPLES, 0xBEEF_0066);
+
+        // Two populations, and they are not the same rows. `lifted` is what
+        // the new rule combined; `was_lifted` is what the old one did, which
+        // is the population the ticket measured 39-46% overconfidence in.
+        let (mut lifted, mut was_lifted) = (0usize, 0usize);
+        let (mut over, mut naive_over) = (0usize, 0usize);
+        let (mut worst, mut worst_naive) = (0.0f64, 0.0f64);
+        for (qi, (_, rows)) in queries.iter().enumerate() {
+            for (i, r) in rows.iter().enumerate() {
+                let p = oracle[qi][i];
+                let tol = tolerance(p, SAMPLES);
+                if r.support >= 2 {
+                    lifted += 1;
+                }
+                if r.naive_support >= 2 {
+                    was_lifted += 1;
+                    if r.naive - p > tol {
+                        naive_over += 1;
+                        worst_naive = worst_naive.max(r.naive - p);
+                    }
+                }
+                if r.confidence - p > tol {
+                    over += 1;
+                    worst = worst.max(r.confidence - p);
+                }
+                assert!(
+                    r.confidence >= r.path - 1.0e-9,
+                    "corroboration may raise the best path's confidence and never lower it"
+                );
+            }
+        }
+        assert!(
+            was_lifted >= 100,
+            "only {} rows had more than one supporting path at all -- this fixture \
+             cannot say anything about corroboration",
+            was_lifted
+        );
+        assert_eq!(
+            over, 0,
+            "{} returned rows claim more confidence than the graph delivers, by up \
+             to +{:.3}. Each one is a node whose corroborating paths rest on the same \
+             document, counted twice.",
+            over, worst
+        );
+        assert!(
+            naive_over >= 10 && worst_naive > 0.1,
+            "the pre-REM-66 lift was overconfident on {} of {} lifted rows, worst \
+             +{:.3}. Fewer than ten of them, or none by more than 0.1, means this \
+             fixture no longer carries correlated evidence -- so the assertion above \
+             passes for the wrong reason, and the fixture is what to fix rather than \
+             this number. ({} rows are still lifted under the disjointness rule.)",
+            naive_over,
+            was_lifted,
+            worst_naive,
+            lifted
+        );
+    }
+
+    /// The other half: where the edges ARE independent, nothing changes.
+    ///
+    /// `path_confidence` is the max-product best path and the rank bound
+    /// §8.3 rests on, so it is checked against a plain Dijkstra written here
+    /// rather than against a number recorded from a previous run -- the top 25
+    /// settled are the top 25, in the same order, with the same values.
+    #[pg_test]
+    fn one_document_per_edge_leaves_the_ranking_where_it_was() {
+        const SAMPLES: usize = 4000;
+        let (g, reliability) = corpus(3000, 10_000, usize::MAX, 0x5EED_1067);
+        assert!(
+            g.root_count as usize >= g.m(),
+            "this fixture is the independent one: every edge is its own source"
+        );
+        let queries = sweep(&g, 40, 25, 0xC0FF_EE67);
+        assert!(queries.len() >= 30, "too few answered queries to compare a ranking");
+
+        for (seed, rows) in queries.iter() {
+            // The reference: max-product from the same seed, no rank bound, no
+            // corroboration. Exhaustive over the component, which is what the
+            // settle cap is an optimisation of.
+            let mut dist = vec![f64::INFINITY; g.n()];
+            let mut heap: BinaryHeap<QItem> = BinaryHeap::new();
+            dist[*seed as usize] = 0.0;
+            heap.push(QItem(0.0, *seed));
+            let mut done = vec![false; g.n()];
+            while let Some(QItem(d, v)) = heap.pop() {
+                if done[v as usize] {
+                    continue;
+                }
+                done[v as usize] = true;
+                for &eid in g.out(v).iter().chain(g.inc(v).iter()) {
+                    let e = &g.edges[eid as usize];
+                    let u = if e.src == v { e.dst } else { e.src };
+                    let nd = d - (e.w as f64).clamp(1.0e-6, 1.0).ln();
+                    if nd < dist[u as usize] {
+                        dist[u as usize] = nd;
+                        heap.push(QItem(nd, u));
+                    }
+                }
+            }
+            let mut want: Vec<(u32, f64)> = (0..g.n() as u32)
+                .filter(|&v| dist[v as usize].is_finite())
+                .map(|v| (v, (-dist[v as usize]).exp()))
+                .filter(|&(_, c)| c >= 0.01)
+                .collect();
+            want.sort_by(|a, c| c.1.total_cmp(&a.1).then_with(|| a.0.cmp(&c.0)));
+            want.truncate(rows.len());
+
+            let mut got: Vec<(u32, f64)> = rows.iter().map(|r| (r.v, r.path)).collect();
+            got.sort_by(|a, c| c.1.total_cmp(&a.1).then_with(|| a.0.cmp(&c.0)));
+            for (i, (&(wv, wc), &(gv, gc))) in want.iter().zip(got.iter()).enumerate() {
+                assert!(
+                    (wc - gc).abs() < 1.0e-9,
+                    "rank {} from seed {}: the walk says {:.6} and an exhaustive \
+                     max-product says {:.6}",
+                    i,
+                    seed,
+                    gc,
+                    wc
+                );
+                assert!(
+                    wv == gv || (wc - gc).abs() < 1.0e-12,
+                    "rank {} from seed {} is a different node ({} rather than {}) at a \
+                     different confidence",
+                    i,
+                    seed,
+                    gv,
+                    wv
+                );
+            }
+        }
+
+        // And the lift is still sound where it was sound before: with one
+        // document per edge, every path is its own evidence and the
+        // disjointness rule takes away nothing the answer rested on.
+        let nodes: Vec<(u32, Vec<u32>)> = queries
+            .iter()
+            .map(|(s, rows)| (*s, rows.iter().map(|r| r.v).collect()))
+            .collect();
+        let oracle = connected_share(&g, &reliability, &nodes, SAMPLES, 0xBEEF_0067);
+        let (mut over, mut lifted, mut worst) = (0usize, 0usize, 0.0f64);
+        for (qi, (_, rows)) in queries.iter().enumerate() {
+            for (i, r) in rows.iter().enumerate() {
+                if r.support >= 2 {
+                    lifted += 1;
+                }
+                let p = oracle[qi][i];
+                if r.confidence - p > tolerance(p, SAMPLES) {
+                    over += 1;
+                    worst = worst.max(r.confidence - p);
+                }
+            }
+        }
+        assert!(
+            lifted >= 20,
+            "only {} rows were corroborated at all -- the disjointness rule has \
+             thrown away the independent evidence it was meant to keep",
+            lifted
+        );
+        assert_eq!(
+            over, 0,
+            "{} rows over the oracle by up to +{:.3} on a graph of independent edges",
+            over, worst
         );
     }
 }

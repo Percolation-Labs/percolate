@@ -18279,7 +18279,44 @@ end $$;
 -- downstream can tell them apart. `support` is the corroboration count and is
 -- the column to read second: a confident number with support 0 is one path's
 -- opinion.
--- ------------------------------------------------------------
+--
+-- FOUR NUMBERS, because two of them were one and it hid a defect. `support`
+-- counts the corroborating paths whose SOURCES ARE DISJOINT -- two paths
+-- extracted from the same document are one document's word and are now
+-- counted once (REM-66, graph-algorithms.md §5.4). `path_confidence` is the
+-- single best path, unlifted, and is what the ranking is made on.
+-- `naive_confidence` is what `confidence` was before that rule: it ships for
+-- ONE release so a caller can see the size of the correction on their own
+-- graph, and then it goes.
+--
+-- THE DROP IS THE RETURN TYPE CHANGING, which `create or replace` cannot do,
+-- and the grants are carried across by hand because dropping a function takes
+-- its ACL with it -- an operator who had run aiq.enable_graph_algorithms()
+-- would otherwise find this one function, and only this one, unreachable
+-- after an upgrade, with nothing raised.
+do $$
+declare v_sig text :=
+    'aiq.graph_trust(text[],double precision,integer,integer,text,timestamptz)';
+begin
+    -- pg_temp SPELLED OUT, every time: an extension script runs with
+    -- search_path set to the extension's schema, so an unqualified temp
+    -- table is not the one that was just created.
+    create temp table if not exists graph_trust_acl (who text);
+    delete from pg_temp.graph_trust_acl;
+    if to_regprocedure(v_sig) is not null
+       and pg_get_function_result(to_regprocedure(v_sig)) not like '%path_confidence%'
+    then
+        insert into pg_temp.graph_trust_acl
+        select a.grantee::regrole::text
+          from pg_proc p, lateral aclexplode(p.proacl) a
+         where p.oid = to_regprocedure(v_sig)
+           and a.privilege_type = 'EXECUTE'
+           and a.grantee <> 0
+           and a.grantee <> p.proowner;
+        execute format('drop function %s', v_sig);
+    end if;
+end $$;
+
 create or replace function aiq.graph_trust(
     p_keys      text[],
     p_floor     double precision default 0.01,
@@ -18288,7 +18325,9 @@ create or replace function aiq.graph_trust(
     p_relation  text default null,
     p_as_of     timestamptz default null
 ) returns table(node_id uuid, key text, entity_type text,
-                confidence double precision, support int, budget_exhausted boolean)
+                confidence double precision, support int,
+                path_confidence double precision, naive_confidence double precision,
+                budget_exhausted boolean)
 language plpgsql stable as $$
 declare v_seeds uuid[]; v_res jsonb;
 begin
@@ -18309,6 +18348,8 @@ begin
     select n.id, kk.key, n.entity_type,
            (r->>'confidence')::double precision,
            (r->>'support')::int,
+           (r->>'path_confidence')::double precision,
+           (r->>'naive_confidence')::double precision,
            (v_res->'meta'->>'exhausted')::boolean
       from jsonb_array_elements(v_res->'rows') r
       join aiq.nodes n on n.id = (r->>'node_id')::uuid
@@ -18316,6 +18357,18 @@ begin
                           where nk.node_id = n.id and nk.kind = 'canonical'
                           limit 1) kk on true
      order by (r->>'confidence')::double precision desc;
+end $$;
+
+-- The grants the drop above took away, put back on the roles that held them.
+do $$
+declare r record;
+begin
+    for r in select who from pg_temp.graph_trust_acl loop
+        execute format(
+            'grant execute on function aiq.graph_trust'
+            '(text[],double precision,integer,integer,text,timestamptz) to %I', r.who);
+    end loop;
+    drop table pg_temp.graph_trust_acl;
 end $$;
 
 -- ------------------------------------------------------------
@@ -18507,7 +18560,10 @@ comment on function aiq.graph_connect(text[], int, text) is
 comment on function aiq.graph_dense(text, int, int, int, text) is
     'Core numbers and maximal cliques in the neighbourhood of a named node.';
 comment on function aiq.graph_trust(text[], float8, int, int, text, timestamptz) is
-    'Confidence and corroboration propagated from seeds, over edge weights.';
+    'Confidence and corroboration propagated from seeds, over edge weights. '
+    'support counts corroborating paths with disjoint sources; path_confidence '
+    'is the best single path; naive_confidence is the pre-REM-66 lift and goes '
+    'away after one release.';
 comment on function aiq.graph_frontier(text, int, boolean, int) is
     'Estimated size of the k-hop neighbourhood, for deciding whether to walk it.';
 comment on function aiq.graph_components(int, int) is
