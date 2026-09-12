@@ -247,12 +247,86 @@ select unnest(credentials) as credential_ref,
        array_agg(id order by id) as used_by
 from content.connectors where enabled group by 1 order by 2 desc;
 
+-- WHO MAY SEE THE CATALOGUE: the roles that operate it, and nobody else.
+--
+-- This block used to read, in full:
+--
+--     grant select, insert, update, delete on content.connectors to authenticated;
+--     grant select on content.v_connectors, ... to authenticated, web_anon;
+--     grant select on content.connectors to web_anon;
+--     grant execute on function content.due_connectors(int) to authenticated, web_anon;
+--     grant execute on function content.report_connector_run(...) to authenticated;
+--
+-- Five grants, one defect, and the one that was reported (REM-82) was the
+-- fourth. `due_connectors` is SECURITY DEFINER, `select *` over whole rows,
+-- with no org or owner predicate -- so an anonymous caller could enumerate the
+-- entire catalogue through it. But revoking only that function would have been
+-- the fix landing at the copy that failed
+-- (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md): line three
+-- handed `web_anon` the RAW TABLE, which carries `headers` and the whole `auth`
+-- object that the view does not, so the function was not even the cheapest way
+-- in. The sibling sweep is what found the other four.
+--
+-- What each of them exposed, to whom:
+--
+--   * the table, to web_anon -- every `url`, the free-form `headers` jsonb, the
+--     whole `auth` object, `credentials` names, rate and quota, and the
+--     tier/score valuation columns, to anybody who can reach PostgREST;
+--   * the four views, to web_anon -- the same catalogue minus `headers`, and
+--     v_required_credentials is a list of every credential name the deployment
+--     needs. These views are neither `security_invoker` nor owned by
+--     api_viewer, which is the shape dev/tests/rbac/02 refuses for a view
+--     handed to web_anon;
+--   * the table, to authenticated, with INSERT, UPDATE and DELETE -- and
+--     content.connectors takes neither rbac.add_scope_columns() nor
+--     rbac.add_scope_policy() (see org_id's comment above), so there is no RLS
+--     and no owner column. Any signed-in user could have deleted the whole
+--     catalogue. That was the worst of the five and was not the one reported.
+--
+-- It is not a leak of credential MATERIAL -- sources.md §15.1 keeps `auth` to a
+-- name and a shape -- but `headers` is free-form jsonb and only convention
+-- stops a key landing in it, so the blast radius rested on a convention rather
+-- than on a constraint.
+--
+-- THE RULE is the one sources.md §17.3 already gave: these RPCs are SECURITY
+-- DEFINER "so a worker with no table grant can call it". That argues for
+-- `worker`, and it argues against `authenticated` and `web_anon` in the same
+-- breath. A definer exists to let a role act WITHOUT a table grant; it is not
+-- a reason to widen who may act.
+--
+-- WHY NOT "ask the row's question like its neighbours", which is the
+-- alternative REM-82 offered: content.connectors has no owner_id and no
+-- visibility column to ask it with. rbac.may_read() takes three columns this
+-- table does not have. Until it takes add_scope_columns() the catalogue is
+-- operator data, and the honest grant is to the operator roles. When it takes
+-- them -- the same change that moves this file into ORDER -- a signed-in grant
+-- can come back and ask the row.
+--
+-- WHAT THIS COSTS: sources.md §17 demonstrates registering 304 sources over
+-- PostgREST, and that demonstration ran as `authenticated`. Registering a
+-- connector is an operator action now. That is the correct reading of a table
+-- with no tenant column: there is no tenant it could belong to.
 grant usage on schema content to authenticated, web_anon;
-grant select, insert, update, delete on content.connectors to authenticated;
+
+revoke all on content.connectors from public, web_anon, authenticated;
+revoke all on content.v_connectors, content.v_connectors_attention,
+              content.v_required_credentials, content.v_build_order
+           from public, web_anon, authenticated;
+
+grant select, insert, update, delete on content.connectors to app_owner;
+grant select on content.connectors to worker;
 grant select on content.v_connectors, content.v_connectors_attention,
                 content.v_required_credentials, content.v_build_order
-             to authenticated, web_anon;
-grant select on content.connectors to web_anon;
-grant execute on function content.due_connectors(int) to authenticated, web_anon;
-grant execute on function content.report_connector_run(text,text,int,text,text,int,jsonb) to authenticated;
-grant execute on function content.classify_health(int,text,int) to authenticated, web_anon;
+             to worker, app_owner;
+
+revoke all on function content.due_connectors(int) from public;
+revoke all on function content.report_connector_run(text,text,int,text,text,int,jsonb) from public;
+grant execute on function content.due_connectors(int) to worker, app_owner;
+grant execute on function content.report_connector_run(text,text,int,text,text,int,jsonb) to worker, app_owner;
+
+-- classify_health KEEPS its broad grant, and the difference is the point of the
+-- block above rather than an exception to it: it is `immutable`, takes three
+-- scalars, reads no table and returns a word. There is no row in it to scope,
+-- so it is not part of this exposure -- said here so the next reader does not
+-- take it for a sixth instance that was missed.
+grant execute on function content.classify_health(int,text,int) to authenticated, web_anon, worker;

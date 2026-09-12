@@ -689,6 +689,26 @@ begin
         raise exception 'model_json accepted text that is not JSON';
     exception when invalid_text_representation then null;
     end;
+    -- A SOURCE-TEXT GREP, and what it can and cannot catch (REM-73's third
+    -- bullet, applied to the greps that survive rather than only to the two
+    -- that were replaced).
+    --
+    -- It CAN catch the call being removed or renamed -- the fan-in going back
+    -- to a bare ::jsonb cast, which is the regression that matters, because a
+    -- model answer carrying a   escape then aborts the landing.
+    --
+    -- It CANNOT catch the call being made and its result discarded, nor a
+    -- second unparsed path added alongside it. And it would pass on the string
+    -- appearing only in a COMMENT -- the failure that made both arms of
+    -- content/01 §6 inert for months. Checked here rather than assumed: the one
+    -- occurrence in this body is the live assignment
+    -- `v_graph := content.model_json(...)`, not a comment.
+    --
+    -- It stays a grep because the behavioural version needs a completed child
+    -- task carrying a NUL escape through the real fan-in, which is evals
+    -- territory (dev/tests/evals), not a single transaction. The statements
+    -- above it DO measure model_json's behaviour directly; this one only
+    -- asserts that the fan-in is wired to it.
     if not exists (select 1 from pg_proc where oid = 'content.land_graph_windows(uuid)'::regprocedure
                      and prosrc like '%content.model_json(%') then
         raise exception 'land_graph_windows does not parse child answers through content.model_json';

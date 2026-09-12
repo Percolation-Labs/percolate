@@ -39,8 +39,19 @@
 --   agentic.detach_skill   agentic/02 §6
 --   workflow.start_workflow  handed back a run started by whoever else had
 --                          used that external_id -- workflow/17, REM-77
--- and, left declared with the gap in the sentence: content.register_fetched
--- (see its row).
+--   content.register_fetched  let a signed-in caller without resources:create
+--                        add content the upload path refuses -- REM-76,
+--                        content/09, sources.md §21
+--   content.start_source_pull  resolved "is one already running?" by workflow
+--                          NAME across every tenant, so pulling your own source
+--                          handed you somebody else's run -- content/04, REM-80
+--
+-- NOTHING IS LEFT DECLARED WITH A GAP. This list used to end "and, left
+-- declared with the gap in the sentence: ...", naming the rows that stated a
+-- hole rather than a check. Both of those closed within a day of each other
+-- (REM-76, REM-77), which is the argument for declaring a gap in the catalogue
+-- rather than in a comment somebody has to find: a row that says "GAP" is a
+-- task, and it was picked up. Say so here when the next one opens.
 --
 -- A PACKAGE'S SCHEMA IS OUT OF SCOPE HERE, and that is a decision rather than
 -- the list stopping where it was convenient. This file declares what THIS tree
@@ -106,8 +117,8 @@ insert into t14_declared (fn, mechanism, why) values
  'a predicate about the caller: may act in the org, and holds resources:create'),
 ('content.record_chunks(uuid,jsonb)', 'rbac.may_write',
  'the resource''s own write rule, read off the resource rather than taken as an argument'),
-('content.register_fetched(text,text,text,text,uuid,jsonb)', 'content.assert_org_write',
- 'asks only whether the caller may act in the org, and reads the channel through may_read. GAP: it does not ask resources:create, which register_upload does through may_upload. Not changed here: world-model-ingestion/brief.md names a scheduled pull workflow as its caller, which may carry no person, and may_upload''s operator arm also requires the login to hold INSERT on content.resources, which the worker and scheduler logins do not'),
+('content.register_fetched(text,text,text,text,uuid,jsonb)', 'content.may_upload',
+ 'rbac.is_operator() or content.may_upload(org): a caller that carries claims is refused without resources:create in an org it may act in, the same predicate register_upload asks through the same one home. The GAP this row used to declare is closed (REM-76). The leading operator arm is not a loophole but the only caller: register_fetched is reached by a REGISTERED STEP FUNCTION (selfmodel.ingest_prose via workflow.call_step_function), which sets no claims and runs on the worker login -- and may_upload''s own operator arm needs INSERT on content.resources from session_user, which worker does not hold, so bare may_upload refuses it (measured: session_user=worker, is_operator=t, login_can_insert=f, may_upload=f). A signed-in caller cannot reach that arm: set_config is not PUBLIC''s since user-rbac/roles.sql §6. sources.md §21 states the rule and records what is still owed -- call_step_function does not set the run owner''s claims, so a scheduled fetch is an operator rather than its source owner; dev/tests/content/09 measures both arms'),
 ('content.register_upload(text,text,text,text,bigint,text,text,text,uuid,jsonb,text,text,text)', 'content.may_upload',
  'refused without resources:create in an org the caller may act in'),
 ('content.reset_source_progress(uuid)', 'owner',
@@ -118,8 +129,8 @@ insert into t14_declared (fn, mechanism, why) values
  'refused without workflows:update, and an existing source only by its owner'),
 ('content.save_source(uuid,text,jsonb,jsonb,timestamp with time zone)', 'workflow.may_define',
  'refused without workflows:update, and an existing source only by its owner'),
-('content.start_source_pull(uuid,text)', 'owner',
- 'only the source''s owner'),
+('content.start_source_pull(uuid,text)', 'workflow.may_access_run',
+ 'TWO objects, and this row used to name only the first. `owner` -- only the source''s owner may start a pull -- is true of the CHANNEL and was never the whole sentence: the function then resolved "is one already running?" by workflow NAME across every tenant and returned that run''s id, so owning your own source got you somebody else''s run (REM-80, measured: bo pulls his own source and receives ana''s running ingest_file run with her input). Definitions are installation-wide by design, so a shared name like `ingest_file` is everybody''s. The lookup now filters on workflow.may_access_run -- REM-77''s extracted predicate, in workflow.reusable_run''s shape -- and prefers the caller''s own run, so an administrator holding workflow_runs:select still gets their own in-flight pull back. Residual, recorded and not a leak: two sources of the SAME owner naming one shared ingest_workflow still share a run. dev/tests/content/04 measures both people'),
 ('content.windows_to_index(uuid)', 'rbac.may_read',
  'as chunks_to_embed'),
 -- ---------- rbac -------------------------------------------------------------

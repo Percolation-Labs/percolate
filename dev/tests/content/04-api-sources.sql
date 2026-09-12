@@ -93,4 +93,120 @@ do $$ declare t uuid; begin
  exception when insufficient_privilege then null;end;
  raise notice 'content/04: owned API feeds, atomic pages, claim/revision fences, old-version protection, task replay, reset and private data passed';
 end $$;
+
+-- ---------------------------------------------------------------------
+-- PULLING YOUR OWN SOURCE NEVER HANDS YOU SOMEBODY ELSE'S RUN (REM-80).
+--
+-- start_source_pull is idempotent by design: pulling a source already being
+-- pulled returns the pull in flight rather than starting a second one. It
+-- resolved "already being pulled" as ANY running run of the workflow this
+-- source names, across every tenant -- and workflow definitions are
+-- installation-wide by design, so `ingest_file` is everybody's. The owner check
+-- the function already had is about the CHANNEL and says nothing about the RUN.
+-- Measured before the fix: bo pulls his own source and is handed ana's running
+-- ingest_file run, with her input, without using his own p_external_id at all.
+--
+-- WHY NOT THE USERS ABOVE. alice-api and bob-api are both `admin`, and `admin`
+-- is the one role holding `workflow_runs:select` (measured). The fix scopes the
+-- lookup to runs the caller MAY SEE, and an administrator may see every
+-- tenant's -- so writing this with those two would assert nothing and pass
+-- whether or not the fix is present. Two ordinary members are the callers who
+-- can exhibit the defect, so they are the callers it is measured with.
+--
+-- BOTH SOURCES NAME THE SAME SHARED WORKFLOW, which is the reachable state the
+-- defect needs: content.save_api_source mints a per-source definition
+-- (`source_<uuid>`), but a channel built any other way can name a shared one,
+-- and that is an ordinary insert.
+-- ---------------------------------------------------------------------
+set local role app_owner;
+reset request.jwt.claims;
+insert into rbac.users(id,email) values
+ ('aaaa0000-0000-4000-8000-00000000000a','ana-pull@test.invalid'),
+ ('bbbb0000-0000-4000-8000-00000000000b','bo-pull@test.invalid') on conflict(id) do nothing;
+-- `member`, NOT `admin`: see the note above. Asserted rather than assumed,
+-- because the whole block is vacuous if either of them can see every run.
+do $$
+begin
+ insert into rbac.user_roles(user_id,role) values
+  ('aaaa0000-0000-4000-8000-00000000000a','member'),
+  ('bbbb0000-0000-4000-8000-00000000000b','member') on conflict do nothing;
+ if rbac.has_permission('bbbb0000-0000-4000-8000-00000000000b','workflow_runs','select') is distinct from false then
+  raise exception 'the second puller can see every tenant''s runs, so this block cannot measure the leak';
+ end if;
+end $$;
+insert into content.channels(id,name,kind,config,owner_id,visibility,org_id,enabled) values
+ ('aaaa0000-0000-4000-8000-0000000000a1','t-pull-ana','http_pull',
+  '{"ingest_workflow":"ingest_file"}'::jsonb,'aaaa0000-0000-4000-8000-00000000000a','private',rbac.shared_org_id(),true),
+ ('bbbb0000-0000-4000-8000-0000000000b1','t-pull-bo','http_pull',
+  '{"ingest_workflow":"ingest_file"}'::jsonb,'bbbb0000-0000-4000-8000-00000000000b','private',rbac.shared_org_id(),true);
+
+do $$
+declare v_ana uuid; v_bo uuid; v_ana_owner uuid; v_bo_owner uuid;
+begin
+ -- ana pulls her source and gets a run of her own
+ set local role authenticated;
+ execute format('set local request.jwt.claims = %L', '{"sub":"aaaa0000-0000-4000-8000-00000000000a"}');
+ v_ana := content.start_source_pull('aaaa0000-0000-4000-8000-0000000000a1','ana-key-1');
+ if v_ana is null then raise exception 'ana got no run for her own source'; end if;
+
+ -- and it is RUNNING, so it is a candidate the old lookup would have matched.
+ -- Without this the block could pass because there was nothing to leak.
+ -- Read as app_owner: `authenticated` holds no grant on workflow.runs (it goes
+ -- through runs_api), which is the point of the table and not a problem here.
+ reset role;
+ if (select status from workflow.runs where id=v_ana) is distinct from 'running' then
+  raise exception 'ana''s run is not running, so bo''s lookup has no row to find and this block measures nothing';
+ end if;
+
+ -- bo pulls HIS OWN source, which names the same shared workflow
+ set local role authenticated;
+ execute format('set local request.jwt.claims = %L', '{"sub":"bbbb0000-0000-4000-8000-00000000000b"}');
+ v_bo := content.start_source_pull('bbbb0000-0000-4000-8000-0000000000b1','bo-key-1');
+ if v_bo is null then raise exception 'bo got no run for his own source'; end if;
+
+ if v_bo = v_ana then
+  raise exception
+   'bo pulled his own source and was handed ana''s run (%) -- start_source_pull '
+   'is resolving a run by workflow name across every tenant', v_ana;
+ end if;
+
+ reset role;
+ select owner_id into v_ana_owner from workflow.runs where id=v_ana;
+ select owner_id into v_bo_owner  from workflow.runs where id=v_bo;
+ if v_ana_owner is distinct from 'aaaa0000-0000-4000-8000-00000000000a'::uuid then
+  raise exception 'ana''s run is owned by % rather than ana', v_ana_owner;
+ end if;
+ if v_bo_owner is distinct from 'bbbb0000-0000-4000-8000-00000000000b'::uuid then
+  raise exception 'bo''s run is owned by % rather than bo', v_bo_owner;
+ end if;
+
+ raise notice 'content/04: two owners pulling their own sources through one shared workflow each get their own run';
+end $$;
+
+-- AND THE IDEMPOTENCE IT EXISTS FOR STILL WORKS -- a scope that refused
+-- everything would pass the block above and be an outage. Ana pulls again and
+-- must get HER run back rather than a second one.
+do $$
+declare v_first uuid; v_again uuid; v_n int;
+begin
+ set local role authenticated;
+ execute format('set local request.jwt.claims = %L', '{"sub":"aaaa0000-0000-4000-8000-00000000000a"}');
+ reset role;
+ select x.id into v_first from workflow.runs x join workflow.definitions d on d.id=x.workflow_def_id
+  where d.name='ingest_file' and x.status='running' and x.owner_id='aaaa0000-0000-4000-8000-00000000000a'
+  order by x.created_at desc limit 1;
+ set local role authenticated;
+ v_again := content.start_source_pull('aaaa0000-0000-4000-8000-0000000000a1','ana-key-2');
+ if v_again is distinct from v_first then
+  raise exception
+   'pulling a source whose pull is already in flight started a second run '
+   '(% then %) -- the overlap check no longer finds the caller''s own run',
+   v_first, v_again;
+ end if;
+ reset role;
+ select count(*) into v_n from workflow.runs x join workflow.definitions d on d.id=x.workflow_def_id
+  where d.name='ingest_file' and x.owner_id='aaaa0000-0000-4000-8000-00000000000a';
+ if v_n <> 1 then raise exception 'ana has % ingest_file runs, expected exactly 1', v_n; end if;
+ raise notice 'content/04: a second pull of a source already in flight still returns the caller''s own run, not a new one';
+end $$;
 rollback;

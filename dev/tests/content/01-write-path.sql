@@ -8,6 +8,22 @@
 --
 -- Nobody had asked what a tenant could WRITE.
 
+-- WHAT THIS FILE NEEDS FROM THE `rbac` SURFACE, named because the next person
+-- to run it alone will otherwise read the failure as their own regression.
+--
+-- §1 registers an upload as alice ('1111...'), and content.register_upload gates
+-- on content.may_upload, which needs `resources:create`. Alice holds it through
+-- a role that the `rbac` surface seeds, not through anything in this file. So:
+--
+--     dev/tests/run.sh content      -> §1 fails, "not authorized to upload content"
+--     dev/tests/run.sh              -> green, because rbac runs first
+--
+-- run.sh's SURFACES order is deliberate and documented in its own header
+-- ("RBAC first, because if row-level security is not actually on, every later
+-- assertion about who-sees-what is meaningless"), so this is a dependency to
+-- state rather than a bug to fix here. Measured while fixing REM-73, where it
+-- cost a few minutes of reading a correct diff for a fault that was not in it.
+
 \set ON_ERROR_STOP on
 
 begin;
@@ -324,12 +340,46 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
--- 6. The predicate is in two places, so it is asserted in two places.
+-- 6. The predicate is in two places, so it is asserted in two places --
+--    BY BEHAVIOUR, because asserting it by source text asserted nothing.
 --
--- resolve_file() carries the org check as SQL because content.files is granted
+-- resolve_file() carries the read check as SQL because content.files is granted
 -- to nobody and no RLS policy could scope it; the same rule lives on
 -- content.resources as a policy. The schema says that duplication is the cost
 -- of the design. A test is what keeps a cost from becoming a divergence.
+--
+-- WHAT THIS BLOCK USED TO DO, AND WHY IT CAUGHT NOTHING (REM-73). It greped
+-- prosrc:
+--
+--     if position('may_access_org' in v_fn) = 0 then
+--         raise exception 'resolve_file no longer applies the org check';
+--
+-- resolve_file does not call may_access_org and has not for some time. It
+-- calls rbac.may_read, deliberately, and its body carries the sentence
+-- "may_read, NOT may_access_org" explaining the choice. That comment was the
+-- only occurrence of the string in the body, so the assertion passed BECAUSE
+-- of a sentence saying the thing it greped for is not used -- and would have
+-- gone on passing if the predicate were deleted and the comment kept.
+--
+-- THE SAME WAS TRUE OF THE record_chunks ARM, which REM-73 recorded as still
+-- live. It is not, and the sibling sweep the postmortem's §6 rule asks for is
+-- what found it: record_chunks moved to rbac.may_write and kept a comment
+-- reading "This asked rbac.may_access_org(org), which answers...". Verified on
+-- a live 0.2.0 install -- for both functions the one occurrence of the string
+-- is inside a comment saying it is not what the function calls. Two arms, one
+-- defect, and the ticket had spotted one of them.
+--
+-- So both arms are now behavioural, and the subject is chosen so the specific
+-- regression the greps pretended to guard -- may_read weakening back to
+-- may_access_org -- is the thing that makes them fail. A caller who is a
+-- MEMBER OF THE OWNER'S ORG but may not read the row passes may_access_org and
+-- fails may_read: that is the only caller who tells the two predicates apart,
+-- and neither the org-B caller of §5 nor the owner of §1 is one.
+--
+-- meta/postmortems/README.md calls the class "a check that cannot distinguish
+-- pass from fail". dev/assertion-audit.py catches one spelling of it (a scalar
+-- subquery going three-valued); a grep for a name that appears in a comment is
+-- another, and no tool catches that one -- only asking what the code DOES.
 --
 -- THE POLICY HALF IS NOW ASSERTED AGAINST ITS GENERATOR rather than against a
 -- substring. It used to check `position('current_org_ids' in v_policy) <> 0`,
@@ -342,7 +392,7 @@ end $$;
 -- p8.enums(): an audit that keeps its own copy is one more copy free to drift.
 -- ---------------------------------------------------------------------
 do $$
-declare v_policy text; v_fn text; v_expected text;
+declare v_policy text; v_fn text;
 begin
     select pg_get_expr(polqual, polrelid) into v_policy
       from pg_policy p join pg_class c on c.oid = p.polrelid
@@ -363,6 +413,26 @@ begin
     -- table's policy in the same database and diffing the two parsed forms;
     -- this file asserts the weaker property, that all three axes are present,
     -- which is what content specifically cares about.
+    --
+    -- WHAT THIS GREP CAN AND CANNOT CATCH, recorded because the two arms
+    -- that used to follow it were greps that caught nothing (REM-73, and the
+    -- block header above).
+    --
+    -- It CAN catch: an axis dropped outright -- a policy hand-rewritten to
+    -- consult the org and the owner but not the visibility, which is a shape
+    -- somebody reaching for "make it work" produces.
+    --
+    -- It CANNOT catch: a policy that mentions all three names and still decides
+    -- wrongly -- `or true`, an inverted test, an axis consulted in a branch that
+    -- never runs. It also cannot catch a name that appears only in a COMMENT,
+    -- which is the exact way the two arms below it passed for months. It is safe
+    -- from that particular failure only because pg_get_expr returns a parsed
+    -- expression with no comments in it, not because a grep is a good idea.
+    --
+    -- It is kept rather than deleted because it is cheap and names the axes for
+    -- a reader; the assertion that decides this section is the block that follows,
+    -- and rbac/02 holds the exact-text comparison. A green result here on its
+    -- own would not be evidence that the policy is right.
     if position('rbac.current_org_ids' in v_policy) = 0
        or position('rbac.current_user_id' in v_policy) = 0
        or position('visibility' in v_policy) = 0 then
@@ -371,18 +441,118 @@ begin
             'it must consult the owner, the org AND the visibility. policy: %',
             v_policy;
     end if;
-    if position('may_access_org' in v_fn) = 0 then
+    raise notice 'content/01: the resources policy still consults the owner, the org and the visibility';
+end $$;
+
+-- THE BEHAVIOURAL HALF -- a caller who tells may_read and may_access_org apart.
+--
+-- The subject is a PRIVATE resource in org A, and the caller is a SECOND MEMBER
+-- of org A. For that pair:
+--
+--   rbac.may_access_org(org_a)                  -> true   (they are a member)
+--   rbac.may_read(alice, org_a, 'private')      -> false  (not theirs)
+--
+-- so a resolve_file that asks the org returns the storage keys and one that
+-- asks the row returns nothing. Nothing else in this file distinguishes them:
+-- §1's caller owns the row and §5's caller is in a different org, which is why
+-- the org-vs-row regression needed a grep to stand in for it and got one that
+-- did not work.
+--
+-- res_a is not reusable as the subject: register_upload named an org, so
+-- rbac.default_visibility() made it 'org', and an org-visible row is one every
+-- member may read. The subject has to be `private`, passed explicitly.
+do $$
+declare
+    a uuid; v_alice uuid := '11111111-1111-1111-1111-111111111111';
+    v_carol uuid := '33333333-3333-3333-3333-333333333333';
+    v_priv uuid; v_sees_row boolean; v_resolves boolean; v_n int;
+begin
+    select org_a into a from t_ctx;
+
+    -- a second member of org A, and the private row alice owns there
+    insert into rbac.users (id, email, status)
+        values (v_carol, 't-carol-' || left(a::text, 8) || '@example.test', 'active')
+        on conflict (id) do nothing;
+    insert into rbac.org_members (org_id, user_id) values (a, v_carol)
+        on conflict do nothing;
+
+    set local role authenticated;
+    execute format('set local request.jwt.claims = %L',
+                   json_build_object('sub', v_alice, 'orgs', array[a])::text);
+    v_priv := content.register_upload('t-uploads', 't-sum-priv', 'bucket', 'keys/priv',
+                                      64, 'text/plain', 'Alice private', null, a,
+                                      '{}'::jsonb, null, null, 'private');
+    if v_priv is null then
+        raise exception 'the private subject was not registered';
+    end if;
+    -- it has bytes, so resolve_file has something to return and a green result
+    -- below cannot mean "there was never a row to find"
+    if (select count(*) from content.resolve_file(v_priv)) <> 1 then
         raise exception
-            'resolve_file no longer applies the org check, so a caller could '
-            'resolve storage keys for a resource they cannot read';
+            'its own owner cannot resolve the private subject -- the assertions '
+            'below would pass on an empty subject rather than on the predicate';
     end if;
-    -- and the read path and the write path share ONE predicate, so a service
-    -- connection cannot end up able to write what it cannot read
-    if (select prosrc from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-         where n.nspname='content' and p.proname='record_chunks') not like '%may_access_org%' then
-        raise exception 'record_chunks no longer uses the shared access predicate';
+
+    -- NOW AS CAROL: in the org, not the owner, and the row is private.
+    execute format('set local request.jwt.claims = %L',
+                   json_build_object('sub', v_carol, 'orgs', array[a])::text);
+
+    -- the premise, measured rather than assumed: carol is exactly the caller
+    -- who separates the two predicates
+    if rbac.may_access_org(a) is distinct from true then
+        raise exception
+            'carol cannot act in org A, so she does not distinguish may_read '
+            'from may_access_org and this block measures nothing';
     end if;
-    raise notice 'content/01: the read path, the write path and the policy all scope on the same claim';
+
+    v_sees_row  := exists (select 1 from content.resources where id = v_priv);
+    v_resolves  := exists (select 1 from content.resolve_file(v_priv));
+
+    -- (a) resolve_file asks the ROW. This is REM-73's first bullet: a resource
+    --     a second caller may not read returns no row, run as that caller with
+    --     their own claims.
+    if v_resolves then
+        raise exception
+            'resolve_file returned storage keys for a private resource to a '
+            'co-member of its org -- it is asking the ORG, not the row, so a '
+            'caller can resolve keys for a resource they cannot read';
+    end if;
+
+    -- (b) and the POLICY agrees with it, which is what "the predicate is in two
+    --     places" means. Asserted as a biconditional so a drift in EITHER copy
+    --     fires: the table read is RLS-scoped, resolve_file is SECURITY DEFINER
+    --     and scopes itself, and the two must answer the same question.
+    if v_sees_row is distinct from v_resolves then
+        raise exception
+            'the policy and resolve_file disagree about the same row for the '
+            'same caller: the table read says %, resolve_file says % -- the '
+            'duplicated predicate has drifted', v_sees_row, v_resolves;
+    end if;
+
+    -- (c) record_chunks asks the row's WRITE rule, replacing the second inert
+    --     grep. Carol may act in org A, so a function asking may_access_org
+    --     would let her replace the chunks of a row she cannot even read.
+    --     §5 asserts this for a caller in another org; this asserts it for the
+    --     caller who passes the org check, which is the one that mattered.
+    begin
+        perform content.record_chunks(v_priv, '[{"content":"REPLACED BY CAROL"}]'::jsonb);
+        raise exception
+            'a co-member of the org rewrote the chunks of a private resource '
+            'she cannot read -- record_chunks is asking the org, not the row';
+    exception when others then
+        if sqlerrm like 'a co-member%' then raise; end if;
+    end;
+
+    reset role;
+
+    -- and nothing was actually written, checked outside the caller's own RLS
+    select count(*) into v_n from content.resource_chunks
+     where resource_id = v_priv and content like '%REPLACED BY CAROL%';
+    if v_n <> 0 then
+        raise exception 'carol''s chunks landed after all: % row(s)', v_n;
+    end if;
+
+    raise notice 'content/01: the read path, the write path and the policy all refuse a co-member who may not read the row -- asked as behaviour, not as a substring';
 end $$;
 
 -- ---------------------------------------------------------------------

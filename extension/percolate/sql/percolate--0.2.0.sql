@@ -19556,6 +19556,55 @@ declare
 begin
     perform content.assert_org_write(p_org_id, 'register content');
 
+    -- AND resources:create, WHEN THERE IS SOMEBODY TO ASK IT OF. This function
+    -- asked only the org, so a signed-in caller without `resources:create`
+    -- could add a resource to a channel through the fetch path that the upload
+    -- path refuses -- the two entry points write the same table and differ only
+    -- in whether bytes came with it. Found by declaring every reachable definer
+    -- in dev/tests/rbac/14 (REM-76), where it stood as a stated gap.
+    --
+    -- content.may_upload IS THE PERMISSION HALF, not a second copy of it:
+    -- `resources:create` is asked in exactly one place in this collection
+    -- (may_upload, forty lines above), which is what stops the two register_*
+    -- functions drifting apart again.
+    --
+    -- THE LEADING OPERATOR ARM IS NOT DECORATION: bare may_upload() here
+    -- would be an outage rather than a check. may_upload's own operator arm
+    -- reads `has_table_privilege(session_user, 'content.resources', 'insert')`
+    -- -- SESSION_USER, the login, not the definer -- and the caller this
+    -- function actually has is a REGISTERED STEP FUNCTION:
+    -- selfmodel.ingest_prose, reached through workflow.call_step_function,
+    -- which is definer-owned by app_owner but runs on the `worker` login and
+    -- sets no claims at all. Measured in that exact shape (a definer function
+    -- owned by app_owner, invoked by the worker login):
+    --
+    --     session_user=worker | is_operator=t | login_can_insert=f | may_upload=f
+    --
+    -- So may_upload alone refuses the only caller in the tree. rbac.is_operator()
+    -- is the collection's one spelling of "there is no person behind this call",
+    -- and since user-rbac/roles.sql §6 took set_config away from PUBLIC a
+    -- signed-in caller cannot clear their own claims to reach it. This arm
+    -- therefore changes nothing for a claimless writer -- an install, a seed,
+    -- a step function -- which is precisely the set assert_org_write already
+    -- admits one line above, and adds the permission for every caller that
+    -- carries claims. `api_viewer` is a DIRECT member of `authenticated`
+    -- (verified), so the execute_as_viewer path is a person here, not an
+    -- operator, and is asked for the permission like any other.
+    --
+    -- WHAT THIS DOES NOT DO, because sources.md §21 rests on the distinction:
+    -- it does not make a scheduled fetch carry its SOURCE OWNER's authority.
+    -- It cannot from here. call_step_function never sets the run owner's
+    -- claims, so a scheduled pull is an operator, not a person -- unlike
+    -- content.lake_resolve and content.source_passages in this same subsystem,
+    -- which do set `{"sub": <run owner>}` for the call. Closing that is the
+    -- workflow engine's to close, and is recorded on REM-76 rather than
+    -- half-done here.
+    if not (rbac.is_operator() or content.may_upload(p_org_id)) then
+        raise exception 'not authorized to register fetched content'
+            using errcode = 'insufficient_privilege',
+                  hint = 'needs resources:create';
+    end if;
+
     select id into v_channel from content.channels
     where name = p_channel
       and enabled and rbac.may_read(owner_id, org_id, visibility)
@@ -25930,8 +25979,52 @@ begin
  select * into c from content.channels where id=p_source_id for update;
  if c.id is null or rbac.current_user_id() is null or c.owner_id is distinct from rbac.current_user_id() then raise exception 'Only the source owner can start this pull.' using errcode='42501';end if;
  if c.kind<>'http_pull' or not c.enabled then raise exception 'This API source is not enabled.';end if;
+ -- IS ONE OF MINE ALREADY RUNNING? -- and the scope is the whole of REM-80.
+ --
+ -- This asked `d.name = c.config->>'ingest_workflow' and status='running'` and
+ -- nothing else, so it resolved a run by workflow NAME ACROSS EVERY TENANT and
+ -- returned it. The owner check above is real and guards the wrong object: it
+ -- establishes that the caller owns the CHANNEL, and the next statement then
+ -- handed back a RUN belonging to whoever had most recently started one under
+ -- the same definition. Measured -- bo owns one enabled http_pull source of his
+ -- own, calls this on it, and receives the id of ana's running `ingest_file`
+ -- run with her input attached:
+ --
+ --     ana run: 01a09308-...  (owner ...000a, status running)
+ --     bo got run: 01a09308-...  owned by ...000a, input {"who": "ana, privately"}
+ --
+ -- His own p_external_id was never used. Definitions are installation-wide by
+ -- design, so `ingest_file` is everybody's, and any channel whose
+ -- config.ingest_workflow names a SHARED definition rather than the per-source
+ -- one save_api_source mints (`source_<uuid>`) is in this state. That is
+ -- reachable through an ordinary channel insert, which is how the measurement
+ -- above was built.
+ --
+ -- This is REM-77's defect in a second copy and a wider one: that one at least
+ -- keyed on a value the caller had chosen, and this needs no key at all. Its
+ -- fix does not reach here, because the leak happens BEFORE start_workflow is
+ -- called.
+ --
+ -- workflow.may_access_run IS THE PREDICATE, not a third spelling of it. REM-77
+ -- extracted it from assert_run_access precisely so the next caller would not
+ -- write its own; the shape below -- filter by the predicate, then prefer the
+ -- caller's own row -- is workflow.reusable_run's, deliberately, so the two
+ -- places that resolve "an existing run for this request" answer alike. The
+ -- ordering matters for an administrator holding workflow_runs:select, who
+ -- reaches every tenant's runs: they still get their OWN in-flight pull back
+ -- rather than whichever was newest.
+ --
+ -- WHAT THIS DOES NOT FIX, and it is an overlap bug rather than a leak: two
+ -- sources owned by the SAME person that both name a shared ingest_workflow
+ -- still share an in-flight run, so pulling the second returns the first's id.
+ -- Scoping to the source rather than to the definition needs the run to carry
+ -- source_id, which it does not -- start_workflow is called with '{}' and the
+ -- step reads source_id from the DEFINITION. Recorded on REM-80 rather than
+ -- changing what a run's input means in a security fix.
  select x.id into r from workflow.runs x join workflow.definitions d on d.id=x.workflow_def_id
- where d.name=c.config->>'ingest_workflow' and x.status='running' order by x.created_at desc limit 1;
+ where d.name=c.config->>'ingest_workflow' and x.status='running'
+   and workflow.may_access_run(x.id,'select')
+ order by (x.owner_id=rbac.current_user_id()) desc nulls last, x.created_at desc limit 1;
  if r is not null then return r;end if;
  return workflow.start_workflow(c.config->>'ingest_workflow','{}',p_external_id);
 end $$;
