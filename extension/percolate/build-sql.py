@@ -468,6 +468,33 @@ returns void language sql volatile as $fn$
            built_at = excluded.built_at;
 $fn$;
 
+-- WHOEVER BUILDS THE IMAGE, AND NOBODY ELSE. Its two callers are
+-- dev/build-image.sh and get-percolate's image-postgres.yml, both running as
+-- the superuser at build time, so revoking from PUBLIC needs no grant to put
+-- back.
+--
+-- It needs saying here rather than being left to identity/closing.sql, which
+-- cannot see it: this function is created BEFORE the `alter default privileges`
+-- in identity/schema.sql, and it lives in `public`, which is not one of
+-- percolate.extension_schemas(). So it kept the PUBLIC default it was born
+-- with, and `web_anon` could rewrite the table that answers which commit is
+-- running -- the signal REM-79 is about, and the one whose absence the header
+-- above says cost a day.
+--
+-- The READ stays everybody's, deliberately: percolate_build() and the table's
+-- `grant select ... to public` above are the point of putting this in `public`
+-- at all. A caller who cannot log in should still be able to ask what version
+-- they are talking to. Writing is the half that is not a question.
+--
+-- Measured on a clean 0.2.0 install: this is the only function either percolate
+-- extension ships into `public` that WRITES and carries EXECUTE for PUBLIC. The
+-- parser's p8_* and aiq_parse are pure text-to-jsonb and public on purpose; the
+-- p8_graph_* algorithms are already revoked. One instance is history, so this
+-- fixes the instance -- teaching closing.sql to follow pg_depend into `public`
+-- is the gate, and it is not owed until there is a second.
+revoke execute on function public.percolate_record_build(
+    text, text, text, timestamptz) from public;
+
 -- The one-line answer. Reports every component and says plainly whether they
 -- came from the same commit, because "the halves disagree" is the condition
 -- worth naming and the one a human would otherwise have to eyeball.
