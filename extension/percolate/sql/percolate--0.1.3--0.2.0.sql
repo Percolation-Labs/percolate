@@ -21069,6 +21069,78 @@ create or replace trigger trg_agents_updated
     before update on agentic.agents
     for each row execute function public.touch_updated_at();
 
+-- THE GRAMMAR OF `agents.model`, stated once (brief §7). `provider:model_id`,
+-- split at the FIRST colon, because that is what pydantic-ai parses and the
+-- runtime hands the column to pydantic-ai unchanged; `ollama:llama3:8b` is
+-- provider `ollama`, model `llama3:8b`. A name with no colon means `openai`,
+-- the provider every OpenAI-shaped default here already assumes.
+--
+-- It needed saying because there were two grammars (REM-54). The runtime
+-- needs the prefix -- pydantic-ai refuses a bare `gpt-4.1-mini` as an unknown
+-- model -- and `agent_call` sent the column verbatim to a chat-completions
+-- endpoint, where `openai:gpt-4.1-mini` is a 404 `model_not_found`. Packages
+-- wrote both, so which rows worked depended on which path called them.
+create or replace function agentic.parse_model(
+    p_model text, out provider text, out model_id text)
+language plpgsql immutable
+set search_path = pg_catalog, public
+as $$
+declare v text := btrim(p_model);
+begin
+    if v is null or v = '' then
+        return;
+    end if;
+    if position(':' in v) = 0 then
+        provider := 'openai';
+        model_id := v;
+    else
+        provider := lower(split_part(v, ':', 1));
+        model_id := substr(v, position(':' in v) + 1);
+    end if;
+    if provider !~ '^[a-z][a-z0-9_-]*$' or model_id = '' then
+        raise exception
+            'agent model % is not provider:model_id -- for example openai:gpt-4.1-mini '
+            'or moonshotai:kimi-k2.6. A bare model id means openai.', quote_literal(p_model);
+    end if;
+end $$;
+
+comment on function agentic.parse_model(text) is
+    'Split an agents.model value into (provider, model_id): provider:model_id at '
+    'the first colon, and a bare id means openai. Raises on anything else.';
+
+create or replace function agentic.canonical_model(p_model text)
+returns text language sql immutable
+set search_path = pg_catalog, public
+as $$
+    select m.provider || ':' || m.model_id from agentic.parse_model(p_model) m;
+$$;
+
+-- Written canonical, so every reader sees ONE spelling: the runtime passes it
+-- to pydantic-ai as is, and a builder that needs the provider's own id asks
+-- parse_model rather than trimming a prefix itself. A trigger rather than a
+-- rule in upsert_agent, because applications insert agent rows directly.
+create or replace function agentic.canonicalize_agent_model()
+returns trigger language plpgsql
+set search_path = pg_catalog, public
+as $$
+begin
+    new.model := agentic.canonical_model(new.model);
+    return new;
+end $$;
+
+create or replace trigger trg_agents_model_canonical
+    before insert or update of model on agentic.agents
+    for each row execute function agentic.canonicalize_agent_model();
+
+-- Rows written before the trigger existed. `update ... set model = model`
+-- fires it; only rows whose spelling changes are touched.
+update agentic.agents set model = model
+ where model is distinct from agentic.canonical_model(model);
+
+alter table agentic.agents drop constraint if exists agents_model_is_canonical;
+alter table agentic.agents add constraint agents_model_is_canonical
+    check (model is null or model = agentic.canonical_model(model));
+
 -- ------------------------------------------------------------
 -- 2b. Skills -- capability as prose, loaded on demand (plugins.md)
 --
@@ -21901,7 +21973,7 @@ create or replace function agentic.agent_call(
     p_endpoint   text default 'https://api.openai.com/v1/chat/completions',
     p_credential text default 'LLM_API_KEY'
 ) returns jsonb as $$
-declare a agentic.agents;
+declare a agentic.agents; m record;
 begin
     select * into a from agentic.agents where name = p_agent;
     if not found then
@@ -21921,6 +21993,15 @@ begin
             'no model and the endpoint would refuse it -- which is a failure in a '
             'worker rather than here, and this is the better place for it.', p_agent;
     end if;
+    -- The endpoint wants the provider's own id, not the column: the column
+    -- is `openai:gpt-4.1-mini` and OpenAI has no model by that name.
+    m := agentic.parse_model(coalesce(p_model, a.model));
+    if p_endpoint = 'https://api.openai.com/v1/chat/completions'
+       and m.provider not in ('openai', 'openai-chat', 'openai-responses') then
+        raise exception
+            'agent ''%'' runs a % model (%), and the endpoint is OpenAI''s default. '
+            'Pass p_endpoint for a host that serves it.', p_agent, m.provider, m.model_id;
+    end if;
 
     return jsonb_build_object(
         'url',        p_endpoint,
@@ -21930,7 +22011,7 @@ begin
         -- The vectorless half of what the runtime would have done: system
         -- prompt from the row, schema from the row, input from the caller.
         'body', jsonb_build_object(
-            'model', coalesce(p_model, a.model),
+            'model', m.model_id,
             'temperature', 0,
             'messages', jsonb_build_array(
                 jsonb_build_object('role','system','content', a.system_prompt),
@@ -21948,7 +22029,7 @@ begin
         -- marker: the task row should say what it IS, not leave a reader to
         -- infer an intent from a url and a body.
         'agent',      jsonb_build_object('agent', a.name,
-                                         'model', coalesce(p_model, a.model)));
+                                         'model', m.provider || ':' || m.model_id));
 end;
 $$ language plpgsql stable;
 
@@ -23069,6 +23150,10 @@ grant execute on function agentic.attach_skill(text, text, jsonb) to authenticat
 grant execute on function agentic.detach_skill(text, text) to authenticated;
 grant execute on function agentic.apply_plugin(jsonb) to authenticated;
 grant execute on function agentic.channel_for(uuid) to authenticated, api_viewer;
+-- A pure function of its argument that reads no table, granted because the
+-- request builders call it as whoever is building. canonical_model is not:
+-- only the table's owner writes agent rows (upsert_agent is SECURITY DEFINER).
+grant execute on function agentic.parse_model(text) to authenticated, worker;
 
 -- AND THE PUBLIC DEFAULT, TAKEN AWAY -- because the grants above are what this
 -- plane MEANS, and until this block existed they were not what it SAID.
@@ -24920,8 +25005,11 @@ begin
             'agentic.agent_call().', p_agent;
     end if;
 
+    -- The row's own model when the caller names none, which is what
+    -- ingest_file's run description has always said ("the agent's own
+    -- model"). It fell through to gpt-4o-mini whatever the row pinned (REM-54).
     v_call := agentic.agent_call(p_agent, p_text,
-                                 coalesce(p_model, 'gpt-4o-mini'),
+                                 coalesce(p_model, a.model, 'gpt-4o-mini'),
                                  p_endpoint, p_credential);
     -- `extractor` rather than `agent`, and the schema name stays 'graph':
     -- both are what this function has always returned, and a consumer reading

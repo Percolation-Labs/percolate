@@ -276,6 +276,9 @@ begin
     end if;
 
     reset role;
+    -- The claims too: `set local` outlives this block, and the next one
+    -- authors agents, which only an operator may do.
+    reset request.jwt.claims;
     raise notice 'agentic: audience filters agents_pickable for a real caller, and '
                  'does not hide a system_prompt from agents_api';
 end $$;
@@ -361,6 +364,97 @@ begin
     end if;
 
     raise notice 'agentic: agent_call builds any agent''s request, and extractor_call is a guard on it';
+end $$;
+
+-- ---------------------------------------------------------------------
+-- ONE GRAMMAR FOR agents.model, whichever path runs the row (REM-54).
+--
+-- The runtime hands the column to pydantic-ai, which refuses a bare
+-- `gpt-4.1-mini` as an unknown model; agent_call sent the column to OpenAI,
+-- which answers `openai:gpt-4.1-mini` with a 404 model_not_found. Packages
+-- wrote both spellings, so a row worked on one path and not the other. Now a
+-- row is stored `provider:model_id` and a builder sends parse_model's id.
+-- ---------------------------------------------------------------------
+do $$
+declare v_call jsonb; v_model text;
+    v_schema jsonb := jsonb_build_object('type','object',
+        'properties', jsonb_build_object('ok', jsonb_build_object('type','boolean')));
+begin
+    perform agentic.upsert_agent(jsonb_build_object('name','t54_bare',
+        'model','gpt-4.1-mini', 'system_prompt','judge', 'structured_output_schema', v_schema));
+    perform agentic.upsert_agent(jsonb_build_object('name','t54_prefixed',
+        'model','openai:gpt-4.1-mini', 'system_prompt','judge', 'structured_output_schema', v_schema));
+
+    -- Either spelling is stored as the one the runtime can run.
+    for v_model in select model from agentic.agents_api where name in ('t54_bare','t54_prefixed') loop
+        if v_model <> 'openai:gpt-4.1-mini' then
+            raise exception 'agents.model was stored as %, not provider:model_id', v_model;
+        end if;
+    end loop;
+
+    -- And either spelling reaches the endpoint as the id the endpoint knows.
+    foreach v_model in array array['t54_bare','t54_prefixed'] loop
+        v_call := agentic.agent_call(v_model, 'x');
+        if v_call->'body'->>'model' <> 'gpt-4.1-mini' then
+            raise exception 'agent_call sent % for %, which OpenAI answers with model_not_found',
+                v_call->'body'->>'model', v_model;
+        end if;
+        if v_call->'agent'->>'model' <> 'openai:gpt-4.1-mini' then
+            raise exception 'the call''s marker does not name the canonical model: %', v_call->'agent';
+        end if;
+    end loop;
+
+    -- A direct insert, which applications do, is canonicalized too.
+    insert into agentic.agents (name, model) values ('t54_direct', 'gpt-4o-mini');
+    if (select model from agentic.agents where name = 't54_direct') is distinct from 'openai:gpt-4o-mini' then
+        raise exception 'a direct insert kept a bare model id';
+    end if;
+
+    -- The provider's id keeps its own colons: split at the FIRST one.
+    if (select model_id from agentic.parse_model('ollama:llama3:8b')) is distinct from 'llama3:8b' then
+        raise exception 'parse_model split ollama:llama3:8b at the wrong colon';
+    end if;
+
+    -- A malformed value is refused by name rather than stored.
+    begin
+        perform agentic.upsert_agent('{"name":"t54_bad","model":"openai:"}'::jsonb);
+        raise exception 'an empty model id was stored';
+    exception when others then
+        if sqlerrm not like '%provider:model_id%' then
+            raise exception 'a malformed model was refused without the grammar: %', sqlerrm;
+        end if;
+    end;
+
+    -- A non-OpenAI row is not sent to OpenAI's endpoint by default ...
+    perform agentic.upsert_agent(jsonb_build_object('name','t54_kimi',
+        'model','moonshotai:kimi-k2.6', 'system_prompt','judge', 'structured_output_schema', v_schema));
+    begin
+        perform agentic.agent_call('t54_kimi', 'x');
+        raise exception 'a moonshotai model was addressed to api.openai.com';
+    exception when others then
+        if sqlerrm like '%addressed to api.openai.com%' then raise; end if;
+    end;
+    -- ... and reaches a host that serves it as its own id.
+    v_call := agentic.agent_call('t54_kimi', 'x', null,
+                                 'https://api.moonshot.ai/v1/chat/completions', 'MOONSHOTAI_API_KEY');
+    if v_call->'body'->>'model' <> 'kimi-k2.6' then
+        raise exception 'the moonshot call sent %', v_call->'body'->>'model';
+    end if;
+
+    raise notice 'agentic: agents.model is provider:model_id on every path, and a builder sends the provider''s id';
+end $$;
+
+-- extractor_call ran gpt-4o-mini when the caller named no model, whatever the
+-- row pinned, while ingest_file described the run as "the agent's own model".
+do $$
+declare v_x jsonb;
+begin
+    perform aiq.install_structure_null('gpt-4.1');
+    v_x := aiq.extractor_call('structure_null', null, 'some text');
+    if v_x->'body'->>'model' <> 'gpt-4.1' then
+        raise exception 'extractor_call ignored the row''s model: %', v_x->'body'->>'model';
+    end if;
+    raise notice 'agentic: extractor_call runs the row''s model when the caller names none';
 end $$;
 
 -- ---------------------------------------------------------------------
