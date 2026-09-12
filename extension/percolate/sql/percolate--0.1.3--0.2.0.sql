@@ -11204,11 +11204,16 @@ grant create on schema rbac to api_viewer;
 alter view rbac.users_api owner to api_viewer;
 alter view rbac.refresh_tokens_api owner to api_viewer;
 alter view rbac.api_keys_api owner to api_viewer;
+-- INSIDE this block, not after it. The transfer needs CREATE on the schema,
+-- which the line above grants and the line below takes back; an `alter view`
+-- placed after the revoke is refused with "permission denied for schema rbac"
+-- on a fresh install, while passing every test on a database where the view
+-- already exists and is already owned correctly.
+alter view rbac.orgs_api owner to api_viewer;
 
 revoke create on schema rbac from api_viewer;
 
 grant select on rbac.users_api to authenticated;
-alter view rbac.orgs_api owner to api_viewer;
 grant select on rbac.orgs_api to authenticated;
 grant select on rbac.refresh_tokens_api to authenticated;
 grant select on rbac.api_keys_api to authenticated;
