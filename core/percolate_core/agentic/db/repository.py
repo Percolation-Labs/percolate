@@ -27,10 +27,12 @@ from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
 from ...core import agent_document
+from ...core.text import without_nul
 from ..contracts import AgentSpec, Message, Run, RunStatus, Session, ToolServer
 from .client import PgClient
 
 _QUALIFIED_NAME = re.compile(r"[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*", re.IGNORECASE)
+
 
 
 @runtime_checkable
@@ -347,10 +349,10 @@ class PgRepository:
         like evaluating the set.
         """
         payload = [
-            m.model_dump(mode="json", include={
+            without_nul(m.model_dump(mode="json", include={
                 "id", "run_id", "session_id", "role", "content", "tool_calls",
                 "tool_call_id", "is_error", "error_kind", "citations",
-            })
+            }))
             for m in messages
         ]
         async with self.client.as_user(self.claims) as conn:

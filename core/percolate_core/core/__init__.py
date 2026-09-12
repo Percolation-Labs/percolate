@@ -17,6 +17,7 @@ from .config import (
     s3,
 )
 from .credentials import CredentialRefused, credential_for
+from .text import without_nul
 from .identity import (
     as_caller,
     as_service,
@@ -49,4 +50,5 @@ __all__ = [
     "required",
     "s3",
     "set_pool",
+    "without_nul",
 ]
