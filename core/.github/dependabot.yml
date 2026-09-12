@@ -1,0 +1,29 @@
+# WHAT KEEPS A PIN FROM BECOMING A FREEZE.
+#
+# Dependabot SECURITY updates are on for this repository and need no file: they
+# open a PR when an advisory lands against something in a manifest or a lock,
+# and they are the half that matters. This file adds the other half, for one
+# ecosystem only.
+#
+# github-actions, because an action reference is the dependency nobody
+# re-resolves. Two of them in this collection were BRANCH refs -- `@stable` and
+# `@release/v1`, one of them on the job that publishes to PyPI with an OIDC
+# credential -- so the build was fetching whatever those branches pointed at
+# that morning. They are pinned by commit now, and a pin with nothing bumping
+# it goes stale in a way that is worse than a tag: it stops getting fixes and
+# nobody notices, because it never fails.
+#
+# MONTHLY AND GROUPED, deliberately. A repository with no review step does not
+# need a daily stream of single-line PRs; it needs one PR a month that CI has
+# already graded. Everything else here is covered by security updates, which
+# fire on an advisory rather than on a release.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+    open-pull-requests-limit: 3
