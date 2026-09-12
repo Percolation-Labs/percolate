@@ -671,7 +671,10 @@ begin
         --
         -- So a write is wrapped too: the body of a data-modifying CTE, which
         -- parses only as ONE INSERT, UPDATE, DELETE or MERGE, and whose count
-        -- is the row count the step reports. PREPARE was tried first and is
+        -- is the row count the step reports. The wrapping itself lives in
+        -- workflow.one_write_statement, because it was written here and
+        -- `plan_probe` needed the same rule and did not have it.
+        -- PREPARE was tried first and is
         -- not enough: plpgsql's EXECUTE runs a string of several statements
         -- one after another, USING or not, so `prepare x as insert ...; set
         -- local ...` prepared the insert and ran the SET (measured, and
@@ -681,13 +684,9 @@ begin
         -- trade (run_sql).
         begin
             if p_params is not null then
-                execute format('with p8_write as (%s returning 1) select count(*) from p8_write',
-                               regexp_replace(p_statement, '[[:space:];]+$', ''))
-                into v_count using p_params;
+                execute workflow.one_write_statement(p_statement) into v_count using p_params;
             else
-                execute format('with p8_write as (%s returning 1) select count(*) from p8_write',
-                               regexp_replace(p_statement, '[[:space:];]+$', ''))
-                into v_count;
+                execute workflow.one_write_statement(p_statement) into v_count;
             end if;
         exception when syntax_error then
             raise exception
