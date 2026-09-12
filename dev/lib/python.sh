@@ -29,7 +29,15 @@
 # is answering this question themselves, and a script that overrules them is one
 # they will stop running.
 
-PERCOLATE_PY_VENV="${PERCOLATE_PY_VENV:-${ROOT:-$PWD}/dev/.gates-venv}"
+# OUTSIDE THE CHECKOUT, deliberately. `meta/postmortems/2026-09-12-a-gate-that-
+# can-write.md` argues the rule this has to satisfy: a pre-push hook may read
+# the tree and refuse the push, and may not write to the tree, to the branch, or
+# to anything shared. The hook calls check.sh, which calls this, so a venv under
+# `dev/` would be a hook writing into somebody's working copy during a push --
+# gitignored, and still a write. A cache directory is not the tree, is shared by
+# every worktree on the machine rather than built per clone, and can be deleted
+# by anybody at any time with no effect but one slow run.
+PERCOLATE_PY_VENV="${PERCOLATE_PY_VENV:-${XDG_CACHE_HOME:-$HOME/.cache}/percolate/gates-venv}"
 
 # Both requirements in one call, because asking them separately reports the
 # first failure and hides the second.
