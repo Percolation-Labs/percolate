@@ -484,27 +484,100 @@ $fn$;
 """
 
 
-def report_cross_file_redefinitions(sigs_by_file) -> None:
-    """Name every function defined in more than one shipped file.
+# THE SHADOWS THE BUILD ALLOWS, and nothing else.
+#
+# One function may be defined in two shipped files on purpose: the engine
+# declares a standalone body, and integration-rbac.sql replaces it with one
+# that also authorizes. The pattern is deliberate and schema.sql:2495 argues
+# for it -- standalone the engine has no people, so there is nobody for a step
+# to act as, and a stub that raises is better than a silent wrong answer.
+#
+# It is also the trap that has been walked into THREE times: 942c90e, 1716727
+# and 8be039c are each a fix applied to the copy that every deployment loads
+# and then immediately overwrites, so the change had no effect and nothing said
+# so. This used to print a note. A note in build output is read by whoever is
+# already looking, which is not the person about to edit the wrong body.
+#
+# So the list is declared here and the build REFUSES an undeclared one. The
+# ratchet is deliberately the weaker of the two obvious designs -- it does not
+# stop a fix landing in the dead copy, which needs the bodies merged (REM-57's
+# second bullet, not done here). What it does is make the TENTH shadow a
+# decision somebody writes down, and give the person who added the ninth a
+# place that already says which body is live.
+#
+# Each entry: signature -> why the standalone body exists at all. If you cannot
+# write that sentence, the two bodies are one function and belong in one file.
+DECLARED_SHADOWS = {
+    "workflow.run_owner_of(uuid)":
+        "standalone: no identity plane, so a run has no owner. Returns null, "
+        "and every caller reads that as 'nobody to act for'.",
+    "workflow.execute_for(uuid,text,boolean,jsonb)":
+        "standalone: raises. There is nobody to run a statement for, and "
+        "running it with the engine's own reach is the leak REM-38 found.",
+    "workflow.may_define()":
+        "standalone: table privilege stands in for a permission nobody has "
+        "granted, because there are no roles to grant it to.",
+    "workflow.reusable_run(text)":
+        "standalone: an external_id is installation-wide, because there is no "
+        "owner to scope it to. With identities it narrows to one run per "
+        "owner per key (REM-77).",
+    "workflow.signal_task(uuid,text,jsonb)":
+        "standalone: signals any waiting task. The shadow adds "
+        "assert_run_access so a signal cannot reach somebody else's run.",
+    "workflow.cancel_run(uuid)":
+        "standalone: cancels any run, same reason as signal_task.",
+    "workflow.assert_schedule_access(text,text)":
+        "standalone: passes. A schedule has no owner to check against.",
+    "workflow.matrix_rows(uuid)":
+        "standalone: reads the rows with the engine's reach. The shadow runs "
+        "the row source as the run's owner.",
+    "workflow.matrix_outputs(uuid)":
+        "standalone: reads every child output. The shadow scopes to the run "
+        "the caller may see.",
+}
 
-    check_single_definition() guards WITHIN a file. Across files the same
-    shadowing is legitimate and deliberate -- integration-rbac.sql replaces
-    several engine entry points to add authorization -- so this reports rather
-    than refuses. It reports because the trap is real and was walked into: a
-    fix to signal_task's completed_at was applied to schema.sql's copy, which
-    every deployment loads and then immediately overwrites, so the change had
-    no effect and nothing said so. Knowing which definition is live is the
-    difference between editing the function and editing a comment.
+
+def check_cross_file_redefinitions(sigs_by_file) -> None:
+    """Refuse a function defined in more than one shipped file undeclared.
+
+    Both directions, so the list cannot rot into a description of a build that
+    has moved on: an undeclared shadow fails, and a declaration for a signature
+    that is no longer shadowed fails too.
     """
     seen = {}
     for rel, sigs in sigs_by_file:
         for sig in sigs:
             seen.setdefault(sig, []).append(rel)
     shadowed = {s: f for s, f in seen.items() if len(f) > 1}
+
+    undeclared = sorted(set(shadowed) - set(DECLARED_SHADOWS))
+    if undeclared:
+        lines = []
+        for sig in undeclared:
+            files = shadowed[sig]
+            lines.append(f"  {sig}\n      {' -> '.join(files)}   (live: {files[-1]})")
+        raise SystemExit(
+            "these functions are defined in more than one shipped file and are not "
+            "declared in DECLARED_SHADOWS:\n" + "\n".join(lines) + "\n\n"
+            "The last definition wins and the earlier one is dead in every deployment "
+            "that loads both -- which is how three fixes (942c90e, 1716727, 8be039c) "
+            "landed in a body nothing runs. If the shadow is deliberate, add it to "
+            "DECLARED_SHADOWS in extension/percolate/build-sql.py with one sentence "
+            "saying why the standalone body exists. If you cannot write that "
+            "sentence, the two bodies are one function and belong in one file.")
+
+    stale = sorted(set(DECLARED_SHADOWS) - set(shadowed))
+    if stale:
+        raise SystemExit(
+            "DECLARED_SHADOWS names functions that are no longer defined twice:\n  "
+            + "\n  ".join(stale)
+            + "\nRemove the entries. A declaration that describes nothing is a "
+              "licence nobody asked for.")
+
     if shadowed:
-        print("note: defined in more than one shipped file -- the LAST one wins:")
+        print(f"note: {len(shadowed)} declared shadow(s); the LAST definition wins:")
         for sig, files in sorted(shadowed.items()):
-            print(f"  {sig}\n      {' -> '.join(files)}   (live: {files[-1]})")
+            print(f"  {sig}\n      live: {files[-1]}")
 
 
 def check_every_spec_is_accounted_for() -> None:
@@ -795,7 +868,7 @@ def main() -> int:
     if not emit(*CLOSING):
         return 1
 
-    report_cross_file_redefinitions(sigs_by_file)
+    check_cross_file_redefinitions(sigs_by_file)
 
     out = ROOT / f"extension/percolate/sql/percolate--{VERSION}.sql"
     body = "\n".join(parts)

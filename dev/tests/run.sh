@@ -24,6 +24,26 @@
 # failure the rest of this collection keeps finding: locally the file is
 # skipped and named, in CI it must run.
 #
+# A FILE MAY ALSO DECLARE THE COMPILED PARSER IT NEEDS, with
+# `-- requires-parser: <version>`, and a MIXED file may defer one assertion at a
+# time with a notice beginning `DEFERRED:`. Both exist for the window PACKAGING
+# calls "where main is red on purpose": the extension SQL and the .so ship as
+# separate files, so between a parser change and the next image every compiled
+# assertion fails for a reason that is not this commit's.
+#
+# The polarity is the OPPOSITE of `-- requires:` above and the difference is the
+# point. REQUIRE_ALL does not promote these to failures, because CI runs the
+# published image deliberately. What bounds them instead is the database: a
+# deferral is honoured only while pg_extension says `percolate` and
+# `percolate_parser` disagree. When the image catches up they agree, every
+# deferral turns back into the assertion it was hiding, and a file declaring a
+# parser that is NOT behind fails. Nobody has to remember to remove one.
+#
+# Prefer the notice to the file-level line wherever a file is not entirely
+# compiled: `-- requires-parser:` stands the whole file down, and query/15's
+# sections 2 to 5 are pure SQL that would then stop running in CI for a reason
+# that has nothing to do with them.
+#
 # DB exists because the two halves of the inner loop did not compose. reload.sh
 # builds `p8reload` by default and this file only ever asked `p8experiment`, so
 # testing the edit you just made meant either reloading over the stack's own
