@@ -53,7 +53,18 @@
 # Measured on this branch: merging an origin/main that had moved produced exit
 # 0 and zero conflicts, and then the tree gate went red on `The generated SQL
 # matches the specs it came from`. So this removes the hand-resolution of
-# conflicts and does not remove the regenerate-after-merge step. That is still
+# conflicts and does not remove the regenerate-after-merge step.
+#
+# AND `--check` IS NOT THE WHOLE OF THAT STEP EITHER, which is the larger
+# version of the same caveat and is not mine: run `dev/upgrade-converges.sh`
+# after merging too. `--check`, `--tree`, the workflow suite and `surface.sql`
+# all ask their question of ONE database, so a clean merge of two schema
+# changes can leave every one of them green and still diverge on upgrade.
+# Measured by p8-subsystems-75 on REM-109: `create table if not exists
+# workflow.queue_config` is a no-op on an existing database, so a new column
+# default reached fresh installs only -- a fifth copy of a number, created by
+# the commit that deleted the other four, and invisible to all four green
+# checks. That is still
 # the larger half of the cost gone -- resolving eight files is the part nobody
 # can do usefully; running one command is the part anybody can -- but the
 # ticket's framing of "merge without hand-resolving" is only true of the
