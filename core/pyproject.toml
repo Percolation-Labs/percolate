@@ -1,6 +1,6 @@
 [project]
 name = "percolate-core"
-version = "0.1.9"
+version = "0.1.10"
 description = "Percolate core: the worker, Content Server and Agent Runtime for a Postgres-native stack"
 requires-python = ">=3.11"
 readme = "README.md"

@@ -193,7 +193,27 @@ async def _restore_login_role(conn: Any) -> None:
         await conn.execute("reset role")
         await conn.execute("select set_config('request.jwt.claims', '', false)")
     except Exception:
-        conn.terminate()
+        # BEST EFFORT, because the failure this handles includes the case where
+        # the connection is already gone -- and `terminate()` on a released
+        # connection raises `InterfaceError: cannot call Connection.terminate():
+        # connection has been released back to the pool`, which then REPLACES
+        # the exception we are here to re-raise.
+        #
+        # The cost is not a tidy traceback. Found by the tour: two acts got a
+        # 500 whose agent log named this InterfaceError, so the turn's actual
+        # cause appeared nowhere -- and the tour, parsing an error body it
+        # expected to be JSON, aborted the whole act on a Python TypeError. One
+        # swallowed exception, three layers of wrong diagnosis.
+        #
+        # Swallowing is safe in exactly this direction: a connection that cannot
+        # be terminated BECAUSE it is already released is one the pool has
+        # already taken back, which is what terminate() was reaching for. What
+        # must not be lost is the `raise`, which is what tells the caller the
+        # reset failed -- so it stays outside the inner try.
+        try:
+            conn.terminate()
+        except Exception:
+            pass
         raise
 
 

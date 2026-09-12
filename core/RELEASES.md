@@ -31,10 +31,18 @@ silently.
 | 0.1.6 | `v0.1.6` | `d8ae150` | yes |
 | 0.1.7 | `v0.1.7` | `939a5be` | yes |
 | 0.1.8 | `v0.1.8` → `8c03d2a` | **`91ef61b`** | yes |
+| 0.1.9 | `v0.1.9` | `014b75e` | yes |
 
 0.1.0–0.1.3 went to PyPI before releasing was a workflow. There is nothing to
 recover: the wheels are on PyPI and no tag was ever pushed, and no Release page
 can be created for a tag that does not exist.
+
+0.1.9 is the first release where the invariant above was checked rather than
+trusted: `v0.1.9` names `014b75e`, whose `pyproject.toml` says `0.1.9`. It also
+published as a **retry** — the tree carried `0.1.9` with no tag, which
+`release.yml` reads as a release that did not finish, so it published that
+rather than bumping past it. The run said so itself: *"0.1.9 is in the tree and
+untagged -- publishing THAT rather than bumping."*
 
 0.1.4 and 0.1.5 were tagged correctly and had no Release page; both were created
 on 2026-09-12 and say so in their own text, so nobody reads a 2026-09-12

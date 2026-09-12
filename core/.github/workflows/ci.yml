@@ -190,6 +190,14 @@ jobs:
       # to everything that watches it (REM-136, live pair REM-135). The file
       # includes the refusal made to fail on purpose; a probe only ever run
       # against a working database cannot be told from a `pass`.
+      # A publisher's connection that cannot be reset is terminated rather than
+      # pooled. When it is ALREADY released, terminate() raises and used to
+      # replace the exception the handler exists to re-raise -- so the reason a
+      # turn failed was gone and only the cleanup's own failure was logged.
+      # Found by the tour (p8-subsystems scenarios/tour).
+      - name: A failed connection reset keeps its cause
+        run: python -m unittest discover -s tests -p test_reset_failure_keeps_its_cause.py
+
       - name: A runtime refuses a database it cannot serve
         run: python -m unittest discover -s tests -p test_startup_refuses_a_database_it_cannot_serve.py
 
