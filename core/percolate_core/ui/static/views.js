@@ -25,7 +25,7 @@ import {workflowComposer} from './workflow-composer.js';
 import { draftStore, stageWorkflow } from "./drafts.js";
 import { markdown } from "./md.js";
 import {workspaceTabs,contextualHelp,editorWorkspace} from "./workspace.js";
-import { h, chip, status, table, stat, statGap, panel, gap, fmtTime, short, seg, stream, eventTone, dag } from "./ui.js";
+import { chip, dag, eventTone, fmtTime, gap, h, iconAction, panel, seg, short, stat, statGap, status, stream, table } from "./ui.js";
 
 /* The tile, or the reason there is no tile. One call site cannot get this
    wrong in the direction that matters, which is why it is a function. */
@@ -238,18 +238,20 @@ export async function run(id) {
       showRepeat();
       repeat.scrollIntoView({behavior:"smooth", block:"start"});
     }}, "Run again")] : []),
-    h("button", {class:"btn", onclick:async (e) => {
+    iconAction("refresh", "Refresh this run", { onclick: async (e) => {
       e.currentTarget.disabled = true;
       const refreshed = await run(id);
       if (node.isConnected) node.replaceWith(refreshed);
-    }}, "Refresh"),
-    h("button", { class: "btn", disabled:!active, onclick: async () => {
+    } }),
+    iconAction("signal", "Send a signal to this run", { disabled:!active, onclick: async () => {
       const sig = prompt("Signal name for signal_task()");
       if (!sig) return;
       const res = await tryRead(() => rpc("workflow", "signal_task",
         { p_run_id: id, p_signal: sig, p_payload: {} }), (e) => ({ error: e }));
       out.replaceChildren(res.error ? chip(res.error.message, "failed") : chip("signalled", "succeeded"));
-    } }, "Signal"),
+    } }),
+    /* Cancelling a run is not reversible, so it keeps its words
+       (`ui-design-language.md` §3.2). Not an oversight. */
     h("button", { class: "btn danger", disabled:!active, onclick: async (e) => {
       e.target.disabled = true;
       const res = await tryRead(() => rpc("workflow", "cancel_run", { p_run_id: id }), (err) => ({ error: err }));
@@ -370,11 +372,12 @@ export async function workflows() {
         h("td", { class: "pill-row" }, (w.step_kinds || []).map((k) => h("span", { class: "chip kind" }, k))),
         h("td", { class: "mono" }, (w.queues || []).join(", ") || "default"),
         h("td", { class: "mono" }, fmtTime(w.created_at)),
-        h("td", {}, h("button", { class: "btn", disabled: latest.get(w.name) !== w.version,
-          title: "New runs use the latest registered version", onclick: async (e) => {
-          e.target.closest("tr").after(h("tr", {}, h("td", {colspan:7}, runForm(w.name))));
-          e.target.disabled = true;
-        } }, "Start"))))));
+        h("td", {}, iconAction("play", "Start a run of " + w.name,
+          { disabled: latest.get(w.name) !== w.version, onclick: async (e) => {
+          const button = e.currentTarget;
+          button.closest("tr").after(h("tr", {}, h("td", {colspan:7}, runForm(w.name))));
+          button.disabled = true;
+        } }))))));
 
   node.append(h("p", {class:"document-help"}, "Start uses the latest saved version. Choose Create a workflow to author a definition, or open Runs to inspect an execution."));
   return node;
@@ -699,12 +702,17 @@ export async function queues() {
               (p.observed_generation === null ? " / never observed"
                                               : " / obs " + p.observed_generation)),
             h("td", {}, p.phase ? status(p.phase) : h("span", { class: "chip" }, "no status")),
-            h("td", {}, h("button", { class: "btn ghost", onclick: async (e) => {
-              const res = await tryRead(() => select("workflow", "pools",
-                "name=eq." + p.name, { method: "PATCH", body: { enabled: !p.enabled } }),
-                (err) => ({ error: err }));
-              e.target.replaceWith(res.error ? chip(res.error.message, "failed") : chip("toggled", "succeeded"));
-            } }, p.enabled ? "disable" : "enable"))))));
+            /* Reversible in one click, which is what earns an icon: the worst
+               outcome of a mis-click is that you click it again. */
+            h("td", {}, iconAction(p.enabled ? "pause" : "power",
+              (p.enabled ? "Disable pool " : "Enable pool ") + p.name,
+              { onclick: async (e) => {
+                const button = e.currentTarget;
+                const res = await tryRead(() => select("workflow", "pools",
+                  "name=eq." + p.name, { method: "PATCH", body: { enabled: !p.enabled } }),
+                  (err) => ({ error: err }));
+                button.replaceWith(res.error ? chip(res.error.message, "failed") : chip("toggled", "succeeded"));
+              } }))))));
 
   if (pending && !pools.error) {
     node.append(h("div", { class: "note amber" },

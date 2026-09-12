@@ -129,6 +129,83 @@ export const fmtTime = (s) => {
    the part that distinguishes them. */
 export const short = (id) => (id || "").slice(-12);
 
+
+/* ── The icon vocabulary, in one place ─────────────────────
+ *
+ * It used to be in three: a nav set in `index.html`, a four-entry set in
+ * `access.js` for the Chat rail, and nothing anywhere else -- so every screen
+ * outside Chat spelled a per-row action as a full-width labelled button, and
+ * the Queues table gave a pool's `enable` control more width than its name,
+ * image and replica range put together.
+ *
+ * Three sets meant an icon was cheaper to write inline than to share, which is
+ * how a vocabulary stops being one. This is a module, so `index.html` and every
+ * screen import the same map and a new icon is added once.
+ */
+export const ICONS = {
+  home: '<path d="M2 7l5.5-4.5L13 7v6H2z"/>',
+  chat: '<path d="M2 3h11v8H7l-3 3v-3H2z"/>',
+  flow: '<path d="M2 3h4v3H2zM9 3h4v3H9zM5.5 10h4v3h-4z"/><path d="M4 6v2h7V6M7.5 8v2"/>',
+  book: '<path d="M2.5 2.5h4c1 0 1 .8 1 .8V13s0-.8-1-.8h-4zM12.5 2.5h-4c-1 0-1 .8-1 .8V13s0-.8 1-.8h4z"/>',
+  runs: '<path d="M2 8h3l2-5 2 10 2-5h2"/>',
+  clock: '<circle cx="7.5" cy="7.5" r="5.5"/><path d="M7.5 4v3.5L10 9"/>',
+  pools: '<rect x="1.5" y="2" width="12" height="3.2"/><rect x="1.5" y="6.4" width="12" height="3.2"/><rect x="1.5" y="10.8" width="12" height="2.4"/>',
+  scale: '<path d="M2 12.5V6M6 12.5V3M10 12.5V8M14 12.5V4.5"/>',
+  events: '<path d="M1.5 11l3-4 2.5 2L10 4.5l3.5 3"/>',
+  agents: '<circle cx="7.5" cy="4.5" r="2.5"/><path d="M2.5 13c0-2.8 2.2-4.5 5-4.5s5 1.7 5 4.5"/>',
+  users: '<circle cx="5.5" cy="5" r="2.3"/><circle cx="11" cy="5.8" r="1.8"/><path d="M1.5 12.5c0-2.3 1.8-3.8 4-3.8s4 1.5 4 3.8M10.5 9c1.8 0 3 1.2 3 3.2"/>',
+  roles: '<path d="M7.5 1.5l5 2.2v4c0 3-2.2 5.2-5 6.3-2.8-1.1-5-3.3-5-6.3v-4z"/>',
+  keys: '<circle cx="4.5" cy="7.5" r="2.8"/><path d="M7.3 7.5H14M12 7.5v2.6M10 7.5v2"/>',
+  settings: '<circle cx="7.5" cy="7.5" r="2.3"/><path d="M7.5 1.2v1.8M7.5 12v1.8M13.8 7.5H12M3 7.5H1.2M12 3l-1.3 1.3M4.3 10.7L3 12M12 12l-1.3-1.3M4.3 4.3L3 3"/>',
+  grid: '<rect x="2" y="2" width="4.6" height="4.6"/><rect x="8.4" y="2" width="4.6" height="4.6"/><rect x="2" y="8.4" width="4.6" height="4.6"/><rect x="8.4" y="8.4" width="4.6" height="4.6"/>',
+  /* The Chat rail's set, moved here from access.js. */
+  panelLeft: '<rect x="1.5" y="2.5" width="12" height="10" rx="1.5"/><path d="M5.5 2.5v10"/>',
+  panelRight: '<rect x="1.5" y="2.5" width="12" height="10" rx="1.5"/><path d="M9.5 2.5v10"/>',
+  plus: '<path d="M7.5 3v9M3 7.5h9"/>',
+  send: '<path d="M2 7.5h10M8 3.5l4 4-4 4"/>',
+  /* Per-row actions. */
+  play: '<path d="M5 3.2l7 4.3-7 4.3z"/>',
+  pause: '<path d="M5.5 3.5v8M9.5 3.5v8"/>',
+  power: '<path d="M7.5 2v5"/><path d="M4.2 4.2a4.6 4.6 0 1 0 6.6 0"/>',
+  signal: '<path d="M7.5 6.5v5"/><circle cx="7.5" cy="4" r="1.2"/>',
+  refresh: '<path d="M12.5 7.5a5 5 0 1 1-1.6-3.7"/><path d="M13 2v3h-3"/>',
+};
+
+/** One `<svg>` for a named icon. Unknown names fall back visibly, not silently. */
+export const icon = (name) => {
+  const s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  s.setAttribute("viewBox", "0 0 15 15"); s.setAttribute("fill", "none");
+  s.setAttribute("stroke", "currentColor"); s.setAttribute("stroke-width", "1.2");
+  s.setAttribute("stroke-linecap", "round"); s.setAttribute("stroke-linejoin", "round");
+  s.setAttribute("aria-hidden", "true");
+  s.innerHTML = ICONS[name] || ICONS.grid;
+  return s;
+};
+
+/** A per-row action drawn as an icon, with ONE source for its name.
+ *
+ * `label` becomes the `aria-label` a screen reader announces AND the tooltip a
+ * pointer or keyboard user sees, so an icon cannot ship without an accessible
+ * name -- the failure mode of every icon toolbar, and one a reviewer cannot
+ * catch by looking at a screenshot.
+ *
+ * The tooltip is CSS on `data-tip`, not `title`: a native tooltip appears on
+ * hover only, and a control that explains itself to a mouse and not to a
+ * keyboard is the accessibility half of the same bug. `theme.css` shows it on
+ * `:hover` and on `:focus-visible`.
+ *
+ * WHAT THIS IS NOT FOR. A consequential action keeps its words
+ * (`ui-design-language.md` §3.2): Save, Run, Apply, and anything destructive or
+ * access-changing. `revoke` and `grant` are text buttons on purpose, not by
+ * oversight -- an icon is for an action whose worst outcome is that you do it
+ * again.
+ */
+export function iconAction(name, label, attrs = {}) {
+  if (!label) throw Error("an icon action needs a label: it is the accessible name");
+  return h("button", { class: "icon-btn " + (attrs.class || ""), type: "button",
+    "aria-label": label, "data-tip": label, ...attrs }, icon(name));
+}
+
 /* ── Components the mockups established ───────────────────── */
 
 /** A segmented filter. Returns the element; `onpick` gets the value. */

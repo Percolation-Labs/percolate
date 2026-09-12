@@ -13,7 +13,7 @@ import { select, rpc, read, probeQuery, config, setEndpoint, token } from "./api
 import { READS, PROBES } from "./reads.js";
 import { agentEditor } from "./agent-editor.js";
 import { HELP_AGENT, createChatSession } from "./query-assist.js";
-import { h, chip, status, setStatusVocabulary, table, stat, statGap, panel, gap, fmtTime, short, seg, stream } from "./ui.js";
+import { chip, fmtTime, gap, h, icon, panel, seg, setStatusVocabulary, short, stat, statGap, status, stream, table } from "./ui.js";
 import { markdown } from "./md.js";
 import { head, page, tryRead, defs } from "./views.js";
 
@@ -362,23 +362,6 @@ const bubble = (role, when, body) =>
     h("span", { class: "name" }, role === "user" ? "you" : role, when ? " · " + when : ""),
     body);
 
-const icon = (d) => {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 15 15");
-  svg.setAttribute("fill", "none");
-  svg.setAttribute("stroke", "currentColor");
-  svg.setAttribute("stroke-width", "1.4");
-  svg.setAttribute("stroke-linecap", "round");
-  svg.setAttribute("stroke-linejoin", "round");
-  svg.innerHTML = d;
-  return svg;
-};
-const I = {
-  panelLeft: '<rect x="1.5" y="2.5" width="12" height="10" rx="1.5"/><path d="M5.5 2.5v10"/>',
-  panelRight: '<rect x="1.5" y="2.5" width="12" height="10" rx="1.5"/><path d="M9.5 2.5v10"/>',
-  plus: '<path d="M7.5 3v9M3 7.5h9"/>',
-  send: '<path d="M2 7.5h10M8 3.5l4 4-4 4"/>',
-};
 
 export async function help() {
   const guide = h("div", {class:"help-guide"});
@@ -586,7 +569,7 @@ export async function chat() {
     try { localStorage.setItem("p8-chat-" + side, state); } catch (e) {}
   };
   const rightBtn = h("button", { class: "icon-btn", title: "Session details",
-    onclick: () => setPanel("right", shell.dataset.right === "open" ? "shut" : "open") }, icon(I.panelRight));
+    onclick: () => setPanel("right", shell.dataset.right === "open" ? "shut" : "open") }, icon('panelRight'));
 
   const title = h("span", { class: "title" }, "Chat");
   const newSession = async () => {
@@ -626,7 +609,7 @@ export async function chat() {
   else if ((ag.rows || []).some(a => a.name === HELP_AGENT)) agentPick.value = HELP_AGENT;
   agentPick.setAttribute("aria-label", "Agent");
   agentPick.addEventListener("change", () => sessionStorage.setItem("p8-chat-agent", agentPick.value));
-  sendBtn = h("button", { class: "send-btn", title: "Send  ⌘↵" }, icon(I.send));
+  sendBtn = h("button", { class: "send-btn", title: "Send  ⌘↵" }, icon('send'));
 
   /* Grow with the text and stop -- a fixed three-row box is too tall for "yes"
      and too short for a spec. Capped in CSS at 40vh so it cannot eat the
@@ -773,7 +756,7 @@ export async function chat() {
         h("div", { class: "tabs" }, h("button", { "aria-selected": "true" }, "Session")),
         h("span", { class: "spacer" }),
         h("button", { class: "icon-btn", title: "Hide", onclick: () => setPanel("right", "shut") },
-          icon(I.panelRight))),
+          icon('panelRight'))),
       aside));
 
   shell.dataset.left = stored("p8-chat-left", "open");
