@@ -83,3 +83,17 @@ require_named_container() {
 #
 # Recorded here rather than in a comment in check.sh so that the fix and the
 # predicate live together, which is the whole argument for this file.
+#
+# AND THE SECOND HARM, WHICH IS WORSE THAN A DATABASE IN THE WRONG PLACE: a
+# GATE reading the wrong one. Measured by p8-subsystems-ae on 2026-09-12 --
+# `dev/tests/query/11-graph-algorithms.sql` and `15-edge-currency.sql` fail
+# against the shared `p8dev` and pass against a database built fresh from
+# `origin/main` (11 defers on parser 0.1.5, 15 passes). A day of six sessions
+# reloading into one instance drifted it, and `check.sh` unset points there.
+#
+# So an unnamed container does not only misplace a write -- it makes the full
+# gate go red about the machine, which is how a run stops being believed. The
+# remedy that session reached for was `CONTAINER=<their own> dev/check.sh`
+# rather than `--no-verify`, which is this predicate arrived at from the other
+# end. Somebody should rebuild `p8dev`; nobody has, because rebuilding a shared
+# database under five sessions is the defect rather than the fix.
