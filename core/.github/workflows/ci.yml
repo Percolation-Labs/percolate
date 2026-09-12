@@ -76,6 +76,14 @@ jobs:
       - name: Tool identity and persisted execution
         run: python -m unittest discover -s tests -p test_tool_auth.py
 
+      # README.md documents the scheduled step as `{{task.id}}` and `task` was
+      # not a resolvable namespace, so the documented step could not dispatch
+      # and the seeded reference sent no body -- and /internal/run needs the id
+      # because the runtime completes its own triggering task (REM-126). Also
+      # pins that a malformed call is refused by name rather than 500'd.
+      - name: The documented scheduled step resolves, and a bad one is refused
+        run: python -m unittest discover -s tests -p test_scheduled_step_resolves.py
+
       # workflow.heartbeat_task shipped, was granted to `worker`, and was called
       # by nothing -- so a task running longer than the queue's stale_timeout was
       # reaped and re-run with the first copy still in flight (REM-109). These

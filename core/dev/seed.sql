@@ -36,9 +36,20 @@ on conflict (email) do nothing;
 -- ------------------------------------------------------------
 insert into workflow.definitions (name, version, spec) values (
   'summarize_session_window', 1,
+  -- THE BODY, because without it this definition cannot work and was the
+  -- shipped reference anyway (REM-126). `/internal/run` needs the task id: the
+  -- runtime completes its own triggering task once the run and any chained
+  -- action have finished (brief.md §3), so with no id the task is never
+  -- completed, the reaper takes its lease, and the run happens again. This is
+  -- the shape specs/workflow-engine/README.md documents, and `{{task.id}}`
+  -- resolves as of the same change.
   '{"steps": [{"key": "dispatch", "queue": "http", "kind": "http_call",
                "input": {"url": "http://127.0.0.1:8765/internal/run",
-                         "method": "POST", "mode": "async"}}]}'::jsonb
+                         "method": "POST", "mode": "async",
+                         "body": {"workflow_task_id": "{{task.id}}",
+                                  "input": {"agent": "{{run.agent}}",
+                                            "session_id": "{{run.session_id}}",
+                                            "prompt": "{{run.prompt}}"}}}}]}'::jsonb
 ) on conflict (name, version) do update set spec = excluded.spec;
 
 -- ------------------------------------------------------------
