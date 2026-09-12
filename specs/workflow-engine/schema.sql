@@ -2519,6 +2519,39 @@ $$ language plpgsql;
 revoke execute on function workflow.run_owner_of(uuid) from public;
 revoke execute on function workflow.execute_for(uuid, text, boolean, jsonb) from public;
 
+-- ONE HOME FOR "ONE STATEMENT THAT CANNOT BE TWO", and it is here rather than
+-- beside either caller because the rule was written once, at the call site
+-- where it was needed, and the sibling that needed the same rule did not get
+-- it. `execute_as_viewer` wraps a write as the body of a data-modifying CTE --
+-- the grammar, not a pattern, deciding that a string is ONE insert, update,
+-- delete or merge -- because plpgsql's EXECUTE runs a string of several
+-- statements one after another, so `insert ...; set local request.jwt.claims
+-- = ...` rewrites whose step it is (REM-64, workflow/15 §4b). `plan_probe`
+-- took a workflow author's statement straight into `execute 'explain (format
+-- json) ' || v_stmt`, two lines above a read branch that was correctly
+-- wrapped, and EXPLAIN of the first statement does not stop the second from
+-- running. It is SECURITY INVOKER and granted to `authenticated`.
+--
+-- That is the seventeenth instance of meta/postmortems/2026-09-11-fixed-at-
+-- the-copy-that-failed.md, so the fix is not a second copy of the wrapping:
+-- it is this function, which both callers now ask.
+--
+-- TRAILING SEMICOLONS ARE DROPPED, since an author writes them and a CTE body
+-- cannot hold one. A statement carrying its own RETURNING does not parse here
+-- and is meant not to; each caller says so in its own words, because "your
+-- write step is malformed" and "this probe could not plan it" are different
+-- sentences to different people.
+create or replace function workflow.one_write_statement(p_statement text)
+returns text as $$
+    select pg_catalog.format(
+        'with p8_write as (%s returning 1) select count(*) from p8_write',
+        pg_catalog.regexp_replace(p_statement, '[[:space:];]+$', ''));
+$$ language sql immutable;
+
+revoke execute on function workflow.one_write_statement(text) from public;
+-- plan_probe is SECURITY INVOKER and reaches this as the caller.
+grant execute on function workflow.one_write_statement(text) to authenticated;
+
 -- Dropped rather than left beside the new signature: `create or replace` with
 -- an added parameter makes a SECOND function, and the old three-argument one
 -- would still be callable and would still interpolate.
@@ -7870,7 +7903,16 @@ begin
 
             begin
                 if coalesce((v_in->>'write')::boolean, false) then
-                    execute 'explain (format json) ' || v_stmt into v_plan;
+                    -- THE SAME WRAPPING execute_as_viewer USES, from the same
+                    -- home. EXPLAIN plans the first statement of the string it
+                    -- is given and does not stop plpgsql running the rest, so
+                    -- an unwrapped `explain (format json) ' || v_stmt` ran
+                    -- whatever a workflow author put after the semicolon --
+                    -- here, as the caller, from a function granted to
+                    -- `authenticated` whose own comment promises it runs no
+                    -- step.
+                    execute format('explain (format json) %s',
+                                   workflow.one_write_statement(v_stmt)) into v_plan;
                 else
                     execute format(
                         'explain (format json) select * from (%s) t', v_stmt) into v_plan;
