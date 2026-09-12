@@ -657,33 +657,87 @@ begin
     end if;
 end $$;
 
--- 7c. WHAT IS DELIBERATELY NOT ASSERTED HERE, AND WHY -- because it is false.
+-- 7c. A BACKING-OFF TASK IS IN THE MEDIUM AND NOT IN THE HEADCOUNT.
 --
--- REM-9's second property was "a task that fails and backs off stays visible to
--- workflow.queue_depth() throughout, which is what makes backoff evaporation
--- rather than rescheduling". It does not. Measured on this database, through
--- the real path -- claim a `work` task with max_attempts 3, fail it, let
--- fail_task take its retry branch:
+-- This block asserted nothing when it was written, on the reading that
+-- `queue_depth` excluding a backing-off task was a defect -- brief.md §2 said
+-- backoff keeps the row visible to it. Reading `queue_depth`'s own comment
+-- settled it the other way: the exclusion is deliberate and the reason is
+-- money. "A task backing off between retries is not work anyone can do yet,
+-- and holding a pod for it burns money until the backoff expires."
 --
---     status=ready  run_after in the future  attempts=1
---     queue_depth before the failure: 1
---     queue_depth after  the failure: 0
+-- So this is a decision worth pinning rather than a defect worth filing, and
+-- what it pins is the pair. The row stays in the medium -- v_backlog counts it
+-- -- and stays out of the headcount, which is what makes the stigmergic
+-- reading in brief.md §2 true at both thresholds rather than at one.
 --
--- `workflow.queue_depth` is `status='running' or (status='ready' and run_after
--- <= now())`, and a backing-off task is ready with run_after ahead of now, so
--- it is counted by neither arm. The autoscaler's own probe therefore reports a
--- queue with pending retries as empty, and scales the pool down while work is
--- waiting to be redone.
---
--- No assertion here, in either direction: asserting the current behaviour would
--- freeze a defect into the suite, and asserting the spec's behaviour would
--- leave a red that is not this file's to fix. Filed as its own Bug -- the fix
--- is a decision about what `queue_depth` is for, which is the autoscaler's
--- question rather than the recovery suite's. REM-119.
+-- Measured through the real path rather than by setting columns: the lifecycle
+-- trigger refuses an illegal transition, so a task is driven into backoff by
+-- claiming it and failing it, which is what a worker does.
+do $$
+declare
+    v_run uuid; v_t uuid;
+    v_depth_due bigint; v_depth_backoff bigint;
+    v_backing_off bigint; v_attempts int; v_due boolean;
+begin
+    insert into workflow.definitions (name, spec) values
+    ('t_backoff', '{"steps":[
+        {"key":"s","kind":"work","queue":"qbo","max_attempts":3,"input":{"n":1}}
+     ]}');
+    v_run := workflow.start_workflow('t_backoff', '{}'::jsonb);
+    select id into v_t from workflow.tasks where run_id = v_run limit 1;
+
+    select workflow.queue_depth('qbo') into v_depth_due;
+    if v_depth_due <> 1 then
+        raise exception 'a ready, due task was not counted by queue_depth (got %)', v_depth_due;
+    end if;
+
+    -- Into backoff the way a worker puts it there.
+    perform workflow.claim_task('qbo', 'w-backoff');
+    perform workflow.fail_task(v_t, '{"e":"boom"}'::jsonb);
+
+    -- `coalesce` NAMING THE ABSENT CASE, because `if v_attempts < 1` is NULL
+    -- when the row is gone and `if NULL then` does not fire -- so the check
+    -- would pass exactly when its subject had vanished. dev/assertion-audit.py
+    -- caught this one on its first run; -1 and false are chosen so a missing
+    -- row reports as a failed fixture rather than a satisfied one.
+    select attempts, run_after > now() into v_attempts, v_due
+      from workflow.tasks where id = v_t;
+    if coalesce(v_attempts, -1) < 1 or not coalesce(v_due, false) then
+        raise exception
+            'the fixture did not reach backoff: attempts=%, run_after in future=% '
+            '(a NULL in either means the task row is gone)',
+            coalesce(v_attempts::text, 'NULL'), coalesce(v_due::text, 'NULL');
+    end if;
+
+    select workflow.queue_depth('qbo') into v_depth_backoff;
+    select backing_off into v_backing_off from workflow.v_backlog where queue = 'qbo';
+
+    -- OUT of the headcount, deliberately.
+    if v_depth_backoff <> 0 then
+        raise exception
+            'queue_depth counted a backing-off task (%). It excludes them on purpose -- '
+            'a pod held through a doubling backoff is paid for and idle. If this is '
+            'meant to change, the reason beside queue_depth in schema.sql and '
+            'specs/trace-field/brief.md §2 both have to change with it.',
+            v_depth_backoff;
+    end if;
+
+    -- And IN the medium, which is the half that makes backoff evaporation
+    -- rather than descheduling. v_backlog.backing_off is its one home; a
+    -- second function answering the same question would be a second home.
+    if coalesce(v_backing_off, 0) <> 1 then
+        raise exception
+            'v_backlog reported % backing-off task(s) on a queue holding one. That '
+            'column is the only place an operator can see work that exists and is '
+            'not yet runnable.', coalesce(v_backing_off, 0);
+    end if;
+end $$;
+
 do $$ begin
     raise notice 'workflow/06 §7: two workers claim disjoint sets and neither starves; '
-                 'nothing writes task priority. NOT asserted: a backing-off task is '
-                 'invisible to queue_depth -- measured, refuted, filed.';
+                 'nothing writes task priority; a backing-off task is out of '
+                 'queue_depth and in v_backlog.backing_off -- both on purpose';
 end $$;
 
 rollback;
