@@ -85,6 +85,53 @@ run_sql() {
     fi
 }
 
+# A FILE MAY ASK FOR A SPEC SCHEMA THE EXTENSION DOES NOT SHIP, with
+# `-- loads: <path under specs/>` on its first lines. It arrives at
+# /tmp/<basename> for the test to `\i` inside its own rolled-back transaction.
+#
+# WHY THIS EXISTS. build-sql.py's NOT_SHIPPED holds spec schemas that
+# `create extension percolate` deliberately does not contain --
+# world-model-ingestion/connectors.sql among them, "UNDECIDED ... ship it once
+# it lands bytes in the content plane". Their objects are in no database this
+# suite runs against, so nothing here could assert anything about them, and
+# REM-82 is what that cost: five grants handing the connector catalogue to
+# `web_anon` and to any signed-in caller, sitting in the tree unasserted
+# because the table they name does not exist in CI.
+#
+# A not-shipped file is not an unused one. dev/currency.sh once found
+# content.connectors* ORPHAN on a live stack -- "present in the database,
+# absent from the specs' own extension script ... loaded by hand" -- and
+# sources.md §17 registers 304 sources through it against a running deployment.
+# So those grants were live wherever somebody loaded the file, and latent
+# everywhere else until it enters ORDER.
+#
+# The alternative was a grep over the file's text for `web_anon`, which is the
+# assertion shape REM-73 has just finished removing from content/01. Loading the
+# real file and asking the catalogue is the same question asked exactly:
+# Postgres parses the grants, and the test reads has_table_privilege rather than
+# the source text that produced them.
+#
+# ROLLBACK IS THE TEST'S JOB, not this function's. The file is copied in; the
+# test wraps its own `\i` in a transaction it rolls back, as
+# world-model-ingestion/graph-demo.sql does. A test that committed one of these
+# would leave a not-shipped schema behind and make every later run a different
+# question.
+stage_loads() {
+    local f="$1" rel src
+    rel=$(sed -n 's/^-- loads:[[:space:]]*//p' "$f" | head -1)
+    [ -n "$rel" ] || return 0
+    src="$HERE/../../specs/$rel"
+    [ -f "$src" ] || { echo "-- loads: names no such file: specs/$rel" >&2; return 1; }
+    if [ -z "$DSN" ]; then
+        docker cp "$src" "$CONTAINER:/tmp/$(basename "$src")" >/dev/null
+    else
+        # DSN mode runs psql on this host, so the path the test \i's has to be
+        # one this host can see. Copied rather than read in place so the test
+        # spells the same /tmp path in both modes.
+        cp "$src" "/tmp/$(basename "$src")"
+    fi
+}
+
 # WHAT IS UNDER TEST, before anything is asserted about it.
 #
 # This banner exists because a run of this suite once failed on two parser bugs
@@ -189,6 +236,12 @@ for surface in ${SURFACES[@]}; do
                 skipped=$((skipped + 1))
                 skipped_names="$skipped_names $surface/$(basename "$f")"
             fi
+            continue
+        fi
+        if ! out=$(stage_loads "$f" 2>&1); then
+            echo "FAILED"
+            echo "$out" | sed 's/^/      /'
+            failed=1
             continue
         fi
         if out=$(run_sql "$f" 2>&1); then
