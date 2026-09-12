@@ -582,8 +582,6 @@ begin
                  'human-in-the-loop primitive, executed';
 end $$;
 
-rollback;
-
 -- ---------------------------------------------------------------------
 -- 7. THE THREE PROPERTIES THE AUTOSCALER AND THE PUBLIC DOCS RELY ON.
 --
@@ -687,3 +685,5 @@ do $$ begin
                  'nothing writes task priority. NOT asserted: a backing-off task is '
                  'invisible to queue_depth -- measured, refuted, filed.';
 end $$;
+
+rollback;
