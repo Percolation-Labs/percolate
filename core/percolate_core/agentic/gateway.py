@@ -53,16 +53,36 @@ def caller_claims(headers: dict[str, str]) -> dict[str, Any] | None:
     algorithm or an expired token is ``None`` here rather than an exception:
     every caller turns ``None`` into its own refusal (401, ``PermissionError``).
 
-    With NO ``P8_JWT_SECRET`` at all this is the local no-auth dev loop: the
-    ``X-P8-User-Id`` header names the user and becomes ``{"sub": <id>}``. The
-    Content Server has no such mode (it answers 500 when asked to verify
-    without a secret), which is why the gateway must never be exposed without
-    the secret set. With a secret configured the header is ignored.
+    WITHOUT ``P8_JWT_SECRET`` THIS REFUSES, and the paragraph that used to be
+    here is why it has to. It said: "this is the local no-auth dev loop: the
+    ``X-P8-User-Id`` header names the user ... which is why the gateway must
+    never be exposed without the secret set." That sentence identified the
+    hazard correctly and then left it to whoever deployed the thing, in a
+    docstring they would have to read first. An operator who omits one
+    environment variable turned every endpoint below into *act as any user id*:
+    ``as_caller`` faithfully sets ``request.jwt.claims`` from it, and every row
+    policy in the database believes it.
+
+    The Content Server, handed the same problem, answers 500 rather than
+    guessing (``content/server.py``, ``caller``). Two halves of one collection
+    disagreeing about whether an unverifiable request is an error is the kind of
+    disagreement that becomes authorisation, so this half now agrees with that
+    one.
+
+    ``P8_DEV_NO_AUTH=1`` restores the header path for a local loop. It is a
+    second variable on purpose: forgetting to set a secret is an accident,
+    setting this is a decision, and that difference is the whole of the fix.
     """
     secret = os.getenv("P8_JWT_SECRET")
     lower = {k.lower(): v for k, v in headers.items()}
 
     if not secret:
+        if os.getenv("P8_DEV_NO_AUTH") != "1":
+            raise RuntimeError(
+                "P8_JWT_SECRET is not set, so no caller can be identified. Set it, "
+                "or set P8_DEV_NO_AUTH=1 to trust the X-P8-User-Id header on a loop "
+                "that is not reachable from a network -- on that path the header is "
+                "an assertion by the caller, not a verified identity.")
         raw = lower.get("x-p8-user-id")
         try:
             return {"sub": str(UUID(raw))} if raw else None

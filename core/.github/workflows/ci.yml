@@ -87,6 +87,21 @@ jobs:
             python -m unittest discover -s tests -p "$t" || exit 1
           done
 
+      # REM-91 items 4, 5 and 8, from the 2026-09-12 security audit. Three
+      # unrelated mechanisms with one shape -- a value from outside used
+      # somewhere that decides authority rather than content. A missing
+      # P8_JWT_SECRET was an identity; a model-chosen path parameter left its
+      # bound operation, past an origin check that urljoin had already
+      # normalised the traversal out of; an uploaded file was served inline on
+      # the file API's own origin.
+      #
+      # Named here because this job ENUMERATES files rather than discovering
+      # them, so a test nobody adds to this list is a test nobody runs. That was
+      # true of five files in this directory when the audit looked, which is why
+      # the line above this one exists too.
+      - name: Untrusted input cannot widen what a caller may do
+        run: python -m unittest discover -s tests -p test_untrusted_input_cannot_widen.py
+
       # content.api_source in the extension is the one home of an API source's
       # defaults and choices (REM-61); APIConfig and the UI's API_DEFAULTS are
       # copies, and a copy that drifts saves a different source.

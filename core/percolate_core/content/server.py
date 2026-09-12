@@ -123,7 +123,29 @@ async def fetch(resource_id: UUID, claims: dict | None = Depends(caller)):
         raise HTTPException(404, "no such file, or not yours")
 
     body = storage.get(row["bucket"], row["object_key"])
-    return Response(body, media_type=row["content_type"] or "application/octet-stream")
+    # NEVER INLINE, WHATEVER THE TYPE SAYS. `content_type` is the uploader's own
+    # `Content-Type` header, kept verbatim from the upload above, and the bytes
+    # are theirs too. Served inline it executes on this origin -- the same origin
+    # as this file API -- so an uploaded `text/html` reads every file the viewer
+    # can read. The delivery is already built: an agent answer containing a link
+    # to `/files/<id>` passes the chat renderer's scheme allowlist
+    # (`ui/static/md.js`), because a same-origin path is exactly what that
+    # allowlist is for.
+    #
+    # This is CWE-80, which 2026 model evaluations fail about 85% of the time
+    # against 82% passed for SQL injection -- and it is invisible to the 1,506
+    # SQL assertions in the collection, which is why the SQL here is clean and
+    # this was not. `attachment` carries no filename deliberately: the name is
+    # attacker-supplied too and quoting it into a header is a second bug.
+    return Response(
+        body,
+        media_type=row["content_type"] or "application/octet-stream",
+        headers={
+            "Content-Disposition": "attachment",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "sandbox; default-src 'none'",
+        },
+    )
 
 
 @routes.post("/probe")

@@ -236,10 +236,22 @@ class RuntimeHttpIdentityTest(unittest.TestCase):
         self.assertEqual(self.events({"X-P8-User-Id": ALICE}).status_code, 401)
 
     def test_without_a_secret_the_dev_loop_names_only_a_sub(self):
-        with patch.dict("os.environ", {}, clear=True):
+        # P8_DEV_NO_AUTH=1 is new, and this test is the reason it exists rather
+        # than the dev loop being removed outright: the loop is wanted. What was
+        # not wanted is reaching it by forgetting something. Before REM-91 item
+        # 4 an unset P8_JWT_SECRET alone put the runtime here, so an operator who
+        # omitted one variable accepted `X-P8-User-Id` as an identity from
+        # anybody who could reach the port. The behaviour asserted below is
+        # unchanged; only the way you arrive at it is.
+        with patch.dict("os.environ", {"P8_DEV_NO_AUTH": "1"}, clear=True):
             self.assertEqual(caller_claims({"X-P8-User-Id": ALICE}), {"sub": ALICE})
             self.assertIsNone(caller_claims({"X-P8-User-Id": "not-a-uuid"}))
             self.assertIsNone(caller_claims(bearer(token())))
+
+    def test_an_unset_secret_is_an_error_and_not_an_open_door(self):
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaises(RuntimeError):
+                caller_claims({"X-P8-User-Id": ALICE})
 
 
 if __name__ == "__main__":

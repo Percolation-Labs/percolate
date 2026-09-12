@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
 import httpx
 
@@ -232,7 +232,24 @@ class OpenApiProvider:
         for name, value in call.arguments.items():
             where = target.param_in.get(name, "query")
             if where == "path":
-                path = path.replace("{" + name + "}", str(value))
+                # PERCENT-ENCODED, INCLUDING THE SLASH, because the value is
+                # whatever the model put in that argument. Substituted raw, a
+                # path parameter left its own operation: `{"id":
+                # "../../rpc/sql_passthrough"}` against a tool bound to
+                # `/rpc/get_thing/{id}` resolved to a different endpoint
+                # entirely, and `urljoin` normalised the `..` away before the
+                # origin check below ever saw it -- so the check passed, the
+                # host being unchanged, and the request went out with the
+                # caller's forwarded bearer on it. `?` did the same for a query
+                # string.
+                #
+                # That made the per-agent `tools:` allowlist -- described in
+                # percolate.yaml as "the agent's entire capability surface" --
+                # not a boundary at all against a model that controls one
+                # segment. `safe=""` is the whole fix: with `/` encoded there is
+                # no traversal to normalise, and dots alone cannot leave a
+                # segment.
+                path = path.replace("{" + name + "}", quote(str(value), safe=""))
             elif where == "header":
                 if _is_reserved(name):
                     return ToolResult(
