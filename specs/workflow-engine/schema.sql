@@ -1539,6 +1539,17 @@ begin
         -- a worker is not merely untidy: the lease fence reads claimed_by, so a
         -- stale one would let the previous holder act on a task it no longer
         -- owns -- the exact hole the fence exists to close.
+        -- UNCAPPED ON PURPOSE, AND THE BOUND IS max_attempts RATHER THAN A
+        -- CEILING. `power(2, attempts)` has no `least()` over it, so at the
+        -- usual max_attempts of 3-5 the last wait is 8-16 seconds and at 20 it
+        -- would be twelve days. A cap was considered and not added: nobody has
+        -- configured a budget deep enough to notice, so it would be a limit
+        -- bought against a hypothetical -- and the moment this interval becomes
+        -- configurable (it is a constant here, not a queue_config column) the
+        -- cap belongs in the same home as the interval rather than bolted on
+        -- beside it. Recorded so the next reader does not re-file it: the thing
+        -- that makes this safe today is the attempt budget, and if that budget
+        -- ever grows, this line grows a ceiling with it.
         update workflow.tasks set status = 'ready', error = p_error,
             claimed_by = null, claimed_at = null,
             run_after = now() + (power(2, t.attempts) * interval '1 second')

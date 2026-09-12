@@ -2027,6 +2027,17 @@ begin
         -- a worker is not merely untidy: the lease fence reads claimed_by, so a
         -- stale one would let the previous holder act on a task it no longer
         -- owns -- the exact hole the fence exists to close.
+        -- UNCAPPED ON PURPOSE, AND THE BOUND IS max_attempts RATHER THAN A
+        -- CEILING. `power(2, attempts)` has no `least()` over it, so at the
+        -- usual max_attempts of 3-5 the last wait is 8-16 seconds and at 20 it
+        -- would be twelve days. A cap was considered and not added: nobody has
+        -- configured a budget deep enough to notice, so it would be a limit
+        -- bought against a hypothetical -- and the moment this interval becomes
+        -- configurable (it is a constant here, not a queue_config column) the
+        -- cap belongs in the same home as the interval rather than bolted on
+        -- beside it. Recorded so the next reader does not re-file it: the thing
+        -- that makes this safe today is the attempt budget, and if that budget
+        -- ever grows, this line grows a ceiling with it.
         update workflow.tasks set status = 'ready', error = p_error,
             claimed_by = null, claimed_at = null,
             run_after = now() + (power(2, t.attempts) * interval '1 second')
@@ -12840,6 +12851,26 @@ create unique index if not exists idx_node_keys_canonical
     on aiq.node_keys (org_id, key, entity_type) nulls not distinct
     where kind = 'canonical';
 create index if not exists idx_node_keys_lookup on aiq.node_keys (key);
+-- AND THE SAME KEY FOLDED, because the exact tier asks for it folded and this
+-- is the tier meant to be cheap. `aiq.resolve_mention` normalises its argument
+-- to `lower(btrim(...))` and then filters `lower(k.key) = v_norm` at three
+-- sites (resolution.sql, the exact match, the ambiguous escalation and the
+-- suffix probe). A b-tree on `key` cannot serve a predicate on `lower(key)`,
+-- and the trigram index answers similarity rather than equality -- so the
+-- FIRST and cheapest tier of resolution was the one that scanned, and its cost
+-- grew with the whole key table instead of with the number of candidates.
+--
+-- MEASURED on 50,026 keys, the exact-match query from resolution.sql:
+--
+--   without this index   Seq Scan, 50,025 rows removed by filter, 569 buffers
+--   with it              Index Scan, 3 buffers
+--
+-- An expression index rather than folding the column on write, and the reason
+-- is `idx_node_keys_canonical` directly above: it is unique on `(org_id, key,
+-- entity_type)` with `key` case-sensitive, so `Apple` and `apple` are today two
+-- distinct canonical keys. Folding on write would collide them -- a change to
+-- what the table permits, not a change to how it is read.
+create index if not exists idx_node_keys_key_lower on aiq.node_keys (lower(key));
 -- FUZZY lives here and ONLY here: a trigram index on this thin key table,
 -- never on the data plane (graph-identity.md "Scale").
 create index if not exists idx_node_keys_trgm on aiq.node_keys using gin (key gin_trgm_ops);
@@ -15233,8 +15264,76 @@ create unique index if not exists idx_embedding_models_one_default
 -- An expression index rather than a stored column: nothing should be able to
 -- write a derived value, and a generated column would be a second place the
 -- derivation lives -- which is the thing this collection keeps removing.
+--
+-- THE DERIVATION ITSELF HAD FIFTEEN HOMES, and the comment above is the reason
+-- that mattered: it argues against a generated column on the grounds that a
+-- second place for the derivation is the thing to avoid, four lines above an
+-- index expression that was the fifteenth. `aiq.embedding_space_name()` is the
+-- one home now, and this index calls it -- which is the case that made a
+-- function necessary rather than merely tidy. An index expression is a STORED
+-- artifact: until it is dropped and recreated it keeps indexing whatever
+-- spelling it was built with, so a naming change that updated fourteen call
+-- sites would have left this one silently disagreeing with all of them.
+--
+-- `immutable` is what makes it indexable, and it is honestly immutable:
+-- replace() and || over one argument, no reads, no settings.
+--
+-- `set search_path` for the reason every other function here has it: the body
+-- is parsed in the caller's search_path, and an index expression is evaluated
+-- on every write to the table, so an unpinned one lets a writer decide which
+-- `replace` runs. It does NOT fix the convergence problem below, which is what
+-- it was first written to do -- see the drop.
+create or replace function aiq.embedding_space_name(p_model text)
+returns text language sql immutable parallel safe strict
+set search_path = pg_catalog as $$
+    select 'emb_' || replace(p_model, '-', '_')
+$$;
+
+comment on function aiq.embedding_space_name(text) is
+    'The table name for a model''s embedding space, derived from the model '
+    'name. The ONE home of that derivation -- it was spelled fifteen times, '
+    'one of them inside idx_embedding_models_derived_space, where it is a '
+    'stored artifact that cannot be kept in step by anybody remembering to.';
+
+-- GRANTED, because the read path reaches it as the caller. The retrieval
+-- functions that resolve a model to its space are SECURITY INVOKER, so
+-- `permission denied for function embedding_space_name` is what a signed-in
+-- caller got the moment this replaced the inline concatenation -- caught by
+-- dev/tests/query/09-retrieval-tenancy.sql and query/13-retrieval-at-scale.sql on the
+-- first run, which is the argument for having those at all. Deny-by-default is
+-- the posture (identity/closing.sql), so a new function reaching a caller is a
+-- grant somebody writes rather than an omission that happens to work.
+grant execute on function aiq.embedding_space_name(text) to authenticated;
+
+-- DROPPED BEFORE IT IS CREATED, AND THE COMMENT ABOVE IS WHY -- three lines
+-- above, this file says an index expression is a stored artifact that keeps
+-- indexing whatever spelling it was built with. Then it wrote
+-- `create unique index if not exists` over a name 0.1.6 had already shipped
+-- with `(('emb_' || replace(name, '-', '_')))` inline, which makes the replay
+-- a NO-OP: `if not exists` matches on the NAME and never looks at the
+-- expression. Every upgraded database would have gone on indexing the inline
+-- spelling while all fifteen call sites read the function, which is exactly the
+-- silent disagreement the paragraph above argues the function prevents.
+--
+-- Measured, not reasoned: `dev/upgrade-converges.sh` failed on 2026-09-12 with
+-- the two `pg_get_indexdef` strings side by side, and failed again identically
+-- after a first fix that pinned the function's search_path -- which was a guess
+-- at an inlining mechanism that is not what happened.
+--
+-- So: drop, then create. The drop is a no-op on a fresh install and on every
+-- replay after this one; `embedding_models` holds a handful of rows, so
+-- rebuilding the index costs nothing. `create ... if not exists` is the right
+-- default for a table and the wrong one for an index whose EXPRESSION changes,
+-- because the name is all the guard compares.
+-- The `if not exists` stays because build-sql.py's replay lint requires it
+-- (`create index -> create index if not exists <name>`), and after the drop it
+-- is inert rather than load-bearing. Note what that lint can and cannot see: it
+-- proves the statement can run twice, and a no-op runs twice happily. Nothing
+-- in the tree could have caught this one -- `dev/upgrade-converges.sh` did, by
+-- comparing the two databases instead of reading the statement.
+drop index if exists aiq.idx_embedding_models_derived_space;
 create unique index if not exists idx_embedding_models_derived_space
-    on aiq.embedding_models ((('emb_' || replace(name, '-', '_'))));
+    on aiq.embedding_models ((aiq.embedding_space_name(name)));
 
 -- ------------------------------------------------------------
 -- 10a. What an embedding CALL looks like -- one row per provider.
@@ -15339,7 +15438,7 @@ begin
     -- index cannot speak to: a space built before that index existed, or a
     -- model whose `dim` was edited after its space was built. Same silent wrong
     -- answer, different route in.
-    v_tbl := 'emb_' || replace(m.name, '-', '_');
+    v_tbl := aiq.embedding_space_name(m.name);
 
     -- And if the table is already there, it has to be the right shape. A space
     -- registered before this check existed, or a model whose dim was edited
@@ -15365,13 +15464,13 @@ begin
             chunk_id   uuid primary key,
             embedding  vector(%2$s) not null,
             embedded_at timestamptz not null default now()
-        )$q$, 'emb_' || replace(m.name, '-', '_'), m.dim);
+        )$q$, aiq.embedding_space_name(m.name), m.dim);
 
     execute format($q$
         create index if not exists %1$I on aiq.%2$I
         using hnsw (embedding %3$s)$q$,
         'idx_' || replace(m.name,'-','_') || '_hnsw',
-        'emb_' || replace(m.name, '-', '_'), m.distance_op);
+        aiq.embedding_space_name(m.name), m.distance_op);
 
     -- DECLARE WHAT THIS TABLE IS, here, because nothing else can. A space is
     -- created at REGISTRATION, not at install, so specs/identity's
@@ -15379,7 +15478,7 @@ begin
     -- name it. A table created by a function is declared by that function or
     -- it stays undeclared forever, and specs/identity/checks.sql will say so.
     insert into percolate.table_kinds (schema_name, table_name, kind, why)
-    values ('aiq', 'emb_' || replace(p_model, '-', '_'), 'natural',
+    values ('aiq', aiq.embedding_space_name(p_model), 'natural',
             'an embedding space: chunk_id is the identity and nothing '
             'references it by surrogate; created per registered model')
     on conflict (schema_name, table_name) do nothing;
@@ -15466,9 +15565,9 @@ begin
     end if;
 
     for v_tbl in
-        select 'emb_' || replace(m.name, '-', '_')
+        select aiq.embedding_space_name(m.name)
           from aiq.embedding_models m
-         where to_regclass('aiq.' || quote_ident('emb_' || replace(m.name, '-', '_'))) is not null
+         where to_regclass('aiq.' || quote_ident(aiq.embedding_space_name(m.name))) is not null
     loop
         execute format('delete from aiq.%I e where %s', v_tbl, v_live);
         get diagnostics v_n = row_count;
@@ -15497,9 +15596,9 @@ begin
         return null;
     end if;
     for v_tbl in
-        select 'emb_' || replace(m.name, '-', '_')
+        select aiq.embedding_space_name(m.name)
           from aiq.embedding_models m
-         where to_regclass('aiq.' || quote_ident('emb_' || replace(m.name, '-', '_'))) is not null
+         where to_regclass('aiq.' || quote_ident(aiq.embedding_space_name(m.name))) is not null
     loop
         execute format('delete from aiq.%I e using gone g where e.chunk_id = g.id', v_tbl);
     end loop;
@@ -15770,7 +15869,7 @@ begin
     -- Idempotent, so the space existing is not a precondition the caller has
     -- to arrange separately.
     perform aiq.register_embedding_space(m.name);
-    v_tbl := 'emb_' || replace(m.name, '-', '_');
+    v_tbl := aiq.embedding_space_name(m.name);
 
     execute format($q$
         insert into aiq.%1$I (chunk_id, embedding)
@@ -15892,7 +15991,7 @@ begin
     -- mirror of the case the workflow compiler already refuses (a space with
     -- no endpoint, so it can be searched and not embedded into), and it
     -- deserves the same treatment: say which registration is missing.
-    v_tbl := 'emb_' || replace(m.name, '-', '_');
+    v_tbl := aiq.embedding_space_name(m.name);
     if to_regclass('aiq.' || quote_ident(v_tbl)) is null then
         raise exception
             'embedding model % is registered but its space does not exist -- '
@@ -16812,7 +16911,7 @@ begin
                     'is_default', m.is_default,
                     'callable', (m.endpoint is not null and p.provider is not null),
                     'space_exists', to_regclass('aiq.' ||
-                        quote_ident('emb_' || replace(m.name, '-', '_'))) is not null)
+                        quote_ident(aiq.embedding_space_name(m.name))) is not null)
                     order by m.name)
                 from aiq.embedding_models m
                 left join aiq.embedding_providers p on p.provider = m.provider), '[]'::jsonb),
@@ -18158,7 +18257,7 @@ begin
         -- It is idempotent (create table if not exists), so the space existing
         -- is not a precondition the pipeline has to arrange separately.
         perform aiq.register_embedding_space(v_model);
-        v_tbl    := 'emb_' || replace(v_model, '-', '_');
+        v_tbl    := aiq.embedding_space_name(v_model);
         v_models := v_models || v_model;
 
         execute format($q$
@@ -18240,7 +18339,7 @@ stable
 set search_path = pg_catalog, public
 as $$
 declare
-    v_tbl text := 'aiq.' || quote_ident('emb_' || replace(p_model, '-', '_'));
+    v_tbl text := 'aiq.' || quote_ident(aiq.embedding_space_name(p_model));
     v_hit boolean;
 begin
     if to_regclass(v_tbl) is null then
@@ -18327,7 +18426,7 @@ as $$
                 -- Registered and never created is a real, silent state: the
                 -- embed call succeeds and there is nowhere to land the vector.
                 'space_exists', to_regclass(
-                    'aiq.' || quote_ident('emb_' || replace(m.name, '-', '_'))) is not null)))
+                    'aiq.' || quote_ident(aiq.embedding_space_name(m.name))) is not null)))
               from aiq.embedding_models m), '{}'::jsonb),
         'entities', coalesce((
             select jsonb_object_agg(entity_type, jsonb_build_object(

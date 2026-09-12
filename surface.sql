@@ -190,6 +190,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 
 -- ---------- ai-query-layer: SCHEMA facets (schema.sql §13) --------------
 ('ai-query-layer','function','aiq.schema','text,text','§13: the mode answerable before you know anything'),
+('ai-query-layer','function','aiq.embedding_space_name','text','the one home of a model''s embedding-space table name -- reachable because the SECURITY INVOKER read path asks it as the caller'),
 ('ai-query-layer','function','aiq.render_facet','text,text','§13b: one place a facet is produced'),
 ('ai-query-layer','function','aiq.verify_example','text,text','§13a: examples are run, not trusted'),
 ('ai-query-layer','function','aiq.capture_schema_revisions','','§13b: the version is a hash, a change is a row'),

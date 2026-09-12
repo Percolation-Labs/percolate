@@ -541,7 +541,7 @@ begin
         -- It is idempotent (create table if not exists), so the space existing
         -- is not a precondition the pipeline has to arrange separately.
         perform aiq.register_embedding_space(v_model);
-        v_tbl    := 'emb_' || replace(v_model, '-', '_');
+        v_tbl    := aiq.embedding_space_name(v_model);
         v_models := v_models || v_model;
 
         execute format($q$
@@ -623,7 +623,7 @@ stable
 set search_path = pg_catalog, public
 as $$
 declare
-    v_tbl text := 'aiq.' || quote_ident('emb_' || replace(p_model, '-', '_'));
+    v_tbl text := 'aiq.' || quote_ident(aiq.embedding_space_name(p_model));
     v_hit boolean;
 begin
     if to_regclass(v_tbl) is null then
@@ -710,7 +710,7 @@ as $$
                 -- Registered and never created is a real, silent state: the
                 -- embed call succeeds and there is nowhere to land the vector.
                 'space_exists', to_regclass(
-                    'aiq.' || quote_ident('emb_' || replace(m.name, '-', '_'))) is not null)))
+                    'aiq.' || quote_ident(aiq.embedding_space_name(m.name))) is not null)))
               from aiq.embedding_models m), '{}'::jsonb),
         'entities', coalesce((
             select jsonb_object_agg(entity_type, jsonb_build_object(
