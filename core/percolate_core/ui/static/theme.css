@@ -42,6 +42,13 @@
   --sans:  "Source Sans 3", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --mono:  "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
 
+  /* THE MEASURE. One value, one place, for text meant to be read in lines.
+     In `ch` rather than `rem` because the thing being capped is a character
+     count, not a width: the serif lede and the sans note reach 68 characters
+     at different pixel widths, which is the point. Data, tables, code and
+     diagrams are not prose and keep the full width -- see `.page.wide`. */
+  --measure: 68ch;
+
   --rail: 234px;
   --rail-pad: 1.15rem;
 }
@@ -77,10 +84,29 @@
 }
 
 html { -webkit-text-size-adjust: 100%; }
+/* WRAPPING IS A DEFAULT WITH NAMED EXCEPTIONS.
+ *
+ * It used to be nineteen `overflow-wrap: anywhere` declarations, added one at
+ * a time to `.document-name`, `.suggestion-code`, `.stat .value`, `.page-head
+ * h1` and so on -- the signature of fixing an overflow after each report
+ * rather than choosing a default. Anything not on the list overflowed, and
+ * `.mono` -- the class carrying ids, cron expressions, model names like
+ * `anthropic:claude-sonnet-5` and dot paths, which is to say every string in
+ * the app with no break opportunity in it -- was not on the list.
+ *
+ * `anywhere` rather than `break-word` because the two differ exactly where it
+ * matters: `anywhere` lets a box's min-content shrink below its longest word,
+ * so a flex or grid child holding an id yields instead of forcing the row
+ * wider than the window. `break-word` breaks the line and still reserves the
+ * width.
+ *
+ * The exceptions are below, each with the reason it must stay whole: a token
+ * in an identifier column, and a control label. */
 body {
   background: var(--paper); color: var(--body);
   font-family: var(--sans); font-size: 15px; line-height: 1.6;
   -webkit-font-smoothing: antialiased;
+  overflow-wrap: anywhere;
   display: flex; min-height: 100vh;
 }
 
@@ -256,7 +282,19 @@ h1 { font-family: var(--serif); font-weight: 500; color: var(--ink);
      font-size: 2.1rem; line-height: 1.1; letter-spacing: -.015em; }
 h2 { font-family: var(--serif); font-weight: 500; color: var(--ink); font-size: 1.3rem; line-height: 1.2; }
 h3 { font-family: var(--sans); font-weight: 600; color: var(--ink); font-size: .95rem; }
-.lede { font-family: var(--serif); font-size: 1.08rem; line-height: 1.5; color: var(--ink); max-width: 46rem; }
+.lede { font: .94rem/1.5 var(--sans); color: var(--muted); }
+
+/* The measure, applied once to the classes that carry prose. Everything else
+   -- panels, grids, tables, code blocks, the graph -- takes the page width.
+   `.note` is on this list because notes hold the longest prose in the app:
+   the amber warnings and the "why there is no spec on this page" panels ran
+   to 178 characters on Queues at a 1470px viewport, measured 2026-09-12. */
+.lede, .document-help, .assistant-intro p, .suggestion-card p { max-width: var(--measure); }
+
+/* A heading should not end on a one-word line, and a paragraph should not end
+   on a short one. Both degrade to normal wrapping where unsupported. */
+h1, h2, h3, h4 { text-wrap: balance; }
+p, li, .lede, .note, .document-help { text-wrap: pretty; }
 .head-row { display: flex; align-items: flex-end; gap: 1rem; flex-wrap: wrap; }
 .head-row .spacer { margin-left: auto; }
 
@@ -550,6 +588,12 @@ pre.code, .code {
   border-left: 2px solid var(--accent); background: var(--accent-soft);
   padding: .6rem .8rem; border-radius: 0 4px 4px 0; font-size: .84rem; color: var(--ink);
 }
+/* A note is a banner and prose at the same time. The tinted box belongs to the
+   panel it sits in -- capping it left a half-filled band of panel beside every
+   error -- so the box keeps its width and the measure is held off by padding.
+   Percentage padding resolves against the containing block, which for a note
+   is the panel body, so the text column lands on the measure either way. */
+.note { padding-right: max(.8rem, calc(100% - var(--measure))); }
 .note.amber { border-color: var(--amber); background: var(--amber-soft); }
 .note.rose  { border-color: var(--rose);  background: var(--rose-soft); }
 .note strong { font-weight: 600; }
@@ -800,7 +844,7 @@ a.org-switch { color: inherit; text-decoration: none; }
 .file-icon { flex-shrink: 0; width: 36px; height: 43px; border: 1px solid var(--rule); border-radius: 5px;
   display: grid; place-items: center; color: var(--accent); background: var(--sunk); font: .62rem var(--mono); text-transform: uppercase; }
 .document-label { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: .3rem; }
-.document-name { font-size: .9rem; font-weight: 600; overflow-wrap: anywhere; line-height: 1.35; }
+.document-name { font-size: .9rem; font-weight: 600; line-height: 1.35; }
 .document-meta { color: var(--muted); font-size: .76rem; }
 .document-row .chip { flex-shrink: 0; font-size: .55rem; }
 .library-empty { padding: 2.5rem 1.5rem; color: var(--muted); line-height: 1.6; text-align: center; }
@@ -808,8 +852,8 @@ a.org-switch { color: inherit; text-decoration: none; }
   padding:1rem 1.2rem; border-bottom:1px solid var(--hair); }
 .document-panel-head h3 { font-size:.95rem; }
 .document-panel h4 { font-size: .8rem; color: var(--body); }
-.document-title { font-size:1rem; line-height:1.5; overflow-wrap:anywhere; }
-.document-id { font: .67rem var(--mono); color: var(--muted); overflow-wrap:anywhere; }
+.document-title { font-size:1rem; line-height:1.5; }
+.document-id { font: .67rem var(--mono); color: var(--muted); }
 .document-help { font-size:.84rem; line-height:1.6; color:var(--muted); }
 .document-facts { display:grid; grid-template-columns:auto 1fr; gap:.6rem 1rem; font-size:.8rem; }
 .document-facts dt { color:var(--muted); }
@@ -833,8 +877,7 @@ a.org-switch { color: inherit; text-decoration: none; }
 
 .control.mono { font-family: var(--mono); font-size: .8rem; }
 .files-page > [role="status"]:empty { display: none; }
-.query-cell { max-width:36rem; min-width:8rem; max-height:13rem; overflow:auto;
-  overflow-wrap:anywhere; line-height:1.55; }
+.query-cell { max-width:36rem; min-width:8rem; max-height:13rem; overflow:auto; line-height:1.55; }
 
 .query-results > p, .query-results > details { padding: .8rem 1rem; }
 
@@ -846,7 +889,7 @@ a.org-switch { color: inherit; text-decoration: none; }
 .query-workspace .form-stack { padding:1.5rem; }
 .assistant-intro { display:flex; flex-direction:column; gap:.45rem; }
 .assistant-intro h3 { font:500 1.35rem var(--serif); }
-.assistant-intro p, .suggestion-card p { font-size:.9rem; line-height:1.65; color:var(--body); max-width:70rem; }
+.assistant-intro p, .suggestion-card p { font-size:.9rem; line-height:1.65; color:var(--body); }
 .query-examples { display:flex; flex-wrap:wrap; gap:.5rem; }
 .example-prompt { border:1px solid var(--hair); border-radius:6px; background:var(--sunk); color:var(--muted);
   padding:.45rem .65rem; font:.76rem var(--sans); cursor:pointer; text-align:left; }
@@ -855,7 +898,7 @@ a.org-switch { color: inherit; text-decoration: none; }
 .suggestion-card { border:1px solid var(--rule); border-radius:8px; padding:1.25rem; display:flex; flex-direction:column; gap:1rem; }
 .suggestion-heading { display:flex; align-items:center; justify-content:space-between; gap:.8rem; flex-wrap:wrap; }
 .suggestion-heading h3 { font-size:.9rem; }
-.suggestion-code { white-space:pre-wrap; overflow-wrap:anywhere; max-height:22rem; overflow:auto; padding:1rem; background:var(--sunk); border-radius:6px; }
+.suggestion-code { white-space:pre-wrap; max-height:22rem; overflow:auto; padding:1rem; background:var(--sunk); border-radius:6px; }
 .suggestion-card h4 { font-size:.8rem; margin-bottom:.4rem; }
 .suggestion-card ul { padding-left:1.2rem; font-size:.85rem; line-height:1.65; color:var(--body); }
 .help-actions { background:var(--accent-soft); border:1px solid var(--rule); border-radius:10px; padding:1.5rem; display:flex; flex-direction:column; gap:1rem; }
@@ -885,10 +928,10 @@ a.org-switch { color: inherit; text-decoration: none; }
 .workflow-result h3 { font-size:.9rem; color:var(--accent); }
 .workflow-result h4 { margin:.9rem 0 .35rem; font-size:.82rem; }
 .workflow-result ul { padding-left:1.2rem; font-size:.88rem; line-height:1.7; }
-.result-sources .mono { font-size:.72rem; overflow-wrap:anywhere; }
+.result-sources .mono { font-size:.72rem; }
 @media (max-width:900px) { .workflow-hero, .workflow-editor-layout { grid-template-columns:minmax(0,1fr); } .workflow-hero { gap:1.5rem; padding:1.5rem; } }
 @media (max-width:650px) { .query-workspace .form-stack, .help-actions, .help-guide { padding:1rem; } }
-.result-source summary { cursor: pointer; overflow-wrap: anywhere; }
+.result-source summary { cursor: pointer; }
 .result-source[open] { padding: .6rem 0; }
 .result-source .md { padding-top: .6rem; }
 
@@ -896,7 +939,7 @@ a.org-switch { color: inherit; text-decoration: none; }
 .sources-layout { display:grid; grid-template-columns:minmax(220px, 300px) minmax(0,1fr); gap:1.5rem; align-items:start; }
 .source-library, .source-editor, .source-list { display:flex; flex-direction:column; gap:1rem; min-width:0; }
 .source-library > .form-actions { justify-content:space-between; }
-.source-card { display:flex; flex-direction:column; gap:.5rem; text-align:left; border:1px solid var(--rule); border-radius:10px; background:var(--card); padding:1rem; color:var(--body); cursor:pointer; font:inherit; overflow-wrap:anywhere; }
+.source-card { display:flex; flex-direction:column; gap:.5rem; text-align:left; border:1px solid var(--rule); border-radius:10px; background:var(--card); padding:1rem; color:var(--body); cursor:pointer; font:inherit; }
 .source-card:hover, .source-card:focus-visible { border-color:var(--accent); background:var(--accent-soft); }
 .source-card strong { color:var(--ink); font-weight:600; }
 .source-card small { color:var(--muted); }
@@ -921,8 +964,8 @@ a.org-switch { color: inherit; text-decoration: none; }
 .api-receipt-counts { display: flex; flex-wrap: wrap; gap: 16px; margin: 12px 0; }
 .api-receipt-counts span { padding: 10px 14px; border: 1px solid var(--rule); border-radius: 8px; }
 
-.stat .value .stat-name { display: block; font-family: var(--sans); font-size: 1rem; line-height: 1.5; overflow-wrap: anywhere; }
-.stat .value .stat-reference { display: block; font-family: var(--mono); font-size: .75rem; line-height: 1.5; overflow-wrap: anywhere; }
+.stat .value .stat-name { display: block; font-family: var(--sans); font-size: 1rem; line-height: 1.5; }
+.stat .value .stat-reference { display: block; font-family: var(--mono); font-size: .75rem; line-height: 1.5; }
 
 /* Workbench layout contract: one vocabulary for browse, edit and inspect. */
 :root {
@@ -932,9 +975,8 @@ a.org-switch { color: inherit; text-decoration: none; }
 }
 .page { padding: var(--space-4) var(--space-6) var(--space-8); gap: var(--space-4); }
 .page-head { min-width: 0; }
-.page-head h1 { font-size: 1.75rem; line-height: 1.2; overflow-wrap: anywhere; }
+.page-head h1 { font-size: 1.75rem; line-height: 1.2; }
 .page-head .kicker { font-size: .62rem; letter-spacing: .08em; }
-.page-head .lede { font: .94rem/1.5 var(--sans); color: var(--muted); max-width: 76ch; }
 .head-row { align-items: center; }
 .head-row > div:first-child { min-width: 0; }
 .btn { min-height: var(--control-height); padding: .45rem .75rem; font: 500 .83rem/1.2 var(--sans);
@@ -954,13 +996,19 @@ textarea.control { resize: vertical; line-height: 1.55; }
 .field { gap: .35rem; }
 .field > span:first-child, .field > label { font-size: .82rem; font-weight: 600; }
 .data th, .data td { padding: .6rem .75rem; }
-.data td { overflow-wrap: anywhere; }
-/* Identifier columns hold single unbreakable tokens -- `operations_brief`,
-   `anthropic:claude-sonnet-5`. `anywhere` breaks them mid-token the moment the
-   column is squeezed, which is how a name became "operations_ brief". They
-   take their natural width instead, and the table's own container scrolls when
-   the sum does not fit, which §3.4 of the design language allows for tables. */
-.data td.ident, .data th:first-child { white-space: nowrap; }
+/* THE EXCEPTION TO THE WRAPPING DEFAULT. Identifier columns hold single
+   unbreakable tokens -- `operations_brief`, `anthropic:claude-sonnet-5`.
+   `anywhere` breaks them mid-token the moment the column is squeezed, which is
+   how a name became "operations_ brief". They take their natural width
+   instead, and the table's own container scrolls when the sum does not fit,
+   which §3.4 of the design language allows for tables.
+   `.mono` is on this list at every width. It used to be here only below 760px,
+   so the same cell broke mid-id on a desktop and refused to on a phone -- the
+   narrow rule was right and the wide one was the default leaking in.
+   The first column is on it for the same reason its header already was: every
+   `.data` table in the app puts the thing's name there, and a name is an
+   identifier. At 390px `ask_uploads` was setting as "ask_upload / s". */
+.data td.ident, .data td.mono, .data th:first-child, .data td:first-child { white-space: nowrap; }
 .data td.ident .sub { display: block; }
 
 /* A row that opens its object. The name is a real button so the row is
@@ -1000,7 +1048,7 @@ textarea.control { resize: vertical; line-height: 1.55; }
 .data td.pill-row { display: table-cell; }
 .data td.pill-row > * { margin: .15rem; }
 .data td > .btn + .btn { margin-left: .25rem; }
-.data td .code { white-space: pre-wrap; overflow-wrap: anywhere; }
+.data td .code { white-space: pre-wrap; }
 .library-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: .75rem; padding: .75rem 1rem; }
 .library-toolbar > input { flex: 1; min-width: 10rem; }
 .library-toolbar > h3 { flex: 1; }
@@ -1020,7 +1068,7 @@ textarea.control { resize: vertical; line-height: 1.55; }
 .workspace-object { position: sticky; top: var(--topbar-height); z-index: 12; display: flex; gap: .75rem;
   align-items: center; flex-wrap: wrap; padding: .6rem .75rem; border: 1px solid var(--rule);
   background: var(--card); border-radius: var(--surface-radius); }
-.workspace-object h2 { flex: 1; min-width: 8rem; font: 600 1rem/1.35 var(--sans); overflow-wrap: anywhere; }
+.workspace-object h2 { flex: 1; min-width: 8rem; font: 600 1rem/1.35 var(--sans); }
 .workspace, .split-workspace { min-width: 0; }
 .workspace { background: var(--card); border: 1px solid var(--rule); border-radius: var(--surface-radius); }
 .workspace-tabs, .query-tabs { display: flex; flex-wrap: wrap; gap: .25rem; padding: .35rem .6rem 0;
@@ -1070,7 +1118,7 @@ textarea.control { resize: vertical; line-height: 1.55; }
 .workspace-pane .form-stack > details:not(.contextual-help) { border-top: 1px solid var(--hair); padding-top: .75rem; }
 .workspace-pane details > summary { cursor: pointer; font-size: .85rem; }
 .workspace-pane details > .form-stack { padding-top: .75rem; }
-pre.package-code { max-height: 65vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+pre.package-code { max-height: 65vh; overflow: auto; white-space: pre-wrap; }
 .workspace-section-head { padding: .8rem 1rem; border-bottom: 1px solid var(--rule); }
 .workspace-section-head h2 { font: 600 .95rem var(--sans); }
 .split-workspace { display: flex; flex-direction: column; gap: .75rem; }
@@ -1095,7 +1143,7 @@ pre.package-code { max-height: 65vh; overflow: auto; white-space: pre-wrap; over
 .collection-workspace[data-expanded="true"] textarea[aria-label="Document text"] { min-height: 42vh; }
 .workflow-hero { gap: 1.5rem; padding: 1.25rem; }
 .workflow-hero h2 { font-size: 1.6rem; }
-.help-guide { max-width: 76ch; }
+.help-guide { max-width: var(--measure); }
 .run-page > .grid.g4 .stat .value { font-size: 1.25rem; line-height: 1.3; }
 .run-page > .grid.g4 .stat { padding: .65rem .85rem; }
 .query-workspace, .panel:has(.workspace-actions), .body.tight:has(.workspace-actions) { overflow: visible; }
@@ -1127,11 +1175,9 @@ pre.package-code { max-height: 65vh; overflow: auto; white-space: pre-wrap; over
   .topbar { padding: .6rem .75rem; gap: .5rem; min-height: var(--topbar-height); }
   .topbar .crumbs { font-size: .6rem; letter-spacing: 0; }
   .topbar .connection-label { display: none; }
-  .page-head .kicker { overflow-wrap: anywhere; }
   .grid.g3, .grid.g4 { grid-template-columns: minmax(0,1fr); }
   .collection-library .data { min-width: 38rem; }
   .data th, .data td { min-width: 6rem; }
-  .data td.mono { white-space: nowrap; }
   .head-row { gap: .5rem; }
   .head-row > .form-actions { flex-basis: 100%; }
   .source-fields, .starter-fields { grid-template-columns: minmax(0,1fr); }
@@ -1156,12 +1202,11 @@ pre.package-code { max-height: 65vh; overflow: auto; white-space: pre-wrap; over
 .component-option { display:flex; align-items:flex-start; gap:12px; padding:10px 12px; border-radius:8px; cursor:pointer; }
 .component-option:hover { background:var(--sunk); }
 .component-option input { flex:none; margin-top:4px; }
-.component-option > span { min-width:0; overflow-wrap:anywhere; }
+.component-option > span { min-width:0; }
 .composition-flow { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; list-style:none; padding:0; counter-reset:flow; }
 .composition-flow li { counter-increment:flow; display:flex; flex-direction:column; gap:6px; padding:16px; border:1px solid var(--rule); border-radius:8px; background:var(--card); }
 .composition-flow li strong:before { content:counter(flow) '. '; color:var(--muted); }
 .composition-components { display:grid; gap:12px; }
 .composition-component { padding:12px; border:1px solid var(--rule); border-radius:8px; }
-.composition-code { max-height:28rem; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; font-size:.8rem; }
-.result-sources a { overflow-wrap:anywhere; }
+.composition-code { max-height:28rem; overflow:auto; white-space:pre-wrap; font-size:.8rem; }
 @media (max-width:760px) { .composition-flow { grid-template-columns:1fr; } .component-catalogue { max-height:15rem; } }
