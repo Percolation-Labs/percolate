@@ -231,6 +231,77 @@ select 'trg '||n.nspname||'.'||c.relname||'.'||t.tgname
   join pg_proc p on p.oid = t.tgfoid
  where not t.tgisinternal
    and n.nspname in $S
+union all
+-- THE VOCABULARY ROWS, added because everything above describes OBJECTS and a
+-- seed row is not one (REM-68). Extension-owned vocabulary was inserted with
+-- 'on conflict do nothing', so a corrected is_terminal, inverse_label or table
+-- kind reached a fresh install and never reached a database that upgraded --
+-- and this script said CONVERGES, because it compared the table and not what
+-- was in it. A check blind to the difference cannot report the difference.
+--
+-- WHICH TABLES, DERIVED TWICE OVER RATHER THAN LISTED, because a list here
+-- would be a third copy of a decision the extension already records.
+--
+--   * pg_extension.extconfig is exactly the set specs/contract/schema.sql §4
+--     marks as the DEPLOYMENT's rows, one pg_extension_config_dump() call per
+--     table. Not being in it is what makes a table's rows the extension's.
+--   * percolate.table_kinds.kind = 'vocabulary' is the extension's own
+--     classification of what a table HOLDS -- twenty of them say it.
+--
+-- Both are needed. extconfig alone pulls in content.channels and
+-- workflow.definitions, which are entity tables keyed by uuidv7() with
+-- created_at defaults: their seeded rows can never hash equal between two
+-- databases created at different moments, so they would make this section
+-- permanently red and teach everyone to ignore it. A vocabulary is keyed by
+-- what it means -- a state name, a relation, a provider -- so the same
+-- vocabulary IS the same bytes, which is what makes the comparison sound.
+--
+-- Hashed per table rather than emitted per row: the diff has to NAME the table
+-- whose contents moved, and a vocabulary is small enough that the hash is the
+-- whole answer.
+--
+-- EVERY COLUMN EXCEPT THE CLOCK. registered_at timestamptz default now() and
+-- its siblings record WHEN a row was written, and the two databases here are
+-- written seconds apart by construction -- so comparing them would make this
+-- section permanently red over a difference that is not a difference. Measured
+-- rather than assumed: with select * all five vocabularies differed, and the
+-- whole of it was one trailing timestamp per row.
+--
+-- The columns are chosen by their DEFAULT rather than by name or type, so a
+-- vocabulary that genuinely carries a meaningful date is still compared; only
+-- one defaulted to a clock read is dropped. A default is a short mechanical
+-- expression, which is what makes matching on its text sound here.
+select 'voc '||tbl||' '||md5(x::text)
+  from (select n.nspname||'.'||c.relname as tbl
+          from pg_depend d
+          join pg_class c on c.oid = d.objid
+          join pg_namespace n on n.oid = c.relnamespace
+          join percolate.table_kinds k
+            on k.schema_name = n.nspname and k.table_name = c.relname
+         where d.classid = 'pg_class'::regclass and d.deptype = 'e'
+           and c.relkind = 'r'
+           and n.nspname in $S
+           and k.kind = 'vocabulary'
+           and not exists (select 1 from pg_extension e
+                            where c.oid = any(e.extconfig))) t,
+       lateral (select string_agg(quote_ident(a.attname), ', ' order by a.attnum) as cols
+                  from pg_attribute a
+                  left join pg_attrdef ad
+                         on ad.adrelid = a.attrelid and ad.adnum = a.attnum
+                 where a.attrelid = t.tbl::regclass
+                   and a.attnum > 0 and not a.attisdropped
+                   and coalesce(pg_get_expr(ad.adbin, ad.adrelid), '')
+                       !~* 'now[(][)]|current_timestamp|clock_timestamp') cc,
+       -- ORDERED BY EVERY COMPARED COLUMN, not by the first one. ORDER BY 1
+       -- is ambiguous the moment two rows share it -- percolate.table_kinds is
+       -- keyed (schema_name, table_name), so ordering by schema_name alone
+       -- leaves the row order to the heap, and a fresh install and an upgraded
+       -- one hand it back differently. That reported percolate.table_kinds as
+       -- DIVERGED over two byte-identical tables, which is a check crying wolf
+       -- rather than a defect.
+       lateral query_to_xml(format('select %s from %s order by %s',
+                                   cc.cols, tbl, cc.cols),
+                            true, true, '') as x
 order by 1;"
 }
 

@@ -544,6 +544,15 @@ create table if not exists workflow.lifecycle_states (
     note        text not null
 );
 
+-- `do update`, NOT `do nothing`, because these rows are the EXTENSION's
+-- (REM-68). The schema is replayed on every upgrade, so `do nothing` means a
+-- corrected value reaches fresh installs only and every existing database keeps
+-- the old one forever -- silently, because dev/upgrade-converges.sh compares
+-- OBJECTS and cannot see a row. Whose rows these are is not a judgement call:
+-- specs/contract/schema.sql §4's `deployment_tables` is the list, and this
+-- table is not on it. Tables that ARE on it -- rbac.role_permissions, roles --
+-- keep `do nothing`, because a deployment may edit them and an update would
+-- overwrite somebody's change on every upgrade.
 insert into workflow.lifecycle_states (state, is_terminal, is_success, note) values
     ('pending',          false, false, 'created, not yet eligible to run'),
     ('ready',            false, false, 'eligible: dependencies satisfied, awaiting a claim'),
@@ -553,7 +562,10 @@ insert into workflow.lifecycle_states (state, is_terminal, is_success, note) val
     ('failed',           true,  false, 'finished, and did not'),
     ('cancelled',        true,  false, 'stopped deliberately before finishing'),
     ('quota_exceeded',   true,  false, 'stopped because a budget ran out, not because it broke')
-on conflict (state) do nothing;
+on conflict (state) do update
+    set is_terminal = excluded.is_terminal,
+        is_success  = excluded.is_success,
+        note        = excluded.note;
 
 grant select on workflow.lifecycle_states to authenticated, api_viewer;
 
@@ -14778,13 +14790,26 @@ create table if not exists aiq.embedding_providers (
     notes            text
 );
 
+-- `do update`, NOT `do nothing`, because these rows are the EXTENSION's
+-- (REM-68). The schema is replayed on every upgrade, so `do nothing` means a
+-- corrected value reaches fresh installs only and every existing database keeps
+-- the old one forever -- silently, because dev/upgrade-converges.sh compares
+-- OBJECTS and cannot see a row. Whose rows these are is not a judgement call:
+-- specs/contract/schema.sql §4's `deployment_tables` is the list, and this
+-- table is not on it. Tables that ARE on it -- rbac.role_permissions, roles --
+-- keep `do nothing`, because a deployment may edit them and an update would
+-- overwrite somebody's change on every upgrade.
 insert into aiq.embedding_providers (provider, request_template, response_path, notes) values
     ('ollama', '{"model": "{{model}}", "prompt": "{{text}}"}'::jsonb, 'embedding',
      'POST /api/embeddings -- one vector, at the top level under "embedding".'),
     ('openai', '{"model": "{{model}}", "input": "{{text}}"}'::jsonb, 'data.0.embedding',
      'POST /v1/embeddings -- a list, because the API embeds a batch; a single '
      'text still comes back as data[0]. Needs credential_ref on the model row.')
-on conflict (provider) do nothing;
+on conflict (provider) do update
+    set request_template = excluded.request_template,
+        response_path    = excluded.response_path,
+        method           = excluded.method,
+        notes            = excluded.notes;
 
 -- Each registered model gets its own storage table + HNSW index, generated
 -- from the registry so the dimension and operator class can never drift from
@@ -20329,10 +20354,26 @@ select aiq.register_entity_table(
     $$n.status = 'ready'$$
 );
 
+-- `do update`, NOT `do nothing`, because these rows are the EXTENSION's
+-- (REM-68). The schema is replayed on every upgrade, so `do nothing` means a
+-- corrected value reaches fresh installs only and every existing database keeps
+-- the old one forever -- silently, because dev/upgrade-converges.sh compares
+-- OBJECTS and cannot see a row. Whose rows these are is not a judgement call:
+-- specs/contract/schema.sql §4's `deployment_tables` is the list, and this
+-- table is not on it. Tables that ARE on it -- rbac.role_permissions, roles --
+-- keep `do nothing`, because a deployment may edit them and an update would
+-- overwrite somebody's change on every upgrade.
+--
+-- Only the two rows named here are the extension's. A package or an application
+-- that registers its own relation type is a different statement and is
+-- untouched by this one, which is what makes `do update` safe on a table whose
+-- rows have more than one author.
 insert into aiq.relation_types (src_type, relation, dst_type, inverse_label, description) values
   ('document','derived_from','document','source_of','a document produced from another'),
   ('document','supersedes','document','superseded_by','a newer revision of the same thing')
-on conflict do nothing;
+on conflict (src_type, relation, dst_type) do update
+    set inverse_label = excluded.inverse_label,
+        description   = excluded.description;
 
 -- ------------------------------------------------------------
 -- 3. Tenancy.
@@ -27573,7 +27614,20 @@ from percolate.table_kind_proposal
 -- for whoever owns them. A guess written here would be indistinguishable
 -- from a decision, which is the failure the view was built to avoid.
 where proposed_kind is not null
-on conflict (schema_name, table_name) do nothing;
+-- `do update` for the reason percolate.null_means twenty lines above already
+-- does it (REM-68): the schema is replayed on every upgrade, so `do nothing`
+-- means a re-reviewed kind reaches fresh installs only and every existing
+-- database keeps the old one forever, invisibly -- dev/upgrade-converges.sh
+-- compares objects, not rows. percolate.table_kinds is not on
+-- specs/contract/schema.sql §4's `deployment_tables`, so these rows are the
+-- extension's to correct.
+--
+-- Safe on a table whose rows have more than one author because the SELECT is
+-- already scoped: percolate.table_kind_proposal reads only
+-- percolate.extension_schemas(), so an application's own declaration is not a
+-- row this statement can name.
+on conflict (schema_name, table_name) do update
+    set kind = excluded.kind, why = excluded.why;
 
 -- The abstentions, declared one at a time, which is what the view asks for:
 -- "Read it, disagree with it, then write the row."
@@ -27587,7 +27641,9 @@ on conflict (schema_name, table_name) do nothing;
 insert into percolate.table_kinds (schema_name, table_name, kind, why) values
  ('content','source_state','natural',
   'a sidecar keyed by content.channels(id); same shape as the aiq.emb_* tables')
-on conflict (schema_name, table_name) do nothing;
+-- `do update`, same reason as the statement above, and here it names one row.
+on conflict (schema_name, table_name) do update
+    set kind = excluded.kind, why = excluded.why;
 
 -- ------------------------------------------------------------
 -- 5. ENFORCE THE KEY DEFAULT, on upgrades as well as fresh installs.

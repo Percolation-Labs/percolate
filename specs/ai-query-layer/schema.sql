@@ -2554,13 +2554,26 @@ create table if not exists aiq.embedding_providers (
     notes            text
 );
 
+-- `do update`, NOT `do nothing`, because these rows are the EXTENSION's
+-- (REM-68). The schema is replayed on every upgrade, so `do nothing` means a
+-- corrected value reaches fresh installs only and every existing database keeps
+-- the old one forever -- silently, because dev/upgrade-converges.sh compares
+-- OBJECTS and cannot see a row. Whose rows these are is not a judgement call:
+-- specs/contract/schema.sql §4's `deployment_tables` is the list, and this
+-- table is not on it. Tables that ARE on it -- rbac.role_permissions, roles --
+-- keep `do nothing`, because a deployment may edit them and an update would
+-- overwrite somebody's change on every upgrade.
 insert into aiq.embedding_providers (provider, request_template, response_path, notes) values
     ('ollama', '{"model": "{{model}}", "prompt": "{{text}}"}'::jsonb, 'embedding',
      'POST /api/embeddings -- one vector, at the top level under "embedding".'),
     ('openai', '{"model": "{{model}}", "input": "{{text}}"}'::jsonb, 'data.0.embedding',
      'POST /v1/embeddings -- a list, because the API embeds a batch; a single '
      'text still comes back as data[0]. Needs credential_ref on the model row.')
-on conflict (provider) do nothing;
+on conflict (provider) do update
+    set request_template = excluded.request_template,
+        response_path    = excluded.response_path,
+        method           = excluded.method,
+        notes            = excluded.notes;
 
 -- Each registered model gets its own storage table + HNSW index, generated
 -- from the registry so the dimension and operator class can never drift from

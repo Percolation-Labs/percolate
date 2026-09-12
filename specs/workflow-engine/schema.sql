@@ -100,6 +100,15 @@ create table if not exists workflow.lifecycle_states (
     note        text not null
 );
 
+-- `do update`, NOT `do nothing`, because these rows are the EXTENSION's
+-- (REM-68). The schema is replayed on every upgrade, so `do nothing` means a
+-- corrected value reaches fresh installs only and every existing database keeps
+-- the old one forever -- silently, because dev/upgrade-converges.sh compares
+-- OBJECTS and cannot see a row. Whose rows these are is not a judgement call:
+-- specs/contract/schema.sql §4's `deployment_tables` is the list, and this
+-- table is not on it. Tables that ARE on it -- rbac.role_permissions, roles --
+-- keep `do nothing`, because a deployment may edit them and an update would
+-- overwrite somebody's change on every upgrade.
 insert into workflow.lifecycle_states (state, is_terminal, is_success, note) values
     ('pending',          false, false, 'created, not yet eligible to run'),
     ('ready',            false, false, 'eligible: dependencies satisfied, awaiting a claim'),
@@ -109,7 +118,10 @@ insert into workflow.lifecycle_states (state, is_terminal, is_success, note) val
     ('failed',           true,  false, 'finished, and did not'),
     ('cancelled',        true,  false, 'stopped deliberately before finishing'),
     ('quota_exceeded',   true,  false, 'stopped because a budget ran out, not because it broke')
-on conflict (state) do nothing;
+on conflict (state) do update
+    set is_terminal = excluded.is_terminal,
+        is_success  = excluded.is_success,
+        note        = excluded.note;
 
 grant select on workflow.lifecycle_states to authenticated, api_viewer;
 
