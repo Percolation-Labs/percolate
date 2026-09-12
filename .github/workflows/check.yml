@@ -106,23 +106,83 @@ jobs:
           key: parser-package-${{ hashFiles('dev/Dockerfile.pgrx-builder', 'extension/percolate_parser/Cargo.lock') }}
           restore-keys: parser-package-
 
-      # No restore-keys, for parser-tests.yml's reason: an image restored under
-      # a changed Dockerfile is the wrong toolchain, and it would surface as a
-      # red test rather than as a cache miss.
+      # THE SAME BASE THIS TOOLCHAIN IS BUILT ON, RESOLVED. Copied from
+      # parser-tests.yml deliberately, and the gate `dev/check.sh` runs
+      # ("Two workflows build one toolchain, under one key") keeps the two in
+      # step -- because sharing a cache key is only safe while the two builds
+      # are the same build.
       #
-      # AND Cargo.toml IS IN THE KEY, because the pgrx pin moved into it. The
-      # toolchain image is now a function of the Dockerfile AND the version
-      # passed into it; keyed on the Dockerfile alone, bumping pgrx in the crate
-      # would be a cache HIT on an image carrying the previous cargo-pgrx --
-      # which compiles, and produces a .so the crate does not match. That is the
-      # exact failure the comment above is about, arriving through the change
-      # that was meant to give the pin one home.
+      # The tag is read out of the Dockerfile rather than written here twice, so
+      # bumping the base stays a one-line edit in one file.
+      - name: Resolve the base image the toolchain is built on
+        id: base
+        run: |
+          TAG=$(sed -n 's/^FROM \([^ ]*\).*/\1/p' dev/Dockerfile.pgrx-builder | head -1)
+          [ -n "$TAG" ] || { echo "::error::no FROM line in dev/Dockerfile.pgrx-builder"; exit 1; }
+          # The INDEX digest, which moves when any platform's image moves.
+          DIGEST=$(docker buildx imagetools inspect "$TAG" --format '{{json .Manifest.Digest}}' | tr -d '"')
+          case "$DIGEST" in
+            sha256:*) ;;
+            *) echo "::error::could not resolve a digest for $TAG (got '$DIGEST')"; exit 1 ;;
+          esac
+          echo "::notice::toolchain base $TAG is $DIGEST"
+          echo "digest=${DIGEST#sha256:}" >> "$GITHUB_OUTPUT"
+
+      # WHY THIS KEY IS CHARACTER-FOR-CHARACTER parser-tests.yml's, AND WHY THE
+      # TRAILING DIGEST IS LOAD-BEARING FOR A REASON THAT IS NOT THE BASE IMAGE.
+      #
+      # THE COMMENT THIS REPLACES WAS FALSE, and it is the reason REM-142 exists.
+      # It said: "No restore-keys, for parser-tests.yml's reason: an image
+      # restored under a changed Dockerfile is the wrong toolchain." Omitting
+      # `restore-keys` prevents only ADDITIONAL prefixes. **The primary key is a
+      # restore prefix in its own right**, so this cache took a loose hit on
+      # every run of this workflow -- and specifically on parser-tests.yml's
+      # entry, because this key used to STOP where that one continued:
+      #
+      #     check.yml        pgrx-builder-image-<hash>              (ended here)
+      #     parser-tests.yml pgrx-builder-image-<hash>-<digest>
+      #
+      # Logged every run as `Cache hit for restore-key:
+      # pgrx-builder-image-4f5f0998...-c2f9db76...`, ~775 MB restored. And
+      # because `cache-hit` is set only on an EXACT match it read `false`, so
+      # BOTH guards below fired the wrong way: the build ran and rebuilt an
+      # image already on disk, and the load was skipped so the 813 MB was never
+      # used. The restored tarball being ignored is the only reason a toolchain
+      # from another workflow's base digest was never actually loaded -- one bug
+      # masking the other, which is why namespacing alone would have been a
+      # regression rather than a fix (an exact hit makes the load start
+      # happening, and without the digest here it would load a stale toolchain).
+      #
+      # SO THE FIX IS STRUCTURAL RATHER THAN NOMINAL. Both keys now end with the
+      # same segment, so neither can be a PROPER prefix of the other: any
+      # divergence in the hash makes the two differ mid-string instead of one
+      # extending the other. A namespace prefix would have been a convention
+      # somebody could bump; this is arithmetic.
+      #
+      # THE KEYS ARE NOW IDENTICAL, AND THAT IS THE POINT, not a collision.
+      # These two workflows build the same image by the same command -- same
+      # Dockerfile, same PGRX_VERSION read from the same Cargo.toml by the same
+      # sed, same `docker save` to the same path -- so one entry legitimately
+      # serves both, and an exact hit here means the toolchain genuinely
+      # matches. Two runs no longer build it twice, which on a runner that
+      # arrives 88% full (REM-140) is the same kind of saving as the reclaim.
+      #
+      # WHICH MAKES THE SHARING A PROMISE THAT HAS TO BE KEPT: it is sound only
+      # while the two builds stay the same build. That is not a thing to
+      # remember, so dev/check.sh asserts it -- if either key or either build
+      # command drifts, the tree gate fails and names both files.
+      #
+      # AND Cargo.toml IS IN THE HASH, because the pgrx pin moved into it. The
+      # toolchain image is a function of the Dockerfile AND the version passed
+      # into it; keyed on the Dockerfile alone, bumping pgrx in the crate would
+      # be a cache HIT on an image carrying the previous cargo-pgrx -- which
+      # compiles, and produces a .so the crate does not match.
       - name: Cache the pgrx toolchain image
         id: toolchain
         uses: actions/cache@v6
         with:
           path: /tmp/pgrx-builder.tar
-          key: pgrx-builder-image-${{ hashFiles('dev/Dockerfile.pgrx-builder', 'extension/percolate_parser/Cargo.toml') }}
+          key: pgrx-builder-image-${{ hashFiles('dev/Dockerfile.pgrx-builder', 'extension/percolate_parser/Cargo.toml') }}-${{ steps.base.outputs.digest }}
 
       # BOTH NUMBERS FROM THE CRATE THAT DECLARES THEM, once, so no step below
       # spells either. `Cargo.toml` says which pgrx this builds against and
