@@ -2351,9 +2351,16 @@ create or replace view agentic.sessions_api as
 -- every upgrading database hits. Found by dev/upgrade-converges.sh, which is
 -- the only check that applies this file to a database that already has the
 -- old view.
-    select id, owner_id, agui_thread_id, title, created_at,
-           org_id, visibility
-      from agentic.sessions;
+    select s.id, s.owner_id, s.agui_thread_id, s.title, s.created_at,
+           s.org_id, s.visibility,
+           -- The Chat list fetched the messages and the runs of every session
+           -- to show how much was in each one. Counted here, where the rows
+           -- are, rather than over the wire. Appended for the reason the
+           -- comment above gives.
+           (select count(*) from agentic.messages m where m.session_id = s.id) as message_count,
+           (select count(*) from agentic.runs r where r.session_id = s.id) as run_count,
+           (select max(m.created_at) from agentic.messages m where m.session_id = s.id) as last_message_at
+      from agentic.sessions s;
 create or replace view agentic.runs_api as
     select id, session_id, agent_id, owner_id, parent_run_id,
            delegated_by_message_id, trigger_kind, workflow_task_id,
