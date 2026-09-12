@@ -217,3 +217,108 @@ export async function count(schema, view, q = "") {
                                   { schema, count: true });
   return total;
 }
+
+/* ── The suggestion contract, once ─────────────────────────
+ *
+ * `specs/agentic/browser-ui.md` §7 says what an assistant owes its caller, and
+ * its own audit of 2026-09-10 recorded that the six shipping assistants did not
+ * all pay it. Each had written the loop again: build the `/chat` body, parse the
+ * content, validate, append the error, try once more. Five of six retried; the
+ * query assistant threw on the first malformed response. Three carried a
+ * `needs_clarification` field; three signalled a question by returning an empty
+ * string in the field that would have carried the answer -- so a question and a
+ * failure arrived as the same value and the screen rendered one as the other.
+ *
+ * Those were recorded as table rows rather than fixed, which is the right call
+ * for an audit and the wrong state to leave a contract in: a rule that six files
+ * implement six ways is a rule the seventh will implement a seventh way. This is
+ * the one implementation.
+ *
+ * WHAT IT ENFORCES, beyond removing the duplication:
+ *
+ *   - A malformed or invalid response is corrected ONCE, with the validation
+ *     error, and a second failure is a failed suggestion. Never a partial one:
+ *     §7 is explicit that a half-filled form is indistinguishable from one
+ *     somebody meant.
+ *   - A response must answer or ask. `needs_clarification` is its own field, and
+ *     a response that fills neither it nor the answer is rejected as off-schema
+ *     -- which is what it is. This is the row the audit could not tick.
+ *   - A refusal is not retried. A 4xx from the runtime is the same 4xx on the
+ *     second attempt, and asking again only costs the operator time.
+ *
+ * The prompt, the schema and the meaning of "answered" stay with each assistant,
+ * because those are what the assistants actually differ in.
+ */
+export const HELP_AGENT = "percolate_help";
+
+/** A conversation to hold this suggestion, so the operator can go and read it. */
+export async function createChatSession(title) {
+  const { rows } = await rpc("agentic", "create_session", { p_title: title });
+  const id = typeof rows === "string" ? rows : rows?.id;
+  if (typeof id !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+    throw new Error("The workspace did not return a conversation ID. Try creating a session in Chat.");
+  }
+  return id;
+}
+
+/** One model turn under the §7 contract. Returns the parsed, validated answer.
+ *
+ * `prompt` may be a function of the correction text, for an assistant that has
+ * to rebuild its prompt around what it learned from the rejected draft --
+ * workflow design discovers SQL columns while validating and has to put them in
+ * front of the model on the second attempt. `validate` may be async for the same
+ * reason: it compiles the proposed workflow before showing it.
+ * `answered` says what counts as an answer for this assistant -- a query string,
+ * a settings object, a cron expression -- because only the assistant knows. It
+ * is the ONE place the answer-or-question rule is enforced: an assistant that
+ * also checked it in its own parser would be the seventh copy of a rule this
+ * exists to have one of.
+ */
+export async function suggest({ name, schema, session, prompt, validate, answered, extra = {},
+                                strict = true, attempts = 2, onStatus = () => {}, signal }) {
+  if (!config().core) throw Error("Connect an agent runtime in Settings to use AI suggestions.");
+  let correction = "";
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (attempt) onStatus("Correcting the assistant's draft…");
+    const content = typeof prompt === "function" ? prompt(correction) : prompt + correction;
+    const res = await authFetch(config().core.replace(/\/$/, "") + "/chat", {
+      method: "POST", headers: { "Content-Type": "application/json" }, signal,
+      /* `extra` is for what an assistant genuinely needs on the wire and the
+         others do not -- workflow design sends `tool_choice: "none"`, because a
+         composition turn must propose and not call anything. It is not a hole
+         for re-diverging: anything two assistants pass belongs above. */
+      body: JSON.stringify({ model: HELP_AGENT, session_id: session, stream: false, ...extra,
+        messages: [{ role: "user", content }],
+        response_format: { type: "json_schema", json_schema: { name, strict, schema } } }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const detail = typeof data.detail === "string" ? data.detail
+        : Array.isArray(data.detail) ? data.detail.map((d) => d.msg).join("; ")
+        : data.error?.message;
+      throw Error(detail || `The assistant could not complete this request (${res.status}). Check its run in Chat.`);
+    }
+    let value;
+    try {
+      value = JSON.parse(data.choices?.[0]?.message?.content);
+      if (!value || typeof value !== "object") throw Error("the response was not an object");
+      const question = typeof value.needs_clarification === "string"
+        ? value.needs_clarification.trim() : "";
+      if (!question && !(answered ? answered(value) : true)) {
+        throw Error("it returned neither an answer nor a question in needs_clarification");
+      }
+      // `validate` may return the assistant's own richer shape -- a parsed
+      // schema, a settings object -- so it is not parsed a second time by the
+      // caller. Returning nothing means "the raw value is the answer".
+      return (!question && validate ? await validate(value) : null) ?? value;
+    } catch (e) {
+      if (attempt + 1 >= attempts) {
+        throw Error(`The assistant did not return a usable suggestion: ${e.message}. `
+          + "You can inspect its response in Chat.");
+      }
+      correction = `\nYour previous answer was rejected: ${e.message}. `
+        + `Return corrected JSON matching the schema. Previous answer: ${JSON.stringify(value ?? null)}`;
+    }
+  }
+}

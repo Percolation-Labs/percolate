@@ -12,7 +12,7 @@ import { authFetch } from "./api.js";
 import { select, rpc, read, probeQuery, config, setEndpoint, token } from "./api.js";
 import { READS, PROBES } from "./reads.js";
 import { agentEditor } from "./agent-editor.js";
-import { HELP_AGENT, createChatSession } from "./query-assist.js";
+import { HELP_AGENT, createChatSession } from "./api.js";
 import { chip, fmtTime, gap, h, icon, panel, seg, setStatusVocabulary, short, stat, statGap, status, stream, table } from "./ui.js";
 import { markdown } from "./md.js";
 import { head, page, tryRead, defs } from "./views.js";

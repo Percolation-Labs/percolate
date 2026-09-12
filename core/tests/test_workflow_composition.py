@@ -46,7 +46,11 @@ assert.throws(()=>plan.parsePlan({...base,workflow_json:JSON.stringify(w)},catal
 const draft=spec=>({...base,new_agents:[{spec_json:JSON.stringify(spec),reason:'Focused brief'}]});
 assert.throws(()=>plan.parsePlan(draft({name:'brief',model:'openai:configured',system_prompt:'Summarize'}),catalogue,queues),/already exists/);
 assert.throws(()=>plan.parsePlan(draft({name:'new',model:'invented',system_prompt:'Summarize'}),catalogue,queues),/configured/);
-assert.throws(()=>plan.parsePlan(draft({name:'new',model:'openai:configured',system_prompt:'Summarize',tools:['invented']}),catalogue,queues),/Unknown tool/);
+// A bare server name is refused here because agentic.upsert_agent refuses it:
+// the UI no longer proposes a binding the database will reject (REM-62).
+assert.throws(()=>plan.parsePlan(draft({name:'new',model:'openai:configured',system_prompt:'Summarize',tools:['p8-query']}),catalogue,queues),/bare server name/);
+assert.throws(()=>plan.parsePlan(draft({name:'new',model:'openai:configured',system_prompt:'Summarize',tools:[{server:'invented',tools:[]}]}),catalogue,queues),/Unknown tool server/);
+assert.throws(()=>plan.parsePlan(draft({name:'new',model:'openai:configured',system_prompt:'Summarize',tools:[{server:'p8-query',tool:'query'}]}),catalogue,queues),/which nothing reads/);
 const p=plan.parsePlan(draft({name:'new',model:'openai:configured',system_prompt:'Summarize'}),catalogue,queues);
 assert.equal(p.agents[0].spec.visibility,'private');
 """)

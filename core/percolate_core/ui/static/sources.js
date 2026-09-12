@@ -5,7 +5,7 @@ import {page,head} from './views.js';
 import {draftStore,sameInput} from './drafts.js';
 import {SOURCE_DEFAULTS,sourcePackage,packageText} from './source-authoring.js';
 import {suggestSource} from './source-assist.js';
-import {HELP_AGENT} from './query-assist.js';
+import {HELP_AGENT} from './api.js';
 import {apiSources} from './api-sources.js';
 import {workspaceTabs,collectionWorkspace,contextualHelp} from './workspace.js';
 const field=(label,input,hint)=>h('label',{class:'field'},h('span',{},label),input,hint?h('small',{class:'hint'},hint):null);
@@ -78,6 +78,10 @@ async function fileSources() {
     try{
       const v=await suggestSource({description:description.value,current:get(),agents,models,id,queues:queues(),onStatus:s=>{aiStatus.textContent=s;}});
       if(contextId!==id)return;
+      /* A question is not a failed suggestion, and is no longer delivered as
+         one: browser-ui.md §7. */
+      if(!v.settings){aiStatus.textContent='One more detail is needed.';
+        aiOut.replaceChildren(h('article',{class:'suggestion-card'},h('p',{},v.needs_clarification),conversation(v.session)));return;}
       aiStatus.textContent='Review this proposal, then use it in the configuration editor.';
       aiOut.replaceChildren(h('article',{class:'suggestion-card'},h('h3',{},v.settings.name),h('p',{},v.explanation),
         h('ul',{},v.assumptions.map(a=>h('li',{},a))),h('details',{},h('summary',{},'Suggested settings'),h('pre',{class:'code suggestion-code'},JSON.stringify(v.settings,null,2))),

@@ -20,11 +20,44 @@ export const AGENT_DEFAULTS = {
 
 export const VISIBILITIES = ["private", "org", "public"];
 
-/* A tool reference is `{server, tools:[...]}`. Stored specs also accept a bare
-   string for the whole server, which the runtime reads as "every operation"
-   — kept on read so an agent authored elsewhere survives a round trip. */
+/* A tool reference is `{server, tools:[...]}`. A bare string is still READ as
+   "the whole server", so an agent authored before that rule survives a round
+   trip through this form. */
 export const toolRef = (entry) =>
   typeof entry === "string" ? { server: entry, tools: [] } : { server: entry.server, tools: entry.tools || [] };
+
+/** The database's rule, applied before the write rather than after it.
+ *
+ * `agentic.upsert_agent` refuses a binding that is not an object naming a
+ * server, and refuses unknown keys — because `{"server":"p8-query","tool":"query"}`,
+ * singular, is the spelling anybody writes for one tool, and the runtime,
+ * looking for `tools`, found nothing and handed the model the server's ENTIRE
+ * surface. One character, no error, an allow-list that became its opposite.
+ *
+ * The guard belongs in the database and is there. This is not a second guard:
+ * it is this screen refusing to PROPOSE what the database will refuse, so the
+ * operator is corrected while they are editing rather than by an exception
+ * after they press save. The wording is the database's, deliberately, so the
+ * two cannot drift into disagreeing about the same binding. */
+export function checkToolBindings(tools) {
+  if (tools === undefined || tools === null) return;
+  if (!Array.isArray(tools)) throw new Error('Tools are a list of server bindings: [{"server": "<name>", "tools": ["a","b"]}].');
+  for (const binding of tools) {
+    if (typeof binding !== "object" || binding === null || Array.isArray(binding) || typeof binding.server !== "string") {
+      throw new Error('A tool binding names its server: {"server": "<name>", "tools": ["a","b"]}. A bare server name is not accepted on write.');
+    }
+    const unknown = Object.keys(binding).filter((k) => !["server", "tools"].includes(k));
+    if (unknown.length) {
+      throw new Error(`Tool binding for ${binding.server} carries ${unknown.join(", ")}, which nothing reads. `
+        + "The allow-list key is `tools` (a list); an entry the runtime does not understand is not ignored — "
+        + "it leaves the agent with every tool that server exposes.");
+    }
+    if (binding.tools !== undefined && binding.tools !== null
+        && !(Array.isArray(binding.tools) && binding.tools.every((t) => typeof t === "string"))) {
+      throw new Error(`The allow-list for ${binding.server} must be a list of tool names, or null for all of them.`);
+    }
+  }
+}
 
 export const toolLabel = (ref) =>
   ref.tools?.length ? `${ref.server} · ${ref.tools.join(", ")}` : `${ref.server} · all operations`;
@@ -67,7 +100,10 @@ export function toSpec(form) {
   if ((form.structured_output_schema || "").trim()) {
     spec.structured_output_schema = parseSchema(form.structured_output_schema);
   }
-  if (form.tools?.length) spec.tools = form.tools.map(toolRef);
+  if (form.tools?.length) {
+    spec.tools = form.tools.map(toolRef);
+    checkToolBindings(spec.tools);
+  }
   for (const key of ["category", "audience"]) {
     if ((form[key] || "").trim()) spec[key] = form[key].trim();
   }
