@@ -87,6 +87,16 @@ jobs:
             python -m unittest discover -s tests -p "$t" || exit 1
           done
 
+      # A summary is derived text and carries no more authority than the window
+      # it replaced (REM-94). It was replayed as a SystemPromptPart, so anything
+      # an attacker put in a retrieved chunk was restated by our own summarizer
+      # and replayed with system authority on every later turn. Two of the four
+      # cases here are controls -- the summary's text must still reach the
+      # model, and a configured `role='system'` message must KEEP its authority
+      # -- so the property cannot be satisfied by dropping summaries or by
+      # demoting everything.
+      - name: Derived text carries no authority it did not arrive with
+        run: python -m unittest discover -s tests -p test_summary_authority.py
       # REM-91 items 4, 5 and 8, from the 2026-09-12 security audit. Three
       # unrelated mechanisms with one shape -- a value from outside used
       # somewhere that decides authority rather than content. A missing
