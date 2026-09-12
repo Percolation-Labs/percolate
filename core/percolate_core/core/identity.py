@@ -27,6 +27,8 @@ from typing import Any
 
 import asyncpg
 
+from .config import dsn as config_dsn
+
 ROLE = os.getenv("P8_ROLE", "authenticated")
 """The role a request-scoped transaction assumes. `user-rbac/roles.sql` names it."""
 
@@ -78,7 +80,7 @@ async def open_pool(dsn: str | None = None, **kwargs: Any) -> asyncpg.Pool:
     global _POOL, _REFS
     if _POOL is None:
         _POOL = await asyncpg.create_pool(
-            dsn or os.environ.get("P8_DSN") or os.environ["P8_DATABASE_URL"],
+            dsn or config_dsn(),
             min_size=kwargs.pop("min_size", 1),
             max_size=kwargs.pop("max_size", 10),
             init=kwargs.pop("init", _init_connection),

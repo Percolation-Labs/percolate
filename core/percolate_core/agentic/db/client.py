@@ -22,6 +22,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from ...core import identity
+from ...core.config import dsn
 from ..settings import Settings
 
 
@@ -52,8 +53,11 @@ class PgClient:
         process with the Content Server.
         """
         opener = identity.open_pool if self.owns_pool else identity.pool
+        # `dsn()` rather than the field: an unset database is refused HERE, by
+        # name, which is the step that used to restart-loop against a localhost
+        # default nobody had configured.
         self._pool = await opener(
-            self.settings.database_url,
+            self.settings.database_url or dsn(),
             min_size=self.settings.pool_min,
             max_size=self.settings.pool_max,
         )
@@ -159,7 +163,7 @@ class PgClient:
             )
         await self._listeners.acquire()
         try:
-            conn = await asyncpg.connect(self.settings.database_url)
+            conn = await asyncpg.connect(self.settings.database_url or dsn())
         except BaseException:
             self._listeners.release()
             raise

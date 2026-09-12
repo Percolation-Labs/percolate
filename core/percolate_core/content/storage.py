@@ -15,7 +15,7 @@ from functools import lru_cache
 import boto3
 from botocore.client import Config
 
-from ..core import required
+from ..core import required, s3
 
 
 @lru_cache(maxsize=1)
@@ -29,18 +29,25 @@ def client():
     The endpoint does default, because pointing at a local MinIO is a
     reasonable dev default and getting it wrong is loud.
     """
+    # WHERE it is comes from core.config.s3(); WHAT TO DO when the credentials
+    # are absent stays here, because that answer is this module's and not
+    # shared: a Content Server without object storage is broken, while
+    # `lake.lake()` returns None for the same absence and is right to.
+    settings = s3()
     return boto3.client(
         "s3",
-        endpoint_url=os.environ.get("P8_S3_ENDPOINT", "http://localhost:9000"),
-        aws_access_key_id=required("P8_S3_KEY", "the Content Server needs object storage credentials"),
-        aws_secret_access_key=required("P8_S3_SECRET", "the Content Server needs object storage credentials"),
+        endpoint_url=settings.endpoint,
+        aws_access_key_id=settings.key or required(
+            "P8_S3_KEY", "the Content Server needs object storage credentials"),
+        aws_secret_access_key=settings.secret or required(
+            "P8_S3_SECRET", "the Content Server needs object storage credentials"),
         config=Config(signature_version="s3v4"),
-        region_name=os.environ.get("P8_S3_REGION", "us-east-1"),
+        region_name=settings.region,
     )
 
 
 def bucket() -> str:
-    return os.environ.get("P8_BUCKET", "p8-content")
+    return s3().bucket
 
 
 def put(data: bytes, content_type: str | None = None) -> tuple[str, str]:
