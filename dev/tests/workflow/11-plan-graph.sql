@@ -515,4 +515,157 @@ begin
     raise notice 'workflow/11: plan_facet is granted to authenticated and to nobody anonymous';
 end $$;
 
+-- ---------------------------------------------------------------------
+-- 8. EVERY PLAN FUNCTION, CALLED AS THE ROLE IT IS GRANTED TO.
+--
+-- The direction that catches the next one. Everything above this point runs as
+-- app_owner, which holds every base-table privilege and is exempt from RLS --
+-- so it measures whether the function ANSWERS and never whether the caller it
+-- was written for can reach it. workflow.plan_status was granted to
+-- `authenticated` and raised `permission denied for table tasks` at every
+-- member of that role, for as long as nobody called it as one (REM-81).
+--
+-- surface.sql cannot cover this: it asserts that a declared object exists,
+-- never that a role can reach it -- its own header §3 names that debt. A
+-- grant is not a capability until somebody exercises it.
+-- ---------------------------------------------------------------------
+do $$
+declare
+    v_user uuid := gen_random_uuid();
+    v_def  text := 't-plan-reach-' || left(gen_random_uuid()::text, 8);
+    v_run  uuid;
+    v_fn   text;
+    v_sql  text;
+    v_err  text;
+    v_bad  text[] := '{}';
+    v_rows int;
+begin
+    insert into rbac.users (id, email, status)
+        values (v_user, v_def || '@example.test', 'active');
+
+    -- A run this caller owns, so §8 measures reachability rather than an
+    -- empty answer: plan_status is scoped, and a caller with no runs would
+    -- get zero rows from a working function and from a broken one alike.
+    insert into workflow.definitions (name, spec) values (v_def, jsonb_build_object(
+        'steps', jsonb_build_array(jsonb_build_object(
+            'key', 'only', 'kind', 'work', 'queue', 't'))));
+    insert into workflow.runs (workflow_def_id, owner_id, status)
+        select id, v_user, 'running' from workflow.definitions where name = v_def
+        returning id into v_run;
+    insert into workflow.tasks (run_id, step_key, kind, queue, status, attempts,
+                                claimed_at, completed_at)
+        values (v_run, 'only', 'work', 't', 'succeeded', 1, now(), now());
+
+    set local role authenticated;
+    execute format('set local request.jwt.claims = %L',
+                   json_build_object('sub', v_user)::text);
+
+    -- THE RULE, NOT A LIST. Which plan functions `authenticated` may call is
+    -- read from the catalogue rather than typed here, so this assertion needs
+    -- no edit on the day workflow.definitions adopts scope and the other five
+    -- grants come back (REM-42). A list would have to be remembered; a rule
+    -- goes green on its own.
+    for v_fn, v_sql in
+        select p.proname,
+               case p.proname
+                   when 'plan_catalog' then 'select count(*) from jsonb_each(workflow.plan_catalog())'
+                   when 'plan_status'  then 'select count(*) from workflow.plan_status($1, null)'
+                   when 'plan_defects' then 'select count(*) from workflow.plan_defects($1)'
+                   else format('select count(*) from workflow.%I($1, 1)', p.proname)
+               end
+          from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+         where n.nspname = 'workflow' and p.proname like 'plan\_%'
+           and has_function_privilege('authenticated', p.oid, 'execute')
+    loop
+        begin
+            execute v_sql using v_def;
+        exception when others then
+            v_err := sqlerrm;
+            v_bad := v_bad || (v_fn || ' -> ' || v_err);
+        end;
+    end loop;
+
+    if array_length(v_bad, 1) > 0 then
+        raise exception
+            'a plan function granted to `authenticated` refuses that role: %',
+            array_to_string(v_bad, ' | ');
+    end if;
+
+    -- AND THE GRANT IS NOT EMPTY, which is what stops the loop above from
+    -- passing by finding nothing. plan_status is the one this file is about.
+    if not has_function_privilege('authenticated',
+                                  'workflow.plan_status(text,uuid)', 'execute') then
+        raise exception
+            'plan_status is not granted to `authenticated` -- §8 measured nothing';
+    end if;
+
+    -- AND IT ANSWERS, rather than merely not raising. A body that resolved no
+    -- run would also not raise, and would be the same defect wearing a
+    -- different error.
+    execute 'select count(*) from workflow.plan_status($1, null)'
+       into v_rows using v_def;
+    if v_rows <> 1 then
+        raise exception
+            'plan_status ran as `authenticated` and returned % step rows for a '
+            'run that caller owns, not 1', v_rows;
+    end if;
+
+    reset role;
+    raise notice 'workflow/11: every plan function answers for the role it is granted to, and plan_status finds the caller''s own run';
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 9. AND IT IS SCOPED, which is the other half: a capability that answers for
+--    everybody is not the same as one that answers for you.
+-- ---------------------------------------------------------------------
+do $$
+declare
+    v_mine   uuid := gen_random_uuid();
+    v_theirs uuid := gen_random_uuid();
+    v_def    text := 't-plan-scope-' || left(gen_random_uuid()::text, 8);
+    v_run    uuid;
+    v_rows   int;
+begin
+    insert into rbac.users (id, email, status) values
+        (v_mine,   v_def || '-mine@example.test',   'active'),
+        (v_theirs, v_def || '-theirs@example.test', 'active');
+
+    insert into workflow.definitions (name, spec) values (v_def, jsonb_build_object(
+        'steps', jsonb_build_array(jsonb_build_object(
+            'key', 'only', 'kind', 'work', 'queue', 't'))));
+    -- The OTHER person's run, and it is the newest one under this name -- so a
+    -- plan_status that resolves "the newest run" without scoping it hands the
+    -- caller below somebody else's steps.
+    insert into workflow.runs (workflow_def_id, owner_id, status)
+        select id, v_theirs, 'running' from workflow.definitions where name = v_def
+        returning id into v_run;
+    insert into workflow.tasks (run_id, step_key, kind, queue, status, attempts,
+                                claimed_at, completed_at)
+        values (v_run, 'only', 'work', 't', 'succeeded', 1, now(), now());
+
+    set local role authenticated;
+    execute format('set local request.jwt.claims = %L',
+                   json_build_object('sub', v_mine)::text);
+
+    execute 'select count(*) from workflow.plan_status($1, null)'
+       into v_rows using v_def;
+    if v_rows <> 0 then
+        raise exception
+            'plan_status handed a caller % step rows from a run owned by '
+            'somebody else -- the run-less form is not scoped', v_rows;
+    end if;
+
+    -- Naming it outright is refused the same way: no rows, not their steps.
+    execute 'select count(*) from workflow.plan_status($1, $2)'
+       into v_rows using v_def, v_run;
+    if v_rows <> 0 then
+        raise exception
+            'plan_status returned % step rows for a run id the caller may not '
+            'see -- a supplied run id is trusted rather than filtered', v_rows;
+    end if;
+
+    reset role;
+    raise notice 'workflow/11: plan_status does not hand back somebody else''s run, named or newest';
+end $$;
+
 rollback;

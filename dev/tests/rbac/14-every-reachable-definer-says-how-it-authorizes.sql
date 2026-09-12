@@ -173,6 +173,8 @@ insert into t14_declared (fn, mechanism, why) values
  'the run''s owner or runs:select, unless the caller is that run''s own step'),
 ('workflow.matrix_rows(uuid)', 'workflow.assert_run_access',
  'the run''s owner or runs:select'),
+('workflow.plan_status(text,uuid)', 'workflow.may_access_run',
+ 'the run''s owner or workflow_runs:select, with rbac.is_operator() as the leading arm. It FILTERS rather than raises, which is why it names may_access_run and not assert_run_access: the run-less form has to resolve "the newest run of this workflow I may see", and a raise is the wrong shape for a lookup that may legitimately find nothing. A run id handed in goes through the same predicate, so naming somebody else''s run returns no rows instead of their steps. Definer at all only because the INVOKER body was unusable: authenticated holds no SELECT on workflow.runs or workflow.tasks, so every call it was granted to raised `permission denied for table tasks` (REM-81). The operator arm is reusable_run''s, and exists because the views that would otherwise serve this are empty for a session with no JWT'),
 ('workflow.queue_depth(text)', 'none',
  'one count of ready and running tasks on a named queue, across tenants: queues are installation-wide and a worker pool scales on the true depth (queues_api)'),
 ('workflow.schedule_workflow(text,text,text,jsonb,text,text)', 'workflow.assert_schedule_access',
