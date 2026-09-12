@@ -23,7 +23,7 @@ docker exec -i p8-experiment-pg19 psql -U p8 -d p8journey -v ON_ERROR_STOP=1 \
     < dev/tests/journeys/materials.sql
 ```
 
-`reload.sh` also loads `dev/init/02-09`, so a journey database arrives with the
+`reload.sh` also loads `dev/init/` files 02 through 09, so a journey database arrives with the
 sample graph, the sample corpus and the `demo-quad-a` embedding space already
 in it — under a dev org that belongs to none of the cast. That is a feature: it
 is another tenant's data sitting in the same tables, which makes Act 8's tenancy

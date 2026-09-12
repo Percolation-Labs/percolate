@@ -19,7 +19,7 @@
 -- opened as an ordinary caller, the agent row resolved, the run written. All
 -- of that is this repository's schema, and all of it happens before the first
 -- byte goes to a provider. The behaviour past that point is
--- percolate-core's `dev/verify.py` and is deliberately not duplicated here
+-- percolate-core's `percolate-core/dev/verify.py` and is deliberately not duplicated here
 -- (specs/agentic/sequence.md: "two artifacts proving the same thing").
 --
 -- THE THREE OUTCOMES, and the middle one is why this file is not a one-liner.
