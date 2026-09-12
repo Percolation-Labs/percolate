@@ -534,6 +534,12 @@ DECLARED_SHADOWS = {
     "workflow.matrix_outputs(uuid)":
         "standalone: reads every child output. The shadow scopes to the run "
         "the caller may see.",
+    "workflow.plan_status(text,uuid)":
+        "standalone: reads every run with the engine's reach, because there is "
+        "nobody to scope one to. The shadow is definer over may_access_run, so "
+        "the run-less form means the CALLER's newest run -- the standalone body "
+        "raised 'permission denied for table tasks' at every caller it was "
+        "granted to (REM-81).",
 }
 
 
