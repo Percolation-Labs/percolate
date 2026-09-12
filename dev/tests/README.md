@@ -193,6 +193,28 @@ found seven stale `aiq.*` bodies, one function that had silently lost
 `SECURITY DEFINER`, and `content.connectors*` present in the database and
 absent from the product.
 
+**It answers the third question for the SQL half only, and the compiled half
+had no answer at all** (REM-139). `pg_proc` holds the body of a `plpgsql` or
+`sql` function, so a stale one is caught here; a `LANGUAGE c` function's body is
+in `percolate_parser.so`, and all `pg_proc` knows is which symbol to call. The
+only currency test the compiled half had was `percolate_parser.extversion`
+against `percolate.extversion` — **existence again, one level up.** A parser
+change does not bump the version, so both halves read the same unreleased
+`0.2.0` while the `.so` was compiled from an older commit of it, and
+`dev/tests/query/11-graph-algorithms.sql` and `15-edge-currency.sql` then
+reported a broken graph guarantee rather than a stale binary. `query/11`'s
+header records three sessions losing a day to that reading before it was
+understood, and a fourth found the mechanism.
+
+`run.sh` now compares the `.so`'s mtime to the newest commit touching
+`extension/percolate_parser/` and stands the compiled assertions down on either
+lag — see PACKAGING §*"Telling a lag red from a real red, without asking
+anybody"*. What it still cannot do is diff a compiled body the way `currency.sh`
+diffs a SQL one: an mtime says the artifact is older than its source, not what
+changed in it. That is the remaining gap, and provenance on the artifact — a
+sidecar beside the `.so`, or an image label — is what would close it, because
+`public.percolate_build` records it in a database that `dev/reload.sh` drops.
+
 `scenarios/` is upstream of this directory. Exploration happens there; what
 turns out to be worth re-running forever gets pinned here.
 

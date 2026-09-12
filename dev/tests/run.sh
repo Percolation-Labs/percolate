@@ -97,11 +97,28 @@ if [ -n "$DSN" ] && ! command -v psql >/dev/null 2>&1; then
     exit 1
 fi
 
+# THE VERDICT REACHES THE SQL, because a test file cannot work out on its own
+# whether the .so is behind: it can read `pg_extension`, which is the label
+# that provably does not move, and it cannot stat a file or read the git log.
+# So the one home for the verdict is parser_behind() above, and this carries it
+# in as a GUC -- not a psql `-v`, which is not interpolated inside the
+# dollar-quoted function bodies that need it.
+#
+# `unknown` is passed through as itself rather than folded into `no`. A file
+# reading this decides for itself what to do when nobody can tell, and today
+# query/15 treats unknown the way it always behaved -- it asserts -- so this
+# change cannot turn a real red green anywhere the evidence is missing.
+parser_guc() {
+    if parser_artifact_behind_source; then echo "yes"; else echo "$PARSER_DRIFT"; fi
+}
+
 run_sql() {
+    local opts="-c percolate.parser_behind=$(parser_guc)"
     if [ -n "$DSN" ]; then
-        psql "$DSN" -v ON_ERROR_STOP=1 -q -f "$1"
+        PGOPTIONS="$opts" psql "$DSN" -v ON_ERROR_STOP=1 -q -f "$1"
     else
-        docker exec -i "$CONTAINER" psql -U p8 -d "$DB" -v ON_ERROR_STOP=1 -q < "$1"
+        docker exec -e PGOPTIONS="$opts" -i "$CONTAINER" \
+            psql -U p8 -d "$DB" -v ON_ERROR_STOP=1 -q < "$1"
     fi
 }
 
@@ -264,14 +281,33 @@ halves_note() {
                       where extname in ('percolate', 'percolate_parser')")
     [ -n "$vers" ] || return 0
     echo "  $vers"
-    db_query "select (select extversion from pg_catalog.pg_extension where extname='percolate')
-                   = (select extversion from pg_catalog.pg_extension where extname='percolate_parser')" \
-      | grep -q '^t$' && return 0
+    if db_query "select (select extversion from pg_catalog.pg_extension where extname='percolate')
+                      = (select extversion from pg_catalog.pg_extension where extname='percolate_parser')" \
+         | grep -q '^t$'; then
+        # THE CASE THE VERSION COMPARISON CANNOT SEE, and the one the inner
+        # loop is always in. Same unreleased 0.2.0, different commit.
+        parser_artifact_behind_source || return 0
+        echo "  these two AGREE and the compiled half is still behind. The .so is"
+        echo "  dated $(parser_iso_utc "$PARSER_SO_AT"), and extension/percolate_parser/"
+        echo "  has a commit at $(parser_iso_utc "$PARSER_SRC_AT") -- so a traversal"
+        echo "  assertion may fail because the .so predates the fix rather than"
+        echo "  because the graph is wrong. A version number cannot say so: one"
+        echo "  unreleased version is compiled from many commits."
+        echo "  dev/build-image.sh rebuilds it; a parser release clears it."
+        return 0
+    fi
     echo "  these two disagree: the compiled half and the extension SQL ship as"
     echo "  separate files and drift apart independently, so a traversal assertion"
     echo "  may fail because the .so predates the schema rather than because the"
     echo "  graph is wrong. dev/build-image.sh rebuilds it; a parser release clears it."
 }
+
+# THE COMPILED HALF'S CURRENCY HAS ONE HOME, and it is not this file: the same
+# question is asked by dev/check.sh's anti-mute gate, which is how a fifth copy
+# of a version comparison came to exist. dev/lib/parser-currency.sh carries the
+# reasoning, the incident and the list of call sites.
+. "$HERE/../lib/parser-currency.sh"
+
 
 # One way to ask the database a scalar, whichever of the two connection modes
 # this run is using. banner() and have_ext() each had their own copy of the
@@ -302,7 +338,11 @@ PARSER_VER=$(db_query "select extversion from pg_catalog.pg_extension where extn
 SCHEMA_VER=$(db_query "select extversion from pg_catalog.pg_extension where extname='percolate'")
 
 parser_behind() {
-    [ -n "$PARSER_VER" ] && [ -n "$SCHEMA_VER" ] && [ "$PARSER_VER" != "$SCHEMA_VER" ]
+    # Two ways to be behind, and the second is the one a version cannot show.
+    # Either is sufficient: a deferral is legal while the compiled half lags
+    # the schema by EITHER measure, and illegal only when both say it does not.
+    { [ -n "$PARSER_VER" ] && [ -n "$SCHEMA_VER" ] && [ "$PARSER_VER" != "$SCHEMA_VER" ]; } \
+        || parser_artifact_behind_source
 }
 
 # sort -V rather than a numeric compare per component: the versions here are
@@ -347,10 +387,22 @@ for surface in ${SURFACES[@]}; do
         # lives. The bound is the other way round: the declaration is honoured
         # only while the halves disagree, so it expires by itself on the day the
         # image catches up rather than on the day somebody remembers.
+        # TWO WAYS THE DECLARATION APPLIES, and the second is REM-139. A file
+        # asking for 0.2.0 against a 0.2.0 .so used to run, because the only
+        # question asked was whether the NUMBER had arrived -- and one
+        # unreleased number is compiled from many commits. query/11's own
+        # header records what that cost: three sessions in one day read
+        # `without as_of the expired edge was still traversed` as a defect in
+        # the graph, and the .so was simply older than the fix.
         want=$(sed -n 's/^-- requires-parser:[[:space:]]*//p' "$f" | head -1)
-        if [ -n "$want" ] && ! parser_at_least "$want"; then
+        if [ -n "$want" ] && { ! parser_at_least "$want" \
+                                   || parser_artifact_behind_source; }; then
             if parser_behind; then
-                echo "deferred (parser $PARSER_VER, needs $want)"
+                if parser_at_least "$want"; then
+                    echo "deferred (parser $PARSER_VER has $want, but the .so is older than the crate)"
+                else
+                    echo "deferred (parser $PARSER_VER, needs $want)"
+                fi
                 deferred=$((deferred + 1))
                 deferred_names="$deferred_names $surface/$(basename "$f")"
             else
@@ -467,7 +519,17 @@ if [ "$deferred" -ne 0 ]; then
     # guarantee nobody checked. The difference is that this one says what would
     # make it run, and the run above refuses it the moment that is true.
     echo "$deferred assertion(s)/file(s) deferred to a newer parser:$deferred_names"
-    echo "  the compiled half is $PARSER_VER and the extension SQL is $SCHEMA_VER."
+    # SAY WHICH OF THE TWO LAGS IT IS. This used to print both versions
+    # unconditionally, which in the same-version case read as "the compiled
+    # half is 0.2.0 and the extension SQL is 0.2.0" beside a deferral -- a
+    # footer that contradicts itself, on the surface CI actually shows.
+    if parser_artifact_behind_source; then
+        echo "  both halves are $PARSER_VER, and the .so ($(parser_iso_utc "$PARSER_SO_AT")) is"
+        echo "  older than the newest commit in extension/percolate_parser/"
+        echo "  ($(parser_iso_utc "$PARSER_SRC_AT")), so the number cannot show the lag."
+    else
+        echo "  the compiled half is $PARSER_VER and the extension SQL is $SCHEMA_VER."
+    fi
     echo "  dev/build-image.sh rebuilds the .so; a parser release clears this."
 fi
 if [ "$failed" -ne 0 ]; then

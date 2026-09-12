@@ -55,10 +55,31 @@ $$;
 -- compiled assertions defer one at a time and say so. run.sh counts every
 -- DEFERRED: notice, reports it beside the skips, and refuses it outright once
 -- the two halves agree -- which is what keeps this from being a mute.
+--
+-- TWO QUESTIONS, AND THE VERSION ANSWERS ONLY THE FIRST (REM-139). Whether the
+-- .so is from a different RELEASE than the schema, pg_extension can say. Whether
+-- it is from a different COMMIT of the same unreleased release, it cannot: one
+-- 0.2.0 is compiled from many commits, so both halves read 0.2.0 while the .so
+-- predates the very fix these assertions cover. Measured 2026-09-12 -- the .so
+-- was dated 2026-09-11T12:00:20Z and `2d54769` landed ten hours after it, and
+-- section 1 reported the graph wrong on a database built from origin/main.
+--
+-- A test file cannot see that for itself: it may read pg_extension, which is the
+-- label that provably does not move, and it may not stat a file or read a git
+-- log. So `dev/tests/run.sh` compares the .so's mtime to the newest commit
+-- touching extension/percolate_parser/ and passes the verdict in as
+-- `percolate.parser_behind`. `yes` stands these assertions down.
+--
+-- UNKNOWN ASSERTS, deliberately. A DSN run cannot stat the .so and a direct
+-- psql sets no GUC at all, so both arrive here as absent -- and absent behaves
+-- exactly as this file behaved before, which is the property that keeps the
+-- change from turning a real red green anywhere the evidence is missing. The
+-- banner says which of the two you got.
 create or replace function pg_temp.parser_current() returns boolean language sql stable as $$
     select coalesce((select p.extversion = c.extversion
                        from pg_catalog.pg_extension p, pg_catalog.pg_extension c
-                      where p.extname = 'percolate_parser' and c.extname = 'percolate'), false);
+                      where p.extname = 'percolate_parser' and c.extname = 'percolate'), false)
+       and coalesce(current_setting('percolate.parser_behind', true), 'absent') <> 'yes';
 $$;
 
 -- 1. A RETRACTED EDGE STOPS ANSWERING, ON EVERY READ PATH (REM-51).
@@ -121,11 +142,21 @@ begin
         raise notice 'query/15: a retracted edge is gone from neighbours, walk, PGQ, GRAPH, '
                      'paths, related and induced, and still there as of before';
     else
-        raise notice 'DEFERRED: query/15 §1 graph_paths, related and graph_induced -- the '
-                     'compiled parser (%) predates the extension SQL (%), and REM-51''s filter '
-                     'lives in the .so. The five SQL read paths above were checked.',
-            (select extversion from pg_catalog.pg_extension where extname = 'percolate_parser'),
-            (select extversion from pg_catalog.pg_extension where extname = 'percolate');
+        -- WHY %s AND NOT TWO VERSIONS. Printing both numbers read as
+        -- "the compiled parser (0.2.0) predates the extension SQL (0.2.0)"
+        -- in the case that is now detectable, which is a notice that
+        -- contradicts itself. Name the lag that was actually found.
+        raise notice 'DEFERRED: query/15 §1 graph_paths, related and graph_induced -- %, '
+                     'and REM-51''s filter lives in the .so. The five SQL read paths '
+                     'above were checked.',
+            case current_setting('percolate.parser_behind', true)
+                when 'yes' then 'the .so is older than the crate it was built from'
+                else format('the compiled parser (%s) predates the extension SQL (%s)',
+                            (select extversion from pg_catalog.pg_extension
+                              where extname = 'percolate_parser'),
+                            (select extversion from pg_catalog.pg_extension
+                              where extname = 'percolate'))
+            end;
     end if;
 end $$;
 
@@ -246,8 +277,12 @@ begin
         if jsonb_array_length(v->'paths') <> 1 then raise exception 'now, after the revival: absent'; end if;
     else
         raise notice 'DEFERRED: query/15 §4 the four as-of instants through graph_paths -- '
-                     'the compiled parser predates the extension SQL, and the belief-period '
-                     'filter lives in the .so. aiq.edge_periods is checked below, in SQL.';
+                     '%, and the belief-period filter lives in the .so. '
+                     'aiq.edge_periods is checked below, in SQL.',
+            case current_setting('percolate.parser_behind', true)
+                when 'yes' then 'the .so is older than the crate it was built from'
+                else 'the compiled parser predates the extension SQL'
+            end;
     end if;
 
     -- and the same four instants in SQL, over the periods
