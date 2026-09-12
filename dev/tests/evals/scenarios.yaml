@@ -1565,10 +1565,10 @@ scenarios:
       -- default does not fill a column an insert names explicitly -- so the
       -- literal null that used to mean "the shared tier" now raises a
       -- not-null violation before the scenario reaches its assertion.
-      insert into content.resources (id, channel_id, title, status, org_id)
+      insert into content.resources (id, channel_id, title, status, org_id, visibility)
       values ('39990000-0000-0000-0000-0000000000d1',
               '11110000-0000-0000-0000-0000000000c1','Never parsed','ready',
-              rbac.shared_org_id());
+              rbac.shared_org_id(), 'public');
     check:
       - name: drift reports it, by id and by kind
         sql: "select count(*) from content.check_drift() d where d.id='39990000-0000-0000-0000-0000000000d1'"
@@ -1800,11 +1800,11 @@ scenarios:
     # `dev/tests/init/` does (`memo://finance/q3`), and assert exactly what
     # they always asserted. Corrected 2026-09-12 under REM-75.
     setup: |
-      insert into content.resources (id, channel_id, title, uri, status, metadata)
+      insert into content.resources (id, channel_id, title, uri, status, metadata, visibility)
       values ('39990000-0000-0000-0000-0000000000f1',
               '11110000-0000-0000-0000-0000000000c1',
               'Tolvaxen PSUR 2026','psur://calder/tolvaxen-2026',
-              'ready','{"doctype":"psur"}'::jsonb);
+              'ready','{"doctype":"psur"}'::jsonb, 'public');
       create temp table r as select aiq.land_graph($g${
         "nodes": [
           {"k":"document","n":"psur://calder/tolvaxen-2026"},
@@ -1842,10 +1842,10 @@ scenarios:
     role: app_owner
     setup: |
       -- The uri is the document's key, not the title. See f2g-01.
-      insert into content.resources (id, channel_id, title, uri, status)
+      insert into content.resources (id, channel_id, title, uri, status, visibility)
       values ('39990000-0000-0000-0000-0000000000f2',
               '11110000-0000-0000-0000-0000000000c1','PSUR with an unknown kind',
-              'psur://calder/unknown-kind','ready');
+              'psur://calder/unknown-kind','ready', 'public');
       create temp table r as select aiq.land_graph($g${
         "nodes": [
           {"k":"document","n":"psur://calder/unknown-kind"},
@@ -1876,11 +1876,11 @@ scenarios:
     role: app_owner
     setup: |
       -- The uri is the document's key, not the title. See f2g-01.
-      insert into content.resources (id, channel_id, title, uri, status) values
+      insert into content.resources (id, channel_id, title, uri, status, visibility) values
         ('39990000-0000-0000-0000-0000000000f3','11110000-0000-0000-0000-0000000000c1',
-         'PSUR one','psur://calder/one','ready'),
+         'PSUR one','psur://calder/one','ready', 'public'),
         ('39990000-0000-0000-0000-0000000000f4','11110000-0000-0000-0000-0000000000c1',
-         'Inspection report two','inspection://calder/two','ready');
+         'Inspection report two','inspection://calder/two','ready', 'public');
       select aiq.land_graph($g${
         "nodes": [{"k":"document","n":"psur://calder/one"},{"k":"sponsor","n":"ALTM"}],
         "edges": [{"s":0,"t":1,"r":"mentions"}]}$g$::jsonb,
@@ -1906,9 +1906,9 @@ scenarios:
     catches: [wrong-grouping]
     role: app_owner
     setup: |
-      insert into content.resources (id, channel_id, title, status) values
-        ('39990000-0000-0000-0000-0000000000f5','11110000-0000-0000-0000-0000000000c1','Report five','ready'),
-        ('39990000-0000-0000-0000-0000000000f6','11110000-0000-0000-0000-0000000000c1','Report six','ready');
+      insert into content.resources (id, channel_id, title, status, visibility) values
+        ('39990000-0000-0000-0000-0000000000f5','11110000-0000-0000-0000-0000000000c1','Report five','ready', 'public'),
+        ('39990000-0000-0000-0000-0000000000f6','11110000-0000-0000-0000-0000000000c1','Report six','ready', 'public');
       select aiq.land_graph($g${
         "nodes": [{"k":"product","n":"tolvaxen"},{"k":"sponsor","n":"BRNG"}],
         "edges": [{"s":0,"t":1,"r":"supplies"}]}$g$::jsonb,
@@ -1945,8 +1945,8 @@ scenarios:
     catches: [wrong-answer-not-error]
     role: app_owner
     setup: |
-      insert into content.resources (id, channel_id, title, status)
-      values ('39990000-0000-0000-0000-0000000000f7','11110000-0000-0000-0000-0000000000c1','Forum post','ready');
+      insert into content.resources (id, channel_id, title, status, visibility)
+      values ('39990000-0000-0000-0000-0000000000f7','11110000-0000-0000-0000-0000000000c1','Forum post','ready', 'public');
       create temp table before as
         select weight from aiq.edges e
         join aiq.nodes s on s.id=e.src_id join aiq.nodes d on d.id=e.dst_id
@@ -1994,9 +1994,9 @@ scenarios:
     # the refusal would pass over the regression the change was made to fix.
     # Rewritten 2026-09-12 under REM-75.
     setup: |
-      insert into content.resources (id, channel_id, title, uri, status)
+      insert into content.resources (id, channel_id, title, uri, status, visibility)
       values ('39990000-0000-0000-0000-0000000000f8','11110000-0000-0000-0000-0000000000c1',
-              'Invented','psur://calder/invented','ready');
+              'Invented','psur://calder/invented','ready', 'public');
       create temp table r as select aiq.land_graph($g${
         "nodes": [{"k":"product","n":"tolvaxen"},{"k":"sponsor","n":"ALTM"}],
         "edges": [{"s":0,"t":1,"r":"causes_harm_to"}]}$g$::jsonb,
@@ -2023,8 +2023,8 @@ scenarios:
     catches: [silent-success]
     role: app_owner
     setup: |
-      insert into content.resources (id, channel_id, title, status)
-      values ('39990000-0000-0000-0000-0000000000f9','11110000-0000-0000-0000-0000000000c1','Bad ordinal','ready');
+      insert into content.resources (id, channel_id, title, status, visibility)
+      values ('39990000-0000-0000-0000-0000000000f9','11110000-0000-0000-0000-0000000000c1','Bad ordinal','ready', 'public');
     check:
       - name: refused
         sql: |
@@ -2043,8 +2043,8 @@ scenarios:
     catches: [silent-success]
     role: app_owner
     setup: |
-      insert into content.resources (id, channel_id, title, status)
-      values ('39990000-0000-0000-0000-0000000000fa','11110000-0000-0000-0000-0000000000c1','Self edge','ready');
+      insert into content.resources (id, channel_id, title, status, visibility)
+      values ('39990000-0000-0000-0000-0000000000fa','11110000-0000-0000-0000-0000000000c1','Self edge','ready', 'public');
       create temp table r as select aiq.land_graph($g${
         "nodes": [{"k":"product","n":"tolvaxen"},{"k":"sponsor","n":"ALTM"}],
         "edges": [{"s":0,"t":0,"r":"is_a"},{"s":0,"t":1,"r":"supplies"}]}$g$::jsonb,
@@ -2067,8 +2067,8 @@ scenarios:
     catches: [silent-success, wrong-answer-not-error]
     role: app_owner
     setup: |
-      insert into content.resources (id, channel_id, title, status)
-      values ('39990000-0000-0000-0000-0000000000fb','11110000-0000-0000-0000-0000000000c1','Promote me','ready');
+      insert into content.resources (id, channel_id, title, status, visibility)
+      values ('39990000-0000-0000-0000-0000000000fb','11110000-0000-0000-0000-0000000000c1','Promote me','ready', 'public');
       select aiq.land_graph($g${
         "nodes": [{"k":"document","n":"Promote me"},
                   {"k":"adverse_event","n":"hepatic injury"}],
@@ -2102,9 +2102,9 @@ scenarios:
     role: app_owner
     setup: |
       -- The uri is the document's key, not the title. See f2g-01.
-      insert into content.resources (id, channel_id, title, uri, status)
+      insert into content.resources (id, channel_id, title, uri, status, visibility)
       values ('39990000-0000-0000-0000-0000000000fc','11110000-0000-0000-0000-0000000000c1',
-              'PSUR for the pipeline','psur://calder/pipeline','ready');
+              'PSUR for the pipeline','psur://calder/pipeline','ready', 'public');
       select aiq.land_graph($g${
         "nodes": [{"k":"document","n":"psur://calder/pipeline"},{"k":"product","n":"tolvaxen"}],
         "edges": [{"s":0,"t":1,"r":"mentions"}]}$g$::jsonb,
