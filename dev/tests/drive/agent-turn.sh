@@ -31,8 +31,11 @@ AGENT="${AGENT_CONTAINER:-$CONTAINER-agent}"
 # Named for the container it grades, like dev/upgrade-with-data.sh's UPGC and
 # for the same reason: three sessions run this at once on this machine.
 SECRET="${P8_JWT_SECRET:-experiment-only-jwt-secret-not-for-real-use-0123456789}"
-AGENT_NAME="${P8_TEST_AGENT:-percolate}"
+AGENT_NAME="${P8_TEST_AGENT:-turn-gate-probe}"
 CALLER_EMAIL="${P8_TEST_CALLER:-turn-gate@dev.invalid}"
+# The provider this probe names. It is never reached without a key, which is
+# the point -- the assertion permits exactly that one failure.
+AGENT_MODEL="${P8_TEST_MODEL:-openai:gpt-4o-mini}"
 
 # THE IMAGE PIN IS READ, not written here. `dev/docker-compose.yml` is where
 # this repository decides which percolate-core it runs; a second copy in this
@@ -88,6 +91,57 @@ if [ "$(psql_ -tAc "select count(*) from rbac.role_permissions
     echo "  missing fixture -- so this driver refuses instead of granting it." >&2
     exit 1
 fi
+
+# ------------------------------------------------------------------ the agent
+# PROVISIONED, NOT BORROWED, for the same reason the caller below is.
+#
+# This drove the seeded `percolate` agent until 2026-09-12, when the core pin
+# moved to 0.1.9 and every turn began failing with `LookupError: tool server
+# 'p8-query' has no discovered tools`. The seed registers `p8-query` pointing at
+# `http://query-mcp:8090` and stores NO catalogue -- discovery is a live HTTP
+# call -- and `dev/ci-database.sh` builds a bare container with no query-mcp in
+# it. So the seeded agent is unusable in a CI database BY CONSTRUCTION, and was
+# only passing because core 0.1.8 raised on set_config long before it got as far
+# as resolving a tool.
+#
+# NOT A PRODUCT DEFECT, checked: `query-mcp` does not appear in
+# get-percolate/compose/docker-compose.yml at all, and `p8-query` is not in its
+# bootstrap. It is a dev fixture, so a shipped install has no such server and no
+# such failure.
+#
+# WHAT THIS GATE CLAIMS is that a turn reaches the provider through THIS schema
+# -- a verified token, a session opened as an ordinary caller, an agent row
+# resolved, a run and a message written. A tool catalogue is not on that path,
+# so an agent with no tools tests the claim exactly and nothing else.
+#
+# `"tools": []` EXPLICITLY, NOT BY OMISSION, and this cost a confusing red before
+# it was written down. `upsert_agent` carries the column DEFAULT for a key the
+# caller omits -- not "no change" -- so an omitted `tools` PRESERVES whatever the
+# row already had. That is the same `excluded` behaviour `01-binding.sql` asserts
+# about `upsert_tool_server` erasing cached_tools, one table over, and it means a
+# probe agent that ever acquired a tool binding keeps it forever: the agent row
+# cannot be deleted either, because `runs_agent_id_fkey` holds it once a single
+# turn has run. Stating the empty list makes this gate idempotent against a
+# database somebody else has poked at, which is the property it claims.
+#
+# WHAT IT THEREFORE DOES NOT COVER, said here rather than discovered: whether a
+# seeded agent's tool bindings still resolve. `dev/tests/agentic/01-binding.sql`
+# asserts those as rows, and asserting them through a live turn would need
+# query-mcp started beside the runtime -- a second service for a second claim,
+# which belongs in its own row if anybody wants it.
+psql_ -tAc "
+do \$probe\$
+begin
+    perform agentic.upsert_agent(\$a\$ {
+        \"name\": \"$AGENT_NAME\",
+        \"audience\": \"user\",
+        \"category\": \"general\",
+        \"model\": \"$AGENT_MODEL\",
+        \"system_prompt\": \"You exist so a gate can prove a turn opens a session. Answer in one word.\",
+        \"tools\": []
+    } \$a\$::jsonb);
+end
+\$probe\$;" >/dev/null
 
 SUB=$(psql_ -tAc "
 do \$gate\$

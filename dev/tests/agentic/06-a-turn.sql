@@ -130,11 +130,17 @@ begin
     if v_st >= 500 then
         if v.agent_log like '%permission denied for function set_config%' then
             raise notice
-                'CORE-DEFERRED: the turn was refused at set_config. % writes the '
-                'role before the claims, and this database revokes set_config '
-                'from authenticated. A core that orders them the other way '
-                'round closes this; until the pin moves, no turn can open a '
-                'session on this pair.', v.image;
+                'CORE-DEFERRED: the turn was refused at set_config, against '
+                'image %. WHAT THAT MEANS IS NOT MEASURED HERE: this reports '
+                'the refusal it saw, not a cause. The known cause is a runtime '
+                'that writes the role before the claims, which cores through '
+                '0.1.8 do -- but this message used to ASSERT that of whatever '
+                'image was pinned, by interpolating the pin into the sentence, '
+                'and it said it of 0.1.9, which orders claims first '
+                '(identity.py:207 before :210). A template that reads as an '
+                'observation sends the next reader to fix something already '
+                'fixed. Read the runtime log below and check the ordering in '
+                'the image named, rather than trusting this line.', v.image;
             return;
         end if;
         -- One E-string rather than a plain literal continued into an
