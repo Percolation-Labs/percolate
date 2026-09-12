@@ -550,12 +550,15 @@ $$ language sql stable;
 -- never have a null trace_id, even for a client that doesn't participate in
 -- tracing. Same empty-string-after-pooled-connection-commit guard as
 -- current_user_id() -- see its comment above -- applies here too.
+-- `set search_path` for the same reason percolate.uuidv5 carries one, and the
+-- comment there has the measurement: `gen_random_bytes` is pgcrypto's, in
+-- `public`, and a restore runs with an empty path.
 create or replace function rbac.current_trace_id() returns text as $$
     select coalesce(
         nullif(current_setting('request.trace_id', true), ''),
         encode(gen_random_bytes(16), 'hex')
     );
-$$ language sql stable;
+$$ language sql stable set search_path = pg_catalog, public;
 
 -- ------------------------------------------------------------
 -- 2b. SCOPE -- who may see a row, as distinct from what a role may do.

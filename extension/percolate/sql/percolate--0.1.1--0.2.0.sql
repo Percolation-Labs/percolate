@@ -497,8 +497,25 @@ grant execute on function percolate.extension_schemas() to public;
 -- is that an extension is named when something needs it; one function is not
 -- something.
 -- ------------------------------------------------------------
+-- `set search_path` IS LOAD-BEARING HERE, NOT HYGIENE, and the case that
+-- proves it is a restore. `pg_dump` writes `select pg_catalog.set_config(
+-- 'search_path', '', false)` at the top of every dump -- that is what makes a
+-- restore hermetic -- and every trigger on a dumped table then fires with an
+-- empty path during COPY. `digest()` is pgcrypto's, which lives in `public`,
+-- so an unqualified call could not resolve and the load failed:
+--
+--     ERROR:  function digest(bytea, unknown) does not exist
+--
+-- Measured on a live 0.2.0 by dumping a seeded database and loading it one
+-- table at a time: three of four sampled tables errored -- content.resources,
+-- workflow.runs and aiq.nodes -- and only rbac.users came back. The rows were
+-- in the file; they would not go back in. dev/backup-carries-the-data.sh
+-- proves the write half of that round trip and never proved the read half,
+-- which is the class meta/postmortems/2026-09-11-fixed-at-the-copy-that-
+-- failed.md keeps naming. dev/restore-is-possible.sh now does the round trip.
 create or replace function percolate.uuidv5(p_namespace uuid, p_name text)
-returns uuid language sql immutable strict parallel safe as $$
+returns uuid language sql immutable strict parallel safe
+set search_path = pg_catalog, public as $$
     with h as (
         select substring(
                    digest(decode(replace(p_namespace::text, '-', ''), 'hex')
@@ -9427,12 +9444,15 @@ $$ language sql stable;
 -- never have a null trace_id, even for a client that doesn't participate in
 -- tracing. Same empty-string-after-pooled-connection-commit guard as
 -- current_user_id() -- see its comment above -- applies here too.
+-- `set search_path` for the same reason percolate.uuidv5 carries one, and the
+-- comment there has the measurement: `gen_random_bytes` is pgcrypto's, in
+-- `public`, and a restore runs with an empty path.
 create or replace function rbac.current_trace_id() returns text as $$
     select coalesce(
         nullif(current_setting('request.trace_id', true), ''),
         encode(gen_random_bytes(16), 'hex')
     );
-$$ language sql stable;
+$$ language sql stable set search_path = pg_catalog, public;
 
 -- ------------------------------------------------------------
 -- 2b. SCOPE -- who may see a row, as distinct from what a role may do.
