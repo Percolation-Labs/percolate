@@ -139,3 +139,53 @@ jobs:
       - name: What the database said, if it failed
         if: failure()
         run: docker logs "$CONTAINER" | tail -60
+
+  # THE SELF-MODEL, REBUILT FROM THE REPOSITORY ALONE.
+  #
+  # A third job, split from the second for the reason the second was split from
+  # the first: cost. This one is minutes rather than seconds, and the `database`
+  # job's own comment says not to add work there without measuring. Measured on
+  # this runner, 2026-09-12 (run 34668494624): 5m47s here, against 2m03s for
+  # `database` and 16s for `tree`. Roughly two thirds of it is the load and the
+  # rest `tests.sql`. The three run in parallel, so this costs wall clock only
+  # where it is the slowest, which it is -- and it is still three times the
+  # whole database job, which is why it is not a line inside it.
+  #
+  # WHY IT EXISTS. `applications/percolate-self-model/load.sh --from-zero` had
+  # been broken since `492e007` and nobody noticed for a month, because every
+  # load anybody runs is incremental against a database that already holds the
+  # rows -- so the path that makes the self-model a rebuildable artifact rather
+  # than a database somebody happens to still have was the one path nothing
+  # exercised. Eight defects had accumulated in it (REM-74), every one invisible
+  # to an incremental load by construction: what is missing is exactly what the
+  # previous run left behind. load.sh's own ordering comment had already recorded
+  # the mirror-image bug and drawn the conclusion -- "there are two load paths and
+  # both have to be exercised" -- and then neither was exercised by CI. This is
+  # that sentence, run.
+  #
+  # NO API KEY, ON PURPOSE. load.sh skips embed.py without one, which is a
+  # supported state and therefore one worth testing: two of the eight defects
+  # were steps downstream that had quietly made embeddings mandatory.
+  self-model:
+    runs-on: ubuntu-latest
+    env:
+      CONTAINER: p8-sm
+      DB: p8sm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # THE HISTORY, not a snapshot of it. ingest.py, symbol_touch.py and
+          # metrics.sql all read git -- commits, per-file revisions, evolutionary
+          # coupling -- so a shallow clone would load the self-model of a
+          # repository with one commit in it and report success.
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install --quiet pyyaml
+      - run: dev/ci-database.sh
+      - run: dev/check.sh --self-model
+
+      - name: What the database said, if it failed
+        if: failure()
+        run: docker logs "$CONTAINER" | tail -60

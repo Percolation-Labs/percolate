@@ -695,7 +695,7 @@ begin
     --
     -- It CAN catch the call being removed or renamed -- the fan-in going back
     -- to a bare ::jsonb cast, which is the regression that matters, because a
-    -- model answer carrying a   escape then aborts the landing.
+    -- model answer carrying a \u0000 escape then aborts the landing.
     --
     -- It CANNOT catch the call being made and its result discarded, nor a
     -- second unparsed path added alongside it. And it would pass on the string
