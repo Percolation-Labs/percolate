@@ -397,10 +397,36 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-        with: {fetch-depth: 0}
+        with:
+          fetch-depth: 0
+          # THE COMMIT THAT WAS BUILT, which is what `build` and `image` already
+          # check out. Without this the job took `github.sha` -- main as it stood
+          # when the button was pressed -- and tagged that.
+          #
+          # v0.1.8 is the evidence and it is still wrong on the remote:
+          #
+          #     $ git show v0.1.8:pyproject.toml | sed -n 3p
+          #     version = "0.1.7"
+          #
+          # The bump commit is not an ancestor of its own tag. It went unnoticed
+          # because v0.1.8 was the first release under the tag-last ordering and
+          # nothing reads a tag until somebody tries to reproduce what shipped.
+          ref: ${{ needs.version.outputs.sha }}
       - name: Tag it, now that it exists
         run: |
           V=${{ needs.version.outputs.version }}
+          # AND THE TREE HAS TO AGREE, because the ref above is a value handed
+          # between jobs and a wrong one would tag silently. This is the whole
+          # invariant a tag carries -- `v0.1.8` names the commit that IS 0.1.8 --
+          # and nothing asserted it before, which is why the defect above shipped
+          # and sat there.
+          HAVE=$(sed -n 's/^version *= *"\(.*\)"/\1/p' pyproject.toml | head -1)
+          if [ "$HAVE" != "$V" ]; then
+            echo "::error::refusing to tag v$V: this tree says $HAVE." >&2
+            echo "::error::The checkout is not the commit that was built -- check" >&2
+            echo "::error::needs.version.outputs.sha rather than re-pointing the tag." >&2
+            exit 1
+          fi
           # Set here, not only in the bump step -- that step is skipped on the
           # retry path, and `git tag -a` without an identity dies on
           # `fatal: empty ident name` with everything already published.
