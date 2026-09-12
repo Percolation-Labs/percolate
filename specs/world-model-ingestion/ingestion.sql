@@ -612,6 +612,36 @@ begin
     where not exists (
         select 1 from content.channels
          where name = 'uploads' and org_id = rbac.shared_org_id());
+
+    -- MARKED BY ITS OWN STATEMENT, because the insert above is guarded by
+    -- `where not exists` and therefore does nothing at all on a replay -- so
+    -- on an upgraded database the seed would keep the `false` the column was
+    -- added with, be dumped, and collide with itself on restore. The five
+    -- tables seeded through shared register functions get this for free from
+    -- their `on conflict do update`; these two channels are the seeds with no
+    -- conflict clause to hang it on, and the name is right here rather than in
+    -- a list somewhere that a later seed would not be added to.
+    -- AND IT REPAIRS THE ROW, because on an upgraded database it cannot mark
+    -- it without doing so. Measured on 0.1.6 -> 0.2.0: both global channels
+    -- are there as `private` with no owner and no org. `not (visibility =
+    -- 'private' and owner_id is null)` was added NOT VALID, so those rows
+    -- survived unchecked -- and any UPDATE to one revalidates it, which is how
+    -- marking `shipped` found them.
+    --
+    -- They are not merely invalid, they are DEAD: rbac.may_read(null,
+    -- shared_org, 'private') is NULL, so the channel lookup drops the row and
+    -- POST /files answers "no channel named uploads for this org" -- REM-83's
+    -- failure, still shipping on every database upgraded rather than
+    -- installed. A fresh 0.2.0 seeds these public; converging the upgraded one
+    -- onto that is what dev/upgrade-converges.sh asks for anyway.
+    --
+    -- Visibility only. owner_id stays null because these channels have no
+    -- owner by design -- they are everybody's -- and `public` is what makes
+    -- that legible to the read path instead of unreachable.
+    update content.channels
+       set shipped = true, visibility = 'public'
+     where name = 'uploads' and org_id = rbac.shared_org_id()
+       and (not shipped or visibility is distinct from 'public');
 end $$;
 
 

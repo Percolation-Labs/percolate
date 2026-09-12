@@ -402,7 +402,15 @@ comment on function percolate.contract() is
 -- catches the fifty-third table on the day it is added, which is the only
 -- moment anybody could reasonably be expected to notice.
 --
--- STILL BROKEN, AND MEASURED RATHER THAN IMPLIED. Seven tables hold shipped rows
+-- FIXED, AND THE COUNT WAS WRONG. Read what follows as the account of a
+-- defect that is closed, not an outstanding one -- the mechanism is at the
+-- bottom of this comment and in `seeded_tables` below. There were EIGHT, not
+-- seven: rbac.orgs is the same shape and was not on this list, and it was
+-- found by dev/restore-is-possible.sh refusing a duplicate key on the run
+-- that proved the other seven fixed, not by anybody re-reading this. Losing
+-- that table's COPY loses every tenant in the backup.
+--
+-- Eight tables hold shipped rows
 -- AND take deployment rows: workflow.definitions (ships `ingest_file`),
 -- aiq.entity_registry (3 shipped, 6 after seeding), content.channels (2 and 3),
 -- aiq.graph_vocabulary, aiq.lexical_sources, aiq.semantic_sources,
@@ -426,23 +434,71 @@ comment on function percolate.contract() is
 -- the vocabulary. So `resources`, `resource_chunks` and `edges` restored EMPTY
 -- despite being registered here -- 5, 6 and 15 rows lost to two absent parents.
 --
--- The shape of the fix, since the next person should not have to rediscover it:
--- a `shipped boolean not null default false` on each of the seven, set true by
--- the statement that seeds them (which replays on upgrade, so existing
--- databases mark themselves and no literal list is needed), and registered as
--- `WHERE NOT shipped`. Derived, and it cannot go stale the way a hand-written
--- key list would.
+-- THE FIX, AND THE PART OF IT THIS PARAGRAPH USED TO GET WRONG. It said: a
+-- `shipped boolean not null default false` on each, "set true by the statement
+-- that seeds them". Half of that is right. The column and the `WHERE NOT
+-- shipped` registration are what shipped.
 --
--- WHAT THIS CHANGE IS WORTH, stated honestly: before it, a backup contained the
--- schema and nothing else and a restore came up empty and working. After it, a
--- backup contains almost everything and a restore fails loudly, naming the two
--- parents it could not find. Both are broken. Only the second one tells you.
+-- But FIVE OF THE EIGHT HAVE NO SEEDING STATEMENT. Their rows arrive through
+-- aiq.register_entity_table, aiq.register_lexical_source,
+-- workflow.define_yaml and two more -- the same functions a DEPLOYMENT calls
+-- to register its own. Seeding and user registration are one code path, so
+-- there is nothing to put a literal `true` on: doing it inside the function
+-- marks the user's rows too, which is silent data loss from every future
+-- backup and strictly worse than the duplicate key it replaces.
+--
+-- What distinguishes them is not the call site, it is WHO IS CALLING. The
+-- generated script sets `percolate.seeding` for its own length (see the
+-- HEADER in build-sql.py, and the reset in identity/closing.sql); each
+-- table's `shipped` defaults to reading it; every one of the ~14 insert sites
+-- is untouched. On an upgrade the script replays, the seeds hit their
+-- `on conflict do update set shipped = excluded.shipped or <t>.shipped`, and
+-- an existing database marks itself. Still derived, still no key list.
+--
+-- WHAT THE CHANGE WAS WORTH, in three states rather than two. Before any of
+-- it: a backup held the schema and nothing else, and a restore came up empty
+-- and working. After registering the tables: a backup held almost everything
+-- and the restore failed loudly, naming the parents it could not find --
+-- broken, but it told you. After the `shipped` column: measured on a live
+-- 0.2.0, 26 registered tables, no duplicate keys, and a dump that carries the
+-- deployment's orgs and not the shared one, its channels and not `uploads`.
+--
+-- The middle state was worth passing through, and that is the part worth
+-- keeping: the loud failure is what dev/restore-is-possible.sh caught, and
+-- catching it is what found the eighth table.
 -- ------------------------------------------------------------
 do $$
 declare
     t text;
+    -- THE SEVEN THAT HOLD BOTH KINDS OF ROW, and the reason this loop no
+    -- longer passes '' to everything. Each ships rows from the install script
+    -- AND takes rows from a deployment; an empty condition dumps both, the
+    -- restore's CREATE EXTENSION re-seeds the shipped ones, and the COPY dies
+    -- on a duplicate key with the whole restore -- the deployment's own rows
+    -- included -- rolled back with it. Measured: 4 channels dumped, 2
+    -- re-seeded, 0 restored.
+    --
+    -- The condition is on a COLUMN rather than a list of keys, so this array
+    -- is the only place the seven are named and adding an eighth seed to any
+    -- of them changes nothing here. See each table's `shipped` column and the
+    -- generated script's `percolate.seeding` flag for how a row gets marked.
+    seeded_tables text[] := array[
+        'aiq.entity_registry',
+        'aiq.graph_vocabulary',
+        'aiq.lexical_sources',
+        'aiq.schema_examples',
+        'aiq.semantic_sources',
+        'content.channels',
+        -- THE EIGHTH, and it is here because a gate found it rather than
+        -- because this list was re-derived. The install seeds the shared org;
+        -- every other row is a tenant. Losing this table's COPY loses all of
+        -- them. See rbac.orgs' own `shipped` column for the measurement.
+        'rbac.orgs',
+        'workflow.definitions'
+    ];
     -- Every table whose rows are the DEPLOYMENT's rather than the extension's,
-    -- verified empty on a from-zero install.
+    -- verified empty on a from-zero install -- plus the seven above, which are
+    -- not empty there and are registered with a condition instead.
     deployment_tables text[] := array[
         'agentic.agents',
         'agentic.messages',
@@ -459,12 +515,17 @@ declare
         -- lose an edge: it silently makes every past as-of answer about that
         -- edge wrong, in the confident direction.
         'aiq.edge_retractions',
+        'aiq.entity_registry',
         'aiq.embedding_models',
+        'aiq.graph_vocabulary',
+        'aiq.lexical_sources',
         'aiq.lake_nodes',
         'aiq.node_keys',
         'aiq.node_resolutions',
         'aiq.nodes',
         'aiq.schema_revisions',
+        'aiq.schema_examples',
+        'aiq.semantic_sources',
         'aiq.soft_nodes',
         'content.dataset_files',
         'content.datasets',
@@ -533,7 +594,9 @@ begin
                     where d.classid = 'pg_class'::regclass
                       and d.objid = t::regclass
                       and d.deptype = 'e') then
-            perform pg_catalog.pg_extension_config_dump(t, '');
+            perform pg_catalog.pg_extension_config_dump(
+                t, case when t = any(seeded_tables) then 'WHERE NOT shipped'
+                        else '' end);
         end if;
     end loop;
 end $$;

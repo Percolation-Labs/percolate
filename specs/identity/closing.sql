@@ -244,3 +244,19 @@ begin
         '% functions build SQL at run time and are reachable by authenticated; all % declared',
         array_length(v_dynamic, 1), array_length(v_dynamic, 1);
 end $$;
+
+-- ------------------------------------------------------------
+-- SEEDING IS OVER.
+--
+-- The HEADER set `percolate.seeding` so that every table holding both shipped
+-- and deployment rows could default its `shipped` column from it. This runs
+-- last in the generated script, so anything inserted after this point -- by a
+-- deployment, by a migration, by a person -- is a deployment row and gets
+-- dumped, which is the whole point.
+--
+-- It matters in one specific case rather than in general: a caller who runs
+-- `CREATE EXTENSION percolate` and then registers their own entity tables in
+-- the SAME transaction. Without this they would inherit the flag and their
+-- rows would never be backed up.
+-- ------------------------------------------------------------
+reset percolate.seeding;

@@ -21,7 +21,8 @@ select aiq.register_lexical_source('chunks', 'content.resource_chunks');
 
 insert into aiq.semantic_sources (name, source_table)
 values ('chunks', 'content.resource_chunks')
-on conflict (name) do update set source_table = excluded.source_table;
+on conflict (name) do update set source_table = excluded.source_table,
+    shipped = excluded.shipped or semantic_sources.shipped;
 
 -- ------------------------------------------------------------
 -- 2. Resources become graph nodes; chunks deliberately do NOT.
@@ -470,6 +471,35 @@ select 'workflow_artifacts', 'file_upload',
 where not exists (
     select 1 from content.channels
      where name = 'workflow_artifacts' and org_id = rbac.shared_org_id());
+
+-- MARKED BY ITS OWN STATEMENT. The insert above is guarded by `where not
+-- exists`, so it does nothing on a replay -- and on an upgraded database the
+-- seed would keep the `false` its column was added with, be carried into the
+-- dump, and collide with the copy `CREATE EXTENSION` re-seeds on restore. The
+-- five tables seeded through shared register functions get this from their
+-- `on conflict do update`; the two global channels are the seeds with no
+-- conflict clause to hang it on.
+-- AND IT REPAIRS THE ROW, because on an upgraded database it cannot mark
+-- it without doing so. Measured on 0.1.6 -> 0.2.0: both global channels
+-- are there as `private` with no owner and no org. `not (visibility =
+-- 'private' and owner_id is null)` was added NOT VALID, so those rows
+-- survived unchecked -- and any UPDATE to one revalidates it, which is how
+-- marking `shipped` found them.
+--
+-- They are not merely invalid, they are DEAD: rbac.may_read(null,
+-- shared_org, 'private') is NULL, so the channel lookup drops the row and
+-- POST /files answers "no channel named uploads for this org" -- REM-83's
+-- failure, still shipping on every database upgraded rather than
+-- installed. A fresh 0.2.0 seeds these public; converging the upgraded one
+-- onto that is what dev/upgrade-converges.sh asks for anyway.
+--
+-- Visibility only. owner_id stays null because these channels have no
+-- owner by design -- they are everybody's -- and `public` is what makes
+-- that legible to the read path instead of unreachable.
+update content.channels
+   set shipped = true, visibility = 'public'
+ where name = 'workflow_artifacts' and org_id = rbac.shared_org_id()
+   and (not shipped or visibility is distinct from 'public');
 
 create or replace function workflow.register_artifact(
     p_task_id      uuid,

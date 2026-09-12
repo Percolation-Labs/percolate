@@ -430,7 +430,8 @@ begin
         values ('skills', 'agentic.skills', 'discovery_text')
         on conflict (name) do update
            set source_table = excluded.source_table,
-               content_col  = excluded.content_col;
+               content_col  = excluded.content_col,
+               shipped = excluded.shipped or semantic_sources.shipped;
         perform aiq.register_lexical_source('skills', 'agentic.skills', 'discovery_text');
     end if;
 end $$;

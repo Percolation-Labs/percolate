@@ -429,6 +429,36 @@ begin
 end $preflight$;
 
 -- ------------------------------------------------------------
+-- WHO IS INSERTING: the extension, or somebody using it.
+--
+-- Seven tables hold rows this script ships AND rows a deployment adds
+-- (specs/contract/schema.sql section 4 names them). A dump has to carry the
+-- second kind and not the first, or `CREATE EXTENSION` re-seeds on restore and
+-- the COPY dies on a duplicate key -- measured: 4 channels dumped, 2 re-seeded,
+-- `duplicate key value violates unique constraint "channels_org_id_name_key"`,
+-- and because a failed COPY aborts the whole thing, 0 rows restored including
+-- the deployment's own.
+--
+-- Marking them needed a way to tell the two apart, and the awkward part is
+-- that MOST of them are not seeded by a statement in this file at all: they
+-- arrive through aiq.register_entity_table, register_lexical_source,
+-- workflow.define_yaml and three more -- the same functions a deployment calls
+-- for its own rows. The call site cannot answer the question because the call
+-- site is shared.
+--
+-- The caller's CONTEXT can. This flag is on for the length of this script and
+-- off afterwards, each table's `shipped` column defaults to reading it, and
+-- every one of those ~14 insert sites is unchanged. No list of shipped keys
+-- exists anywhere, so there is none to go stale when somebody adds a seed.
+--
+-- `set`, not `set local`: CREATE EXTENSION runs this in a transaction where
+-- either spelling works, but a raw `psql -f` of this file does not, and there
+-- `set local` warns and silently does nothing -- which would mark every
+-- shipped row as a deployment's. A plain SET still rolls back with the
+-- transaction on failure, and identity/closing.sql resets it on success.
+set percolate.seeding = 'on';
+
+-- ------------------------------------------------------------
 -- WHAT THIS BUILD WAS MADE FROM.
 --
 -- Provenance, because its absence cost a day. Two parser fixes were committed
@@ -455,17 +485,51 @@ create table if not exists public.percolate_build (
     commit_sha text,
     built_at   timestamptz
 );
+
+-- WHAT IDENTIFIES THE COMPILED HALF, which a commit in this checkout does not.
+--
+-- The parser `.so` in a published image is DOWNLOADED from a get-percolate
+-- release; no commit of this repository produced it, and after an SQL-only
+-- rebuild the ref this file was generated from is not even close to the one
+-- that compiled the binary. Stamping it with `commit_sha` anyway is what made
+-- the `parser` row name a commit that did not build it. So: the release tag
+-- and the `.so` digests go here, and `commit_sha` stays null for that row
+-- rather than being filled with the nearest plausible thing.
+--
+-- Null for `schema`, where the commit IS the artifact and there is nothing to
+-- add. dev/build-image.sh builds the parser locally and has a real commit for
+-- it, so that path fills `commit_sha` and leaves this null; the two are read
+-- together and neither is load-bearing alone.
+--
+-- ADDED BY REPLAY, not by the `create table` above. `create table if not
+-- exists` is a no-op on a database that already has the table, so a column
+-- added to that definition reaches fresh installs and nothing else -- the
+-- schema is replayed to upgrade it (write_upgrades()), and a replayed no-op
+-- upgrades nothing.
+alter table public.percolate_build add column if not exists artifact text;
+
 grant select on public.percolate_build to public;
 
+-- ONE ARITY, and the old one is dropped rather than left beside it. `create or
+-- replace function` on a changed argument list does not replace anything --
+-- it creates an OVERLOAD. Replayed on an upgrade that would leave both forms
+-- installed, and a caller still passing four arguments would go on writing
+-- rows with no artifact while looking like it had been updated.
+drop function if exists public.percolate_record_build(
+    text, text, text, timestamptz);
+
 create or replace function public.percolate_record_build(
-    p_component text, p_version text, p_commit text, p_built_at timestamptz)
+    p_component text, p_version text, p_commit text, p_built_at timestamptz,
+    p_artifact text)
 returns void language sql volatile as $fn$
-    insert into public.percolate_build (component, version, commit_sha, built_at)
-    values (p_component, p_version, p_commit, p_built_at)
+    insert into public.percolate_build
+           (component, version, commit_sha, built_at, artifact)
+    values (p_component, p_version, p_commit, p_built_at, p_artifact)
     on conflict (component) do update
        set version = excluded.version,
            commit_sha = excluded.commit_sha,
-           built_at = excluded.built_at;
+           built_at = excluded.built_at,
+           artifact = excluded.artifact;
 $fn$;
 
 -- WHOEVER BUILDS THE IMAGE, AND NOBODY ELSE. Its two callers are
@@ -493,19 +557,50 @@ $fn$;
 -- fixes the instance -- teaching closing.sql to follow pg_depend into `public`
 -- is the gate, and it is not owed until there is a second.
 revoke execute on function public.percolate_record_build(
-    text, text, text, timestamptz) from public;
+    text, text, text, timestamptz, text) from public;
 
--- The one-line answer. Reports every component and says plainly whether they
--- came from the same commit, because "the halves disagree" is the condition
--- worth naming and the one a human would otherwise have to eyeball.
+-- The one-line answer: what each half was built from, and whether the stamp
+-- still describes THIS database.
+--
+-- The column that used to be here compared the two rows' commits and asked
+-- whether the halves agreed. It could not fail. Both rows were written from
+-- one `git rev-parse` in the publishing workflow, so `count(distinct
+-- commit_sha) <= 1` was true by construction on every image ever published --
+-- the shape meta/postmortems/README.md files under "a check that cannot
+-- distinguish pass from fail". Filling the parser row with a release tag
+-- instead would have made it permanently FALSE, which is the same defect with
+-- the sign flipped, so the comparison is gone rather than repaired.
+--
+-- `stamp_current` replaces it with something that can go either way. The stamp
+-- is written when the IMAGE is assembled; `ALTER EXTENSION ... UPDATE` moves
+-- the database without touching it, so a database that has taken an upgrade
+-- hop reports the version it was stamped at and the version it is actually
+-- running, and says they differ. That is the question people mean when they
+-- run this, and unlike the old one it has a false case you can produce.
+--
+-- Which halves drifted apart from EACH OTHER is a different question with an
+-- existing answer -- `compiler_capabilities()`, and the version footer
+-- dev/tests/run.sh prints -- and it is not recoverable from these rows now
+-- that the two artifacts are legitimately versioned apart.
+drop function if exists public.percolate_build();
+
 create or replace function public.percolate_build()
-returns table (component text, version text, commit_sha text,
-               built_at timestamptz, consistent boolean)
+returns table (component text, version text, installed_version text,
+               commit_sha text, artifact text, built_at timestamptz,
+               stamp_current boolean)
 language sql stable as $fn$
-    select b.component, b.version, b.commit_sha, b.built_at,
-           (select count(distinct commit_sha) <= 1
-              from public.percolate_build where commit_sha is not null)
+    select b.component, b.version, e.extversion,
+           b.commit_sha, b.artifact, b.built_at,
+           e.extversion is not distinct from b.version
       from public.percolate_build b
+      -- left join: a database carrying a `parser` row with the parser
+      -- extension not installed is a real state (the SQL ships in the image
+      -- and the create is conditional), and it should report the row with an
+      -- unknown installed version rather than dropping it from the answer.
+      left join pg_extension e
+             on e.extname = case b.component
+                                 when 'parser' then 'percolate_parser'
+                                 else 'percolate' end
      order by b.component;
 $fn$;
 """

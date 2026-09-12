@@ -174,6 +174,24 @@ create table if not exists workflow.definitions (
     unique (name, version)
 );
 
+-- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. workflow.definitions holds
+-- both, and a backup must carry the second kind only -- see the HEADER's
+-- `percolate.seeding` note and specs/contract/schema.sql section 4.
+--
+-- TWO STATEMENTS, AND THE SECOND IS THE ONE THAT REACHES AN UPGRADE. The
+-- column is added `default false` so that rows which already exist on an
+-- upgraded database are treated as the deployment's -- the safe direction,
+-- since the cost of a wrong `false` is a loud duplicate key and the cost of a
+-- wrong `true` is a row silently absent from every future backup. The default
+-- is THEN repointed at the seeding flag, for rows inserted after this line.
+-- Putting the flag-reading default on the `add column` instead would evaluate
+-- it once, during the upgrade, with seeding on -- marking every deployment row
+-- as shipped. Measured shape, not a worry: the same one-statement-short trap
+-- cost REM-109 half a day on `queue_config`.
+alter table workflow.definitions add column if not exists shipped boolean not null default false;
+alter table workflow.definitions alter column shipped set default
+    (coalesce(current_setting('percolate.seeding', true), 'off') = 'on');
+
 -- WHETHER THIS CALLER MAY USE THIS DEFINITION AT ALL -- the gate spec.md §17
 -- decided and nothing implemented.
 --
@@ -3410,6 +3428,47 @@ begin
     -- survives is refused by the lint below, with the missing integration named.
     if to_regprocedure('aiq.expand_embed_steps(jsonb)') is not null then
         execute 'select aiq.expand_embed_steps($1)' into v_spec using v_spec;
+    end if;
+
+    -- AN UNCHANGED DEFINITION IS NOT A NEW VERSION.
+    --
+    -- Without this, every call inserts `max(version) + 1` unconditionally --
+    -- so the generated script, which is REPLAYED to upgrade a database,
+    -- deposits another copy of every workflow it ships on every upgrade.
+    -- Measured against main: a database holding `ingest_file` at versions 1
+    -- and 2, asked for the same pipeline again, gained a version 3 whose spec
+    -- hashes identically to version 1.
+    --
+    -- It is also what lets `shipped` reach an upgraded database. The other six
+    -- tables are marked by an `on conflict do update`; this insert can never
+    -- conflict, because it computes a version that does not exist yet. Finding
+    -- the identical row first gives it the same replay, and the `or` is there
+    -- for the same reason as theirs: a user re-submitting the extension's own
+    -- YAML must not un-ship the row and break the next restore.
+    --
+    -- `spec = v_spec` is jsonb equality, which ignores key order and duplicate
+    -- keys, so it compares what the definition MEANS rather than how it was
+    -- typed. A genuinely edited workflow differs and still gets a new version.
+    --
+    -- ONLY WHILE THE INSTALL IS SEEDING, and that guard is not caution, it is
+    -- required. A DEFINITION BELONGS TO SOMEBODY: two people may submit the
+    -- same YAML under the same name and those are two rows with two owners,
+    -- which is the asymmetry workflow/20 exists to assert. Deduplicating on
+    -- (name, spec) alone hands the second caller the first caller's row.
+    --
+    -- The honest predicate would add the owner, and this function cannot
+    -- write it: `owner_id` does not exist until rbac.add_scope_columns() adds
+    -- it, and a body in THIS file cannot name a column the standalone engine
+    -- does not have -- the same constraint may_start() carries above. So the
+    -- collapse is scoped to the one caller that is definitely not a person.
+    if coalesce(current_setting('percolate.seeding', true), 'off') = 'on' then
+        select id into v_id from workflow.definitions
+         where name = v_name and spec = v_spec
+         order by version desc limit 1;
+        if v_id is not null then
+            update workflow.definitions set shipped = true where id = v_id;
+            return v_id;
+        end if;
     end if;
 
     insert into workflow.definitions (name, version, spec)

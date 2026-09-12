@@ -840,6 +840,15 @@ create temporary table api_exclusions (
 -- secret column MUST NOT -- and the check below fails loudly if one ever does.
 -- These four are the reason the distinction is worth carrying.
 insert into api_exclusions (api_view, column_name, kind, why) values
+-- BACKUP BOOKKEEPING, NOT CONTENT. `shipped` says whether the extension's own
+-- install created this definition, so that pg_extension_config_dump can carry
+-- a deployment's workflows into a dump and leave the shipped ones to be
+-- re-seeded by CREATE EXTENSION on restore. It is set by a column default
+-- reading `percolate.seeding` and by nothing a caller can reach; exposing it
+-- through the API would invite somebody to set it, and a deployment row marked
+-- shipped is a row that silently never gets backed up again.
+('workflow.definitions_api', 'shipped', 'internal', 'backup bookkeeping: which rows CREATE EXTENSION re-seeds, set by the install, not content'),
+('rbac.orgs_api',            'shipped', 'internal', 'backup bookkeeping: true for the shared org the install seeds, set by the install, not content'),
 ('rbac.users_api',          'password_hash', 'secret', 'a bcrypt hash still enables offline attack; verification stays server-side'),
 ('rbac.users_api',          'mfa_secret',    'secret', 'the TOTP seed IS the second factor'),
 ('rbac.api_keys_api',       'key_hash',      'secret', 'the stored half of a credential'),

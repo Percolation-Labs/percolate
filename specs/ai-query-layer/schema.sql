@@ -835,6 +835,24 @@ create table if not exists aiq.entity_registry (
     include_where text not null default 'true',
     registered_at timestamptz not null default now()
 );
+
+-- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. aiq.entity_registry holds
+-- both, and a backup must carry the second kind only -- see the HEADER's
+-- `percolate.seeding` note and specs/contract/schema.sql section 4.
+--
+-- TWO STATEMENTS, AND THE SECOND IS THE ONE THAT REACHES AN UPGRADE. The
+-- column is added `default false` so that rows which already exist on an
+-- upgraded database are treated as the deployment's -- the safe direction,
+-- since the cost of a wrong `false` is a loud duplicate key and the cost of a
+-- wrong `true` is a row silently absent from every future backup. The default
+-- is THEN repointed at the seeding flag, for rows inserted after this line.
+-- Putting the flag-reading default on the `add column` instead would evaluate
+-- it once, during the upgrade, with seeding on -- marking every deployment row
+-- as shipped. Measured shape, not a worry: the same one-statement-short trap
+-- cost REM-109 half a day on `queue_config`.
+alter table aiq.entity_registry add column if not exists shipped boolean not null default false;
+alter table aiq.entity_registry alter column shipped set default
+    (coalesce(current_setting('percolate.seeding', true), 'off') = 'on');
 -- ...AND ON A DATABASE THAT ALREADY HAS THE TABLE, where the line above is a
 -- no-op. Same shape as rbac's `alter column status set default`: the upgrade
 -- script is this file replayed, and `create table if not exists` is perfectly
@@ -1029,7 +1047,11 @@ begin
         set source_table = excluded.source_table, key_expr = excluded.key_expr,
             summary_expr = excluded.summary_expr, org_expr = excluded.org_expr,
             visibility_expr = excluded.visibility_expr,
-            include_where = excluded.include_where;
+            include_where = excluded.include_where,
+            -- OR, not assignment: a re-registration by a deployment (seeding
+            -- off, excluded.shipped false) must not un-ship a row the
+            -- extension seeded, or the next restore collides on it.
+            shipped = excluded.shipped or entity_registry.shipped;
 
     -- One projection function per registered type, generated from the
     -- registry row. Generated rather than generic-at-runtime because a
@@ -1790,6 +1812,24 @@ create table if not exists aiq.semantic_sources (
     embedding_col text not null default 'embedding',
     link_expr     text                 -- optional SQL expr -> owning node's entity_id
 );
+
+-- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. aiq.semantic_sources holds
+-- both, and a backup must carry the second kind only -- see the HEADER's
+-- `percolate.seeding` note and specs/contract/schema.sql section 4.
+--
+-- TWO STATEMENTS, AND THE SECOND IS THE ONE THAT REACHES AN UPGRADE. The
+-- column is added `default false` so that rows which already exist on an
+-- upgraded database are treated as the deployment's -- the safe direction,
+-- since the cost of a wrong `false` is a loud duplicate key and the cost of a
+-- wrong `true` is a row silently absent from every future backup. The default
+-- is THEN repointed at the seeding flag, for rows inserted after this line.
+-- Putting the flag-reading default on the `add column` instead would evaluate
+-- it once, during the upgrade, with seeding on -- marking every deployment row
+-- as shipped. Measured shape, not a worry: the same one-statement-short trap
+-- cost REM-109 half a day on `queue_config`.
+alter table aiq.semantic_sources add column if not exists shipped boolean not null default false;
+alter table aiq.semantic_sources alter column shipped set default
+    (coalesce(current_setting('percolate.seeding', true), 'off') = 'on');
 
 -- The superseded implementation, removed rather than left to be found.
 --
@@ -3386,6 +3426,24 @@ create table if not exists aiq.lexical_sources (
     regconfig    text not null default 'english'
 );
 
+-- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. aiq.lexical_sources holds
+-- both, and a backup must carry the second kind only -- see the HEADER's
+-- `percolate.seeding` note and specs/contract/schema.sql section 4.
+--
+-- TWO STATEMENTS, AND THE SECOND IS THE ONE THAT REACHES AN UPGRADE. The
+-- column is added `default false` so that rows which already exist on an
+-- upgraded database are treated as the deployment's -- the safe direction,
+-- since the cost of a wrong `false` is a loud duplicate key and the cost of a
+-- wrong `true` is a row silently absent from every future backup. The default
+-- is THEN repointed at the seeding flag, for rows inserted after this line.
+-- Putting the flag-reading default on the `add column` instead would evaluate
+-- it once, during the upgrade, with seeding on -- marking every deployment row
+-- as shipped. Measured shape, not a worry: the same one-statement-short trap
+-- cost REM-109 half a day on `queue_config`.
+alter table aiq.lexical_sources add column if not exists shipped boolean not null default false;
+alter table aiq.lexical_sources alter column shipped set default
+    (coalesce(current_setting('percolate.seeding', true), 'off') = 'on');
+
 -- A generated tsvector column + GIN index is the standard shape: the vector
 -- is maintained by Postgres on write, never by application code that can
 -- forget, and the index is what makes it a search rather than a scan.
@@ -3398,7 +3456,8 @@ begin
     insert into aiq.lexical_sources (name, source_table, content_col, regconfig)
     values (p_name, p_source_table, p_content_col, p_regconfig)
     on conflict (name) do update set source_table = excluded.source_table,
-        content_col = excluded.content_col, regconfig = excluded.regconfig;
+        content_col = excluded.content_col, regconfig = excluded.regconfig,
+        shipped = excluded.shipped or lexical_sources.shipped;
 
     execute format(
         'alter table %s add column if not exists search_tsv tsvector
@@ -3776,6 +3835,24 @@ create table if not exists aiq.schema_examples (
     primary key (facet, label)
 );
 
+-- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. aiq.schema_examples holds
+-- both, and a backup must carry the second kind only -- see the HEADER's
+-- `percolate.seeding` note and specs/contract/schema.sql section 4.
+--
+-- TWO STATEMENTS, AND THE SECOND IS THE ONE THAT REACHES AN UPGRADE. The
+-- column is added `default false` so that rows which already exist on an
+-- upgraded database are treated as the deployment's -- the safe direction,
+-- since the cost of a wrong `false` is a loud duplicate key and the cost of a
+-- wrong `true` is a row silently absent from every future backup. The default
+-- is THEN repointed at the seeding flag, for rows inserted after this line.
+-- Putting the flag-reading default on the `add column` instead would evaluate
+-- it once, during the upgrade, with seeding on -- marking every deployment row
+-- as shipped. Measured shape, not a worry: the same one-statement-short trap
+-- cost REM-109 half a day on `queue_config`.
+alter table aiq.schema_examples add column if not exists shipped boolean not null default false;
+alter table aiq.schema_examples alter column shipped set default
+    (coalesce(current_setting('percolate.seeding', true), 'off') = 'on');
+
 create or replace function aiq.register_schema_example(
     p_facet text, p_label text, p_kind text, p_example text,
     p_note text default null, p_ordinal int default 100
@@ -3783,7 +3860,8 @@ create or replace function aiq.register_schema_example(
     insert into aiq.schema_examples (facet, label, kind, example, note, ordinal)
     values (lower(p_facet), p_label, p_kind, p_example, p_note, p_ordinal)
     on conflict (facet, label) do update set kind = excluded.kind,
-        example = excluded.example, note = excluded.note, ordinal = excluded.ordinal;
+        example = excluded.example, note = excluded.note, ordinal = excluded.ordinal,
+        shipped = excluded.shipped or schema_examples.shipped;
 $$ language sql;
 
 -- Run one example through the thing that actually consumes it.

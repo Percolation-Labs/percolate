@@ -184,6 +184,36 @@ begin
 end $preflight$;
 
 -- ------------------------------------------------------------
+-- WHO IS INSERTING: the extension, or somebody using it.
+--
+-- Seven tables hold rows this script ships AND rows a deployment adds
+-- (specs/contract/schema.sql section 4 names them). A dump has to carry the
+-- second kind and not the first, or `CREATE EXTENSION` re-seeds on restore and
+-- the COPY dies on a duplicate key -- measured: 4 channels dumped, 2 re-seeded,
+-- `duplicate key value violates unique constraint "channels_org_id_name_key"`,
+-- and because a failed COPY aborts the whole thing, 0 rows restored including
+-- the deployment's own.
+--
+-- Marking them needed a way to tell the two apart, and the awkward part is
+-- that MOST of them are not seeded by a statement in this file at all: they
+-- arrive through aiq.register_entity_table, register_lexical_source,
+-- workflow.define_yaml and three more -- the same functions a deployment calls
+-- for its own rows. The call site cannot answer the question because the call
+-- site is shared.
+--
+-- The caller's CONTEXT can. This flag is on for the length of this script and
+-- off afterwards, each table's `shipped` column defaults to reading it, and
+-- every one of those ~14 insert sites is unchanged. No list of shipped keys
+-- exists anywhere, so there is none to go stale when somebody adds a seed.
+--
+-- `set`, not `set local`: CREATE EXTENSION runs this in a transaction where
+-- either spelling works, but a raw `psql -f` of this file does not, and there
+-- `set local` warns and silently does nothing -- which would mark every
+-- shipped row as a deployment's. A plain SET still rolls back with the
+-- transaction on failure, and identity/closing.sql resets it on success.
+set percolate.seeding = 'on';
+
+-- ------------------------------------------------------------
 -- WHAT THIS BUILD WAS MADE FROM.
 --
 -- Provenance, because its absence cost a day. Two parser fixes were committed
@@ -210,17 +240,51 @@ create table if not exists public.percolate_build (
     commit_sha text,
     built_at   timestamptz
 );
+
+-- WHAT IDENTIFIES THE COMPILED HALF, which a commit in this checkout does not.
+--
+-- The parser `.so` in a published image is DOWNLOADED from a get-percolate
+-- release; no commit of this repository produced it, and after an SQL-only
+-- rebuild the ref this file was generated from is not even close to the one
+-- that compiled the binary. Stamping it with `commit_sha` anyway is what made
+-- the `parser` row name a commit that did not build it. So: the release tag
+-- and the `.so` digests go here, and `commit_sha` stays null for that row
+-- rather than being filled with the nearest plausible thing.
+--
+-- Null for `schema`, where the commit IS the artifact and there is nothing to
+-- add. dev/build-image.sh builds the parser locally and has a real commit for
+-- it, so that path fills `commit_sha` and leaves this null; the two are read
+-- together and neither is load-bearing alone.
+--
+-- ADDED BY REPLAY, not by the `create table` above. `create table if not
+-- exists` is a no-op on a database that already has the table, so a column
+-- added to that definition reaches fresh installs and nothing else -- the
+-- schema is replayed to upgrade it (write_upgrades()), and a replayed no-op
+-- upgrades nothing.
+alter table public.percolate_build add column if not exists artifact text;
+
 grant select on public.percolate_build to public;
 
+-- ONE ARITY, and the old one is dropped rather than left beside it. `create or
+-- replace function` on a changed argument list does not replace anything --
+-- it creates an OVERLOAD. Replayed on an upgrade that would leave both forms
+-- installed, and a caller still passing four arguments would go on writing
+-- rows with no artifact while looking like it had been updated.
+drop function if exists public.percolate_record_build(
+    text, text, text, timestamptz);
+
 create or replace function public.percolate_record_build(
-    p_component text, p_version text, p_commit text, p_built_at timestamptz)
+    p_component text, p_version text, p_commit text, p_built_at timestamptz,
+    p_artifact text)
 returns void language sql volatile as $fn$
-    insert into public.percolate_build (component, version, commit_sha, built_at)
-    values (p_component, p_version, p_commit, p_built_at)
+    insert into public.percolate_build
+           (component, version, commit_sha, built_at, artifact)
+    values (p_component, p_version, p_commit, p_built_at, p_artifact)
     on conflict (component) do update
        set version = excluded.version,
            commit_sha = excluded.commit_sha,
-           built_at = excluded.built_at;
+           built_at = excluded.built_at,
+           artifact = excluded.artifact;
 $fn$;
 
 -- WHOEVER BUILDS THE IMAGE, AND NOBODY ELSE. Its two callers are
@@ -248,19 +312,50 @@ $fn$;
 -- fixes the instance -- teaching closing.sql to follow pg_depend into `public`
 -- is the gate, and it is not owed until there is a second.
 revoke execute on function public.percolate_record_build(
-    text, text, text, timestamptz) from public;
+    text, text, text, timestamptz, text) from public;
 
--- The one-line answer. Reports every component and says plainly whether they
--- came from the same commit, because "the halves disagree" is the condition
--- worth naming and the one a human would otherwise have to eyeball.
+-- The one-line answer: what each half was built from, and whether the stamp
+-- still describes THIS database.
+--
+-- The column that used to be here compared the two rows' commits and asked
+-- whether the halves agreed. It could not fail. Both rows were written from
+-- one `git rev-parse` in the publishing workflow, so `count(distinct
+-- commit_sha) <= 1` was true by construction on every image ever published --
+-- the shape meta/postmortems/README.md files under "a check that cannot
+-- distinguish pass from fail". Filling the parser row with a release tag
+-- instead would have made it permanently FALSE, which is the same defect with
+-- the sign flipped, so the comparison is gone rather than repaired.
+--
+-- `stamp_current` replaces it with something that can go either way. The stamp
+-- is written when the IMAGE is assembled; `ALTER EXTENSION ... UPDATE` moves
+-- the database without touching it, so a database that has taken an upgrade
+-- hop reports the version it was stamped at and the version it is actually
+-- running, and says they differ. That is the question people mean when they
+-- run this, and unlike the old one it has a false case you can produce.
+--
+-- Which halves drifted apart from EACH OTHER is a different question with an
+-- existing answer -- `compiler_capabilities()`, and the version footer
+-- dev/tests/run.sh prints -- and it is not recoverable from these rows now
+-- that the two artifacts are legitimately versioned apart.
+drop function if exists public.percolate_build();
+
 create or replace function public.percolate_build()
-returns table (component text, version text, commit_sha text,
-               built_at timestamptz, consistent boolean)
+returns table (component text, version text, installed_version text,
+               commit_sha text, artifact text, built_at timestamptz,
+               stamp_current boolean)
 language sql stable as $fn$
-    select b.component, b.version, b.commit_sha, b.built_at,
-           (select count(distinct commit_sha) <= 1
-              from public.percolate_build where commit_sha is not null)
+    select b.component, b.version, e.extversion,
+           b.commit_sha, b.artifact, b.built_at,
+           e.extversion is not distinct from b.version
       from public.percolate_build b
+      -- left join: a database carrying a `parser` row with the parser
+      -- extension not installed is a real state (the SQL ships in the image
+      -- and the create is conditional), and it should report the row with an
+      -- unknown installed version rather than dropping it from the answer.
+      left join pg_extension e
+             on e.extname = case b.component
+                                 when 'parser' then 'percolate_parser'
+                                 else 'percolate' end
      order by b.component;
 $fn$;
 
@@ -724,6 +819,24 @@ create table if not exists workflow.definitions (
     deleted_at  timestamptz,
     unique (name, version)
 );
+
+-- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. workflow.definitions holds
+-- both, and a backup must carry the second kind only -- see the HEADER's
+-- `percolate.seeding` note and specs/contract/schema.sql section 4.
+--
+-- TWO STATEMENTS, AND THE SECOND IS THE ONE THAT REACHES AN UPGRADE. The
+-- column is added `default false` so that rows which already exist on an
+-- upgraded database are treated as the deployment's -- the safe direction,
+-- since the cost of a wrong `false` is a loud duplicate key and the cost of a
+-- wrong `true` is a row silently absent from every future backup. The default
+-- is THEN repointed at the seeding flag, for rows inserted after this line.
+-- Putting the flag-reading default on the `add column` instead would evaluate
+-- it once, during the upgrade, with seeding on -- marking every deployment row
+-- as shipped. Measured shape, not a worry: the same one-statement-short trap
+-- cost REM-109 half a day on `queue_config`.
+alter table workflow.definitions add column if not exists shipped boolean not null default false;
+alter table workflow.definitions alter column shipped set default
+    (coalesce(current_setting('percolate.seeding', true), 'off') = 'on');
 
 -- WHETHER THIS CALLER MAY USE THIS DEFINITION AT ALL -- the gate spec.md §17
 -- decided and nothing implemented.
@@ -3961,6 +4074,47 @@ begin
     -- survives is refused by the lint below, with the missing integration named.
     if to_regprocedure('aiq.expand_embed_steps(jsonb)') is not null then
         execute 'select aiq.expand_embed_steps($1)' into v_spec using v_spec;
+    end if;
+
+    -- AN UNCHANGED DEFINITION IS NOT A NEW VERSION.
+    --
+    -- Without this, every call inserts `max(version) + 1` unconditionally --
+    -- so the generated script, which is REPLAYED to upgrade a database,
+    -- deposits another copy of every workflow it ships on every upgrade.
+    -- Measured against main: a database holding `ingest_file` at versions 1
+    -- and 2, asked for the same pipeline again, gained a version 3 whose spec
+    -- hashes identically to version 1.
+    --
+    -- It is also what lets `shipped` reach an upgraded database. The other six
+    -- tables are marked by an `on conflict do update`; this insert can never
+    -- conflict, because it computes a version that does not exist yet. Finding
+    -- the identical row first gives it the same replay, and the `or` is there
+    -- for the same reason as theirs: a user re-submitting the extension's own
+    -- YAML must not un-ship the row and break the next restore.
+    --
+    -- `spec = v_spec` is jsonb equality, which ignores key order and duplicate
+    -- keys, so it compares what the definition MEANS rather than how it was
+    -- typed. A genuinely edited workflow differs and still gets a new version.
+    --
+    -- ONLY WHILE THE INSTALL IS SEEDING, and that guard is not caution, it is
+    -- required. A DEFINITION BELONGS TO SOMEBODY: two people may submit the
+    -- same YAML under the same name and those are two rows with two owners,
+    -- which is the asymmetry workflow/20 exists to assert. Deduplicating on
+    -- (name, spec) alone hands the second caller the first caller's row.
+    --
+    -- The honest predicate would add the owner, and this function cannot
+    -- write it: `owner_id` does not exist until rbac.add_scope_columns() adds
+    -- it, and a body in THIS file cannot name a column the standalone engine
+    -- does not have -- the same constraint may_start() carries above. So the
+    -- collapse is scoped to the one caller that is definitely not a person.
+    if coalesce(current_setting('percolate.seeding', true), 'off') = 'on' then
+        select id into v_id from workflow.definitions
+         where name = v_name and spec = v_spec
+         order by version desc limit 1;
+        if v_id is not null then
+            update workflow.definitions set shipped = true where id = v_id;
+            return v_id;
+        end if;
     end if;
 
     insert into workflow.definitions (name, version, spec)
@@ -9611,6 +9765,27 @@ create table if not exists rbac.orgs (
     created_at  timestamptz not null default now(),
     updated_at  timestamptz not null default now()
 );
+
+-- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. The eighth table of
+-- the class specs/contract/schema.sql section 4 names seven of: the install
+-- seeds the shared org (rbac.shared_org_id()) and every other row here is a
+-- tenant somebody created. Registered with an empty condition, a restore
+-- re-seeds the shared org and then COPYs it again --
+-- `duplicate key value violates unique constraint "orgs_pkey"`, the COPY
+-- aborts, and EVERY TENANT IN THE BACKUP is lost with it.
+--
+-- Found by dev/restore-is-possible.sh the first time it refused this class
+-- rather than printing a note about it, on the run that proved the other
+-- seven fixed. The list in that comment was written from the tables that
+-- were empty-on-install; this one was not on it.
+--
+-- Two statements: `default false` so existing rows on an upgraded database
+-- are treated as tenants (a wrong `false` is a loud duplicate key, a wrong
+-- `true` is a tenant silently absent from every future backup), then the
+-- default repointed at the seeding flag for rows inserted after this line.
+alter table rbac.orgs add column if not exists shipped boolean not null default false;
+alter table rbac.orgs alter column shipped set default
+    (coalesce(current_setting('percolate.seeding', true), 'off') = 'on');
 create or replace trigger trg_rbac_orgs_touch before update on rbac.orgs
     for each row execute function public.touch_updated_at();
 
@@ -9659,7 +9834,10 @@ comment on function rbac.shared_org_id() is
 -- instead of keeping whatever it had.
 insert into rbac.orgs (id, slug, name)
 values (rbac.shared_org_id(), 'shared', 'Shared (every tenant)')
-on conflict (id) do update set slug = excluded.slug, name = excluded.name;
+on conflict (id) do update set slug = excluded.slug, name = excluded.name,
+    -- OR, so a replay cannot un-ship it: this row must never reach a dump,
+    -- because CREATE EXTENSION recreates it on the far side of a restore.
+    shipped = excluded.shipped or orgs.shipped;
 
 -- COERCE and TEST, named once each, because between them they are every
 -- remaining use of the fact and writing `coalesce(x, rbac.shared_org_id()) =
@@ -13873,6 +14051,24 @@ create table if not exists aiq.entity_registry (
     include_where text not null default 'true',
     registered_at timestamptz not null default now()
 );
+
+-- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. aiq.entity_registry holds
+-- both, and a backup must carry the second kind only -- see the HEADER's
+-- `percolate.seeding` note and specs/contract/schema.sql section 4.
+--
+-- TWO STATEMENTS, AND THE SECOND IS THE ONE THAT REACHES AN UPGRADE. The
+-- column is added `default false` so that rows which already exist on an
+-- upgraded database are treated as the deployment's -- the safe direction,
+-- since the cost of a wrong `false` is a loud duplicate key and the cost of a
+-- wrong `true` is a row silently absent from every future backup. The default
+-- is THEN repointed at the seeding flag, for rows inserted after this line.
+-- Putting the flag-reading default on the `add column` instead would evaluate
+-- it once, during the upgrade, with seeding on -- marking every deployment row
+-- as shipped. Measured shape, not a worry: the same one-statement-short trap
+-- cost REM-109 half a day on `queue_config`.
+alter table aiq.entity_registry add column if not exists shipped boolean not null default false;
+alter table aiq.entity_registry alter column shipped set default
+    (coalesce(current_setting('percolate.seeding', true), 'off') = 'on');
 -- ...AND ON A DATABASE THAT ALREADY HAS THE TABLE, where the line above is a
 -- no-op. Same shape as rbac's `alter column status set default`: the upgrade
 -- script is this file replayed, and `create table if not exists` is perfectly
@@ -14067,7 +14263,11 @@ begin
         set source_table = excluded.source_table, key_expr = excluded.key_expr,
             summary_expr = excluded.summary_expr, org_expr = excluded.org_expr,
             visibility_expr = excluded.visibility_expr,
-            include_where = excluded.include_where;
+            include_where = excluded.include_where,
+            -- OR, not assignment: a re-registration by a deployment (seeding
+            -- off, excluded.shipped false) must not un-ship a row the
+            -- extension seeded, or the next restore collides on it.
+            shipped = excluded.shipped or entity_registry.shipped;
 
     -- One projection function per registered type, generated from the
     -- registry row. Generated rather than generic-at-runtime because a
@@ -14828,6 +15028,24 @@ create table if not exists aiq.semantic_sources (
     embedding_col text not null default 'embedding',
     link_expr     text                 -- optional SQL expr -> owning node's entity_id
 );
+
+-- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. aiq.semantic_sources holds
+-- both, and a backup must carry the second kind only -- see the HEADER's
+-- `percolate.seeding` note and specs/contract/schema.sql section 4.
+--
+-- TWO STATEMENTS, AND THE SECOND IS THE ONE THAT REACHES AN UPGRADE. The
+-- column is added `default false` so that rows which already exist on an
+-- upgraded database are treated as the deployment's -- the safe direction,
+-- since the cost of a wrong `false` is a loud duplicate key and the cost of a
+-- wrong `true` is a row silently absent from every future backup. The default
+-- is THEN repointed at the seeding flag, for rows inserted after this line.
+-- Putting the flag-reading default on the `add column` instead would evaluate
+-- it once, during the upgrade, with seeding on -- marking every deployment row
+-- as shipped. Measured shape, not a worry: the same one-statement-short trap
+-- cost REM-109 half a day on `queue_config`.
+alter table aiq.semantic_sources add column if not exists shipped boolean not null default false;
+alter table aiq.semantic_sources alter column shipped set default
+    (coalesce(current_setting('percolate.seeding', true), 'off') = 'on');
 
 -- The superseded implementation, removed rather than left to be found.
 --
@@ -16424,6 +16642,24 @@ create table if not exists aiq.lexical_sources (
     regconfig    text not null default 'english'
 );
 
+-- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. aiq.lexical_sources holds
+-- both, and a backup must carry the second kind only -- see the HEADER's
+-- `percolate.seeding` note and specs/contract/schema.sql section 4.
+--
+-- TWO STATEMENTS, AND THE SECOND IS THE ONE THAT REACHES AN UPGRADE. The
+-- column is added `default false` so that rows which already exist on an
+-- upgraded database are treated as the deployment's -- the safe direction,
+-- since the cost of a wrong `false` is a loud duplicate key and the cost of a
+-- wrong `true` is a row silently absent from every future backup. The default
+-- is THEN repointed at the seeding flag, for rows inserted after this line.
+-- Putting the flag-reading default on the `add column` instead would evaluate
+-- it once, during the upgrade, with seeding on -- marking every deployment row
+-- as shipped. Measured shape, not a worry: the same one-statement-short trap
+-- cost REM-109 half a day on `queue_config`.
+alter table aiq.lexical_sources add column if not exists shipped boolean not null default false;
+alter table aiq.lexical_sources alter column shipped set default
+    (coalesce(current_setting('percolate.seeding', true), 'off') = 'on');
+
 -- A generated tsvector column + GIN index is the standard shape: the vector
 -- is maintained by Postgres on write, never by application code that can
 -- forget, and the index is what makes it a search rather than a scan.
@@ -16436,7 +16672,8 @@ begin
     insert into aiq.lexical_sources (name, source_table, content_col, regconfig)
     values (p_name, p_source_table, p_content_col, p_regconfig)
     on conflict (name) do update set source_table = excluded.source_table,
-        content_col = excluded.content_col, regconfig = excluded.regconfig;
+        content_col = excluded.content_col, regconfig = excluded.regconfig,
+        shipped = excluded.shipped or lexical_sources.shipped;
 
     execute format(
         'alter table %s add column if not exists search_tsv tsvector
@@ -16814,6 +17051,24 @@ create table if not exists aiq.schema_examples (
     primary key (facet, label)
 );
 
+-- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. aiq.schema_examples holds
+-- both, and a backup must carry the second kind only -- see the HEADER's
+-- `percolate.seeding` note and specs/contract/schema.sql section 4.
+--
+-- TWO STATEMENTS, AND THE SECOND IS THE ONE THAT REACHES AN UPGRADE. The
+-- column is added `default false` so that rows which already exist on an
+-- upgraded database are treated as the deployment's -- the safe direction,
+-- since the cost of a wrong `false` is a loud duplicate key and the cost of a
+-- wrong `true` is a row silently absent from every future backup. The default
+-- is THEN repointed at the seeding flag, for rows inserted after this line.
+-- Putting the flag-reading default on the `add column` instead would evaluate
+-- it once, during the upgrade, with seeding on -- marking every deployment row
+-- as shipped. Measured shape, not a worry: the same one-statement-short trap
+-- cost REM-109 half a day on `queue_config`.
+alter table aiq.schema_examples add column if not exists shipped boolean not null default false;
+alter table aiq.schema_examples alter column shipped set default
+    (coalesce(current_setting('percolate.seeding', true), 'off') = 'on');
+
 create or replace function aiq.register_schema_example(
     p_facet text, p_label text, p_kind text, p_example text,
     p_note text default null, p_ordinal int default 100
@@ -16821,7 +17076,8 @@ create or replace function aiq.register_schema_example(
     insert into aiq.schema_examples (facet, label, kind, example, note, ordinal)
     values (lower(p_facet), p_label, p_kind, p_example, p_note, p_ordinal)
     on conflict (facet, label) do update set kind = excluded.kind,
-        example = excluded.example, note = excluded.note, ordinal = excluded.ordinal;
+        example = excluded.example, note = excluded.note, ordinal = excluded.ordinal,
+        shipped = excluded.shipped or schema_examples.shipped;
 $$ language sql;
 
 -- Run one example through the thing that actually consumes it.
@@ -20168,6 +20424,24 @@ create table if not exists content.channels (
     unique (org_id, name)
 );
 
+-- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. content.channels holds
+-- both, and a backup must carry the second kind only -- see the HEADER's
+-- `percolate.seeding` note and specs/contract/schema.sql section 4.
+--
+-- TWO STATEMENTS, AND THE SECOND IS THE ONE THAT REACHES AN UPGRADE. The
+-- column is added `default false` so that rows which already exist on an
+-- upgraded database are treated as the deployment's -- the safe direction,
+-- since the cost of a wrong `false` is a loud duplicate key and the cost of a
+-- wrong `true` is a row silently absent from every future backup. The default
+-- is THEN repointed at the seeding flag, for rows inserted after this line.
+-- Putting the flag-reading default on the `add column` instead would evaluate
+-- it once, during the upgrade, with seeding on -- marking every deployment row
+-- as shipped. Measured shape, not a worry: the same one-statement-short trap
+-- cost REM-109 half a day on `queue_config`.
+alter table content.channels add column if not exists shipped boolean not null default false;
+alter table content.channels alter column shipped set default
+    (coalesce(current_setting('percolate.seeding', true), 'off') = 'on');
+
 -- NULLS NOT DISTINCT, for the reason content.datasets already carries below.
 --
 -- A plain `unique (org_id, name)` does not constrain a SHARED channel at all:
@@ -21273,7 +21547,8 @@ select aiq.register_lexical_source('chunks', 'content.resource_chunks');
 
 insert into aiq.semantic_sources (name, source_table)
 values ('chunks', 'content.resource_chunks')
-on conflict (name) do update set source_table = excluded.source_table;
+on conflict (name) do update set source_table = excluded.source_table,
+    shipped = excluded.shipped or semantic_sources.shipped;
 
 -- ------------------------------------------------------------
 -- 2. Resources become graph nodes; chunks deliberately do NOT.
@@ -21722,6 +21997,35 @@ select 'workflow_artifacts', 'file_upload',
 where not exists (
     select 1 from content.channels
      where name = 'workflow_artifacts' and org_id = rbac.shared_org_id());
+
+-- MARKED BY ITS OWN STATEMENT. The insert above is guarded by `where not
+-- exists`, so it does nothing on a replay -- and on an upgraded database the
+-- seed would keep the `false` its column was added with, be carried into the
+-- dump, and collide with the copy `CREATE EXTENSION` re-seeds on restore. The
+-- five tables seeded through shared register functions get this from their
+-- `on conflict do update`; the two global channels are the seeds with no
+-- conflict clause to hang it on.
+-- AND IT REPAIRS THE ROW, because on an upgraded database it cannot mark
+-- it without doing so. Measured on 0.1.6 -> 0.2.0: both global channels
+-- are there as `private` with no owner and no org. `not (visibility =
+-- 'private' and owner_id is null)` was added NOT VALID, so those rows
+-- survived unchecked -- and any UPDATE to one revalidates it, which is how
+-- marking `shipped` found them.
+--
+-- They are not merely invalid, they are DEAD: rbac.may_read(null,
+-- shared_org, 'private') is NULL, so the channel lookup drops the row and
+-- POST /files answers "no channel named uploads for this org" -- REM-83's
+-- failure, still shipping on every database upgraded rather than
+-- installed. A fresh 0.2.0 seeds these public; converging the upgraded one
+-- onto that is what dev/upgrade-converges.sh asks for anyway.
+--
+-- Visibility only. owner_id stays null because these channels have no
+-- owner by design -- they are everybody's -- and `public` is what makes
+-- that legible to the read path instead of unreachable.
+update content.channels
+   set shipped = true, visibility = 'public'
+ where name = 'workflow_artifacts' and org_id = rbac.shared_org_id()
+   and (not shipped or visibility is distinct from 'public');
 
 create or replace function workflow.register_artifact(
     p_task_id      uuid,
@@ -22420,7 +22724,8 @@ begin
         values ('skills', 'agentic.skills', 'discovery_text')
         on conflict (name) do update
            set source_table = excluded.source_table,
-               content_col  = excluded.content_col;
+               content_col  = excluded.content_col,
+               shipped = excluded.shipped or semantic_sources.shipped;
         perform aiq.register_lexical_source('skills', 'agentic.skills', 'discovery_text');
     end if;
 end $$;
@@ -24857,6 +25162,24 @@ create table if not exists aiq.graph_vocabulary (
     registered_at  timestamptz not null default now()
 );
 
+-- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. aiq.graph_vocabulary holds
+-- both, and a backup must carry the second kind only -- see the HEADER's
+-- `percolate.seeding` note and specs/contract/schema.sql section 4.
+--
+-- TWO STATEMENTS, AND THE SECOND IS THE ONE THAT REACHES AN UPGRADE. The
+-- column is added `default false` so that rows which already exist on an
+-- upgraded database are treated as the deployment's -- the safe direction,
+-- since the cost of a wrong `false` is a loud duplicate key and the cost of a
+-- wrong `true` is a row silently absent from every future backup. The default
+-- is THEN repointed at the seeding flag, for rows inserted after this line.
+-- Putting the flag-reading default on the `add column` instead would evaluate
+-- it once, during the upgrade, with seeding on -- marking every deployment row
+-- as shipped. Measured shape, not a worry: the same one-statement-short trap
+-- cost REM-109 half a day on `queue_config`.
+alter table aiq.graph_vocabulary add column if not exists shipped boolean not null default false;
+alter table aiq.graph_vocabulary alter column shipped set default
+    (coalesce(current_setting('percolate.seeding', true), 'off') = 'on');
+
 comment on table aiq.graph_vocabulary is
     'What a structure extractor may emit as `r`, and what that edge is worth on '
     'a graph_walk. Distinct from aiq.relation_types, which is what the edge '
@@ -24965,7 +25288,13 @@ begin
         insert into aiq.graph_vocabulary (relation, description)
         select e->>'relation', e->>'description'
         from jsonb_array_elements(p_relations) e
-        on conflict (relation) do nothing;
+        -- Was `do nothing`. It still changes nothing a caller can see: the
+        -- only assignment is the backup flag, and the UPDATE below is what
+        -- applies the payload. What it buys is the replay -- an upgraded
+        -- database marks the relations the extension ships without a list of
+        -- their names living anywhere.
+        on conflict (relation) do update
+           set shipped = excluded.shipped or graph_vocabulary.shipped;
 
         update aiq.graph_vocabulary g
            set machine_weight = coalesce((e->>'machine_weight')::real, g.machine_weight),
@@ -26860,6 +27189,36 @@ begin
     where not exists (
         select 1 from content.channels
          where name = 'uploads' and org_id = rbac.shared_org_id());
+
+    -- MARKED BY ITS OWN STATEMENT, because the insert above is guarded by
+    -- `where not exists` and therefore does nothing at all on a replay -- so
+    -- on an upgraded database the seed would keep the `false` the column was
+    -- added with, be dumped, and collide with itself on restore. The five
+    -- tables seeded through shared register functions get this for free from
+    -- their `on conflict do update`; these two channels are the seeds with no
+    -- conflict clause to hang it on, and the name is right here rather than in
+    -- a list somewhere that a later seed would not be added to.
+    -- AND IT REPAIRS THE ROW, because on an upgraded database it cannot mark
+    -- it without doing so. Measured on 0.1.6 -> 0.2.0: both global channels
+    -- are there as `private` with no owner and no org. `not (visibility =
+    -- 'private' and owner_id is null)` was added NOT VALID, so those rows
+    -- survived unchecked -- and any UPDATE to one revalidates it, which is how
+    -- marking `shipped` found them.
+    --
+    -- They are not merely invalid, they are DEAD: rbac.may_read(null,
+    -- shared_org, 'private') is NULL, so the channel lookup drops the row and
+    -- POST /files answers "no channel named uploads for this org" -- REM-83's
+    -- failure, still shipping on every database upgraded rather than
+    -- installed. A fresh 0.2.0 seeds these public; converging the upgraded one
+    -- onto that is what dev/upgrade-converges.sh asks for anyway.
+    --
+    -- Visibility only. owner_id stays null because these channels have no
+    -- owner by design -- they are everybody's -- and `public` is what makes
+    -- that legible to the read path instead of unreachable.
+    update content.channels
+       set shipped = true, visibility = 'public'
+     where name = 'uploads' and org_id = rbac.shared_org_id()
+       and (not shipped or visibility is distinct from 'public');
 end $$;
 
 
@@ -28065,7 +28424,15 @@ comment on function percolate.contract() is
 -- catches the fifty-third table on the day it is added, which is the only
 -- moment anybody could reasonably be expected to notice.
 --
--- STILL BROKEN, AND MEASURED RATHER THAN IMPLIED. Seven tables hold shipped rows
+-- FIXED, AND THE COUNT WAS WRONG. Read what follows as the account of a
+-- defect that is closed, not an outstanding one -- the mechanism is at the
+-- bottom of this comment and in `seeded_tables` below. There were EIGHT, not
+-- seven: rbac.orgs is the same shape and was not on this list, and it was
+-- found by dev/restore-is-possible.sh refusing a duplicate key on the run
+-- that proved the other seven fixed, not by anybody re-reading this. Losing
+-- that table's COPY loses every tenant in the backup.
+--
+-- Eight tables hold shipped rows
 -- AND take deployment rows: workflow.definitions (ships `ingest_file`),
 -- aiq.entity_registry (3 shipped, 6 after seeding), content.channels (2 and 3),
 -- aiq.graph_vocabulary, aiq.lexical_sources, aiq.semantic_sources,
@@ -28089,23 +28456,71 @@ comment on function percolate.contract() is
 -- the vocabulary. So `resources`, `resource_chunks` and `edges` restored EMPTY
 -- despite being registered here -- 5, 6 and 15 rows lost to two absent parents.
 --
--- The shape of the fix, since the next person should not have to rediscover it:
--- a `shipped boolean not null default false` on each of the seven, set true by
--- the statement that seeds them (which replays on upgrade, so existing
--- databases mark themselves and no literal list is needed), and registered as
--- `WHERE NOT shipped`. Derived, and it cannot go stale the way a hand-written
--- key list would.
+-- THE FIX, AND THE PART OF IT THIS PARAGRAPH USED TO GET WRONG. It said: a
+-- `shipped boolean not null default false` on each, "set true by the statement
+-- that seeds them". Half of that is right. The column and the `WHERE NOT
+-- shipped` registration are what shipped.
 --
--- WHAT THIS CHANGE IS WORTH, stated honestly: before it, a backup contained the
--- schema and nothing else and a restore came up empty and working. After it, a
--- backup contains almost everything and a restore fails loudly, naming the two
--- parents it could not find. Both are broken. Only the second one tells you.
+-- But FIVE OF THE EIGHT HAVE NO SEEDING STATEMENT. Their rows arrive through
+-- aiq.register_entity_table, aiq.register_lexical_source,
+-- workflow.define_yaml and two more -- the same functions a DEPLOYMENT calls
+-- to register its own. Seeding and user registration are one code path, so
+-- there is nothing to put a literal `true` on: doing it inside the function
+-- marks the user's rows too, which is silent data loss from every future
+-- backup and strictly worse than the duplicate key it replaces.
+--
+-- What distinguishes them is not the call site, it is WHO IS CALLING. The
+-- generated script sets `percolate.seeding` for its own length (see the
+-- HEADER in build-sql.py, and the reset in identity/closing.sql); each
+-- table's `shipped` defaults to reading it; every one of the ~14 insert sites
+-- is untouched. On an upgrade the script replays, the seeds hit their
+-- `on conflict do update set shipped = excluded.shipped or <t>.shipped`, and
+-- an existing database marks itself. Still derived, still no key list.
+--
+-- WHAT THE CHANGE WAS WORTH, in three states rather than two. Before any of
+-- it: a backup held the schema and nothing else, and a restore came up empty
+-- and working. After registering the tables: a backup held almost everything
+-- and the restore failed loudly, naming the parents it could not find --
+-- broken, but it told you. After the `shipped` column: measured on a live
+-- 0.2.0, 26 registered tables, no duplicate keys, and a dump that carries the
+-- deployment's orgs and not the shared one, its channels and not `uploads`.
+--
+-- The middle state was worth passing through, and that is the part worth
+-- keeping: the loud failure is what dev/restore-is-possible.sh caught, and
+-- catching it is what found the eighth table.
 -- ------------------------------------------------------------
 do $$
 declare
     t text;
+    -- THE SEVEN THAT HOLD BOTH KINDS OF ROW, and the reason this loop no
+    -- longer passes '' to everything. Each ships rows from the install script
+    -- AND takes rows from a deployment; an empty condition dumps both, the
+    -- restore's CREATE EXTENSION re-seeds the shipped ones, and the COPY dies
+    -- on a duplicate key with the whole restore -- the deployment's own rows
+    -- included -- rolled back with it. Measured: 4 channels dumped, 2
+    -- re-seeded, 0 restored.
+    --
+    -- The condition is on a COLUMN rather than a list of keys, so this array
+    -- is the only place the seven are named and adding an eighth seed to any
+    -- of them changes nothing here. See each table's `shipped` column and the
+    -- generated script's `percolate.seeding` flag for how a row gets marked.
+    seeded_tables text[] := array[
+        'aiq.entity_registry',
+        'aiq.graph_vocabulary',
+        'aiq.lexical_sources',
+        'aiq.schema_examples',
+        'aiq.semantic_sources',
+        'content.channels',
+        -- THE EIGHTH, and it is here because a gate found it rather than
+        -- because this list was re-derived. The install seeds the shared org;
+        -- every other row is a tenant. Losing this table's COPY loses all of
+        -- them. See rbac.orgs' own `shipped` column for the measurement.
+        'rbac.orgs',
+        'workflow.definitions'
+    ];
     -- Every table whose rows are the DEPLOYMENT's rather than the extension's,
-    -- verified empty on a from-zero install.
+    -- verified empty on a from-zero install -- plus the seven above, which are
+    -- not empty there and are registered with a condition instead.
     deployment_tables text[] := array[
         'agentic.agents',
         'agentic.messages',
@@ -28122,12 +28537,17 @@ declare
         -- lose an edge: it silently makes every past as-of answer about that
         -- edge wrong, in the confident direction.
         'aiq.edge_retractions',
+        'aiq.entity_registry',
         'aiq.embedding_models',
+        'aiq.graph_vocabulary',
+        'aiq.lexical_sources',
         'aiq.lake_nodes',
         'aiq.node_keys',
         'aiq.node_resolutions',
         'aiq.nodes',
         'aiq.schema_revisions',
+        'aiq.schema_examples',
+        'aiq.semantic_sources',
         'aiq.soft_nodes',
         'content.dataset_files',
         'content.datasets',
@@ -28196,7 +28616,9 @@ begin
                     where d.classid = 'pg_class'::regclass
                       and d.objid = t::regclass
                       and d.deptype = 'e') then
-            perform pg_catalog.pg_extension_config_dump(t, '');
+            perform pg_catalog.pg_extension_config_dump(
+                t, case when t = any(seeded_tables) then 'WHERE NOT shipped'
+                        else '' end);
         end if;
     end loop;
 end $$;
@@ -29046,3 +29468,19 @@ begin
         '% functions build SQL at run time and are reachable by authenticated; all % declared',
         array_length(v_dynamic, 1), array_length(v_dynamic, 1);
 end $$;
+
+-- ------------------------------------------------------------
+-- SEEDING IS OVER.
+--
+-- The HEADER set `percolate.seeding` so that every table holding both shipped
+-- and deployment rows could default its `shipped` column from it. This runs
+-- last in the generated script, so anything inserted after this point -- by a
+-- deployment, by a migration, by a person -- is a deployment row and gets
+-- dumped, which is the whole point.
+--
+-- It matters in one specific case rather than in general: a caller who runs
+-- `CREATE EXTENSION percolate` and then registers their own entity tables in
+-- the SAME transaction. Without this they would inherit the flag and their
+-- rows would never be backed up.
+-- ------------------------------------------------------------
+reset percolate.seeding;

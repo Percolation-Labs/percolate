@@ -36,6 +36,24 @@ create table if not exists aiq.graph_vocabulary (
     registered_at  timestamptz not null default now()
 );
 
+-- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. aiq.graph_vocabulary holds
+-- both, and a backup must carry the second kind only -- see the HEADER's
+-- `percolate.seeding` note and specs/contract/schema.sql section 4.
+--
+-- TWO STATEMENTS, AND THE SECOND IS THE ONE THAT REACHES AN UPGRADE. The
+-- column is added `default false` so that rows which already exist on an
+-- upgraded database are treated as the deployment's -- the safe direction,
+-- since the cost of a wrong `false` is a loud duplicate key and the cost of a
+-- wrong `true` is a row silently absent from every future backup. The default
+-- is THEN repointed at the seeding flag, for rows inserted after this line.
+-- Putting the flag-reading default on the `add column` instead would evaluate
+-- it once, during the upgrade, with seeding on -- marking every deployment row
+-- as shipped. Measured shape, not a worry: the same one-statement-short trap
+-- cost REM-109 half a day on `queue_config`.
+alter table aiq.graph_vocabulary add column if not exists shipped boolean not null default false;
+alter table aiq.graph_vocabulary alter column shipped set default
+    (coalesce(current_setting('percolate.seeding', true), 'off') = 'on');
+
 comment on table aiq.graph_vocabulary is
     'What a structure extractor may emit as `r`, and what that edge is worth on '
     'a graph_walk. Distinct from aiq.relation_types, which is what the edge '
@@ -144,7 +162,13 @@ begin
         insert into aiq.graph_vocabulary (relation, description)
         select e->>'relation', e->>'description'
         from jsonb_array_elements(p_relations) e
-        on conflict (relation) do nothing;
+        -- Was `do nothing`. It still changes nothing a caller can see: the
+        -- only assignment is the backup flag, and the UPDATE below is what
+        -- applies the payload. What it buys is the replay -- an upgraded
+        -- database marks the relations the extension ships without a list of
+        -- their names living anywhere.
+        on conflict (relation) do update
+           set shipped = excluded.shipped or graph_vocabulary.shipped;
 
         update aiq.graph_vocabulary g
            set machine_weight = coalesce((e->>'machine_weight')::real, g.machine_weight),

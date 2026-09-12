@@ -48,6 +48,24 @@ create table if not exists content.channels (
     unique (org_id, name)
 );
 
+-- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. content.channels holds
+-- both, and a backup must carry the second kind only -- see the HEADER's
+-- `percolate.seeding` note and specs/contract/schema.sql section 4.
+--
+-- TWO STATEMENTS, AND THE SECOND IS THE ONE THAT REACHES AN UPGRADE. The
+-- column is added `default false` so that rows which already exist on an
+-- upgraded database are treated as the deployment's -- the safe direction,
+-- since the cost of a wrong `false` is a loud duplicate key and the cost of a
+-- wrong `true` is a row silently absent from every future backup. The default
+-- is THEN repointed at the seeding flag, for rows inserted after this line.
+-- Putting the flag-reading default on the `add column` instead would evaluate
+-- it once, during the upgrade, with seeding on -- marking every deployment row
+-- as shipped. Measured shape, not a worry: the same one-statement-short trap
+-- cost REM-109 half a day on `queue_config`.
+alter table content.channels add column if not exists shipped boolean not null default false;
+alter table content.channels alter column shipped set default
+    (coalesce(current_setting('percolate.seeding', true), 'off') = 'on');
+
 -- NULLS NOT DISTINCT, for the reason content.datasets already carries below.
 --
 -- A plain `unique (org_id, name)` does not constrain a SHARED channel at all:

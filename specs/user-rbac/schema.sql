@@ -656,6 +656,27 @@ create table if not exists rbac.orgs (
     created_at  timestamptz not null default now(),
     updated_at  timestamptz not null default now()
 );
+
+-- SHIPPED BY THE EXTENSION, OR ADDED BY THIS DEPLOYMENT. The eighth table of
+-- the class specs/contract/schema.sql section 4 names seven of: the install
+-- seeds the shared org (rbac.shared_org_id()) and every other row here is a
+-- tenant somebody created. Registered with an empty condition, a restore
+-- re-seeds the shared org and then COPYs it again --
+-- `duplicate key value violates unique constraint "orgs_pkey"`, the COPY
+-- aborts, and EVERY TENANT IN THE BACKUP is lost with it.
+--
+-- Found by dev/restore-is-possible.sh the first time it refused this class
+-- rather than printing a note about it, on the run that proved the other
+-- seven fixed. The list in that comment was written from the tables that
+-- were empty-on-install; this one was not on it.
+--
+-- Two statements: `default false` so existing rows on an upgraded database
+-- are treated as tenants (a wrong `false` is a loud duplicate key, a wrong
+-- `true` is a tenant silently absent from every future backup), then the
+-- default repointed at the seeding flag for rows inserted after this line.
+alter table rbac.orgs add column if not exists shipped boolean not null default false;
+alter table rbac.orgs alter column shipped set default
+    (coalesce(current_setting('percolate.seeding', true), 'off') = 'on');
 create or replace trigger trg_rbac_orgs_touch before update on rbac.orgs
     for each row execute function public.touch_updated_at();
 
@@ -704,7 +725,10 @@ comment on function rbac.shared_org_id() is
 -- instead of keeping whatever it had.
 insert into rbac.orgs (id, slug, name)
 values (rbac.shared_org_id(), 'shared', 'Shared (every tenant)')
-on conflict (id) do update set slug = excluded.slug, name = excluded.name;
+on conflict (id) do update set slug = excluded.slug, name = excluded.name,
+    -- OR, so a replay cannot un-ship it: this row must never reach a dump,
+    -- because CREATE EXTENSION recreates it on the far side of a restore.
+    shipped = excluded.shipped or orgs.shipped;
 
 -- COERCE and TEST, named once each, because between them they are every
 -- remaining use of the fact and writing `coalesce(x, rbac.shared_org_id()) =

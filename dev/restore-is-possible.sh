@@ -137,22 +137,44 @@ fi
 # there, which attributed the whole remainder to two harmless causes. It is
 # incomplete, and the class it omitted is the serious one.
 DUPKEY=$(grep -ci "ERROR:.*duplicate key value violates unique constraint" "$LOG" || true)
+
+# A FAILURE CONDITION NOW, NOT A NOTE. This block used to print the paragraph
+# below and exit 0, on the grounds that the duplicate key was a known defect
+# with a ticket on it. That is how it spent several hours describing a
+# ROW-LOSING failure as part of "the rest" -- a reader saw a green gate and a
+# footnote. The fix it prescribed has landed (the seven tables carry `shipped`,
+# registered `WHERE NOT shipped`), so the class is no longer expected and its
+# return is a regression: somebody added an eighth table that ships rows and
+# takes them, or a seed stopped being marked.
+#
+# Deliberately keyed on the ERROR text rather than on a list of the seven. A
+# list here would be a second copy of specs/contract/schema.sql's
+# `seeded_tables`, and the eighth table is exactly the case both would have to
+# be updated for -- which is the failure this refuses.
+if [ "$DUPKEY" -gt 0 ]; then
+    echo "FAILED: $DUPKEY duplicate key(s) in the load, and this class LOSES ROWS."
+    grep -i "ERROR:.*duplicate key value violates unique constraint" "$LOG" \
+        | sed 's/^/    /' | head -8
+    echo ""
+    echo "A table holding rows the extension SHIPS and rows a deployment adds must be"
+    echo "registered with a condition that excludes its own: CREATE EXTENSION re-seeds"
+    echo "the shipped rows on restore, the COPY hits them again, and an aborted COPY"
+    echo "takes the deployment's rows in that table with it -- measured at 4 channels"
+    echo "in and 0 after, before this was fixed."
+    echo ""
+    echo "The seven known ones carry \`shipped boolean\`, defaulted from the"
+    echo "\`percolate.seeding\` flag the install sets, and are registered"
+    echo "\`WHERE NOT shipped\` in specs/contract/schema.sql's \`seeded_tables\`."
+    echo "If the table above is not one of them, it is the eighth: give it the same"
+    echo "column and add it to that array. If it IS one of them, its seed stopped"
+    echo "being marked -- check that the seeding statement replays."
+    exit 1
+fi
+
 if [ "$OTHER" -gt 0 ]; then
     echo "    note: $OTHER other error(s) in the load, none of them a function that"
     echo "    could not resolve. A --data-only dump does not restore cleanly into a"
     echo "    fresh install yet. By class:"
-    if [ "$DUPKEY" -gt 0 ]; then
-        echo "      * $DUPKEY duplicate key(s) -- and this one LOSES ROWS. Seven tables hold"
-        echo "        rows the extension SHIPS and rows a deployment adds: workflow.definitions,"
-        echo "        content.channels, aiq.entity_registry, aiq.graph_vocabulary,"
-        echo "        aiq.lexical_sources, aiq.semantic_sources, aiq.schema_examples."
-        echo "        Registered with an empty condition, CREATE EXTENSION inserts the shipped"
-        echo "        rows and the restore COPYs them again, so the COPY aborts and takes the"
-        echo "        deployment's rows in that table with it. Measured: 4 channels in, 0 after."
-        echo "        specs/contract/schema.sql predicted it; the fix it prescribes is a"
-        echo "        \`shipped boolean\` set by the seeding statement, registered as"
-        echo "        \`WHERE NOT shipped\` -- derived, so it cannot rot like a key list."
-    fi
     echo "      * the rest: no cron schema unless pg_cron is installed in the target, no"
     echo "        demo schema, and no per-model aiq.emb_* tables (created when a model is"
     echo "        first used rather than by the extension)."
