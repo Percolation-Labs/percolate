@@ -326,7 +326,9 @@ it: an agent that delegates references it as an ordinary `tool_servers` row.
 
 For the packaging decision record see
 [PACKAGING.md](https://github.com/Percolation-Labs/p8-subsystems/blob/main/PACKAGING.md);
-for what packaging *requires of the design*, `specs/agentic/brief.md` §10.
+for what packaging *requires of the design*, `specs/agentic/brief.md` §10. For
+which commit each published version was cut from — and the one tag that is off
+by one — see [RELEASES.md](RELEASES.md).
 
 ---
 

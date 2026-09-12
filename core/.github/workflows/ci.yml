@@ -27,8 +27,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           # Tags, because check-version.sh asks whether this version is already
-          # published and a shallow clone has none -- it would pass by knowing
-          # nothing.
+          # published and check-releases.sh audits the ones that are. A shallow
+          # clone has none -- both would pass by knowing nothing.
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
@@ -122,6 +122,13 @@ jobs:
 
       - name: A released version number may not be reused
         run: dev/check-version.sh
+
+      # The other half of the same question. check-version.sh asks whether THIS
+      # number is spent; this asks whether the record of the spent ones is true.
+      # v0.1.8 points at a tree that says 0.1.7 and nobody noticed for six days,
+      # because a tag is read only when somebody tries to reproduce a release.
+      - name: Every published tag is accounted for
+        run: dev/check-releases.sh
 
       # The CLI is what the documentation tells people to run, and it is the
       # part that broke when `auth bootstrap` moved into the extension. Checking

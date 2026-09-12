@@ -1,0 +1,64 @@
+# Releases
+
+What was published, and which commit each published version was cut from.
+
+This file exists because a tag is not self-describing once one of them is
+wrong, and because `p8-subsystems/PACKAGING.md` makes the core pin bump
+conditional on "the `percolate-core` release notes" — a precondition that had
+never existed. The generated GitHub Release bodies are bare compare links;
+this is the account that is written on purpose.
+
+`.github/workflows/release.yml` is the mechanism. It publishes to PyPI and
+Docker Hub first and tags last, so a failed run leaves a bumped, untagged tree
+that the next run finishes. The tag is the commit point.
+
+## The invariant
+
+**`v<x>` names the commit whose `pyproject.toml` says `<x>`.** The `tag` job
+checks out `needs.version.outputs.sha` — the commit `build` and `image` used —
+and then refuses to tag at all if the tree it landed on disagrees with the
+version it is about to tag. Both halves are needed: the `ref:` is a value
+handed between jobs, and before the assertion existed a wrong one tagged
+silently.
+
+## Published versions
+
+| Version | Tag | Commit | GitHub Release |
+| -- | -- | -- | -- |
+| 0.1.0 – 0.1.3 | none | — | none |
+| 0.1.4 | `v0.1.4` | `db0a944` | none |
+| 0.1.5 | `v0.1.5` | `6669bc4` | none |
+| 0.1.6 | `v0.1.6` | `d8ae150` | yes |
+| 0.1.7 | `v0.1.7` | `939a5be` | yes |
+| 0.1.8 | `v0.1.8` → `8c03d2a` | **`91ef61b`** | yes |
+
+0.1.0–0.1.3 went to PyPI before releasing was a workflow. There is nothing to
+recover: the wheels are on PyPI and no tag was ever pushed. 0.1.4 and 0.1.5 are
+tagged correctly and simply have no Release page; the tag is what a reproduction
+needs, so this is recorded rather than backfilled.
+
+## `v0.1.8` is off by one, and is not being moved
+
+`v0.1.8` points at `8c03d2a`, whose tree says `0.1.7`. The commit that is
+0.1.8 is `91ef61b`, its immediate child.
+
+```
+$ git show v0.1.8:pyproject.toml | sed -n 3p
+version = "0.1.7"
+$ git diff --stat v0.1.8 91ef61b
+ percolate_core/__init__.py | 2 +-
+ pyproject.toml             | 2 +-
+```
+
+That diff is the whole of it: two version strings and nothing else. The code
+published as 0.1.8 is byte-for-byte what the tag points at, so a checkout of
+`v0.1.8` reproduces the right software and misreports its own version number.
+
+It happened because the `tag` job took `github.sha` — main as it stood when the
+button was pressed — instead of the commit that was built. 0.1.8 was the first
+release under the tag-last ordering, so it is the only one affected;
+`v0.1.4`–`v0.1.7` are self-consistent. The cause is fixed in `release.yml`, and
+the assertion above would now refuse this tag.
+
+The tag stays where it is. Moving a published tag breaks every clone that has
+already fetched it, and buys back two lines that this file already records.
