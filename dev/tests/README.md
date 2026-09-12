@@ -6,6 +6,42 @@
 DSN="postgres://…" ./run.sh
 ```
 
+**`run.sh` IS NOT THE GATE. `dev/check.sh` IS.** "All of them, in order" means
+all of *these five surfaces*, and that sentence has been read as "everything"
+more than once. `dev/check.sh` is what CI runs and what decides whether a change
+is green; on top of this file it adds the eval journeys (111 scenarios in
+`evals/scenarios.yaml`), the backup round trip, the contract re-check and four
+upgrade paths. Measured cost of the confusion, 2026-09-12: a session ran
+`run.sh`, got five green surfaces, pushed, and CI went red on eleven eval
+fixtures. Run `dev/check.sh` before a PR. Run `run.sh` while iterating on a
+surface, which is what it is for.
+
+**AND IF YOUR CHANGE TOUCHES AN OBJECT THAT ALREADY EXISTS, NEITHER OF THEM CAN
+SEE THE DEFECT.** Adding a column, a column default, a seed row or a grant to
+something already installed produces a divergence that lives only in an
+*upgraded* database, and every check in this directory — plus `surface.sql`,
+plus all ten tree gates — asks its question of **one** database, so all of them
+are green either way. `dev/upgrade-converges.sh` is the only thing in the
+collection that compares an upgraded database against a fresh one object by
+object:
+
+```bash
+CONTAINER=p8-mine DB=p8mine dev/upgrade-converges.sh
+```
+
+Measured, same day: REM-109 changed `workflow.queue_config`'s `stale_timeout`
+default from a literal to `workflow.stale_timeout_default()`. `create table if
+not exists` is a no-op on a database that already has the table, so the new
+default reached fresh installs only and every upgraded deployment kept
+`'00:02:00'::interval` — a fifth copy of the number, created by the commit that
+deleted the other four. Ten tree gates, all 19 workflow files and `surface.sql`
+were green with that live. `upgrade-converges.sh` reported it as one line.
+
+The remedy for that shape is an explicit `alter table … alter column … set
+default` after the create, which `rbac.users` has carried since user-rbac §1 and
+which REM-68 is the open ticket for. **`dev/check.sh` runs this gate, so a PR is
+covered; what is not covered is believing a local `--tree` run.**
+
 Three of these are not one concern among many — they are **the** concern.
 Everything else in the collection is composed out of them: ingestion is
 workflows over content, the graph is queries over RBAC-scoped rows, an agent is
