@@ -227,6 +227,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 -- replaces it, and a database carrying only the stub is one where naming
 -- somebody else's external_id hands back their run.
 ('workflow-engine','function','workflow.reusable_run','text','spec.md §4: an external_id matches only among the runs its caller may see'),
+('workflow-engine','function','workflow.may_start','workflow.definitions','spec.md §17(a): whether this caller may use this definition. Callable by `authenticated` because current_definition() -- which asks it -- is SECURITY INVOKER, and a USING-clause-style predicate has no definer indirection to hide behind. Reading it tells a caller only about a row they already hold'),
 ('workflow-engine','function','workflow.may_access_run','uuid,text','integration-rbac.sql (e): the run row rule as a boolean, shared by assert_run_access and reusable_run'),
 ('workflow-engine','function','workflow.claim_task','text,text','spec.md: SKIP LOCKED claiming'),
 ('workflow-engine','function','workflow.get_task_context','uuid,text','§16: a worker must see its run input'),
@@ -867,14 +868,19 @@ insert into api_exclusions (api_view, column_name, kind, why) values
 -- publishing the index and inviting somebody to rank in application code.
 ('agentic.skills_api', 'search_tsv', 'internal', 'the generated lexical index; TEXT mode is the read path, not the vector'),
 
--- definitions_api publishes the CATALOGUE and not the bodies. `spec` is the
--- one that matters: workflow.definitions carries no owner_id, no org_id and no
--- RLS, so a column in this view is a column every tenant reads. Names,
--- versions and the derived shape (step_count, step_kinds, queues) are what
--- listing and labelling need. The body waits for the table to adopt scope --
--- rbac.add_scope_columns('workflow.definitions') plus a scope policy -- at
--- which point this exclusion is the thing to delete.
-('workflow.definitions_api', 'spec',       'internal', 'the workflow body, on a table with no tenant scope; the derived step_count/step_kinds/queues are the published shape'),
+-- definitions_api publishes the CATALOGUE and not the bodies, and the REASON
+-- for excluding `spec` has changed even though the exclusion has not. It used
+-- to be that workflow.definitions carried no owner_id, no org_id and no RLS,
+-- so a column in this view was a column every tenant read. The table adopts
+-- scope now (REM-91), and this view is owned by api_viewer rather than by the
+-- table owner, so a policy decides what it returns -- the old reason is gone.
+--
+-- What is left is that nothing asks for the body, and that the two directions
+-- do not cost the same: `create or replace view` may only APPEND, so a column
+-- added here can be withdrawn only by dropping the view on every deployment.
+-- Names, versions, the derived shape and now the scope columns are what
+-- listing and labelling need. `spec` goes in the day a screen needs it.
+('workflow.definitions_api', 'spec',       'internal', 'the workflow body; nothing reads it, and a view column is easier to add than to withdraw -- the derived step_count/step_kinds/queues are the published shape'),
 ('workflow.definitions_api', 'deleted_at', 'internal', 'the view IS where deleted_at is null; a soft-delete tombstone is not a fact about a live definition'),
 
 -- task_events records the transition. input_snapshot is what the engine held

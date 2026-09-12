@@ -642,6 +642,19 @@
     },
     {
       "admits": [
+        "org",
+        "private",
+        "public"
+      ],
+      "column": "visibility",
+      "enforced_by": "reference",
+      "members": "shipped",
+      "schema": "workflow",
+      "table": "definitions",
+      "vocabulary": "rbac.visibilities"
+    },
+    {
+      "admits": [
         "none",
         "compensating",
         "compensated"

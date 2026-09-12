@@ -662,6 +662,43 @@ create table if not exists workflow.definitions (
     unique (name, version)
 );
 
+-- WHETHER THIS CALLER MAY USE THIS DEFINITION AT ALL -- the gate spec.md §17
+-- decided and nothing implemented.
+--
+-- Same stub-and-shadow shape as may_define() below and assert_run_access():
+-- the engine standalone has no identity model, so the honest default is `true`
+-- and integration-rbac.sql replaces this with the rbac-aware version when the
+-- identity plane is installed. The whole ROW is the argument rather than
+-- (owner_id, org_id, visibility), and that is forced rather than tidy: those
+-- columns do not exist until rbac.add_scope_columns() adds them, so a body in
+-- THIS file cannot name them and a signature in this file cannot take them.
+--
+-- Asked HERE, inside current_definition(), and not at the three call sites.
+-- REM-58 made this function the single answer to "which version does this name
+-- mean" precisely because three callers had each answered it and two disagreed;
+-- a visibility check copied to those same three places would repeat that
+-- history with a security predicate instead of an ORDER BY.
+--
+-- And asked here rather than left to the RLS policy, which is the part spec.md
+-- §17(a) had wrong. start_workflow(), start_child_workflow() and
+-- schedule_workflow() are all SECURITY DEFINER, and a definer function owned
+-- by the table's owner does not see the table's policies at all. MEASURED,
+-- 2026-09-12, on a three-line reproduction: of two rows where a policy admits
+-- one, a direct select returned 1, a SECURITY INVOKER function returned 1, and
+-- a SECURITY DEFINER function returned 2. `force row level security` brings it
+-- back to 1 and is the wrong lever here -- the engine's own definer paths
+-- legitimately read every definition, including the max(version)+1 allocation
+-- in define_yaml() and seed_load()'s probe, so forcing the table would break
+-- the writer to gate the reader.
+--
+-- The argument is NAMED, and it has to be: `create or replace function` may
+-- not change a parameter's name, so a stub with an anonymous argument could
+-- never be shadowed by a body that reads it. `d` here and `d` there.
+create or replace function workflow.may_start(d workflow.definitions)
+returns boolean as $$
+    select true;
+$$ language sql stable;
+
 -- WHICH VERSION A NAME MEANS, in one place, because three callers were each
 -- answering it and two of them answered it differently from the column above.
 --
@@ -685,6 +722,13 @@ create or replace function workflow.current_definition(p_name text)
 returns workflow.definitions as $$
     select d.* from workflow.definitions d
      where d.name = p_name and d.deleted_at is null
+       -- AMONG THE DEFINITIONS THIS CALLER MAY USE, never every definition
+       -- with the name -- so the version that is resolved is the latest one
+       -- VISIBLE, not the latest one that exists. Filtering after the
+       -- `order by` would pick another tenant's newer version and then refuse
+       -- it, hiding a definition the caller does have from a caller who does
+       -- own one.
+       and workflow.may_start(d)
      order by d.version desc
      limit 1;
 $$ language sql stable;
@@ -1520,7 +1564,15 @@ begin
 
     v_def := workflow.current_definition(p_name);
     if v_def.id is null then
-        raise exception 'no workflow_def found for name %', p_name;
+        -- ONE MESSAGE FOR BOTH "no such workflow" and "not yours", which
+        -- spec.md §17(a) settles deliberately rather than by accident:
+        -- distinguishing them tells an unauthorised caller that a name
+        -- exists, which is the probe `2e5995e` closed for agents
+        -- (agentic.may_invoke) and the identical probe here.
+        raise exception
+            'no workflow definition named ''%'' is visible to you', p_name
+            using hint = 'it may not exist, or it may belong to an org you '
+                         'are not a member of';
     end if;
 
     v_comp := workflow.compensation_keys(v_def.spec);
@@ -2213,6 +2265,10 @@ begin
     -- STARTABLE, not merely present: the same question start_workflow asks one
     -- call along, so this cannot admit a run that the starter then refuses.
     if (workflow.current_definition(p_workflow_name)).id is null then
+        -- Not an authorization message, and the distinction matters: this
+        -- runs as `worker`, which rbac.is_operator() admits, so may_start()
+        -- does not filter here. A definition missing from THIS path is
+        -- genuinely unregistered.
         raise exception
             'sub_workflow step names workflow %, which is not registered', p_workflow_name;
     end if;
@@ -4329,8 +4385,14 @@ begin
 
     -- Startable, for the reason start_child_workflow gives above.
     if (workflow.current_definition(p_workflow)).id is null then
-        raise exception 'no workflow definition named "%"', p_workflow
-            using hint = 'register it with workflow.define_yaml() first';
+        -- The same single message as start_workflow(), for the same reason:
+        -- scheduling a workflow starts it later, so a caller who may not
+        -- start one may not schedule one either, and the refusal must not
+        -- distinguish "no such name" from "not yours".
+        raise exception
+            'no workflow definition named ''%'' is visible to you', p_workflow
+            using hint = 'register it with workflow.define_yaml() first, or '
+                         'ask the org that owns it to share it';
     end if;
     -- Raises on a malformed expression or an unknown timezone.
     perform workflow.cron_matches(p_cron, now(), p_timezone);
@@ -9116,6 +9178,11 @@ insert into rbac.permission_kinds (resource, action, checked_by) values
     -- <table>_scoped for the read and <table>_scoped_write for the write.
     ('workflow_runs',      'select', 'policy runs_scoped'),
     ('workflow_schedules', 'select', 'policy schedules_scoped'),
+    -- The registry joins them. A workflow body is SQL that runs as the engine
+    -- owner, so reading every tenant's definitions is a real authority and
+    -- gets a pair somebody can be granted -- rather than being available to
+    -- anyone who can reach the table, which is what it was.
+    ('workflow_definitions', 'select', 'policy definitions_scoped'),
     -- Agents, tool servers, skills and plugins are scoped like anything else
     -- now, so each needs a read pair alongside the authoring pair below --
     -- the override for an operator who must see every tenant's configuration.
@@ -11454,6 +11521,35 @@ end $$;
 select rbac.add_scope_columns('workflow.runs');
 select rbac.add_scope_policy ('workflow.runs', 'workflow_runs');
 
+-- AND SO DOES THE REGISTRY, in this section rather than beside its owner
+-- trigger in (e), because `definitions_api` in (c2) below publishes these
+-- three columns and a view cannot select a column that does not exist yet.
+-- The same split `workflow.runs` has: columns and policy here, the trigger
+-- that fills owner_id with the rest of the write path.
+-- AND SO DOES THE REGISTRY. `workflow.definitions` carried no owner_id, no
+-- org_id and no RLS, which is the root spec.md §17 names: there was nothing on
+-- the row for a check to read, so no check could be written. Measured on
+-- 2026-09-12 before this landed -- a plain `member` who owns nothing called
+-- start_workflow() on a definition somebody else wrote and it succeeded --
+-- and that included the per-user `source_<id>` workflows save_api_source()
+-- compiles from a private data source.
+--
+-- BACKFILLED 'public', NOT 'private', and spec.md §17(d) said 'private' in a
+-- sentence that contradicted the two either side of it. The intent it states
+-- twice is that an upgraded database keeps working exactly as it does now and
+-- the change is opt-in per definition; 'private' over a table whose rows have
+-- no owner_id yet satisfies rbac.may_read() for nobody at all, so every
+-- existing workflow would have become unstartable by everyone -- which §17(d)
+-- itself calls "a worse failure than the gap it closes". 'public' is the same
+-- answer agentic.agents/skills/tool_servers/plugins took, and for the same
+-- reason: the policy being replaced was effectively `using (true)`.
+--
+-- The column DEFAULT stays 'private' (add_scope_columns sets it), so the
+-- backfill is about rows that already exist and new definitions are private to
+-- their author. That asymmetry is the whole of the fix.
+select rbac.add_scope_columns('workflow.definitions', 'public');
+select rbac.add_scope_policy ('workflow.definitions', 'workflow_definitions');
+
 alter table workflow.tasks enable row level security;
 
 -- Tasks inherit their run's visibility rather than restating the rule -- one
@@ -11552,12 +11648,19 @@ attempt failed.$c$;
 --    workflow's name -- runs_api carries workflow_def_id and there was no row
 --    on the other end of it.
 --
---    `spec` IS DELIBERATELY NOT PUBLISHED HERE. definitions has no owner_id,
---    no org_id and no RLS, so every authenticated caller in every tenant
---    would read every workflow body. Names and shapes are what a list and a
---    run label need; the body waits for the table to adopt scope, which is
---    `rbac.add_scope_columns('workflow.definitions')` +
---    `rbac.add_scope_policy(...)` -- the collection's own primitive.
+--    `spec` IS STILL NOT PUBLISHED HERE, and the reason has changed. It used
+--    to be that definitions had no owner_id, no org_id and no RLS, so every
+--    authenticated caller in every tenant would read every workflow body. The
+--    table adopts scope in section (e) below, so that reason is gone: this
+--    view is owned by api_viewer, which owns nothing else, so a policy on the
+--    base table now decides what it returns.
+--
+--    What is left is that nothing asks for the body. Adding a column to a view
+--    is one line and is not reversible in the same way -- `create or replace
+--    view` may only APPEND, so a column added here can be withdrawn only by
+--    dropping the view on every deployment. Names and shapes are what a list
+--    and a run label need; `spec` goes in the day a screen needs it, not the
+--    day it becomes safe.
 -- ------------------------------------------------------------
 grant select on workflow.definitions to api_viewer;
 
@@ -11577,7 +11680,18 @@ select d.id,
        -- `runs_api.name`: a Start control that is enabled by a client-side
        -- max() is enabled by something no test executes.
        d.version = (select max(v.version) from workflow.definitions v
-                     where v.name = d.name and v.deleted_at is null) as is_latest
+                     where v.name = d.name and v.deleted_at is null) as is_latest,
+       -- APPENDED, and the position is forced for the reason runs_api states
+       -- above: `create or replace view` may only add columns at the end, so a
+       -- column slotted in beside `name` installs cleanly and fails on every
+       -- upgrading database.
+       --
+       -- Published because a list of workflows that cannot say which are yours
+       -- is a list somebody has to guess at -- the same three columns runs_api
+       -- publishes, for the same screens. A caller sees only rows the policy
+       -- admits, so `owner_id` here names either them or somebody they already
+       -- share an org with.
+       d.owner_id, d.org_id, d.visibility
   from workflow.definitions d
  where d.deleted_at is null;
 
@@ -11845,6 +11959,87 @@ $$ language plpgsql security definer set search_path = pg_catalog, public;
 create or replace trigger trg_set_run_owner
     before insert on workflow.runs
     for each row execute function workflow.set_run_owner();
+
+-- Ownership from the JWT, never from an argument -- the third instance of the
+-- shape set_run_owner() and set_schedule_owner() already use, and a trigger
+-- for their reason rather than a modified define_yaml(): the core function
+-- keeps no rbac dependency, and every other insert path (apply_package,
+-- seed_load, a hand-written INSERT) gets it for free.
+--
+-- THE SECOND BRANCH IS NOT SYMMETRY, it is what keeps packages installable.
+-- percolate.apply_package() is SECURITY DEFINER and is run by an operator with
+-- no JWT, so current_user_id() is null and owner_id stays null -- and a row
+-- with no owner at visibility 'private' is readable by nobody under
+-- rbac.may_read(), including the operator who installed it. Every package
+-- workflow would install successfully and then be startable by no signed-in
+-- caller, with nothing to say so.
+--
+-- So: a definition nobody owns is the deployment's, and spec.md §17(c) already
+-- decides what that means -- "a package is installed for the deployment, and
+-- the shared tier is exactly what 'for the deployment' means". There is no
+-- explicit-private case to protect: ownerless AND private is a row no caller
+-- can ever read, so it cannot be what anybody meant.
+create or replace function workflow.set_definition_owner() returns trigger as $$
+begin
+    if new.owner_id is null then
+        new.owner_id := rbac.current_user_id();
+    end if;
+    if new.owner_id is null and new.visibility = 'private' then
+        new.visibility := 'public';
+    end if;
+    return new;
+end;
+$$ language plpgsql security definer set search_path = pg_catalog, public;
+
+create or replace trigger trg_set_definition_owner
+    before insert on workflow.definitions
+    for each row execute function workflow.set_definition_owner();
+
+-- The real check, replacing schema.sql's `select true` stand-in. The row is
+-- the argument because schema.sql cannot name columns rbac adds; see the stub
+-- for why, and for the measurement showing why the policy alone cannot do
+-- this job through a SECURITY DEFINER caller.
+--
+-- rbac.may_read() rather than a fourth copy of the predicate: its own header
+-- says it exists for exactly this caller -- "what a SECURITY DEFINER function
+-- calls, once, about one row it has already fetched" -- and the 58x per-row
+-- cost that keeps it out of policies does not arise when it is asked once.
+--
+-- THREE ARMS, and each one was found by something failing rather than chosen.
+--
+-- is_operator() is load-bearing rather than defensive. `worker` and
+-- `scheduler` hold no JWT, so may_read() alone answers false for every
+-- definition that is not public -- and start_child_workflow() resolves its
+-- definition as `worker` while the clock resolves one as `scheduler`. Without
+-- this arm, making a workflow private silently stops its own sub-workflows and
+-- its own schedule, and nothing reports it. Same arm, same position, as
+-- rbac.scope_write_predicate().
+--
+-- has_permission() IS THE ARM THE POLICY HAS, and leaving it out made this
+-- function and the policy beside it two rules that disagreed -- the exact drift
+-- the "one rule, two spellings" argument above claims to prevent. Found by
+-- dev/tests/content/03-sources.sql, which starts a private source workflow as
+-- an `admin` to prove the transformation reader follows the RUN's owner rather
+-- than the workflow input: the policy admitted that caller through
+-- workflow_definitions:select and this function refused them, so a test about
+-- impersonation failed as a missing workflow. add_scope_policy() emits this arm
+-- whenever it is given a resource, so a predicate that means to agree with the
+-- policy has to carry it. may_access_run() has the identical shape for the
+-- identical reason.
+create or replace function workflow.may_start(d workflow.definitions)
+returns boolean as $$
+    select rbac.is_operator()
+        or rbac.may_read(d.owner_id, d.org_id, d.visibility)
+        or rbac.has_permission(rbac.current_user_id(), 'workflow_definitions', 'select');
+$$ language sql stable;
+
+-- Called from inside current_definition(), which is SECURITY INVOKER and is
+-- reached by every role that starts anything -- so EXECUTE is checked against
+-- the caller, not against the engine owner, exactly as user-rbac §9 says of
+-- the predicates its policies call.
+revoke execute on function workflow.may_start(workflow.definitions) from public;
+grant execute on function workflow.may_start(workflow.definitions)
+    to authenticated, api_viewer, worker, scheduler;
 
 -- AND THE IDEMPOTENCY KEY IS SCOPED THE SAME WAY THE ROWS ARE.
 --

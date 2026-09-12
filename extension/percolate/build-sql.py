@@ -544,6 +544,10 @@ DECLARED_SHADOWS = {
     "workflow.may_define()":
         "standalone: table privilege stands in for a permission nobody has "
         "granted, because there are no roles to grant it to.",
+    "workflow.may_start(workflow.definitions)":
+        "standalone: every definition is startable, because owner_id, org_id "
+        "and visibility do not exist until rbac.add_scope_columns() adds them "
+        "-- so the standalone body cannot name the columns the shadow reads.",
     "workflow.reusable_run(text)":
         "standalone: an external_id is installation-wide, because there is no "
         "owner to scope it to. With identities it narrows to one run per "

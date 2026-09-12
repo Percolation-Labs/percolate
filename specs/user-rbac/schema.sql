@@ -286,6 +286,11 @@ insert into rbac.permission_kinds (resource, action, checked_by) values
     -- <table>_scoped for the read and <table>_scoped_write for the write.
     ('workflow_runs',      'select', 'policy runs_scoped'),
     ('workflow_schedules', 'select', 'policy schedules_scoped'),
+    -- The registry joins them. A workflow body is SQL that runs as the engine
+    -- owner, so reading every tenant's definitions is a real authority and
+    -- gets a pair somebody can be granted -- rather than being available to
+    -- anyone who can reach the table, which is what it was.
+    ('workflow_definitions', 'select', 'policy definitions_scoped'),
     -- Agents, tool servers, skills and plugins are scoped like anything else
     -- now, so each needs a read pair alongside the authoring pair below --
     -- the override for an operator who must see every tenant's configuration.

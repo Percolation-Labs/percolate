@@ -174,6 +174,43 @@ create table if not exists workflow.definitions (
     unique (name, version)
 );
 
+-- WHETHER THIS CALLER MAY USE THIS DEFINITION AT ALL -- the gate spec.md §17
+-- decided and nothing implemented.
+--
+-- Same stub-and-shadow shape as may_define() below and assert_run_access():
+-- the engine standalone has no identity model, so the honest default is `true`
+-- and integration-rbac.sql replaces this with the rbac-aware version when the
+-- identity plane is installed. The whole ROW is the argument rather than
+-- (owner_id, org_id, visibility), and that is forced rather than tidy: those
+-- columns do not exist until rbac.add_scope_columns() adds them, so a body in
+-- THIS file cannot name them and a signature in this file cannot take them.
+--
+-- Asked HERE, inside current_definition(), and not at the three call sites.
+-- REM-58 made this function the single answer to "which version does this name
+-- mean" precisely because three callers had each answered it and two disagreed;
+-- a visibility check copied to those same three places would repeat that
+-- history with a security predicate instead of an ORDER BY.
+--
+-- And asked here rather than left to the RLS policy, which is the part spec.md
+-- §17(a) had wrong. start_workflow(), start_child_workflow() and
+-- schedule_workflow() are all SECURITY DEFINER, and a definer function owned
+-- by the table's owner does not see the table's policies at all. MEASURED,
+-- 2026-09-12, on a three-line reproduction: of two rows where a policy admits
+-- one, a direct select returned 1, a SECURITY INVOKER function returned 1, and
+-- a SECURITY DEFINER function returned 2. `force row level security` brings it
+-- back to 1 and is the wrong lever here -- the engine's own definer paths
+-- legitimately read every definition, including the max(version)+1 allocation
+-- in define_yaml() and seed_load()'s probe, so forcing the table would break
+-- the writer to gate the reader.
+--
+-- The argument is NAMED, and it has to be: `create or replace function` may
+-- not change a parameter's name, so a stub with an anonymous argument could
+-- never be shadowed by a body that reads it. `d` here and `d` there.
+create or replace function workflow.may_start(d workflow.definitions)
+returns boolean as $$
+    select true;
+$$ language sql stable;
+
 -- WHICH VERSION A NAME MEANS, in one place, because three callers were each
 -- answering it and two of them answered it differently from the column above.
 --
@@ -197,6 +234,13 @@ create or replace function workflow.current_definition(p_name text)
 returns workflow.definitions as $$
     select d.* from workflow.definitions d
      where d.name = p_name and d.deleted_at is null
+       -- AMONG THE DEFINITIONS THIS CALLER MAY USE, never every definition
+       -- with the name -- so the version that is resolved is the latest one
+       -- VISIBLE, not the latest one that exists. Filtering after the
+       -- `order by` would pick another tenant's newer version and then refuse
+       -- it, hiding a definition the caller does have from a caller who does
+       -- own one.
+       and workflow.may_start(d)
      order by d.version desc
      limit 1;
 $$ language sql stable;
@@ -1032,7 +1076,15 @@ begin
 
     v_def := workflow.current_definition(p_name);
     if v_def.id is null then
-        raise exception 'no workflow_def found for name %', p_name;
+        -- ONE MESSAGE FOR BOTH "no such workflow" and "not yours", which
+        -- spec.md §17(a) settles deliberately rather than by accident:
+        -- distinguishing them tells an unauthorised caller that a name
+        -- exists, which is the probe `2e5995e` closed for agents
+        -- (agentic.may_invoke) and the identical probe here.
+        raise exception
+            'no workflow definition named ''%'' is visible to you', p_name
+            using hint = 'it may not exist, or it may belong to an org you '
+                         'are not a member of';
     end if;
 
     v_comp := workflow.compensation_keys(v_def.spec);
@@ -1725,6 +1777,10 @@ begin
     -- STARTABLE, not merely present: the same question start_workflow asks one
     -- call along, so this cannot admit a run that the starter then refuses.
     if (workflow.current_definition(p_workflow_name)).id is null then
+        -- Not an authorization message, and the distinction matters: this
+        -- runs as `worker`, which rbac.is_operator() admits, so may_start()
+        -- does not filter here. A definition missing from THIS path is
+        -- genuinely unregistered.
         raise exception
             'sub_workflow step names workflow %, which is not registered', p_workflow_name;
     end if;
@@ -3841,8 +3897,14 @@ begin
 
     -- Startable, for the reason start_child_workflow gives above.
     if (workflow.current_definition(p_workflow)).id is null then
-        raise exception 'no workflow definition named "%"', p_workflow
-            using hint = 'register it with workflow.define_yaml() first';
+        -- The same single message as start_workflow(), for the same reason:
+        -- scheduling a workflow starts it later, so a caller who may not
+        -- start one may not schedule one either, and the refusal must not
+        -- distinguish "no such name" from "not yours".
+        raise exception
+            'no workflow definition named ''%'' is visible to you', p_workflow
+            using hint = 'register it with workflow.define_yaml() first, or '
+                         'ask the org that owns it to share it';
     end if;
     -- Raises on a malformed expression or an unknown timezone.
     perform workflow.cron_matches(p_cron, now(), p_timezone);

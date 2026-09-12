@@ -239,9 +239,20 @@ end $$;
 -- a definition whose first step fails as the admin, then a read as the member,
 -- in one transaction, and the member's read must be the member's.
 -- ---------------------------------------------------------------------
-insert into workflow.definitions (name, spec) values
+-- `visibility` IS EXPLICIT HERE and on none of the definitions at the top of
+-- this file, and the difference is the reason rather than an inconsistency.
+-- Since REM-91 a definition is its author's and private by default, and the
+-- author is taken from the claims in force at the INSERT -- which, uniquely for
+-- this fixture, is §6's member B rather than nobody. Every definition above is
+-- inserted before any claims are set, so each is ownerless and the trigger
+-- makes it the deployment's. This one would have been B's, and §7 starts it as
+-- A: the file would fail with 'no workflow definition named t_sr_boom is
+-- visible to you', which is the correct answer to a question the section is not
+-- asking. Stated rather than fixed by clearing the claims, because §7 needs
+-- them set.
+insert into workflow.definitions (name, spec, visibility) values
 ('t_sr_boom', '{"steps":[{"key":"q","kind":"sql","queue":"none",
-    "input":{"statement":"select 1 from t_sr_notes where 1/0 = 1"}}]}');
+    "input":{"statement":"select 1 from t_sr_notes where 1/0 = 1"}}]}', 'public');
 do $$
 declare r record; v_seen text;
 begin

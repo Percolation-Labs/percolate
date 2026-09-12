@@ -1345,9 +1345,24 @@ scenarios:
         - id: officer
           signal: true
       $y$);
-      -- Started with no `sub` claim, the way a scheduler or a migration starts
-      -- one: the run has no owner.
-      set local request.jwt.claims = '{}';
+      -- Started with NO CLAIMS AT ALL, the way a scheduler or a migration
+      -- starts one: the run has no owner.
+      --
+      -- The empty string, not '{}', and the two are different callers rather
+      -- than two spellings of one. `rbac.is_operator()` asks whether the
+      -- claims setting is absent; '{}' is a claims object that is PRESENT and
+      -- names no subject, so it is neither a person (current_user_id() is
+      -- null) nor the engine (is_operator() is false) and is refused
+      -- everything. Measured: claims '{}' gives operator=f, claims '' gives
+      -- operator=t, both with a null user id.
+      --
+      -- It did not matter until workflow.may_start() began asking, at which
+      -- point this setup died at 'no workflow definition named ev_hitl12 is
+      -- visible to you' -- a red line about scaffolding on a scenario whose
+      -- subject is who may SIGNAL, which is the second time this fixture has
+      -- done that (see the note above about may_define reading claims rather
+      -- than role). `dev/tests/workflow/17` and `/20` both use '' for this.
+      set local request.jwt.claims = '';
       create temp table ctx as
         select workflow.start_workflow('ev_hitl12','{}'::jsonb) as run_id;
       set local role authenticated;
