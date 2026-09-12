@@ -211,6 +211,69 @@ async def as_caller(claims: Mapping[str, Any] | None, role: str = ROLE):
         yield conn
 
 
+# The remedy, as a sentence rather than a stack trace, because the person who
+# sees this is deploying rather than debugging.
+CANNOT_OPEN_A_SESSION = (
+    "this runtime cannot open a session as `{role}` against this database, so "
+    "every turn would fail after reporting healthy. Postgres said: {err}\n"
+    "  * If the database is newer than the runtime, upgrade the runtime -- a "
+    "database at extension 0.2.0 or later refuses `set_config` to `{role}`, "
+    "and a runtime older than 0.1.9 writes the role before the claims, which "
+    "is the reverse of the order that works (see as_caller above).\n"
+    "  * If the runtime is newer than the database, upgrade the extension "
+    "(`alter extension percolate update`).\n"
+    "  * If neither, the connection's login role is not a member of `{role}`: "
+    "check P8_DSN's user and P8_ROLE."
+)
+
+
+async def verify_can_open_a_session(role: str = ROLE) -> None:
+    """Refuse at startup if a turn could not open a session at all.
+
+    THE PROBE IS THE THING ITSELF, not a proxy for it. It runs the two
+    statements `as_caller` runs, in the order it runs them, and throws the
+    transaction away -- so what it answers is "would a turn get a session",
+    which is the question, rather than "do these version numbers look
+    compatible", which is a different question that has been wrong before.
+    `core/agent_document.py` settled this shape for the same reason and says
+    so: a catalogue probe survives a database upgraded in place, where
+    `pg_extension.extversion` has been known to lag what is installed.
+    Comparing versions would also need a table of which pairs work, which is a
+    second home for a fact the database already enforces.
+
+    Called from the agent runtime's `lifespan` after the pool opens, so the
+    process exits instead of serving. WHY STARTUP AND NOT THE FIRST TURN: the
+    first turn reports in band. AG-UI answers HTTP 200 with a well-formed
+    stream carrying one `RUN_ERROR`, `docker compose ps` says healthy, and the
+    deployment looks fine to everything that watches it. REM-10 found the live
+    instance of this only by asserting on the events inside the stream.
+
+    WHAT THIS DOES NOT DO, and it is the first thing to say because the issue
+    that produced it is about a pair this cannot catch. A check that ships in
+    0.1.9 does not run in 0.1.8, so the REM-135 pairing -- published 0.1.8
+    against a 0.2.0 database -- is not detected by this and never will be. The
+    only cure for an already-published runtime is not to pair it (REM-135's
+    `PACKAGING.md` row). What this buys is the NEXT one: from here on, a
+    runtime that cannot serve the database it is pointed at says so at startup,
+    in one sentence, instead of once per turn inside a 200.
+
+    Anonymous claims rather than an invented `sub`: the two statements and
+    their order are what is under test, and inventing a user id would put a
+    value in `request.jwt.claims` that names nobody for no gain.
+    """
+    try:
+        async with as_caller(None, role):
+            pass
+    except asyncpg.InsufficientPrivilegeError as exc:
+        # The specific one, because it is the one with a remedy worth naming.
+        # Anything else -- the database is down, the pool is exhausted, the DSN
+        # is wrong -- is not a compatibility answer and is left to propagate as
+        # itself rather than be reported as a version mismatch.
+        raise RuntimeError(
+            CANNOT_OPEN_A_SESSION.format(role=role, err=exc)
+        ) from exc
+
+
 @asynccontextmanager
 async def as_service(role: str = SERVICE_ROLE):
     """A transaction with **no** caller identity.

@@ -183,6 +183,16 @@ jobs:
       - name: A provider failure means one thing on every path
         run: python -m unittest discover -s tests -p test_provider_failures.py
 
+      # A runtime that cannot serve the database it is pointed at refuses at
+      # STARTUP rather than inside the first turn. It used to fail in band --
+      # AG-UI answers 200 with one RUN_ERROR in a well-formed stream, and
+      # `docker compose ps` calls that healthy -- so the deployment looked fine
+      # to everything that watches it (REM-136, live pair REM-135). The file
+      # includes the refusal made to fail on purpose; a probe only ever run
+      # against a working database cannot be told from a `pass`.
+      - name: A runtime refuses a database it cannot serve
+        run: python -m unittest discover -s tests -p test_startup_refuses_a_database_it_cannot_serve.py
+
       - name: A released version number may not be reused
         run: dev/check-version.sh
 

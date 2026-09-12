@@ -40,6 +40,7 @@ from fastapi import APIRouter, FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.routing import APIRoute
 
+from ..core import identity
 from ..core.refusal import STATUS as REFUSED_STATUS, refusal
 from .contracts import ChatRequest, RequestContext, RunError, Session, to_sse
 from .db import PgClient, PgRepository
@@ -73,6 +74,15 @@ async def lifespan(app: FastAPI, settings: Settings | None = None) -> AsyncItera
     app.state.percolate_agent_settings = resolved
     app.state.percolate_agent_client = PgClient(resolved)
     await app.state.percolate_agent_client.connect()
+    # AFTER THE POOL, BEFORE THE FIRST REQUEST -- and it raises, so the process
+    # exits rather than serving. A runtime that cannot open a session as the
+    # caller role serves nothing but errors, and it reports them IN BAND: AG-UI
+    # answers 200 with a well-formed stream carrying one RUN_ERROR, so
+    # `docker compose ps` calls the container healthy and every watchdog agrees
+    # with it. REM-10 found the live instance of that only by asserting on the
+    # events inside the stream. Failing here costs one connection once and
+    # turns a per-turn mystery into a startup message (REM-136).
+    await identity.verify_can_open_a_session()
     try:
         yield
     finally:
