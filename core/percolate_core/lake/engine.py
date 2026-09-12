@@ -28,6 +28,8 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass
+
+from ..core import s3
 from typing import Any
 
 from ..worker.templates import TerminalError
@@ -99,14 +101,18 @@ def lake() -> Lake | None:
     None is a real state, not an error: a refine step over inline rows that
     only lands into Postgres needs no object storage at all.
     """
-    key, secret = os.environ.get("P8_S3_KEY"), os.environ.get("P8_S3_SECRET")
-    if not (key and secret):
+    # `P8_LAKE_BUCKET` first stays this module's business -- it is the one
+    # caller that has a bucket of its own -- and the other four settings come
+    # from core.config.s3(), which is where the endpoint default and the region
+    # now live for everybody.
+    settings = s3(os.environ.get("P8_LAKE_BUCKET") or None)
+    if not (settings.key and settings.secret):
         return None
     return Lake(
-        endpoint=os.environ.get("P8_S3_ENDPOINT", "http://localhost:9000"),
-        key=key, secret=secret,
-        region=os.environ.get("P8_S3_REGION", "us-east-1"),
-        bucket=os.environ.get("P8_LAKE_BUCKET") or os.environ.get("P8_BUCKET", "p8-content"),
+        endpoint=settings.endpoint,
+        key=settings.key, secret=settings.secret,
+        region=settings.region,
+        bucket=settings.bucket,
         catalog_url=os.environ.get("P8_LAKE_CATALOG_URL") or None,
         warehouse=os.environ.get("P8_LAKE_WAREHOUSE") or None,
         catalog_token_ref=os.environ.get("P8_LAKE_CATALOG_TOKEN_REF") or None,

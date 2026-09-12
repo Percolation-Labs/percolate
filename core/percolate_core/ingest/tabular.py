@@ -26,13 +26,12 @@ migration is `read_parquet` to a table, not a rewrite of this module.
 from __future__ import annotations
 
 import io
-import os
 import posixpath
 import re
 
 from .policy import IngestPolicy
 
-__all__ = ["dataset_name_for", "object_key_for", "read_dataset", "to_parquet"]
+__all__ = ["dataset_name_for", "object_key_for", "to_parquet"]
 
 
 class MissingParser(RuntimeError):
@@ -144,40 +143,17 @@ def object_key_for(dataset: str, checksum: str) -> str:
     return "datasets/" + dataset + "/" + checksum + ".parquet"
 
 
-def read_dataset(uri: str, sql: str | None = None):
-    """Query a dataset where it lies. Returns a pyarrow Table.
+# `read_dataset` WAS HERE, and it is deleted rather than fixed (REM-69).
+#
+# It opened its own DuckDB connection, ran `install httpfs` at query time, and
+# carried the third of this package's three different readings of the S3
+# environment. It also had no callers -- not in this package, not in the tests,
+# not in the UI. A second, unsealed way to reach object storage, maintained for
+# nobody, is worse than none: `challenge-the-process` §3, deleting a step beats
+# automating one.
+#
+# The capability is not lost. `lake/engine.py` is the module that reaches object
+# storage from DuckDB and is the one under test; a caller that needs to query a
+# dataset where it lies should go through it, and if it turns out to want a
+# convenience wrapper, that wrapper belongs there beside the connection it uses.
 
-    `uri` is what content.dataset_uri() returned -- an s3:// glob. DuckDB reads
-    it directly; nothing is downloaded into Postgres and nothing is copied into
-    a warehouse first, which is the entire reason the tabular path stores
-    Parquet rather than rows.
-    """
-    try:
-        import duckdb
-    except ModuleNotFoundError as e:
-        raise MissingParser(
-            "reading a dataset needs duckdb: pip install 'percolate-core[tabular]' "
-            f"(missing {e.name})") from None
-
-    con = duckdb.connect()
-    endpoint = os.environ.get("P8_S3_ENDPOINT", "http://localhost:9000")
-    host = endpoint.split("://", 1)[-1]
-    def q(value: str) -> str:
-        # SET does not accept bound parameters in DuckDB -- "Unexpected prepared
-        # parameter. This type of statement can't be prepared!" -- so these are
-        # interpolated, and quoted here rather than trusted: an endpoint or a
-        # key with a quote in it would otherwise end the statement.
-        return "'" + str(value).replace("'", "''") + "'"
-
-    con.execute("install httpfs; load httpfs;")
-    con.execute("set s3_endpoint = " + q(host))
-    con.execute("set s3_use_ssl = " + ("true" if endpoint.startswith("https") else "false"))
-    # Path style, because a MinIO on localhost has no per-bucket DNS. Real S3
-    # accepts it too, so this is one setting rather than a branch.
-    con.execute("set s3_url_style = 'path'")
-    con.execute("set s3_access_key_id = " + q(os.environ.get("P8_S3_KEY", "")))
-    con.execute("set s3_secret_access_key = " + q(os.environ.get("P8_S3_SECRET", "")))
-    con.execute("set s3_region = " + q(os.environ.get("P8_S3_REGION", "us-east-1")))
-
-    con.execute("create or replace view dataset as select * from read_parquet(" + q(uri) + ")")
-    return con.execute(sql or "select * from dataset").arrow()
