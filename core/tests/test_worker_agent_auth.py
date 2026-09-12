@@ -12,7 +12,8 @@ import asyncpg
 
 from percolate_core.core.identity import claims_from_jwt
 from percolate_core.core.config import ConfigError
-from percolate_core.worker.agent_auth import AGENT_URL, agent_authorization
+from percolate_core.worker.agent_auth import (
+    AGENT_RUN_URL, AGENT_URL, AGENT_URL_TEMPLATE, agent_authorization)
 from percolate_core.worker.http import build_request, http_call
 from percolate_core.worker.loop import run_once
 from percolate_core.worker.templates import TerminalError
@@ -145,6 +146,75 @@ class WorkerAgentAuthTest(unittest.IsolatedAsyncioTestCase):
             await http_call(self.spec(), self.context())
         self.assertEqual(len(requests), 1)
         self.assertEqual(str(requests[0].url), TARGET + "/v1/chat/completions")
+
+    # -- The scheduled path, which is the one that was not covered (REM-96) ----
+    #
+    # Everything above tests `/v1/chat/completions`. The endpoint a SCHEDULED
+    # run actually calls is `/internal/run` (specs/workflow-engine/README.md
+    # §"scheduled runs"), and it matched nothing here -- so every scheduled
+    # agent run in the shipped deployment authenticated with the shared
+    # `P8_API_KEY` and RLS applied one identity's scope to the whole night's
+    # work. The tests passed throughout, because they only ever asked about the
+    # interactive endpoint.
+
+    def run_spec(self, **changes):
+        """The scheduled step of `specs/workflow-engine/README.md` §"scheduled runs".
+
+        The body is that example's shape with one deliberate difference: the
+        README writes `workflow_task_id: "{{task.id}}"` and `task` is not a
+        resolvable namespace -- `worker/templates.py` accepts `steps`, `run`
+        and `env` only, and nothing else injects the id either. That is a real
+        defect in the documented example and it is NOT this test's subject, so
+        the id is a literal here rather than quietly depending on a template
+        that raises. Reported on REM-96.
+        """
+        return {"method":"POST", "url":AGENT_RUN_URL, "credential_ref":"P8_API_KEY",
+                "mode":"async", "timeout_ms":120000,
+                "body":{"workflow_task_id":"3f4a1c88-0000-4000-8000-000000000001",
+                        "input":{"agent":"classifier", "prompt":"Classify - {{run.question}}"}},
+                **changes}
+
+    def test_a_scheduled_run_is_authenticated_as_whoever_scheduled_it(self):
+        # Fails before the fix: the url did not match, no token was minted, and
+        # the step went out with the deployment's shared key instead.
+        request, resolved = build_request(self.run_spec(), self.context())
+        claims = self.decode(request)
+        self.assertEqual(claims["sub"], ALICE)
+        self.assertEqual(claims["role"], "authenticated")
+        self.assertEqual(claims["exp"] - claims["iat"], 300)
+        self.assertNotIn(KEY, json.dumps(resolved))
+
+    def test_both_runtime_endpoints_mint_and_nothing_else_does(self):
+        # The eligible set is exactly what the compiler emits. A third path on
+        # the same host is not a runtime endpoint, and adding one to AGENT_PATHS
+        # should be a decision somebody makes on purpose.
+        for url in (AGENT_URL, AGENT_RUN_URL):
+            with self.subTest(url=url):
+                self.assertEqual(self.decode(build_request(self.spec(url=url), self.context())[0])["sub"], ALICE)
+        # An unlisted path on the same host is not a runtime endpoint. Asserted
+        # against agent_authorization directly rather than through
+        # build_request, because a step with no eligible credential fails at
+        # credential resolution first and would pass this for the wrong reason.
+        with self.subTest(url="an unlisted path on the runtime"):
+            spec = self.spec(url=AGENT_URL_TEMPLATE + "/internal/other")
+            self.assertIsNone(agent_authorization(spec, {"url":TARGET + "/internal/other"}, ALICE))
+
+    def test_the_scheduled_step_reaches_only_the_configured_runtime(self):
+        # The resolved url is what the request is sent to, so it is what has to
+        # match -- not the template it came from.
+        with self.assertRaises(TerminalError):
+            agent_authorization(self.run_spec(), {"url":"https://external.example/internal/run"}, ALICE)
+        # ...and a misconfigured runtime fails loudly rather than falling back
+        # to the shared key, which is the silent version of this whole bug.
+        for target in ("", "file:///tmp/agent", "https://user@agent:8080"):
+            with self.subTest(target=target), patch.dict("os.environ", {"P8_AGENT_URL":target}):
+                with self.assertRaises(TerminalError):
+                    build_request(self.run_spec(), self.context())
+
+    def test_a_scheduled_run_with_no_verified_owner_does_not_borrow_the_shared_key(self):
+        for owner in (None, "", "forged"):
+            with self.subTest(owner=owner), self.assertRaisesRegex(TerminalError, "verified run owner"):
+                build_request(self.run_spec(), self.context(owner))
 
 
 if __name__ == "__main__":
