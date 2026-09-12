@@ -26,6 +26,7 @@ from typing import Any
 import httpx
 
 from ..core import credential_for
+from ..core.provider_errors import raise_for
 from .templates import TerminalError, dig, resolve_task
 from .agent_auth import agent_authorization
 
@@ -72,21 +73,6 @@ def build_request(spec: dict, ctx: dict) -> tuple[dict, dict]:
     }, spec
 
 
-# The error codes OpenAI-shaped APIs use for an account out of credit, as
-# opposed to a request rate that is too high (`rate_limit_exceeded`).
-QUOTA_CODES = {"insufficient_quota", "credit_balance_exhausted"}
-
-
-def quota_exhausted(r: httpx.Response) -> bool:
-    try:
-        err = r.json().get("error") or {}
-    except Exception:
-        return False
-    if not isinstance(err, dict):
-        return False
-    return bool({err.get("type"), err.get("code")} & QUOTA_CODES)
-
-
 async def http_call(spec: dict, ctx: dict) -> Any:
     req, spec = build_request(spec, ctx)
 
@@ -102,23 +88,10 @@ async def http_call(spec: dict, ctx: dict) -> Any:
         except httpx.RequestError as e:
             raise RuntimeError(f"connection failed: {e}")
 
-    if r.status_code >= 400:
-        detail = r.text[:2000]
-        # 4xx is the caller's fault and fails identically forever; 5xx/429 are
-        # the server's and are worth retrying. Collapsing these into one "it
-        # failed" turns a fast failure into five slow ones.
-        if 400 <= r.status_code < 500 and r.status_code not in (408, 429):
-            raise TerminalError(
-                f"HTTP {r.status_code} (client error, not retryable): {detail}")
-        # A 429 that says the ACCOUNT has no credit is not a rate limit, and
-        # waiting does not fix it. Retried as one, 797 extraction tasks each
-        # queued five attempts against an account that could not succeed
-        # (dogfood backfill, 2026-09-11). Read from the provider's own error
-        # field, not from the message text.
-        if r.status_code == 429 and quota_exhausted(r):
-            raise TerminalError(
-                f"HTTP 429 (the provider account has no quota left; retrying will not help): {detail}")
-        raise RuntimeError(f"HTTP {r.status_code}: {detail}")
+    # 4xx is the caller's fault and fails identically forever, and so does an
+    # account with no credit; 5xx and a plain 429 are worth retrying. The rule
+    # is core.provider_errors', shared with every other provider call.
+    raise_for(r.status_code, r.content, "http_call", r.text[:2000])
 
     try:
         parsed = r.json()

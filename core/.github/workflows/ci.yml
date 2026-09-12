@@ -114,6 +114,12 @@ jobs:
       - name: A refused caller is told so, and an upstream failure is still 502
         run: python -m unittest discover -s tests -p test_database_refusals.py
 
+      # An exhausted or refused provider account stops after one attempt on
+      # every path that calls a provider, and a rate limit is still retried
+      # (REM-53).
+      - name: A provider failure means one thing on every path
+        run: python -m unittest discover -s tests -p test_provider_failures.py
+
       - name: A released version number may not be reused
         run: dev/check-version.sh
 

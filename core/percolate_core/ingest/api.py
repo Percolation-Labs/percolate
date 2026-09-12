@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..core import as_service, credential_for
 from ..core.credentials import origin as credential_origin
+from ..core.provider_errors import raise_for
 from ..worker.templates import TerminalError
 
 
@@ -189,10 +190,15 @@ async def api_pull(spec: dict,ctx: dict) -> dict:
         try:
             async with client.stream('GET',url,headers=headers) as response:
                 if response.status_code>=300:
-                    if response.status_code==429 or response.status_code>=500 or response.status_code==408:
-                        raise RuntimeError(f'API HTTP {response.status_code}; retry later. The checkpoint is preserved.')
-                    if response.status_code in (401,403): raise TerminalError(f'API HTTP {response.status_code}. Check the credential reference and API permissions; progress is preserved.')
-                    raise TerminalError(f'API HTTP {response.status_code}. Check the endpoint and parameters; progress is preserved.')
+                    # The rule is core.provider_errors', shared with every provider call, so an
+                    # API account out of credit stops once. Its body is read (capped) only to
+                    # classify it and never quoted: an arbitrary API's body is not an operator message.
+                    body=bytearray()
+                    async for part in response.aiter_bytes():
+                        body.extend(part)
+                        if len(body)>65536: break
+                    raise_for(response.status_code,bytes(body),'The API','the checkpoint is preserved')
+                    raise TerminalError(f'API HTTP {response.status_code}. Redirects are not followed; check the endpoint. Progress is preserved.')
                 data=bytearray()
                 async for part in response.aiter_bytes():
                     data.extend(part)

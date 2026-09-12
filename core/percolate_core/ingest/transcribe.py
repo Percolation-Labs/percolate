@@ -29,6 +29,7 @@ from typing import Any
 import httpx
 
 from ..core import credential_for
+from ..core.provider_errors import raise_for
 from .policy import TranscribePolicy
 
 __all__ = ["transcribe"]
@@ -67,10 +68,7 @@ def transcribe(data: bytes, name: str, policy: TranscribePolicy) -> tuple[str, d
     headers = {"Authorization": "Bearer " + credential_for(policy.credential, policy.endpoint)}
     with httpx.Client(timeout=300.0) as client:
         r = client.post(policy.endpoint, headers=headers, data=form, files=files)
-        if r.status_code >= 400:
-            raise RuntimeError(
-                "transcription endpoint returned " + str(r.status_code) + ": "
-                + r.text[:500])
+        raise_for(r.status_code, r.content, "transcription endpoint", r.text[:500])
         # A server that does not implement verbose_json answers with plain text
         # rather than failing, so accept both instead of insisting.
         try:
