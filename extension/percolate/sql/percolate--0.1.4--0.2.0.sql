@@ -11105,8 +11105,14 @@ create or replace view rbac.users_api as
 
 -- Orgs with the number of people in them. The Settings screen was counting
 -- `org_members` rows client-side per org, which is a group-by in a browser.
+--
+-- EVERY COLUMN OF `rbac.orgs`, not the three the screen happens to draw. A view
+-- named `<table>_api` is the read surface for that table, and `surface.sql`
+-- enforces it: a column that is in neither the view nor `api_exclusions` is
+-- silently unreachable, which is the state that check exists to end. It caught
+-- this one -- `created_at` and `updated_at` were missing from the first version.
 create or replace view rbac.orgs_api as
-  select o.id, o.slug, o.name,
+  select o.id, o.slug, o.name, o.created_at, o.updated_at,
          (select count(*) from rbac.org_members m where m.org_id = o.id) as member_count
     from rbac.orgs o;
 create or replace view rbac.refresh_tokens_api as
@@ -11148,11 +11154,16 @@ grant create on schema rbac to api_viewer;
 alter view rbac.users_api owner to api_viewer;
 alter view rbac.refresh_tokens_api owner to api_viewer;
 alter view rbac.api_keys_api owner to api_viewer;
+-- INSIDE this block, not after it. The transfer needs CREATE on the schema,
+-- which the line above grants and the line below takes back; an `alter view`
+-- placed after the revoke is refused with "permission denied for schema rbac"
+-- on a fresh install, while passing every test on a database where the view
+-- already exists and is already owned correctly.
+alter view rbac.orgs_api owner to api_viewer;
 
 revoke create on schema rbac from api_viewer;
 
 grant select on rbac.users_api to authenticated;
-alter view rbac.orgs_api owner to api_viewer;
 grant select on rbac.orgs_api to authenticated;
 grant select on rbac.refresh_tokens_api to authenticated;
 grant select on rbac.api_keys_api to authenticated;
