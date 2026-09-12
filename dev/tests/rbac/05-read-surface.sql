@@ -263,6 +263,14 @@ declare
         -- The extractor fleet as an operations surface, mirroring the shape
         -- content.v_connectors will have when connectors.sql ships.
         'agentic.v_extractors',
+        -- auth_events counted by kind over the last day. The base table IS
+        -- granted to `authenticated` and carries auth_events_self_or_admin, so
+        -- a caller already has the read this view would look like -- their own
+        -- rows. This one is read as the owner and counts everybody's, which is
+        -- the only way to see credential stuffing at all and the reason it is
+        -- granted to nobody. user-rbac/schema.sql's section 10 self-check
+        -- refuses the grant at load time as well as here.
+        'rbac.v_auth_activity',
         -- identity/schema.sql's guess at each table's kind, for whoever is
         -- writing percolate.table_kinds rows: a tool for the schema's author,
         -- not a read surface. Unseen here until this file read `percolate`.

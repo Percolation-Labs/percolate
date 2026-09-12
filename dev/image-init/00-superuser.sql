@@ -232,6 +232,28 @@ create extension if not exists pg_trgm;
 create extension if not exists vector;
 create extension if not exists percolate_parser;
 
+-- PRELOADING pg_stat_statements IS HALF OF IT. The module is in
+-- shared_preload_libraries in the shipped compose file and the chart, which is
+-- what makes it collect; the VIEW only exists in a database that has created
+-- the extension. Without this line an operator pays the collection overhead
+-- and has nothing to read, which is worse than not enabling it -- and it is
+-- exactly the shape this file exists to prevent, a step written in one place
+-- and forgotten in the other.
+--
+-- UNCONDITIONAL, and not guarded on the preload, because the two halves fail
+-- in opposite directions and only one of them is quiet. Measured on a server
+-- started with `shared_preload_libraries=pg_cron` alone: CREATE EXTENSION
+-- succeeds, and the view then raises
+--
+--     ERROR:  pg_stat_statements must be loaded via "shared_preload_libraries"
+--
+-- on every read until the server is restarted with it -- a sentence naming its
+-- own fix. The other order is the silent one: a preloaded server whose database
+-- never ran CREATE EXTENSION pays the collection overhead and reports
+-- `relation "pg_stat_statements" does not exist`, which a reader takes for
+-- "this build does not have it" rather than "run one statement".
+create extension if not exists pg_stat_statements;
+
 -- Room for app_owner to create things. Dynamic, because the database's name
 -- is not a variable every caller has.
 do $$ begin

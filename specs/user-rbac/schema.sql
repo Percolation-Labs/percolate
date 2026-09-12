@@ -1941,6 +1941,46 @@ create table if not exists rbac.auth_events (
     at         timestamptz not null default now()
 );
 create index if not exists idx_auth_events_user on rbac.auth_events (user_id, at);
+-- Read by user, and read by time. The first index answers "show me my
+-- sign-ins"; nothing answered "what has happened lately", which is the
+-- question the view below is, and without this it is a sequential scan of a
+-- table nothing ever deletes from (specs/README.md's data lifecycle keeps
+-- append-only audit logs whole) every thirty seconds.
+create index if not exists idx_auth_events_at on rbac.auth_events (at desc);
+
+-- WHAT THE AUTH SYSTEM HAS BEEN ASKED TO DO LATELY, and how much of it was
+-- refused. Nine functions in this file write auth_events and, until this view,
+-- nothing read it: a trace nobody follows is a trace nobody has.
+--
+-- OWNER-PRIVILEGED AND GRANTED TO NOBODY, which is the opposite of the `_api`
+-- views in section 9 and is what that distinction is for. auth_events
+-- carries RLS (auth_events_self_or_admin), so a caller reading the table sees
+-- their own rows -- right for "show me my sign-ins", useless for "is somebody
+-- stuffing credentials at us", which is a question about everyone else's rows.
+-- This view is read as the table owner and so counts every row, and that is
+-- exactly why it is granted to no one; the self-check in section 10 fails the
+-- load if a later edit hands an `rbac.v_%` view to a PostgREST role. The `v_`
+-- prefix is workflow-engine's convention for the same thing (`v_backlog`,
+-- `v_unclaimable`): an operator view, owner-privileged, ungranted.
+--
+-- BOUNDED TO A DAY rather than open-ended, because the table has no retention
+-- and a `max(at)` over all of history costs more every week it runs. An event
+-- type with nothing in the last 24 hours is absent from the view rather than
+-- present with a zero -- which matters to whoever reads it: see
+-- `docs/src/operating.md`, where the metric an alert fires on is an aggregate
+-- over this view rather than a row of it, for exactly that reason.
+--
+-- TWO WINDOWS, NOT A RATE. `last_hour` is the number an alert reads;
+-- `last_day` is what says whether this hour is unusual. One derived rate
+-- column would answer neither on its own.
+create or replace view rbac.v_auth_activity as
+select event_type,
+       count(*) filter (where at > now() - interval '1 hour')   as last_hour,
+       count(*)                                                 as last_day,
+       max(at)                                                  as most_recent
+  from rbac.auth_events
+ where at > now() - interval '24 hours'
+ group by event_type;
 
 -- SECURITY: this is the vulnerability that motivated this whole section --
 -- confirmed empirically as a full, working privilege escalation, not a
@@ -2622,5 +2662,28 @@ begin
             'is bypassed on every read through it (roles.sql §2).', v_bad;
     end if;
 
-    raise notice 'user-rbac self-check passed: no base-table write grants; non-superuser owner (%); api views owned by a separate non-superuser role', current_user;
+    -- The other half of that invariant, for the views that are NOT a REST
+    -- surface. An `rbac.v_%` view is owner-privileged over an RLS-enabled
+    -- table by design -- an operator asking about everybody -- so a grant to
+    -- a PostgREST role does not narrow it per caller the way a grant on the
+    -- base table does; it publishes every tenant's rows to anyone who can
+    -- reach the schema. workflow-engine checks its own operator views the same
+    -- way (dev/tests/workflow/12-retention-and-gates.sql section 4); this one
+    -- is at load time because the view is defined seven hundred lines above
+    -- the grants and the line that would break it is a single GRANT anywhere
+    -- between.
+    select string_agg(table_name || ' -> ' || grantee, ', ')
+    into v_bad
+    from information_schema.role_table_grants
+    where table_schema = 'rbac'
+      and table_name like 'v\_%'
+      and grantee in ('authenticated', 'web_anon', 'PUBLIC');
+    if v_bad is not null then
+        raise exception
+            'an rbac operator view is readable by a caller: %. These views are '
+            'read as the owner and so bypass RLS by design; a caller-facing read '
+            'needs an `_api` view owned by api_viewer instead.', v_bad;
+    end if;
+
+    raise notice 'user-rbac self-check passed: no base-table write grants; non-superuser owner (%); api views owned by a separate non-superuser role; no operator view granted to a caller', current_user;
 end $$;
