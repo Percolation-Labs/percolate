@@ -66,10 +66,26 @@ select aiq.register_entity_table(
     $$n.status = 'ready'$$
 );
 
+-- `do update`, NOT `do nothing`, because these rows are the EXTENSION's
+-- (REM-68). The schema is replayed on every upgrade, so `do nothing` means a
+-- corrected value reaches fresh installs only and every existing database keeps
+-- the old one forever -- silently, because dev/upgrade-converges.sh compares
+-- OBJECTS and cannot see a row. Whose rows these are is not a judgement call:
+-- specs/contract/schema.sql §4's `deployment_tables` is the list, and this
+-- table is not on it. Tables that ARE on it -- rbac.role_permissions, roles --
+-- keep `do nothing`, because a deployment may edit them and an update would
+-- overwrite somebody's change on every upgrade.
+--
+-- Only the two rows named here are the extension's. A package or an application
+-- that registers its own relation type is a different statement and is
+-- untouched by this one, which is what makes `do update` safe on a table whose
+-- rows have more than one author.
 insert into aiq.relation_types (src_type, relation, dst_type, inverse_label, description) values
   ('document','derived_from','document','source_of','a document produced from another'),
   ('document','supersedes','document','superseded_by','a newer revision of the same thing')
-on conflict do nothing;
+on conflict (src_type, relation, dst_type) do update
+    set inverse_label = excluded.inverse_label,
+        description   = excluded.description;
 
 -- ------------------------------------------------------------
 -- 3. Tenancy.

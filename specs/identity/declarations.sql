@@ -83,7 +83,20 @@ from percolate.table_kind_proposal
 -- for whoever owns them. A guess written here would be indistinguishable
 -- from a decision, which is the failure the view was built to avoid.
 where proposed_kind is not null
-on conflict (schema_name, table_name) do nothing;
+-- `do update` for the reason percolate.null_means twenty lines above already
+-- does it (REM-68): the schema is replayed on every upgrade, so `do nothing`
+-- means a re-reviewed kind reaches fresh installs only and every existing
+-- database keeps the old one forever, invisibly -- dev/upgrade-converges.sh
+-- compares objects, not rows. percolate.table_kinds is not on
+-- specs/contract/schema.sql §4's `deployment_tables`, so these rows are the
+-- extension's to correct.
+--
+-- Safe on a table whose rows have more than one author because the SELECT is
+-- already scoped: percolate.table_kind_proposal reads only
+-- percolate.extension_schemas(), so an application's own declaration is not a
+-- row this statement can name.
+on conflict (schema_name, table_name) do update
+    set kind = excluded.kind, why = excluded.why;
 
 -- The abstentions, declared one at a time, which is what the view asks for:
 -- "Read it, disagree with it, then write the row."
@@ -97,7 +110,9 @@ on conflict (schema_name, table_name) do nothing;
 insert into percolate.table_kinds (schema_name, table_name, kind, why) values
  ('content','source_state','natural',
   'a sidecar keyed by content.channels(id); same shape as the aiq.emb_* tables')
-on conflict (schema_name, table_name) do nothing;
+-- `do update`, same reason as the statement above, and here it names one row.
+on conflict (schema_name, table_name) do update
+    set kind = excluded.kind, why = excluded.why;
 
 -- ------------------------------------------------------------
 -- 5. ENFORCE THE KEY DEFAULT, on upgrades as well as fresh installs.
