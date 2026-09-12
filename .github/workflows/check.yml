@@ -144,6 +144,27 @@ jobs:
           echo "pgrx=$X" >> "$GITHUB_OUTPUT"
           echo "pg$M, pgrx $X"
 
+      # THE COLD PATH IS THE TIGHT ONE, and the first version of this fix missed
+      # it. p8#132's own run took a cache MISS and died in the step below,
+      # before any `df` line printed -- so the reclaim aimed at the load path
+      # was aimed at a path that run never took. `docker save` needs the image
+      # in the graph AND a ~2GB tarball beside it, which is 2x the image on the
+      # cold path and the reason the save/load design is the thing under
+      # pressure. That design is deliberate (parser-tests.yml's header) and is
+      # not reversed here.
+      #
+      # So: reclaim what the runner ships and nothing here uses. These four
+      # directories are the standard ~25GB on a GitHub-hosted runner, and this
+      # job needs a Rust toolchain inside a container and nothing else from the
+      # host. `|| true` on each because their presence is the runner image's
+      # business and not a thing this job should assert.
+      - name: Free what this job does not use
+        run: |
+          df -h / | tail -1 | sed 's/^/before reclaim: /'
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+                      /opt/hostedtoolcache/CodeQL || true
+          df -h / | tail -1 | sed 's/^/after reclaim:  /'
+
       - name: Build the pgrx toolchain image
         if: steps.toolchain.outputs.cache-hit != 'true'
         working-directory: dev
@@ -151,11 +172,62 @@ jobs:
           docker build -f Dockerfile.pgrx-builder \
             --build-arg PGRX_VERSION=${{ steps.pins.outputs.pgrx }} \
             -t pgrx-builder .
+          # AND THE RESTORED TARBALL GOES BEFORE THE SAVE, which is where the
+          # space actually went. MEASURED, run 34713089283 job 103605298996:
+          #
+          #   key:  pgrx-builder-image-4f5f0998…                (one segment)
+          #   log:  Cache hit for restore-key:
+          #           pgrx-builder-image-4f5f0998…-c2f9db76…    (two segments)
+          #         Cache Size: ~775 MB (813031760 B)
+          #
+          # An older workflow saved this cache under a LONGER key, and the
+          # current key is a prefix of it — so every run takes a restore-key
+          # hit, lands an 813 MB tarball, and still reports `cache-hit: false`,
+          # because actions/cache sets that only on an EXACT match. The load
+          # step is skipped, the image is therefore not in the graph, the build
+          # runs, and then `docker save` writes a second tarball while the
+          # first is still on disk. 199 MB crate cache + 813 MB stale tarball +
+          # the image in the graph + the new tarball = no space left, at
+          # 19:12:03.
+          #
+          # Unconditional, and safe on both paths: here the file is either
+          # stale from a prefix hit or absent, and the save is about to
+          # overwrite it either way. actions/cache has not run its post-job
+          # save yet, and the file it will save is the one written below.
+          # Located by p8-subsystems-d1 reading this PR's log.
+          df -h / | tail -1 | sed 's/^/before save:   /'
+          rm -f /tmp/pgrx-builder.tar
           docker save pgrx-builder -o /tmp/pgrx-builder.tar
+          df -h / | tail -1 | sed 's/^/after save:    /'
 
-      - name: Load the pgrx toolchain image
+      # AND THE TARBALL GOES, because holding it through the build is what ran
+      # the runner out of disk. This job keeps three large things at once on
+      # ~14GB: the restored `parser-package` cache (target-ci and .pgrx), the
+      # restored /tmp/pgrx-builder.tar, and the same image again expanded into
+      # the Docker graph by the load below. `cargo pgrx package` then builds
+      # into target-ci and dies -- measured on main's own run 34712571354,
+      # `write /tmp/.docker_temp_2778519223: no space left on device`, seven
+      # minutes after both caches restored. Four branches including main.
+      #
+      # DELETING IT CANNOT COST A CACHE WRITE, and that is why the rm lives in
+      # this step rather than a later one: this step runs only on a cache HIT,
+      # which is exactly when actions/cache skips its post-job save. On a MISS
+      # the build step above creates the tarball and the save needs it, and
+      # that path is untouched.
+      #
+      # `df` THREE TIMES, so the next failure is a measurement rather than a
+      # guess. The reclaim is the largest thing available without reversing the
+      # save/load design, whose reasoning is in parser-tests.yml's header --
+      # and it is NOT established that it is enough. These numbers are what
+      # would settle that, and what a buildx-layer-cache argument would start
+      # from.
+      - name: Load the pgrx toolchain image, then drop the tarball
         if: steps.toolchain.outputs.cache-hit == 'true'
-        run: docker load -i /tmp/pgrx-builder.tar
+        run: |
+          df -h / | tail -1 | sed 's/^/before load:  /'
+          docker load -i /tmp/pgrx-builder.tar
+          rm -f /tmp/pgrx-builder.tar
+          df -h / | tail -1 | sed 's/^/after reclaim: /'
 
       # `package`, not `test`: parser-tests.yml runs the crate's own tests and
       # this produces the artefact the database job installs. The same command
@@ -163,6 +235,7 @@ jobs:
       # one the published container expects.
       - name: cargo pgrx package
         run: |
+          df -h / | tail -1 | sed 's/^/before build: /'
           docker run --rm \
             -v "$GITHUB_WORKSPACE/extension/percolate_parser":/work \
             -e PGRX_HOME=/work/.pgrx -e CARGO_TARGET_DIR=/work/target-ci \
