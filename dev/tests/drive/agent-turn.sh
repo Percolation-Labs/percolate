@@ -170,7 +170,24 @@ select id from rbac.users where email = '$CALLER_EMAIL';" | tail -1 | tr -d '[:s
 want_dsn="postgres://authenticator:authpass@127.0.0.1:5432/$DB"
 have_dsn=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$AGENT" 2>/dev/null \
            | sed -n 's/^P8_DSN=//p' | head -1 || true)
-if [ "$have_dsn" != "$want_dsn" ] || \
+# AND THE NAMESPACE IT JOINED MUST STILL BE THE DATABASE THAT IS RUNNING NOW.
+#
+# The two checks above are DSN and running-state, and the comment over them
+# argues for exactly the case they cannot see: `dev/ci-database.sh` destroys and
+# recreates $CONTAINER on every run, so a reused agent stays attached to
+# `container:<old id>` -- a namespace with no Postgres in it. It keeps answering
+# /_build, because that is served from inside the agent, so the readiness loop
+# below passes and every database call then fails with `ConnectionRefusedError:
+# Connect call failed ('127.0.0.1', 5432)`. `06-a-turn.sql` reports that as "the
+# turn failed with 500 and NOT at the known set_config ordering", which reads
+# like a regression in whatever branch is being tested.
+#
+# Found by `p8-subsystems-ae`, who lost a red and a wrong diagnosis to it.
+# Comparing the recorded NetworkMode against the database container's CURRENT id
+# is exact: a rebuilt database has a new id, and that is the whole of the case.
+want_ns="container:$(docker inspect -f '{{.Id}}' "$CONTAINER" 2>/dev/null || echo none)"
+have_ns=$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$AGENT" 2>/dev/null || echo none)
+if [ "$have_dsn" != "$want_dsn" ] || [ "$have_ns" != "$want_ns" ] || \
    [ "$(docker inspect -f '{{.State.Running}}' "$AGENT" 2>/dev/null || echo false)" != "true" ]; then
     docker rm -f "$AGENT" >/dev/null 2>&1 || true
     docker run -d --name "$AGENT" --network "container:$CONTAINER" \
