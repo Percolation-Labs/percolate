@@ -75,6 +75,26 @@ class MemoryRepository:
         self.agents[agent.name] = agent
         return agent
 
+    async def upsert_agent_document(self, doc: dict[str, Any]) -> AgentSpec:
+        """The document form, for a twin that has no database to translate it.
+
+        `authoring.from_json_schema` is the in-process mapping and this calls it
+        rather than repeating it. For a row that is really stored the database is
+        the authority (`brief.md` §6.1); a twin translating a fourth way is the
+        drift REM-70 removed.
+        """
+        from . import authoring
+
+        return await self.upsert_agent(authoring.from_json_schema(doc))
+
+    async def translates_agent_documents(self) -> bool:
+        """True: the twin translates in process, so a caller never has to refuse.
+
+        The question exists because a *database* older than REM-70 drops half a
+        document (`core.agent_document`). There is no database here.
+        """
+        return True
+
     async def get_tool_server(self, name: str) -> ToolServer | None:
         return self.tool_servers.get(name)
 

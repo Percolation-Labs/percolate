@@ -12,8 +12,10 @@ Run: ``uv run python tests/smoke.py``
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -34,6 +36,7 @@ from percolate_core.agentic.testing import (
     scripted_model,
 )
 from percolate_core.agentic.tools import sync_server
+from percolate_core.core import samples
 
 AGENT = """
 type: object
@@ -199,56 +202,85 @@ async def check_a_sub_run_does_not_inherit_its_parents_history() -> None:
     assert [m.content for m in parent_window] == ["parent turn"], parent_window
 
 
-def check_a_schema_document_becomes_a_row_with_its_prompt() -> None:
-    """agents.md: `description` is the system prompt, `properties` the output.
+async def check_the_loader_sends_the_document_and_translates_nothing() -> None:
+    """brief.md §6.1: one translation, in the database, and no loader has one.
 
-    THE TWO DIALECTS LOOK ALIKE AND THE WRONG ONE FAILS SILENTLY. Everything
-    that authors an agent -- these docs, a pydantic class, the sample -- writes
-    a JSON Schema document. `agentic.upsert_agent` takes the ROW, where those
-    two keys are `system_prompt` and `structured_output_schema`, and ignores
-    what it does not recognise. Hand it the document directly and it returns
-    success and stores an agent with an empty prompt and no output contract: it
-    exists, resolves by name, and can do nothing.
+    THE TWO DIALECTS LOOK ALIKE AND THE WRONG ONE USED TO FAIL SILENTLY. What
+    authors an agent -- the docs, a pydantic class, a sample, a package manifest
+    -- writes a JSON Schema document, where the prompt is `description` and the
+    contract is `properties`. The row spells those `system_prompt` and
+    `structured_output_schema`.
 
-    That shipped in the harbour sample and nothing caught it, because every
-    stage reported success. This asserts the translation both ways round the
-    only place it is written down.
+    This file used to assert that THIS loader translated, and that assertion
+    passed while `p8-subsystems/packages/apply.py` -- which knew a different
+    dialect and not this one -- installed the same extractor with an empty
+    prompt. Three loaders, three mappings, and `upsert_agent` dropping whatever
+    it did not recognise (REM-70). So the assertion is now the opposite one, and
+    it is the one that composes: the loader hands the document over UNCHANGED,
+    and `agentic.upsert_agent` translates it for every tool at once.
     """
     doc = {
         "type": "object",
         "name": "harbourmaster",
         "description": "You answer questions about the fleet.",
         "model": "openai:gpt-4o-mini",
+        "category": "extractor",
+        "skills": ["house-style"],
         "properties": {"verdict": {"type": "string"}},
         "required": ["verdict"],
     }
-    # Asserted through the sample loader's translation rather than through
-    # `authoring.from_json_schema` alone. The mapping was always correct; what
-    # was missing was anything CALLING it on the way to apply_plugin, so a test
-    # of the mapping would have passed while the sample shipped a mute agent.
-    from percolate_core.core.samples import _agent_to_row
 
-    row = _agent_to_row(doc)
-    # .get(), not [], so a translation that did nothing fails with the sentence
-    # rather than a KeyError the reader has to interpret.
-    assert row.get("system_prompt") == doc["description"], (
-        f"the document was not translated -- system_prompt is "
-        f"{row.get('system_prompt')!r}, so this agent would upsert mute"
+    class FakeConn:
+        """Records what reached the database, which is the whole assertion."""
+
+        def __init__(self) -> None:
+            self.sent: list[Any] = []
+
+        async def execute(self, sql: str, *args: Any) -> None:
+            self.sent.append((sql, args))
+
+    conn = FakeConn()
+    plugin = {"name": "harbour", "version": "1.0.0", "agents": [dict(doc)]}
+    await samples.apply_plugin(conn, plugin)
+
+    assert len(conn.sent) == 1, conn.sent
+    sql, args = conn.sent[0]
+    assert "agentic.apply_plugin" in sql, sql
+    sent = json.loads(args[0])["agents"][0]
+    assert sent == doc, (
+        "the loader changed the agent document on the way to the database. It is "
+        f"the database's to translate now (brief.md §6.1): {sent}"
     )
-    assert row.get("structured_output_schema"), "properties were dropped -- mute agent"
-    assert row["structured_output_schema"]["required"] == ["verdict"]
-    assert "description" not in row and "properties" not in row, row.keys()
+    # And nothing of the document was lost before it left -- `category` is what
+    # makes an agent an extractor, and pydantic does not model it.
+    assert sent["category"] == "extractor" and sent["skills"] == ["house-style"]
 
-    # Keys the schema document carries that AgentSpec does not model are kept:
-    # `skills` is a real column, and dropping it is the same silent loss in a
-    # different place.
-    with_skills = _agent_to_row({**doc, "skills": ["house-style"]})
-    assert with_skills["skills"] == ["house-style"], with_skills.get("skills")
+    # THE IN-PROCESS MAPPING STILL AGREES WITH THE DATABASE'S ON THIS DOCUMENT.
+    # `authoring.from_json_schema` is kept for what needs no database at all
+    # (`from_model_class`, the in-memory twin), so the two must not disagree
+    # about the two keys that carry meaning. The database's half is asserted in
+    # `p8-subsystems/dev/tests/agentic/05-agent-document.sql` against the same
+    # document shape; these are the mappings, not the copies.
+    spec = authoring.from_json_schema(doc)
+    assert spec.system_prompt == doc["description"], spec.system_prompt
+    assert spec.structured_output_schema == {
+        "type": "object",
+        "properties": {"verdict": {"type": "string"}},
+        "required": ["verdict"],
+    }, spec.structured_output_schema
 
-    # A document already in the row dialect is passed through untouched, so an
-    # author who spells the row keys is taken at their word.
-    already = {"name": "x", "system_prompt": "spelled the row way"}
-    assert _agent_to_row(already) == already
+    # A nested model's `$defs` travels with the contract: a stored `$ref`
+    # pointing at definitions nobody kept is a schema no provider can validate.
+    nested = authoring.from_json_schema(
+        {
+            "name": "n",
+            "description": "d",
+            "properties": {"claim": {"$ref": "#/$defs/Claim"}},
+            "$defs": {"Claim": {"type": "object", "properties": {"t": {"type": "string"}}}},
+        }
+    )
+    assert (nested.structured_output_schema or {}).get("$defs"), nested.structured_output_schema
+    assert "$defs" in authoring.to_json_schema(nested), "the round trip drops $defs"
 
 
 def check_every_model_provider_we_ship_can_be_constructed() -> None:
@@ -418,7 +450,7 @@ async def main() -> None:
     check_our_vocabularies_match_the_published_contract()
     check_a_partial_write_mentions_only_what_it_sets()
     check_a_code_authored_agent_is_the_same_document()
-    check_a_schema_document_becomes_a_row_with_its_prompt()
+    await check_the_loader_sends_the_document_and_translates_nothing()
     check_every_model_provider_we_ship_can_be_constructed()
     await check_citations_come_from_tools_not_the_model()
     await check_quota_denial_is_terminal_not_a_crash()

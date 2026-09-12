@@ -26,6 +26,7 @@ from collections.abc import Mapping
 from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
+from ...core import agent_document
 from ..contracts import AgentSpec, Message, Run, RunStatus, Session, ToolServer
 from .client import PgClient
 
@@ -41,6 +42,8 @@ class Repository(Protocol):
     async def get_agent_by_id(self, agent_id: UUID) -> AgentSpec | None: ...
     async def list_agents(self) -> list[AgentSpec]: ...
     async def upsert_agent(self, agent: AgentSpec) -> AgentSpec: ...
+    async def upsert_agent_document(self, doc: dict[str, Any]) -> AgentSpec: ...
+    async def translates_agent_documents(self) -> bool: ...
     async def get_tool_server(self, name: str) -> ToolServer | None: ...
     async def list_tool_servers(self) -> list[ToolServer]: ...
     async def upsert_tool_server(self, server: ToolServer) -> ToolServer: ...
@@ -170,6 +173,44 @@ class PgRepository:
         result = _agent(row)
         assert result is not None
         return result
+
+    async def upsert_agent_document(self, doc: dict[str, Any]) -> AgentSpec:
+        """An agent as the DOCUMENT it was authored as, sent to the database whole.
+
+        `brief.md` §6.1: `agentic.agent_document_to_row` is the one translation
+        and `upsert_agent` calls it, so a client that parses a document into an
+        `AgentSpec` and sends the model's fields is translating a second time --
+        and it loses, in this process and without a word, every column
+        `AgentSpec` does not model. That is not hypothetical: `category`,
+        `audience`, `tags` and `skills` are real columns, an extractor is defined
+        by `category: extractor`, and `percolate agent push` dropped all four on
+        the way through pydantic. The document has them; this sends the document.
+
+        No `exclude_unset` question to get wrong either: the keys present are the
+        ones the author wrote, which is exactly what `upsert_agent`'s
+        "an omitted key means leave it alone" rule wants to be told.
+
+        Against an extension older than the translation this would install an
+        agent with an empty prompt and report success, so the caller asks first
+        (`core.agent_document.assert_translates`).
+        """
+        async with self.client.as_user(self.claims) as conn:
+            row = await conn.fetchrow("select * from agentic.upsert_agent($1::jsonb)", doc)
+        result = _agent(row)
+        assert result is not None
+        return result
+
+    async def translates_agent_documents(self) -> bool:
+        """Whether this database maps a document onto columns, or drops half of it.
+
+        Asked, not assumed, because the difference is silent: an extension that
+        predates `agentic.agent_document_to_row` stores the document's row keys,
+        ignores `description` and `properties`, and reports success. One SQL
+        string, in `core.agent_document`, so the client and the sample loader ask
+        the same question.
+        """
+        async with self.client.as_user(self.claims) as conn:
+            return bool(await conn.fetchval(agent_document.SUPPORTS_SQL))
 
     async def get_tool_server(self, name: str) -> ToolServer | None:
         async with self.client.as_user(self.claims) as conn:

@@ -32,6 +32,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from . import agent_document
+
 STEP_KINDS = ("sql", "sources", "graph", "plugin", "workflows", "documents")
 
 
@@ -77,52 +79,36 @@ def read_manifest(root: Path) -> dict[str, Any]:
             )
         if not (root / target).exists():
             raise SampleError(f"{path}: step {i} names {target}, which does not exist")
-        if kind == "plugin":
-            _assert_can_translate_agents(root / target)
     return doc
 
 
-def _needs_agent_translation(entry: dict[str, Any]) -> bool:
-    """Whether `_agent_row` would have to reach for the agent extra.
+async def assert_can_load(conn: Any, root: Path, manifest: dict[str, Any]) -> None:
+    """Fail BEFORE the first write if this database would drop half an agent.
 
-    Deliberately the same three tests `_agent_row` makes, in the same order,
-    because a pre-flight that disagrees with the thing it is checking for is
-    worse than no pre-flight: it either blocks a load that would have worked or
-    passes one that will not.
+    The check this replaces asked whether the *agent extra* was installed,
+    because the translation used to happen in this process (REM-70). It does not
+    any more -- `agentic.upsert_agent` translates, so the documents go through
+    untouched and the extra is not needed to load a sample at all. What is needed
+    is an extension new enough to translate, and an older one accepts the
+    document and stores an agent with an empty prompt, which is exactly the
+    silence the fix removed.
+
+    It stays a pre-flight for the reason the old one did. Asked at the agent
+    step, a refusal leaves the schema, the entities, the graph and its edges
+    written -- "partially loaded", the one state neither loading again nor
+    removing handles well, produced by the loader itself.
     """
-    if "system_prompt" in entry or "structured_output_schema" in entry:
-        return False
-    return bool({"description", "properties"} & entry.keys())
-
-
-def _assert_can_translate_agents(plugin_path: Path) -> None:
-    """Fail BEFORE the first write if the translation cannot happen.
-
-    This check used to live where the translation does -- inside `_agent_row`,
-    a third of the way through the load -- so `sample load` on an install
-    without the agent extra wrote the schema, the entities, the graph and its
-    edges, and only then discovered it could not read the agents. That is
-    precisely the "partially loaded" state this function's docstring says is
-    the one nothing handles well, produced by the loader itself.
-    """
-    try:
-        doc = _yaml().safe_load(plugin_path.read_text()) or {}
-    except Exception as err:
-        raise SampleError(f"{plugin_path}: cannot be parsed as YAML ({err})") from err
-    if not any(
-        _needs_agent_translation(a)
-        for a in (doc.get("agents") or [])
-        if isinstance(a, dict)
-    ):
-        return
-    try:
-        from ..agentic import authoring  # noqa: F401
-    except ModuleNotFoundError as err:
-        raise SampleError(
-            f"{plugin_path} writes agents as JSON Schema documents, which needs "
-            "the agent extra to translate: pip install 'percolate-core[agent]' "
-            "(the published image already has it). Nothing has been written."
-        ) from err
+    for step in manifest.get("load") or []:
+        kind, target = next(iter(step.items()))
+        if kind != "plugin":
+            continue
+        try:
+            doc = _yaml().safe_load((root / target).read_text()) or {}
+        except Exception as err:
+            raise SampleError(f"{root / target}: cannot be parsed as YAML ({err})") from err
+        await agent_document.assert_translates(
+            conn, doc.get("agents") or [], str(root / target)
+        )
 
 
 def missing_credentials(doc: dict[str, Any], env: dict[str, str]) -> list[str]:
@@ -323,60 +309,31 @@ async def apply_graph(conn: Any, doc: dict[str, Any]) -> list[str]:
     return done
 
 
-def _agent_to_row(entry: dict[str, Any]) -> dict[str, Any]:
-    """An agent written as a JSON Schema document, in the row shape.
-
-    THE TWO DIALECTS LOOK ALIKE AND ONE IS SILENTLY DROPPED. Every page of the
-    documentation authors an agent as a schema document -- the system prompt is
-    `description`, the output contract is `properties` -- because that is the
-    form a pydantic class already produces. `agentic.upsert_agent` takes the
-    ROW, where those two are `system_prompt` and `structured_output_schema`,
-    and ignores keys it does not know. So applying the documented form directly
-    returns success and stores an agent with an empty prompt and no output
-    contract: it exists, it resolves by name, and it can do nothing. That is
-    the exact failure agents.md describes for a partial upsert, reached by a
-    different road.
-
-    `authoring.from_json_schema` is the canonical translation and this calls
-    it rather than repeating the mapping -- two implementations of one
-    convention is how they drift.
-    """
-    if "system_prompt" in entry or "structured_output_schema" in entry:
-        return entry  # already the row shape; take the author at their word
-    if not ({"description", "properties"} & entry.keys()):
-        return entry  # neither dialect's distinguishing keys -- nothing to do
-
-    try:
-        from ..agentic import authoring
-    except ModuleNotFoundError as err:
-        raise SampleError(
-            "this sample writes agents as JSON Schema documents, which needs "
-            "the agent extra to translate: pip install 'percolate-core[agent]' "
-            "(the published image already has it)"
-        ) from err
-
-    spec = authoring.from_json_schema(entry)
-    row = spec.model_dump(mode="json", exclude={"id", "created_at", "updated_at"})
-    # Keys the schema document carries that AgentSpec does not model, kept
-    # rather than dropped -- `skills` and `category` are real columns.
-    for extra in ("skills", "category", "audience", "tags", "plugin"):
-        if entry.get(extra) is not None:
-            row[extra] = entry[extra]
-    return {k: v for k, v in row.items() if v is not None}
-
-
 async def apply_plugin(conn: Any, doc: dict[str, Any]) -> list[str]:
     """Tool servers, skills and agents, as one named and removable bundle.
 
     `agentic.apply_plugin` already does this and does it in the right order --
     servers before skills before agents, because a skill can require a server
     and an agent can pin a skill. Reimplementing the ordering here would be a
-    second place for it to be wrong. The agents are translated on the way in;
-    see `_agent_to_row`.
+    second place for it to be wrong.
+
+    AND THE AGENTS GO THROUGH EXACTLY AS WRITTEN. This function used to translate
+    them -- a schema document's `description` and `properties` onto the row's
+    `system_prompt` and `structured_output_schema` -- because `upsert_agent` read
+    only the row keys and dropped the rest in silence. Three loaders did that,
+    each knowing one dialect, which is REM-70: `p8-subsystems/packages/apply.py`
+    knew a package's file-path `output_schema` and not this one, so the same
+    extractor installed differently depending on which tool applied it, and a
+    package manifest written the documented way installed an agent with no prompt
+    and reported success.
+
+    The translation is `agentic.agent_document_to_row` now, called by
+    `upsert_agent`, so both documented forms install the same row through every
+    tool there is and a key nobody reads is refused rather than dropped. The only
+    thing left for a client to know is whether the database is new enough to do
+    it, which `assert_can_load` asks once, before the first write.
     """
     doc = dict(doc)
-    if doc.get("agents"):
-        doc["agents"] = [_agent_to_row(a) for a in doc["agents"]]
     await conn.execute("select agentic.apply_plugin($1::jsonb)", json.dumps(doc))
     return [
         f"plugin {doc.get('name')} "

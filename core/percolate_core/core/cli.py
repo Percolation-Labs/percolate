@@ -417,6 +417,15 @@ def sample_load(
                     "app_owner -- the database owner, not a service role."
                 ) from err
 
+            # BEFORE THE FIRST WRITE, and it needs the connection -- which is
+            # why it is here rather than in `read_manifest` with the rest of the
+            # pre-flight. An extension older than the document translation
+            # (REM-70) accepts an agent written as a schema document and stores
+            # it with an empty prompt, reporting success; a refusal discovered at
+            # the plugin step would leave the schema, the entities and the graph
+            # already written.
+            await samples.assert_can_load(conn, root, manifest)
+
             for step in manifest["load"]:
                 kind, target = next(iter(step.items()))
                 where = root / target
