@@ -547,17 +547,34 @@ $$ language sql stable;
 -- OTel ground rule (specs/README.md): the W3C trace_id for the request this
 -- function call is happening inside, not a fresh disconnected one, whenever
 -- the caller already has one. Reads request.trace_id, the same "GUC PostgREST
--- sets per-request" mechanism as current_user_id() above -- bridged from the
--- standard `traceparent` HTTP header via PostgREST's db-pre-request hook (a
--- function that runs before every request and can set session GUCs from
--- request.headers), not a new mechanism. Falls back to a fresh trace_id only
--- when the caller genuinely didn't propagate one -- an auth_events row should
--- never have a null trace_id, even for a client that doesn't participate in
--- tracing. Same empty-string-after-pooled-connection-commit guard as
--- current_user_id() -- see its comment above -- applies here too.
--- `set search_path` for the same reason percolate.uuidv5 carries one, and the
--- comment there has the measurement: `gen_random_bytes` is pgcrypto's, in
--- `public`, and a restore runs with an empty path.
+-- sets per-request" mechanism as current_user_id() above. Falls back to a
+-- fresh trace_id when the caller didn't propagate one -- an auth_events row
+-- should never have a null trace_id, even for a client that doesn't
+-- participate in tracing. Same empty-string-after-pooled-connection-commit
+-- guard as current_user_id() -- see its comment above -- applies here too.
+--
+-- TODAY THE FALLBACK IS THE ONLY PATH, and this comment used to say otherwise.
+-- It claimed request.trace_id was "bridged from the standard `traceparent`
+-- HTTP header via PostgREST's db-pre-request hook". No such function is
+-- defined anywhere in the collection and PGRST_DB_PRE_REQUEST is set in no
+-- compose file and no chart value, so nothing ever sets that GUC: every
+-- auth_events row in every deployment gets a fresh random trace_id
+-- correlating with nothing, while the code said it correlated with the
+-- caller's span. A comment describing a mechanism that does not exist is
+-- worse than no comment, because it is what somebody debugging a broken
+-- correlation reads first and believes.
+--
+-- The function is right and stays as it is -- reading the GUC first is what
+-- makes it correct the day something sets it. To make the first path real:
+-- define a function that parses request.headers->>'traceparent' and calls
+-- set_config('request.trace_id', ...), then point PGRST_DB_PRE_REQUEST at it
+-- in the shipped compose file and the chart. That is a packaging change in
+-- get-percolate, not a change here, which is why it is not done in this
+-- commit -- see REM-114.
+--
+-- `set search_path` for the same reason percolate.uuidv5 carries one, and
+-- the comment there has the measurement: `gen_random_bytes` is pgcrypto's,
+-- in `public`, and a restore runs with an empty path.
 create or replace function rbac.current_trace_id() returns text as $$
     select coalesce(
         nullif(current_setting('request.trace_id', true), ''),
