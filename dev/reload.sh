@@ -37,6 +37,14 @@ cd "$(dirname "$0")"
 ROOT="$(cd .. && pwd)"
 
 DB=${1:-p8dev}
+
+# WHICH CONTAINER, ASKED RATHER THAN ASSUMED WHEN IT IS AMBIGUOUS (REM-131).
+# The predicate and the whole argument live in dev/lib/container.sh, beside
+# lib/python.sh which is the same pattern for a different question -- including
+# why the obvious `--filter ancestor=` form returns zero, and the check.sh
+# sibling this guard cannot see.
+. "$ROOT/dev/lib/container.sh"
+[ -z "${CONTAINER:-}" ] && require_named_container p8-dev-db "dev/reload.sh ${DB}"
 CONTAINER=${CONTAINER:-p8-dev-db}
 SUPERUSER=${SUPERUSER:-p8}
 # `postgres`, not the served database: you cannot DROP the database you are
