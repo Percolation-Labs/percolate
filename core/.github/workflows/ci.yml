@@ -76,6 +76,16 @@ jobs:
       - name: Tool identity and persisted execution
         run: python -m unittest discover -s tests -p test_tool_auth.py
 
+      # workflow.heartbeat_task shipped, was granted to `worker`, and was called
+      # by nothing -- so a task running longer than the queue's stale_timeout was
+      # reaped and re-run with the first copy still in flight (REM-109). These
+      # are the pure-logic half: that the loop beats at all while a handler runs,
+      # that it paces itself from the queue rather than from a constant here, and
+      # that it stops before the terminal transition. The live proof needs a
+      # database and is p8-subsystems/dev/tests/workflow/19-*.sql.
+      - name: A long task is heartbeated, so it finishes once
+        run: python -m unittest discover -s tests -p test_worker_heartbeat.py
+
       # A token's claims reach the database whole and before the role switch
       # (REM-44, REM-48), and a credential reaches only the origin it is bound
       # to (REM-49). The worker and API-ingest files are here because the
