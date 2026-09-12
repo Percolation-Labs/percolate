@@ -2416,7 +2416,27 @@ create policy visibilities_are_the_contract on rbac.visibilities for select
 -- reads session state regardless of whose privileges are active for the
 -- column check.
 create or replace view rbac.users_api as
-  select id, email, status, created_at, updated_at from rbac.users;
+  select u.id, u.email, u.status, u.created_at, u.updated_at,
+         -- The Users screen read three views and joined them in JavaScript.
+         -- Aggregated here instead: the numbers on that screen are now a thing
+         -- a test can execute (browser-ui.md §3, and `percolate-ui/README.md`'s
+         -- "never client-side group-bys").
+         --
+         -- APPENDED, and that position is forced rather than chosen: `create or
+         -- replace view` may only add columns at the end. A fresh install never
+         -- sees the difference; every upgrading database does.
+         coalesce((select array_agg(ur.role order by ur.role)
+                     from rbac.user_roles ur where ur.user_id = u.id), '{}') as roles,
+         coalesce((select jsonb_object_agg(om.org_id, om.role)
+                     from rbac.org_members om where om.user_id = u.id), '{}'::jsonb) as org_roles
+    from rbac.users u;
+
+-- Orgs with the number of people in them. The Settings screen was counting
+-- `org_members` rows client-side per org, which is a group-by in a browser.
+create or replace view rbac.orgs_api as
+  select o.id, o.slug, o.name,
+         (select count(*) from rbac.org_members m where m.org_id = o.id) as member_count
+    from rbac.orgs o;
 create or replace view rbac.refresh_tokens_api as
   select id, user_id, device_label, issued_at, expires_at, revoked_at from rbac.refresh_tokens;
 create or replace view rbac.api_keys_api as
@@ -2460,6 +2480,8 @@ alter view rbac.api_keys_api owner to api_viewer;
 revoke create on schema rbac from api_viewer;
 
 grant select on rbac.users_api to authenticated;
+alter view rbac.orgs_api owner to api_viewer;
+grant select on rbac.orgs_api to authenticated;
 grant select on rbac.refresh_tokens_api to authenticated;
 grant select on rbac.api_keys_api to authenticated;
 -- No grant on the base tables themselves to web_anon or authenticated --
