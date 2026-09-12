@@ -211,10 +211,23 @@ class OtherSendersTest(Env, unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(_catalog_headers(lake), {"Authorization": "Bearer lt"})
 
     async def test_a_tool_servers_credential_stays_on_its_own_origin(self):
+        # REM-91 item 7: a tool server's credential now resolves through
+        # credential_for like every other one in this package, so its origin has
+        # to be bound. Before that the REGISTRATION origin alone was enough --
+        # which is no check at all when whoever registered the server chose that
+        # origin, and `tool_servers:update` is a permission a person can hold.
         server = ToolServer(name="ext", kind="openapi", url="https://tools.example/",
                             credential_ref="env:LLM_API_KEY")
-        self.assertEqual((await outbound_headers(server))["Authorization"], "Bearer sk-unit-test")
-        self.assertNotIn("Authorization", await outbound_headers(server, url=ATTACKER + "/x"))
+        with patch.dict("os.environ", {"P8_CREDENTIAL_ORIGINS":
+                                       '{"LLM_API_KEY": ["https://tools.example"]}'}):
+            self.assertEqual(
+                (await outbound_headers(server))["Authorization"], "Bearer sk-unit-test")
+            # The destination still has to match the registration, as before.
+            self.assertNotIn(
+                "Authorization", await outbound_headers(server, url=ATTACKER + "/x"))
+        # And with no binding at all the same call is refused rather than sent.
+        with self.assertRaises(CredentialRefused):
+            await outbound_headers(server)
 
 
 if __name__ == "__main__":

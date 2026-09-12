@@ -20,15 +20,106 @@ the extension. Three reasons this collection does not, the third being decisive:
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import os
+import socket
 from typing import Any
 
 import httpx
 
 from ..core import credential_for
+from ..core.credentials import origin
 from ..core.provider_errors import raise_for
-from .templates import TerminalError, dig, resolve_task
+from .templates import TEMPLATE_ENV, TerminalError, dig, resolve_task
 from .agent_auth import agent_authorization
+
+
+def _sanctioned_origins() -> set[tuple[str, str, int]]:
+    """The internal endpoints this deployment has named, as origins.
+
+    NOT A NEW LIST. It is the one templates already read -- ``P8_AGENT_URL``,
+    ``LLM_URL``, and whatever ``P8_TEMPLATE_ENV`` adds -- because that list
+    already means "endpoints this operator sanctions", and a second list for the
+    same fact is a second list to forget. A deployment that wants the worker to
+    reach another internal service names it there and gets both at once.
+    """
+    names = set(TEMPLATE_ENV) | {
+        n.strip() for n in os.environ.get("P8_TEMPLATE_ENV", "").split(",") if n.strip()}
+    out: set[tuple[str, str, int]] = set()
+    for name in names:
+        value = os.environ.get(name)
+        if not value:
+            continue
+        try:
+            out.add(origin(value))
+        except ValueError:
+            continue
+    return out
+
+
+def refuse_internal_egress(url: str) -> None:
+    """Refuse a step that points the worker back at its own network.
+
+    The docstring at the top of this file argues that giving *the database*
+    outbound egress is "a real posture change", and notes that pg_durable ships
+    an allow-list "precisely because" it is. The worker had none, and the worker
+    is the process that actually makes the calls.
+
+    It sits on the compose network beside Postgres, MinIO and PostgREST with
+    ``P8_S3_KEY`` in its environment, and a step's ``url`` is resolved from
+    ``{{run.*}}`` and ``{{steps.*}}`` -- whatever started the run and whatever
+    the last step returned, which on the ingestion path includes text taken out
+    of an uploaded document. So ``http://minio:9000/...`` or
+    ``http://169.254.169.254/`` was a request the worker would make, with the
+    response landing in ``tasks.output`` and from there into the next step's
+    context.
+
+    ``credential_for`` already stops a *named* secret travelling somewhere it
+    was not bound to, and ``TEMPLATE_ENV`` already stops ``{{env.X}}`` putting a
+    secret in a body. Neither says anything about an unauthenticated GET to a
+    service that answers on this network because the caller is on it.
+
+    WHAT THIS DOES NOT DO: it resolves and checks, and does not pin the resolved
+    address for the request that follows, so a name answering differently on a
+    second lookup is not covered. That is DNS rebinding; it has no incident
+    here, and closing it means a pinned-IP transport for every call. Named so
+    the next reader knows it was considered rather than missed.
+    """
+    try:
+        target = origin(url)
+    except ValueError as exc:
+        raise TerminalError(f"http_call url is not a usable HTTP(S) URL: {exc}") from None
+
+    if target in _sanctioned_origins():
+        return
+
+    _, host, port = target
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        # A NAME THAT DOES NOT RESOLVE REACHES NOTHING, so there is nothing here
+        # to refuse: let the request proceed and fail as it always did, with
+        # httpx's own retryable "connection failed". The first version of this
+        # raised instead, and fourteen existing tests went red -- they drive the
+        # worker with hostnames like `model.example` and a mocked transport, and
+        # a check that resolves for real turned "this test never touches the
+        # network" into "this test needs DNS". That is the check changing what
+        # the code under it means, which is worse than the gap it closes: the
+        # gap is a host that cannot be connected to either.
+        return
+
+    for info in infos:
+        address = ipaddress.ip_address(info[4][0])
+        if (address.is_private or address.is_loopback or address.is_link_local
+                or address.is_reserved or address.is_multicast
+                or address.is_unspecified):
+            raise TerminalError(
+                f"http_call refuses {host}: it resolves to {address}, which is on "
+                "this machine's own network. A step's url is resolved from the run "
+                "and from earlier steps, so it is not necessarily an address anybody "
+                "chose. If the worker is meant to reach it, name the endpoint in "
+                "P8_TEMPLATE_ENV (or P8_AGENT_URL / LLM_URL).")
 
 
 def build_request(spec: dict, ctx: dict) -> tuple[dict, dict]:
@@ -36,6 +127,11 @@ def build_request(spec: dict, ctx: dict) -> tuple[dict, dict]:
     spec = resolve_task(spec, ctx)
     if not spec.get("url"):
         raise TerminalError("http_call task has no 'url'")
+
+    # After resolve_task and before anything is attached to the request: the
+    # templated url is the one that will be fetched, and the check has to see
+    # that rather than the `{{...}}` the author wrote.
+    refuse_internal_egress(spec["url"])
 
     headers = dict(spec.get("headers") or {})
     body = spec.get("body")

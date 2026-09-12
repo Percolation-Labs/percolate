@@ -38,7 +38,13 @@ async def outbound_headers(server, headers=None, *, url=None):
     if caller and caller[0] and origin(server.url) in caller[1] and same_origin:
         outbound["Authorization"] = caller[0]
     elif same_origin:
-        credential = await resolve_credential(server.credential_ref)
+        # The DESTINATION, not the registration -- they coincide here only
+        # because same_origin already holds. resolve_credential now asks
+        # core.credentials whether this origin is bound to that variable, which
+        # the same-origin test above cannot answer: a server somebody registered
+        # at their own host IS its own registration origin, so same_origin was
+        # true for exactly the case worth refusing.
+        credential = await resolve_credential(server.credential_ref, url or server.url)
         if credential:
             outbound["Authorization"] = f"Bearer {credential}"
     return outbound
