@@ -37,8 +37,10 @@
 --   aiq.schema_graph       sampled keys of private nodes by org -- rbac/13 §6
 --   agentic.attach_skill,  said "no agent named %" to anybody before asking --
 --   agentic.detach_skill   agentic/02 §6
+--   workflow.start_workflow  handed back a run started by whoever else had
+--                          used that external_id -- workflow/17, REM-77
 -- and, left declared with the gap in the sentence: content.register_fetched
--- and workflow.start_workflow (see their rows).
+-- (see its row).
 --
 -- A PACKAGE'S SCHEMA IS OUT OF SCOPE HERE, and that is a decision rather than
 -- the list stopping where it was convenient. This file declares what THIS tree
@@ -168,8 +170,8 @@ insert into t14_declared (fn, mechanism, why) values
  'the schedule''s owner, or schedules:update'),
 ('workflow.signal_task(uuid,text,jsonb)', 'workflow.assert_run_access',
  'the run''s owner, or runs:signal'),
-('workflow.start_workflow(text,jsonb,text,text)', 'none',
- 'definitions are installation-wide (no tenant column, no policy, no permission to start one); the run is owned by the caller (trg_set_run_owner) and each step runs as that owner through execute_as_viewer. GAP: an external_id already used by somebody else''s run returns that run''s id, or names it in the error'),
+('workflow.start_workflow(text,jsonb,text,text)', 'workflow.reusable_run',
+ 'definitions are installation-wide (no tenant column, no policy, no permission to start one); the run is owned by the caller (trg_set_run_owner) and each step runs as that owner through execute_as_viewer. The idempotency match now asks whose run the external_id found: reusable_run matches only among the runs the caller may see -- their own, or one their permissions reach, which is assert_run_access''s rule through the may_access_run they share -- while an operator with no identity (tick() firing a schedule) matches every run under the key, authorized by the grant. The key is unique per OWNER, so a second person''s start is a new run rather than a unique violation (REM-77)'),
 ('workflow.unschedule_workflow(text)', 'workflow.assert_schedule_access',
  'the schedule''s owner, or schedules:delete');
 

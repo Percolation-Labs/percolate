@@ -293,7 +293,17 @@ create table if not exists workflow.runs (
     id               uuid primary key default uuidv7(),
     workflow_def_id  uuid not null references workflow.definitions(id),
     parent_task_id   uuid,
-    external_id      text unique,     -- caller-supplied idempotency key for workflow.start_workflow
+    -- caller-supplied idempotency key for workflow.start_workflow.
+    --
+    -- NOT `unique` HERE, for the same reason the status CHECK is not: the key
+    -- is unique PER OWNER rather than per installation (REM-77), and a unique
+    -- constraint written inside `create table if not exists` reaches fresh
+    -- installs only. So it is declared once as a drop-then-add index near the
+    -- end of this file -- globally, because the engine standalone has no
+    -- owners to scope it by -- and integration-rbac.sql §(e) narrows that same
+    -- index to (owner, key) once identities exist. Both are convergent, so a
+    -- fresh install and an upgraded one end on the same one index.
+    external_id      text,
     -- The CHECK is not here. It is one drop-then-add near the end of this
     -- file, with the tasks one beside it, so which subset of the vocabulary a
     -- table admits is stated once and an existing installation picks up a
@@ -860,6 +870,27 @@ $$ language plpgsql;
 --    id), then wire workflow.task_dependencies + compute real pending_deps once all
 --    ids are known. Idempotent via external_id.
 -- ------------------------------------------------------------
+
+-- WHICH RUN AN IDEMPOTENCY KEY MAY RESOLVE TO, FOR THIS CALLER.
+--
+-- The engine standalone has no identities, so every run with the key is the
+-- caller's and the honest answer here is the run itself -- the same
+-- stub-and-shadow shape may_define() carries, and integration-rbac.sql §(e)
+-- replaces this with the version that asks whose run it is. That question has
+-- to be asked somewhere: start_workflow is idempotent on external_id, and the
+-- version of it that matched on the key alone handed a caller who named
+-- somebody else's key that run's id -- an existence oracle over another
+-- tenant's work, and a run id trusted by whatever the caller did next (REM-77,
+-- found while classifying reachable definers for REM-46).
+--
+-- A FUNCTION RATHER THAN A PREDICATE IN THE QUERY BELOW, because `owner_id`
+-- does not exist in this file: the core engine is deliberately identity-free
+-- and the column arrives with rbac.add_scope_columns().
+create or replace function workflow.reusable_run(p_external_id text)
+returns uuid as $$
+    select id from workflow.runs where external_id = p_external_id;
+$$ language sql stable;
+
 -- p_trace_id: propagate an existing W3C trace_id from an already-traced
 -- caller (e.g. a FastAPI request already inside a trace) instead of always
 -- starting a disconnected new one -- specs/README.md's OTel ground rule.
@@ -882,18 +913,20 @@ declare
     v_comp      text[];
 begin
     if p_external_id is not null then
-        select id, status into v_run_id, v_status
-        from workflow.runs where external_id = p_external_id;
+        -- AMONG THE RUNS THIS CALLER MAY SEE, never every run with the key.
+        -- reusable_run() is the one place that decides which those are.
+        v_run_id := workflow.reusable_run(p_external_id);
 
         if v_run_id is not null then
+            select status into v_status from workflow.runs where id = v_run_id;
             if v_status in ('running', 'succeeded') then
                 return v_run_id;      -- the work happened; do not repeat it
             end if;
             raise exception
                 'external_id % already belongs to run %, which is %. That run did not '
                 'complete, so returning it would report work that never happened -- and '
-                'external_id is unique, so this key cannot start a second run. Use a new '
-                'external_id to retry.', p_external_id, v_run_id, v_status;
+                'external_id is unique per owner, so this key cannot start a second run '
+                'for you. Use a new external_id to retry.', p_external_id, v_run_id, v_status;
         end if;
     end if;
 
@@ -5994,8 +6027,9 @@ comment on function workflow.validate_shape(jsonb, jsonb) is
 -- wrong for one that was cancelled or failed, where the work did NOT happen
 -- and the caller is being told it did.
 --
--- external_id is UNIQUE, so a retry cannot silently mint a second run under
--- the same key; the honest move is to say so by name and let the caller decide
+-- external_id is UNIQUE per owner, so a retry cannot silently mint a second
+-- run under the same key; the honest move is to say so by name and let the
+-- caller decide
 -- (a scheduler records it in last_error, which is exactly the column for it).
 -- Guessing -- reusing the corpse, or inventing a suffixed key -- would make
 -- "idempotent" mean two different things depending on how the last attempt
@@ -6467,7 +6501,9 @@ kind is p8ql or sql execute inside Postgres as soon as they are ready; rest,
 agent and work steps become queued tasks a worker picks up. Poll runs_api by
 that id for status, or tasks_api by run_id for per-step detail.
 p_external_id is an idempotency key: starting twice with the same one returns
-the existing run rather than a second one.$c$;
+the existing run rather than a second one. It is YOUR key -- the match is made
+only among the runs you may see, so somebody else using the same value gets
+their own run and neither of you is handed the other's id.$c$;
 
 comment on function workflow.define_yaml(text) is
 $c$Define or re-version a workflow from a YAML document.
@@ -6966,6 +7002,26 @@ alter table workflow.tasks drop constraint if exists tasks_status_check;
 alter table workflow.tasks add  constraint tasks_status_check
     check (status in ('pending','ready','running','waiting_external',
                       'succeeded','failed','cancelled'));
+
+-- AND THE IDEMPOTENCY KEY, for the same reason and with the same shape.
+--
+-- `runs.external_id` carried `unique` inside `create table if not exists`,
+-- which reaches fresh installs only -- so it is restated here, where a replay
+-- reaches it. `if not exists` matches the CONSTRAINT's index by name on a
+-- database that already has one, so this is a no-op there rather than a second
+-- declaration of the same fact.
+--
+-- GLOBAL HERE AND PER-OWNER THERE. The engine standalone has no identities and
+-- no owner column, so the strongest form it can state is one run per key;
+-- integration-rbac.sql §(e) drops this and narrows it to (owner, key) once
+-- `owner_id` exists. That is the same stub-and-shadow shape may_define() and
+-- assert_run_access() use, applied to a constraint instead of a function, and
+-- it is what stops the match scope and the constraint scope disagreeing --
+-- a start_workflow that matches only the caller's own runs, over a key that is
+-- unique installation-wide, turns another tenant's row from a returned id into
+-- a unique violation, which is the same existence oracle plus a broken write.
+create unique index if not exists runs_external_id_key
+    on workflow.runs (external_id);
 
 alter table workflow.runs  drop constraint if exists runs_status_fk;
 alter table workflow.runs  add  constraint runs_status_fk
