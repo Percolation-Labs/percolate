@@ -74,8 +74,9 @@ done
 # worse than a failure, because both look like an answer. `--check` is the
 # door build-sql.py already had; it costs nothing and the run below costs
 # minutes, so it goes first.
-python3 extension/percolate/build-sql.py --check >/dev/null || {
-    echo "the generated extension scripts are behind specs/ -- run: python3 extension/percolate/build-sql.py" >&2
+PY="${PY:-python3}"
+"$PY" extension/percolate/build-sql.py --check >/dev/null || {
+    echo "the generated extension scripts are behind specs/ -- run: $PY extension/percolate/build-sql.py" >&2
     exit 1; }
 
 # The OLD schema comes from the TAG, never from this tree's copy of that

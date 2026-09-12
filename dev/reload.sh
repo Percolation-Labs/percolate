@@ -49,7 +49,7 @@ docker inspect "$CONTAINER" >/dev/null 2>&1 || {
   exit 1; }
 
 echo "==> regenerating the extension SQL from specs/"
-python3 "$ROOT/extension/percolate/build-sql.py" | tail -1
+"${PY:-python3}" "$ROOT/extension/percolate/build-sql.py" | tail -1
 
 # Into the image's own extension directory, so `create extension percolate`
 # finds the version being tested rather than the one the image shipped with.

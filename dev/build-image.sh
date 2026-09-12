@@ -15,7 +15,8 @@ VERSION=$(sed -n "s/^default_version = '\\(.*\\)'/\\1/p" "$ROOT/extension/percol
 [ -n "$VERSION" ] || { echo "no default_version in percolate.control" >&2; exit 1; }
 
 echo "==> regenerating percolate--$VERSION.sql from specs/"
-python3 "$ROOT/extension/percolate/build-sql.py"
+PY="${PY:-python3}"
+"$PY" "$ROOT/extension/percolate/build-sql.py"
 
 # One .so per architecture. A shared library is compiled against one ABI, so
 # "multi-arch" for this file means N files, not one clever one -- and the image
