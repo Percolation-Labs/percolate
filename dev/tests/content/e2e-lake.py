@@ -184,10 +184,20 @@ def refine_workflow(name: str, step_input: dict) -> str:
 async def start(conn, name: str, step_input: dict, run_input: dict | None = None) -> str:
     """Define and start a one-step workflow as Alice, in org A.
 
-    The org is set by hand after the start: a run takes its owner from the
-    caller's claims and its org defaults to the shared tier, and nothing yet
-    starts a run in a named org (lake.md §8). Setting it here is the test
-    standing in for that, and it is the one shim in this file.
+    The org is set by hand after the start, and since REM-42 that is a
+    LEFTOVER rather than a stand-in. A run now derives its org from its
+    definition's (spec.md §17(b)), so the way to start a run in org A is to
+    author the workflow in org A -- an `update workflow.definitions set org_id`
+    before the start, which is the mechanism §17(d) names. This workflow is
+    defined under Alice's claims and left on the shared tier, so the derivation
+    correctly leaves the run shared and these two lines still do the work.
+
+    Two lines, not one: the same statement is at the p8ql case below. lake.md
+    §8 called it "the one shim in this file" and it is two, which is the
+    `fixed-at-the-copy-that-failed` shape -- so whoever moves them onto the
+    definition moves both. Not done when REM-42 landed because this file needs
+    MinIO and an Iceberg catalog, is in no gate, and an edit nobody can run is
+    not an improvement.
     """
     async with conn.transaction():
         await conn.execute("set local role authenticated")

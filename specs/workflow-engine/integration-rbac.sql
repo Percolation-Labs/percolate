@@ -463,11 +463,62 @@ end $$;
 -- ownership model three spec sections describe was unusable end to end.
 -- Null stays null for system-initiated runs (a scheduled poll, a
 -- consolidation run) -- those have no human owner and must not invent one.
+--
+-- AND THE RUN'S ORG COMES FROM THE DEFINITION, NOT FROM THE CALLER -- spec.md
+-- §17(b), the other half of the scope REM-91 put on `workflow.definitions`.
+--
+-- A run of an org's workflow is that org's run. That is what makes the org
+-- unambiguous when the caller belongs to several, and it is the one thing
+-- `world-model-ingestion/lake.md` §8 asks for from this end: "lake outputs
+-- land in the shared org, where dataset names are unique across every user,
+-- and a second user's `sales` is refused as not theirs. Starting a run in a
+-- named org is workflow-engine's to add." `e2e-lake.py` set `runs.org_id` by
+-- hand and called it its one shim; this is the shim's replacement.
+--
+-- A `p_org_id` argument checked against rbac.current_org_ids() was the
+-- alternative and §17(b) rejects it: it puts the choice in the caller's hands
+-- for no gain, and every caller would then pass the value the definition
+-- already carries. It is also the spoofable shape this function's own header
+-- is about.
+--
+-- ONLY WHEN THE RUN IS STILL ON THE SHARED TIER, so an explicit org survives.
+-- rbac.is_shared_org() rather than `org_id is null`: the column is NOT NULL
+-- with the shared sentinel as its default, so "the caller did not choose one"
+-- reads as the sentinel and not as a null (the reason that function exists).
+--
+-- VISIBILITY IS NOT TOUCHED, and that is deliberate rather than unfinished.
+-- §17(b) makes the run BELONG to the org; it does not make it readable by
+-- everyone in it, and a run is private to its owner exactly as before. The org
+-- is what scopes dataset names in `content.datasets`, which is what lake.md §8
+-- needs -- widening every run of a shared workflow to org-visible would be a
+-- disclosure nobody asked for, on the same table where `add_scope_columns`
+-- chose 'private' for precisely this reason.
+--
+-- It would not work anyway, which is worth writing down because the next
+-- person will try it: `trg_runs_visibility` sorts before `trg_set_run_owner`,
+-- and Postgres fires BEFORE triggers in name order -- so rbac.enforce_visibility()
+-- has already validated the row by the time this runs. Setting `visibility`
+-- here would skip its check; a caller who inserts visibility 'org' must still
+-- supply the org themselves, and the error they get if they do not is
+-- accurate.
 create or replace function workflow.set_run_owner() returns trigger as $$
+declare v_def_org uuid;
 begin
     if new.owner_id is null then
         new.owner_id := rbac.current_user_id();
     end if;
+
+    if rbac.is_shared_org(new.org_id) and new.workflow_def_id is not null then
+        select d.org_id into v_def_org
+          from workflow.definitions d where d.id = new.workflow_def_id;
+        -- Shared-tier definitions keep today's behaviour and §17(b) says why:
+        -- "a workflow nobody owns produces a run nobody owns". Assigning
+        -- anything else would have to invent a tenant.
+        if v_def_org is not null and not rbac.is_shared_org(v_def_org) then
+            new.org_id := v_def_org;
+        end if;
+    end if;
+
     return new;
 end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
