@@ -12,13 +12,77 @@ on "the `percolate-core` release notes" — a precondition that had never been
 met and could not be, so the bump happened without it. A condition nobody can
 satisfy is not a safeguard; it is a sentence people learn to step over.
 
-## Unreleased
+## 0.1.9
 
-Nothing yet. `pyproject.toml` says `0.1.9` and no `v0.1.9` tag exists, so the
-release workflow treats 0.1.9 as a **retry** — it publishes the tree as it
-stands rather than bumping again.
+`pyproject.toml` said `0.1.9` with no `v0.1.9` tag, so the release workflow ran
+in **retry** mode and published the tree as it stood rather than bumping again.
 
-What is on `main` and not in published 0.1.8:
+**Read this first if you run the extension at 0.2.0 or later.** 0.1.8 and
+earlier cannot serve such a database *at all*: they set the caller's role
+before writing the claims, and 0.2.0 refuses `pg_catalog.set_config` to
+`authenticated`, so no turn opens a session and every one of them fails after
+the service has reported healthy. **0.1.9 is the minimum runtime for a 0.2.0
+database.** The pairing is not a preference — a database is refused the upgrade
+to 0.2.0 while that grant is still there, so there is no 0.2.0 database without
+the revoke.
+
+Seventy commits since `v0.1.8`, 45 of them not merges, and this list is what
+changes behaviour rather than all of them. The identity group is first because
+it is why the release exists.
+
+### Identity, and who a statement runs as
+
+- **Claims are written before the role switch.** `core/identity.as_caller` set
+  `role` and then the claims; the second statement is refused on a 0.2.0
+  database. The order is now claims-then-role, which is PostgREST's order and
+  the only one that works — the revoke exists because while `authenticated`
+  could call `set_config`, any signed-in user could write another user's `sub`
+  into `request.jwt.claims` from inside `aiq.sql_passthrough` and read as them.
+- **An org-scoped token is no longer widened to every org.** The agent runtime
+  verified tokens with a second, hand-written HS256 path that kept only `sub`,
+  so a token carrying `orgs: [A]` reached the database with no `orgs` claim —
+  which `rbac.current_org_ids()` reads as *every* org the user belongs to.
+  One verifier now, shared with the Content Server.
+- **A streamed turn no longer hands its connection back still as
+  `authenticated`.** A pooled connection left in a caller's role is the next
+  caller's identity.
+- **A missing secret, a path parameter and an uploaded file each decided
+  authority, and none of them may.** The gateway accepted an unverified
+  `X-P8-User-Id` when `P8_JWT_SECRET` was unset (it now refuses to start
+  unless `P8_DEV_NO_AUTH=1`); an OpenAPI path parameter could escape its
+  operation; an uploaded file was served with a content type it chose.
+- **A credential goes only to the origin it is bound to.** A tool server
+  registered at a host of your choosing was a credential oracle, and the worker
+  sent credentials to whatever host the row or upload beside them named.
+- **The worker refuses its own egress to internal addresses** — it argued the
+  database should not have egress while having it itself, including to
+  `169.254.169.254`.
+- **Row text from a fan-out is not resolved as a template.**
+
+### A turn that finishes, and a pool that holds
+
+- **A pool of eight served four conversations.** A turn holds one connection
+  for its life and takes a second per query, so `pool_max` of 8 deadlocked at
+  eight concurrent turns. The default is 16, the budget is documented, and an
+  acquire that cannot be satisfied now says so instead of hanging.
+- **A task longer than the lease finishes once.** `heartbeat_task` shipped, was
+  granted to `worker`, and was called by nothing, so a five-minute task was
+  reaped and re-run.
+- **A runtime that cannot serve its database refuses at startup**, naming the
+  remedy, instead of failing inside every turn behind an HTTP 200 that
+  `docker compose ps` calls healthy.
+- **A database refusal reaches the caller as 403**, not as a server error, on
+  every endpoint — and the worker no longer retries one four times.
+- **A provider account out of credit is classified, not retried.** It looked
+  like a rate limit on three of the four paths that call a provider.
+- **A delegation tree has a budget**, and a run that stopped because it ran out
+  says so rather than chipping as nothing in particular.
+- **A scheduled step's namespace exists.** The documented form named one that
+  did not.
+- **A summary is replayed as delimited user text, not as a system prompt** — a
+  summary is a record of a conversation, not an instruction from the operator.
+
+### Contracts, configuration and screens
 
 - **One translation from an agent document to a row.** `packages/apply.py`,
   `core/samples.py` and `percolate agent push` each knew one dialect, so an
@@ -36,12 +100,30 @@ What is on `main` and not in published 0.1.8:
   exhausted account was retried until something else failed.
 - **The agent runtime speaks OpenTelemetry.** `percolate_core/agentic/telemetry.py`
   is new; the published image has no telemetry module.
-- **The workbench** (`percolate ui`, the `[ui]` extra) is new and unpublished.
+- **The workbench** (`percolate ui`, the `[ui]` extra) is new.
+- **One database and one object store, whoever is asking** — which service you
+  are does not change where the data is.
+- **Six assistants implemented one suggestion contract six ways**, and one of
+  them proposed tools it then called. One contract now, and four screens stopped
+  doing the database's arithmetic in JavaScript.
+- **A lake worker refines staged data in DuckDB** and runs `p8ql` LAKE steps.
+- **A release tag names the commit that was released.** `v0.1.8` named a tree
+  that said `0.1.7`, and nothing said so anywhere.
 
-Several documentation pages in `get-percolate` say "percolate-core `@@core@@`
-does not yet ..." about the last two. Those sentences renumber themselves on
-release — the number stays true and the claim goes false — so they need
-rewriting with this release rather than after it.
+Two `get-percolate` pages describe telemetry and the workbench as not yet
+shipped — `docs/src/ui.md` ("the workbench is not in a published release yet …
+`percolate-core` `@@core@@` on PyPI has no `ui` command and no `[ui]` extra")
+and `docs/src/operating.md` ("the agent runtime speaks OpenTelemetry **from the
+next `percolate-core` release**"). Both ship here, and `@@core@@` renders
+whatever `versions.toml` pins — so those sentences renumber themselves into
+lies: the number stays true and the claim goes false. Rewritten in gp#27, which
+lands **after** this release and after the pin moves, because until then
+`@@core@@` still renders 0.1.8 and the corrected sentence would be false in the
+other direction.
+
+`docs/src/skills.md` is NOT in that set and is unchanged: the runtime still
+does not read `agents.skills` or `context_policy.skills`, so its sentence
+survives 0.1.9.
 
 ## Released versions
 
