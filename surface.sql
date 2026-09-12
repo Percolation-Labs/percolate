@@ -448,7 +448,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('workflow-engine','function','workflow.plan_document','text,integer','the same resolution, projected into the pipeline a person reads'),
 ('workflow-engine','function','workflow.plan_defects','text','every current definition, defects only -- the deployment gate shape'),
 ('workflow-engine','function','workflow.plan_probe','text,integer','the cheap half of every step, executed: parses, relations, result columns, arity'),
-('workflow-engine','function','workflow.plan_status','text,uuid','what the last run returned, shape by shape -- the thing a plan cannot know'),
+('workflow-engine','function','workflow.plan_status','text,uuid','what YOUR last run returned, shape by shape -- the thing a plan cannot know'),
 
 -- ---------- agentic ----------------------------------------------------
 -- The fifth subsystem. It had a complete schema.sql and zero rows here, which
