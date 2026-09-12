@@ -49,7 +49,11 @@ docker inspect "$CONTAINER" >/dev/null 2>&1 || {
   exit 1; }
 
 echo "==> regenerating the extension SQL from specs/"
-"${PY:-python3}" "$ROOT/extension/percolate/build-sql.py" | tail -1
+# The same interpreter check.sh and ci-database.sh use: build-sql.py needs
+# PyYAML and CI's version, and a bare `python3` is not a promise of either.
+. "$ROOT/dev/lib/python.sh"
+PY="$(percolate_python)" || exit 2
+"$PY" "$ROOT/extension/percolate/build-sql.py" | tail -1
 
 # Into the image's own extension directory, so `create extension percolate`
 # finds the version being tested rather than the one the image shipped with.
