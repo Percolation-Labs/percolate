@@ -231,16 +231,45 @@ async def apply_sources(conn: Any, doc: dict[str, Any]) -> list[str]:
             # applies. Writing coalesce(...) here instead would put the name of
             # the shared tier in a second place; the default is already the one
             # place it is written down.
-            if c.get("org") is None:
-                await conn.execute(
-                    "insert into content.channels (name, kind) values ($1,$2)",
-                    c["name"], c.get("kind", "manual"),
-                )
-            else:
-                await conn.execute(
-                    "insert into content.channels (name, kind, org_id) values ($1,$2,$3)",
-                    c["name"], c.get("kind", "manual"), c["org"],
-                )
+            #
+            # OWNER AND VISIBILITY ARE WRITTEN, and leaving them to the column
+            # defaults is the fourth instance of one defect. `private` with a
+            # null owner means readable by nobody -- `rbac.may_read(null,
+            # shared_org, 'private')` is NULL -- and 0.2.0 added
+            # `channels_readable_by_somebody` to refuse exactly that row. So
+            # `sample load`, the command install.md tells a reader to run, died
+            # with `new row for relation "channels" violates check constraint`
+            # the moment the published extension became one that carries the
+            # CHECK. REM-147.
+            #
+            # The same call the fixed loaders make -- `percolate.apply_package`
+            # both branches, `content.register_upload` -- rather than a literal,
+            # because the answer differs by who is installing: this runs on
+            # `P8_ADMIN_DSN`, so `rbac.is_operator()` is true and the channel is
+            # `public` with no owner, which is what deployment configuration
+            # should be. A signed-in installer gets `private` against their own
+            # id. A constant would be right for one of them.
+            #
+            # Guarded by `to_regprocedure` for the reason the shared-org lookup
+            # above is: a CLI newer than the database it is pointed at is what
+            # pip produces by default, and an extension predating REM-83 has
+            # neither the function nor the CHECK.
+            vis = await conn.fetchval(
+                "select case when to_regprocedure('rbac.default_visibility(uuid)')"
+                " is not null then 1 end")
+            cols, vals = ["name", "kind"], ["$1", "$2"]
+            args = [c["name"], c.get("kind", "manual")]
+            if c.get("org") is not None:
+                cols.append("org_id")
+                vals.append(f"${len(args) + 1}")
+                args.append(c["org"])
+            if vis:
+                cols += ["owner_id", "visibility"]
+                vals += ["rbac.current_user_id()", "rbac.default_visibility()"]
+            await conn.execute(
+                f"insert into content.channels ({', '.join(cols)})"
+                f" values ({', '.join(vals)})", *args,
+            )
         done.append(f"channel {c['name']}" + ("" if not exists else " (existed)"))
 
     for k in doc.get("node_keys") or []:
