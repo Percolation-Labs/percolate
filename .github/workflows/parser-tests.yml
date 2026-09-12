@@ -105,17 +105,57 @@ jobs:
       # as a tarball, which has no build graph to walk and no export to pay:
       # `docker load` below IS the 25.6s the build was already spending.
       #
-      # KEYED ON THE DOCKERFILE AND NOTHING ELSE, and deliberately with NO
+      # AND THE BASE IT STARTS FROM, because the Dockerfile is not a pure
+      # function of its own text (REM-11). Three of its four layers move
+      # underneath it:
+      #
+      #     FROM postgres:19beta3-bookworm            <- mutable tag
+      #     apt-get install ...                       <- unpinned
+      #     rustup --default-toolchain stable         <- "stable" moves
+      #     cargo install cargo-pgrx --version 0.19.2 <- the only pinned one
+      #
+      # Cache on the Dockerfile alone and a moved base tag is a cache HIT: the
+      # toolchain keeps being restored from a tarball built against headers
+      # nobody ships any more. get-percolate's parser.yml names that failure in
+      # its own header -- "a .so built against one beta's headers and loaded
+      # into another's server is not a thing to ship, and it is not a thing a
+      # test would catch" -- and cache eviction does not bound the window,
+      # because a cache that keeps getting used never expires.
+      #
+      # RESOLVED RATHER THAN PINNED, which is the whole design. Writing a digest
+      # into the Dockerfile would freeze this builder while dev/Dockerfile.pg19
+      # -- the RUNTIME image, carrying the same `FROM postgres:19beta3-bookworm`
+      # and rebuilt from scratch every release -- kept tracking upstream, and
+      # the two drifting apart is the thing being prevented. Resolving the tag
+      # at build time keeps them in step and turns a moved base into a miss.
+      #
+      # The tag is read out of the Dockerfile rather than written here twice, so
+      # bumping the base is still a one-line edit in one file.
+      - name: Resolve the base image the toolchain is built on
+        id: base
+        run: |
+          TAG=$(sed -n 's/^FROM \([^ ]*\).*/\1/p' dev/Dockerfile.pgrx-builder | head -1)
+          [ -n "$TAG" ] || { echo "::error::no FROM line in dev/Dockerfile.pgrx-builder"; exit 1; }
+          # The INDEX digest, which moves when any platform's image moves.
+          DIGEST=$(docker buildx imagetools inspect "$TAG" --format '{{json .Manifest.Digest}}' | tr -d '"')
+          case "$DIGEST" in
+            sha256:*) ;;
+            *) echo "::error::could not resolve a digest for $TAG (got '$DIGEST')"; exit 1 ;;
+          esac
+          echo "::notice::toolchain base $TAG is $DIGEST"
+          echo "digest=${DIGEST#sha256:}" >> "$GITHUB_OUTPUT"
+
+      # KEYED ON THE DOCKERFILE AND THE RESOLVED BASE, and deliberately with NO
       # restore-keys. The crate cache above wants a near miss; this one must
-      # never have one. An image restored under a changed Dockerfile is the
-      # wrong toolchain, and it would surface as a red test rather than as a
-      # cache miss.
+      # never have one. An image restored under a changed Dockerfile -- or under
+      # a base that has moved -- is the wrong toolchain, and it would surface as
+      # a red test rather than as a cache miss.
       - name: Cache the pgrx toolchain image
         id: toolchain
         uses: actions/cache@v4
         with:
           path: /tmp/pgrx-builder.tar
-          key: pgrx-builder-image-${{ hashFiles('dev/Dockerfile.pgrx-builder') }}
+          key: pgrx-builder-image-${{ hashFiles('dev/Dockerfile.pgrx-builder') }}-${{ steps.base.outputs.digest }}
 
       - name: Build the pgrx toolchain image
         if: steps.toolchain.outputs.cache-hit != 'true'
