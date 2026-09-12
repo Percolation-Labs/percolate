@@ -508,11 +508,66 @@ create index if not exists idx_task_deps_reverse on workflow.task_dependencies (
 -- ------------------------------------------------------------
 -- 4. Per-queue config
 -- ------------------------------------------------------------
+-- HOW LONG A LEASE SURVIVES WITHOUT A HEARTBEAT, IN ONE PLACE (REM-109).
+--
+-- This was written out four times -- the column default here, twice inside
+-- `reap_stale_tasks`, once in `v_stuck_tasks` -- and every copy said two
+-- minutes. Four copies of a number nobody had checked against the thing it
+-- bounds: `ingest/transcribe.py` waits 300 seconds on one HTTP call and
+-- `ingest/embed.py` waits 120, so a transcription task was reaped at 120s and
+-- re-queued with the first copy still in flight, up to `max_attempts` times.
+-- Duplicate provider spend and duplicate writes, on the ingestion path.
+--
+-- The number is not the fix -- raising it to 301 seconds would be a fifth copy
+-- of a fact that belongs to the handler rather than to the queue. The fix is
+-- that a worker holding a lease says so while it works
+-- (`workflow.heartbeat_task`, and `queue_stale_timeout` below is what lets it
+-- pace itself), which makes this a bound on SILENCE rather than on duration.
+create or replace function workflow.stale_timeout_default() returns interval
+    language sql immutable parallel safe as $$ select interval '2 minutes' $$;
+
+comment on function workflow.stale_timeout_default() is
+    'How long a running task may go without a heartbeat before the reaper '
+    'takes its lease, absent a workflow.queue_config row. Read by '
+    'queue_stale_timeout, reap_stale_tasks and v_stuck_tasks -- never copied.';
+
 create table if not exists workflow.queue_config (
     queue          text primary key,
-    stale_timeout  interval not null default interval '2 minutes',
+    stale_timeout  interval not null default workflow.stale_timeout_default(),
     rate_lookahead int not null default 20
 );
+
+-- AND ON A DATABASE THAT ALREADY HAS THE TABLE, which is every deployment.
+-- `create table if not exists` is a no-op there, so the default above would
+-- have reached fresh installs only and an upgraded database would have kept
+-- `'00:02:00'::interval` -- a fifth copy of the number, created by the commit
+-- that removed the other four, living exactly where nobody would look for it.
+-- Same shape as `rbac.users`' `alter column status set default` in user-rbac §1,
+-- and as REM-68, which is open about this class. Idempotent, so it costs
+-- nothing on the install that just created the column this way.
+--
+-- Caught by `dev/upgrade-converges.sh`, which is the only gate that compares an
+-- upgraded database against a fresh one object by object, and which reported
+-- exactly this one line: `def=workflow.stale_timeout_default()` against
+-- `def='00:02:00'::interval`.
+alter table workflow.queue_config
+    alter column stale_timeout set default workflow.stale_timeout_default();
+
+-- What a worker on this queue is actually bound by, so it can pick a heartbeat
+-- interval from the database rather than from a constant that has to be kept
+-- in step with one. A queue with no row is the common case and is not an
+-- error: it means "the default", which is what the coalesce says.
+create or replace function workflow.queue_stale_timeout(p_queue text)
+returns interval language sql stable as $$
+    select coalesce(
+        (select stale_timeout from workflow.queue_config where queue = p_queue),
+        workflow.stale_timeout_default())
+$$;
+
+comment on function workflow.queue_stale_timeout(text) is
+    'The effective stale timeout for a queue. A worker heartbeats at a '
+    'fraction of this rather than at a hard-coded interval, so raising a '
+    'queue''s timeout cannot leave the workers pacing to the old one.';
 
 -- ------------------------------------------------------------
 -- 5. Rate limiting
@@ -1973,16 +2028,50 @@ returns bigint as $$
            or (status = 'ready' and run_after <= now()));
 $$ language sql stable;
 
-create or replace function workflow.reap_stale_tasks() returns int as $$
+-- BOUNDED, AND THE NEXT TICK TAKES THE REST (REM-109).
+--
+-- This was one unbounded transaction a minute. Every row it reaps writes a
+-- `task_events` row and fires the cascade trigger, so the cost of a tick is
+-- the size of the backlog -- and a backlog is exactly the condition under
+-- which it runs. It mattered less while reaping was exceptional; the heartbeat
+-- makes a reap mean "a worker actually died", which is rarer per task and
+-- arrives in clumps when a pod does, which is the shape that needs the bound.
+--
+-- `p_limit` rather than a time budget: a partial pass is correct here because
+-- the selection is a predicate over current state, so whatever is left is
+-- still stale on the next tick and nothing is lost by deferring it. Ordered
+-- oldest-heartbeat-first so a bounded pass drains the longest-dead leases
+-- first instead of an arbitrary slice.
+-- A NEW SIGNATURE, SO THE OLD ONE IS DROPPED RATHER THAN LEFT BESIDE IT.
+-- `create or replace` with an added parameter defines a SECOND function, and
+-- an upgraded database would then hold both. MEASURED, because the guess was
+-- wrong and worth recording: with `reap_stale_tasks()` and
+-- `reap_stale_tasks(int default 1000)` both present, Postgres does not prefer
+-- the exact zero-arg match -- it refuses the call, `function
+-- workflow.reap_stale_tasks() is not unique` (42725). So the cron job
+-- `select workflow.reap_stale_tasks()` would error every minute rather than
+-- quietly reaping the old way, which is the better of the two failures and
+-- still a reaper that never runs. The drop is what makes the upgrade a
+-- replacement instead of an ambiguity.
+drop function if exists workflow.reap_stale_tasks();
+create or replace function workflow.reap_stale_tasks(p_limit int default 1000)
+returns int as $$
 declare v_rec record; v_n int := 0;
 begin
+    if p_limit is null or p_limit < 1 then
+        raise exception 'reap_stale_tasks: p_limit must be >= 1, got %', p_limit
+            using errcode = '22023';
+    end if;
     for v_rec in
         select t.id, t.claimed_by, t.attempts, t.max_attempts,
-               coalesce(qc.stale_timeout, interval '2 minutes') as timeout
+               coalesce(qc.stale_timeout, workflow.stale_timeout_default()) as timeout
         from workflow.tasks t
         left join workflow.queue_config qc on qc.queue = t.queue
         where t.status = 'running'
-          and t.heartbeat_at < now() - coalesce(qc.stale_timeout, interval '2 minutes')
+          and t.heartbeat_at < now() - coalesce(qc.stale_timeout,
+                                                workflow.stale_timeout_default())
+        order by t.heartbeat_at
+        limit p_limit
     loop
         perform workflow.fail_task(v_rec.id, jsonb_build_object(
             'error', format(
@@ -2020,7 +2109,7 @@ create or replace view workflow.v_stuck_tasks as
     from workflow.tasks t
     left join workflow.queue_config qc on qc.queue = t.queue
     where (t.status = 'ready' and t.run_after < now() - interval '5 minutes')
-       or (t.status = 'running' and t.heartbeat_at < now() - coalesce(qc.stale_timeout, interval '2 minutes'))
+       or (t.status = 'running' and t.heartbeat_at < now() - coalesce(qc.stale_timeout, workflow.stale_timeout_default()))
        or (t.status = 'waiting_external' and t.created_at < now() - interval '1 hour');
 
 -- Reports on the COMPENSATION tasks (the work that undoes), not merely on
@@ -2126,7 +2215,7 @@ alter function workflow.promote_due_timers()
     security definer set search_path = pg_catalog, public;
 alter function workflow.queue_depth(text)
     security definer set search_path = workflow, pg_catalog;
-alter function workflow.reap_stale_tasks()
+alter function workflow.reap_stale_tasks(int)
     security definer set search_path = pg_catalog, public;
 
 -- The audit trigger, likewise. Without this a worker needs INSERT on
@@ -2241,6 +2330,9 @@ grant execute on function workflow.claim_task(text, text) to worker;
 grant execute on function workflow.claim_tasks(text, text, int) to worker;
 grant execute on function workflow.claim_task_rate_limited(text, text) to worker;
 grant execute on function workflow.heartbeat_task(uuid, text) to worker;
+-- The worker paces its heartbeat from the queue's own timeout rather than
+-- from a constant on its side that has to be kept below one (REM-109).
+grant execute on function workflow.queue_stale_timeout(text) to worker;
 grant execute on function workflow.complete_task(uuid, jsonb, text) to worker;
 grant execute on function workflow.fail_task(uuid, jsonb, boolean, text) to worker;
 grant execute on function workflow.complete_decision_task(uuid, jsonb, jsonb, text) to worker;
@@ -2255,7 +2347,7 @@ grant execute on function workflow.get_task_context(uuid, text) to worker;
 grant execute on function workflow.artifact_ref(jsonb) to worker, authenticated;
 
 grant execute on function workflow.promote_due_timers() to scheduler;
-grant execute on function workflow.reap_stale_tasks() to scheduler;
+grant execute on function workflow.reap_stale_tasks(int) to scheduler;
 
 -- End users, via PostgREST: start a run, signal it, cancel their own.
 grant execute on function workflow.start_workflow(text, jsonb, text, text) to authenticated;
@@ -7302,6 +7394,15 @@ end;
 $$ language plpgsql security definer set search_path = pg_catalog, public;
 
 revoke execute on function workflow.purge_completed(interval, int, int) from public;
+-- AND GRANTED TO THE ROLE THAT RUNS IT, which nothing did until REM-109 put it
+-- on a schedule. It was revoked from PUBLIC and granted to nobody, so it was
+-- callable only by the owner -- which is correct as a default and is why
+-- scheduling it without this line would have produced a `pg_cron` job failing
+-- with `permission denied for function purge_completed` at 03:17 every night,
+-- into a log nobody reads, while the tables it exists to bound grew anyway. A
+-- revoke with no matching grant is not a closed door, it is a function with no
+-- caller; the three jobs beside it are all `scheduler` for the same reason.
+grant execute on function workflow.purge_completed(interval, int, int) to scheduler;
 
 -- ------------------------------------------------------------
 -- 2. The plan gate.

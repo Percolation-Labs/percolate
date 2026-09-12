@@ -123,17 +123,29 @@ SQL
 # the cron.job rows with it -- they live in the cron schema OF the cron
 # database -- and nothing else puts them back, so a reload used to leave a
 # stack whose scheduled workflows, stale-task reaper and timer steps silently
-# never fired again. Same three jobs, same `scheduler` role, as the image's own
+# never fired again. Same jobs, same `scheduler` role, as the image's own
 # bootstrap (dev/image-init/01-percolate.sh §5).
 if [ "$CRON_DB" = "$DB" ]; then
   docker exec -i "$CONTAINER" psql -U "$SUPERUSER" -d "$DB" -v ON_ERROR_STOP=1 -qtA >/dev/null <<'SQL'
 select cron.schedule('workflow-tick',   '* * * * *', 'select workflow.tick()');
 select cron.schedule('workflow-reaper', '* * * * *', 'select workflow.reap_stale_tasks()');
 select cron.schedule('workflow-timers', '* * * * *', 'select workflow.promote_due_timers()');
+-- The retention pass, so a dev database that is reloaded rarely behaves like
+-- a deployment rather than like an archive (REM-109).
+select cron.schedule('workflow-purge',  '17 3 * * *', 'select workflow.purge_completed()');
+-- BY THE SAME PREDICATE THE GATE ASSERTS OVER, not by a list of names.
+-- This was `jobname in ('workflow-tick','workflow-reaper','workflow-timers')`,
+-- and adding a fourth job (`workflow-purge`, REM-109) left it running as the
+-- superuser that scheduled it -- because `cron.schedule` makes the job the
+-- CALLER's, which is the trap the comment in image-init/01-percolate.sh §5
+-- already documents. `dev/tests/workflow/03-cron-tick.sql:49` asks
+-- `jobname like 'workflow-%' and username <> 'scheduler'`, so that is what
+-- this sets: the fix and the check now read the same set, and a fifth job
+-- cannot be missed by one and caught by the other.
 update cron.job set username = 'scheduler'
- where jobname in ('workflow-tick','workflow-reaper','workflow-timers');
+ where jobname like 'workflow-%' and username <> 'scheduler';
 SQL
-  echo "    (clock re-registered: tick, reaper, timers)"
+  echo "    (clock re-registered: every workflow-* job, as scheduler)"
 fi
 
 for f in init/0[2-9]-*.sql; do
