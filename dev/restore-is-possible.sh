@@ -132,11 +132,32 @@ if [ "$UNRESOLVED" -gt 0 ]; then
     exit 1
 fi
 
+# THE OTHER ERRORS, NAMED BY CLASS RATHER THAN COUNTED. An earlier version of
+# this block said "no cron schema, no per-model aiq.emb_* tables" and stopped
+# there, which attributed the whole remainder to two harmless causes. It is
+# incomplete, and the class it omitted is the serious one.
+DUPKEY=$(grep -ci "ERROR:.*duplicate key value violates unique constraint" "$LOG" || true)
 if [ "$OTHER" -gt 0 ]; then
     echo "    note: $OTHER other error(s) in the load, none of them a function that"
     echo "    could not resolve. A --data-only dump does not restore cleanly into a"
-    echo "    fresh install yet -- no cron schema, no per-model aiq.emb_* tables."
-    echo "    Not this gate's subject; see the restore page in get-percolate/docs."
+    echo "    fresh install yet. By class:"
+    if [ "$DUPKEY" -gt 0 ]; then
+        echo "      * $DUPKEY duplicate key(s) -- and this one LOSES ROWS. Seven tables hold"
+        echo "        rows the extension SHIPS and rows a deployment adds: workflow.definitions,"
+        echo "        content.channels, aiq.entity_registry, aiq.graph_vocabulary,"
+        echo "        aiq.lexical_sources, aiq.semantic_sources, aiq.schema_examples."
+        echo "        Registered with an empty condition, CREATE EXTENSION inserts the shipped"
+        echo "        rows and the restore COPYs them again, so the COPY aborts and takes the"
+        echo "        deployment's rows in that table with it. Measured: 4 channels in, 0 after."
+        echo "        specs/contract/schema.sql predicted it; the fix it prescribes is a"
+        echo "        \`shipped boolean\` set by the seeding statement, registered as"
+        echo "        \`WHERE NOT shipped\` -- derived, so it cannot rot like a key list."
+    fi
+    echo "      * the rest: no cron schema unless pg_cron is installed in the target, no"
+    echo "        demo schema, and no per-model aiq.emb_* tables (created when a model is"
+    echo "        first used rather than by the extension)."
+    echo "    Not this gate's subject -- it refuses one class, the unresolvable function."
+    echo "    See the restore page in get-percolate/docs, and REM-104's comments."
 fi
 
 echo "    every row in ${#TABLES[@]} registered table(s) went back in"
