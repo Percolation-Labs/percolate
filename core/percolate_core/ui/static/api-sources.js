@@ -28,7 +28,7 @@ export async function apiSources(requestedId){
  const remember=()=>{
   let clean=false;
   try{const source=build().sources[0];clean=!!selected&&source.name===selected.name&&sameInput(source.config.api,selected.config.api)&&sameInput(source.config.editor,selected.config.editor)&&source.config.description===selected.config.description;}catch(_){}
-  draftNote.textContent=store.write({id,revision,raw:raw(),tab:activeTab,description:description.value,sample:sample.value})?(clean?'Saved':selected?'Unsaved changes · kept in this tab':'New draft · kept in this tab'):'Draft storage is unavailable; keep this page open.';
+  draftNote.textContent=store.write({id,revision,raw:raw(),tab:activeTab,description:description.value,sample:sample.value,probeUrl:probeUrl.value})?(clean?'Saved':selected?'Unsaved changes · kept in this tab':'New draft · kept in this tab'):'Draft storage is unavailable; keep this page open.';
  };
  const changes=()=>{editRevision++;preview.replaceChildren();out.replaceChildren();remember();};
  const load=(s,queue=config().ingestQueue||'ingest')=>{for(const [k,node] of Object.entries(fields)){const v=k==='queue'?queue:s[k]??API_DEFAULTS[k];node.value=jsonFields.has(k)?JSON.stringify(v,null,2):v??'';}updateControls();};
@@ -64,27 +64,49 @@ export async function apiSources(requestedId){
  }
  const description=h('textarea',{class:'control',rows:4,'aria-label':'Describe your API ingestion',placeholder:'Connect to our support API, pull issues updated since the last run, and map their owner and status.'},saved.description||'');
  const sample=h('textarea',{class:'control mono',rows:6,'aria-label':'API response example',placeholder:'Optional: paste a small response example or the relevant API contract. Remove credentials and personal data.'},saved.sample||'');
+ /* The endpoint is asked for FIRST, because it is what makes the difference
+    between a configuration read off a response and one guessed from a
+    description. Empty is still allowed -- the assistant then says so rather
+    than producing paths it cannot support. */
+ const probeUrl=h('input',{class:'control mono',type:'url','aria-label':'Endpoint to inspect',placeholder:'https://api.example.com/v1/items',value:saved.probeUrl||saved.api?.url||''});
  const aiStatus=h('p',{class:'document-help',role:'status'}),aiOut=h('div',{'aria-live':'polite'});
  const chat=session=>h('a',{class:'btn',href:'#/chat',onclick:()=>{sessionStorage.setItem('p8-chat-agent',HELP_AGENT);sessionStorage.setItem('p8-chat-session',session);}},'Open conversation');
  const suggest=h('button',{class:'btn primary',onclick:async()=>{
   if(aiBusy)return;aiBusy=true;suggest.disabled=true;aiOut.replaceChildren();const sourceId=id;
   try{let current;try{current=settings();}catch(_){current=raw();}
    const requestRevision=editRevision;
-   const v=await suggestAPI({description:description.value,sample:sample.value,current,id,queue:fields.queue.value,onStatus:t=>{aiStatus.textContent=t;}});if(id!==sourceId)return;
+   const v=await suggestAPI({description:description.value,sample:sample.value,current,id,queue:fields.queue.value,
+    url:probeUrl.value||fields.url.value,
+    auth:{auth_type:fields.auth_type.value,credential_ref:fields.credential_ref.value,auth_header:fields.auth_header.value},
+    onStatus:t=>{aiStatus.textContent=t;}});if(id!==sourceId)return;
    aiStatus.textContent=v.settings?'Review this configuration before saving or pulling data.':'More API detail is needed.';
-   aiOut.replaceChildren(h('article',{class:'suggestion-card'},h('p',{},v.explanation),h('ul',{},v.assumptions.map(a=>h('li',{},a))),
+   aiOut.replaceChildren(h('article',{class:'suggestion-card'},h('p',{},v.explanation),
+    /* What was read, beside what was proposed. The operator is being asked to
+       trust a record path; showing the response it came out of is the cheapest
+       way for them to check it, and the friction list is where the endpoint's
+       own problems -- no change timestamp, array fields, a page that was
+       truncated -- get said out loud instead of being designed around. */
+    v.observed?h('details',{},h('summary',{},'What the endpoint returned'),
+     h('ul',{},h('li',{},'Records at '+v.observed.observed?.records_path+' — '+(v.observed.observed?.record_count??0)+' read, '+Object.keys(v.observed.observed?.fields||{}).length+' fields'),
+      h('li',{},'Pagination: '+(v.observed.observed?.pagination||'unknown')+' — '+(v.observed.observed?.evidence||'')),
+      ...(v.observed.friction||[]).map(f=>h('li',{},f)))):null,
+    v.probeError?h('p',{class:'note rose'},'The endpoint could not be inspected: '+v.probeError):null,
+    h('ul',{},v.assumptions.map(a=>h('li',{},a))),
     v.settings?h('details',{},h('summary',{},'Suggested API configuration'),h('pre',{class:'code suggestion-code'},JSON.stringify(v.settings,null,2))):null,
     h('div',{class:'form-actions'},v.settings?h('button',{class:'btn primary',onclick:()=>{if(id!==sourceId||editRevision!==requestRevision){aiStatus.textContent='Your configuration changed. Request a new suggestion to review the current draft.';return;}load(v.settings,fields.queue.value);changes();switchTab('manual');fields.name.focus();}},'Apply suggestion'):null,chat(v.session))));
   }catch(e){aiOut.replaceChildren(error(e));aiStatus.textContent='Could not finish this proposal.';if(e.session)aiOut.append(chat(e.session));}
   finally{aiBusy=false;suggest.disabled=false;}
  }},'Suggest API configuration');
  const ai=h('div',{class:'form-stack',role:'tabpanel',id:'api-ai-panel','aria-labelledby':'api-ai-tab'},
-  h('p',{},'Describe the API and the result you need. AI proposes the incremental filter, pagination and record transformations. A response sample helps it use the right fields.'),field('Your API ingestion task',description),
+  h('p',{},'Give the endpoint and describe the result you need. The endpoint is read once, and the record path, pagination and field names come from that response rather than from a guess. AI proposes the incremental filter and record transformations on top of it.'),
+  field('Endpoint to inspect',probeUrl),
+  h('p',{class:'document-help'},'One GET, from this deployment, identifying itself. Authentication uses the credential reference configured under Authentication — never a pasted value. Leave it empty to work from documentation alone.'),
+  field('Your API ingestion task',description),
   h('details',{},h('summary',{},'Add a response example or API contract'),sample),suggest,aiStatus,aiOut);
  const tabs=h('div',{class:'query-tabs',role:'tablist','aria-label':'API source authoring'}),tabNodes={};
  function switchTab(tab){activeTab=tab;manual.hidden=tab!=='manual';ai.hidden=tab!=='ai';actions.hidden=tab!=='manual';for(const [k,n] of Object.entries(tabNodes)){n.setAttribute('aria-selected',String(k===tab));n.tabIndex=k===tab?0:-1;}if(workspace&&workspace.selected!==tab)workspace.show(tab);remember();}
  for(const [key,label] of [['manual','Configure API'],['ai','Suggest with AI']]){const n=h('button',{id:'api-'+key+'-tab',role:'tab','aria-controls':'api-'+key+'-panel',onclick:()=>switchTab(key)},label);n.addEventListener('keydown',e=>{if(['ArrowLeft','ArrowRight','Home','End'].includes(e.key)){e.preventDefault();const next=e.key==='Home'?'manual':e.key==='End'?'ai':activeTab==='manual'?'ai':'manual';switchTab(next);tabNodes[next].focus();}});tabNodes[key]=n;tabs.append(n);}
- for(const node of Object.values(fields))node.addEventListener('input',()=>{updateControls();changes();});description.addEventListener('input',remember);sample.addEventListener('input',remember);
+ for(const node of Object.values(fields))node.addEventListener('input',()=>{updateControls();changes();});description.addEventListener('input',remember);sample.addEventListener('input',remember);probeUrl.addEventListener('input',remember);
  const build=()=>apiSourcePackage(id,settings(),fields.queue.value);
  const showPackage=m=>{preview.replaceChildren(h('h3',{},'API source and ingestion workflow'),h('pre',{class:'code package-code'},apiPackageText(m)),h('p',{class:'document-help'},'This package includes the current draft configuration. It starts with fresh progress in another workspace; configure its named queue and credential references there.'));workspace?.show('package');};
  const save=h('button',{class:'btn primary',onclick:async()=>{if(save.disabled)return;save.disabled=true;try{

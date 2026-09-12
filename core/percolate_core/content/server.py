@@ -126,6 +126,49 @@ async def fetch(resource_id: UUID, claims: dict | None = Depends(caller)):
     return Response(body, media_type=row["content_type"] or "application/octet-stream")
 
 
+@routes.post("/probe")
+async def probe_source(request: Request, claims: dict | None = Depends(caller)):
+    """Read one endpoint once and describe what came back.
+
+    THE SAME OUTBOUND-HTTP RESPONSIBILITY this module already has, not a fourth
+    one: the scraper pulls a channel and `http_call` steps execute here for the
+    same reason, which is that this is the process allowed to make a request to
+    somewhere else. A probe route on the UI server would have been a second
+    place with that permission, and the UI server's whole claim is that it has
+    none (`ui/server.py`).
+
+    Signed in, always. Not because the report is sensitive -- it is the
+    operator's own endpoint -- but because an unauthenticated URL fetcher on an
+    internal network is a request forwarder for whoever finds it. The URL rules
+    (`core/credentials.origin`), the byte and time caps, and the credential
+    binding are in `probe.py` beside this file, and come from `core.credentials`,
+    the same parser `ingest/api.py` wraps for the puller.
+
+    No row is read or written. The report is not persisted: it describes an
+    endpoint at a moment, and a stored one would be a second, ageing account of
+    a source's shape beside the source's own configuration.
+    """
+    if not claims:
+        raise HTTPException(401, "Sign in before inspecting an endpoint")
+    body = await request.json() if await request.body() else {}
+    if not isinstance(body, dict) or not isinstance(body.get("url"), str):
+        raise HTTPException(400, "send {\"url\": \"https://...\"}")
+    from .probe import ProbeFailed, probe
+
+    try:
+        return await probe(
+            body["url"],
+            auth_type=str(body.get("auth_type") or "none"),
+            credential_ref=str(body.get("credential_ref") or ""),
+            auth_header=str(body.get("auth_header") or "X-API-Key"),
+        )
+    except ProbeFailed as e:
+        # A refusal to probe is the answer, not a server error: the assistant
+        # shows it to the operator and declines to invent paths, which is the
+        # whole point of asking.
+        raise HTTPException(400, str(e)) from None
+
+
 @routes.get("/health")
 async def health():
     return {"status": "ok", "bucket": storage.bucket()}
