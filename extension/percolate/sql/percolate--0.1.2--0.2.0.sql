@@ -11178,7 +11178,27 @@ create policy visibilities_are_the_contract on rbac.visibilities for select
 -- reads session state regardless of whose privileges are active for the
 -- column check.
 create or replace view rbac.users_api as
-  select id, email, status, created_at, updated_at from rbac.users;
+  select u.id, u.email, u.status, u.created_at, u.updated_at,
+         -- The Users screen read three views and joined them in JavaScript.
+         -- Aggregated here instead: the numbers on that screen are now a thing
+         -- a test can execute (browser-ui.md §3, and `percolate-ui/README.md`'s
+         -- "never client-side group-bys").
+         --
+         -- APPENDED, and that position is forced rather than chosen: `create or
+         -- replace view` may only add columns at the end. A fresh install never
+         -- sees the difference; every upgrading database does.
+         coalesce((select array_agg(ur.role order by ur.role)
+                     from rbac.user_roles ur where ur.user_id = u.id), '{}') as roles,
+         coalesce((select jsonb_object_agg(om.org_id, om.role)
+                     from rbac.org_members om where om.user_id = u.id), '{}'::jsonb) as org_roles
+    from rbac.users u;
+
+-- Orgs with the number of people in them. The Settings screen was counting
+-- `org_members` rows client-side per org, which is a group-by in a browser.
+create or replace view rbac.orgs_api as
+  select o.id, o.slug, o.name,
+         (select count(*) from rbac.org_members m where m.org_id = o.id) as member_count
+    from rbac.orgs o;
 create or replace view rbac.refresh_tokens_api as
   select id, user_id, device_label, issued_at, expires_at, revoked_at from rbac.refresh_tokens;
 create or replace view rbac.api_keys_api as
@@ -11222,6 +11242,8 @@ alter view rbac.api_keys_api owner to api_viewer;
 revoke create on schema rbac from api_viewer;
 
 grant select on rbac.users_api to authenticated;
+alter view rbac.orgs_api owner to api_viewer;
+grant select on rbac.orgs_api to authenticated;
 grant select on rbac.refresh_tokens_api to authenticated;
 grant select on rbac.api_keys_api to authenticated;
 -- No grant on the base tables themselves to web_anon or authenticated --
@@ -11370,10 +11392,18 @@ create or replace view workflow.runs_api as
 -- every upgrading database hits. Found by dev/upgrade-converges.sh, which is
 -- the only check that applies this file to a database that already has the
 -- old view.
-  select id, workflow_def_id, owner_id, status, compensation_state,
-         external_id, input, context, trace_id, created_at, updated_at, completed_at,
-         org_id, visibility
-  from workflow.runs;
+  select r.id, r.workflow_def_id, r.owner_id, r.status, r.compensation_state,
+         r.external_id, r.input, r.context, r.trace_id, r.created_at, r.updated_at, r.completed_at,
+         r.org_id, r.visibility,
+         -- `name` is here because every screen that LABELS a run had to fetch
+         -- the definitions table and join it in JavaScript -- three reads for
+         -- one column, and a client-side join is a number no test can check
+         -- (browser-ui.md §3). A run without a readable definition still gets a
+         -- row: the left join yields null, which the screen renders as the id,
+         -- rather than dropping the run from the list.
+         d.name
+  from workflow.runs r
+  left join workflow.definitions d on d.id = r.workflow_def_id;
 create or replace view workflow.tasks_api as
   select id, run_id, step_key, kind, queue, status, attempts, max_attempts,
          priority, run_after, output, error, span_id, parent_span_id,
@@ -11459,7 +11489,13 @@ select d.id,
           from jsonb_array_elements(d.spec -> 'steps') s) as step_kinds,
        (select array_agg(distinct s ->> 'queue')
           from jsonb_array_elements(d.spec -> 'steps') s
-         where s ? 'queue')                              as queues
+         where s ? 'queue')                              as queues,
+       -- "is this the version a new run would use", answered here rather than
+       -- by the screen sorting versions in JavaScript. Same reason as
+       -- `runs_api.name`: a Start control that is enabled by a client-side
+       -- max() is enabled by something no test executes.
+       d.version = (select max(v.version) from workflow.definitions v
+                     where v.name = d.name and v.deleted_at is null) as is_latest
   from workflow.definitions d
  where d.deleted_at is null;
 
@@ -11547,6 +11583,24 @@ select q.queue,
        q.rate_lookahead,
        workflow.queue_depth(q.queue) as depth
   from workflow.queue_config q;
+
+-- WHY THERE IS NO `pool` COLUMN HERE, though the Queues screen joins queue
+-- depth to pool bindings in the browser and REM-62 asked for one.
+--
+-- `workflow.pool_queues` lives in `pools.sql`, which is NOT shipped with the
+-- extension -- `reads.js` marks three Queues contracts `absent:` for exactly
+-- that reason, and this database is one where the table does not exist. A
+-- scalar subquery does not help: the relation has to exist when the view is
+-- created, so adding the column here makes this file fail to apply on every
+-- deployment without pools.
+--
+-- The alternative is for `pools.sql` to re-create this view with the column
+-- appended, which is legal. It is also worse: `queues_api` would then have a
+-- different column list on different deployments, and a screen projecting
+-- `pool` would 400 on the ones without it -- which is precisely the failure
+-- `1919bb7` fixed and the Surface audit exists to catch. A client-side join
+-- over two reads that both declare their absence is the honest shape here.
+  
 
 -- ------------------------------------------------------------
 -- 6. Rate limits, MINUS the ones that are personal data.
@@ -23500,9 +23554,16 @@ create or replace view agentic.sessions_api as
 -- every upgrading database hits. Found by dev/upgrade-converges.sh, which is
 -- the only check that applies this file to a database that already has the
 -- old view.
-    select id, owner_id, agui_thread_id, title, created_at,
-           org_id, visibility
-      from agentic.sessions;
+    select s.id, s.owner_id, s.agui_thread_id, s.title, s.created_at,
+           s.org_id, s.visibility,
+           -- The Chat list fetched the messages and the runs of every session
+           -- to show how much was in each one. Counted here, where the rows
+           -- are, rather than over the wire. Appended for the reason the
+           -- comment above gives.
+           (select count(*) from agentic.messages m where m.session_id = s.id) as message_count,
+           (select count(*) from agentic.runs r where r.session_id = s.id) as run_count,
+           (select max(m.created_at) from agentic.messages m where m.session_id = s.id) as last_message_at
+      from agentic.sessions s;
 create or replace view agentic.runs_api as
     select id, session_id, agent_id, owner_id, parent_run_id,
            delegated_by_message_id, trigger_kind, workflow_task_id,
