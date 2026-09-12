@@ -101,6 +101,56 @@ select rbac.add_scope_columns('content.channels', 'public');
 select rbac.add_scope_policy ('content.channels');
 select rbac.add_scope_columns('content.resources', 'public');
 
+-- ------------------------------------------------------------
+-- A ROW NOBODY CAN EVER READ IS REFUSED HERE, because writing it has now been
+-- a bug three times in three different files.
+--
+-- `visibility = 'private'` with no owner is not a narrow row; it is a dead
+-- one. rbac.may_read(null, org, 'private') is NULL on every arm -- not public,
+-- not the caller's, not an org scope -- so the row is invisible to every
+-- caller including the one that wrote it, and the policy these two tables
+-- carry is exactly those three arms and nothing else.
+--
+-- The three instances, all reported as the same sentence:
+--
+--   REM-75  content.register_fetched wrote it, and the poller's own next
+--           select found nothing.
+--   REM-74  the self-model's content.sql created its channel without it.
+--   REM-83  percolate.apply_package, above, for a package-declared source.
+--
+-- Each was repaired at the call site, which is why there were three. By
+-- meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §6 the third
+-- occurrence buys a gate rather than a fourth repair, and by
+-- challenge-the-process §9 the gate belongs at the lowest layer that can
+-- refuse it -- which is the table.
+--
+-- NOT VALID, and that is the substance rather than a performance note. It
+-- refuses every NEW row while leaving existing ones alone, so an upgrade of a
+-- database that already carries dead rows does not fail -- and, more to the
+-- point, nothing here has to decide what those rows should have been. Turning
+-- a private row public is a disclosure, and a migration is the wrong place to
+-- make one on somebody's behalf. The dead rows stay dead and visible to an
+-- operator who goes looking; only the fourth instance is refused.
+--
+-- These two tables and not the other twelve that take add_scope_columns:
+-- agentic.agents/plugins/skills/tool_servers, workflow.runs and
+-- workflow.schedules each carry an extra `rbac.has_permission(...)` arm on
+-- their read policy, so a private ownerless row there is reachable by an
+-- administrator and is not dead. aiq.nodes, aiq.soft_nodes, aiq.lake_nodes,
+-- content.datasets, agentic.runs and agentic.sessions have the three-arm
+-- policy and DO have the same dead shape; they are not constrained here
+-- because no instance has been observed on them and each wants its own look at
+-- what writes it. Recorded on REM-83 rather than done silently.
+--
+-- Dropped before added: a CHECK has no IF NOT EXISTS, and build-sql.py's
+-- idempotency check refuses the pair written the other way round.
+alter table content.channels  drop constraint if exists channels_readable_by_somebody;
+alter table content.channels  add  constraint channels_readable_by_somebody
+    check (not (visibility = 'private' and owner_id is null)) not valid;
+alter table content.resources drop constraint if exists resources_readable_by_somebody;
+alter table content.resources add  constraint resources_readable_by_somebody
+    check (not (visibility = 'private' and owner_id is null)) not valid;
+
 -- AND NOW resolve_file, which needs the three columns the line above adds.
 -- Its home is here for that reason; schema.sql carries the pointer.
 --

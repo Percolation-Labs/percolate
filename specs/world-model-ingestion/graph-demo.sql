@@ -51,20 +51,26 @@ begin
 end $$;
 
 -- Its own channel, so the only thing it depends on is the fixture DATA.
-insert into content.channels (id, name, kind)
-values ('11110000-0000-0000-0000-0000000000de', 'graph-demo', 'manual')
+--
+-- `public` on both, and it is not decoration: omitted, the columns default to
+-- private with no owner, which rbac.may_read grants to nobody -- so the demo
+-- would land two contracts that the traversal it then runs cannot see. The
+-- same omission REM-83 fixed in percolate.apply_package, one file along, and
+-- content.channels/content.resources now refuse the pair outright.
+insert into content.channels (id, name, kind, visibility)
+values ('11110000-0000-0000-0000-0000000000de', 'graph-demo', 'manual', 'public')
 on conflict (id) do nothing;
 
-insert into content.resources (id, channel_id, title, status, metadata)
+insert into content.resources (id, channel_id, title, status, metadata, visibility)
 values
  ('33330000-0000-0000-0000-000000000001',
   '11110000-0000-0000-0000-0000000000de',
   'MSA - Northwind Capital and Acme Robotics', 'ready',
-  '{"doctype":"contract"}'::jsonb),
+  '{"doctype":"contract"}'::jsonb, 'public'),
  ('33330000-0000-0000-0000-000000000002',
   '11110000-0000-0000-0000-0000000000de',
   'Supply Agreement - Acme Robotics and Helios Freight', 'ready',
-  '{"doctype":"contract"}'::jsonb)
+  '{"doctype":"contract"}'::jsonb, 'public')
 on conflict (id) do update set title = excluded.title, status = excluded.status;
 
 -- ------------------------------------------------------------

@@ -200,8 +200,13 @@ do $$
 declare a uuid; v_ok boolean := false;
 begin
     select org_a into a from t_ctx;
-    insert into content.channels (name, kind, org_id, config)
-    values ('t-broken','file_upload', a, '{"ingest_workflow":"no_such_workflow"}'::jsonb);
+    -- `public`, for the reason the fixture at the top of this file already
+    -- gives and this line did not take: omitted, the columns default to
+    -- private with no owner, which content.channels now refuses outright
+    -- (REM-83). What this block measures is a BROKEN ingest_workflow, so the
+    -- channel only has to be resolvable.
+    insert into content.channels (name, kind, org_id, config, visibility)
+    values ('t-broken','file_upload', a, '{"ingest_workflow":"no_such_workflow"}'::jsonb, 'public');
     begin
         perform content.register_upload('t-broken','t-b','b','k/b',1,null,null,null,a);
     exception when others then
