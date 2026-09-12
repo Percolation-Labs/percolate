@@ -16,4 +16,40 @@
 #
 #     git diff --text -- extension/percolate/sql/
 #
-extension/percolate/sql/*.sql  -diff  linguist-generated=true
+extension/percolate/sql/*.sql  -diff  linguist-generated=true  merge=percolate-sql
+
+# AND THE MERGE HALF. `-diff` above stops a reader scrolling past the generated
+# copy; `merge=percolate-sql` stops an AUTHOR hand-resolving it. The driver is
+# dev/merge-generated-sql.sh and it does the only thing a resolution here can
+# ever mean: run the generator against the merged specs and take the result.
+#
+# Measured over one session on eight branches: three rounds of merge-regenerate-
+# resolve, main having taken twelve merges in the window, every conflict
+# mechanical -- and in round three a genuine conflict in surface.sql sitting
+# inside eight that were not. That is the cost: an author who has learned the
+# conflicts here are noise stops reading them.
+#
+# REGISTER IT ONCE PER CLONE -- git will not let a repository configure its own
+# driver, for the same reason it will not arm its own hooks:
+#
+#     git config merge.percolate-sql.name   "regenerate the extension SQL"
+#     git config merge.percolate-sql.driver "dev/merge-generated-sql.sh %A %O %B %P"
+#
+# MEASURED, on a real conflict rather than assumed. Two branches appending to
+# the same place in specs/identity/declarations.sql, so the generated files
+# conflict in the same region:
+#
+#   * no driver registered  -- 8 conflicts: 7 generated files and the genuine
+#     one in the spec. That is today's behaviour, and it is what a clone
+#     WITHOUT the config gets: git falls back to its default merge, exit 1, and
+#     `build-sql.py --check` still decides afterwards. Nothing silent.
+#   * driver registered     -- 1 conflict, the genuine one. The seven resolved
+#     by regenerating, and both branches' changes are in the result
+#     (`--check` exits 0 after the spec conflict is resolved by hand).
+#
+# THE ONE TRAP, found by unsetting the two config keys one at a time. Setting
+# `merge.percolate-sql.name` WITHOUT `.driver` does not fall back -- it is
+# `fatal: custom merge driver percolate-sql lacks command line` and the merge
+# does not start at all. So register both keys or neither. Registering neither
+# is a supported state; half of it is not, and git says so loudly rather than
+# quietly, which is the right way round.

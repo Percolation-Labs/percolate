@@ -315,6 +315,37 @@ Complementary, and neither replaces the other:
 Both exit nonzero, so both work as CI gates. Run `surface.sql` first: a missing
 function makes a behavioural test fail for an uninteresting reason.
 
+## If you add a gate: it reports everything red, not the first thing
+
+**A gate that runs several internal checks reports all of them.** Not the first
+one to fail — all of them, in one run, and then exits non-zero once.
+
+This is a property of how a gate is *written*, and it cannot be given to one
+from outside. `dev/check.sh` already runs every gate regardless of which ones
+failed (`set -uo pipefail`, no `-e`; `run_gate` handles a failure as an `else`
+branch), and a bash runner cannot see inside a `psql` script or a Python one
+anyway. So each gate carries the rule or does not have it.
+
+`run.sh` carries it — it collects `failed` and exits at the end, and its header
+explains why: *one broken guarantee usually breaks several*. `surface.sql` did
+not, for a long time, and the cost is measured. `ff36b70` landed four defects;
+they were found over three fix-and-re-run cycles, each invisible until the one
+before it was fixed, because the first aborted the install and the script
+stopped there. Two sessions were sent on that chase four hours apart, and
+stopping after the first fix would have shipped three of the four.
+
+The shape, if you are writing one:
+
+```sql
+create temporary table <gate>_failures (seq serial, check_name text, detail text);
+-- every check INSERTs instead of raising
+-- one block at the end: RAISE WARNING per row, then RAISE EXCEPTION once
+```
+
+The thing to get right is the ending. A gate that reports beautifully and exits
+0 is not a gate — `run_gate` reads the exit code, so the final block must still
+raise.
+
 ## Notes
 
 Suites wrap themselves in a transaction and roll back. `rbac/01` cannot — it

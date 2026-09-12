@@ -61,6 +61,38 @@
 \set ON_ERROR_STOP on
 \pset pager off
 
+-- ------------------------------------------------------------
+-- EVERY FAILURE IN ONE RUN, not the first one.
+--
+-- This file had four `raise exception` sites and each aborted the script, so a
+-- database with four surface defects reported one. `dev/tests/run.sh` decided
+-- the opposite for itself and says so in its own header -- it carries `failed`
+-- to the end "because one broken guarantee usually breaks several, and a run
+-- that stops at the first tells you how many surfaces are red only after you
+-- have fixed one and run it again" -- and names THIS FILE as its complement in
+-- the next line. One rule, two homes, applied in one.
+--
+-- WHAT IT COST, measured rather than argued. `ff36b70` landed four defects and
+-- they were found over three fix-and-re-run cycles, each invisible until the
+-- one before it was fixed: an ownership transfer outside its grant window
+-- aborted the install, which hid two columns outside the read contract, which
+-- hid an undeclared reachable view. Two separate sessions were sent on that
+-- chase four hours apart. Stopping after the first fix would have shipped
+-- three of the four.
+--
+-- THE RULE, stated as a property rather than as this file's behaviour, because
+-- that is why it did not travel the first time: *a gate that runs several
+-- internal checks reports all of them, not the first*. It cannot be enforced
+-- from outside -- `dev/check.sh` already runs every gate regardless of
+-- failures, and a bash runner cannot see inside a psql script -- so each gate
+-- has to carry it. dev/tests/README.md says so where a new gate's author will
+-- meet it.
+create temporary table surface_failures (
+    seq     serial,
+    check_name text not null,
+    detail  text not null
+);
+
 create temporary table expected (
     subsystem text,
     -- Every value here has a branch in the CASE that computes `present`, and
@@ -736,13 +768,15 @@ declare v_missing int;
 begin
     select count(*) into v_missing from surface where not present;
     if v_missing > 0 then
-        raise exception
-            'SURFACE INCOMPLETE: % of % declared capabilities are missing. '
-            'Each is a spec promise with nothing behind it.',
-            v_missing, (select count(*) from surface);
+        insert into surface_failures (check_name, detail) values (
+            'SURFACE INCOMPLETE',
+            format('%s of %s declared capabilities are missing. Each is a spec '
+                   'promise with nothing behind it.',
+                   v_missing, (select count(*) from surface)));
+    else
+        raise notice 'SURFACE COMPLETE: all % declared capabilities present',
+            (select count(*) from surface);
     end if;
-    raise notice 'SURFACE COMPLETE: all % declared capabilities present',
-        (select count(*) from surface);
 end $$;
 
 
@@ -965,20 +999,25 @@ begin
     select count(*) into v_write from write_contract
      where (not settable and not declared_out) or (settable and declared_out);
 
+    -- BOTH, not the first of the two. A leak and a gap are independent
+    -- findings and a database can have one of each; raising on the leak used
+    -- to mean the round trip was never counted.
     if v_leak > 0 then
-        raise exception
-            'SECRET EXPOSED: % column(s) declared as secrets are readable through an '
-            '*_api view. This is the one failure in this file that is a breach rather '
-            'than a gap.', v_leak;
+        insert into surface_failures (check_name, detail) values (
+            'SECRET EXPOSED',
+            format('%s column(s) declared as secrets are readable through an *_api '
+                   'view. This is the one failure in this file that is a breach '
+                   'rather than a gap.', v_leak));
     end if;
 
     if v_read + v_write > 0 then
-        raise exception
-            'ROUND TRIP INCOMPLETE: % column(s) sit outside the read contract and % '
-            'outside the write contract with no decision recorded. Put the column in '
-            'the view or the function, or declare it excluded with a reason -- '
-            'silently unreachable is the state this check exists to end.',
-            v_read, v_write;
+        insert into surface_failures (check_name, detail) values (
+            'ROUND TRIP INCOMPLETE',
+            format('%s column(s) sit outside the read contract and %s outside the '
+                   'write contract with no decision recorded. Put the column in the '
+                   'view or the function, or declare it excluded with a reason -- '
+                   'silently unreachable is the state this check exists to end.',
+                   v_read, v_write));
     end if;
 
     raise notice
@@ -1089,15 +1128,49 @@ begin
     select count(*) into v_reachable from reachable;
 
     if v_undeclared > 0 then
-        raise exception
-            'SURFACE UNDECLARED: % of % reachable objects are callable by `authenticated` '
-            'or `web_anon` and appear nowhere in this file. Either declare each one with '
-            'the reason it is exposed, or revoke the grant -- an external surface nobody '
-            'wrote a sentence for is the shape every drift defect starts as.',
-            v_undeclared, v_reachable;
+        insert into surface_failures (check_name, detail) values (
+            'SURFACE UNDECLARED',
+            format('%s of %s reachable objects are callable by `authenticated` or '
+                   '`web_anon` and appear nowhere in this file. Either declare each '
+                   'one with the reason it is exposed, or revoke the grant -- an '
+                   'external surface nobody wrote a sentence for is the shape every '
+                   'drift defect starts as.', v_undeclared, v_reachable));
+    else
+        raise notice
+            'SURFACE CLOSED: all % objects a caller role can reach are declared here',
+            v_reachable;
+    end if;
+end $$;
+
+
+-- ============================================================
+-- THE ONE PLACE THIS FILE FAILS.
+--
+-- Everything above records; this raises. So a run reports every red surface,
+-- and the exit code is still non-zero for `dev/check.sh` -- which is the half
+-- that matters, because a gate that reports well and exits 0 is not a gate.
+--
+-- The detail lines are printed before the raise as well as named in it: RAISE
+-- truncates nothing, but a five-line message inside a psql error block is
+-- harder to read than five notices, and `run_gate` greps for the word FAILED.
+-- ============================================================
+do $$
+declare
+    r record;
+    v_n int;
+begin
+    select count(*) into v_n from surface_failures;
+    if v_n = 0 then
+        raise notice 'SURFACE: every check in this file passed';
+        return;
     end if;
 
-    raise notice
-        'SURFACE CLOSED: all % objects a caller role can reach are declared here',
-        v_reachable;
+    for r in select check_name, detail from surface_failures order by seq loop
+        raise warning 'FAILED -- %: %', r.check_name, r.detail;
+    end loop;
+
+    raise exception
+        'SURFACE AUDIT FAILED: % of this file''s checks are red (%). Every one is '
+        'named in the warnings above -- fix them together rather than one per run.',
+        v_n, (select string_agg(check_name, ', ' order by seq) from surface_failures);
 end $$;
