@@ -144,13 +144,12 @@ jobs:
   #
   # A third job, split from the second for the reason the second was split from
   # the first: cost. This one is minutes rather than seconds, and the `database`
-  # job's own comment says not to add work there without measuring. Measured,
-  # 2026-09-12: `dev/check.sh --self-model` is 15m30s wall clock against a
-  # dev/ci-database.sh container, on an M-series Mac carrying a load average of
-  # 11 at the time -- an upper bound rather than a clean figure, and the runner's
-  # own number is the one to read off this workflow once it has run. Roughly two
-  # thirds is the load, the rest `tests.sql`. The jobs run in parallel, so this
-  # costs wall clock only where it is the slowest, which it is.
+  # job's own comment says not to add work there without measuring. Measured on
+  # this runner, 2026-09-12 (run 34668494624): 5m47s here, against 2m03s for
+  # `database` and 16s for `tree`. Roughly two thirds of it is the load and the
+  # rest `tests.sql`. The three run in parallel, so this costs wall clock only
+  # where it is the slowest, which it is -- and it is still three times the
+  # whole database job, which is why it is not a line inside it.
   #
   # WHY IT EXISTS. `applications/percolate-self-model/load.sh --from-zero` had
   # been broken since `492e007` and nobody noticed for a month, because every
