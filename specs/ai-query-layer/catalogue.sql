@@ -30,7 +30,16 @@
 -- DIFFERENT PROMISES. So the graph knows a named surface and the row knows the
 -- signatures, and a claim anchored here is anchored to the name.
 create table if not exists aiq.db_objects (
-    id          uuid generated always as (md5(ident)::uuid) stored primary key,
+    -- percolate.uuidv5, not md5(ident)::uuid. specs/identity/spec.md §3 bans
+    -- the second: it produces a value whose version nibble is 0, which is not
+    -- a UUID and compares unequal to the same id derived correctly anywhere
+    -- else -- and `492e007` added this column two days after the ban, because
+    -- the check that enforces it reads pg_proc and a generated column is not a
+    -- function (REM-58). The ALTER below is what carries it to a database that
+    -- upgrades, since `create table if not exists` is a no-op there.
+    id          uuid generated always as
+                (percolate.uuidv5(percolate.id_namespace('db_object'), ident))
+                stored primary key,
     ident       text not null unique,      -- schema-qualified, or the bare name for a role
     nspname     text not null,             -- '' for a role, which has no schema
     objname     text not null,
@@ -41,6 +50,37 @@ create table if not exists aiq.db_objects (
     reachable   boolean not null default false,
     grantees    text[] not null default '{}'
 );
+
+-- AND THE SAME EXPRESSION ON A DATABASE THAT ALREADY HAS THE COLUMN, because
+-- the `create table if not exists` above does nothing there and the two would
+-- diverge -- exactly what dev/upgrade-converges.sh exists to catch.
+--
+-- `set expression` recomputes every row in place and keeps the primary key, so
+-- `ident` stays unique and the table stays consistent with itself. Guarded on
+-- the CURRENT expression rather than run unconditionally: it rewrites the
+-- table, and the schema is replayed on every upgrade.
+--
+-- aiq.nodes rows anchored to a db_object carry the old id in `entity_id`. They
+-- are re-derived by aiq.refresh_catalogue() and its graph sync, which run on a
+-- schedule and on demand -- the catalogue is a derivation of the live catalog,
+-- not a store -- so this leaves stale anchors until the next refresh rather
+-- than broken ones. Stated because it is a real window, not a no-op.
+do $$
+begin
+    if exists (
+        select 1 from pg_attrdef d
+          join pg_attribute a on a.attrelid = d.adrelid and a.attnum = d.adnum
+         where d.adrelid = 'aiq.db_objects'::regclass
+           and a.attname = 'id'
+           and pg_get_expr(d.adbin, d.adrelid) ilike '%md5%')
+    then
+        alter table aiq.db_objects
+            alter column id set expression as
+            (percolate.uuidv5(percolate.id_namespace('db_object'), ident));
+        raise notice 'aiq.db_objects.id re-derived as uuidv5 (was md5) -- '
+                     'run aiq.refresh_catalogue() to re-anchor aiq.nodes';
+    end if;
+end $$;
 
 -- NO org_id, AND THAT IS A DECISION. Sixteen tables in this extension carry one
 -- and this is not the seventeenth: a database's own catalogue is one shared

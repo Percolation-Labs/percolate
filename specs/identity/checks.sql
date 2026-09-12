@@ -122,6 +122,56 @@ where (n.nspname in (select percolate.extension_schemas()) or n.nspname = 'selfm
 order by 1;
 
 \echo ''
+\echo '=== 4b. NOR IS A GENERATED COLUMN, AND A SOURCE SCAN CANNOT SEE ONE ==='
+\echo '    4 reads pg_proc. aiq.db_objects.id was added as md5(ident)::uuid two'
+\echo '    days after the rule, in a GENERATED COLUMN, and passed (REM-58).'
+\echo '    No regex here: a generated expression is one mechanical expression,'
+\echo '    so naming md5 at all is the finding.'
+select c.relnamespace::regnamespace || '.' || c.relname || '.' || a.attname as col,
+       pg_get_expr(d.adbin, d.adrelid) as expression
+  from pg_attrdef d
+  join pg_attribute a on a.attrelid = d.adrelid and a.attnum = d.adnum
+  join pg_class c on c.oid = d.adrelid
+  join pg_namespace n on n.oid = c.relnamespace
+ where a.attgenerated <> ''
+   and (n.nspname in (select percolate.extension_schemas()) or n.nspname = 'selfmodel')
+   and pg_get_expr(d.adbin, d.adrelid) ilike '%md5%'
+ order by 1;
+
+\echo ''
+\echo '=== 4c. AND THE ROWS THEMSELVES CARRY VERSION 5 ==='
+\echo '    The exact form of the same question, and the one nothing can hide'
+\echo '    from: whatever the expression looks like, a derived id that is not'
+\echo '    version 5 is not the value a client recomputing it would get.'
+\echo '    Reads data rather than source, so it needs no pattern at all.'
+do $$
+declare r record; v int; bad text[] := '{}';
+begin
+    for r in
+        select c.relnamespace::regnamespace::text as sch, c.relname as tbl, a.attname as col
+          from pg_attribute a
+          join pg_class c on c.oid = a.attrelid
+          join pg_namespace n on n.oid = c.relnamespace
+         where a.attgenerated <> '' and a.atttypid = 'uuid'::regtype
+           and (n.nspname in (select percolate.extension_schemas())
+                or n.nspname = 'selfmodel')
+    loop
+        -- One row is enough: the expression is the same for all of them.
+        execute format(
+            'select uuid_extract_version(%I) from %I.%I where %I is not null limit 1',
+            r.col, r.sch, r.tbl, r.col) into v;
+        if v is not null and v <> 5 then
+            bad := bad || format('%s.%s.%s holds version %s', r.sch, r.tbl, r.col, v);
+        end if;
+    end loop;
+    if array_length(bad, 1) > 0 then
+        raise warning 'derived ids that are not v5: %', array_to_string(bad, ', ');
+    else
+        raise notice 'every generated uuid column with rows in it holds version 5';
+    end if;
+end $$;
+
+\echo ''
 \echo '=== 5. NO org_id IS NULLABLE, AND EVERY ONE DEFAULTS TO THE SHARED ORG ==='
 \echo '    spec.md §4: the shared tier is a ROW (rbac.shared_org_id()), not a'
 \echo '    NULL. This is the check that makes a seventeenth org_id column'
@@ -194,6 +244,19 @@ begin
      where (n.nspname in (select percolate.extension_schemas()) or n.nspname = 'selfmodel')
        and regexp_replace(p.prosrc, '--[^\n]*', '', 'g')
            ~ 'md5\s*\([^)]*\)\s*::\s*uuid';
+
+    -- 4b counts into the same verdict: a generated column deriving an id is
+    -- the same defect as a function doing it, and was invisible only because
+    -- the query above cannot see one.
+    v4 := v4 + (select count(*)
+                  from pg_attrdef d
+                  join pg_attribute a on a.attrelid = d.adrelid and a.attnum = d.adnum
+                  join pg_class c on c.oid = d.adrelid
+                  join pg_namespace n on n.oid = c.relnamespace
+                 where a.attgenerated <> ''
+                   and (n.nspname in (select percolate.extension_schemas())
+                        or n.nspname = 'selfmodel')
+                   and pg_get_expr(d.adbin, d.adrelid) ilike '%md5%');
 
     select count(*) into v5
       from pg_class c
