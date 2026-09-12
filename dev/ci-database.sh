@@ -58,7 +58,12 @@ DB="${DB:-p8ci}"
 # the tree's, one of them measured a baseline against it, and the other reached
 # for a PATH shim instead of an override that should have existed. Two copies of
 # the same fact (which interpreter to use) with only one of them configurable.
-PY="${PY:-python3}"
+# One picker, in dev/lib/python.sh, rather than the install-or-explain block
+# that used to live below: the "install pyyaml into it" step moved in there, so
+# a runner still gets the cheap answer and a laptop gets a venv instead of an
+# error. Three scripts asking this question three ways is what that file ends.
+. "$(cd "$(dirname "$0")" && pwd)/lib/python.sh"
+PY="$(percolate_python)" || exit 1
 
 V=$(sed -n "s/^default_version = '\(.*\)'/\1/p" extension/percolate/percolate.control)
 [ -n "$V" ] || { echo "percolate.control has no default_version" >&2; exit 1; }
@@ -113,12 +118,6 @@ fi
 # install` with the script under `set -e` still let a 127 through as the last
 # statement's status in some shells, and a build step that cannot install its
 # own build dependency must not continue as though it had.
-"$PY" -c 'import yaml' 2>/dev/null || {
-    "$PY" -m pip install --quiet pyyaml || {
-        echo "cannot install PyYAML for $(command -v "$PY") -- build-sql.py needs it" >&2
-        echo "  $PY -m pip install pyyaml      # or run inside a venv" >&2
-        echo "  PY=/usr/bin/python3 $0         # or point PY at an interpreter that has it" >&2
-        exit 1; }; }
 "$PY" extension/percolate/build-sql.py >/dev/null
 
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
