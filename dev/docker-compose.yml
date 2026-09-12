@@ -46,7 +46,7 @@ x-credential-origins: &credential-origins '${P8_CREDENTIAL_ORIGINS:-{"LLM_API_KE
 # `${P8_CORE_IMAGE:-...}` as well as the anchor, because the dev loop wants to
 # run a locally built core against this stack without editing a tracked file --
 # which was previously done by editing all seven and remembering to undo it.
-x-core-image: &core-image '${P8_CORE_IMAGE:-percolationlabs/percolate-core:0.1.8}'
+x-core-image: &core-image '${P8_CORE_IMAGE:-percolationlabs/percolate-core:0.1.9}'
 
 services:
   db:
