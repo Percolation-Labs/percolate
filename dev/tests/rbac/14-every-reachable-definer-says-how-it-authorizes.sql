@@ -129,8 +129,8 @@ insert into t14_declared (fn, mechanism, why) values
  'refused without workflows:update, and an existing source only by its owner'),
 ('content.save_source(uuid,text,jsonb,jsonb,timestamp with time zone)', 'workflow.may_define',
  'refused without workflows:update, and an existing source only by its owner'),
-('content.start_source_pull(uuid,text)', 'owner',
- 'only the source''s owner'),
+('content.start_source_pull(uuid,text)', 'workflow.may_access_run',
+ 'TWO objects, and this row used to name only the first. `owner` -- only the source''s owner may start a pull -- is true of the CHANNEL and was never the whole sentence: the function then resolved "is one already running?" by workflow NAME across every tenant and returned that run''s id, so owning your own source got you somebody else''s run (REM-80, measured: bo pulls his own source and receives ana''s running ingest_file run with her input). Definitions are installation-wide by design, so a shared name like `ingest_file` is everybody''s. The lookup now filters on workflow.may_access_run -- REM-77''s extracted predicate, in workflow.reusable_run''s shape -- and prefers the caller''s own run, so an administrator holding workflow_runs:select still gets their own in-flight pull back. Residual, recorded and not a leak: two sources of the SAME owner naming one shared ingest_workflow still share a run. dev/tests/content/04 measures both people'),
 ('content.windows_to_index(uuid)', 'rbac.may_read',
  'as chunks_to_embed'),
 -- ---------- rbac -------------------------------------------------------------

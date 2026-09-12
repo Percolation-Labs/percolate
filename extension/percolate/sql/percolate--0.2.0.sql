@@ -25979,8 +25979,52 @@ begin
  select * into c from content.channels where id=p_source_id for update;
  if c.id is null or rbac.current_user_id() is null or c.owner_id is distinct from rbac.current_user_id() then raise exception 'Only the source owner can start this pull.' using errcode='42501';end if;
  if c.kind<>'http_pull' or not c.enabled then raise exception 'This API source is not enabled.';end if;
+ -- IS ONE OF MINE ALREADY RUNNING? -- and the scope is the whole of REM-80.
+ --
+ -- This asked `d.name = c.config->>'ingest_workflow' and status='running'` and
+ -- nothing else, so it resolved a run by workflow NAME ACROSS EVERY TENANT and
+ -- returned it. The owner check above is real and guards the wrong object: it
+ -- establishes that the caller owns the CHANNEL, and the next statement then
+ -- handed back a RUN belonging to whoever had most recently started one under
+ -- the same definition. Measured -- bo owns one enabled http_pull source of his
+ -- own, calls this on it, and receives the id of ana's running `ingest_file`
+ -- run with her input attached:
+ --
+ --     ana run: 01a09308-...  (owner ...000a, status running)
+ --     bo got run: 01a09308-...  owned by ...000a, input {"who": "ana, privately"}
+ --
+ -- His own p_external_id was never used. Definitions are installation-wide by
+ -- design, so `ingest_file` is everybody's, and any channel whose
+ -- config.ingest_workflow names a SHARED definition rather than the per-source
+ -- one save_api_source mints (`source_<uuid>`) is in this state. That is
+ -- reachable through an ordinary channel insert, which is how the measurement
+ -- above was built.
+ --
+ -- This is REM-77's defect in a second copy and a wider one: that one at least
+ -- keyed on a value the caller had chosen, and this needs no key at all. Its
+ -- fix does not reach here, because the leak happens BEFORE start_workflow is
+ -- called.
+ --
+ -- workflow.may_access_run IS THE PREDICATE, not a third spelling of it. REM-77
+ -- extracted it from assert_run_access precisely so the next caller would not
+ -- write its own; the shape below -- filter by the predicate, then prefer the
+ -- caller's own row -- is workflow.reusable_run's, deliberately, so the two
+ -- places that resolve "an existing run for this request" answer alike. The
+ -- ordering matters for an administrator holding workflow_runs:select, who
+ -- reaches every tenant's runs: they still get their OWN in-flight pull back
+ -- rather than whichever was newest.
+ --
+ -- WHAT THIS DOES NOT FIX, and it is an overlap bug rather than a leak: two
+ -- sources owned by the SAME person that both name a shared ingest_workflow
+ -- still share an in-flight run, so pulling the second returns the first's id.
+ -- Scoping to the source rather than to the definition needs the run to carry
+ -- source_id, which it does not -- start_workflow is called with '{}' and the
+ -- step reads source_id from the DEFINITION. Recorded on REM-80 rather than
+ -- changing what a run's input means in a security fix.
  select x.id into r from workflow.runs x join workflow.definitions d on d.id=x.workflow_def_id
- where d.name=c.config->>'ingest_workflow' and x.status='running' order by x.created_at desc limit 1;
+ where d.name=c.config->>'ingest_workflow' and x.status='running'
+   and workflow.may_access_run(x.id,'select')
+ order by (x.owner_id=rbac.current_user_id()) desc nulls last, x.created_at desc limit 1;
  if r is not null then return r;end if;
  return workflow.start_workflow(c.config->>'ingest_workflow','{}',p_external_id);
 end $$;

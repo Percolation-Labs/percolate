@@ -19,7 +19,8 @@
 -- real file (`-- loads:` above), installs it inside a transaction, asks the
 -- catalogue, and rolls back.
 --
--- That is deliberately NOT a grep over the file's text for `web_anon`. REM-73
+-- That is NOT a grep over the file's text for `web_anon`, and the choice is
+-- the point of the file. REM-73
 -- has just finished removing two assertions of exactly that shape from
 -- content/01, where they passed on comments saying the greped-for name was
 -- unused. Postgres parses the grants; this file reads has_table_privilege and
@@ -49,7 +50,7 @@ set local role app_owner;
 -- 0. The subject exists and is the real one.
 --
 -- First, because every assertion below is about objects this transaction just
--- created: if the load silently did nothing, all of them would be asking about
+-- created: if the load brought in nothing, all of them would be asking about
 -- nothing and passing.
 -- ---------------------------------------------------------------------
 do $$
@@ -193,7 +194,7 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
--- 4. classify_health is deliberately NOT in the list above.
+-- 4. classify_health is NOT in the list above, and that is a decision.
 --
 -- It is immutable, takes three scalars, reads no table and returns a word, so
 -- there is no row in it to scope. Asserted rather than left to a comment,
@@ -205,7 +206,7 @@ begin
     if not has_function_privilege('web_anon', 'content.classify_health(int,text,int)', 'execute') then
         raise exception
             'classify_health has been revoked from web_anon -- it reads no rows, '
-            'so this is a cost with nothing bought; if it was deliberate, this '
+            'so this is a cost with nothing bought; if it was meant, this '
             'assertion is the place to say why';
     end if;
     raise notice 'rbac/15: classify_health stays broad -- pure arithmetic over three scalars, no row to scope';

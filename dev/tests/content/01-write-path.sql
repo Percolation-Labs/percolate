@@ -8,6 +8,22 @@
 --
 -- Nobody had asked what a tenant could WRITE.
 
+-- WHAT THIS FILE NEEDS FROM THE `rbac` SURFACE, named because the next person
+-- to run it alone will otherwise read the failure as their own regression.
+--
+-- §1 registers an upload as alice ('1111...'), and content.register_upload gates
+-- on content.may_upload, which needs `resources:create`. Alice holds it through
+-- a role that the `rbac` surface seeds, not through anything in this file. So:
+--
+--     dev/tests/run.sh content      -> §1 fails, "not authorized to upload content"
+--     dev/tests/run.sh              -> green, because rbac runs first
+--
+-- run.sh's SURFACES order is deliberate and documented in its own header
+-- ("RBAC first, because if row-level security is not actually on, every later
+-- assertion about who-sees-what is meaningless"), so this is a dependency to
+-- state rather than a bug to fix here. Measured while fixing REM-73, where it
+-- cost a few minutes of reading a correct diff for a fault that was not in it.
+
 \set ON_ERROR_STOP on
 
 begin;
