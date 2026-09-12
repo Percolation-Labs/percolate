@@ -78,7 +78,24 @@ def resolve(value: Any, ctx: dict) -> Any:
     if not isinstance(value, str):
         return value
 
-    sources = {"steps": ctx.get("context") or {}, "run": ctx.get("run_input") or {}}
+    # `task`, because README.md §"scheduled runs" documents the reference
+    # scheduled step as `"workflow_task_id": "{{task.id}}"` and there was no
+    # such namespace -- so the documented step raised `unknown template
+    # namespace 'task'` at dispatch and every scheduled agent run took an
+    # undocumented path instead (REM-126).
+    #
+    # It matters more than a missing convenience. `/internal/run` needs the id
+    # because the runtime COMPLETES ITS OWN TRIGGERING TASK once the run and
+    # any chained action have finished (agentic/sequencer.py, brief.md §3).
+    # With no id, `workflow_task_id` is None, that block is skipped, and the
+    # task is never completed -- so the reaper takes its lease and the run
+    # happens again, up to max_attempts. REM-109's duplicate-work failure
+    # reached from the other end.
+    sources = {
+        "steps": ctx.get("context") or {},
+        "run": ctx.get("run_input") or {},
+        "task": {"id": ctx.get("_task_id"), "worker_id": ctx.get("_worker_id")},
+    }
 
     # A whole-string reference keeps its native type, so
     # body: "{{steps.x.result}}" sends an object rather than a JSON string
@@ -102,7 +119,7 @@ def resolve(value: Any, ctx: dict) -> Any:
         else:
             raise TerminalError(
                 f"unknown template namespace '{head}' in {{{{{ref}}}}}"
-                " -- expected steps, run or env")
+                " -- expected steps, run, task or env")
         # Terminal, not retryable: a missing reference is a definition bug or a
         # missing env var, and no number of retries will conjure it.
         if found is None:

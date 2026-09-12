@@ -186,11 +186,19 @@ async def run_once(queue: str, worker_id: str) -> bool:
         # CONTAIN braces (a chunk of text on its way to a model), and resolving
         # an already-resolved value would turn that data into a missing
         # reference. One pass, at the layer that owns the shape.
-        if kind == "work":
-            spec = resolve_task(spec, ctx)
-
+        # BEFORE the resolution below, not after it, because `{{task.id}}` is
+        # resolvable now (REM-126) and `work` resolves HERE while `http_call`
+        # resolves inside its own handler. Set after, a `work` step asking for
+        # `{{task.id}}` got `template {{task.id}} resolved to nothing` while the
+        # identical reference in an `http_call` step worked -- one namespace
+        # behaving differently by step kind, which is the asymmetry the comment
+        # above is at pains to say is deliberate about resolution TIMING and is
+        # not deliberate about what is resolvable.
         ctx["_task_id"] = task_id
         ctx["_worker_id"] = worker_id
+
+        if kind == "work":
+            spec = resolve_task(spec, ctx)
 
         # The handler runs with a heartbeat beside it, so a task that takes
         # longer than the queue's stale_timeout finishes once instead of being

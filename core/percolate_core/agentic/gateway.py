@@ -198,6 +198,33 @@ def build_server(settings: Settings | None = None) -> Any:
         from starlette.responses import JSONResponse
 
         body = await request.json()
+
+        # WHAT A MALFORMED CALL IS TOLD, which this endpoint predates REM-67
+        # and did not do. `body["workflow_task_id"]` and `body["input"]["agent"]`
+        # were read unconditionally, so a caller that omitted either got a
+        # KeyError and a 500 -- the shape REM-67 exists to end, since a 500
+        # says the server is broken when the request was. The seeded reference
+        # definition sent no body at all (REM-126), so 500 was the answer the
+        # documented path actually produced.
+        #
+        # Named individually rather than as "invalid body", because the whole
+        # defect was that nobody could tell WHICH field was missing.
+        missing = [
+            name for name, present in (
+                ("workflow_task_id", bool(body.get("workflow_task_id"))),
+                ("input", isinstance(body.get("input"), dict)),
+                ("input.agent", isinstance(body.get("input"), dict)
+                                and bool(body["input"].get("agent"))),
+            ) if not present
+        ]
+        if missing:
+            return JSONResponse(
+                {"error": "missing required field(s): " + ", ".join(missing),
+                 "hint": "a scheduled step sends {\"workflow_task_id\": "
+                         "\"{{task.id}}\", \"input\": {\"agent\": ...}} -- see "
+                         "specs/workflow-engine/README.md, scheduled runs"},
+                400)
+
         # `mode: "async"` means dispatch-and-return (workflow-engine/spec.md
         # §14): the executor's job is only to hand the work over, and this
         # runtime completes the task itself when the run is genuinely done.
