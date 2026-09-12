@@ -14,9 +14,9 @@
 
 from __future__ import annotations
 
-import os
 from typing import Protocol
 
+from ...core.credentials import credential_for
 from ..contracts import CanonicalTool, ToolInvocation, ToolResult, ToolServer
 
 
@@ -58,31 +58,33 @@ class ToolProvider(Protocol):
         ...
 
 
-async def resolve_credential(credential_ref: str | None) -> str | None:
-    """Turn a ``credential_ref`` into an actual credential.
+async def resolve_credential(credential_ref: str | None, url: str) -> str | None:
+    """The secret named by ``credential_ref``, if ``url`` is an origin it is bound to.
 
-    OPEN, and deliberately unimplemented (``brief.md`` §9): "How the agent
-    runtime gets credentials for the microservices it binds to ... is exactly
-    where the delegated-credential/secrets-vault gap ``specs/README.md`` already
-    named as explicitly out of the core five would bite first — worth resolving
-    alongside that, not inventing a second, narrower credential mechanism just
-    for this runtime."
+    THE BINDING IS THE POINT, and this function used to have none. It read
+    ``env:VAR_NAME`` straight out of the environment and handed it back, and
+    ``auth.py`` then sent it as a Bearer to whatever ``tool_servers.url`` said.
+    Its own docstring called that a placeholder awaiting a secrets mechanism —
+    and ``core.credentials.credential_for`` **is** that mechanism, shipped in
+    REM-49, one package away. So this is no longer a second, narrower credential
+    path: it is the same one, reached from here.
 
-    One scheme is implemented, deliberately the most boring one:
-    ``env:VAR_NAME`` reads a process environment variable. It is enough to bind
-    a real authenticated service today, it is obviously not a secrets
-    mechanism, and it fails loudly (rather than sending no auth) for any other
-    reference shape — so nothing accumulates around a placeholder pretending to
-    be the answer. One function; whatever this collection settles on lands here.
+    What it closes: a holder of ``tool_servers:update`` registering a server at
+    their own host with ``credential_ref: env:OPENAI_API_KEY`` and calling
+    ``POST /tools/<name>/sync``. ``list_tools`` fetches the document *with
+    credentials*, so the provider key left the process to an origin nobody had
+    sanctioned. ``outbound_headers``' same-origin check cannot see it, because
+    the attacker's host **is** the registration origin.
+
+    Now the operator's ``P8_CREDENTIAL_ORIGINS`` decides, the destination is
+    checked before the secret is read, and a refusal names the variable and the
+    origin it would need. ``env:`` stays the only accepted shape, for the reason
+    the old docstring gave: nothing should accumulate around a placeholder.
     """
     if credential_ref is None:
         return None
     if credential_ref.startswith("env:"):
-        name = credential_ref[4:]
-        value = os.getenv(name)
-        if value is None:
-            raise LookupError(f"credential_ref {credential_ref!r}: ${name} is not set")
-        return value
+        return credential_for(credential_ref[4:], url)
     raise NotImplementedError(
         f"credential_ref {credential_ref!r}: only env: references are supported "
         "until this collection has a secrets mechanism (brief.md §9)"
