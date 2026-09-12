@@ -85,9 +85,14 @@ api.setToken('header.'+Buffer.from(JSON.stringify({{sub:session,exp:Date.now()/1
 
     def test_bad_output_and_runtime_errors_keep_inspectable_session(self):
         self.run_js("""
+        // This assistant used to throw on the FIRST malformed response where
+        // every other one retried with the validation error -- the last row of
+        // browser-ui.md §7's audit. It goes through api.js:suggest() now, so a
+        // bad response costs one correction and then fails whole.
         for(const bad of ['not JSON',JSON.stringify({...suggestion,requires_embedding:'no'}),JSON.stringify({...suggestion,assumptions:[{}]})]){
-          content=bad;
-          await assert.rejects(assist.suggestQuery({mode:'suggest',description:'Find recalls',query:''}),e=>e.session===session&&/usable query/.test(e.message));
+          content=bad;calls.length=0;
+          await assert.rejects(assist.suggestQuery({mode:'suggest',description:'Find recalls',query:''}),e=>e.session===session&&/usable suggestion/.test(e.message));
+          assert.equal(calls.filter(c=>c.url.endsWith('/chat')).length,2,'one correction, then a failed suggestion');
         }
         status=422;
         await assert.rejects(assist.suggestQuery({mode:'suggest',description:'Find recalls',query:''}),e=>e.session===session&&e.message==='Invalid request');

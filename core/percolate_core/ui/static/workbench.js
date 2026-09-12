@@ -1,7 +1,8 @@
 import {splitWorkspace,contextualHelp} from "./workspace.js";
 import { rpc, read } from "./api.js";
 import { READS } from "./reads.js";
-import { HELP_AGENT, suggestQuery, withoutTerminator } from "./query-assist.js";
+import { HELP_AGENT } from "./api.js";
+import { suggestQuery, withoutTerminator } from "./query-assist.js";
 import { h, panel, table } from "./ui.js";
 import { page, head } from "./views.js";
 import { draftStore, stageWorkflow, sameInput } from "./drafts.js";

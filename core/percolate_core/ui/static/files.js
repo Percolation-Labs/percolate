@@ -1,4 +1,4 @@
-import { config, token, read, authFetch } from "./api.js";
+import { config, token, read, rpc, authFetch } from "./api.js";
 import { READS } from "./reads.js";
 import { h, status } from "./ui.js";
 import { page, head } from "./views.js";
@@ -147,9 +147,14 @@ export async function files() {
   }
   const loadChannels=async()=>{
     try{
-      const [{rows},{rows:orgs}]=await Promise.all([read(READS.uploadChannels),read(READS.orgs)]);
-      const shared=orgs.find(o=>o.slug==="shared");
-      channels=rows.filter(c=>c.org_id===shared?.id);
+      /* The shared tier is `rbac.shared_org_id()`, a derived v5 uuid that is
+         the same in every deployment -- not "the org whose slug is shared",
+         which is a convention this screen was asserting on its own. A rename,
+         or a second org somebody slugged the same way, and the upload channel
+         list silently becomes somebody else's. */
+      const [{rows},{rows:sharedOrg}]=await Promise.all([read(READS.uploadChannels),rpc("rbac","shared_org_id",{})]);
+      const shared=typeof sharedOrg==="string"?sharedOrg:sharedOrg?.shared_org_id;
+      channels=rows.filter(c=>c.org_id===shared);
       channel.replaceChildren(...channels.map(c=>h("option",{value:c.id},c.name)));
       const preferred=channels.find(c=>c.id===sessionStorage.getItem("p8-upload-channel")) || channels.find(c=>c.name==="ui-documents");if(preferred)channel.value=preferred.id;
     }catch(e){notice.replaceChildren(error(e));}

@@ -7,8 +7,7 @@
  * than in an empty answer, and treats the description as data.
  */
 
-import { authFetch, config } from "./api.js";
-import { HELP_AGENT, createChatSession } from "./query-assist.js";
+import { createChatSession, suggest } from "./api.js";
 import { describeCron } from "./cron.js";
 
 /* ── the assistant ─────────────────────────────────────────────────── */
@@ -33,11 +32,6 @@ export function parseScheduleSuggestion(content) {
   if (!v || strings.some((k) => typeof v[k] !== "string")
       || !Array.isArray(v.assumptions) || !v.assumptions.every((a) => typeof a === "string")) {
     throw new Error("The assistant returned an incomplete suggestion.");
-  }
-  /* A question and an answer are different fields, so a caller never has to
-     read an empty expression as either "ask the user" or "it failed". */
-  if (!v.cron_expr.trim() && !v.needs_clarification.trim()) {
-    throw new Error("The assistant returned neither a schedule nor a question.");
   }
   if (v.cron_expr.trim()) {
     describeCron(v.cron_expr, v.timezone);        // the engine's own validation
@@ -64,33 +58,15 @@ ${JSON.stringify({ request: description })}`;
 
 export async function suggestSchedule({ description, workflows = [], onStatus = () => {} }) {
   if (!description.trim()) throw new Error("Describe when the workflow should run.");
-  if (!config().core) throw new Error("Connect an agent runtime in Settings to use schedule assistance.");
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   const session = await createChatSession("Schedule suggestion");
-  let correction = "";
-  for (let attempt = 0; attempt < 2; attempt++) {
-    onStatus(attempt ? "Correcting the proposed schedule…" : "Working out the cron expression and zone…");
-    const res = await authFetch(config().core.replace(/\/$/, "") + "/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-P8-Session-Id": session },
-      body: JSON.stringify({
-        model: HELP_AGENT,
-        stream: false,
-        response_format: { type: "json_schema", json_schema: { name: "schedule", schema: SCHEDULE_SUGGESTION_SCHEMA } },
-        messages: [{ role: "user", content: schedulePrompt({ description, workflows, zone }) + correction }],
-      }),
-    });
-    if (!res.ok) throw new Error(`The assistant is unavailable (HTTP ${res.status}).`);
-    const body = await res.json();
-    const content = body.choices?.[0]?.message?.content ?? body.content ?? body;
-    try {
-      return parseScheduleSuggestion(content);
-    } catch (e) {
-      /* Hand the validation error back once. A second failure is a failed
-         suggestion and leaves the form untouched, rather than half-filling it. */
-      if (attempt) throw e;
-      correction = `\nYour previous answer was rejected: ${e.message}. Return corrected JSON matching the schema.`;
-    }
-  }
-  throw new Error("The assistant could not produce a valid schedule.");
+  onStatus("Working out the cron expression and zone…");
+  return suggest({
+    name: "schedule", schema: SCHEDULE_SUGGESTION_SCHEMA, strict: false, session, onStatus,
+    prompt: schedulePrompt({ description, workflows, zone }),
+    /* A question and an answer are different fields, so a caller never has to
+       read an empty expression as either "ask the user" or "it failed". */
+    answered: (v) => typeof v.cron_expr === "string" && !!v.cron_expr.trim(),
+    validate: parseScheduleSuggestion,
+  });
 }

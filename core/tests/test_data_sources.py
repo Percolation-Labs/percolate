@@ -64,7 +64,7 @@ content=()=>JSON.stringify({settings:{...author.SOURCE_DEFAULTS,name:'handover',
 const v=await sourceAssist.suggestSource({description:'Find blockers in uploaded notes',current:author.SOURCE_DEFAULTS,agents:['brief'],models:[],id:session,queues:{}});
 assert.equal(v.settings.mode,'text');assert.equal(n,2);
 assert.ok(calls.every(c=>c.url.endsWith('/chat')||c.url.endsWith('/rpc/create_session')));
-assert.ok(calls.at(-1).body.messages[0].content.includes('failed validation'));
+assert.ok(calls.at(-1).body.messages[0].content.includes('was rejected'),'the shared contract hands the validation error back');
 """)
 
     def test_unavailable_ai_agent_does_not_become_a_saved_configuration(self):
@@ -138,12 +138,17 @@ content=()=>JSON.stringify({configuration_json:JSON.stringify({...author.GITHUB_
 const result=await assist.suggestAPI({description:'Track issues',current:{},id:session,queue:'ingest-ui'});
 assert.equal(result.settings.max_pages,2);assert.equal(n,2);
 assert.ok(calls.every(c=>c.url.endsWith('/chat')||c.url.endsWith('/rpc/create_session')));
-assert.ok(calls.at(-1).body.messages[0].content.includes('validation error'));
+assert.ok(calls.at(-1).body.messages[0].content.includes('was rejected'),'the shared contract hands the validation error back');
 """)
 
     def test_unknown_api_requests_contract_instead_of_inventing_a_source(self):
         self.run_js("""
-content=JSON.stringify({configuration_json:'',explanation:'Provide the endpoint and response example.',assumptions:[]});
+// A question is its own field now (browser-ui.md §7): an empty configuration
+// used to mean both "ask the user" and "it failed", and the screen could not
+// tell them apart.
+content=JSON.stringify({configuration_json:'',needs_clarification:'Which endpoint, and what does one record look like?',explanation:'',assumptions:[]});
 const result=await assist.suggestAPI({description:'Connect our internal API',current:{},id:session,queue:'ingest-ui'});
 assert.equal(result.settings,null);
+assert.match(result.needs_clarification,/Which endpoint/);
+assert.equal(calls.filter(c=>c.url.endsWith('/chat')).length,1,'a question is not retried');
 """)

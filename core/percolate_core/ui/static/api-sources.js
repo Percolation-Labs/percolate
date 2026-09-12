@@ -5,7 +5,7 @@ import {page,head} from './views.js';
 import {draftStore,sameInput} from './drafts.js';
 import {API_CHOICES,API_DEFAULTS,GITHUB_EXAMPLE,recentNewsExample,apiSourcePackage,apiPackageText} from './api-source-authoring.js';
 import {suggestAPI} from './api-source-assist.js';
-import {HELP_AGENT} from './query-assist.js';
+import {HELP_AGENT} from './api.js';
 import {workspaceTabs,collectionWorkspace,contextualHelp} from './workspace.js';
 const field=(name,node,hint)=>h('label',{class:'field'},h('span',{},name),node,hint?h('small',{class:'hint'},hint):null);
 const error=e=>h('div',{class:'note rose',role:'alert'},e.message);
@@ -79,8 +79,8 @@ export async function apiSources(requestedId){
     url:probeUrl.value||fields.url.value,
     auth:{auth_type:fields.auth_type.value,credential_ref:fields.credential_ref.value,auth_header:fields.auth_header.value},
     onStatus:t=>{aiStatus.textContent=t;}});if(id!==sourceId)return;
-   aiStatus.textContent=v.settings?'Review this configuration before saving or pulling data.':'More API detail is needed.';
-   aiOut.replaceChildren(h('article',{class:'suggestion-card'},h('p',{},v.explanation),
+   aiStatus.textContent=v.settings?'Review this configuration before saving or pulling data.':'One more detail is needed.';
+   aiOut.replaceChildren(h('article',{class:'suggestion-card'},h('p',{},v.settings?v.explanation:v.needs_clarification),
     /* What was read, beside what was proposed. The operator is being asked to
        trust a record path; showing the response it came out of is the cheapest
        way for them to check it, and the friction list is where the endpoint's

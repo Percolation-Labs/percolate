@@ -1,4 +1,5 @@
 import {apiSourcePackage} from './api-source-authoring.js';
+import {checkToolBindings} from './agent-authoring.js';
 
 const object = v => v && typeof v === 'object' && !Array.isArray(v);
 const strings = v => Array.isArray(v) && v.every(x => typeof x === 'string');
@@ -49,13 +50,16 @@ function agentSpec(spec, catalogue) {
   if (!catalogue.agents.some(a=>a.model===spec.model)) throw Error('Use a model already configured on a visible agent.');
   if (spec.skills!==undefined && !strings(spec.skills)) throw Error('Agent skills must be a list of names.');
   for (const skill of spec.skills || []) if (!catalogue.skills.some(s=>s.name===skill)) throw Error('Unknown skill: '+skill);
-  if (spec.tools!==undefined && !Array.isArray(spec.tools)) throw Error('Agent tools must be a list of server bindings.');
+  /* The same rule `agentic.upsert_agent` applies, from the same function, so a
+     proposal this screen accepts is not one the database then refuses. It used
+     to accept a bare server name here and in agent-authoring, which the
+     database has never accepted. */
+  checkToolBindings(spec.tools);
   for (const binding of spec.tools || []) {
-    const name=typeof binding==='string'?binding:binding?.server;
+    const name=binding.server;
     const server=catalogue.tools.find(t=>t.name===name);
     if (!server) throw Error('Unknown tool server: '+name);
-    if (typeof binding!=='string') {
-      if (!strings(binding.tools) || Object.keys(binding).some(k=>!['server','tools'].includes(k))) throw Error('A tool binding needs server and tools.');
+    if (binding.tools) {
       const known=(server.cached_tools || []).map(t=>t.name || t.function?.name);
       for (const tool of binding.tools) if (!known.includes(tool)) throw Error('Unknown tool: '+name+'/'+tool);
     }
