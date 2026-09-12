@@ -3,7 +3,7 @@
 -- Both steps are in-database kinds, so the run finishes before
 -- start_workflow returns. There is no queue to poll and no process to deploy.
 set local role app_owner;
-set local request.jwt.claims = '{"orgs":["d0000000-0000-0000-0000-00000000000a"]}';
+set local request.jwt.claims = '{"sub":"80000000-0000-0000-0000-000000000001","orgs":["d0000000-0000-0000-0000-00000000000a"]}';
 
 select workflow.define_yaml($$
 name: fleet_brief

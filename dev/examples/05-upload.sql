@@ -4,7 +4,7 @@
 -- what they say. Neither needs the bytes in Postgres -- the file lives in
 -- object storage and the row carries the bucket and key.
 set local role authenticated;
-set local request.jwt.claims = '{"orgs":["d0000000-0000-0000-0000-00000000000a"]}';
+set local request.jwt.claims = '{"sub":"80000000-0000-0000-0000-000000000001","orgs":["d0000000-0000-0000-0000-00000000000a"]}';
 
 select content.register_upload(
     p_channel      => 'harbour-reports',

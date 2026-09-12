@@ -4,7 +4,7 @@
 -- spelling. LOOKUP searches KEYS, so it answers from the node registry rather
 -- than from any of the four typed tables the keys came from.
 set local role authenticated;
-set local request.jwt.claims = '{"orgs":["d0000000-0000-0000-0000-00000000000a"]}';
+set local request.jwt.claims = '{"sub":"80000000-0000-0000-0000-000000000001","orgs":["d0000000-0000-0000-0000-00000000000a"]}';
 
 \echo '-- exact, and it misses:'
 select coalesce(jsonb_array_length(aiq.query('LOOKUP "meridien dawn"')->'rows'),0) as rows_returned;

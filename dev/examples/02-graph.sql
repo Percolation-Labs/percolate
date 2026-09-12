@@ -5,7 +5,7 @@
 -- route is -- the subsidiary claim is 0.95, not 1.0, because it came from a
 -- registry rather than a filing.
 set local role authenticated;
-set local request.jwt.claims = '{"orgs":["d0000000-0000-0000-0000-00000000000a"]}';
+set local request.jwt.claims = '{"sub":"80000000-0000-0000-0000-000000000001","orgs":["d0000000-0000-0000-0000-00000000000a"]}';
 
 select r->>'depth' as depth, r->>'entity_type' as type, r->>'summary' as summary,
        r->>'path_relations' as path, round((r->>'path_weight')::numeric,2) as weight
