@@ -114,31 +114,40 @@ banner() {
         echo "under test: this build records no provenance (percolate_build is empty)"
     fi
 
-    # THE TWO HALVES, BY VERSION, and the note when they disagree.
-    #
-    # percolate_build can be empty, and on the published image it carries no
-    # parser row at all -- so the banner above can be silent about the one
-    # drift that makes a traversal assertion fail for a reason that is not a
-    # defect. The extension versions are always there.
-    #
-    # This note lives HERE, once. It was three copies of a paragraph attached
-    # to three RAISEs in query/11 and query/15, which is the shape this
-    # collection keeps writing postmortems about: the next edit fixes the copy
-    # somebody happened to hit. The long-form explanation of WHY the halves
-    # drift is query/11's preamble, also once.
+    halves_note
+}
+
+# THE TWO HALVES, BY VERSION, and the note when they disagree.
+#
+# percolate_build can be empty, and on the published image it carries no parser
+# row at all -- so the banner can be silent about the one drift that makes a
+# traversal assertion fail for a reason that is not a defect. The extension
+# versions are always there.
+#
+# ONE HOME, TWO CALL SITES, and the second one is the whole point. The banner
+# prints at the top of a run, and `dev/check.sh` shows a failing gate as two
+# lines before each failure, six after, and the last twelve of the log --
+# so a note hundreds of lines above the first failure reaches CI not at all.
+# Measured on run 34661284744, which carried no version line anywhere. The
+# footer lands inside that `tail -12`, which is the surface where main's red
+# is actually read; the banner stays because a direct run reads from the top.
+#
+# The long-form explanation of WHY the halves drift is query/11's preamble,
+# also once.
+halves_note() {
     local vers
     vers=$(db_query "select string_agg(extname || ' ' || extversion, ', ' order by extname)
                        from pg_catalog.pg_extension
                       where extname in ('percolate', 'percolate_parser')")
-    [ -n "$vers" ] && echo "  $vers"
-    if [ -n "$vers" ] && ! db_query "select (select extversion from pg_catalog.pg_extension where extname='percolate')
-                                          = (select extversion from pg_catalog.pg_extension where extname='percolate_parser')" \
-         | grep -q '^t$'; then
-        echo "  these two disagree: the compiled half and the extension SQL ship as"
-        echo "  separate files and drift apart independently, so a traversal assertion"
-        echo "  may fail because the .so predates the schema rather than because the"
-        echo "  graph is wrong. dev/build-image.sh rebuilds it; a parser release clears it."
-    fi
+    [ -n "$vers" ] || return 0
+    echo "  $vers"
+    db_query "select (select extversion from pg_catalog.pg_extension where extname='percolate')
+                   = (select extversion from pg_catalog.pg_extension where extname='percolate_parser')" \
+      | grep -q '^t$' && return 0
+    echo "  these two disagree: the compiled half and the extension SQL ship as"
+    echo "  separate files and drift apart independently, so a traversal assertion"
+    echo "  may fail because the .so predates the schema rather than because the"
+    echo "  graph is wrong. dev/build-image.sh rebuilds it; a parser release clears it."
 }
 
 # One way to ask the database a scalar, whichever of the two connection modes
@@ -202,6 +211,9 @@ if [ "$skipped" -ne 0 ]; then
     echo "  (REQUIRE_ALL=1 makes this a failure -- dev/check.sh sets it where the database has pg_cron)"
 fi
 if [ "$failed" -ne 0 ]; then
+    # Repeated here rather than only in the banner: see halves_note's header.
+    # A reader of CI sees the last twelve lines of this log and nothing above.
+    halves_note
     echo "FAILED -- a guarantee the specs make is no longer held."
     exit 1
 fi
