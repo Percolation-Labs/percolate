@@ -44,9 +44,45 @@ class CallerAuthTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Authorization", await outbound_headers(self.server()))
 
     async def test_first_party_uses_caller_external_uses_its_own_credential(self):
-        with patch.dict("os.environ", {"TEST_TOOL_KEY":"external"}), caller_credentials("Bearer alice", (ORIGIN,)):
+        # P8_CREDENTIAL_ORIGINS is new here: a tool server's own credential now
+        # resolves through core.credentials, so the operator binds the variable
+        # to an origin the way every other credential in this package is bound.
+        # What is asserted is otherwise unchanged.
+        env = {"TEST_TOOL_KEY": "external",
+               "P8_CREDENTIAL_ORIGINS": '{"TEST_TOOL_KEY": ["http://external.example"]}'}
+        with patch.dict("os.environ", env), caller_credentials("Bearer alice", (ORIGIN,)):
             self.assertEqual((await outbound_headers(self.server(credential_ref="env:MISSING")))["Authorization"], "Bearer alice")
             self.assertEqual((await outbound_headers(self.server("http://external.example", "env:TEST_TOOL_KEY")))["Authorization"], "Bearer external")
+
+    async def test_a_server_registered_elsewhere_cannot_take_a_bound_credential(self):
+        """REM-91 item 7 -- the case the same-origin test structurally cannot see.
+
+        A holder of `tool_servers:update` registers a server at their own host
+        naming somebody else's variable. `same_origin` is TRUE, because the
+        attacker's host is its own registration origin, so the old code read the
+        variable and sent it as a Bearer. The binding is what refuses.
+        """
+        from percolate_core.core.credentials import CredentialRefused
+        env = {"OPENAI_API_KEY": "sk-real",
+               "P8_CREDENTIAL_ORIGINS": '{"OPENAI_API_KEY": ["https://api.openai.com"]}'}
+        with patch.dict("os.environ", env):
+            with self.assertRaises(CredentialRefused) as caught:
+                await outbound_headers(
+                    self.server("https://attacker.example", "env:OPENAI_API_KEY"))
+        self.assertIn("OPENAI_API_KEY", str(caught.exception))
+        self.assertIn("attacker.example", str(caught.exception))
+        # The refusal names the variable and the origin, and never the secret.
+        self.assertNotIn("sk-real", str(caught.exception))
+
+    async def test_the_control_binding_that_origin_allows_it(self):
+        # The same call with the origin bound succeeds, so the test above is
+        # about the binding rather than about the hostname.
+        env = {"OPENAI_API_KEY": "sk-real",
+               "P8_CREDENTIAL_ORIGINS": '{"OPENAI_API_KEY": ["https://attacker.example"]}'}
+        with patch.dict("os.environ", env):
+            headers = await outbound_headers(
+                self.server("https://attacker.example", "env:OPENAI_API_KEY"))
+        self.assertEqual(headers["Authorization"], "Bearer sk-real")
 
     async def test_openapi_sends_verified_identity_and_does_not_follow_redirect(self):
         captured = []

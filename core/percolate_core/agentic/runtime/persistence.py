@@ -19,6 +19,25 @@ from ..db import Repository
 from ..settings import Settings
 
 
+# THE DELIMITER HAS ONE HOME, because the test asserts it and a test agreeing
+# with its own copy of a string is a test that passes while the code drifts --
+# the axis this collection spent a whole postmortem on
+# (2026-09-11-fixed-at-the-copy-that-failed.md).
+SUMMARY_OPEN = "<conversation-summary>"
+SUMMARY_CLOSE = "</conversation-summary>"
+
+
+def frame_summary(content: str | None) -> str:
+    """Wrap a summary in the marker that says it is background, not instruction.
+
+    A summary is replayed as USER text (see ``to_model_messages``), and an
+    undelimited user part is indistinguishable from something the user actually
+    said -- a different confusion with the same root as replaying it as a
+    system part.
+    """
+    return f"{SUMMARY_OPEN}\n{content or ''}\n{SUMMARY_CLOSE}"
+
+
 class PersistenceAdapter:
     """Reads and writes the conversation plane. Owns the context policy."""
 
@@ -99,8 +118,12 @@ class PersistenceAdapter:
         be persisted, which would make the two granularities semantically
         different rather than just structurally different (``brief.md`` §2).
 
-        A ``role='summary'`` row maps to a system-role message, not a user one —
-        it is context about the conversation, not a turn in it.
+        A ``role='summary'`` row maps to a **user**-role message inside an
+        explicit ``<conversation-summary>`` delimiter, not a system one. It is
+        derived text: the summarizer is an ordinary agent run over the window,
+        so a summary of untrusted content is still untrusted content and must
+        not acquire authority by being summarised (``specs/agentic/brief.md``,
+        "What a summary is allowed to do to the next turn").
 
         A delegation round-trips as a real ``ToolCallPart``/``ToolReturnPart``
         pair, never as prose: a delegated turn the model sees as "text
@@ -130,8 +153,25 @@ class PersistenceAdapter:
                 # skips them.
                 continue
             if message.role == "summary":
+                # A SUMMARY IS DERIVED TEXT AND CARRIES NO MORE AUTHORITY THAN
+                # THE WINDOW IT REPLACED. It used to be replayed as a
+                # ``SystemPromptPart``, on the reasonable-sounding argument that
+                # a summary should carry the weight of what it stands in for.
+                # It should not, and the reason is what produces it: the
+                # summarizer is an ordinary agent run over the conversation
+                # window, so anything an attacker put in a retrieved chunk, a
+                # tool result or a delegated answer got restated by us and then
+                # replayed with SYSTEM authority on every later turn --
+                # outliving the window that would otherwise have aged it out.
+                # OWASP ASI06, with the poisoning step performed by our own
+                # summarizer. specs/agentic/brief.md has the decision.
+                #
+                # So: a user part, inside an explicit delimiter. The delimiter
+                # is not decoration -- without it the model cannot tell the
+                # summary from something the user said, which is a different
+                # confusion with the same cause.
                 history.append(
-                    ModelRequest(parts=[SystemPromptPart(content=message.content or "")])
+                    ModelRequest(parts=[UserPromptPart(content=frame_summary(message.content))])
                 )
             elif message.role == "user":
                 history.append(

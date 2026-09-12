@@ -33,8 +33,29 @@ def render_context_block(context: RequestContext) -> str:
     if context.tenant:
         lines.append(f"tenant: {context.tenant}")
     for key, value in sorted(context.extra.items()):
-        lines.append(f"{key}: {value}")
+        lines.append(f"{_one_line(key)}: {_one_line(value)}")
     return "\n".join(lines)
+
+
+def _one_line(value: object) -> str:
+    """A context value is one line of text and cannot be anything else.
+
+    ``context.extra`` is every unrecognised ``x-p8-*`` REQUEST HEADER
+    (``contracts/context.py``), so its contents are chosen by whoever made the
+    call -- a browser page on a CORS-allowed origin, or anything between. They
+    were rendered straight into the block below, whose only delimiter is the
+    ``<context>`` tag ``build_instructions`` wraps it in.
+
+    Two things that buys an attacker, and both are closed here rather than by
+    hoping the model notices: a newline invents further ``key: value`` lines
+    that read exactly like context the runtime supplied, and a literal
+    ``</context>`` ends the block early so everything after it is no longer
+    labelled as data at all. Whitespace collapses to single spaces and angle
+    brackets are escaped; the current_time/locale/tenant lines above are the
+    runtime's own and are left alone.
+    """
+    return (" ".join(str(value).split())
+            .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
 
 def build_instructions(agent: AgentSpec, context: RequestContext) -> str:

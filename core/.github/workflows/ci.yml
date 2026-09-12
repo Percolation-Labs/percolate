@@ -97,6 +97,42 @@ jobs:
             python -m unittest discover -s tests -p "$t" || exit 1
           done
 
+      # A summary is derived text and carries no more authority than the window
+      # it replaced (REM-94). It was replayed as a SystemPromptPart, so anything
+      # an attacker put in a retrieved chunk was restated by our own summarizer
+      # and replayed with system authority on every later turn. Two of the four
+      # cases here are controls -- the summary's text must still reach the
+      # model, and a configured `role='system'` message must KEEP its authority
+      # -- so the property cannot be satisfied by dropping summaries or by
+      # demoting everything.
+      - name: Derived text carries no authority it did not arrive with
+        run: python -m unittest discover -s tests -p test_summary_authority.py
+      # REM-91 items 4, 5 and 8, from the 2026-09-12 security audit. Three
+      # unrelated mechanisms with one shape -- a value from outside used
+      # somewhere that decides authority rather than content. A missing
+      # P8_JWT_SECRET was an identity; a model-chosen path parameter left its
+      # bound operation, past an origin check that urljoin had already
+      # normalised the traversal out of; an uploaded file was served inline on
+      # the file API's own origin.
+      #
+      # Named here because this job ENUMERATES files rather than discovering
+      # them, so a test nobody adds to this list is a test nobody runs. That was
+      # true of five files in this directory when the audit looked, which is why
+      # the line above this one exists too.
+      - name: Untrusted input cannot widen what a caller may do
+        run: python -m unittest discover -s tests -p test_untrusted_input_cannot_widen.py
+
+      # REM-91 item 6, the third leg of the same audit. A step's url is resolved
+      # from {{run.*}} and {{steps.*}}, so on the ingestion path it can carry
+      # text out of an uploaded document -- and the worker that fetches it sits
+      # beside Postgres, MinIO and PostgREST with P8_S3_KEY in its environment.
+      # credential_for binds where a NAMED secret may go and TEMPLATE_ENV stops
+      # {{env.X}} putting one in a body; neither says anything about an
+      # unauthenticated GET to a service that answers because the caller is on
+      # its network.
+      - name: The worker cannot be pointed back at its own network
+        run: python -m unittest discover -s tests -p test_worker_egress.py
+
       # content.api_source in the extension is the one home of an API source's
       # defaults and choices (REM-61); APIConfig and the UI's API_DEFAULTS are
       # copies, and a copy that drifts saves a different source.
