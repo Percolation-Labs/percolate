@@ -85,10 +85,10 @@ jobs:
     permissions:
       contents: write        # commit the bump, push the tag
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: {fetch-depth: 0}
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with: {python-version: "3.12"}
 
       # build-sql.py compiles specs/contract/types/*.yaml into the percolate.types

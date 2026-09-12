@@ -58,14 +58,14 @@ jobs:
   tree:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Tags, and the history between them: "is HEAD past the tag for this
           # version" is a question a shallow clone cannot answer, and a check
           # that silently cannot run is the failure this repository keeps
           # finding in other shapes.
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       # build-sql.py compiles specs/contract/types/*.yaml. A BUILD-time
@@ -97,10 +97,10 @@ jobs:
   parser:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Cache the crate build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: extension/percolate_parser/target-ci
           key: parser-package-${{ hashFiles('dev/Dockerfile.pgrx-builder', 'extension/percolate_parser/Cargo.lock') }}
@@ -111,7 +111,7 @@ jobs:
       # red test rather than as a cache miss.
       - name: Cache the pgrx toolchain image
         id: toolchain
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /tmp/pgrx-builder.tar
           key: pgrx-builder-image-${{ hashFiles('dev/Dockerfile.pgrx-builder') }}
@@ -155,7 +155,7 @@ jobs:
           ls -l parser-dist
           grep default_version parser-dist/percolate_parser.control
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: parser-dist
           path: parser-dist/
@@ -168,12 +168,12 @@ jobs:
       DB: p8ci
     needs: parser
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # The upgrade gate resolves the release it upgrades FROM by reading
           # tags, and ci-database.sh picks its image the same way.
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - run: pip install --quiet pyyaml
@@ -188,7 +188,7 @@ jobs:
       # The image still supplies everything else, so this remains the seconds-
       # long job its header describes; the minutes are the `parser` job's, in
       # parallel with `tree`, on a cache parser-tests.yml already warms.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: parser-dist
           path: parser-dist
@@ -251,14 +251,14 @@ jobs:
       CONTAINER: p8-sm
       DB: p8sm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # THE HISTORY, not a snapshot of it. ingest.py, symbol_touch.py and
           # metrics.sql all read git -- commits, per-file revisions, evolutionary
           # coupling -- so a shallow clone would load the self-model of a
           # repository with one commit in it and report success.
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - run: pip install --quiet pyyaml

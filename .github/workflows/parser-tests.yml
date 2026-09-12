@@ -67,7 +67,7 @@ jobs:
   cargo-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Keyed on what actually invalidates it: the builder's Dockerfile and the
       # lockfile. Same reasoning parser.yml's cache header gives, and
@@ -75,7 +75,7 @@ jobs:
       # every time, so a key derived from it would change every release by
       # construction and the cache would never hit.
       - name: Cache the crate build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: extension/percolate_parser/target-test
           key: parser-tests-${{ hashFiles('dev/Dockerfile.pgrx-builder', 'extension/percolate_parser/Cargo.lock') }}
@@ -112,7 +112,7 @@ jobs:
       # cache miss.
       - name: Cache the pgrx toolchain image
         id: toolchain
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /tmp/pgrx-builder.tar
           key: pgrx-builder-image-${{ hashFiles('dev/Dockerfile.pgrx-builder') }}
