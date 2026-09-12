@@ -26,16 +26,21 @@ silently.
 | Version | Tag | Commit | GitHub Release |
 | -- | -- | -- | -- |
 | 0.1.0 – 0.1.3 | none | — | none |
-| 0.1.4 | `v0.1.4` | `db0a944` | none |
-| 0.1.5 | `v0.1.5` | `6669bc4` | none |
+| 0.1.4 | `v0.1.4` | `db0a944` | yes (backfilled) |
+| 0.1.5 | `v0.1.5` | `6669bc4` | yes (backfilled) |
 | 0.1.6 | `v0.1.6` | `d8ae150` | yes |
 | 0.1.7 | `v0.1.7` | `939a5be` | yes |
 | 0.1.8 | `v0.1.8` → `8c03d2a` | **`91ef61b`** | yes |
 
 0.1.0–0.1.3 went to PyPI before releasing was a workflow. There is nothing to
-recover: the wheels are on PyPI and no tag was ever pushed. 0.1.4 and 0.1.5 are
-tagged correctly and simply have no Release page; the tag is what a reproduction
-needs, so this is recorded rather than backfilled.
+recover: the wheels are on PyPI and no tag was ever pushed, and no Release page
+can be created for a tag that does not exist.
+
+0.1.4 and 0.1.5 were tagged correctly and had no Release page; both were created
+on 2026-09-12 and say so in their own text, so nobody reads a 2026-09-12
+timestamp as the date the software shipped. 0.1.5 has no code change in it at
+all — `git diff v0.1.4 v0.1.5` is the two version strings — which its page
+records rather than dresses up.
 
 ## `v0.1.8` is off by one, and is not being moved
 
