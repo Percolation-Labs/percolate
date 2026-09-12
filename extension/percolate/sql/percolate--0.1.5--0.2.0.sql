@@ -1071,6 +1071,22 @@ create table if not exists workflow.queue_config (
     rate_lookahead int not null default 20
 );
 
+-- AND ON A DATABASE THAT ALREADY HAS THE TABLE, which is every deployment.
+-- `create table if not exists` is a no-op there, so the default above would
+-- have reached fresh installs only and an upgraded database would have kept
+-- `'00:02:00'::interval` -- a fifth copy of the number, created by the commit
+-- that removed the other four, living exactly where nobody would look for it.
+-- Same shape as `rbac.users`' `alter column status set default` in user-rbac §1,
+-- and as REM-68, which is open about this class. Idempotent, so it costs
+-- nothing on the install that just created the column this way.
+--
+-- Caught by `dev/upgrade-converges.sh`, which is the only gate that compares an
+-- upgraded database against a fresh one object by object, and which reported
+-- exactly this one line: `def=workflow.stale_timeout_default()` against
+-- `def='00:02:00'::interval`.
+alter table workflow.queue_config
+    alter column stale_timeout set default workflow.stale_timeout_default();
+
 -- What a worker on this queue is actually bound by, so it can pick a heartbeat
 -- interval from the database rather than from a constant that has to be kept
 -- in step with one. A queue with no row is the common case and is not an
