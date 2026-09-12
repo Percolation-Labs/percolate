@@ -57,10 +57,18 @@ create or replace view workflow.runs_api as
 -- every upgrading database hits. Found by dev/upgrade-converges.sh, which is
 -- the only check that applies this file to a database that already has the
 -- old view.
-  select id, workflow_def_id, owner_id, status, compensation_state,
-         external_id, input, context, trace_id, created_at, updated_at, completed_at,
-         org_id, visibility
-  from workflow.runs;
+  select r.id, r.workflow_def_id, r.owner_id, r.status, r.compensation_state,
+         r.external_id, r.input, r.context, r.trace_id, r.created_at, r.updated_at, r.completed_at,
+         r.org_id, r.visibility,
+         -- `name` is here because every screen that LABELS a run had to fetch
+         -- the definitions table and join it in JavaScript -- three reads for
+         -- one column, and a client-side join is a number no test can check
+         -- (browser-ui.md §3). A run without a readable definition still gets a
+         -- row: the left join yields null, which the screen renders as the id,
+         -- rather than dropping the run from the list.
+         d.name
+  from workflow.runs r
+  left join workflow.definitions d on d.id = r.workflow_def_id;
 create or replace view workflow.tasks_api as
   select id, run_id, step_key, kind, queue, status, attempts, max_attempts,
          priority, run_after, output, error, span_id, parent_span_id,
@@ -146,7 +154,13 @@ select d.id,
           from jsonb_array_elements(d.spec -> 'steps') s) as step_kinds,
        (select array_agg(distinct s ->> 'queue')
           from jsonb_array_elements(d.spec -> 'steps') s
-         where s ? 'queue')                              as queues
+         where s ? 'queue')                              as queues,
+       -- "is this the version a new run would use", answered here rather than
+       -- by the screen sorting versions in JavaScript. Same reason as
+       -- `runs_api.name`: a Start control that is enabled by a client-side
+       -- max() is enabled by something no test executes.
+       d.version = (select max(v.version) from workflow.definitions v
+                     where v.name = d.name and v.deleted_at is null) as is_latest
   from workflow.definitions d
  where d.deleted_at is null;
 
@@ -234,6 +248,24 @@ select q.queue,
        q.rate_lookahead,
        workflow.queue_depth(q.queue) as depth
   from workflow.queue_config q;
+
+-- WHY THERE IS NO `pool` COLUMN HERE, though the Queues screen joins queue
+-- depth to pool bindings in the browser and REM-62 asked for one.
+--
+-- `workflow.pool_queues` lives in `pools.sql`, which is NOT shipped with the
+-- extension -- `reads.js` marks three Queues contracts `absent:` for exactly
+-- that reason, and this database is one where the table does not exist. A
+-- scalar subquery does not help: the relation has to exist when the view is
+-- created, so adding the column here makes this file fail to apply on every
+-- deployment without pools.
+--
+-- The alternative is for `pools.sql` to re-create this view with the column
+-- appended, which is legal. It is also worse: `queues_api` would then have a
+-- different column list on different deployments, and a screen projecting
+-- `pool` would 400 on the ones without it -- which is precisely the failure
+-- `1919bb7` fixed and the Surface audit exists to catch. A client-side join
+-- over two reads that both declare their absence is the honest shape here.
+  
 
 -- ------------------------------------------------------------
 -- 6. Rate limits, MINUS the ones that are personal data.
