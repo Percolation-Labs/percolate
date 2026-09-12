@@ -19556,6 +19556,55 @@ declare
 begin
     perform content.assert_org_write(p_org_id, 'register content');
 
+    -- AND resources:create, WHEN THERE IS SOMEBODY TO ASK IT OF. This function
+    -- asked only the org, so a signed-in caller without `resources:create`
+    -- could add a resource to a channel through the fetch path that the upload
+    -- path refuses -- the two entry points write the same table and differ only
+    -- in whether bytes came with it. Found by declaring every reachable definer
+    -- in dev/tests/rbac/14 (REM-76), where it stood as a stated gap.
+    --
+    -- content.may_upload IS THE PERMISSION HALF, not a second copy of it:
+    -- `resources:create` is asked in exactly one place in this collection
+    -- (may_upload, forty lines above), which is what stops the two register_*
+    -- functions drifting apart again.
+    --
+    -- THE LEADING OPERATOR ARM IS NOT DECORATION: bare may_upload() here
+    -- would be an outage rather than a check. may_upload's own operator arm
+    -- reads `has_table_privilege(session_user, 'content.resources', 'insert')`
+    -- -- SESSION_USER, the login, not the definer -- and the caller this
+    -- function actually has is a REGISTERED STEP FUNCTION:
+    -- selfmodel.ingest_prose, reached through workflow.call_step_function,
+    -- which is definer-owned by app_owner but runs on the `worker` login and
+    -- sets no claims at all. Measured in that exact shape (a definer function
+    -- owned by app_owner, invoked by the worker login):
+    --
+    --     session_user=worker | is_operator=t | login_can_insert=f | may_upload=f
+    --
+    -- So may_upload alone refuses the only caller in the tree. rbac.is_operator()
+    -- is the collection's one spelling of "there is no person behind this call",
+    -- and since user-rbac/roles.sql §6 took set_config away from PUBLIC a
+    -- signed-in caller cannot clear their own claims to reach it. This arm
+    -- therefore changes nothing for a claimless writer -- an install, a seed,
+    -- a step function -- which is precisely the set assert_org_write already
+    -- admits one line above, and adds the permission for every caller that
+    -- carries claims. `api_viewer` is a DIRECT member of `authenticated`
+    -- (verified), so the execute_as_viewer path is a person here, not an
+    -- operator, and is asked for the permission like any other.
+    --
+    -- WHAT THIS DOES NOT DO, because sources.md §21 rests on the distinction:
+    -- it does not make a scheduled fetch carry its SOURCE OWNER's authority.
+    -- It cannot from here. call_step_function never sets the run owner's
+    -- claims, so a scheduled pull is an operator, not a person -- unlike
+    -- content.lake_resolve and content.source_passages in this same subsystem,
+    -- which do set `{"sub": <run owner>}` for the call. Closing that is the
+    -- workflow engine's to close, and is recorded on REM-76 rather than
+    -- half-done here.
+    if not (rbac.is_operator() or content.may_upload(p_org_id)) then
+        raise exception 'not authorized to register fetched content'
+            using errcode = 'insufficient_privilege',
+                  hint = 'needs resources:create';
+    end if;
+
     select id into v_channel from content.channels
     where name = p_channel
       and enabled and rbac.may_read(owner_id, org_id, visibility)
