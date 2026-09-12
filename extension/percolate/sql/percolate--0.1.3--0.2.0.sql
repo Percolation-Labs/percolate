@@ -11161,8 +11161,14 @@ create or replace view rbac.users_api as
 
 -- Orgs with the number of people in them. The Settings screen was counting
 -- `org_members` rows client-side per org, which is a group-by in a browser.
+--
+-- EVERY COLUMN OF `rbac.orgs`, not the three the screen happens to draw. A view
+-- named `<table>_api` is the read surface for that table, and `surface.sql`
+-- enforces it: a column that is in neither the view nor `api_exclusions` is
+-- silently unreachable, which is the state that check exists to end. It caught
+-- this one -- `created_at` and `updated_at` were missing from the first version.
 create or replace view rbac.orgs_api as
-  select o.id, o.slug, o.name,
+  select o.id, o.slug, o.name, o.created_at, o.updated_at,
          (select count(*) from rbac.org_members m where m.org_id = o.id) as member_count
     from rbac.orgs o;
 create or replace view rbac.refresh_tokens_api as
