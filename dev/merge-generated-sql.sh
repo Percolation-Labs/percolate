@@ -42,6 +42,23 @@
 # IT DOES NOT PAPER OVER DRIFT. `build-sql.py --check` still compares the
 # committed artifact against specs/ in the tree. This makes them agree after a
 # merge by regenerating, which is the only state in which they should agree.
+#
+# AND IT ONLY FIRES ON A CONFLICT, which is the honest limit of the approach and
+# was found by using it. A merge driver is invoked for a path git could not
+# resolve by itself; when the generated files merge CLEANLY -- both sides
+# touched different regions -- the driver never runs, and the textually-merged
+# artifact can still disagree with the merged specs. `build-sql.py --check`
+# catches it, correctly, and the author still regenerates by hand.
+#
+# Measured on this branch: merging an origin/main that had moved produced exit
+# 0 and zero conflicts, and then the tree gate went red on `The generated SQL
+# matches the specs it came from`. So this removes the hand-resolution of
+# conflicts and does not remove the regenerate-after-merge step. That is still
+# the larger half of the cost gone -- resolving eight files is the part nobody
+# can do usefully; running one command is the part anybody can -- but the
+# ticket's framing of "merge without hand-resolving" is only true of the
+# conflict case, and a `post-merge` hook would be the shape that closes the
+# rest.
 set -euo pipefail
 
 CURRENT="$1"   # %A -- our version, and the file git expects the result in

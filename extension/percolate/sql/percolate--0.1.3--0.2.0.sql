@@ -340,6 +340,33 @@ returns void language sql volatile as $fn$
            built_at = excluded.built_at;
 $fn$;
 
+-- WHOEVER BUILDS THE IMAGE, AND NOBODY ELSE. Its two callers are
+-- dev/build-image.sh and get-percolate's image-postgres.yml, both running as
+-- the superuser at build time, so revoking from PUBLIC needs no grant to put
+-- back.
+--
+-- It needs saying here rather than being left to identity/closing.sql, which
+-- cannot see it: this function is created BEFORE the `alter default privileges`
+-- in identity/schema.sql, and it lives in `public`, which is not one of
+-- percolate.extension_schemas(). So it kept the PUBLIC default it was born
+-- with, and `web_anon` could rewrite the table that answers which commit is
+-- running -- the signal REM-79 is about, and the one whose absence the header
+-- above says cost a day.
+--
+-- The READ stays everybody's, deliberately: percolate_build() and the table's
+-- `grant select ... to public` above are the point of putting this in `public`
+-- at all. A caller who cannot log in should still be able to ask what version
+-- they are talking to. Writing is the half that is not a question.
+--
+-- Measured on a clean 0.2.0 install: this is the only function either percolate
+-- extension ships into `public` that WRITES and carries EXECUTE for PUBLIC. The
+-- parser's p8_* and aiq_parse are pure text-to-jsonb and public on purpose; the
+-- p8_graph_* algorithms are already revoked. One instance is history, so this
+-- fixes the instance -- teaching closing.sql to follow pg_depend into `public`
+-- is the gate, and it is not owed until there is a second.
+revoke execute on function public.percolate_record_build(
+    text, text, text, timestamptz) from public;
+
 -- The one-line answer. Reports every component and says plainly whether they
 -- came from the same commit, because "the halves disagree" is the condition
 -- worth naming and the one a human would otherwise have to eyeball.
@@ -8836,9 +8863,20 @@ grant execute on function workflow.plan_graph(text, int) to authenticated;
 grant execute on function workflow.plan_document(text, int) to authenticated;
 grant execute on function workflow.plan_defects(text) to authenticated;
 grant execute on function workflow.plan_probe(text, int) to authenticated;
--- plan_status reads workflow.tasks, which is RLS-enabled and per-tenant, and
--- this function is SECURITY INVOKER (the default) precisely so that stays true:
--- a caller sees the runs their policies admit, and nothing else.
+-- plan_status is the one of the six that reads RUN ROWS rather than
+-- definitions, and the body above reads workflow.runs/workflow.tasks with the
+-- engine's own reach -- which standalone is the only reach there is.
+--
+-- THIS COMMENT USED TO SAY the function was SECURITY INVOKER "precisely so
+-- that stays true: a caller sees the runs their policies admit, and nothing
+-- else". The policies never got to run. With the identity plane installed
+-- `authenticated` holds no SELECT on either base table, so the grant check
+-- refused first and every call raised `permission denied for table tasks` --
+-- a capability granted to every signed-in caller that none of them could use.
+-- The sentence described a design that was never reached, which is why reading
+-- it did not reveal the defect (REM-81). integration-rbac.sql §(h) shadows
+-- this with a body over runs_api/tasks_api; the grant below is what that
+-- version re-authorizes, since `create or replace function` keeps the ACL.
 grant execute on function workflow.plan_status(text, uuid) to authenticated;
 
 comment on function workflow.plan_document(text, int) is
@@ -12594,6 +12632,162 @@ end;
 $$ language plpgsql stable security definer set search_path = pg_catalog, public;
 revoke all on function workflow.task_owner(uuid, text) from public;
 grant execute on function workflow.task_owner(uuid, text) to worker;
+
+-- ============================================================
+-- (h) READING A PLAN'S PROGRESS, FOR THE ROLE IT IS GRANTED TO
+-- ============================================================
+--
+-- workflow.plan_status is granted to `authenticated` in schema.sql and, until
+-- this shadow, could not be called by any member of that role. Measured, on
+-- extension 0.2.0:
+--
+--     => begin; set local role authenticated;
+--     => select * from workflow.plan_status('ingest_file', null) limit 1;
+--     ERROR:  permission denied for table tasks
+--
+-- Not a leak -- the opposite. A capability offered to every signed-in caller
+-- that none of them can use, failing with the name of a table they have never
+-- heard of. Its five siblings -- plan_catalog, plan_graph, plan_document,
+-- plan_defects, plan_probe -- share the grant line and read only
+-- workflow.definitions, which `authenticated` may select, so they work.
+-- plan_status is the one that reads run rows.
+--
+-- The standalone body's comment gave the reason as RLS: "this function is
+-- SECURITY INVOKER precisely so that stays true -- a caller sees the runs
+-- their policies admit". The policies never got to run. `authenticated` holds
+-- no SELECT on workflow.runs or workflow.tasks at all (§(a) above: "No
+-- base-table grant to authenticated at all"), so the grant check refused
+-- before RLS was consulted. The sentence described a design that was never
+-- reached, which is why reading it did not reveal the defect.
+--
+-- THE PREDICATE IS may_access_run, WHICH THIS FILE ALREADY OWNS. cancel_run,
+-- signal_task and reusable_run all ask the same question of a caller-supplied
+-- run, and REM-77 extracted it so there would be one copy. A second spelling
+-- here is how `resolve_file` came to ask the row while four siblings asked the
+-- org (meta/postmortems/2026-09-11-fixed-at-the-copy-that-failed.md §6).
+--
+-- READING runs_api/tasks_api INSTEAD WAS TRIED AND IS WRONG, and the measurement
+-- is the reason rather than a preference. Those views are owned by api_viewer
+-- so RLS applies to them -- which is what makes them safe for `authenticated`
+-- and also what makes them empty for an operator: `app_owner` with no JWT has
+-- no current_user_id, so the run policy admits nothing and plan_status returns
+-- zero rows to the caller who has always used it. dev/tests/workflow/11 §10
+-- caught exactly that ("plan_status did not report the row count: <NULL>").
+-- rbac.is_operator() is the collection's one spelling of "a direct session
+-- rather than a request", and reusable_run above carries the same leading arm
+-- for the same reason.
+--
+-- AND THE RUN-LESS FORM NOW MEANS *MY* NEWEST RUN. `plan_status(name)` with no
+-- run id resolves "the newest run of this workflow", and the newest run of an
+-- installation-wide definition belongs to whoever started it. Filtered through
+-- the predicate, the newest run the CALLER may see is the only one it can name
+-- -- which is what somebody asking "how far has my run got" means, and what the
+-- standalone body could not express because it had every run to choose from.
+-- An operator still gets the installation's newest, which is what a diagnostic
+-- is for.
+--
+-- A run id handed in goes through the same predicate rather than being trusted,
+-- so naming somebody else's run returns no rows instead of their steps.
+--
+-- Declared in build-sql.py's DECLARED_SHADOWS, like the eight before it.
+create or replace function workflow.plan_status(p_name text, p_run_id uuid default null)
+returns table (
+    step     text,
+    status   text,
+    attempts int,
+    took     interval,
+    returned jsonb
+)
+language sql
+stable
+security definer
+set search_path = pg_catalog, public
+as $$
+    with visible as (
+        select r.id, r.created_at, r.workflow_def_id
+          from workflow.runs r
+         where rbac.is_operator() or workflow.may_access_run(r.id, 'select')
+    ), r as (
+        -- Runs point at a DEFINITION ID, not at a name: publishing v2 does not
+        -- retarget a run that started under v1. So the newest run of "this
+        -- workflow" is the newest run of any of its versions, which is what
+        -- somebody asking about a name means.
+        select coalesce(
+            (select v.id from visible v where v.id = p_run_id),
+            (select v.id from visible v
+               join workflow.definitions d on d.id = v.workflow_def_id
+              where d.name = p_name
+              order by v.created_at desc limit 1)) as id
+    )
+    select t.step_key,
+           t.status,
+           t.attempts,
+           t.completed_at - t.claimed_at,
+           case jsonb_typeof(t.output->'result')
+                when 'array' then jsonb_build_object(
+                    'rows', jsonb_array_length(t.output->'result'),
+                    'of', case when jsonb_array_length(t.output->'result') = 0 then null
+                          else (select jsonb_object_agg(k, jsonb_typeof(v))
+                                  from jsonb_each(t.output#>'{result,0}') e(k, v)) end)
+                when 'object' then (select jsonb_object_agg(k, jsonb_typeof(v))
+                                      from jsonb_each(t.output->'result') e(k, v))
+                when 'null' then null
+                else to_jsonb(jsonb_typeof(t.output->'result'))
+           end
+      from workflow.tasks t, r
+     where t.run_id = r.id
+     order by t.created_at, t.step_key;
+$$;
+
+comment on function workflow.plan_status(text, uuid) is
+$c$What the last run of this workflow actually did, per step.
+Status, attempts, duration, and the SHAPE of what each step returned -- keys and
+their types, or a row count -- which is the thing a plan cannot know and the
+next step has to be written against. Scoped to the runs you may see: with no run
+id it answers about YOUR newest run of this workflow.$c$;
+
+-- ------------------------------------------------------------
+-- AND THE OTHER FIVE ARE NOT GRANTED TO `authenticated` AT ALL, because they
+-- cannot be honoured without publishing something §1 of this file refuses.
+--
+-- REM-81 was filed about plan_status alone, on the premise that its five
+-- siblings "read only workflow.definitions, which `authenticated` can read, so
+-- they work". Measured as `authenticated` on a live 0.2.0, all six refused:
+--
+--     plan_catalog  -> permission denied for table rate_limits
+--     plan_graph    -> permission denied for table definitions
+--     plan_document -> permission denied for table definitions
+--     plan_defects  -> permission denied for table definitions
+--     plan_probe    -> permission denied for table definitions
+--     plan_status   -> permission denied for table tasks
+--
+-- `authenticated` holds no SELECT on workflow.definitions. §1 above says why,
+-- and it is not an oversight to correct here: "definitions has no owner_id, no
+-- org_id and no RLS, so every authenticated caller in every tenant would read
+-- every workflow body." definitions_api exists precisely to publish the names
+-- and shapes WITHOUT `spec` -- and `spec` is the entire input to plan_graph,
+-- plan_document, plan_defects and plan_probe. There is no version of those
+-- four over the published view; expanding a plan IS reading the body.
+--
+-- So the choice these five make is the other one REM-81 offers: not granted,
+-- rather than granted and unusable. They stay operator diagnostics -- reachable
+-- by app_owner and by a direct session, which is who has been running them --
+-- and what would make them a tenant capability is workflow.definitions
+-- adopting scope (`rbac.add_scope_columns` + `add_scope_policy`, the primitive
+-- §1 already names), which is REM-42's work and REM-40's spec. Restoring the
+-- grant is one line on the day that lands.
+--
+-- A grant that always raises is worse than no grant: the caller is told about
+-- a table they have never heard of instead of being refused, and the surface
+-- audit counts the capability as present. dev/tests/workflow/11 §8 now asserts
+-- the rule this leaves behind -- every plan function granted to `authenticated`
+-- answers for it -- which is a gate rather than a list, and goes green on its
+-- own the day definitions adopts scope and the grants come back.
+revoke execute on function workflow.plan_catalog()        from authenticated;
+revoke execute on function workflow.plan_graph(text, int)    from authenticated;
+revoke execute on function workflow.plan_document(text, int) from authenticated;
+revoke execute on function workflow.plan_defects(text)       from authenticated;
+revoke execute on function workflow.plan_probe(text, int)    from authenticated;
 
 
 -- ============================================================
@@ -28419,12 +28613,23 @@ declare
         'aiq.space_populated(text,text)',
         'aiq.sql_passthrough(text)',            -- read-only by TRANSACTION, not by a parser
         'percolate.enums()',
-        'workflow.define_yaml(text)',
-        'workflow.plan_catalog()',
-        'workflow.plan_defects(text)',
-        'workflow.plan_document(text,integer)',
-        'workflow.plan_graph(text,integer)',
-        'workflow.plan_probe(text,integer)'     -- wrapped through one_write_statement
+        'workflow.define_yaml(text)'
+        -- THE FIVE PLAN FUNCTIONS WERE HERE AND ARE NOT REACHABLE ANY MORE.
+        -- plan_catalog, plan_defects, plan_document, plan_graph and plan_probe
+        -- were declared because they are granted to `authenticated` and build
+        -- SQL. REM-81 revoked those grants: all five expand a workflow's
+        -- `spec`, and integration-rbac.sql §1 refuses to publish `spec` to that
+        -- role -- definitions has no owner, no org and no RLS, which is why
+        -- definitions_api exists and omits it. They are operator diagnostics
+        -- until workflow.definitions adopts scope (REM-42).
+        --
+        -- Deleted rather than left: this list is of what a PERSON can reach,
+        -- and the block below refuses a name that is declared and no longer
+        -- reachable. That direction is what caught this -- the install failed
+        -- naming all five and telling me to delete the lines, which is the gate
+        -- doing exactly its job on somebody who had not read it.
+        --
+        -- When REM-42 lands and the grants come back, so do these five lines.
     ];
     v_new     text;
     v_gone    text;
