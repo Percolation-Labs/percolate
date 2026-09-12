@@ -274,4 +274,60 @@ begin
     end if;
     raise notice 'query/07: the read-only setting is unwound with the passthrough''s own subtransaction';
 end $$;
+
+-- ---------------------------------------------------------------------
+-- 4. THE ROW CAP REFUSES RATHER THAN TRUNCATING (REM-113).
+--
+-- The cap shipped in #93 with no assertion behind it, which is the one thing
+-- this file exists to prevent: every other boundary here is proved by an
+-- attempt that must fail, and read-only is not the same as bounded.
+--
+-- WHAT IS ACTUALLY UNDER TEST IS THE SHAPE OF THE FAILURE, not that a failure
+-- happens. A version that quietly returned the first N rows would also "bound
+-- the allocation" and would be the worse outcome -- the caller receives a
+-- well-formed answer to a question they did not ask and cannot tell. So the
+-- assertion below is that one row over the cap RAISES, and, just as
+-- importantly, that exactly AT the cap does not: an off-by-one here silently
+-- costs a caller their last row, which is the same class of lie one step
+-- smaller.
+--
+-- Verified to fail against the pre-#93 function with "a statement one row over
+-- the cap was accepted", so this is a check that can fail.
+-- ---------------------------------------------------------------------
+do $$
+declare
+    v_n int;
+begin
+    set local percolate.sql_passthrough_max_rows = 3;
+
+    v_n := jsonb_array_length(aiq.sql_passthrough('select g from generate_series(1,3) g'));
+    if v_n <> 3 then
+        raise exception
+            'a statement exactly at the cap returned % rows, not 3 -- the cap is '
+            'off by one and every caller silently loses their last row', v_n;
+    end if;
+
+    begin
+        perform aiq.sql_passthrough('select g from generate_series(1,4) g');
+        raise exception
+            'a statement one row over the cap was accepted -- the passthrough is '
+            'truncating instead of refusing, so a caller now receives fewer rows '
+            'than the database holds and is not told';
+    exception when program_limit_exceeded then
+        null;                                   -- the refusal, which is the pass
+    end;
+
+    -- Read per call, not baked in when the function was defined: an operator
+    -- raising it per role or per database is the documented way out of the cap
+    -- and it has to actually work.
+    set local percolate.sql_passthrough_max_rows = 5;
+    v_n := jsonb_array_length(aiq.sql_passthrough('select g from generate_series(1,4) g'));
+    if v_n <> 4 then
+        raise exception 'raising the setting did not raise the cap: got % rows', v_n;
+    end if;
+
+    reset percolate.sql_passthrough_max_rows;
+    raise notice 'query/07: the row cap refuses past its limit rather than truncating, and the limit is a setting';
+end $$;
+
 rollback;
