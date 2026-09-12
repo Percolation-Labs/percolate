@@ -62,6 +62,72 @@ was busy", which is the case the retry budget was bought for.
 Handler = Callable[[dict, dict], Awaitable[Any]]
 HANDLERS: dict[str, Handler] = {"http_call": http_call}
 
+HEARTBEAT_FRACTION = 3
+"""Heartbeat this many times per stale timeout (REM-109).
+
+Not an interval, because an interval on this side is a copy of a fact that
+lives on the queue: `workflow.queue_stale_timeout` is asked at claim time and
+the period is derived from it, so raising a queue's `stale_timeout` cannot
+leave the workers pacing to the old one. Three rather than two so a single
+dropped beat -- one slow round trip, one restarted connection -- does not cost
+the lease.
+"""
+
+
+async def _heartbeat_until_done(task_id: str, worker_id: str, period: float) -> None:
+    """Say the lease is still held, until cancelled.
+
+    WHY THIS EXISTS. `workflow.heartbeat_task` shipped, was granted to `worker`,
+    and was called by nothing: `heartbeat_at` was written once, at claim. The
+    reaper takes a lease after `stale_timeout` of silence -- two minutes by
+    default -- while `ingest/transcribe.py` waits 300 seconds on one HTTP call
+    and `ingest/embed.py` waits 120. So a transcription task was failed and
+    re-queued with the first copy still in flight, up to `max_attempts` times:
+    duplicate provider spend and duplicate writes, on the ingestion path, with
+    every copy eventually succeeding and the last one winning.
+
+    Raising the timeout instead would have made it a number on the queue that
+    has to stay above the largest timeout any handler might ever use -- which
+    nothing checks, and which the next handler breaks. A heartbeat makes the
+    bound one on SILENCE rather than on duration, which is what the reaper is
+    actually for: distinguishing a long task from a dead worker.
+
+    A false return means the database says this lease is no longer ours to
+    extend -- the lease moved, or cancellation was requested (the function
+    returns `not cancel_requested`). Either way there is nothing further to
+    say, so the beating stops and the handler is left to finish; the existing
+    `complete_task` / `fail_task` path already handles arriving late, because
+    `lease_violation` is checked there too. Cancelling the handler from here
+    would be inventing cancellation semantics this issue did not buy.
+
+    Never fails the task. A heartbeat that cannot reach the database is the
+    same situation as no heartbeat at all, which is the behaviour that existed
+    before this function -- so it logs and keeps trying rather than turning a
+    transient blip into a failed task.
+    """
+    while True:
+        await asyncio.sleep(period)
+        try:
+            async with as_service() as conn:
+                alive = await conn.fetchval(
+                    "select workflow.heartbeat_task($1, $2)", task_id, worker_id)
+        except asyncio.CancelledError:
+            raise
+        except asyncpg.UndefinedFunctionError:
+            # An older database: the lease behaves exactly as it did before
+            # this, so say so once and stop rather than logging every period.
+            print(f"[{worker_id}] no workflow.heartbeat_task in this database; "
+                  f"long tasks are bounded by stale_timeout alone", flush=True)
+            return
+        except Exception as e:  # noqa: BLE001 -- see the docstring
+            print(f"[{worker_id}] heartbeat failed ({type(e).__name__}: {e}); "
+                  f"retrying in {period:.0f}s", flush=True)
+            continue
+        if not alive:
+            print(f"[{worker_id}] heartbeat refused -- the lease moved or "
+                  f"cancellation was requested; no longer extending it", flush=True)
+            return
+
 
 def handler(kind: str) -> Callable[[Handler], Handler]:
     """Register a handler for a step kind. This is the whole extension API."""
@@ -125,7 +191,37 @@ async def run_once(queue: str, worker_id: str) -> bool:
 
         ctx["_task_id"] = task_id
         ctx["_worker_id"] = worker_id
-        out = await fn(spec, ctx)
+
+        # The handler runs with a heartbeat beside it, so a task that takes
+        # longer than the queue's stale_timeout finishes once instead of being
+        # reaped and re-run with the first copy still in flight (REM-109). The
+        # period comes from the database rather than from a constant here --
+        # see HEARTBEAT_FRACTION.
+        try:
+            async with as_service() as conn:
+                stale = await conn.fetchval(
+                    "select extract(epoch from workflow.queue_stale_timeout($1))", queue)
+            period = max(float(stale) / HEARTBEAT_FRACTION, 1.0)
+        except Exception as e:  # noqa: BLE001
+            # An older database with no queue_stale_timeout, or a blip. Fall
+            # back to the default the schema ships (2 minutes) rather than
+            # skipping the heartbeat: a wrong-but-frequent beat is safe, and
+            # no beat at all is the defect.
+            period = 120.0 / HEARTBEAT_FRACTION
+            print(f"[{worker_id}] could not read the queue's stale timeout "
+                  f"({type(e).__name__}); heartbeating every {period:.0f}s", flush=True)
+
+        beat = asyncio.create_task(_heartbeat_until_done(task_id, worker_id, period))
+        try:
+            out = await fn(spec, ctx)
+        finally:
+            # Stop before complete_task/fail_task, so the last word on this
+            # task is the terminal transition rather than a beat racing it.
+            beat.cancel()
+            try:
+                await beat
+            except asyncio.CancelledError:
+                pass
         async with as_service() as conn:
             # Between the handler and complete_task, so it covers every step
             # kind rather than only http_call. An oversized output used to be a
