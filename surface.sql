@@ -344,6 +344,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('ai-query-layer','function','aiq.register_graph_vocabulary','jsonb','graph-index.md §5.3: the closed relation vocabulary, and the symmetry and inverses of each'),
 ('ai-query-layer','function','aiq.install_structure_null','text','graph-index.md §1: the null extractor is a row, installed like the ingest workflow'),
 ('ai-query-layer','function','aiq.extractor_call','text,text,text,text,text','graph-index.md §6: the model half -- an OpenAI-shaped chat call, built as a row'),
+('world-model-ingestion','function','aiq.quote_occurs','text,text','extraction.md §4.2: whether a model''s quote is in its source, by the one rule every extractor uses'),
 ('agentic','function','agentic.agent_call','text,text,text,text,text','the general form of the above: the chat-completions request ANY agent row describes, so a consumer with its own agent does not hand-assemble a body'),
 ('agentic','function','agentic.parse_model','text','brief §7: agents.model is provider:model_id; one parse for every path that runs a row'),
 ('ai-query-layer','function','aiq.plan_facet','','plan-graph.md §4: the sources and models half of the plan catalog'),
