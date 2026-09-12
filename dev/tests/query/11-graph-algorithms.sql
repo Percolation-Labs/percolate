@@ -13,6 +13,16 @@
 -- through a cached array.
 --
 -- Reads the committed sample (`dev/init/04-graph-sample.sql`).
+--
+-- DEFERRED WHERE THE COMPILED HALF IS BEHIND. Every assertion in this file
+-- runs in Rust, so against an image whose .so predates the schema it fails for
+-- a reason that is not this commit's -- which is how three sessions in one day
+-- came to read `without as_of the expired edge was still traversed` as a defect
+-- in the graph (0b7af9f). run.sh honours this only while the two halves
+-- disagree: when the image catches up, the line stops applying by itself, and a
+-- declaration naming a parser that has already arrived is a failure rather than
+-- a mute.
+-- requires-parser: 0.2.0
 
 \set ON_ERROR_STOP on
 
