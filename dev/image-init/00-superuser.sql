@@ -129,7 +129,75 @@ grant authenticated to authenticator;
 grant authenticated to api_viewer;
 
 -- ---------------------------------------------------------------------------
--- 2. Nobody a person can become may rewrite who they are. set_config writes
+-- 2. WHAT THE DATABASE REFUSES, and it is set on the roles that LOG IN rather
+--    than on the roles a caller becomes. REM-113.
+--
+--    Nothing in the estate bounded anything: no statement_timeout, lock_timeout,
+--    idle_in_transaction_session_timeout or transaction_timeout in any compose
+--    file, chart, Dockerfile or conf in any of the three repositories. A single
+--    query -- from an agent, from aiq.sql_passthrough, from a badly shaped view
+--    -- could run until somebody noticed the bill.
+--
+--    THE NON-OBVIOUS PART, measured here rather than assumed, because the
+--    obvious version is dead configuration. `alter role ... set` applies at
+--    LOGIN, from the role that authenticated; SET ROLE does not re-apply it:
+--
+--        alter role t_target set statement_timeout = '5s';   -- nologin
+--        alter role t_login  set statement_timeout = '11s';
+--        \c - t_login
+--        show statement_timeout;              -->  11s
+--        set role t_target; show statement_timeout;  -->  11s, not 5s
+--
+--    Exactly three roles in this cluster can log in -- authenticator, worker,
+--    scheduler. app_owner, api_viewer, authenticated and web_anon are all
+--    NOLOGIN and are only ever reached by SET ROLE, so a timeout written on
+--    them would be a setting that reads correctly in \drds and never applies to
+--    anything. That is the shape this collection keeps finding, so it is
+--    written down here rather than discovered again.
+--
+--    PICKED AS A SET, because the shortest wins and the others become lies
+--    otherwise. transaction_timeout bounds the whole transaction, so it is
+--    above statement_timeout rather than below it; lock_timeout is well under
+--    both, so waiting for a lock fails fast and says so rather than burning the
+--    statement budget.
+--
+--    app_owner is deliberately unbounded, and gets that for free by being
+--    NOLOGIN: an upgrade replays the whole schema and can build an index over a
+--    real corpus, and a migration cut off half way is worse than a slow one.
+-- ---------------------------------------------------------------------------
+do $$
+declare r record;
+begin
+    for r in
+        select * from (values
+            -- Every REST caller arrives on this connection -- web_anon,
+            -- authenticated and api_viewer are all SET ROLE from here -- so
+            -- this one row is the bound on everything a person can ask for.
+            -- 30s is longer than any interactive query should need and short
+            -- enough that a runaway is noticed by the person who caused it.
+            ('authenticator', '30s',  '60s',  '30s', '5s'),
+            -- The worker's own HTTP client already waits 300s on a transcribe
+            -- call (percolate-core transcribe.py), so a shorter statement bound
+            -- here would fail the database side of work the worker still thinks
+            -- is running. Matched deliberately rather than guessed.
+            ('worker',        '300s', '600s', '60s', '15s'),
+            -- pg_cron connects as the job's user. tick, the reaper and the
+            -- timers are all short by construction; a minute is generous and
+            -- still well inside the one-minute schedule, so a stuck job cannot
+            -- pile a second copy on top of the first.
+            ('scheduler',     '60s',  '120s', '30s', '10s')
+        ) as t(role, stmt, txn, idle, lock)
+    loop
+        continue when not exists (select 1 from pg_roles where rolname = r.role);
+        execute format('alter role %I set statement_timeout = %L', r.role, r.stmt);
+        execute format('alter role %I set transaction_timeout = %L', r.role, r.txn);
+        execute format('alter role %I set idle_in_transaction_session_timeout = %L', r.role, r.idle);
+        execute format('alter role %I set lock_timeout = %L', r.role, r.lock);
+    end loop;
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 3. Nobody a person can become may rewrite who they are. set_config writes
 --    request.jwt.claims, which every row rule takes to be the caller: through
 --    aiq.sql_passthrough, carol saw 24 nodes as herself and 229, alice's
 --    count, after writing alice's id there (specs/user-rbac/roles.sql §6).
@@ -145,7 +213,7 @@ grant execute on function pg_catalog.set_config(text, text, boolean)
     to authenticator, app_owner, worker, scheduler;
 
 -- ---------------------------------------------------------------------------
--- 3. The rest is about the database percolate is going INTO, so a template
+-- 4. The rest is about the database percolate is going INTO, so a template
 --    gets none of it. Installed into template1, the extensions would appear in
 --    every database the cluster ever makes, and app_owner's CREATE on its
 --    public schema would be copied into each of them.

@@ -75,6 +75,29 @@ services:
       - shared_preload_libraries=pg_cron
       - -c
       - cron.database_name=${P8_DB:-p8dev}
+      # BOUNDS, EXPLICIT RATHER THAN PACKAGED (REM-113). None of these was set
+      # anywhere in the estate. They are here as flags rather than in a conf so
+      # the dev stack and the shipped compose say the same thing in the same
+      # place, and meta/postgres-manifest.md §"What the database refuses" is
+      # where the values are argued.
+      #
+      # max_connections: the default 100 faces up to 72 backends from ONE
+      # agent-runtime process (REM-110), before the worker, PostgREST's pool and
+      # a person with psql. 200 is headroom, not a measurement.
+      - -c
+      - max_connections=200
+      # work_mem is per sort/hash NODE, not per query, so a query with four
+      # hash joins across eight parallel workers can take 32x this. 8MB against
+      # 200 connections is a worst case nobody will reach and a default that
+      # stops trivial sorts spilling to disk.
+      - -c
+      - work_mem=8MB
+      - -c
+      - shared_buffers=512MB
+      # 256MB, and the /dev/shm note below is why this number is not larger:
+      # pgvector sizes a parallel HNSW build's shared-memory segment from it.
+      - -c
+      - maintenance_work_mem=256MB
     # /dev/shm, because Docker's default for it is 64 MB and Postgres's
     # default `maintenance_work_mem` is ALSO 64 MB -- and pgvector sizes a
     # parallel HNSW build's shared-memory segment from the latter. The two
@@ -176,6 +199,12 @@ services:
       # the fact `agentic.tool_servers.default_headers` exists for.
       PGRST_DB_SCHEMAS: content, aiq, rbac, workflow, agentic, public
       PGRST_DB_ANON_ROLE: web_anon
+      # The REST half of the row cap (REM-113). aiq.sql_passthrough bounds what
+      # a statement may aggregate; this bounds what any table or view read may
+      # return, which is the larger surface -- PostgREST will happily stream a
+      # whole table to anybody with select on it. Unset in all three
+      # configurations before this.
+      PGRST_DB_MAX_ROWS: 10000
       # Test-only secret -- never reuse in a real deployment.
       PGRST_JWT_SECRET: experiment-only-jwt-secret-not-for-real-use-0123456789
       PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:${P8_REST_PORT:-5611}
