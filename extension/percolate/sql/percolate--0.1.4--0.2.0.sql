@@ -3061,6 +3061,39 @@ $$ language plpgsql;
 revoke execute on function workflow.run_owner_of(uuid) from public;
 revoke execute on function workflow.execute_for(uuid, text, boolean, jsonb) from public;
 
+-- ONE HOME FOR "ONE STATEMENT THAT CANNOT BE TWO", and it is here rather than
+-- beside either caller because the rule was written once, at the call site
+-- where it was needed, and the sibling that needed the same rule did not get
+-- it. `execute_as_viewer` wraps a write as the body of a data-modifying CTE --
+-- the grammar, not a pattern, deciding that a string is ONE insert, update,
+-- delete or merge -- because plpgsql's EXECUTE runs a string of several
+-- statements one after another, so `insert ...; set local request.jwt.claims
+-- = ...` rewrites whose step it is (REM-64, workflow/15 §4b). `plan_probe`
+-- took a workflow author's statement straight into `execute 'explain (format
+-- json) ' || v_stmt`, two lines above a read branch that was correctly
+-- wrapped, and EXPLAIN of the first statement does not stop the second from
+-- running. It is SECURITY INVOKER and granted to `authenticated`.
+--
+-- That is the seventeenth instance of meta/postmortems/2026-09-11-fixed-at-
+-- the-copy-that-failed.md, so the fix is not a second copy of the wrapping:
+-- it is this function, which both callers now ask.
+--
+-- TRAILING SEMICOLONS ARE DROPPED, since an author writes them and a CTE body
+-- cannot hold one. A statement carrying its own RETURNING does not parse here
+-- and is meant not to; each caller says so in its own words, because "your
+-- write step is malformed" and "this probe could not plan it" are different
+-- sentences to different people.
+create or replace function workflow.one_write_statement(p_statement text)
+returns text as $$
+    select pg_catalog.format(
+        'with p8_write as (%s returning 1) select count(*) from p8_write',
+        pg_catalog.regexp_replace(p_statement, '[[:space:];]+$', ''));
+$$ language sql immutable;
+
+revoke execute on function workflow.one_write_statement(text) from public;
+-- plan_probe is SECURITY INVOKER and reaches this as the caller.
+grant execute on function workflow.one_write_statement(text) to authenticated;
+
 -- Dropped rather than left beside the new signature: `create or replace` with
 -- an added parameter makes a SECOND function, and the old three-argument one
 -- would still be callable and would still interpolate.
@@ -8438,7 +8471,16 @@ begin
 
             begin
                 if coalesce((v_in->>'write')::boolean, false) then
-                    execute 'explain (format json) ' || v_stmt into v_plan;
+                    -- THE SAME WRAPPING execute_as_viewer USES, from the same
+                    -- home. EXPLAIN plans the first statement of the string it
+                    -- is given and does not stop plpgsql running the rest, so
+                    -- an unwrapped `explain (format json) ' || v_stmt` ran
+                    -- whatever a workflow author put after the semicolon --
+                    -- here, as the caller, from a function granted to
+                    -- `authenticated` whose own comment promises it runs no
+                    -- step.
+                    execute format('explain (format json) %s',
+                                   workflow.one_write_statement(v_stmt)) into v_plan;
                 else
                     execute format(
                         'explain (format json) select * from (%s) t', v_stmt) into v_plan;
@@ -11927,7 +11969,10 @@ begin
         --
         -- So a write is wrapped too: the body of a data-modifying CTE, which
         -- parses only as ONE INSERT, UPDATE, DELETE or MERGE, and whose count
-        -- is the row count the step reports. PREPARE was tried first and is
+        -- is the row count the step reports. The wrapping itself lives in
+        -- workflow.one_write_statement, because it was written here and
+        -- `plan_probe` needed the same rule and did not have it.
+        -- PREPARE was tried first and is
         -- not enough: plpgsql's EXECUTE runs a string of several statements
         -- one after another, USING or not, so `prepare x as insert ...; set
         -- local ...` prepared the insert and ran the SET (measured, and
@@ -11937,13 +11982,9 @@ begin
         -- trade (run_sql).
         begin
             if p_params is not null then
-                execute format('with p8_write as (%s returning 1) select count(*) from p8_write',
-                               regexp_replace(p_statement, '[[:space:];]+$', ''))
-                into v_count using p_params;
+                execute workflow.one_write_statement(p_statement) into v_count using p_params;
             else
-                execute format('with p8_write as (%s returning 1) select count(*) from p8_write',
-                               regexp_replace(p_statement, '[[:space:];]+$', ''))
-                into v_count;
+                execute workflow.one_write_statement(p_statement) into v_count;
             end if;
         exception when syntax_error then
             raise exception
@@ -28026,4 +28067,125 @@ begin
     raise notice 'no function in %, beyond the % declared everybody''s, is executable by PUBLIC',
         (select string_agg(s, ', ' order by s) from percolate.extension_schemas() s),
         array_length(v_public, 1);
+end $$;
+
+-- ============================================================
+-- THE DYNAMIC-SQL SURFACE A SIGNED-IN CALLER CAN REACH IS A LIST SOMEBODY
+-- WROTE DOWN, and the install refuses to finish when it changes.
+--
+-- WHAT WENT WRONG. Twice, and the same shape both times: a function a person
+-- can call built a statement out of text that person supplied.
+--
+--   * `aiq.sql_passthrough` is granted to `authenticated` and runs whatever
+--     SELECT it is given. `set_config` is a legal select. So one statement
+--     rewrote `request.jwt.claims` and the session read as somebody else --
+--     measured: Carol saw 24 nodes, then 229, which was Alice's count
+--     (user-rbac/roles.sql §6). Closed by revoking set_config from the
+--     web-facing roles and refusing to install where that has not been done.
+--   * `workflow.plan_probe`, SECURITY INVOKER, granted to `authenticated`,
+--     whose own comment promises it "runs no step", took a workflow author's
+--     statement into `execute 'explain (format json) ' || v_stmt`. EXPLAIN
+--     plans the first statement of a string and does not stop plpgsql running
+--     what follows the semicolon. The read branch two lines below it was
+--     wrapped correctly. Closed by workflow.one_write_statement.
+--
+-- WHY A LIST AND NOT A PATTERN. The obvious gate -- refuse any body that
+-- concatenates into EXECUTE -- was written and measured before this one, and
+-- it was wrong: of the four functions it flagged on a live 0.2.0, three were
+-- innocent, because `execute 'select f($1,$2)' into x using a || b` puts the
+-- `||` in the USING clause, where it is an argument and not SQL. A rule that
+-- is three-quarters false positives gets widened until it matches nothing.
+-- Nothing in the catalog can tell safe dynamic SQL from unsafe, so this does
+-- not try. It asks the one question the catalog answers exactly -- which
+-- functions a signed-in caller can reach have dynamic SQL AT ALL -- and holds
+-- the answer to a list, in both directions.
+--
+-- SO MEMBERSHIP IS NOT AN ACCUSATION. Every function below is here because it
+-- is meant to be, and the install failing is the review: the extension stops
+-- when this set changes, and the person adding the seventeenth-plus-one
+-- either writes its name here or discovers they did not mean to build a
+-- statement out of someone's argument. That is the only review this
+-- collection has on the surface where a mistake is unrecoverable, and it is
+-- the one kind that cannot be skipped when a day is busy.
+--
+-- plpgsql ONLY, and that is exact rather than a shortcut: EXECUTE is a plpgsql
+-- statement, so a `language sql` body cannot run dynamic SQL whatever words
+-- appear in it. `aiq.extension_boundary()` is the live example -- its text
+-- says EXECUTE because it reads privileges.
+-- ============================================================
+do $$
+declare
+    -- Reachable by `authenticated`, directly or through a role it holds or
+    -- through PUBLIC -- has_function_privilege answers all three at once, which
+    -- is why the list is of what a PERSON can reach rather than of grants.
+    v_dynamic constant text[] := array[
+        'aiq.expand_embed_steps(jsonb)',
+        'aiq.lexical(text,text,integer)',
+        'aiq.query(text,vector)',
+        'aiq.render_facet(text,text)',
+        'aiq.schema_p8ql(text)',
+        'aiq.schema_workflow(text)',
+        'aiq.search(text,text,vector,text,integer,integer)',
+        'aiq.semantic_in(text,vector,text,integer)',
+        'aiq.space_populated(text,text)',
+        'aiq.sql_passthrough(text)',            -- read-only by TRANSACTION, not by a parser
+        'percolate.enums()',
+        'workflow.define_yaml(text)',
+        'workflow.plan_catalog()',
+        'workflow.plan_defects(text)',
+        'workflow.plan_document(text,integer)',
+        'workflow.plan_graph(text,integer)',
+        'workflow.plan_probe(text,integer)'     -- wrapped through one_write_statement
+    ];
+    v_new     text;
+    v_gone    text;
+begin
+    -- What exists and is not declared. This is the direction that catches
+    -- drift: adding the function and adding the line are two separate acts and
+    -- only one of them is needed to ship (challenge-the-process §3).
+    select string_agg(fn, E'\n  ' order by fn) into v_new
+      from (
+        select p.oid::regprocedure::text as fn
+          from pg_catalog.pg_proc p
+          join pg_catalog.pg_language l on l.oid = p.prolang
+         where l.lanname = 'plpgsql'
+           and p.pronamespace in (select n.oid from pg_catalog.pg_namespace n
+                                   where n.nspname in (select percolate.extension_schemas()))
+           and p.prosrc ~* '(^|[^[:alnum:]_])execute[[:space:]]'
+           and pg_catalog.has_function_privilege('authenticated', p.oid, 'execute')
+           and p.oid::regprocedure::text <> all (v_dynamic)
+      ) s;
+    if v_new is not null then
+        raise exception
+            E'UNDECLARED DYNAMIC SQL REACHABLE BY authenticated:\n  %\n'
+            'A signed-in caller can reach these and they build statements at run time. '
+            'If the statement is built from an argument, wrap it -- through format() '
+            'with an identifier or literal specifier, or through '
+            'workflow.one_write_statement for a write -- and then add the signature to '
+            'v_dynamic in specs/identity/closing.sql. If it is not meant to be '
+            'reachable, revoke it instead.', v_new;
+    end if;
+
+    -- And the other direction, so the list cannot go on naming functions that
+    -- were renamed, revoked or had their dynamic SQL taken out. A declared
+    -- exception that is no longer an exception reads as a decision somebody
+    -- made and is a line nobody has looked at.
+    select string_agg(f, ', ' order by f) into v_gone
+      from unnest(v_dynamic) f
+     where to_regprocedure(f) is null
+        or not pg_catalog.has_function_privilege('authenticated', to_regprocedure(f), 'execute')
+        or not exists (select 1 from pg_catalog.pg_proc p
+                        where p.oid = to_regprocedure(f)
+                          and p.prosrc ~* '(^|[^[:alnum:]_])execute[[:space:]]');
+    if v_gone is not null then
+        raise exception
+            'declared as dynamic SQL a signed-in caller reaches, and no longer: %. Either '
+            'the signature changed, the grant is gone, or the dynamic SQL is -- in all '
+            'three cases delete the line from v_dynamic in specs/identity/closing.sql.',
+            v_gone;
+    end if;
+
+    raise notice
+        '% functions build SQL at run time and are reachable by authenticated; all % declared',
+        array_length(v_dynamic, 1), array_length(v_dynamic, 1);
 end $$;
