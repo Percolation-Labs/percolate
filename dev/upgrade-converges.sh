@@ -74,7 +74,16 @@ done
 # worse than a failure, because both look like an answer. `--check` is the
 # door build-sql.py already had; it costs nothing and the run below costs
 # minutes, so it goes first.
-PY="${PY:-python3}"
+# THE FOURTH SCRIPT TO ASK WHICH INTERPRETER, and #82 consolidated three of
+# them into dev/lib/python.sh and missed this one. A bare `python3` here is the
+# same defect that file exists for: on a machine whose python3 is uv-managed
+# with no PyYAML, this gate exits 1 saying "the generated extension scripts are
+# behind specs/" on a tree where they are not -- a red about the machine,
+# wearing the words of a red about the tree, which is the worse of the two
+# because the message names a remedy that will not help. It survived #82
+# because CI's python3 has PyYAML, so the only machine it fails on is a laptop.
+. "$(dirname "${BASH_SOURCE[0]}")/lib/python.sh"
+PY="$(percolate_python)" || exit 2
 "$PY" extension/percolate/build-sql.py --check >/dev/null || {
     echo "the generated extension scripts are behind specs/ -- run: $PY extension/percolate/build-sql.py" >&2
     exit 1; }
