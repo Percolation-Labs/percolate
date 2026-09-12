@@ -315,10 +315,10 @@ images would be separate builds of the same base and separate tags to keep in
 step. `ENTRYPOINT ["percolate"]`, and the command selects the service:
 
 ```yaml
-content: { image: percolationlabs/percolate-core:0.1.1, command: ["content","serve"] }
-agent:   { image: percolationlabs/percolate-core:0.1.1, command: ["agent","serve"] }
-gateway: { image: percolationlabs/percolate-core:0.1.1, command: ["agent","gateway"] }
-worker:  { image: percolationlabs/percolate-core:0.1.1, command: ["worker","--queue","http"] }
+content: { image: percolationlabs/percolate-core:0.1.8, command: ["content","serve"] }
+agent:   { image: percolationlabs/percolate-core:0.1.8, command: ["agent","serve"] }
+gateway: { image: percolationlabs/percolate-core:0.1.8, command: ["agent","gateway"] }
+worker:  { image: percolationlabs/percolate-core:0.1.8, command: ["worker","--queue","http"] }
 ```
 
 The agent gateway is its own entrypoint because delegation is an MCP call into
