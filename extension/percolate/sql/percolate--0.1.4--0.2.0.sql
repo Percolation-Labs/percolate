@@ -16108,6 +16108,7 @@ create or replace function aiq.sql_passthrough(p_statement text)
 returns jsonb as $$
 declare
     v_result jsonb;
+    v_max    int;
 begin
     -- Rejected up front only for the things that are unambiguous and cheap to
     -- catch, giving a clear error instead of a confusing transaction abort.
@@ -16144,10 +16145,43 @@ begin
     -- request.jwt.claims, and through this very passthrough it was how anyone
     -- became anyone (user-rbac/roles.sql §6). SET needs no grant, and the
     -- statement below cannot issue one -- it is wrapped as a subquery.
+    -- AND A ROW CAP, because read-only is not the same as bounded (REM-113).
+    -- The aggregate below builds one jsonb value out of the whole result set,
+    -- in memory, in the server -- so `select * from aiq.nodes` is a read that
+    -- cannot write anything and can still take the backend down. The
+    -- transaction_read_only boundary above says nothing about size.
+    --
+    -- REFUSED RATHER THAN TRUNCATED. Silently returning the first N rows is the
+    -- worse failure: the caller gets a well-formed answer to a question they
+    -- did not ask and cannot tell. So it fetches one more than the cap and
+    -- raises if that row exists, naming the cap and what to do about it.
+    --
+    -- The LIMIT is inside its own subquery rather than on the aggregate, which
+    -- would bound the one row the aggregate returns and nothing else.
+    --
+    -- Through current_setting so an operator can raise it per database or per
+    -- role without a schema change -- the same shape as the timeouts in
+    -- dev/image-init/00-superuser.sql, rather than a literal somebody has to
+    -- find. `true` makes it missing-safe, and the coalesce is the default.
+    v_max := coalesce(
+        nullif(current_setting('percolate.sql_passthrough_max_rows', true), '')::int,
+        10000);
+
     begin
         set local transaction_read_only = on;
-        execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
+        execute format(
+            'select coalesce(jsonb_agg(t), ''[]''::jsonb) from '
+            '(select * from (%s) _p8_passthrough limit %s) t',
+            p_statement, v_max + 1)
         into v_result;
+        if jsonb_array_length(v_result) > v_max then
+            raise exception
+                'the SQL passthrough returned more than % rows. It aggregates the '
+                'whole result set into one jsonb value in the server, so it is '
+                'capped. Add a LIMIT, or aggregate in the statement itself.', v_max
+                using errcode = 'program_limit_exceeded',
+                      hint = 'percolate.sql_passthrough_max_rows raises the cap.';
+        end if;
         raise exception using errcode = 'P0001', message = '__aiq_readonly_done__';
     exception when others then
         if sqlerrm <> '__aiq_readonly_done__' then
