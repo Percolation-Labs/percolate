@@ -97,3 +97,25 @@ require_named_container() {
 # rather than `--no-verify`, which is this predicate arrived at from the other
 # end. Somebody should rebuild `p8dev`; nobody has, because rebuilding a shared
 # database under five sessions is the defect rather than the fix.
+#
+# AND THE HOOK READS IT TOO, IN THE ONE TREE ANYBODY PUSHES FROM. `#88` changed
+# `dev/githooks/pre-push` to `exec "$HERE/check.sh" --tree` -- no database at
+# all -- and that is what `origin/main` carries. But `core.hooksPath` is a path
+# into the WORKING TREE, and the shared checkout at
+# `/Users/sirsh/code/p8-subsystems` is 121 commits behind with `8aa1a85` absent
+# from its history, so its working copy still says `--reload`. Measured:
+#
+#     tail -1 dev/githooks/pre-push          -> exec "$HERE/check.sh" --reload
+#     git show origin/main:...  | tail -1    -> exec "$HERE/check.sh" --tree
+#     git merge-base --is-ancestor 8aa1a85 HEAD -> false
+#
+# Corroborated by the gate count in that session's push output: 22, not ten.
+# `--tree` cannot produce 22, and "Every guarantee the specs make still holds"
+# is a database gate.
+#
+# So **a push from the shared checkout still rebuilds `p8dev`** -- the fix for
+# that shipped this afternoon and has not reached the only tree where the harm
+# occurs, and cannot, because nothing pulls it. Eleven worktrees carry the fix;
+# the twelfth tree, the one everybody pushes from by habit, carries the version
+# it replaced. That makes this file's argument concrete twice over: the default
+# container, and the hook that reads it, are both stale there.
