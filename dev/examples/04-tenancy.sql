@@ -7,12 +7,12 @@
 -- for another is indistinguishable from "no such key".
 set local role authenticated;
 
-set local request.jwt.claims = '{"orgs":["d0000000-0000-0000-0000-00000000000a"]}';
+set local request.jwt.claims = '{"sub":"80000000-0000-0000-0000-000000000001","orgs":["d0000000-0000-0000-0000-00000000000a"]}';
 \echo '-- Meridian sees its own fleet, and the shared charterer:'
 select entity_type, summary from aiq.nodes
 where entity_type in ('vessel','operator') order by entity_type, summary;
 
-set local request.jwt.claims = '{"orgs":["d0000000-0000-0000-0000-00000000000b"]}';
+set local request.jwt.claims = '{"sub":"80000000-0000-0000-0000-000000000002","orgs":["d0000000-0000-0000-0000-00000000000b"]}';
 \echo '-- Kestrel, same query, different answer:'
 select entity_type, summary from aiq.nodes
 where entity_type in ('vessel','operator') order by entity_type, summary;

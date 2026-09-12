@@ -3,7 +3,7 @@
 -- The corpus is built so they disagree. h1 carries the rare code verbatim;
 -- h2 says the same thing in different words and carries none of them.
 set local role authenticated;
-set local request.jwt.claims = '{"orgs":["d0000000-0000-0000-0000-00000000000a"]}';
+set local request.jwt.claims = '{"sub":"80000000-0000-0000-0000-000000000001","orgs":["d0000000-0000-0000-0000-00000000000a"]}';
 
 \echo '-- TEXT: an exact rare token. No embedding anywhere.'
 select round((r->>'score')::numeric,4) as score, left(r->>'content',56) as content
@@ -23,6 +23,6 @@ select r->>'lexical_rank' as lex, r->>'semantic_rank' as sem,
 from jsonb_array_elements(aiq.query('SEARCH "PSC-441 boiler" FROM chunks LIMIT 3','[0,0,0.707,0.707]')->'rows') r;
 
 \echo '-- the same SEARCH as Kestrel. The Meridian exposure note is gone.'
-set local request.jwt.claims = '{"orgs":["d0000000-0000-0000-0000-00000000000b"]}';
+set local request.jwt.claims = '{"sub":"80000000-0000-0000-0000-000000000002","orgs":["d0000000-0000-0000-0000-00000000000b"]}';
 select r->>'lexical_rank' as lex, r->>'semantic_rank' as sem, left(r->>'content',52) as content
 from jsonb_array_elements(aiq.query('SEARCH "PSC-441 boiler" FROM chunks LIMIT 2','[0,0,0.707,0.707]')->'rows') r;

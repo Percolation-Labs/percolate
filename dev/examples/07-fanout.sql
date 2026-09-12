@@ -4,7 +4,7 @@
 -- Nothing outside the database decides the width -- there is no controller
 -- reading a list and templating a pod per element.
 set local role app_owner;
-set local request.jwt.claims = '{"orgs":["d0000000-0000-0000-0000-00000000000a"]}';
+set local request.jwt.claims = '{"sub":"80000000-0000-0000-0000-000000000001","orgs":["d0000000-0000-0000-0000-00000000000a"]}';
 
 select workflow.define_yaml($$
 name: reinspect

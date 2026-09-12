@@ -11,7 +11,7 @@
 select aiq.enable_graph_algorithms('authenticated') -> 'grants' as granted;
 
 set local role authenticated;
-set local request.jwt.claims = '{"orgs":["d0000000-0000-0000-0000-00000000000a"]}';
+set local request.jwt.claims = '{"sub":"80000000-0000-0000-0000-000000000001","orgs":["d0000000-0000-0000-0000-00000000000a"]}';
 
 \echo '-- what is related to this ship, ranked -- not everything within n hops:'
 select key, entity_type, round(score::numeric, 4) as score, budget_exhausted

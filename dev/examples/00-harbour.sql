@@ -73,6 +73,19 @@ create table if not exists harbour.inspections (
 -- ------------------------------------------------------------
 -- 2. The data.
 -- ------------------------------------------------------------
+-- THE TWO TENANTS ARE ROWS, and they were not. This file names
+-- `d0000000-...-a` and `-b` in nine places and registered neither, which was
+-- harmless while `org_id` was a bare uuid on every table. It stopped being
+-- harmless when identity/spec.md §4 made the shared tier a row: the org
+-- columns became real references to rbac.orgs, so aiq.rebuild_entity_type()
+-- raised `insert or update on table "nodes" violates foreign key constraint
+-- "nodes_org_id_fkey"` and the whole fixture stopped loading. Every one of
+-- the ten worked examples depends on it.
+insert into rbac.orgs (id, slug, name) values
+    ('d0000000-0000-0000-0000-00000000000a','meridian','Meridian Line'),
+    ('d0000000-0000-0000-0000-00000000000b','kestrel','Kestrel Shipping')
+on conflict (id) do nothing;
+
 insert into harbour.operators (id, name, code, parent_id, org_id) values
     ('40000000-0000-0000-0000-000000000001','Meridian Line','MERI',null,'d0000000-0000-0000-0000-00000000000a'),
     ('40000000-0000-0000-0000-000000000002','Kestrel Shipping','KEST',null,'d0000000-0000-0000-0000-00000000000b'),
@@ -157,8 +170,14 @@ insert into aiq.relation_types (src_type, relation, dst_type, inverse_label, des
 on conflict (src_type, relation, dst_type) do update
     set inverse_label = excluded.inverse_label, description = excluded.description;
 
+-- `rbac.org_or_shared`, because one row below is deliberately null -- the
+-- rivalry both tenants can see -- and org_id is NOT NULL since
+-- identity/spec.md §4. That function is the collection's one spelling of "an
+-- omitted org means the shared tier", so the fixture below still reads as it
+-- did and the column gets the row the sentinel names.
 insert into aiq.edges (src_id, dst_id, relation, weight, provenance, org_id)
-select s.id, d.id, v.relation, v.weight::real, v.provenance::jsonb, v.org_id::uuid
+select s.id, d.id, v.relation, v.weight::real, v.provenance::jsonb,
+       rbac.org_or_shared(v.org_id::uuid)
 from (values
     ('vessel','50000000-0000-0000-0000-000000000001','operated_by','operator','40000000-0000-0000-0000-000000000001',1.00,'{"source":"registry"}','d0000000-0000-0000-0000-00000000000a'),
     ('vessel','50000000-0000-0000-0000-000000000002','operated_by','operator','40000000-0000-0000-0000-000000000001',1.00,'{"source":"registry"}','d0000000-0000-0000-0000-00000000000a'),
@@ -191,16 +210,23 @@ on conflict (src_id, dst_id, relation) do update set weight = excluded.weight;
 --   h4  the rare code again, in tenant A
 --   h5  tenant B, and it must never answer a tenant A query
 -- ------------------------------------------------------------
-insert into content.channels (id, name, kind, org_id) values
-    ('11110000-0000-0000-0000-000000000002','harbour-reports','manual',null)
+-- `rbac.shared_org_id()` and `public`, not `null` and the default. org_id is
+-- NOT NULL since identity/spec.md §4 -- a literal null raises before the
+-- fixture reaches its first example -- and a channel left at the default pair
+-- (private, no owner) is one rbac.may_read grants to nobody.
+insert into content.channels (id, name, kind, org_id, visibility) values
+    ('11110000-0000-0000-0000-000000000002','harbour-reports','manual',
+     rbac.shared_org_id(),'public')
 on conflict (id) do update set name = excluded.name;
 
-insert into content.resources (id, channel_id, external_id, uri, title, status, org_id) values
-    ('24240000-0000-0000-0000-000000000001','11110000-0000-0000-0000-000000000002','psc-rot','memo://psc/rotterdam','Rotterdam PSC report','ready',null),
-    ('24240000-0000-0000-0000-000000000002','11110000-0000-0000-0000-000000000002','eng-boiler','memo://engineering/boiler','Auxiliary machinery note','ready',null),
-    ('24240000-0000-0000-0000-000000000003','11110000-0000-0000-0000-000000000002','crew-hyg','memo://crew/hygiene','Accommodation inspection','ready',null),
-    ('24240000-0000-0000-0000-000000000004','11110000-0000-0000-0000-000000000002','meri-exp','memo://meridian/exposure','Meridian fleet exposure','ready','d0000000-0000-0000-0000-00000000000a'),
-    ('24240000-0000-0000-0000-000000000005','11110000-0000-0000-0000-000000000002','kest-pos','memo://kestrel/position','Kestrel fleet position','ready','d0000000-0000-0000-0000-00000000000b')
+insert into content.resources (id, channel_id, external_id, uri, title, status, org_id, visibility) values
+    ('24240000-0000-0000-0000-000000000001','11110000-0000-0000-0000-000000000002','psc-rot','memo://psc/rotterdam','Rotterdam PSC report','ready',rbac.shared_org_id(),'public'),
+    ('24240000-0000-0000-0000-000000000002','11110000-0000-0000-0000-000000000002','eng-boiler','memo://engineering/boiler','Auxiliary machinery note','ready',rbac.shared_org_id(),'public'),
+    ('24240000-0000-0000-0000-000000000003','11110000-0000-0000-0000-000000000002','crew-hyg','memo://crew/hygiene','Accommodation inspection','ready',rbac.shared_org_id(),'public'),
+    -- `org`, which is what naming a tenant means, and what makes h4/h5 the
+    -- tenancy probe the header above describes.
+    ('24240000-0000-0000-0000-000000000004','11110000-0000-0000-0000-000000000002','meri-exp','memo://meridian/exposure','Meridian fleet exposure','ready','d0000000-0000-0000-0000-00000000000a','org'),
+    ('24240000-0000-0000-0000-000000000005','11110000-0000-0000-0000-000000000002','kest-pos','memo://kestrel/position','Kestrel fleet position','ready','d0000000-0000-0000-0000-00000000000b','org')
 on conflict (id) do update set title = excluded.title, org_id = excluded.org_id;
 
 insert into content.resource_chunks (id, resource_id, ordinal, content) values
@@ -259,11 +285,38 @@ on conflict (chunk_id) do update set embedding = excluded.embedding;
 -- authoring privilege rather than a read, which is what the refusal says.
 -- ------------------------------------------------------------
 insert into rbac.users (id, email, status) values
-    ('80000000-0000-0000-0000-000000000001','harbourmaster@meridian.example','active')
+    ('80000000-0000-0000-0000-000000000001','harbourmaster@meridian.example','active'),
+    -- A SECOND PERSON, and the tenancy examples are why. 04 and 03 show the
+    -- same query answered differently for two tenants; with one user they
+    -- could only ever change the `orgs` array, and an array is no longer what
+    -- decides (below).
+    ('80000000-0000-0000-0000-000000000002','harbourmaster@kestrel.example','active')
 on conflict (id) do update set email = excluded.email;
 
 insert into rbac.user_roles (user_id, role) values
-    ('80000000-0000-0000-0000-000000000001','admin')
+    ('80000000-0000-0000-0000-000000000001','admin'),
+    ('80000000-0000-0000-0000-000000000002','admin')
+on conflict do nothing;
+
+-- ------------------------------------------------------------
+-- AND THEY ARE MEMBERS OF SOMETHING, which is the fact every example in this
+-- directory silently assumed and none of them established.
+--
+-- user-rbac §"Tenancy is now a table, not a claim": rbac.current_org_ids()
+-- reads rbac.org_members for current_user_id() and INTERSECTS that with the
+-- token's `orgs` array. A token may narrow its holder's reach and can never
+-- widen it. So a claim carrying `orgs` and no `sub` resolves to no orgs at
+-- all -- not to the orgs it names.
+--
+-- Every example here sent exactly that claim, and 04 is what it cost.
+-- Its own echoes read "Meridian sees its own fleet" and "Kestrel, same query,
+-- DIFFERENT answer"; both tenants got the identical one shared row, and the
+-- file passed. A tenancy demonstration that demonstrates the opposite of its
+-- claim is worse than one that fails, and dev/examples/run.sh's header says
+-- the docs pages are written from this transcript.
+insert into rbac.org_members (org_id, user_id, role) values
+    ('d0000000-0000-0000-0000-00000000000a','80000000-0000-0000-0000-000000000001','admin'),
+    ('d0000000-0000-0000-0000-00000000000b','80000000-0000-0000-0000-000000000002','admin')
 on conflict do nothing;
 
 -- ------------------------------------------------------------
