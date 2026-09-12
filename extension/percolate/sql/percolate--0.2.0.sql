@@ -28133,12 +28133,23 @@ declare
         'aiq.space_populated(text,text)',
         'aiq.sql_passthrough(text)',            -- read-only by TRANSACTION, not by a parser
         'percolate.enums()',
-        'workflow.define_yaml(text)',
-        'workflow.plan_catalog()',
-        'workflow.plan_defects(text)',
-        'workflow.plan_document(text,integer)',
-        'workflow.plan_graph(text,integer)',
-        'workflow.plan_probe(text,integer)'     -- wrapped through one_write_statement
+        'workflow.define_yaml(text)'
+        -- THE FIVE PLAN FUNCTIONS WERE HERE AND ARE NOT REACHABLE ANY MORE.
+        -- plan_catalog, plan_defects, plan_document, plan_graph and plan_probe
+        -- were declared because they are granted to `authenticated` and build
+        -- SQL. REM-81 revoked those grants: all five expand a workflow's
+        -- `spec`, and integration-rbac.sql §1 refuses to publish `spec` to that
+        -- role -- definitions has no owner, no org and no RLS, which is why
+        -- definitions_api exists and omits it. They are operator diagnostics
+        -- until workflow.definitions adopts scope (REM-42).
+        --
+        -- Deleted rather than left: this list is of what a PERSON can reach,
+        -- and the block below refuses a name that is declared and no longer
+        -- reachable. That direction is what caught this -- the install failed
+        -- naming all five and telling me to delete the lines, which is the gate
+        -- doing exactly its job on somebody who had not read it.
+        --
+        -- When REM-42 lands and the grants come back, so do these five lines.
     ];
     v_new     text;
     v_gone    text;
