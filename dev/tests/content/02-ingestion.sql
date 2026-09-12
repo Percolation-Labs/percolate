@@ -63,18 +63,26 @@ create temp table t_ing (channel uuid, res uuid, file uuid);
 do $$
 declare v_ch uuid; v_res uuid; v_file uuid; v jsonb;
 begin
-    insert into content.channels (name, kind, config)
+    -- `public` explicitly: private with no owner is a row no policy grants
+    -- to anybody, and content.channels refuses it (REM-83). Nothing in this
+    -- file measures the channel's visibility -- it measures ingest policy.
+    insert into content.channels (name, kind, config, visibility)
     values ('t-ingest', 'file_upload',
-            '{"ingest_policy": {"chunking": {"target_tokens": 900, "overlap": 0.2}}}'::jsonb)
+            '{"ingest_policy": {"chunking": {"target_tokens": 900, "overlap": 0.2}}}'::jsonb,
+            'public')
     returning id into v_ch;
 
     insert into content.files (checksum, bucket, object_key, size_bytes, content_type)
     values ('t-ingest-checksum', 'p8-content', 'objects/tt/t-ingest', 42, 'application/pdf')
     returning id into v_file;
 
-    insert into content.resources (channel_id, file_id, title, status, metadata)
+    -- `public`, for the reason the channel above now carries: private with no
+    -- owner is a row no policy grants to anybody (REM-83). This block measures
+    -- how the resource's ingest_policy layers over the channel's.
+    insert into content.resources (channel_id, file_id, title, status, metadata, visibility)
     values (v_ch, v_file, 'a.pdf', 'pending',
-            '{"ingest_policy": {"chunking": {"target_tokens": 300}, "keep_markdown": false}}'::jsonb)
+            '{"ingest_policy": {"chunking": {"target_tokens": 300}, "keep_markdown": false}}'::jsonb,
+            'public')
     returning id into v_res;
 
     insert into t_ing values (v_ch, v_res, v_file);
@@ -207,10 +215,12 @@ end $$;
 do $$
 declare v_ch uuid; v_r1 uuid; v_r2 uuid; v jsonb;
 begin
-    insert into content.channels (name, kind) values ('t-tables','file_upload')
+    -- `public` on all three, for REM-83's reason: the default pair is
+    -- private with no owner, which no policy grants to anybody.
+    insert into content.channels (name, kind, visibility) values ('t-tables','file_upload','public')
     returning id into v_ch;
-    insert into content.resources (channel_id, title) values (v_ch, 'jan.csv') returning id into v_r1;
-    insert into content.resources (channel_id, title) values (v_ch, 'feb.csv') returning id into v_r2;
+    insert into content.resources (channel_id, title, visibility) values (v_ch, 'jan.csv', 'public') returning id into v_r1;
+    insert into content.resources (channel_id, title, visibility) values (v_ch, 'feb.csv', 'public') returning id into v_r2;
 
     v := content.register_dataset(v_r1, 'sales', 'p8-content',
             'datasets/sales/aaa.parquet',
@@ -735,8 +745,10 @@ begin
     end if;
     insert into rbac.orgs (id, slug, name) values (v_org, 't-graph-org', 'graph org');
     select channel into v_ch from t_ing limit 1;
-    insert into content.resources (channel_id, title, status, org_id)
-    values (v_ch, 'g.md', 'ready', v_org) returning id into v_res;
+    -- `org`, which is what naming an org means here, rather than the default
+    -- private-with-no-owner that no policy grants to anybody (REM-83).
+    insert into content.resources (channel_id, title, status, org_id, visibility)
+    values (v_ch, 'g.md', 'ready', v_org, 'org') returning id into v_res;
 
     insert into workflow.definitions (name, spec) values ('t_graph_org', jsonb_build_object(
         'steps', jsonb_build_array(jsonb_build_object(

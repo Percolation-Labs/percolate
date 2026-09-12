@@ -278,9 +278,33 @@ begin
             select v_e->>'name','http_pull',v_e->'config',rbac.current_user_id(),'private'
             where not exists(select 1 from content.channels where name=v_e->>'name' and org_id=rbac.shared_org_id());
         else
-        insert into content.channels (name, kind, config)
+        -- owner_id AND visibility, for the third time in three files, and the
+        -- CHECK below is what stops there being a fourth.
+        --
+        -- Omitted, the columns default to `private` and null -- and
+        -- rbac.may_read(null, shared_org, 'private') is NULL, so the channel
+        -- this just declared is readable by nobody. content.register_fetched
+        -- filters it out of its own lookup and reports "no channel named % for
+        -- this org" about a channel that is right there, which is the sentence
+        -- REM-75 earned on `workflow_artifacts` and REM-74 earned again on the
+        -- self-model's channel. Measured here before the fix:
+        --
+        --     => select percolate.apply_package('{... "sources": [...] }');
+        --     => select content.register_fetched('rem83_feed','item-1');
+        --     ERROR:  no channel named rem83_feed for this org
+        --
+        -- rbac.default_visibility() rather than a literal, because a package
+        -- install has two shapes and they want different answers: an operator
+        -- installing deployment configuration gets `public` with no owner, and
+        -- a signed-in installer (packages/apply.py --owner) gets `private`
+        -- against their own owner_id. Both are readable; a constant would be
+        -- right for one of them. It is the same call the API branch's sibling
+        -- and content.register_upload already make, so this is not a third
+        -- spelling of the rule.
+        insert into content.channels (name, kind, config, owner_id, visibility)
         select v_e->>'name', coalesce(v_e->>'kind','manual'),
-               coalesce(v_e->'config','{}'::jsonb)
+               coalesce(v_e->'config','{}'::jsonb),
+               rbac.current_user_id(), rbac.default_visibility()
         where not exists (select 1 from content.channels c
                            where c.name = v_e->>'name'
                              and c.org_id = rbac.shared_org_id());
