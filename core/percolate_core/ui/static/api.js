@@ -284,11 +284,29 @@ export async function suggest({ name, schema, session, prompt, validate, answere
     const content = typeof prompt === "function" ? prompt(correction) : prompt + correction;
     const res = await authFetch(config().core.replace(/\/$/, "") + "/chat", {
       method: "POST", headers: { "Content-Type": "application/json" }, signal,
-      /* `extra` is for what an assistant genuinely needs on the wire and the
-         others do not -- workflow design sends `tool_choice: "none"`, because a
-         composition turn must propose and not call anything. It is not a hole
-         for re-diverging: anything two assistants pass belongs above. */
-      body: JSON.stringify({ model: HELP_AGENT, session_id: session, stream: false, ...extra,
+      /* `tool_choice: "none"` IS EVERY ASSISTANT'S, and was one assistant's.
+         Each one reached through here proposes: it asks for a `response_format`
+         json_schema and hands what comes back to a person to save, so none has
+         a reason to call a tool mid-turn -- and all of them put catalogue rows,
+         another agent's system prompt or a live schema into the text they send,
+         which is where a row somebody else wrote gets to act if the turn kept
+         its tools. Workflow design passed it and the other five did not
+         (REM-91 item 12).
+
+         `extra` is for what an assistant genuinely needs on the wire and the
+         others do not. It is not a hole for re-diverging: anything two
+         assistants pass belongs above, which is what moving this was. It sits
+         before `...extra` so an assistant that one day needs a tool mid-turn
+         says so explicitly rather than inheriting it.
+
+         Note what this does NOT do. Older runtimes IGNORE unknown request
+         fields, so on one of those this is accepted and changes nothing.
+         Refusing such a runtime outright is workflow design's own check, where
+         it stays: that assistant composes something that gets saved and run, so
+         a silent downgrade costs more there than it does in a suggestion
+         somebody reads before accepting. */
+      body: JSON.stringify({ model: HELP_AGENT, session_id: session, stream: false,
+        tool_choice: "none", ...extra,
         messages: [{ role: "user", content }],
         response_format: { type: "json_schema", json_schema: { name, strict, schema } } }),
     });

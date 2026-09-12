@@ -131,6 +131,34 @@ const ask=(o={{}})=>api.suggest({{name:'t',schema:SCHEMA,session,prompt:'p',
             self.assertIn("needs_clarification", (STATIC / name).read_text(),
                           f"{name} has no clarification field, so a question arrives as a failure")
 
+    def test_every_turn_proposes_and_calls_nothing(self):
+        """REM-91 item 12: `tool_choice` was one assistant's, and needed to be all six'.
+
+        Each of these asks for a `response_format` json_schema and hands the
+        result to a person to save, and each puts catalogue rows, another
+        agent's system prompt or a live schema into the text it sends. A turn
+        that kept the help agent's tool surface is one where a row somebody else
+        wrote gets to act.
+        """
+        self.run_js("""
+        replies=[{answer:'a',needs_clarification:''}];
+        await ask();
+        assert.equal(calls[0].body.tool_choice,'none','the default turn proposes');
+        """)
+
+    def test_an_assistant_can_still_ask_for_a_tool_deliberately(self):
+        """`extra` wins, so the default is a default and not a ceiling.
+
+        Nothing passes this today. It is here because the value sits before
+        `...extra` on purpose, and an assistant that one day needs a tool
+        mid-turn should have to say so rather than find the door welded shut.
+        """
+        self.run_js("""
+        replies=[{answer:'a',needs_clarification:''}];
+        await ask({extra:{tool_choice:'auto'}});
+        assert.equal(calls[0].body.tool_choice,'auto');
+        """)
+
 
 if __name__ == "__main__":
     unittest.main()

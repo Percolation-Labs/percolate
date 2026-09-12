@@ -68,6 +68,12 @@ export async function suggestWorkflow({description,current,selected=[],catalogue
   if (!config().core) throw Error('Connect an agent runtime in Settings to design with AI.');
   // Older runtimes ignore unknown request fields. Do not silently downgrade
   // a proposal turn to one that can call the agent's configured tools.
+  //
+  // `suggest` now sends tool_choice:'none' for every assistant (REM-91 item
+  // 12), which is the fix; this stays because REFUSING a runtime that would
+  // ignore it is a stricter thing and this assistant is where it is worth the
+  // extra request. A composition is saved and then run, so a downgrade here
+  // costs more than in a suggestion somebody reads before accepting.
   const contract=await authFetch(config().core.replace(/\/$/,'')+'/openapi.json',{signal});
   const protocol=contract.ok?await contract.json():null;
   if (!protocol?.components?.schemas?.ChatRequest?.properties?.tool_choice)
@@ -101,7 +107,7 @@ export async function suggestWorkflow({description,current,selected=[],catalogue
   try {
     return await suggest({
       name:'workflow_composition', schema:PLAN_SCHEMA, session, onStatus, signal,
-      extra:{tool_choice:'none'},   // a composition turn proposes; it calls nothing
+      // tool_choice:'none' is `suggest`'s default now, for every assistant.
       /* The prompt is rebuilt per attempt because validating a proposal
          DISCOVERS schema -- `columns()` appends the real columns of whatever
          relations the draft chose -- and the corrected attempt has to see them. */
