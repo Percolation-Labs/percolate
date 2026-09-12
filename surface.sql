@@ -448,7 +448,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('workflow-engine','function','workflow.plan_document','text,integer','the same resolution, projected into the pipeline a person reads'),
 ('workflow-engine','function','workflow.plan_defects','text','every current definition, defects only -- the deployment gate shape'),
 ('workflow-engine','function','workflow.plan_probe','text,integer','the cheap half of every step, executed: parses, relations, result columns, arity'),
-('workflow-engine','function','workflow.plan_status','text,uuid','what the last run returned, shape by shape -- the thing a plan cannot know'),
+('workflow-engine','function','workflow.plan_status','text,uuid','what YOUR last run returned, shape by shape -- the thing a plan cannot know'),
 ('workflow-engine','function','workflow.one_write_statement','text','the wrapping that makes a write step ONE statement -- reachable because plan_probe is SECURITY INVOKER and asks it as the caller'),
 
 -- ---------- agentic ----------------------------------------------------

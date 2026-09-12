@@ -84,7 +84,27 @@ insert into workflow.definitions (name, spec) values
 -- name -- ends with `grant select on workflow.definitions to authenticated`,
 -- and on the day that lands the EXECUTE would have been reachable by anyone
 -- who can sign in. An assertion written here holds whichever role gets there.
-set local role api_viewer;
+--
+-- AND THE ROLE MOVED UNDER IT, WHICH IS WHAT THAT LAST SENTENCE IS FOR.
+-- REM-81 revoked plan_probe from `authenticated` -- with it plan_catalog,
+-- plan_defects, plan_document and plan_graph -- because all five expand a
+-- workflow's `spec`, and integration-rbac.sql §1 refuses to publish `spec` to
+-- that role. api_viewer inherited the grant through `grant authenticated to
+-- api_viewer` and no longer has it, so the probe below now raises `permission
+-- denied for function plan_probe` as that role.
+--
+-- So this runs as app_owner, which is who reaches plan_probe today: it is an
+-- operator diagnostic until workflow.definitions adopts scope (REM-42), and on
+-- the day the grants come back this goes back to api_viewer and asserts the
+-- same thing. Nothing about what is being tested changes -- whether EXPLAIN
+-- runs the statement after the semicolon is a property of plan_probe's body,
+-- not of who called it -- and the claims are still set, because §2 asks what
+-- the session's claims are after the probe.
+--
+-- The wrapping still matters with the grant gone: workflow.execute_as_viewer
+-- shares one_write_statement and IS reached by a person's workflow step, which
+-- is the sibling workflow/15 §4b covers.
+set local role app_owner;
 set local request.jwt.claims = '{"sub":"18181818-0000-4000-8000-00000000000a"}';
 
 do $$

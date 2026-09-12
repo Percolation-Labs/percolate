@@ -8195,9 +8195,20 @@ grant execute on function workflow.plan_graph(text, int) to authenticated;
 grant execute on function workflow.plan_document(text, int) to authenticated;
 grant execute on function workflow.plan_defects(text) to authenticated;
 grant execute on function workflow.plan_probe(text, int) to authenticated;
--- plan_status reads workflow.tasks, which is RLS-enabled and per-tenant, and
--- this function is SECURITY INVOKER (the default) precisely so that stays true:
--- a caller sees the runs their policies admit, and nothing else.
+-- plan_status is the one of the six that reads RUN ROWS rather than
+-- definitions, and the body above reads workflow.runs/workflow.tasks with the
+-- engine's own reach -- which standalone is the only reach there is.
+--
+-- THIS COMMENT USED TO SAY the function was SECURITY INVOKER "precisely so
+-- that stays true: a caller sees the runs their policies admit, and nothing
+-- else". The policies never got to run. With the identity plane installed
+-- `authenticated` holds no SELECT on either base table, so the grant check
+-- refused first and every call raised `permission denied for table tasks` --
+-- a capability granted to every signed-in caller that none of them could use.
+-- The sentence described a design that was never reached, which is why reading
+-- it did not reveal the defect (REM-81). integration-rbac.sql §(h) shadows
+-- this with a body over runs_api/tasks_api; the grant below is what that
+-- version re-authorizes, since `create or replace function` keeps the ACL.
 grant execute on function workflow.plan_status(text, uuid) to authenticated;
 
 comment on function workflow.plan_document(text, int) is
