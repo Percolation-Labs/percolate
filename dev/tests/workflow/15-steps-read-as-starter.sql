@@ -62,7 +62,7 @@ insert into workflow.definitions (name, spec) values
     "input":{"statement":"select v from t_sr_secret"}}]}'),
 ('t_sr_write', '{"steps":[{"key":"q","kind":"sql","queue":"none",
     "input":{"statement":"insert into t_sr_notes values (null, ''written'')", "write":true}}]}'),
--- §4b's: a write the person may make, and three that would change who they are.
+-- §4b's: a write the person may make, and five that would change who they are.
 ('t_sr_log_ok', '{"steps":[{"key":"q","kind":"sql","queue":"none",
     "input":{"statement":"insert into t_sr_log select body from t_sr_notes", "write":true}}]}'),
 ('t_sr_set_claims', '{"steps":[{"key":"q","kind":"sql","queue":"none",
@@ -70,7 +70,22 @@ insert into workflow.definitions (name, spec) values
 ('t_sr_do_claims', '{"steps":[{"key":"q","kind":"sql","queue":"none",
     "input":{"statement":"do $x$ begin set local request.jwt.claims = ''{\"sub\":\"15151515-0000-4000-8000-00000000000a\"}''; insert into t_sr_log select body from t_sr_notes; end $x$", "write":true}}]}'),
 ('t_sr_two_statements', '{"steps":[{"key":"q","kind":"sql","queue":"none",
-    "input":{"statement":"insert into t_sr_log values (''first''); set local request.jwt.claims = ''{\"sub\":\"15151515-0000-4000-8000-00000000000a\"}''", "write":true}}]}');
+    "input":{"statement":"insert into t_sr_log values (''first''); set local request.jwt.claims = ''{\"sub\":\"15151515-0000-4000-8000-00000000000a\"}''", "write":true}}]}'),
+-- The break-out the wrapping did not stop until the wrapped string was opened
+-- as a cursor (REM-64). The author closes one_write_statement''s `with p8_write
+-- as (` bracket himself, runs a SET that becomes the admin, then REOPENS the
+-- bracket so the wrapper''s trailing `returning 1) select count(*) ...` closes
+-- validly -- on origin/main all three statements ran, the third read t_sr_notes
+-- as the admin, and `admin note` landed in t_sr_log. It must be refused as one
+-- statement, before anything is written.
+('t_sr_bracket_breakout', '{"steps":[{"key":"q","kind":"sql","queue":"none",
+    "input":{"statement":"insert into t_sr_log values (''probe'') returning 1) select 1; set local request.jwt.claims = ''{\"sub\":\"15151515-0000-4000-8000-00000000000a\"}''; with p8_write as (insert into t_sr_log select body from t_sr_notes", "write":true}}]}'),
+-- The same break-out by a different trick: a trailing `--` comments out the
+-- wrapper''s own tail instead of reopening the bracket, and the author supplies
+-- his own complete `with p8_write as (...) select count(*) ...` as the third
+-- statement. Also three statements; also refused.
+('t_sr_comment_breakout', '{"steps":[{"key":"q","kind":"sql","queue":"none",
+    "input":{"statement":"insert into t_sr_log values (''x'') returning 1) select 1; set local request.jwt.claims = ''{\"sub\":\"15151515-0000-4000-8000-00000000000a\"}''; with p8_write as (insert into t_sr_log select body from t_sr_notes returning 1) select count(*) from p8_write --", "write":true}}]}');
 
 -- Where §4b's writes land: a person may insert, and what they insert is what
 -- they could read -- so a row saying `admin note` means the step read as admin.
@@ -171,12 +186,17 @@ end $$;
 -- 4b. A WRITE STEP CANNOT CHANGE WHOSE STEP IT IS (REM-64).
 --
 -- The claims are set by execute_for and the statement runs as api_viewer,
--- which holds no set_config -- but a write step is EXECUTED, not wrapped, so a
--- SET, a DO block issuing one, or a second statement after an innocent first
--- would rewrite who the step acts for. Each is attempted by the member; each
--- must fail before anything is written, and the member's ordinary write must
--- still succeed and still report its row count. `admin note` in t_sr_log would
--- mean a step read as the admin.
+-- which holds no set_config -- but a write step is wrapped as the body of a
+-- data-modifying CTE and the WRAPPING alone did not stop a SET, a DO block
+-- issuing one, or a second statement after an innocent first from rewriting who
+-- the step acts for: an author who closes the wrapper's bracket himself
+-- smuggles the rest past it (t_sr_bracket_breakout, t_sr_comment_breakout),
+-- and on origin/main the smuggled statement ran and wrote `admin note` into
+-- t_sr_log. The wrapped string is opened as a cursor now, which refuses a
+-- multi-statement string before any of it runs. Each attack is made by the
+-- member; each must fail before anything is written, and the member's ordinary
+-- write must still succeed and still report its row count. `admin note` in
+-- t_sr_log would mean a step read as the admin.
 -- ---------------------------------------------------------------------
 do $$
 declare r record; v_name text;
@@ -190,7 +210,8 @@ begin
         raise exception 'a member''s own write step no longer runs, or no longer reports its count (step %, error %)',
             r.status, coalesce(r.err, '(none)');
     end if;
-    foreach v_name in array array['t_sr_set_claims', 't_sr_do_claims', 't_sr_two_statements'] loop
+    foreach v_name in array array['t_sr_set_claims', 't_sr_do_claims', 't_sr_two_statements',
+                                   't_sr_bracket_breakout', 't_sr_comment_breakout'] loop
         select * into r from pg_temp.run_as('15151515-0000-4000-8000-00000000000b', v_name);
         if r.status is distinct from 'failed' or coalesce(r.err, '') not like '%must be one INSERT, UPDATE, DELETE or MERGE%' then
             raise exception '% ran for a member (step %, error %) -- a write step changed whose step it was',

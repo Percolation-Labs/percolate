@@ -58,6 +58,15 @@ insert into workflow.definitions (name, spec) values
      "input":{"write":true,
               "statement":"insert into t_probe_target values (2); set request.jwt.claims = ''{\"sub\":\"18181818-0000-4000-8000-00000000000b\"}''; select 1"}}
  ]}'),
+-- The break-out that the write wrapping alone did not stop (REM-64): the author
+-- closes one_write_statement''s `with p8_write as (` bracket himself and reopens
+-- it, so the whole string parses -- and under EXPLAIN-via-EXECUTE the second
+-- insert ran. EXPLAIN-via-cursor refuses the multi-statement string.
+('t_probe_bracket_breakout', '{"steps":[
+    {"key":"writes", "kind":"sql", "queue":"none",
+     "input":{"write":true,
+              "statement":"insert into t_probe_target values (4) returning 1) select 1; set request.jwt.claims = ''{\"sub\":\"18181818-0000-4000-8000-00000000000b\"}''; with p8_write as (insert into t_probe_target values (99)"}}
+ ]}'),
 ('t_probe_ordinary', '{"steps":[
     {"key":"writes", "kind":"sql", "queue":"none",
      "input":{"write":true, "statement":"insert into t_probe_target values (3)"}},
@@ -142,6 +151,36 @@ begin
         raise exception
             'probing a workflow rewrote the session claims to [%] -- every later '
             'statement in this transaction would act as somebody else', coalesce(v_sub, '');
+    end if;
+end $$;
+
+-- The bracket break-out: the author closes one_write_statement's own `with
+-- p8_write as (` and reopens it, so the whole string parses and the wrapping
+-- did not keep it to one statement. EXPLAIN-via-cursor is what refuses it.
+-- Measured on origin/main: the second insert (99) ran and the probe returned
+-- ok.
+do $$
+declare v_verdict text; v_sub text;
+begin
+    select verdict into v_verdict
+      from workflow.plan_probe('t_probe_bracket_breakout')
+     where step = 'writes' and probe = 'parses';
+
+    if (select count(*) from t_probe_target) <> 0 then
+        raise exception
+            'PROBING A WORKFLOW WROTE A ROW: the bracket break-out reopened the CTE and '
+            'plpgsql ran the statements after the semicolon. The wrapped string has to '
+            'be opened as a cursor, which refuses a multi-statement plan.';
+    end if;
+    if v_verdict is distinct from 'fail' then
+        raise exception
+            'the probe reported [%] for a bracket break-out that is three statements; it '
+            'has to be unplannable, not ok', coalesce(v_verdict, '<no row>');
+    end if;
+    v_sub := current_setting('request.jwt.claims', true)::jsonb->>'sub';
+    if v_sub is distinct from '18181818-0000-4000-8000-00000000000a' then
+        raise exception
+            'the bracket break-out rewrote the session claims to [%]', coalesce(v_sub, '');
     end if;
 end $$;
 

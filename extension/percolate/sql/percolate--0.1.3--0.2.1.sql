@@ -3528,17 +3528,27 @@ revoke execute on function workflow.execute_for(uuid, text, boolean, jsonb) from
 -- where it was needed, and the sibling that needed the same rule did not get
 -- it. `execute_as_viewer` wraps a write as the body of a data-modifying CTE --
 -- the grammar, not a pattern, deciding that a string is ONE insert, update,
--- delete or merge -- because plpgsql's EXECUTE runs a string of several
--- statements one after another, so `insert ...; set local request.jwt.claims
--- = ...` rewrites whose step it is (REM-64, workflow/15 §4b). `plan_probe`
--- took a workflow author's statement straight into `execute 'explain (format
--- json) ' || v_stmt`, two lines above a read branch that was correctly
--- wrapped, and EXPLAIN of the first statement does not stop the second from
--- running. It is SECURITY INVOKER and granted to `authenticated`.
+-- delete or merge. `plan_probe` took a workflow author's statement straight
+-- into `execute 'explain (format json) ' || v_stmt`, two lines above a read
+-- branch that was correctly wrapped, and EXPLAIN of the first statement does
+-- not stop the second from running. It is SECURITY INVOKER and granted to
+-- `authenticated`.
 --
 -- That is the seventeenth instance of meta/postmortems/2026-09-11-fixed-at-
 -- the-copy-that-failed.md, so the fix is not a second copy of the wrapping:
 -- it is this function, which both callers now ask.
+--
+-- THE WRAPPING ALONE DID NOT HOLD, and both callers now open the wrapped
+-- string AS A CURSOR rather than EXECUTE it. plpgsql's EXECUTE runs a string of
+-- several statements one after another, so an author who closes the CTE
+-- bracket himself -- `update t set x=x where false returning 1) select 1; set
+-- local request.jwt.claims = '{"sub":"<victim>"}'; with p8_write as (update
+-- ... where owner='<victim>'` -- wraps into three statements, and under
+-- EXECUTE the SET ran and the third rewrote the victim's rows (REM-64,
+-- measured). SPI refuses to open a multi-statement string as a cursor, and
+-- parses the whole string before running any of it, so `open ... for execute
+-- <wrapped> ; fetch ; close` is a SQL-only, one-statement enforcement that the
+-- wrapping on its own is not. workflow/15 §4b and workflow/18 are the cases.
 --
 -- TRAILING SEMICOLONS ARE DROPPED, since an author writes them and a CTE body
 -- cannot hold one. A statement carrying its own RETURNING does not parse here
@@ -8953,6 +8963,7 @@ declare
     v_fn    text;
     v_oid   oid;
     v_env   text[];
+    v_cur   refcursor;
 begin
     select d.spec into v_spec
       from workflow.definitions d
@@ -8988,21 +8999,30 @@ begin
             v_stmt := regexp_replace(v_in->>'statement', '\{\{[^}]*\}\}', 'null', 'g');
 
             begin
+                -- OPENED AS A CURSOR, NOT EXECUTEd, and this is the whole of
+                -- the fix. EXPLAIN plans the first statement of the string it
+                -- is given and does not stop plpgsql running the rest, so an
+                -- unwrapped `explain (format json) ' || v_stmt` ran whatever a
+                -- workflow author put after the semicolon -- here, as the
+                -- caller, from a function whose own comment promises it runs no
+                -- step. Wrapping the write closed the trivial case; an author
+                -- who closes the wrapper's bracket himself reopens it (REM-64,
+                -- the same break-out execute_as_viewer took). SPI refuses to
+                -- open a multi-statement string as a cursor and parses it whole
+                -- before running any of it, so the statement after the
+                -- semicolon never runs. A break-out lands in the `when others`
+                -- below, is reported `parses: fail`, and nulls v_stmt -- which
+                -- also skips the temp-view probe, the one branch a cursor
+                -- cannot guard, because CREATE VIEW is not openable as one.
                 if coalesce((v_in->>'write')::boolean, false) then
-                    -- THE SAME WRAPPING execute_as_viewer USES, from the same
-                    -- home. EXPLAIN plans the first statement of the string it
-                    -- is given and does not stop plpgsql running the rest, so
-                    -- an unwrapped `explain (format json) ' || v_stmt` ran
-                    -- whatever a workflow author put after the semicolon --
-                    -- here, as the caller, from a function granted to
-                    -- `authenticated` whose own comment promises it runs no
-                    -- step.
-                    execute format('explain (format json) %s',
-                                   workflow.one_write_statement(v_stmt)) into v_plan;
+                    open v_cur for execute format('explain (format json) %s',
+                                   workflow.one_write_statement(v_stmt));
                 else
-                    execute format(
-                        'explain (format json) select * from (%s) t', v_stmt) into v_plan;
+                    open v_cur for execute format(
+                        'explain (format json) select * from (%s) t', v_stmt);
                 end if;
+                fetch v_cur into v_plan;
+                close v_cur;
                 step := v_key; probe := 'parses'; verdict := 'ok';
                 detail := 'the planner accepted it';
                 return next;
@@ -12777,36 +12797,46 @@ returns jsonb as $$
 declare
     v_out   jsonb;
     v_count bigint;
+    v_cur   refcursor;
 begin
     if p_write then
         -- ONE STATEMENT THAT CANNOT CHANGE WHOSE STEP THIS IS, and Postgres's
-        -- grammar decides, not a pattern. A read is wrapped as a subquery
-        -- below, where nothing but a query parses. A write used to be executed
-        -- as written, so `SET LOCAL request.jwt.claims = ...`, a DO block that
-        -- issues one, or a second statement after an innocent first ran as
-        -- api_viewer and rewrote who the step acts for -- and SET is a
-        -- statement, not a function a grant can take away (REM-64).
+        -- grammar decides, not a pattern. A write is wrapped as the body of a
+        -- data-modifying CTE (workflow.one_write_statement), which parses only
+        -- as ONE INSERT, UPDATE, DELETE or MERGE, and whose count is the row
+        -- count the step reports. A read is wrapped as a subquery below.
         --
-        -- So a write is wrapped too: the body of a data-modifying CTE, which
-        -- parses only as ONE INSERT, UPDATE, DELETE or MERGE, and whose count
-        -- is the row count the step reports. The wrapping itself lives in
-        -- workflow.one_write_statement, because it was written here and
-        -- `plan_probe` needed the same rule and did not have it.
-        -- PREPARE was tried first and is
-        -- not enough: plpgsql's EXECUTE runs a string of several statements
-        -- one after another, USING or not, so `prepare x as insert ...; set
-        -- local ...` prepared the insert and ran the SET (measured, and
-        -- workflow/15 §4b is the case). Trailing semicolons are dropped, since
-        -- an author writes them and a CTE body cannot hold one. A system run
-        -- does not come through here: it runs as the engine, the operator's
-        -- trade (run_sql).
+        -- BUT THE WRAPPING IS NOT ENOUGH ON ITS OWN, and this was the REM-64
+        -- hole for a whole release: plpgsql's EXECUTE runs a string of SEVERAL
+        -- statements one after another, so an author who closes the CTE bracket
+        -- himself smuggles the rest past it --
+        --   `update t set x=x where false returning 1) select 1;
+        --    set local request.jwt.claims = '{"sub":"<victim>"}';
+        --    with p8_write as (update ... where owner='<victim>'`
+        -- wraps into three statements, the SET runs as api_viewer, and the
+        -- third rewrites the victim's rows. PREPARE has the same flaw -- it
+        -- prepares the first and EXECUTE runs the rest. Measured before this
+        -- fix: the victim's row was rewritten.
+        --
+        -- So the wrapped string is OPENED AS A CURSOR rather than EXECUTEd.
+        -- SPI parses the whole string before running any of it and refuses to
+        -- open a multi-statement plan as a cursor ('cannot open multi-query
+        -- plan as cursor', invalid_cursor_definition) -- and a CTE body holding
+        -- a SET or a DO or a second statement is a syntax error before that.
+        -- Either way nothing runs: it is the grammar enforcing one statement,
+        -- SQL-only, and it is exact. Trailing semicolons are dropped by
+        -- one_write_statement, since an author writes them and a CTE body
+        -- cannot hold one. A system run does not come through here: it runs as
+        -- the engine, the operator's trade (run_sql).
         begin
             if p_params is not null then
-                execute workflow.one_write_statement(p_statement) into v_count using p_params;
+                open v_cur for execute workflow.one_write_statement(p_statement) using p_params;
             else
-                execute workflow.one_write_statement(p_statement) into v_count;
+                open v_cur for execute workflow.one_write_statement(p_statement);
             end if;
-        exception when syntax_error then
+            fetch v_cur into v_count;
+            close v_cur;
+        exception when syntax_error or invalid_cursor_definition then
             raise exception
                 'a write step run for a person must be one INSERT, UPDATE, DELETE or MERGE '
                 'statement without its own RETURNING, and this is not (%)', sqlerrm
@@ -12815,13 +12845,33 @@ begin
                              'rows the step acts on; write the change as one statement';
         end;
         return jsonb_build_object('rows_affected', v_count);
-    elsif p_params is not null then
-        execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
-        into v_out using p_params;
-    else
-        execute format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
-        into v_out;
     end if;
+
+    -- A read is one query, enforced the same way and for the same reason: the
+    -- `(%s) t` subquery is closable too, so `select 1) t; set local
+    -- request.jwt.claims = ...; select ... from (select <victim's rows>` read
+    -- as the victim under plain EXECUTE (identical shape to aiq.sql_passthrough,
+    -- where it was measured). Opening as a cursor refuses the multi-statement
+    -- string; a genuine error in a single query (a missing relation, say) is a
+    -- different SQLSTATE and propagates unchanged, so the author still sees it.
+    begin
+        if p_params is not null then
+            open v_cur for execute
+                format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement)
+                using p_params;
+        else
+            open v_cur for execute
+                format('select coalesce(jsonb_agg(t), ''[]''::jsonb) from (%s) t', p_statement);
+        end if;
+        fetch v_cur into v_out;
+        close v_cur;
+    exception when syntax_error or invalid_cursor_definition then
+        raise exception
+            'a read step run for a person must be a single query, and this is not (%)', sqlerrm
+            using errcode = 'syntax_error',
+                  hint = 'a SET or a second statement would change whose rows the step '
+                         'reads; write the read as one query';
+    end;
     return coalesce(v_out, '[]'::jsonb);
 end;
 $$ language plpgsql volatile security definer set search_path = pg_catalog, public;
@@ -17026,6 +17076,7 @@ returns jsonb as $$
 declare
     v_result jsonb;
     v_max    int;
+    v_cur    refcursor;
 begin
     -- Rejected up front only for the things that are unambiguous and cheap to
     -- catch, giving a clear error instead of a confusing transaction abort.
@@ -17060,8 +17111,15 @@ begin
     -- A SET statement and not set_config(), because the caller here is a person
     -- and a person no longer holds set_config: the same function writes
     -- request.jwt.claims, and through this very passthrough it was how anyone
-    -- became anyone (user-rbac/roles.sql §6). SET needs no grant, and the
-    -- statement below cannot issue one -- it is wrapped as a subquery.
+    -- became anyone (user-rbac/roles.sql §6). SET needs no grant, so wrapping
+    -- the caller's statement as a subquery is NOT enough to keep one out: the
+    -- `(%s) _p8_passthrough` bracket is closable, and `select 1) _p8_passthrough
+    -- limit 1) t; set local request.jwt.claims = '{"sub":"<victim>"}'; select
+    -- ... from (select <victim's rows>` read as the victim under plain EXECUTE
+    -- (measured -- the same REM-64 break-out execute_as_viewer took). So the
+    -- statement is OPENED AS A CURSOR below, which SPI refuses to open on a
+    -- multi-statement string and parses whole before running any of it -- the
+    -- grammar keeps it to one query, which the subquery wrapping alone did not.
     -- AND A ROW CAP, because read-only is not the same as bounded (REM-113).
     -- The aggregate below builds one jsonb value out of the whole result set,
     -- in memory, in the server -- so `select * from aiq.nodes` is a read that
@@ -17086,11 +17144,20 @@ begin
 
     begin
         set local transaction_read_only = on;
-        execute format(
-            'select coalesce(jsonb_agg(t), ''[]''::jsonb) from '
-            '(select * from (%s) _p8_passthrough limit %s) t',
-            p_statement, v_max + 1)
-        into v_result;
+        begin
+            open v_cur for execute format(
+                'select coalesce(jsonb_agg(t), ''[]''::jsonb) from '
+                '(select * from (%s) _p8_passthrough limit %s) t',
+                p_statement, v_max + 1);
+            fetch v_cur into v_result;
+            close v_cur;
+        exception when syntax_error or invalid_cursor_definition then
+            raise exception
+                'the SQL passthrough runs a single read query, and this is not (%)', sqlerrm
+                using errcode = 'syntax_error',
+                      hint = 'a SET or a second statement would change whose rows are read; '
+                             'write the read as one query';
+        end;
         if jsonb_array_length(v_result) > v_max then
             raise exception
                 'the SQL passthrough returned more than % rows. It aggregates the '
