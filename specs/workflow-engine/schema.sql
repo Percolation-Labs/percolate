@@ -6929,6 +6929,25 @@ exception when others then
 end;
 $$ language plpgsql immutable;
 
+-- Where a compiled agent step carries its agent's name, chosen by the exact url
+-- the step posts to; null for any other url. Two step forms reach the runtime
+-- (workflow-engine/README.md, "Delegation"): `agent:` compiles to
+-- {{env.P8_AGENT_URL}}/v1/chat/completions with the agent in body.model
+-- (percolate_parser/src/lib.rs), and the documented scheduled step posts to
+-- {{env.P8_AGENT_URL}}/internal/run with it in body.input.agent.
+--
+-- lint_spec and plan_probe both read it here. Each used to read body.model for
+-- any url containing P8_AGENT_URL, so every scheduled step was reported as
+-- naming NULL. An exact url rather than a LIKE: a url this does not know is not
+-- an agent step whose name it can find, and it answers null rather than guess.
+create or replace function workflow.agent_name_path(p_url text)
+returns text[] as $$
+    select case p_url
+        when '{{env.P8_AGENT_URL}}/v1/chat/completions' then '{body,model}'::text[]
+        when '{{env.P8_AGENT_URL}}/internal/run'        then '{body,input,agent}'::text[]
+    end
+$$ language sql immutable;
+
 create or replace function workflow.lint_spec(p_spec jsonb)
 returns table(step_key text, severity text, detail text) as $$
 declare
@@ -7123,12 +7142,13 @@ begin
         -- run-time failure mode is SILENCE: the task queues `ready` and waits
         -- for a runtime that will never recognise the name.
         --
-        -- Recognised by the url template, because that is all there is to
-        -- recognise it by: `agent:` compiles to an ordinary http_call whose
-        -- only remaining trace of having been an agent step is that it points
-        -- at {{env.P8_AGENT_URL}}. Worth saying plainly -- the compiled form
-        -- discards the authored intent, so anything downstream that wants to
-        -- reason about agent steps is reading a convention, not a field.
+        -- Recognised by the url, because that is all there is to recognise it
+        -- by: `agent:` compiles to an ordinary http_call whose only remaining
+        -- trace of having been an agent step is the runtime url it posts to.
+        -- The compiled form discards the authored intent, so anything
+        -- downstream that reasons about agent steps is reading a convention,
+        -- not a field. workflow.agent_name_path holds that convention for both
+        -- step forms, and says where each carries the agent's name.
         --
         -- THE TABLE IS NAMED IN DYNAMIC SQL, AND THE `to_regclass` GUARD IS
         -- WHY IT HAS TO BE. `agentic` loads after this schema and after
@@ -7141,17 +7161,20 @@ begin
         -- Which is exactly what happened the day an ingestion pipeline started
         -- installing its own workflow at load time.
         if v_step->>'kind' = 'http_call'
-           and v_step->'input'->>'url' like '%P8_AGENT_URL%'
+           and workflow.agent_name_path(v_step->'input'->>'url') is not null
            and to_regclass('agentic.agents') is not null then
-            declare v_unknown boolean;
+            declare
+                v_unknown boolean;
+                v_agent   text := v_step->'input'
+                                  #>> workflow.agent_name_path(v_step->'input'->>'url');
             begin
                 execute 'select not exists (select 1 from agentic.agents a where a.name = $1)'
-                   into v_unknown using v_step->'input'->'body'->>'model';
+                   into v_unknown using v_agent;
                 if v_unknown then
                     severity := 'warning';
                     detail := format('agent step names %L, which is not in agentic.agents -- '
                                      'this task will queue and wait rather than fail',
-                                     v_step->'input'->'body'->>'model');
+                                     v_agent);
                     return next;
                 end if;
             end;
@@ -8386,7 +8409,7 @@ begin
                 return next;
             end if;
 
-        elsif v_kind = 'http_call' and (v_in->>'url') like '%P8_AGENT_URL%' then
+        elsif v_kind = 'http_call' and workflow.agent_name_path(v_in->>'url') is not null then
             if to_regclass('agentic.agents') is null then
                 step := v_key; probe := 'agent'; verdict := 'skipped';
                 detail := 'agentic is not installed on this deployment';
@@ -8394,10 +8417,11 @@ begin
             else
                 execute format(
                     'select case when exists (select 1 from agentic.agents where name = %L)
-                          then ''ok'' else ''fail'' end', v_in#>>'{body,model}')
+                          then ''ok'' else ''fail'' end',
+                    v_in #>> workflow.agent_name_path(v_in->>'url'))
                 into verdict;
                 step := v_key; probe := 'agent';
-                detail := format('agent %L%s', v_in#>>'{body,model}',
+                detail := format('agent %L%s', v_in #>> workflow.agent_name_path(v_in->>'url'),
                                  case when verdict = 'ok' then ' exists'
                                       else ' has no row in agentic.agents' end);
                 return next;
