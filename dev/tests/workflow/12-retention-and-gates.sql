@@ -204,6 +204,52 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
+-- 3b. A PURGE THAT WOULD OUTLIVE ITS CALLER'S statement_timeout STOPS AND
+--     KEEPS WHAT IT DID, rather than being cancelled and rolling all of it
+--     back.
+--
+-- pg_cron runs the nightly purge as `scheduler`, under statement_timeout 60s.
+-- Measured on 100k finished runs, that call was cancelled at 64.8s and purged
+-- nothing, and would have been every night. Deletes are slowed here by a
+-- trigger so that twenty one-run batches need 6s against a 4s bound: without a
+-- deadline the call is cancelled at 4s; with one it stops starting batches at
+-- 2s and returns what it purged.
+-- ---------------------------------------------------------------------
+create function workflow.t_slow_delete() returns trigger language plpgsql as
+$$ begin perform pg_sleep(0.3); return old; end $$;
+create trigger t_slow_delete before delete on workflow.runs
+    for each row execute function workflow.t_slow_delete();
+
+do $$
+declare v_run uuid; i int;
+begin
+    for i in 1..20 loop
+        v_run := workflow.start_workflow('t_ret', '{}'::jsonb);
+        update workflow.runs set status = 'succeeded',
+               completed_at = now() - interval '90 days'
+         where id = v_run;
+    end loop;
+end $$;
+
+set local statement_timeout = '4s';
+do $$
+declare v_res record;
+begin
+    select * into v_res from workflow.purge_completed(interval '30 days', 1, 1000);
+    if v_res.runs_purged < 1 then
+        raise exception 'a purge that stopped at its deadline purged nothing (%)', v_res;
+    end if;
+end $$;
+set local statement_timeout = 0;
+
+drop trigger t_slow_delete on workflow.runs;
+drop function workflow.t_slow_delete();
+-- The runs this block left unpurged still hold `ready` tasks on t-ret, which
+-- would make t-ret the deepest queue §6's plan gate judges. Cleared, so §6
+-- judges what it seeds.
+select from workflow.purge_completed(interval '30 days', 50, 1000);
+
+-- ---------------------------------------------------------------------
 -- 4. THE OPERATOR VIEWS ARE NOT GRANTED TO CALLERS.
 --
 -- workflow.runs and tasks carry RLS, and these views are owner-privileged --

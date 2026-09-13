@@ -8172,6 +8172,29 @@ alter table workflow.tasks add  constraint tasks_status_fk
 -- also what Kubernetes, Argo and Step Functions call it, so it is the word a
 -- reader arrives already expecting.
 
+-- THE POINTERS A PURGE HAS TO CHECK, INDEXED. Deleting a task or a run makes
+-- Postgres look, once per deleted row, for rows still pointing at it, and two
+-- of those pointers had no index: tasks.child_run_id and
+-- tasks.compensates_task_id were each a sequential scan of workflow.tasks per
+-- deleted row. The eligibility query below also sorted every finished run to
+-- choose fifty, and the runs_skipped count after the loop -- an OR of EXISTS,
+-- which the planner cannot turn into a hash join -- scanned every task once
+-- per finished run. That count is not bounded by anything the loop does.
+--
+-- Measured on 100k finished runs (200k tasks, 600k events), as `scheduler`
+-- (statement_timeout 60s):
+--   without these indexes: cancelled at 64.8s, nothing committed; with the
+--     deadline below and still no indexes, cancelled at 60.0s three calls
+--     running, and one batch as the superuser was still in the count after
+--     ten minutes;
+--   with them: 50,000 runs in 6.2s, then the remaining 50,000 in 7.8s.
+create index if not exists idx_tasks_child_run
+    on workflow.tasks (child_run_id) where child_run_id is not null;
+create index if not exists idx_tasks_compensates
+    on workflow.tasks (compensates_task_id) where compensates_task_id is not null;
+create index if not exists idx_runs_finished
+    on workflow.runs ((coalesce(completed_at, updated_at)));
+
 drop function if exists workflow.purge_completed(interval, int, int);
 create or replace function workflow.purge_completed(
     p_older_than  interval default interval '30 days',
@@ -8190,6 +8213,22 @@ declare
     v_tasks   bigint := 0;
     v_events  bigint := 0;
     v_skipped bigint := 0;
+    -- STOP STARTING BATCHES AT HALF THE CALLER'S OWN BOUND. The call is one
+    -- statement and one transaction, so a purge that outlives
+    -- statement_timeout is not partly done: it is cancelled, every batch rolls
+    -- back, and the next night starts from the same backlog. `scheduler` runs
+    -- under 60s/120s (dev/image-init/00-superuser.sql) so that the tick and
+    -- the reaper cannot pile up, and raising that for one daily job would
+    -- unbound them. So the budget is read from the session rather than
+    -- restated here: half of whichever timeout ends first, leaving the other
+    -- half for the batch in flight and the runs_skipped count below. With no
+    -- timeout set, the deadline is NULL and p_max_batches is the only bound.
+    v_deadline timestamptz := least(
+        statement_timestamp()
+          + nullif(current_setting('statement_timeout')::interval, interval '0') / 2,
+        transaction_timestamp()
+          + nullif(coalesce(current_setting('transaction_timeout', true), '0')::interval,
+                   interval '0') / 2);
 begin
     if p_batch < 1 then
         raise exception 'p_batch must be positive';
@@ -8286,6 +8325,9 @@ begin
         v_runs := v_runs + v_n;
 
         v_batches := v_batches + 1;
+        -- AFTER a batch, not before, so every call purges at least one
+        -- batch however little of its budget is left when it starts.
+        exit when clock_timestamp() >= v_deadline;
     end loop;
 
     -- WHAT WAS ELIGIBLE BY AGE AND HELD BACK BY A REFERENCE -- which means
