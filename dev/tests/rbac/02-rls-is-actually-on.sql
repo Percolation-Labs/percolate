@@ -26,7 +26,7 @@ begin
     from pg_roles
     where rolsuper
       and rolname in ('app_owner','api_viewer','web_anon','authenticated',
-                      'authenticator','worker','scheduler');
+                      'authenticator','worker','scheduler','app_provisioner');
     if v_bad is not null then
         raise exception 'these roles are superusers and bypass all RLS: %', v_bad;
     end if;
@@ -158,12 +158,12 @@ begin
     select string_agg(format('%s on %I.%I', privilege_type, table_schema, table_name), ', ')
     into v_bad
     from information_schema.role_table_grants
-    where grantee in ('worker','scheduler')
+    where grantee in ('worker','scheduler','app_provisioner')
       and table_schema in (select percolate.extension_schemas());
     if v_bad is not null then
         raise exception 'a service role holds direct table grants: %', v_bad;
     end if;
-    raise notice 'rbac/02: worker and scheduler hold no table grants';
+    raise notice 'rbac/02: worker, scheduler and app_provisioner hold no table grants';
 end $$;
 
 -- ---------------------------------------------------------------------

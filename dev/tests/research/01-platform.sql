@@ -319,4 +319,45 @@ begin
 end $$;
 reset role;
 
+
+-- 8. Application provisioning: only the provisioner (here the superuser running
+--    the suite), and never an administrator.
+set local request.jwt.claims = '{"sub": "00000000-0000-4000-8000-00000000b002"}';
+set local role authenticated;
+do $$
+begin
+    begin
+        perform rbac.provision_application_user('00000000-0000-4000-8000-00000000c003');
+        raise exception 'a signed-in person provisioned a user';
+    exception when insufficient_privilege then null;
+    end;
+end $$;
+reset role;
+
+set local request.jwt.claims = '';
+do $$
+declare g uuid;
+begin
+    perform rbac.provision_application_user('00000000-0000-4000-8000-00000000c003');
+    perform rbac.provision_application_user('00000000-0000-4000-8000-00000000c003');
+    assert (select status from rbac.users where id = '00000000-0000-4000-8000-00000000c003') = 'active',
+        'provisioning a user is idempotent and active';
+    perform rbac.provision_application_credential('00000000-0000-4000-8000-000000000c01',
+        '00000000-0000-4000-8000-00000000c003', 'an app token', '{packages:read-own}');
+    perform rbac.revoke_application_credential('00000000-0000-4000-8000-000000000a01');
+    assert (select revoked_at from rbac.api_keys where id = '00000000-0000-4000-8000-000000000a01') is null,
+        'the provisioner cannot revoke a key it did not provision';
+    perform rbac.revoke_application_credential('00000000-0000-4000-8000-000000000c01');
+    assert (select revoked_at from rbac.api_keys where id = '00000000-0000-4000-8000-000000000c01') is not null,
+        'the provisioner revokes its own credential';
+    g := rbac.grant_application_role('00000000-0000-4000-8000-00000000c003', 'rp-app-lister', 'research', 'list', 'operator');
+    assert g = rbac.grant_application_role('00000000-0000-4000-8000-00000000c003', 'rp-app-lister', 'research', 'list', 'operator'),
+        'granting the same role twice keeps one active grant';
+    begin
+        perform rbac.grant_application_role('00000000-0000-4000-8000-00000000c003', 'rp-app-admin', 'users', 'admin', 'operator');
+        raise exception 'the provisioner granted users:admin';
+    exception when insufficient_privilege then null;
+    end;
+end $$;
+
 rollback;
