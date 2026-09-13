@@ -61,6 +61,23 @@ alter table aiq.edges add column if not exists recall_count     bigint not null 
 alter table aiq.edges add column if not exists probe_count      bigint not null default 0;
 alter table aiq.edges add column if not exists last_recalled_at timestamptz;
 
+-- content.resolve_file AND workflow.v_artifacts, both reshaped in 0.2.0
+-- (2d54769): resolve_file gained a trailing `checksum` column, and a changed
+-- return type cannot be `create or replace`d; v_artifacts changed its query
+-- shape and now reads resolve_file. The drops are needed only by a database
+-- still carrying the 0.1.x shapes, so they live HERE and not in the replayed
+-- body -- where they were until the first bump past 0.2.0 replayed them onto
+-- a database whose v_artifacts already depends on resolve_file, and
+-- `cannot drop function content.resolve_file(uuid) because other objects
+-- depend on it` stopped the upgrade. dev/upgrade-converges.sh FROM=self is the
+-- gate that refuses the next one.
+--
+-- The view first: on a 0.1.x database nothing depends on either, and on any
+-- database where the view already reads the function this order is the one
+-- that works. The body recreates both, owned and granted as it says.
+drop view if exists workflow.v_artifacts;
+drop function if exists content.resolve_file(uuid);
+
 -- ============================================================
 -- percolate 0.2.0 -- the whole schema, as one extension script.
 --
@@ -21777,12 +21794,16 @@ alter table content.resources add  constraint resources_readable_by_somebody
 -- AND NOW resolve_file, which needs the three columns the line above adds.
 -- Its home is here for that reason; schema.sql carries the pointer.
 --
--- `checksum` is appended LAST, and the drop is what lets it be: a changed
--- return type cannot be `create or replace`d. It is there so
--- workflow.v_artifacts can take its file columns from here instead of reading
--- content.files, which no end-user role may be granted (§ below); callers that
--- select by name, like percolate-core's content server, are unaffected.
-drop function if exists content.resolve_file(uuid);
+-- `checksum` is appended LAST. It is there so workflow.v_artifacts can take its
+-- file columns from here instead of reading content.files, which no end-user
+-- role may be granted (§ below); callers that select by name, like
+-- percolate-core's content server, are unaffected.
+--
+-- NO DROP IN FRONT OF IT, although a changed return type cannot be `create or
+-- replace`d. The drop that reshaped it lives in specs/migrations/0.1.6--0.2.0.sql,
+-- which only a database older than 0.2.0 runs. Here it was replayed onto 0.2.0
+-- by the first bump past it, where v_artifacts depends on this function, and the
+-- upgrade stopped. A future reshape goes in the migration for its own hop.
 create or replace function content.resolve_file(p_resource_id uuid)
 returns table(bucket text, object_key text, content_type text, size_bytes bigint,
               checksum text) as $$
@@ -22201,9 +22222,9 @@ $$ language plpgsql stable;
 -- signed-in reader. Owned by api_viewer the policies apply; and the file
 -- columns now come from content.resolve_file(), because api_viewer may not
 -- read content.files (the invariant below) and resolve_file is the scoped
--- door to it. Recreated rather than replaced because its query changed shape,
--- and nothing depends on it.
-drop view if exists workflow.v_artifacts;
+-- door to it. Its 0.2.0 reshape needed a drop, which lives in
+-- specs/migrations/0.1.6--0.2.0.sql beside resolve_file's for the same reason:
+-- replayed here, it would drop the view and its grants on every upgrade.
 create or replace view workflow.v_artifacts as
 select t.run_id,
        t.id             as task_id,

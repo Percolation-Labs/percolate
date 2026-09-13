@@ -58,3 +58,20 @@ alter table aiq.edges alter column valid_from set not null;
 alter table aiq.edges add column if not exists recall_count     bigint not null default 0;
 alter table aiq.edges add column if not exists probe_count      bigint not null default 0;
 alter table aiq.edges add column if not exists last_recalled_at timestamptz;
+
+-- content.resolve_file AND workflow.v_artifacts, both reshaped in 0.2.0
+-- (2d54769): resolve_file gained a trailing `checksum` column, and a changed
+-- return type cannot be `create or replace`d; v_artifacts changed its query
+-- shape and now reads resolve_file. The drops are needed only by a database
+-- still carrying the 0.1.x shapes, so they live HERE and not in the replayed
+-- body -- where they were until the first bump past 0.2.0 replayed them onto
+-- a database whose v_artifacts already depends on resolve_file, and
+-- `cannot drop function content.resolve_file(uuid) because other objects
+-- depend on it` stopped the upgrade. dev/upgrade-converges.sh FROM=self is the
+-- gate that refuses the next one.
+--
+-- The view first: on a 0.1.x database nothing depends on either, and on any
+-- database where the view already reads the function this order is the one
+-- that works. The body recreates both, owned and granted as it says.
+drop view if exists workflow.v_artifacts;
+drop function if exists content.resolve_file(uuid);
