@@ -288,6 +288,13 @@ jobs:
       - name: agent serve answers MCP at /mcp, as the agent gateway
         run: python -m unittest discover -s tests -p test_gateway_on_agent_serve.py
 
+      # The query tool server a get-percolate install runs as `query-mcp`:
+      # an agent's own MCP client lists and calls it, the description comes
+      # from SCHEMA "p8ql", and the caller's bearer is what reaches PostgREST.
+      # `sample load` syncs the catalogue of every server its plugin registers.
+      - name: percolate query mcp keeps its three properties, and sample load syncs it
+        run: python -m unittest discover -s tests -p test_query_mcp.py
+
       - name: Prose has one wrapping default and one measure
         run: python -m unittest discover -s tests -p test_ui_theme.py
 

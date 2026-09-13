@@ -389,6 +389,35 @@ async def apply_plugin(conn: Any, doc: dict[str, Any]) -> list[str]:
     ]
 
 
+def sync_tool_server(agent_url: str, name: str, token: str | None) -> str:
+    """Ask the Agent Runtime to fetch one tool server's catalogue; one line of outcome.
+
+    Never raises. The rows are already written, and every way this can fail
+    leaves a command the reader can run once the cause is fixed, so the line
+    names that command instead of stopping the load.
+    """
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    url = f"{agent_url.rstrip('/')}/tools/{urllib.parse.quote(name, safe='')}/sync"
+    retry = f'curl -X POST {url} -H "Authorization: Bearer $TOKEN"'
+    if not token:
+        return f"tool server {name}: not synced, no token (pass --as-email or --token); then {retry}"
+    req = urllib.request.Request(url, method="POST", headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            tools = json.loads(response.read() or b"{}").get("tools") or []
+    except urllib.error.HTTPError as err:
+        detail = err.read().decode(errors="replace")[:200]
+        return f"tool server {name}: not synced, the runtime answered {err.code} {detail}; then {retry}"
+    except (urllib.error.URLError, TimeoutError, OSError) as err:
+        return f"tool server {name}: not synced, {agent_url} is unreachable ({err}); then {retry}"
+    if not tools:
+        return f"tool server {name}: synced, and it exposes no tools; check the server, then {retry}"
+    return f"tool server {name}: synced, {len(tools)} tool(s): {', '.join(tools)}"
+
+
 def orgs_in_documents(where: Path, yaml: Any) -> list[str]:
     """Every distinct org the documents index names, in order.
 

@@ -144,6 +144,12 @@ from .core.cli import sample_app as _sample_app
 app.add_typer(_auth_app, name="auth", help="Bootstrap the first identity, and sign tokens")
 app.add_typer(_sample_app, name="sample", help="Load a sample dataset")
 
+# Direct for the same reason as `auth`: the query tool server is standard
+# library only, so there is no extra to be missing.
+from .query.cli import app as _query_app
+
+app.add_typer(_query_app, name="query", help="The query tool server: p8ql over MCP, as the caller")
+
 
 @app.command()
 def worker(

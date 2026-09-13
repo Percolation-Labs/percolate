@@ -253,6 +253,7 @@ def sample_load(
     path: str = typer.Argument(..., help="The sample directory (holds manifest.yaml)."),
     dsn: str | None = typer.Option(None, help="Owner-level DSN. Default: P8_ADMIN_DSN, then P8_DSN."),
     content_url: str = typer.Option("http://localhost:8081", help="Content Server, for the documents step."),
+    agent_url: str = typer.Option("http://localhost:8080", help="Agent Runtime, to sync the plugin's tool catalogues."),
     token: str | None = typer.Option(None, help="Bearer token for uploads. Default: minted from --as-email."),
     as_email: str | None = typer.Option(None, help="Mint an upload token for this user."),
     secret: str | None = typer.Option(None, help="Signing secret. Default: P8_JWT_SECRET."),
@@ -390,7 +391,7 @@ def sample_load(
         upload_token = None  # minted below, once we know the user id
 
     async def _run() -> None:
-        nonlocal upload_token, stalled, still_ingesting
+        nonlocal upload_token, stalled, still_ingesting, sync_token
         yaml = samples._yaml()
         conn = await _connect(target_dsn)
         try:
@@ -445,7 +446,9 @@ def sample_load(
                 elif kind == "graph":
                     done = await samples.apply_graph(conn, yaml.safe_load(where.read_text()))
                 elif kind == "plugin":
-                    done = await samples.apply_plugin(conn, yaml.safe_load(where.read_text()))
+                    plugin_doc = yaml.safe_load(where.read_text())
+                    done = await samples.apply_plugin(conn, plugin_doc)
+                    plugin_servers.extend(s["name"] for s in plugin_doc.get("tool_servers") or [])
                 elif kind == "workflows":
                     done = await samples.apply_workflows(conn, list(where.glob("*.yaml")))
                 elif kind == "documents":
@@ -524,16 +527,33 @@ def sample_load(
                     continue
                 for line in done:
                     typer.echo(f"  {line}")
+            if plugin_servers and not sync_token and as_email and (secret or os.environ.get("P8_JWT_SECRET")):
+                uid = await conn.fetchval("select id::text from rbac.users where email = $1", as_email)
+                if uid:
+                    sync_token = mint_jwt(uid, _jwt_secret(secret), ttl_seconds=300)
         finally:
             await conn.close()
 
     stalled: str | None = None
     still_ingesting = 0
+    plugin_servers: list[str] = []
+    sync_token = token
     try:
         asyncio.run(_run())
     except samples.SampleError as err:
         typer.secho(str(err), fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
+
+    # A TOOL SERVER THE PLUGIN REGISTERED HAS NO CATALOGUE UNTIL IT IS SYNCED,
+    # and an agent bound to it fails its first turn with `has no discovered
+    # tools`. The sync is the runtime's (`POST /tools/{name}/sync`), because
+    # the runtime is what can reach the server by its in-network name, so this
+    # asks the runtime rather than connecting to the server itself. A stack
+    # whose runtime is not up (ci/examples.sh starts only the database) still
+    # loads: the rows are right, and the line printed is the one command that
+    # finishes the job.
+    for name in plugin_servers:
+        typer.echo("  " + samples.sync_tool_server(agent_url, name, sync_token))
 
     typer.echo("")
     if stalled:
