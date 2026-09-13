@@ -46,7 +46,7 @@ from .contracts import ChatRequest, RequestContext, RunError, Session, to_sse
 from .db import PgClient, PgRepository
 from .gateway import caller_claims, user_id_of
 from .runtime import EventSink, channel, relay
-from .sequencer import TurnSequencer
+from .sequencer import AgentNotFound, TurnSequencer
 from .settings import Settings
 from . import telemetry
 
@@ -131,12 +131,44 @@ class RefusedRoute(APIRoute):
             try:
                 return await handle(request)
             except Exception as exc:
-                refused = refusal(exc)
-                if refused is None:
+                answer = _caller_error(exc)
+                if answer is None:
                     raise
-                return JSONResponse(refused.body(), status_code=REFUSED_STATUS)
+                return answer
 
         return refusals_are_403
+
+
+def _caller_error(exc: BaseException) -> JSONResponse | None:
+    """The answer for an exception that is about the CALLER, or None.
+
+    Two, and only these two, so everything else still reaches the host as the
+    500 it is. A refusal by the database is 403 (`core/refusal.py`). An agent
+    the caller cannot see is 404, whether it does not exist or RLS hides it:
+    `get_agent` returns nothing either way, and the one sentence for both is
+    what keeps the answer from saying which agent names exist. It was a bare
+    500, which says the server is broken when the request named nothing.
+    """
+    refused = refusal(exc)
+    if refused is not None:
+        return JSONResponse(refused.body(), status_code=REFUSED_STATUS)
+    if isinstance(exc, AgentNotFound):
+        return JSONResponse({"detail": f"{exc}, or it is not visible to you"}, status_code=404)
+    return None
+
+
+QUOTA_STATUS = 429
+"""What a turn stopped by `rbac.has_quota_remaining()` is over HTTP.
+
+Not 502, which it was: nothing upstream failed, and `brief.md` §5.1 calls a
+quota cutoff "an expected outcome this system plans for, not a crash". Not 403
+either, which says the database refused this caller, and which
+`core/provider_errors.py` reads as a refused credential. 429 with an error code
+of `insufficient_quota` is the answer OpenAI-shaped APIs give for an account out
+of credit, and it is the one `provider_errors.classify` already reads as
+terminal -- so an `agent:` workflow step calling this runtime stops on the first
+attempt instead of retrying a quota five times, and a plain 429 elsewhere still
+means "rate limited, retry"."""
 
 
 def router() -> APIRouter:
@@ -399,6 +431,21 @@ async def _completion(
     )
 
     status = getattr(result.run, "status", None)
+    # A REFUSAL AFTER THE TURN STARTED is still a refusal. The sequencer turns
+    # every failure inside the turn into a `failed` run, which is right for the
+    # record, and this answered all of them 502 -- so the database refusing a
+    # write the turn needed was reported as the model or a tool failing.
+    if result.error is not None and (refused := refusal(result.error)) is not None:
+        return JSONResponse(refused.body(), status_code=REFUSED_STATUS)
+    if status == "quota_exceeded":
+        message = f"run {result.run.id} stopped: no quota remaining for this caller"
+        return JSONResponse(
+            {"detail": message,
+             "error": {"type": "insufficient_quota", "code": "insufficient_quota",
+                       "message": message}},
+            status_code=QUOTA_STATUS,
+            headers={"X-P8-Session-Id": str(session.id)},
+        )
     answer = next(
         (m.content for m in reversed(result.messages or []) if m.role == "assistant"),
         None,
@@ -489,7 +536,10 @@ async def _start_stream(
         )
         first = await _first_event(queue, turn)
         failure = turn.exception() if turn.done() and not turn.cancelled() else None
-        if first is None and failure is not None and refusal(failure) is not None:
+        # Any exception the route class answers for the caller, not only a
+        # refusal: an unknown agent fails in resolve_agent, before RUN_STARTED,
+        # and was a 200 carrying one RUN_ERROR.
+        if first is None and failure is not None and _caller_error(failure) is not None:
             raise failure
         return _Stream(conn, queue, turn, first)
     except BaseException:
