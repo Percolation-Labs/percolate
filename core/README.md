@@ -322,14 +322,14 @@ gateway: { image: percolationlabs/percolate-core:0.1.11, command: ["agent","gate
 worker:  { image: percolationlabs/percolate-core:0.1.11, command: ["worker","--queue","http"] }
 ```
 
-The agent gateway is its own entrypoint because delegation is an MCP call into
-it: an agent that delegates references it as an ordinary `tool_servers` row.
-
-Scheduled runs do not need the gateway. `agent serve` also answers `POST
+Neither delegation nor scheduled runs need the gateway. `agent serve` answers
+the gateway's MCP route at `/mcp`, so an agent that delegates references
+`http://agent:8080/mcp` as an ordinary `tool_servers` row. It also answers `POST
 /internal/run`, because a scheduled step posts to `{{env.P8_AGENT_URL}}` and the
 worker sends the run owner's token to that origin only. Give it
 `P8_WORKER_DSN` as well as `P8_DSN`, so it can complete the task it was
-dispatched by.
+dispatched by. `agent gateway` serves both routes on its own, for a deployment
+that puts delegation on replicas of its own.
 
 For the packaging decision record see
 [PACKAGING.md](https://github.com/Percolation-Labs/p8-subsystems/blob/main/PACKAGING.md);
