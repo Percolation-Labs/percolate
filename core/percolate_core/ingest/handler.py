@@ -37,7 +37,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..core import as_service, without_nul
+from ..core import as_service
 from ..worker.loop import handler
 from ..worker.templates import TerminalError
 from . import chunk as chunker
@@ -179,18 +179,18 @@ async def ingest(spec: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
     # whatever the parser made of it. `content.record_chunks` reads each one
     # with `c->>'content'`, and Postgres text cannot hold U+0000: one NUL in a
     # 777-byte upload took the ingest task terminal, cancelled the three tasks
-    # after it, and wrote no chunks at all. Measured 2026-09-12; the agent path
-    # had the same defect at its own seam (REM-146).
+    # after it, and wrote no chunks at all. Measured 2026-09-12 (REM-146). The
+    # replacement happens in the pool's jsonb encoder (core/identity.py), which
+    # every jsonb argument in this package passes through.
     async with as_service() as conn:
         landed = json.loads(await conn.fetchval(
             "select content.record_ingest($1::uuid, $2::jsonb)::text",
             str(resource_id),
-            without_nul(
-                {"mode": "text", "parser": parsed.parser, "chunks": chunks,
-                 "markdown": markdown_ref,
-                 "detail": {**parsed.detail, "family": family,
-                            "characters": len(parsed.markdown),
-                            "target_tokens": policy.chunking.target_tokens}})))
+            {"mode": "text", "parser": parsed.parser, "chunks": chunks,
+             "markdown": markdown_ref,
+             "detail": {**parsed.detail, "family": family,
+                        "characters": len(parsed.markdown),
+                        "target_tokens": policy.chunking.target_tokens}}))
 
     # A RECEIPT, not the chunks (workflow-engine/outputs.md §2): the rows have a
     # home, and returning them would copy every chunk into tasks.output and

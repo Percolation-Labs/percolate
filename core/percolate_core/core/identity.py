@@ -29,6 +29,7 @@ from typing import Any
 import asyncpg
 
 from .config import dsn as config_dsn
+from .text import without_nul
 
 
 def _acquire_seconds() -> float:
@@ -99,11 +100,28 @@ async def _init_connection(conn: asyncpg.Connection) -> None:
     Installed here rather than by whichever service happens to open the pool
     first: with one pool per process, a codec set up by one subpackage and not
     another is a difference in behaviour that depends on import order.
+
+    AND U+0000 IS REPLACED ON THE WAY IN, for jsonb (REM-146). jsonb cannot
+    hold `\\u0000`, so one NUL anywhere in a bound payload aborts the whole
+    statement. That rule was first applied at two call sites, and at least
+    three more wrote a foreign string into a jsonb argument without it: an
+    http_call response (`complete_task`), an API source's page
+    (`commit_api_page`) and a tool server's catalogue (`upsert_tool_server`).
+    Every jsonb argument this package binds passes through this encoder, so
+    the rule lives here once rather than at each call site. `json` is left
+    alone: it stores the escape verbatim and nothing here reads it as text.
     """
-    for typ in ("json", "jsonb"):
-        await conn.set_type_codec(
-            typ, encoder=json.dumps, decoder=json.loads, schema="pg_catalog"
-        )
+    await conn.set_type_codec(
+        "json", encoder=json.dumps, decoder=json.loads, schema="pg_catalog"
+    )
+    await conn.set_type_codec(
+        "jsonb", encoder=jsonb_text, decoder=json.loads, schema="pg_catalog"
+    )
+
+
+def jsonb_text(value: Any) -> str:
+    """The text of a jsonb argument: `json.dumps`, with no U+0000 in it."""
+    return json.dumps(without_nul(value))
 
 
 async def open_pool(dsn: str | None = None, **kwargs: Any) -> asyncpg.Pool:

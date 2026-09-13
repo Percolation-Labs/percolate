@@ -15,13 +15,17 @@ from typing import Any
 def without_nul(value: Any) -> Any:
     """U+0000 out of anything bound for a text column, at the last moment.
 
-    Call this on the payload, not on the input. Sanitising at the boundary is
-    what makes it checkable: there are two places a string this runtime did not
-    compose reaches Postgres -- a tool result on the agent path, and parsed
-    document text on the ingestion path -- and both of them end in one call
-    each, so the rule has two sites rather than one per string.
+    Called in ONE place: the jsonb encoder every pool in this package installs
+    (`core.identity.jsonb_text`), because every write that carries a foreign
+    string does so through a jsonb argument. It was first called at two call
+    sites, the two below, and at least three more writes had the same defect
+    without it -- an http_call response on its way to `complete_task` (which
+    also crosses `worker.artifacts.stored_size`), an API source's page on its
+    way to `commit_api_page`, and a tool server's catalogue on its way to
+    `upsert_tool_server`. A rule applied per call site is a rule the next call
+    site does not know about.
 
-    Both were measured failing on 2026-09-12 against a live stack.
+    The first two were measured failing on 2026-09-12 against a live stack.
 
     * The agent path: the live petstore demo API served a NUL inside a pet's
       name, `agentic.persist_turn` read `content` with `->>`, and the turn

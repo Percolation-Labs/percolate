@@ -34,6 +34,7 @@ import json
 import os
 from typing import Any
 
+from ..core.identity import jsonb_text
 from .templates import TerminalError
 
 DEFAULT_MAX_BYTES = 65536
@@ -100,8 +101,14 @@ async def stored_size(conn: Any, out: Any) -> int:
     ingest/handler.py carries the same warning about the same codec; this is
     that defect in the one place a re-encode is invisible, because both answers
     are plausible integers.
+
+    And the text is `jsonb_text`, the codec's own encoder, rather than
+    `json.dumps`: the double cast bypasses the codec, so this was the one jsonb
+    argument on the http_call path that still carried `\\u0000`, and a response
+    with a NUL in it aborted here, before complete_task was reached (REM-146).
+    Measuring the same text the codec sends is also what the engine stores.
     """
-    return await conn.fetchval("select pg_column_size($1::text::jsonb)", json.dumps(out))
+    return await conn.fetchval("select pg_column_size($1::text::jsonb)", jsonb_text(out))
 
 
 def _bytes_of(out: Any) -> tuple[bytes, str, bool]:
