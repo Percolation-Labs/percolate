@@ -29762,9 +29762,15 @@ end $$;
 -- ============================================================
 do $$
 declare
-    -- Reachable by `authenticated`, directly or through a role it holds or
-    -- through PUBLIC -- has_function_privilege answers all three at once, which
-    -- is why the list is of what a PERSON can reach rather than of grants.
+    -- THE THREE WEB-FACING ROLES, and the gate asks about all of them (REM-91,
+    -- REM-103). Checking `authenticated` alone missed a whole seat: PostgREST's
+    -- anonymous role `web_anon`, and `api_viewer` -- the role every *_api view
+    -- and every person's workflow step runs as, which OWNS its functions and so
+    -- holds execute on them whether or not a grant says so. That gap left
+    -- `workflow.execute_as_viewer`, owned by api_viewer and the very function
+    -- REM-64 is about, outside the review. has_function_privilege folds in each
+    -- role's memberships and PUBLIC, so this is still what a PERSON can reach.
+    v_roles constant text[] := array['authenticated', 'web_anon', 'api_viewer'];
     v_dynamic constant text[] := array[
         'aiq.expand_embed_steps(jsonb)',
         'aiq.lexical(text,text,integer)',
@@ -29777,7 +29783,16 @@ declare
         'aiq.space_populated(text,text)',
         'aiq.sql_passthrough(text)',            -- read-only by TRANSACTION, not by a parser
         'percolate.enums()',
-        'workflow.define_yaml(text)'
+        'workflow.define_yaml(text)',
+        -- Owned by api_viewer, so api_viewer holds execute on it and no grant
+        -- can take that away -- but EXECUTE is granted to app_owner alone and
+        -- nobody is a member of api_viewer but app_owner, so no person reaches
+        -- it. Its dynamic SQL is the wrapped write/read the workflow engine runs
+        -- as the run's owner (REM-64): the statement is opened as a cursor, which
+        -- the grammar holds to one INSERT/UPDATE/DELETE/MERGE or one query. It is
+        -- here because api_viewer reaches it, and the reason it is safe is the
+        -- cursor, not a grant.
+        'workflow.execute_as_viewer(text,boolean,jsonb)'
         -- THE FIVE PLAN FUNCTIONS WERE HERE AND ARE NOT REACHABLE ANY MORE.
         -- plan_catalog, plan_defects, plan_document, plan_graph and plan_probe
         -- were declared because they are granted to `authenticated` and build
@@ -29801,27 +29816,31 @@ begin
     -- What exists and is not declared. This is the direction that catches
     -- drift: adding the function and adding the line are two separate acts and
     -- only one of them is needed to ship (challenge-the-process §3).
-    select string_agg(fn, E'\n  ' order by fn) into v_new
+    select string_agg(fn || ' (reachable by: ' || roles || ')', E'\n  ' order by fn) into v_new
       from (
-        select p.oid::regprocedure::text as fn
+        select p.oid::regprocedure::text as fn,
+               (select string_agg(r, ', ' order by r) from unnest(v_roles) r
+                 where pg_catalog.has_function_privilege(r, p.oid, 'execute')) as roles
           from pg_catalog.pg_proc p
           join pg_catalog.pg_language l on l.oid = p.prolang
          where l.lanname = 'plpgsql'
            and p.pronamespace in (select n.oid from pg_catalog.pg_namespace n
                                    where n.nspname in (select percolate.extension_schemas()))
            and p.prosrc ~* '(^|[^[:alnum:]_])execute[[:space:]]'
-           and pg_catalog.has_function_privilege('authenticated', p.oid, 'execute')
+           and exists (select 1 from unnest(v_roles) r
+                        where pg_catalog.has_function_privilege(r, p.oid, 'execute'))
            and p.oid::regprocedure::text <> all (v_dynamic)
       ) s;
     if v_new is not null then
         raise exception
-            E'UNDECLARED DYNAMIC SQL REACHABLE BY authenticated:\n  %\n'
-            'A signed-in caller can reach these and they build statements at run time. '
-            'If the statement is built from an argument, wrap it -- through format() '
-            'with an identifier or literal specifier, or through '
-            'workflow.one_write_statement for a write -- and then add the signature to '
-            'v_dynamic in specs/identity/closing.sql. If it is not meant to be '
-            'reachable, revoke it instead.', v_new;
+            E'UNDECLARED DYNAMIC SQL REACHABLE BY A WEB-FACING ROLE:\n  %\n'
+            'A signed-in caller, the anonymous role, or api_viewer can reach these and '
+            'they build statements at run time. If the statement is built from an '
+            'argument, wrap it -- through format() with an identifier or literal '
+            'specifier, or through workflow.one_write_statement opened as a cursor for a '
+            'write -- and then add the signature to v_dynamic in '
+            'specs/identity/closing.sql. If it is not meant to be reachable, revoke it '
+            'instead.', v_new;
     end if;
 
     -- And the other direction, so the list cannot go on naming functions that
@@ -29831,20 +29850,23 @@ begin
     select string_agg(f, ', ' order by f) into v_gone
       from unnest(v_dynamic) f
      where to_regprocedure(f) is null
-        or not pg_catalog.has_function_privilege('authenticated', to_regprocedure(f), 'execute')
+        or not exists (select 1 from unnest(v_roles) r
+                        where pg_catalog.has_function_privilege(r, to_regprocedure(f), 'execute'))
         or not exists (select 1 from pg_catalog.pg_proc p
                         where p.oid = to_regprocedure(f)
                           and p.prosrc ~* '(^|[^[:alnum:]_])execute[[:space:]]');
     if v_gone is not null then
         raise exception
-            'declared as dynamic SQL a signed-in caller reaches, and no longer: %. Either '
-            'the signature changed, the grant is gone, or the dynamic SQL is -- in all '
-            'three cases delete the line from v_dynamic in specs/identity/closing.sql.',
+            'declared as dynamic SQL a web-facing role reaches, and no longer: %. Either '
+            'the signature changed, no named role (authenticated, web_anon, api_viewer) '
+            'reaches it any more, or the dynamic SQL is -- in all three cases delete the '
+            'line from v_dynamic in specs/identity/closing.sql.',
             v_gone;
     end if;
 
     raise notice
-        '% functions build SQL at run time and are reachable by authenticated; all % declared',
+        '% functions build SQL at run time and are reachable by a web-facing role '
+        '(authenticated, web_anon, api_viewer); all % declared',
         array_length(v_dynamic, 1), array_length(v_dynamic, 1);
 end $$;
 
