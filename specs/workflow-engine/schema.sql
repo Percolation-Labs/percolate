@@ -2748,17 +2748,27 @@ revoke execute on function workflow.execute_for(uuid, text, boolean, jsonb) from
 -- where it was needed, and the sibling that needed the same rule did not get
 -- it. `execute_as_viewer` wraps a write as the body of a data-modifying CTE --
 -- the grammar, not a pattern, deciding that a string is ONE insert, update,
--- delete or merge -- because plpgsql's EXECUTE runs a string of several
--- statements one after another, so `insert ...; set local request.jwt.claims
--- = ...` rewrites whose step it is (REM-64, workflow/15 §4b). `plan_probe`
--- took a workflow author's statement straight into `execute 'explain (format
--- json) ' || v_stmt`, two lines above a read branch that was correctly
--- wrapped, and EXPLAIN of the first statement does not stop the second from
--- running. It is SECURITY INVOKER and granted to `authenticated`.
+-- delete or merge. `plan_probe` took a workflow author's statement straight
+-- into `execute 'explain (format json) ' || v_stmt`, two lines above a read
+-- branch that was correctly wrapped, and EXPLAIN of the first statement does
+-- not stop the second from running. It is SECURITY INVOKER and granted to
+-- `authenticated`.
 --
 -- That is the seventeenth instance of meta/postmortems/2026-09-11-fixed-at-
 -- the-copy-that-failed.md, so the fix is not a second copy of the wrapping:
 -- it is this function, which both callers now ask.
+--
+-- THE WRAPPING ALONE DID NOT HOLD, and both callers now open the wrapped
+-- string AS A CURSOR rather than EXECUTE it. plpgsql's EXECUTE runs a string of
+-- several statements one after another, so an author who closes the CTE
+-- bracket himself -- `update t set x=x where false returning 1) select 1; set
+-- local request.jwt.claims = '{"sub":"<victim>"}'; with p8_write as (update
+-- ... where owner='<victim>'` -- wraps into three statements, and under
+-- EXECUTE the SET ran and the third rewrote the victim's rows (REM-64,
+-- measured). SPI refuses to open a multi-statement string as a cursor, and
+-- parses the whole string before running any of it, so `open ... for execute
+-- <wrapped> ; fetch ; close` is a SQL-only, one-statement enforcement that the
+-- wrapping on its own is not. workflow/15 §4b and workflow/18 are the cases.
 --
 -- TRAILING SEMICOLONS ARE DROPPED, since an author writes them and a CTE body
 -- cannot hold one. A statement carrying its own RETURNING does not parse here
@@ -8173,6 +8183,7 @@ declare
     v_fn    text;
     v_oid   oid;
     v_env   text[];
+    v_cur   refcursor;
 begin
     select d.spec into v_spec
       from workflow.definitions d
@@ -8208,21 +8219,30 @@ begin
             v_stmt := regexp_replace(v_in->>'statement', '\{\{[^}]*\}\}', 'null', 'g');
 
             begin
+                -- OPENED AS A CURSOR, NOT EXECUTEd, and this is the whole of
+                -- the fix. EXPLAIN plans the first statement of the string it
+                -- is given and does not stop plpgsql running the rest, so an
+                -- unwrapped `explain (format json) ' || v_stmt` ran whatever a
+                -- workflow author put after the semicolon -- here, as the
+                -- caller, from a function whose own comment promises it runs no
+                -- step. Wrapping the write closed the trivial case; an author
+                -- who closes the wrapper's bracket himself reopens it (REM-64,
+                -- the same break-out execute_as_viewer took). SPI refuses to
+                -- open a multi-statement string as a cursor and parses it whole
+                -- before running any of it, so the statement after the
+                -- semicolon never runs. A break-out lands in the `when others`
+                -- below, is reported `parses: fail`, and nulls v_stmt -- which
+                -- also skips the temp-view probe, the one branch a cursor
+                -- cannot guard, because CREATE VIEW is not openable as one.
                 if coalesce((v_in->>'write')::boolean, false) then
-                    -- THE SAME WRAPPING execute_as_viewer USES, from the same
-                    -- home. EXPLAIN plans the first statement of the string it
-                    -- is given and does not stop plpgsql running the rest, so
-                    -- an unwrapped `explain (format json) ' || v_stmt` ran
-                    -- whatever a workflow author put after the semicolon --
-                    -- here, as the caller, from a function granted to
-                    -- `authenticated` whose own comment promises it runs no
-                    -- step.
-                    execute format('explain (format json) %s',
-                                   workflow.one_write_statement(v_stmt)) into v_plan;
+                    open v_cur for execute format('explain (format json) %s',
+                                   workflow.one_write_statement(v_stmt));
                 else
-                    execute format(
-                        'explain (format json) select * from (%s) t', v_stmt) into v_plan;
+                    open v_cur for execute format(
+                        'explain (format json) select * from (%s) t', v_stmt);
                 end if;
+                fetch v_cur into v_plan;
+                close v_cur;
                 step := v_key; probe := 'parses'; verdict := 'ok';
                 detail := 'the planner accepted it';
                 return next;

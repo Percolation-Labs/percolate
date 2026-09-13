@@ -112,3 +112,52 @@ begin
     raise notice 'rbac/12: authenticator sets the caller, then becomes them -- the PostgREST order still works';
 end $$;
 commit;
+
+-- 5. The passthrough refuses a SECOND statement, not just a set_config SELECT.
+--    §3 proved bob cannot write the claims through a SELECT, because he holds
+--    no set_config. But `SET request.jwt.claims` is a STATEMENT, needs no grant,
+--    and the passthrough wraps the caller's text as a subquery -- so an author
+--    who closes the `(%s) _p8_passthrough` bracket himself smuggled a SET and a
+--    second read past it: `select 1) _p8_passthrough limit 1) t; set local
+--    request.jwt.claims = '{alice}'; select ... from (select <alice's rows>`
+--    read as alice under plain EXECUTE (REM-64, the same break-out the workflow
+--    write path took). The passthrough opens its wrapped statement as a cursor
+--    now, which refuses the multi-statement string before any of it runs.
+begin;
+set local role app_owner;
+create table t_pt_scoped (owner_id uuid, secret text);
+alter table t_pt_scoped enable row level security;
+create policy own on t_pt_scoped for select using (owner_id = rbac.current_user_id());
+grant select on t_pt_scoped to authenticated;
+insert into t_pt_scoped values
+    ('11111111-1111-1111-1111-111111111111', 'alice secret'),
+    ('22222222-2222-2222-2222-222222222222', 'bob secret');
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"22222222-2222-2222-2222-222222222222"}';
+do $$
+declare v_err text; v jsonb;
+begin
+    -- The control: bob's own honest read sees only bob's row.
+    if (aiq.sql_passthrough('select secret from t_pt_scoped')->0->>'secret')
+       is distinct from 'bob secret' then
+        raise exception 'the passthrough did not read bob''s own row';
+    end if;
+    begin
+        v := aiq.sql_passthrough(
+            'select 1) _p8_passthrough limit 1) t; '
+            'set local request.jwt.claims = ''{"sub":"11111111-1111-1111-1111-111111111111"}''; '
+            'select coalesce(jsonb_agg(t), ''[]''::jsonb) from '
+            '(select * from (select secret from t_pt_scoped');
+    exception when others then v_err := sqlerrm;
+    end;
+    if v_err is null then
+        raise exception
+            'the passthrough ran a break-out and returned %, which is alice''s row read '
+            'as alice -- the second statement was not refused', v;
+    end if;
+    if rbac.current_user_id() <> '22222222-2222-2222-2222-222222222222'::uuid then
+        raise exception 'bob is now %, after a refused passthrough break-out', rbac.current_user_id();
+    end if;
+    raise notice 'rbac/12: the passthrough refuses a smuggled SET and second read (%)', v_err;
+end $$;
+rollback;

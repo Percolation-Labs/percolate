@@ -3596,6 +3596,7 @@ returns jsonb as $$
 declare
     v_result jsonb;
     v_max    int;
+    v_cur    refcursor;
 begin
     -- Rejected up front only for the things that are unambiguous and cheap to
     -- catch, giving a clear error instead of a confusing transaction abort.
@@ -3630,8 +3631,15 @@ begin
     -- A SET statement and not set_config(), because the caller here is a person
     -- and a person no longer holds set_config: the same function writes
     -- request.jwt.claims, and through this very passthrough it was how anyone
-    -- became anyone (user-rbac/roles.sql §6). SET needs no grant, and the
-    -- statement below cannot issue one -- it is wrapped as a subquery.
+    -- became anyone (user-rbac/roles.sql §6). SET needs no grant, so wrapping
+    -- the caller's statement as a subquery is NOT enough to keep one out: the
+    -- `(%s) _p8_passthrough` bracket is closable, and `select 1) _p8_passthrough
+    -- limit 1) t; set local request.jwt.claims = '{"sub":"<victim>"}'; select
+    -- ... from (select <victim's rows>` read as the victim under plain EXECUTE
+    -- (measured -- the same REM-64 break-out execute_as_viewer took). So the
+    -- statement is OPENED AS A CURSOR below, which SPI refuses to open on a
+    -- multi-statement string and parses whole before running any of it -- the
+    -- grammar keeps it to one query, which the subquery wrapping alone did not.
     -- AND A ROW CAP, because read-only is not the same as bounded (REM-113).
     -- The aggregate below builds one jsonb value out of the whole result set,
     -- in memory, in the server -- so `select * from aiq.nodes` is a read that
@@ -3656,11 +3664,20 @@ begin
 
     begin
         set local transaction_read_only = on;
-        execute format(
-            'select coalesce(jsonb_agg(t), ''[]''::jsonb) from '
-            '(select * from (%s) _p8_passthrough limit %s) t',
-            p_statement, v_max + 1)
-        into v_result;
+        begin
+            open v_cur for execute format(
+                'select coalesce(jsonb_agg(t), ''[]''::jsonb) from '
+                '(select * from (%s) _p8_passthrough limit %s) t',
+                p_statement, v_max + 1);
+            fetch v_cur into v_result;
+            close v_cur;
+        exception when syntax_error or invalid_cursor_definition then
+            raise exception
+                'the SQL passthrough runs a single read query, and this is not (%)', sqlerrm
+                using errcode = 'syntax_error',
+                      hint = 'a SET or a second statement would change whose rows are read; '
+                             'write the read as one query';
+        end;
         if jsonb_array_length(v_result) > v_max then
             raise exception
                 'the SQL passthrough returned more than % rows. It aggregates the '
