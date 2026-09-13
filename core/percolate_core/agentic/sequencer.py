@@ -66,6 +66,15 @@ class StepRecord:
     detail: str = ""
 
 
+class AgentNotFound(LookupError):
+    """No agent by that name that this caller can see.
+
+    One exception for "does not exist" and "exists, and RLS hides it from you",
+    because `get_agent` cannot tell them apart and a caller must not be able to
+    either: an answer that differed would say which agent names exist.
+    """
+
+
 @dataclass(slots=True)
 class TurnResult:
     run: Run
@@ -73,6 +82,10 @@ class TurnResult:
     messages: list[Message] = field(default_factory=list)
     execution: ExecutionResult | None = None
     trace: list[StepRecord] = field(default_factory=list)
+    error: BaseException | None = None
+    """What failed the turn, when one did after it started. The run records
+    the sentence; this keeps the exception, so the HTTP boundary can tell a
+    refusal by the database from a failure of the thing the turn called."""
 
 
 class TurnSequencer:
@@ -229,7 +242,7 @@ class TurnSequencer:
             run = await self.repo.update_run(run.id, status="failed", state={**run.state, "error": message})
             await self.sink.emit(RunError(thread_id=run.session_id, run_id=run.id, message=message))
             self._record("finish", "brief §5.1", "failed")
-            return TurnResult(run=run, session=session, trace=list(self.trace))
+            return TurnResult(run=run, session=session, trace=list(self.trace), error=exc)
 
     # -- steps -------------------------------------------------------------
 
@@ -243,7 +256,7 @@ class TurnSequencer:
         """
         agent = await self.repo.get_agent(name)
         if agent is None:
-            raise LookupError(f"no agent row named {name!r}")
+            raise AgentNotFound(f"no agent row named {name!r}")
         self._record("resolve_agent", "brief §2", agent.name)
         return agent
 

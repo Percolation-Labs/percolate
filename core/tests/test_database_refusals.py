@@ -60,15 +60,29 @@ class RefusingRepository(MemoryRepository):
     `append_messages` after RUN_STARTED has gone out.
     """
 
-    def __init__(self, refuse: str | None = None, error: Exception | None = None) -> None:
+    def __init__(self, refuse: str | None = None, error: Exception | None = None,
+                 after: int = 0) -> None:
         super().__init__()
         self.refuse = refuse
         self.error = error
+        # How many calls of the method succeed first. `append_messages` runs
+        # once before the turn's `try` (the user's row) and once inside it (the
+        # answer), so `after=1` is a refusal once the turn is under way.
+        self.after = after
+        self.calls: dict[str, int] = {}
+        self.hidden = False
         self.queue: asyncio.Queue | None = None
 
     def _check(self, method: str) -> None:
-        if method == self.refuse:
+        self.calls[method] = self.calls.get(method, 0) + 1
+        if method == self.refuse and self.calls[method] > self.after:
             raise self.error
+
+    async def get_agent(self, name):
+        # What RLS does to an agent the caller may not see: the row is there
+        # and the read returns nothing.
+        self._check("get_agent")
+        return None if self.hidden else await super().get_agent(name)
 
     async def create_run(self, run):
         self._check("create_run")
@@ -116,8 +130,9 @@ class AgentRuntimeTest(unittest.TestCase):
     """The agent runtime's HTTP surface."""
 
     def repository(self, refuse: str | None = None, error: Exception | None = None,
-                   agent: bool = True, server: ToolServer | None = None) -> RefusingRepository:
-        repo = RefusingRepository(refuse, error)
+                   agent: bool = True, server: ToolServer | None = None,
+                   after: int = 0) -> RefusingRepository:
+        repo = RefusingRepository(refuse, error, after)
         if agent:
             repo.agents["rem18"] = AgentSpec(name="rem18", system_prompt="hello")
         if server is not None:
@@ -172,6 +187,73 @@ class AgentRuntimeTest(unittest.TestCase):
         error = next(json.loads(line[len("data: "):]) for line in response.text.splitlines()
                      if line.startswith("data: ") and '"RUN_ERROR"' in line)
         self.assertEqual(error["message"], f"{INVOKE[0]} ({INVOKE[1]})")
+
+    # -- the paths REM-67 did not reach ---------------------------------------
+
+    def test_an_unknown_agent_is_404_on_both_paths(self):
+        # resolve_agent raised LookupError outside the turn's try: a bare 500
+        # without a stream, and a 200 carrying RUN_ERROR with one.
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                response = self.turn(self.client(self.repository(agent=False)), stream=stream)
+                self.assertEqual(response.status_code, 404)
+                self.assertNotIn("RUN_ERROR", response.text)
+
+    def test_a_hidden_agent_is_answered_exactly_as_a_missing_one(self):
+        """A different answer would tell a caller which agent names exist."""
+        missing = self.turn(self.client(self.repository(agent=False)), stream=False)
+        repo = self.repository()
+        repo.hidden = True
+        hidden = self.turn(self.client(repo), stream=False)
+        self.assertEqual((hidden.status_code, hidden.json()),
+                         (missing.status_code, missing.json()))
+
+    def test_a_refusal_after_the_turn_started_is_403_not_502(self):
+        # Caught by the sequencer's `except Exception`, recorded as `failed`,
+        # and answered 502 -- "the thing it called did not" -- for a write the
+        # database refused.
+        repo = self.repository("append_messages", refused(*INVOKE), after=1)
+        response = self.turn(self.client(repo), stream=False)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json(),
+                         {"detail": INVOKE[0], "code": "42501", "hint": INVOKE[1]})
+        self.assertEqual(repo.calls["append_messages"], 2, "the turn did not start")
+
+    def test_the_same_refusal_mid_stream_stays_an_event(self):
+        repo = self.repository("append_messages", refused(*INVOKE), after=1)
+        response = self.turn(self.client(repo), stream=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("RUN_ERROR", response.text)
+
+    def test_a_quota_cutoff_is_429_that_our_own_client_does_not_retry(self):
+        from percolate_core.core.provider_errors import classify
+
+        repo = self.repository()
+        repo.quota_allowed = False
+        response = self.turn(self.client(repo), stream=False)
+        self.assertEqual(response.status_code, 429)
+        failure = classify(response.status_code, response.content)
+        self.assertEqual((failure.reason, failure.terminal), ("quota", True))
+
+    def test_a_quota_cutoff_mid_stream_is_said_in_run_finished(self):
+        # RUN_STARTED is published by start_run, before the quota gate, so the
+        # status line is already spent; the outcome is the terminal status.
+        repo = self.repository()
+        repo.quota_allowed = False
+        response = self.turn(self.client(repo), stream=True)
+        self.assertEqual(response.status_code, 200)
+        finished = [json.loads(line[len("data: "):]) for line in response.text.splitlines()
+                    if line.startswith("data: ") and '"RUN_FINISHED"' in line]
+        self.assertEqual(len(finished), 1)
+        self.assertIn("quota_exceeded", json.dumps(finished[0]))
+
+    def test_a_failure_that_is_not_about_the_caller_is_not_mapped(self):
+        """The property RefusedRoute has to keep: everything else still raises."""
+        repo = self.repository("get_agent", RuntimeError("pool is closed"))
+        with self.assertRaises(RuntimeError):
+            self.turn(self.client(repo), stream=False)
+        inside = self.repository("append_messages", RuntimeError("model went away"), after=1)
+        self.assertEqual(self.turn(self.client(inside), stream=False).status_code, 502)
 
     def test_a_sync_without_tool_servers_update_is_403_not_502(self):
         server = ToolServer(name="query", kind="openapi", url="http://query:8090")

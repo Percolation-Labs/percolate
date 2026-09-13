@@ -222,7 +222,9 @@ jobs:
 
       # REM-67. What a statement the database refused comes back as, on both
       # HTTP surfaces: 403 naming the permission it wants, rather than a 500
-      # for a turn and a 502 blaming the tool server for a sync.
+      # for a turn and a 502 blaming the tool server for a sync. The same file
+      # pins an unknown or hidden agent as 404, a refusal inside a started turn
+      # as 403, and a quota cutoff as a 429 our own client does not retry.
       - name: A refused caller is told so, and an upstream failure is still 502
         run: python -m unittest discover -s tests -p test_database_refusals.py
 
