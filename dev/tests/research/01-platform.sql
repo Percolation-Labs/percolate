@@ -264,7 +264,25 @@ begin
 end $$;
 reset role;
 
--- Unlisting hides dependent engagement from everyone else immediately.
+-- A revoked listing grant cannot rewrite or withdraw a public head.
+set local request.jwt.claims = '{"sub": "00000000-0000-4000-8000-00000000a001"}';
+set local role authenticated;
+do $$
+begin
+    begin
+        perform research.revise_package('rp-test-listed',
+            '{"schema_version": "0.1", "title": "A listed package", "claims": [], "sources": [], "edges": [], "visibility": "private"}',
+            'draft-1');
+        raise exception 'a revoked lister withdrew public work';
+    exception when insufficient_privilege then null;
+    end;
+end $$;
+reset role;
+
+-- An explicit renewed grant permits unlisting, which hides dependent engagement.
+set local request.jwt.claims = '';
+select rbac.grant_with_basis('00000000-0000-4000-8000-00000000a001',
+    'rp-lister', 'invitation', 'renewed test invitation');
 set local request.jwt.claims = '{"sub": "00000000-0000-4000-8000-00000000a001"}';
 set local role authenticated;
 select research.revise_package('rp-test-listed',

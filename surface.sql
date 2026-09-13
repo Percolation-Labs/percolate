@@ -661,6 +661,7 @@ insert into expected (subsystem, kind, name, detail, why) values
 ('research-platform','function','rbac.provision_application_credential','uuid,uuid,text,text[]','architecture.md §2: an application registers a credential it verified, with its scopes'),
 ('research-platform','function','rbac.revoke_application_credential','uuid','architecture.md §2: an application revokes a credential it provisioned, and no other'),
 ('research-platform','function','rbac.grant_application_role','uuid,text,text,text,text,text','architecture.md §2: an application grants its own capabilities, never an administrator'),
+('research-platform','function','rbac.grant_application_role','uuid,text,text,text,text,text,text,uuid','architecture.md §2: provisioning preserves application/org scope and revoked history'),
 ('research-platform','function','rbac.request_claims','','architecture.md §2: the request claims as jsonb, empty when absent'),
 ('research-platform','function','rbac.require','text,text','architecture.md §2: raise unless the decision allows'),
 ('research-platform','function','rbac.reserve_usage','text,bigint,text,interval','architecture.md §3: an atomic reservation one person and their agents share'),
