@@ -41,12 +41,21 @@
 # at it.
 name: check
 
+# MARKDOWN RUNS THE GATES THAT READ MARKDOWN. Until 2026-09-13 both triggers
+# carried `paths-ignore: ['**.md']`, so a PR that changed only markdown got no
+# check at all. That included the three tree gates whose whole input is
+# markdown: the house voice (`banned.py --changed`, which diffs `*.md` and
+# nothing else), the citation check in `dev/references.sh`, and
+# `dev/ledger-gates.py`. The `self-model` job ingests `specs/**/*.md` and
+# `meta/**/*.md` as well.
+#
+# So the filter moved from the trigger to the two jobs that read no markdown and
+# cost the most: `parser` and `database`. The `changes` job below decides, and
+# `tree` still runs `dev/check.sh --tree`, so the gate list stays in one place.
 on:
   pull_request:
-    paths-ignore: ['**.md']
   push:
     branches: [main]
-    paths-ignore: ['**.md']
   workflow_dispatch:
 
 concurrency:
@@ -54,9 +63,46 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # DOES THIS CHANGE TOUCH ANYTHING BUT MARKDOWN? It answers for the two jobs
+  # that read no markdown. It diffs against the same base `tree` hands to
+  # `banned.py`, so the two jobs cannot disagree about what changed. An empty or
+  # failed diff counts as code, so an error here means more checking, not less.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          filter: blob:none
+      - id: diff
+        env:
+          BASE: ${{ github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000' && github.event.before || format('origin/{0}', github.base_ref || 'main') }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"; echo "dispatched: everything runs"; exit 0
+          fi
+          if ! files=$(git diff --no-renames --name-only "$BASE...HEAD"); then
+            echo "::warning::could not diff against $BASE -- running everything"
+            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          printf '%s\n' "$files" | sed 's/^/  /'
+          if printf '%s\n' "$files" | grep -qv '\.md$'; then
+            echo "code=true" >> "$GITHUB_OUTPUT"; echo "code changed against $BASE"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"; echo "only markdown changed against $BASE: parser and database stand down"
+          fi
+
   # Everything answerable from the tree alone. No Docker, no database, seconds.
   tree:
     runs-on: ubuntu-latest
+    env:
+      # WHAT `banned.py --changed` DIFFS AGAINST. It defaulted to
+      # `origin/main...HEAD`, and on a push to main that range is empty, so the
+      # house-voice gate reported 0 hunks for every merge. A push diffs against
+      # the commit the push replaced; a PR diffs against its base branch.
+      CHANGED_BASE: ${{ github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000' && github.event.before || format('origin/{0}', github.base_ref || 'main') }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -96,6 +142,8 @@ jobs:
   # permanent cold build rather than as a wrong answer.
   parser:
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     steps:
       - uses: actions/checkout@v7
 
@@ -339,7 +387,8 @@ jobs:
     env:
       CONTAINER: p8-ci
       DB: p8ci
-    needs: parser
+    needs: [changes, parser]
+    if: needs.changes.outputs.code == 'true'
     steps:
       - uses: actions/checkout@v7
         with:
