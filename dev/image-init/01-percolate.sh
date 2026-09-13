@@ -79,8 +79,10 @@ begin
         -- own probe -- degrades with the live-to-total row ratio, so at ~10k
         -- tasks/day the thing that decides how many workers to run gets slower
         -- for three months and then matters. Daily rather than per-minute: it
-        -- is a retention pass, and its own defaults (30 days, 50 runs a batch)
-        -- bound one run of it.
+        -- is a retention pass. One run of it stops starting batches at half of
+        -- scheduler's statement_timeout and keeps what it purged, so a backlog
+        -- larger than one night's budget shrinks a night at a time instead of
+        -- being cancelled and rolled back (schema.sql, purge_completed).
         perform cron.schedule_in_database('workflow-purge',  '17 3 * * *',
                     'select workflow.purge_completed()',    current_database(), 'scheduler');
         raise notice 'percolate: pg_cron scheduled -- tick, reaper, timers and purge are live';
