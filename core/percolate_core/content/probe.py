@@ -42,6 +42,7 @@ its operations. `brief.md` §5.2 is the reason it cannot be the other way round.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any
@@ -51,6 +52,7 @@ import httpx
 
 from ..core import TerminalError, credential_for
 from ..core.credentials import origin as credential_origin
+from ..core.egress import refuse_internal_egress
 
 USER_AGENT = "Percolate-Source-Probe (+https://percolate.sh; one request per inspection)"
 """Identifying, and it says what it is doing. An endpoint's operator should be
@@ -61,6 +63,13 @@ MAX_BYTES = 2_000_000
 """Enough to see the shape of a page; small enough that a probe of a large
 export is refused rather than pulled. Reading more would make this an ingestion
 that nobody asked for."""
+
+MAX_REDIRECTS = 3
+
+ANONYMOUS = ("Accept", "User-Agent")
+"""The headers a hop to another origin carries. A named credential is bound to
+the origin the operator named, and a redirect is the endpoint choosing where to
+send it next."""
 
 MAX_RECORDS = 60
 MAX_FIELDS = 80
@@ -114,23 +123,51 @@ def _headers(auth_type: str, credential_ref: str, auth_header: str, url: str) ->
     return headers
 
 
+async def _refuse_internal(url: str) -> None:
+    """`core.egress`, off the event loop (it resolves), restated as a probe refusal."""
+    try:
+        await asyncio.to_thread(refuse_internal_egress, url)
+    except TerminalError as exc:
+        raise ProbeFailed(str(exc)) from None
+
+
 async def _fetch(url: str, headers: dict[str, str]) -> tuple[httpx.Response, bytes, bool]:
-    """One GET, capped in bytes and time. Redirects are followed by httpx and
-    re-checked: a redirect to another scheme or to userinfo is refused here
-    rather than trusted because the first URL was fine."""
-    async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True, max_redirects=3) as client:
-        async with client.stream("GET", url, headers=headers) as response:
-            try:
-                origin(str(response.url))
-            except TerminalError:
-                raise ProbeFailed(
-                    "The endpoint redirected somewhere a probe will not follow.") from None
-            body = bytearray()
-            async for chunk in response.aiter_bytes():
-                body.extend(chunk)
-                if len(body) >= MAX_BYTES:
-                    return response, bytes(body[:MAX_BYTES]), True
-            return response, bytes(body), False
+    """One GET, capped in bytes and time, following at most MAX_REDIRECTS hops.
+
+    BY HAND, NOT `follow_redirects=True`. httpx re-checked nothing on a hop: the
+    origin rule ran on the final URL after the request had already been made,
+    and the egress guard ran nowhere, so `https://public.example/` answering
+    `302 http://169.254.169.254/` was a metadata read returned to the caller.
+    Every hop is a new URL and gets the checks the first one got, BEFORE it is
+    requested. httpx also stripped only `Authorization` on a cross-origin hop,
+    so an `auth_type: header` credential went wherever the endpoint redirected;
+    a hop off the starting origin now carries only `ANONYMOUS`.
+    """
+    start = origin(url)
+    async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=False) as client:
+        for hop in range(MAX_REDIRECTS + 1):
+            await _refuse_internal(url)
+            sent = headers if origin(url) == start else {
+                k: v for k, v in headers.items() if k in ANONYMOUS}
+            async with client.stream("GET", url, headers=sent) as response:
+                if response.has_redirect_location:
+                    if hop == MAX_REDIRECTS:
+                        raise ProbeFailed(
+                            f"The endpoint redirected more than {MAX_REDIRECTS} times.")
+                    url = urljoin(str(response.url), response.headers["location"])
+                    try:
+                        origin(url)
+                    except TerminalError:
+                        raise ProbeFailed(
+                            "The endpoint redirected somewhere a probe will not follow.") from None
+                    continue
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    body.extend(chunk)
+                    if len(body) >= MAX_BYTES:
+                        return response, bytes(body[:MAX_BYTES]), True
+                return response, bytes(body), False
+    raise AssertionError("unreachable: the loop returns or raises")  # pragma: no cover
 
 
 # ------------------------------------------------------------ what it is

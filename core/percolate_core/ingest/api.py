@@ -5,6 +5,7 @@ advances only after the last page. Retries replay safely by source + external ID
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
@@ -16,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..core import as_service, credential_for
 from ..core.credentials import origin as credential_origin
+from ..core.egress import refuse_internal_egress
 from ..core.provider_errors import raise_for
 from ..worker.templates import TerminalError
 
@@ -187,6 +189,9 @@ async def api_pull(spec: dict,ctx: dict) -> dict:
     async with httpx.AsyncClient(timeout=30,follow_redirects=False) as client:
       for _ in range(c.max_pages):
         if origin(url)!=origin(c.url) or url in visited: raise TerminalError('Pagination repeated a URL or changed API origin. The committed watermark is unchanged.')
+        # A saved source's url is a caller's choice, so it gets the worker's egress
+        # check (core.egress) -- on every page, because each is a new request.
+        await asyncio.to_thread(refuse_internal_egress,url)
         try:
             async with client.stream('GET',url,headers=headers) as response:
                 if response.status_code>=300:
