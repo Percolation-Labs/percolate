@@ -165,4 +165,26 @@ begin
                  'the rest; the timeout has one home';
 end $$;
 
+-- ---------------------------------------------------------------
+-- 5. AND THE ROLE THAT PACES FROM IT CAN READ IT.
+--
+-- §4 asks as the owner, and the owner could always read it. The caller the
+-- grant exists for is `worker`, and on 0.2.0 that call raised `permission
+-- denied for function stale_timeout_default`. percolate-core's heartbeat then
+-- fell back to a fixed period, so a queue under about 80s was reaped
+-- mid-handler.
+-- ---------------------------------------------------------------
+set local role worker;
+do $$
+begin
+    if workflow.queue_stale_timeout('rem109') is distinct from interval '2 seconds' then
+        raise exception 'as worker, queue_stale_timeout(''rem109'') returned %, not the '
+                        'queue''s 2 seconds', workflow.queue_stale_timeout('rem109');
+    end if;
+    if workflow.queue_stale_timeout('a-queue-with-no-row') is distinct from interval '2 minutes' then
+        raise exception 'as worker, a queue with no row did not get the default';
+    end if;
+end $$;
+reset role;
+
 rollback;

@@ -619,8 +619,19 @@ alter table workflow.queue_config
 -- interval from the database rather than from a constant that has to be kept
 -- in step with one. A queue with no row is the common case and is not an
 -- error: it means "the default", which is what the coalesce says.
+--
+-- SECURITY DEFINER, like every other call granted to `worker` below that
+-- reads engine state. Without it the call ran as its caller, and `worker`
+-- holds no grant on workflow.queue_config and none on stale_timeout_default
+-- (the schema-wide revoke from PUBLIC took it), so the grant was a
+-- `permission denied for function stale_timeout_default` on 0.2.0.
+-- percolate-core's heartbeat fell back to a third of the two-minute default,
+-- and a queue configured under about 80s had its running tasks reaped
+-- mid-handler: a first live run on a 3-second queue was reaped twice.
+-- workflow/19 §4 read it as the owner, which is why nothing failed.
 create or replace function workflow.queue_stale_timeout(p_queue text)
-returns interval language sql stable as $$
+returns interval language sql stable
+security definer set search_path = pg_catalog, public as $$
     select coalesce(
         (select stale_timeout from workflow.queue_config where queue = p_queue),
         workflow.stale_timeout_default())

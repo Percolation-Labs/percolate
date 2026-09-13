@@ -17,8 +17,9 @@ why: >-
   `jsonpath`), so the documented shape and the honoured shape were different
   objects. `mode` is the sharp edge: the worker tests `spec.get("mode") ==
   "async"` and treats every other value, including a typo of "async", as sync
-  -- so a step written to fire-and-park silently blocks instead, and nothing
-  reports it. An enum here is what makes that a rejected write.
+  -- so a step written to hand its result back later silently waits for the
+  response instead, and nothing reports it. An enum here is what makes that a
+  rejected write.
 
 schema:
   type: object
@@ -58,12 +59,24 @@ schema:
       default: 30000
     mode:
       description: >-
-        async fires the request and parks the task in waiting_external until
-        something calls signal_task. It reuses that status rather than inventing
-        an "in flight externally" one, because the semantics are identical.
+        async sends the request as sync does, then does not complete the task:
+        the worker holds it `running`, heartbeating, until the callee completes
+        or fails it through complete_task/fail_task, or until wait_ms passes.
+        The task is not parked in waiting_external, because the lease fence
+        refuses completion of a parked task (workflow-engine/spec.md). The hold
+        occupies the worker for its length.
       type: string
       enum: [sync, async]
       default: sync
+    wait_ms:
+      description: >-
+        How long an async step's worker holds the task for its callee after a
+        2xx dispatch. Past it the worker fails the task terminally, since a
+        retry would re-dispatch work that may still be running. Ignored by a
+        sync step. Default 15 minutes (percolate-core#46).
+      type: integer
+      minimum: 1
+      default: 900000
     jsonpath:
       description: >-
         Dotted path extracted from the response, so a step hands the NEXT step a
