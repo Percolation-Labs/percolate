@@ -118,5 +118,54 @@ class ARefusedToolCallIsAnError(unittest.TestCase):
                 self.assertFalse(ends[0].is_error)
 
 
+class AFailedChildIsAFailedCall(unittest.TestCase):
+    """The gateway's half: a delegated run that failed is not an answer.
+
+    On the same stack every child `fleet_analyst` run failed after answering
+    (`no workflow definition named 'summarize_session_window'`), and
+    `run_delegated` returned the child's last assistant text regardless, so the
+    parent's model was handed `None` as a successful result and delegated 42
+    more times in one turn.
+    """
+
+    SECRET = "test-only-secret-not-a-production-key"
+    CAUSE = "RaiseError: no workflow definition named 'summarize_session_window'"
+
+    def delegate(self, status):
+        from contextlib import asynccontextmanager
+        from uuid import uuid4
+
+        from percolate_core.agentic import gateway
+        from percolate_core.agentic.contracts import Message, Run
+        from percolate_core.agentic.sequencer import TurnResult
+        from percolate_core.core.identity import mint_jwt
+
+        run_row = Run(status=status, state={"error": self.CAUSE} if status == "failed" else {})
+
+        async def run_turn(self, request, context, **kwargs):
+            return TurnResult(run=run_row, session=None,
+                              messages=[Message(role="assistant", content="two vessels")])
+
+        @asynccontextmanager
+        async def connected(settings, claims):
+            yield MemoryRepository()
+
+        headers = {"Authorization": f"Bearer {mint_jwt(str(uuid4()), self.SECRET)}"}
+        with patch.dict("os.environ", {"P8_JWT_SECRET": self.SECRET}), \
+             patch.object(gateway, "connected", connected), \
+             patch.object(TurnSequencer, "run_turn", run_turn):
+            return asyncio.run(gateway.run_delegated(
+                Settings(), agent_name="fleet_analyst", prompt="which vessels?", headers=headers))
+
+    def test_a_failed_child_raises_with_its_cause(self):
+        with self.assertRaises(RuntimeError) as raised:
+            self.delegate("failed")
+        self.assertIn("finished failed", str(raised.exception))
+        self.assertIn(self.CAUSE, str(raised.exception))
+
+    def test_a_succeeded_child_is_its_answer(self):
+        self.assertEqual(self.delegate("succeeded"), "two vessels")
+
+
 if __name__ == "__main__":
     unittest.main()

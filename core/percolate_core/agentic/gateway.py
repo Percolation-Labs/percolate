@@ -416,6 +416,18 @@ async def run_delegated(
             context,
             parent=parent,
         )
+        # A CHILD THAT DID NOT SUCCEED IS A FAILED TOOL CALL. This returned the
+        # last assistant text whatever the run's status, so a child that failed
+        # handed its parent an empty, successful result -- and on a compose
+        # stack whose children all failed after answering, the parent's model
+        # read `None` as an answer and delegated again, 42 times in one turn.
+        # Raised rather than returned: MCPServer turns an exception from
+        # call_tool into `isError`, which is the channel the parent reads.
+        if result.run.status != "succeeded":
+            cause = (result.run.state or {}).get("error") or "no error was recorded"
+            raise RuntimeError(
+                f"the delegated {agent_name} run {result.run.id} finished "
+                f"{result.run.status}: {cause}")
         answer = next(
             (m.content for m in reversed(result.messages) if m.role == "assistant"), ""
         )
