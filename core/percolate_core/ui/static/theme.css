@@ -1253,3 +1253,11 @@ pre.package-code { max-height: 65vh; overflow: auto; white-space: pre-wrap; }
 .composition-component { padding:12px; border:1px solid var(--rule); border-radius:8px; }
 .composition-code { max-height:28rem; overflow:auto; white-space:pre-wrap; font-size:.8rem; }
 @media (max-width:760px) { .composition-flow { grid-template-columns:1fr; } .component-catalogue { max-height:15rem; } }
+
+/* Operator detail. What a screen knows about a component this deployment did
+   not install -- the refusal, the relation, the file that installs it -- stays
+   one click away instead of leading the page (ui-design-language.md §5). */
+details.operator { border-top: 1px solid var(--hair); padding-top: .7rem; }
+details.operator > summary { cursor: pointer; font-size: .78rem; color: var(--muted); }
+details.operator[open] > summary { margin-bottom: .8rem; }
+details.operator > * + * { margin-top: .8rem; }
