@@ -329,6 +329,9 @@ def map_stream_event(event: Any) -> list[dict[str, Any]]:
                 "kind": "tool_end",
                 "tool_call_id": event.part.tool_call_id,
                 "tool_name": getattr(event.part, "tool_name", ""),
+                # A RetryPromptPart has no outcome and is a failure too: the
+                # model is being told to try again.
+                "is_error": getattr(event.part, "outcome", "failed") == "failed",
             }
         ]
     return []

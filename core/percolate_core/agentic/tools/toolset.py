@@ -9,6 +9,7 @@ forwarding.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from ..contracts import ToolInvocation, ToolResult
@@ -31,10 +32,18 @@ def build_pydantic_ai_tools(
     actually returned, ``brief.md`` §5.3), and return the content to the model.
     No tool logic, by construction.
 
-    ``ToolResult.is_error`` is *not* raised as an exception: the spec wants a
-    failed call to reach the model as an ordinary observation it can react to
-    (``brief.md`` §5.2), so the error text is the return value and the row keeps
-    ``is_error``/``error_kind``.
+    ``ToolResult.is_error`` reaches the model AS A FAILURE, not as a return
+    value. The spec wants a failed call to be an observation the model reacts to
+    (``brief.md`` §5.2), and it read that as "return the error text". A returned
+    string is a *successful* tool result to pydantic-ai and to the provider, so
+    the model was never told the call failed: on a compose stack missing
+    ``P8_TOOL_AUTH_ORIGINS`` every delegation came back ``a verified caller is
+    required`` with ``is_error=True`` on the row and ``false`` everywhere the
+    model and the client could see, and the model called again 54 times until
+    ``request_limit`` stopped it. ``ToolFailed`` is pydantic-ai's word for this
+    one case: the text still goes to the model, as a result whose outcome is
+    ``failed`` (the provider's native error channel where it has one), and it
+    spends no retry budget, so it is still an observation and not a crash.
     """
     from pydantic_ai.tools import Tool
 
@@ -77,6 +86,11 @@ def _forwarder(
         )
         if on_result is not None:
             await on_result(result)
+        if result.is_error:
+            from pydantic_ai.exceptions import ToolFailed
+
+            content = result.content
+            raise ToolFailed(content if isinstance(content, str) else json.dumps(content, default=str))
         return result.content
 
     _call.__name__ = tool_name
