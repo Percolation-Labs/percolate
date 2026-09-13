@@ -50,6 +50,29 @@ cd "$REPO"
 VERSION=$(sed -n "s/^default_version = '\(.*\)'/\1/p" extension/percolate/percolate.control)
 [ -n "$VERSION" ] || { echo "no default_version in percolate.control" >&2; exit 1; }
 
+# FROM=self: THE BODY REPLAYED ONTO THIS VERSION ITSELF, and it is the upgrade
+# every other gate here cannot see. An upgrade script is the whole body plus the
+# migration hops that start at or after the old version; the body is replayed
+# onto whatever the previous release left. While default_version equals the
+# newest tag there is no script from that tag, so nothing ever replays the
+# CURRENT body onto a database already at the CURRENT schema -- and that is
+# exactly what the next bump's first hop does. It failed the first time anybody
+# bumped past 0.2.0: `drop function if exists content.resolve_file(uuid)` sits in
+# the body in front of its own `create or replace`, and on 0.2.0 the view
+# workflow.v_artifacts depends on it. 0.1.6 -> 0.2.0 ran it on a database where
+# nothing did, so every gate that starts from an older tag was green.
+#
+# The script is what build-sql.py's upgrade_script() writes for an upgrade from
+# this version -- asked of that function rather than assembled here, so the two
+# cannot disagree about what a replay is -- and the target is named
+# "<version>-replay" because ALTER EXTENSION needs a version to go to and an
+# update path is found by filename alone; no base script is needed for it.
+SELF=
+if [ "${FROM:-}" = self ]; then
+    SELF=1
+    FROM=$VERSION
+fi
+
 # The release a user upgrading today would be coming from: the newest tag below
 # this tree's version. Read from the tags rather than written down, same source
 # build-sql.py's upgrade scripts and check.yml's upgrade gates both use.
@@ -62,8 +85,18 @@ if [ -z "$FROM" ]; then
 fi
 
 NEW_SQL="extension/percolate/sql/percolate--$VERSION.sql"
-UPG_SQL="extension/percolate/sql/percolate--$FROM--$VERSION.sql"
-for f in "$NEW_SQL" "$UPG_SQL"; do
+if [ -n "$SELF" ]; then
+    TO="$VERSION-replay"
+    UPG_SQL=$(mktemp)
+    UPG_NAME="percolate--$VERSION--$TO.sql"
+    check_files=("$NEW_SQL")
+else
+    TO=$VERSION
+    UPG_SQL="extension/percolate/sql/percolate--$FROM--$VERSION.sql"
+    UPG_NAME=$(basename "$UPG_SQL")
+    check_files=("$NEW_SQL" "$UPG_SQL")
+fi
+for f in "${check_files[@]}"; do
     [ -f "$f" ] || { echo "missing $f -- run extension/percolate/build-sql.py" >&2; exit 1; }
 done
 
@@ -93,12 +126,34 @@ PY="$(percolate_python)" || exit 2
 # clean upgrade: the tree's `percolate--<old>.sql` had already been rewritten by
 # the very edit under test, so it installed the fixed schema and then "upgraded"
 # it to itself.
+#
+# FROM=self is the one exception, and it is not the mistake above: the version
+# under test has no tag yet, and installing this tree's script and then
+# replaying this tree's body onto it is the question being asked.
 OLD_SQL=$(mktemp)
-trap 'rm -f "$OLD_SQL"' EXIT
-git show "v$FROM:extension/percolate/sql/percolate--$FROM.sql" > "$OLD_SQL" 2>/dev/null \
-    || { echo "cannot read percolate--$FROM.sql from tag v$FROM" >&2; exit 1; }
+REPLAY_TMP=${SELF:+$UPG_SQL}
+trap 'rm -f "$OLD_SQL" ${REPLAY_TMP:+"$REPLAY_TMP"}' EXIT
+if [ -n "$SELF" ]; then
+    cp "$NEW_SQL" "$OLD_SQL"
+    "$PY" - "$VERSION" "$NEW_SQL" > "$UPG_SQL" <<'PYEOF'
+import importlib.util, pathlib, sys
+spec = importlib.util.spec_from_file_location("build_sql", "extension/percolate/build-sql.py")
+b = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(b)
+version, body = sys.argv[1], pathlib.Path(sys.argv[2]).read_text()
+sys.stdout.write(b.upgrade_script(version, body, b.migration_hops(b.released_versions())))
+PYEOF
+    chmod 644 "$UPG_SQL"
+else
+    git show "v$FROM:extension/percolate/sql/percolate--$FROM.sql" > "$OLD_SQL" 2>/dev/null \
+        || { echo "cannot read percolate--$FROM.sql from tag v$FROM" >&2; exit 1; }
+fi
 
-echo "==> comparing a fresh $VERSION against $FROM upgraded to $VERSION"
+if [ -n "$SELF" ]; then
+    echo "==> comparing a fresh $VERSION against $VERSION with its own upgrade body replayed onto it"
+else
+    echo "==> comparing a fresh $VERSION against $FROM upgraded to $VERSION"
+fi
 
 # Both databases get the image's own superuser step, so the only difference
 # between them is the one this file measures.
@@ -117,7 +172,7 @@ EXT=/usr/share/postgresql/19/extension
 chmod 644 "$OLD_SQL"   # mktemp makes it 0600 and docker cp keeps the mode
 docker cp "$OLD_SQL" "$CONTAINER:$EXT/percolate--$FROM.sql" >/dev/null
 docker cp "$NEW_SQL" "$CONTAINER:$EXT/" >/dev/null
-docker cp "$UPG_SQL" "$CONTAINER:$EXT/" >/dev/null
+docker cp "$UPG_SQL" "$CONTAINER:$EXT/$UPG_NAME" >/dev/null
 docker cp extension/percolate/percolate.control "$CONTAINER:$EXT/" >/dev/null
 
 mk() {
@@ -156,7 +211,7 @@ mk p8conv_fresh
 mk p8conv_upg
 load p8conv_fresh "create extension percolate version '$VERSION'"
 load p8conv_upg   "create extension percolate version '$FROM'"
-load p8conv_upg   "alter extension percolate update to '$VERSION'"
+load p8conv_upg   "alter extension percolate update to '$TO'"
 
 # EVERY AXIS A REPLAY CAN GET WRONG, not just the ones that have gone wrong.
 #
@@ -315,7 +370,7 @@ order by 1;"
 }
 
 fresh=$(mktemp); upg=$(mktemp)
-trap 'rm -f "$OLD_SQL" "$fresh" "$upg"' EXIT
+trap 'rm -f "$OLD_SQL" "$fresh" "$upg" ${REPLAY_TMP:+"$REPLAY_TMP"}' EXIT
 S_FRESH=$(ext_schemas docker exec -i "$CONTAINER" psql -U p8 -d p8conv_fresh)
 S_UPG=$(ext_schemas docker exec -i "$CONTAINER" psql -U p8 -d p8conv_upg)
 docker exec -i "$CONTAINER" psql -U p8 -d p8conv_fresh -tAc "$(snap "$S_FRESH")" > "$fresh"
