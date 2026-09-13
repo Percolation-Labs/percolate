@@ -665,11 +665,6 @@ export async function events() {
 
 /* -- Queues & pools ---------------------------------------- */
 export async function queues() {
-  const node = page(head("workflow.pools · v_pools · queue_depth()", "Queues & pools",
-    "A worker pool is a row. A manager reconciles it into a Deployment and a KEDA ScaledObject, " +
-    "and KEDA scales it 0 to N on that pool's queue depth. Nothing on this page holds cluster " +
-    "credentials, and no YAML is authored per pool."));
-
   const [pools, binds, unserved, depth, t, rl, policy] = await Promise.all([
     tryRead(() => read(READS.pools), (e) => ({ rows: [], error: e })),
     tryRead(() => read(READS.poolQueues), (e) => ({ rows: [], error: e })),
@@ -682,11 +677,48 @@ export async function queues() {
 
   /* pools.sql is on build-sql.py's NOT_SHIPPED list -- pools.md §13 verifies
      the data model and leaves the control loop a proposal -- so a standard
-     install has NONE of these relations and every panel below shows a gap.
-     Four unexplained refusals read as a broken screen; one sentence says what
-     it actually is, which is a component this deployment did not install. */
-  if ([pools, binds, unserved, policy].every((r) => r.error?.code === "42P01")) {
+     install has NONE of these relations. Detected from what the database
+     answers (42P01 on every pool relation), never assumed: a deployment that
+     applies pools.sql gets the pool screen back with no change here.
+
+     Absent, the screen is for the person who opened Queues: how much is
+     waiting and what paces it, in words. The refusals, relation names and the
+     file that installs them were the first thing on the page -- four
+     `unavailable · 42P01` tiles and a rose gap -- and are operator detail. They
+     move behind a toggle rather than going away, because
+     ui-design-language.md §5 says a smaller first screen "must not make
+     failures, evidence, advanced configuration or the next action
+     inaccessible", and §4 asks this screen for a consistent unavailable state. */
+  const poolsAbsent = [pools, binds, unserved, policy].every((r) => r.error?.code === "42P01");
+  const node = page(poolsAbsent
+    ? head("queues · rate limits", "Queues & pools",
+        "Work waits in a queue until a worker claims it. This shows how much is waiting on each " +
+        "queue and the rate limits that pace it.")
+    : head("workflow.pools · v_pools · queue_depth()", "Queues & pools",
+        "A worker pool is a row. A manager reconciles it into a Deployment and a KEDA ScaledObject, " +
+        "and KEDA scales it 0 to N on that pool's queue depth. Nothing on this page holds cluster " +
+        "credentials, and no YAML is authored per pool."));
+  const operator = poolsAbsent
+    ? h("details", { class: "operator" }, h("summary", {}, "Operator detail: the pool schema"))
+    : null;
+  const poolPart = (...kids) => (operator || node).append(...kids);
+
+  if (poolsAbsent) {
+    const waiting = (depth.rows || []).reduce((a, r) => a + Number(r.depth || 0), 0);
+    /* The same queues the table below lists: queues_api has a row only for a
+       queue with work ready or running, so counting it said "0 queues" over a
+       table of three. */
+    const known = new Set([...(t.rows || []).map((r) => r.queue), ...(depth.rows || []).map((r) => r.queue)]);
     node.append(h("div", { class: "note" },
+      h("strong", {}, "Worker pools are not installed on this deployment. "),
+      "Queues are served by the workers you run, and everything below works without pools. Pools " +
+      "scale workers per queue on Kubernetes; they are an optional component, and the operator " +
+      "detail at the end of this page says what installs them."));
+    node.append(h("div", { class: "grid g3" },
+      statOf(depth.error ? depth : t, "Queues", known.size, "with tasks recorded"),
+      statOf(depth, "Tasks in queues", waiting, "ready or running, every queue"),
+      statOf(rl, "Rate limits", (rl.rows || []).length, "buckets defined")));
+    operator.append(h("div", { class: "note" },
       h("strong", {}, "This deployment has no pool schema. "),
       "The extension does not ship one: ", h("code", { class: "mono" }, "pools.md"),
       " §13 verifies the data model and leaves the control loop a proposal, so a table with no " +
@@ -696,7 +728,7 @@ export async function queues() {
   }
 
   const pending = (pools.rows || []).filter((p) => p.reconcile_pending).length;
-  node.append(h("div", { class: "grid g4" },
+  poolPart(h("div", { class: "grid g4" },
     statOf(pools, "Pools", (pools.rows || []).length, "workflow.pools"),
     statOf(pools, "Enabled", (pools.rows || []).filter((p) => p.enabled).length, "in the desired set"),
     statOf(pools, "Awaiting a manager", pending,
@@ -704,7 +736,7 @@ export async function queues() {
     statOf(unserved, "Unserved queues", (unserved.rows || []).length, "tasks with no pool",
            (unserved.rows || []).length ? "down" : "")));
 
-  node.append(panel("Pools", "desired state and observed state, joined",
+  poolPart(panel("Pools", "desired state and observed state, joined",
     pools.error ? gap("workflow.v_pools", pools.error.message, "schema — apply specs/workflow-engine/pools.sql")
       : table(["Pool", "Image", "Queues", "Replicas", "Node class", "Generation", "Phase", ""],
               pools.rows || [], (p) =>
@@ -750,42 +782,51 @@ export async function queues() {
   /* binds is in this list and was not: when pool_queues is unreadable every
      row rendered "no pool", which is a CLAIM -- the same mistake the em-dash
      comment below refuses to make about depth. Absence and refusal have to
-     read differently or the screen is confidently wrong. */
+     read differently or the screen is confidently wrong. With no pool schema
+     at all there is nothing to serve a queue BY, so the column goes rather
+     than reading "unknown" on every row. */
   const queuesGap = [["workflow.queues_api", depth],
                      ["workflow.tasks_by_status_api", t],
-                     ["workflow.pool_queues", binds]].filter(([, r]) => r.error);
+                     ...(poolsAbsent ? [] : [["workflow.pool_queues", binds]])].filter(([, r]) => r.error);
   node.append(panel("Queues",
     queuesGap.length
       ? queuesGap.map(([what]) => what).join(", ") + " unavailable · "
         + (queuesGap[0][1].error.code || "read failed")
-      : "one pool per queue, enforced by a primary key",
-    table(["Queue", "Served by", "Depth (global)", "Your tasks, by status"], [...queueNames], (q) =>
+      : poolsAbsent ? "depth counts ready and running tasks" : "one pool per queue, enforced by a primary key",
+    table(poolsAbsent ? ["Queue", "Depth (global)", "Your tasks, by status"]
+                      : ["Queue", "Served by", "Depth (global)", "Your tasks, by status"], [...queueNames], (q) =>
       h("tr", {},
         h("td", { class: "mono" }, q),
-        h("td", {}, binds.error ? h("span", { class: "chip" }, "unknown")
-                    : poolOf.has(q) ? chip(poolOf.get(q), "accent")
-                                    : h("span", { class: "chip failed" }, "no pool")),
+        poolsAbsent ? null
+          : h("td", {}, binds.error ? h("span", { class: "chip" }, "unknown")
+                      : poolOf.has(q) ? chip(poolOf.get(q), "accent")
+                                      : h("span", { class: "chip failed" }, "no pool")),
         h("td", { class: "num" }, depths.has(q) ? String(depths.get(q)) : "—"),
         h("td", { class: "pill-row" }, (t.rows || []).filter((r) => r.queue === q).map((b) =>
           h("span", { class: "chip" }, b.status + " " + b.n)))))));
 
-  node.append(h("div", { class: "grid g3" },
-    panel("Unserved queues", "tasks waiting, no pool bound",
-      unserved.error ? gap("workflow.v_unserved_queues", unserved.error.message, "schema — apply specs/workflow-engine/pools.sql")
-        : table(["Queue", "Ready", "Running", "Oldest"], unserved.rows || [], (u) =>
-            h("tr", {}, h("td", { class: "mono" }, u.queue), h("td", { class: "num" }, u.ready_tasks),
-              h("td", { class: "num" }, u.running_tasks), h("td", { class: "mono" }, fmtTime(u.oldest_task))))),
-    panel("Image allow-list", "deny by default",
-      policy.error ? gap("workflow.pool_image_policy", policy.error.message, "schema — apply specs/workflow-engine/pools.sql")
-        : table(["Pattern", "Note"], policy.rows || [], (r) =>
-            h("tr", {}, h("td", { class: "mono" }, r.pattern), h("td", {}, r.note || "—")))),
-    panel("Rate limits", "the bucket, minus the personal keys",
-      rl.error ? gap("workflow.rate_limits_api", rl.error.message, "schema")
-        : table(["Key", "Capacity", "Tokens"], rl.rows || [], (r) =>
-            h("tr", {}, h("td", { class: "mono" }, r.key), h("td", { class: "num" }, r.capacity),
-              h("td", { class: "num" }, Number(r.tokens).toFixed(1)))))));
+  const unservedPanel = panel("Unserved queues", "tasks waiting, no pool bound",
+    unserved.error ? gap("workflow.v_unserved_queues", unserved.error.message, "schema — apply specs/workflow-engine/pools.sql")
+      : table(["Queue", "Ready", "Running", "Oldest"], unserved.rows || [], (u) =>
+          h("tr", {}, h("td", { class: "mono" }, u.queue), h("td", { class: "num" }, u.ready_tasks),
+            h("td", { class: "num" }, u.running_tasks), h("td", { class: "mono" }, fmtTime(u.oldest_task)))));
+  const policyPanel = panel("Image allow-list", "deny by default",
+    policy.error ? gap("workflow.pool_image_policy", policy.error.message, "schema — apply specs/workflow-engine/pools.sql")
+      : table(["Pattern", "Note"], policy.rows || [], (r) =>
+          h("tr", {}, h("td", { class: "mono" }, r.pattern), h("td", {}, r.note || "—"))));
+  const ratePanel = panel("Rate limits", "the bucket, minus the personal keys",
+    rl.error ? gap("workflow.rate_limits_api", rl.error.message, "schema")
+      : table(["Key", "Capacity", "Tokens"], rl.rows || [], (r) =>
+          h("tr", {}, h("td", { class: "mono" }, r.key), h("td", { class: "num" }, r.capacity),
+            h("td", { class: "num" }, Number(r.tokens).toFixed(1)))));
+  if (poolsAbsent) {
+    node.append(ratePanel);
+    operator.append(h("div", { class: "grid g2" }, unservedPanel, policyPanel));
+  } else {
+    node.append(h("div", { class: "grid g3" }, unservedPanel, policyPanel, ratePanel));
+  }
 
-  node.append(h("div", { class: "grid g2" },
+  poolPart(h("div", { class: "grid g2" },
     h("div", { class: "panel" }, h("div", { class: "body" },
       h("h3", {}, "What the database refuses, so this screen does not have to"),
       h("div", { class: "note" }, h("strong", {}, "An image outside the allow-list. "),
@@ -806,28 +847,56 @@ export async function queues() {
       h("div", { class: "note amber" }, h("strong", {}, "Counting only "),
         h("code", { class: "mono" }, "ready"), h("strong", {}, " is the subtle wrong version. "),
         "A pool of pods mid-task reports depth 0 and gets scaled out from under work in flight. " +
+        "Measured in pools.md §13: 4 against 2 on the same queue."))),
+    h("div", { class: "panel" }, h("div", { class: "body" },
+      h("h3", {}, "Depth counts running, not only ready"),
+      h("div", { class: "note" }, "queue_depth() is SECURITY DEFINER, so the number above is the " +
+        "true global depth rather than this caller's slice — which is what KEDA scales on and what " +
+        "an operator needs."),
+      h("div", { class: "note amber" }, h("strong", {}, "Counting only "),
+        h("code", { class: "mono" }, "ready"), h("strong", {}, " is the subtle wrong version. "),
+        "A pool of pods mid-task reports depth 0 and gets scaled out from under work in flight. " +
         "Measured in pools.md §13: 4 against 2 on the same queue.")))));
+  if (operator) node.append(operator);
   return node;
 }
 
 /* -- Load & limits ----------------------------------------- */
+/* What this database can say about load: how much work it holds, by status.
+   The screen used to lead with two tiles reading "-" -- `no table for them`,
+   `no policy row` -- under a panel titled "What would stop this being a
+   placeholder". Both are true and neither is for the person who opened Load &
+   limits: load trials are written to a run log by dev/scale and retention has no
+   policy rows, so there is nothing here to detect and nothing to show. What IS
+   measurable leads; the rest keeps its words behind a toggle
+   (ui-design-language.md §5). */
 export async function scale() {
-  const node = page(head("lifecycle · load · retention", "Load & limits",
-    "What a load trial produces is not in the database - dev/scale writes it to a run log. This " +
-    "screen shows what IS measurable from here, and names the rest as absent."));
+  const node = page(head("load · limits", "Load & limits",
+    "How much work this deployment holds, by status, as the database reports it when the page loads."));
   const [t, rs] = await Promise.all([
     tryRead(() => read(READS.tasksByStatus), (e) => ({ rows: [], error: e })),
     tryRead(() => read(READS.runsByStatus), (e) => ({ rows: [], error: e })),
   ]);
   const tasks = (t.rows || []).reduce((a, r) => a + Number(r.n), 0);
   const runsN = (rs.rows || []).reduce((a, r) => a + Number(r.n), 0);
-  node.append(h("div", { class: "grid g4" },
-    statOf(t, "Tasks visible", tasks, "tasks_by_status_api"),
-    statOf(rs, "Runs visible", runsN, "runs_by_status_api"),
-    stat("Trials recorded", "-", "no table for them", "down"),
-    stat("Retention", "-", "no policy row", "down")));
+  node.append(h("div", { class: "grid g2" },
+    statOf(t, "Tasks", tasks, "visible to you, every queue"),
+    statOf(rs, "Workflow runs", runsN, "visible to you")));
 
   node.append(h("div", { class: "grid g2" },
+    panel("Tasks by status", "per queue",
+      t.error ? gap("workflow.tasks_by_status_api", t.error.message, "schema")
+        : table(["Queue", "Status", "Tasks"], t.rows || [], (r) =>
+            h("tr", {}, h("td", { class: "mono" }, r.queue), h("td", {}, status(r.status)),
+              h("td", { class: "num" }, r.n)))),
+    panel("Runs by status", "every workflow",
+      rs.error ? gap("workflow.runs_by_status_api", rs.error.message, "schema")
+        : table(["Status", "Runs"], rs.rows || [], (r) =>
+            h("tr", {}, h("td", {}, status(r.status)), h("td", { class: "num" }, r.n))))));
+
+  node.append(h("details", { class: "operator" },
+    h("summary", {}, "Operator detail: load trials and retention"),
+    h("div", { class: "grid g2" },
     h("div", { class: "panel" }, h("div", { class: "body" },
       h("h3", {}, "What the specs already measured"),
       h("div", { class: "note" }, h("strong", {}, "13,965 tasks/s "), "on compose, one host; ",
@@ -841,6 +910,6 @@ export async function scale() {
       h("div", { class: "note rose" }, "A table of trial results - substrate, shape, throughput, claim p99, verdict. ",
         "Then this is a list, and every number carries the environment that produced it."),
       h("div", { class: "note rose" }, "A retention policy expressed as rows rather than a cron somebody wrote once."),
-      h("div", { class: "note" }, "Both are schema work in workflow-engine, not UI work.")))));
+      h("div", { class: "note" }, "Both are schema work in workflow-engine, not UI work."))))));
   return node;
 }

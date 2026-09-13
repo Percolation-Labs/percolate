@@ -232,10 +232,18 @@ export async function roles() {
 
 /* -- Keys & sessions --------------------------------------- */
 export async function keys() {
-  const [ak, rt] = await Promise.all([
+  /* The third read is PostgREST's own description of `rbac` -- its OpenAPI
+     root, which lists every function the caller may call. It is what lets the
+     operator detail below say which key and session functions THIS database
+     has, instead of a sentence written about one version of the extension. */
+  const [ak, rt, surface] = await Promise.all([
     tryRead(() => read(READS.apiKeys), (e) => ({ rows: [], error: e })),
     tryRead(() => read(READS.refreshSessions), (e) => ({ rows: [], error: e })),
+    tryRead(() => select("rbac", ""), (e) => ({ rows: null, error: e })),
   ]);
+  const functions = Object.keys(surface.rows?.paths || {})
+    .filter((path) => path.startsWith("/rpc/")).map((path) => path.slice(5))
+    .filter((fn) => /api_key|session/.test(fn)).sort();
   const node = page(head("revocable rows, which is the point of them", "Keys & sessions",
     "A JWT you cannot revoke is a decision you cannot take back, so both of these are rows. " +
     "Presenting an already-rotated refresh token revokes the whole chain - theft shows up as a " +
@@ -266,10 +274,21 @@ export async function keys() {
                 e.target.replaceWith(res.error ? chip(res.error.message, "failed") : chip("revoked", "succeeded"));
               } }, "revoke")))))));
 
-  node.append(h("div", { class: "note amber" },
-    h("strong", {}, "Issuing is the missing half. "),
-    "There is no function that creates an API key, so this screen lists and revokes and cannot ",
-    "issue - and the list is empty on a deployment where nothing has ever made one."));
+  /* "Issuing is the missing half" led this page, amber, on every install. True,
+     and addressed to whoever builds the extension rather than whoever opened
+     the screen. The reader gets what the screen does; the operator detail
+     keeps what the database exposes, read from it (ui-design-language.md §5). */
+  node.append(h("div", { class: "note" },
+    "API keys and signed-in sessions for your account are listed here, and any of them can be revoked. " +
+    "Keys are not created from this screen, so the list stays empty until one is issued outside the workbench."));
+  node.append(h("details", { class: "operator" },
+    h("summary", {}, "Operator detail: key and session functions"),
+    surface.error
+      ? h("div", { class: "note rose" }, "PostgREST did not describe rbac: " + surface.error.message)
+      : h("div", { class: "note" },
+          "The rbac functions this caller can reach: ",
+          functions.length ? functions.map((fn, i) => [i ? ", " : "", h("code", { class: "mono" }, fn)]) : "none",
+          ". None of them issues an API key, which is why this screen lists and revokes and cannot issue.")));
   return node;
 }
 

@@ -73,6 +73,12 @@ jobs:
       - name: Chat keeps a delegated run's stream out of its parent's answer
         run: python -m unittest discover -s tests -p test_chat_stream.py
 
+      # A component this deployment did not install (the pool schema, and the
+      # key issuing and load trials that do not exist yet) reads as that, in
+      # words, with the SQLSTATE and the installing file behind a toggle.
+      - name: Uninstalled components read as words, with operator detail kept
+        run: python -m unittest discover -s tests -p test_ui_uninstalled.py
+
       # The Schedules screen reimplements the engine's cron matcher so it can
       # preview a schedule. These pin the decisions that differ from an
       # ordinary cron library; dev/cron_agrees.py runs both against a live
