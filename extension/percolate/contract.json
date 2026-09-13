@@ -1342,7 +1342,7 @@
           },
           "mode": {
             "default": "sync",
-            "description": "async fires the request and parks the task in waiting_external until something calls signal_task. It reuses that status rather than inventing an \"in flight externally\" one, because the semantics are identical.",
+            "description": "async sends the request as sync does, then does not complete the task: the worker holds it `running`, heartbeating, until the callee completes or fails it through complete_task/fail_task, or until wait_ms passes. The task is not parked in waiting_external, because the lease fence refuses completion of a parked task (workflow-engine/spec.md). The hold occupies the worker for its length.",
             "enum": [
               "sync",
               "async"
@@ -1357,6 +1357,12 @@
           "url": {
             "pattern": "^https?://",
             "type": "string"
+          },
+          "wait_ms": {
+            "default": 900000,
+            "description": "How long an async step's worker holds the task for its callee after a 2xx dispatch. Past it the worker fails the task terminally, since a retry would re-dispatch work that may still be running. Ignored by a sync step. Default 15 minutes (percolate-core#46).",
+            "minimum": 1,
+            "type": "integer"
           }
         },
         "required": [
