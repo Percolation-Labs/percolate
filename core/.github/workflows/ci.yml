@@ -255,6 +255,12 @@ jobs:
       - name: A refused caller is told so, and an upstream failure is still 502
         run: python -m unittest discover -s tests -p test_database_refusals.py
 
+      # REM-174. The quota gate asks core: the function decides when it exists,
+      # a database with no quota policy is allowed as before, and quota policy
+      # without the function refuses instead of calling a model unchecked.
+      - name: The quota gate asks core, and a broken install refuses
+        run: python -m unittest discover -s tests -p test_quota_gate.py
+
       # An exhausted or refused provider account stops after one attempt on
       # every path that calls a provider, and a rate limit is still retried
       # (REM-53).
