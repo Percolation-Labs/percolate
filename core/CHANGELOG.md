@@ -61,6 +61,16 @@ first because each item in it changes who can read what.
   is resolved and then connected to without pinning the address), tool server
   rows, and chained-action webhooks, which a write permission gates instead.
 
+### A scheduled run reports back to its task
+
+- **Completing and failing a task runs on `P8_WORKER_DSN`.** The runtime switched its
+  `authenticator` login to `worker` to call `complete_task` and `fail_task`,
+  and no install permits that (`permission denied to set role "worker"`). A
+  scheduled run therefore never completed or failed its task, and the step
+  waited out `wait_ms`. Give the agent runtime and the gateway the workers' own
+  login in `P8_WORKER_DSN`. Unset, the runtime switches its own login as
+  before, which works only where that login is a member of `worker`.
+
 ### An async `http_call` sends, then holds its task
 
 - **On 0.1.11 an async step returned before sending**, and the worker completed

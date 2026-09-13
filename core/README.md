@@ -246,6 +246,7 @@ send, and a secret goes by `credential_ref`.
 | `P8_S3_ENDPOINT`, `P8_S3_KEY`, `P8_S3_SECRET`, `P8_BUCKET` | content |
 | `P8_CREDENTIAL_ORIGINS` | worker, ingest, lake: JSON map, credential name to origin(s). `P8_INGEST_CREDENTIAL_ORIGINS` (same shape) is still read and merged |
 | `P8_TEMPLATE_ENV` | worker: comma-separated extra variables `{{env.X}}` may read |
+| `P8_WORKER_DSN` | agent runtime and gateway: a login that is a member of `worker` (the workers' own), used only to complete or fail the task a scheduled run was dispatched by. Required where `P8_DSN` logs in as `authenticator`, which cannot become `worker`; without it `/internal/run` answers 503 |
 
 ### Tracing — OpenTelemetry, off unless pointed somewhere
 

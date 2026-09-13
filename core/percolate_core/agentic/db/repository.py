@@ -26,7 +26,7 @@ from collections.abc import Mapping
 from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
-from ...core import agent_document
+from ...core import agent_document, identity
 from ..contracts import AgentSpec, Message, Run, RunStatus, Session, ToolServer
 from .client import PgClient
 
@@ -501,17 +501,18 @@ class PgRepository:
         The role switch is the integration detail that sentence hides:
         ``complete_task`` is granted to ``worker``, not ``authenticated``,
         because in ``workflow-engine``'s role model whoever completes a task is
-        a worker. Borrowing that role for exactly this call is cheaper and more
-        honest than widening either system's grants.
+        a worker. It runs on a ``worker`` login (``P8_WORKER_DSN``), not this
+        caller's connection: that connection logs in as ``authenticator``, which
+        cannot become ``worker``. See ``core.identity.as_task_worker``.
         """
-        async with self.client.as_user(self.claims, role="worker") as conn:
+        async with identity.as_task_worker() as conn:
             await conn.execute("select workflow.complete_task($1, $2::jsonb)", task_id, output)
 
     async def fail_task(self, task_id: UUID, error: dict[str, Any], terminal: bool) -> None:
         """``select workflow.fail_task($1, $2::jsonb, $3)``, as ``worker``, like
         ``complete_task`` and for the same reason. ``terminal`` is the engine's
         "do not retry"; `task_outcome.failure_is_terminal` decides it."""
-        async with self.client.as_user(self.claims, role="worker") as conn:
+        async with identity.as_task_worker() as conn:
             await conn.execute(
                 "select workflow.fail_task($1, $2::jsonb, $3)", task_id, error, terminal)
 
