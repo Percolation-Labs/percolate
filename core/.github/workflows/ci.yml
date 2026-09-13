@@ -67,6 +67,12 @@ jobs:
       - name: Screens and their audit still read the same contracts
         run: python -m unittest discover -s tests -p test_ui_reads.py
 
+      # Every run in a delegation tree publishes on one session channel
+      # (brief.md §4). Chat keeps each run's text apart, lets only the root run
+      # end the turn, and nests a child's output under its delegation.
+      - name: Chat keeps a delegated run's stream out of its parent's answer
+        run: python -m unittest discover -s tests -p test_chat_stream.py
+
       # The Schedules screen reimplements the engine's cron matcher so it can
       # preview a schedule. These pin the decisions that differ from an
       # ordinary cron library; dev/cron_agrees.py runs both against a live

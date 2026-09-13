@@ -771,6 +771,15 @@ a { color: var(--accent); }
   border-bottom-left-radius: 4px;
 }
 
+/* A delegated run's own turn, nested under the call that spawned it and shut
+   by default: brief.md §5.1 item 2 makes it "that call's contents", so the
+   parent's answer stays the thing the conversation reads. */
+details.tool-call > summary.head { cursor: pointer; list-style: none; }
+details.tool-call > summary.head::-webkit-details-marker { display: none; }
+details.tool-call > summary.head::before { content: "▸"; color: var(--faint); font-size: .66rem; }
+details.tool-call[open] > summary.head::before { content: "▾"; }
+details.tool-call .msg { margin-top: .35rem; }
+
 /* ── Sessions, in the rail ──────────────────────────────────
    Under the Chat item, because a list of session titles is navigation and the
    rail is where navigation lives. Collapsed with the rail, and gone from the
