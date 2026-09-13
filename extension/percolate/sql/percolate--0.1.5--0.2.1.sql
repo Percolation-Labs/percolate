@@ -79,7 +79,7 @@ drop view if exists workflow.v_artifacts;
 drop function if exists content.resolve_file(uuid);
 
 -- ============================================================
--- percolate 0.2.0 -- the whole schema, as one extension script.
+-- percolate 0.2.1 -- the whole schema, as one extension script.
 --
 -- GENERATED from specs/ by extension/percolate/build-sql.py. Do not edit.
 --

@@ -39,6 +39,14 @@ CARGO = ROOT / "extension/percolate_parser/Cargo.toml"
 # a placeholder so `kubectl kustomize` alone still renders something
 # installable, so the number has to be moved rather than removed.
 K8S_MANIFEST = ROOT / "k8s/kind/manifests/postgres.yaml"
+# The SIXTH, and it never went through a bump: the lock was committed on
+# 2026-09-12 (23a7b7d), six days after Cargo.toml reached 0.2.0, so no run of
+# this script has ever met it. Left alone, a bump puts Cargo.toml at the new
+# number and the lock's own entry for the crate at the old one, which cargo
+# rewrites on the next build -- a dirty tree from a build, and a lock that
+# disagrees with its manifest in every commit in between. Only the crate's own
+# entry moves; every dependency pin stays exactly as locked.
+CARGO_LOCK = ROOT / "extension/percolate_parser/Cargo.lock"
 SQL_DIR = ROOT / "extension/percolate/sql"
 
 
@@ -94,6 +102,8 @@ def main() -> None:
     sub_once(CONTROL, r"^default_version = '.*'", f"default_version = '{new}'")
     sub_once(PARSER_CONTROL, r"^default_version = '.*'", f"default_version = '{new}'")
     sub_once(CARGO, r'^version = ".*"', f'version = "{new}"')
+    sub_once(CARGO_LOCK, r'^(name = "percolate_parser"\nversion = )"[^"]*"',
+             rf'\g<1>"{new}"')
     # THE MOUNT LINES ONLY, and the anchor is the whole correctness of this.
     #
     # Two occurrences are meant to move -- `mountPath:` and `subPath:` -- so
