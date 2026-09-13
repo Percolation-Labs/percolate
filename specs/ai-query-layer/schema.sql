@@ -890,6 +890,9 @@ create or replace function aiq.projection_statements(
 ) returns text[] language plpgsql stable as $$
 begin
     return array[
+        -- REM-152: preserve source ownership on inserts, updates and rebuilds.
+        -- Private nodes without their owner's ID disappear from that owner's
+        -- search. to_jsonb supports external tables that have no owner_id.
         -- 1. Rows that belong: upsert identity.
         -- rbac.org_or_shared() wraps the org expression at every one of the
         -- sites that writes it, and the wrap is not decoration. aiq.nodes.org_id
@@ -904,11 +907,12 @@ begin
         -- projected would go on being readable after the row it mirrors
         -- stopped being.
         format($q$
-            insert into aiq.nodes (entity_type, entity_id, org_id, summary, visibility)
-            select %1$L, n.id, rbac.org_or_shared(%2$s), %3$s, %4$s from %5$s n where %6$s
+            insert into aiq.nodes (entity_type, entity_id, org_id, summary, visibility, owner_id)
+            select %1$L, n.id, rbac.org_or_shared(%2$s), %3$s, %4$s,
+                   nullif(to_jsonb(n)->>'owner_id', '')::uuid from %5$s n where %6$s
             on conflict (entity_type, entity_id) do update
                 set summary = excluded.summary, org_id = excluded.org_id,
-                    visibility = excluded.visibility, updated_at = now()
+                    visibility = excluded.visibility, owner_id = excluded.owner_id, updated_at = now()
         $q$, r.entity_type, r.org_expr, r.summary_expr, r.visibility_expr,
              p_rows, r.include_where),
 
