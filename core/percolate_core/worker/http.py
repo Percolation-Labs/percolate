@@ -80,14 +80,49 @@ def build_request(spec: dict, ctx: dict) -> tuple[dict, dict]:
     }, spec
 
 
+DEFAULT_WAIT_MS = 15 * 60 * 1000
+"""How long the worker holds an async step for its callee, absent `wait_ms`.
+
+Fifteen minutes. A scheduled agent turn takes minutes -- REM-146 measured turns
+of 23, 75 and 224 seconds -- so this is four times the longest one measured. It
+is not longer because the hold occupies the worker (see `_hold_until_released`
+in loop.py): `percolate worker` runs one task at a time, so a runtime that dies
+without answering stalls that worker for this long. It is also how long a turn
+that fails inside the sequencer takes to fail its task: that path records the
+run as `failed` and neither completes nor fails the task, and
+`gateway._dispatch` fails it only when `run_scheduled` raises.
+"""
+
+
+class Dispatched(dict):
+    """An async step's request was accepted; the callee completes the task.
+
+    A dict, so it reads like any other output in a log, and its own type, so
+    the loop can tell "hold this, do not complete it" from a step whose result
+    merely happens to look like a receipt.
+    """
+
+    def __init__(self, *, status: int, result: Any, wait_seconds: float) -> None:
+        super().__init__(status=status, result=result)
+        self.wait_seconds = wait_seconds
+
+
+def _wait_seconds(spec: dict) -> float:
+    """The step's `wait_ms` as seconds, refused before anything is sent.
+
+    Checked before the request rather than after it, because a bad value found
+    after dispatch would fail a task whose callee is already running.
+    """
+    value = spec.get("wait_ms", DEFAULT_WAIT_MS)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise TerminalError(
+            f"http_call wait_ms must be a positive whole number of milliseconds, got {value!r}")
+    return value / 1000
+
+
 async def http_call(spec: dict, ctx: dict) -> Any:
     req, spec = build_request(spec, ctx)
-
-    if spec.get("mode") == "async":
-        # Fire and park: the task stays in waiting_external until something
-        # calls signal_task. Reuses that status rather than inventing an
-        # "in flight externally" one -- the semantics are identical.
-        return {"dispatched": True, "mode": "async"}
+    wait_seconds = _wait_seconds(spec) if spec.get("mode") == "async" else None
 
     async with httpx.AsyncClient() as client:
         try:
@@ -104,6 +139,18 @@ async def http_call(spec: dict, ctx: dict) -> Any:
         parsed = r.json()
     except Exception:
         parsed = r.text
+
+    if spec.get("mode") == "async":
+        # DISPATCH, THEN LEAVE THE TASK TO THE CALLEE (workflow-engine/spec.md
+        # §14, agentic/brief.md §3). This returned before the request above
+        # was made, and the loop completed the task with the receipt -- so a
+        # scheduled agent run completed without /internal/run ever being
+        # called, and the seeded summarize_session_window did nothing at all.
+        #
+        # The loop then HOLDS the task until the callee moves it, rather than
+        # completing it or parking it in `waiting_external` -- why, and what
+        # the hold costs, is on `_hold_until_released` in loop.py.
+        return Dispatched(status=r.status_code, result=parsed, wait_seconds=wait_seconds)
 
     # Optional extraction, so a step hands the NEXT step a clean value instead
     # of a provider envelope whose shape the next template must know.
