@@ -24,7 +24,7 @@ from pydantic_ai.exceptions import ModelHTTPError, UsageLimitExceeded
 
 from percolate_core.agentic import gateway
 from percolate_core.agentic.contracts import AgentSpec, ChatRequest, InboundMessage, RequestContext
-from percolate_core.agentic.sequencer import TurnSequencer
+from percolate_core.agentic.sequencer import AgentNotFound, TurnSequencer
 from percolate_core.agentic.settings import Settings
 from percolate_core.agentic.testing import MemoryRepository
 from percolate_core.core.config import TerminalError
@@ -125,6 +125,16 @@ class ScheduledTurn(unittest.IsolatedAsyncioTestCase):
                 failed = self.assertFailedOnce(repo, terminal=terminal)
                 self.assertEqual(failed["run_id"], str(result.run.id))
 
+    async def test_a_lookup_error_from_a_bug_inside_the_turn_stays_retryable(self):
+        # KeyError and IndexError are LookupErrors, and so is AgentNotFound.
+        # Only the missing agent is terminal: a missing key in a tool result
+        # is a bug in this turn, and the engine's retry budget is for it.
+        for error in (KeyError("choices"), IndexError("list index out of range")):
+            with self.subTest(type(error).__name__):
+                repo, result = await self.turn(raises=error)
+                self.assertEqual(result.run.status, "failed")
+                self.assertFailedOnce(repo, terminal=False)
+
     async def test_a_quota_cutoff_fails_the_task_terminally_instead_of_completing_it(self):
         repo, result = await self.turn(quota=False)
         self.assertEqual(result.run.status, "quota_exceeded")
@@ -164,7 +174,7 @@ class TheGatewayDispatch(unittest.IsolatedAsyncioTestCase):
 
     async def test_each_escaping_failure_carries_its_own_verdict(self):
         for label, error, terminal in (
-            ("no agent by that name", LookupError("no agent row named 'summarizr'"), True),
+            ("no agent by that name", AgentNotFound("no agent row named 'summarizr'"), True),
             ("no verified caller", PermissionError("a verified caller is required"), True),
             ("start_run refused", refused(), True),
             ("database unreachable", ConnectionRefusedError("connect call failed"), False),

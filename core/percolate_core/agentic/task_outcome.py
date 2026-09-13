@@ -18,7 +18,9 @@ Terminal or retryable is decided by rules this package already has, per cause:
   a 5xx and a plain 429 are not.
 * The run's usage limit is spent, and it is spent on the next attempt too.
 * There is nothing to run: no agent by that name the caller can see
-  (`LookupError`), or no verified caller (`PermissionError`).
+  (`sequencer.AgentNotFound`), or no verified caller (`PermissionError`).
+  Not every `LookupError`: `KeyError` and `IndexError` are LookupErrors too,
+  and one raised by a bug inside a turn is left to the retry budget.
 * A `TerminalError`, which says so itself.
 
 Everything else -- a dropped connection, a deadlock, a timeout -- is retryable,
@@ -33,8 +35,9 @@ def failure_is_terminal(exc: BaseException) -> bool:
     from ..core.config import TerminalError
     from ..core.provider_errors import classify
     from ..worker.loop import PERMANENT_DB_ERRORS
+    from .sequencer import AgentNotFound
 
-    if isinstance(exc, (TerminalError, LookupError, PermissionError) + PERMANENT_DB_ERRORS):
+    if isinstance(exc, (TerminalError, AgentNotFound, PermissionError) + PERMANENT_DB_ERRORS):
         return True
     try:
         from pydantic_ai.exceptions import ModelHTTPError, UsageLimitExceeded
