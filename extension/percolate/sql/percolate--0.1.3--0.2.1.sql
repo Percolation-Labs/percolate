@@ -26603,9 +26603,28 @@ begin
         raise exception 'target node % does not exist', p_target_node_id;
     end if;
 
-    -- 1/2. Repoint, merging provenance on conflict.
-    for v_c in select 1 loop end loop;  -- (no-op; keeps the block shape readable)
-
+    -- 1/2. Repoint, merging on conflict.
+    --
+    -- THE MERGE IS aiq.upsert_graph's CONFLICT BRANCH, applied to two rows
+    -- that already exist, and it disagreed with it on both columns that
+    -- decide a walk. It took `least` of the weights, which the upsert
+    -- abandoned because corroboration by a weaker source is not evidence
+    -- against a stronger one (graph-index.md §11.2). And it never asked
+    -- whether either row HELD: it kept the target's valid_to and deleted the
+    -- candidate's row, so a retracted target merged with a current candidate
+    -- left the fact retracted and deleted the one row that still asserted
+    -- it. Measured with dev/tests/query/10-graph-index.sql §10b.
+    --
+    -- So: weight is `greatest`; the provenance write is the upsert's `||` on
+    -- the object with coalesce on the arrays, because `jsonb_set` over an
+    -- authored edge's absent `sources` is NULL (§11.3), which NOT NULL turned
+    -- into a failed promotion; and the period is the envelope of the two --
+    -- earliest valid_from, and valid_to NULL if either side is open, else the
+    -- later end. Whenever aiq.edge_is_current holds for either row at now(),
+    -- it holds for the envelope, which is the property a merge owes. The
+    -- envelope reads a gap between the two periods as belief, the same
+    -- one-row-per-triple limit the upsert's revival comment names, and a
+    -- revival here is recorded in aiq.edge_retractions by the same trigger.
     with moved as (
         update aiq.edges e set src_id = p_target_node_id
         where e.src_id = v_cand
@@ -26617,9 +26636,13 @@ begin
 
     with merged as (
         update aiq.edges x
-           set provenance = jsonb_set(x.provenance, '{sources}',
-                            (x.provenance->'sources') || (e.provenance->'sources')),
-               weight = least(x.weight, e.weight)
+           set provenance = x.provenance || jsonb_build_object('sources',
+                                coalesce(x.provenance->'sources', '[]'::jsonb)
+                                || coalesce(e.provenance->'sources', '[]'::jsonb)),
+               weight     = greatest(x.weight, e.weight),
+               valid_from = least(x.valid_from, e.valid_from),
+               valid_to   = case when x.valid_to is null or e.valid_to is null then null
+                                 else greatest(x.valid_to, e.valid_to) end
           from aiq.edges e
          where e.src_id = v_cand and x.src_id = p_target_node_id
            and x.dst_id = e.dst_id and x.relation = e.relation
@@ -26645,9 +26668,13 @@ begin
 
     with merged as (
         update aiq.edges x
-           set provenance = jsonb_set(x.provenance, '{sources}',
-                            (x.provenance->'sources') || (e.provenance->'sources')),
-               weight = least(x.weight, e.weight)
+           set provenance = x.provenance || jsonb_build_object('sources',
+                                coalesce(x.provenance->'sources', '[]'::jsonb)
+                                || coalesce(e.provenance->'sources', '[]'::jsonb)),
+               weight     = greatest(x.weight, e.weight),
+               valid_from = least(x.valid_from, e.valid_from),
+               valid_to   = case when x.valid_to is null or e.valid_to is null then null
+                                 else greatest(x.valid_to, e.valid_to) end
           from aiq.edges e
          where e.dst_id = v_cand and x.dst_id = p_target_node_id
            and x.src_id = e.src_id and x.relation = e.relation
