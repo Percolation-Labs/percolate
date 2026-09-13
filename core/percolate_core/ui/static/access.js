@@ -16,6 +16,7 @@ import { HELP_AGENT, createChatSession } from "./api.js";
 import { chip, fmtTime, gap, h, icon, panel, seg, setStatusVocabulary, short, stat, statGap, status, stream, table } from "./ui.js";
 import { markdown } from "./md.js";
 import { head, page, tryRead, defs } from "./views.js";
+import { afterTurn, rootRuns, takeFrames, threadOf, turnModel } from "./chat-stream.js";
 
 /* A count that came back, or the reason it did not. `3 tool servers` and
    `0 tool servers` are both claims about the database; a refused read is
@@ -359,6 +360,27 @@ function toolRow(name, state, detail, opts = {}) {
   return row;
 }
 
+/* A delegated run: one line naming it and its status, and its whole turn
+   inside, shut. The same element for a live child and a persisted one, so the
+   transcript reads the same after the re-read as it did while streaming. */
+function delegationBlock(name, state, detail, contents, error) {
+  const mark = (st) => h("span", { class: "chip " + (st || "") },
+    h("i", { class: st === "running" ? "spin" : "dot" }), st || "unknown");
+  const body = h("div", { class: "delegation-body" }, ...contents,
+    error ? h("div", { class: "note rose" }, error) : null);
+  let chip = mark(state);
+  const block = h("details", { class: "tool-call delegated" },
+    h("summary", { class: "head" },
+      h("span", { class: "tool-name" }, name),
+      h("span", { class: "chip accent" }, "sub-agent"),
+      detail ? h("span", { class: "mono", style: "font-size:.66rem;color:var(--muted)" }, detail) : null,
+      h("span", { class: "spacer" }), chip),
+    body);
+  block.body = body;
+  block.setState = (next) => { const fresh = mark(next); chip.replaceWith(fresh); chip = fresh; };
+  return block;
+}
+
 const bubble = (role, when, body) =>
   h("div", { class: "msg " + (role === "user" ? "user" : "assistant") },
     h("span", { class: "name" }, role === "user" ? "you" : role, when ? " · " + when : ""),
@@ -407,6 +429,11 @@ export async function chat() {
     h("div", { class: "note" }, "Runs and messages for the selected session appear here."));
   let current = null;
   let sending = false;
+  const threadMeta = (sess) => h("div", { class: "meta" },
+    h("span", {}, fmtTime(sess.last_message_at || sess.created_at)),
+    h("span", {}, (sess.message_count ?? 0) + " message" + (sess.message_count === 1 ? "" : "s")
+      + (sess.run_count ? " · " + sess.run_count + " run" + (sess.run_count === 1 ? "" : "s") : "")),
+    h("span", { class: "mono" }, short(sess.id)));
 
   /* The scroller is the conversation column, not the thread inside it. */
   const scroller = () => convo.parentElement;
@@ -429,29 +456,49 @@ export async function chat() {
     ]);
 
     if (current?.id !== s.id) return;
+    const messageBubble = (m) => {
+      const content = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
+      const parts = [markdown(content)];
+      (m.tool_calls || []).forEach((t) => {
+        const name = t.name || t.tool_name || (t.function && t.function.name) || "tool";
+        const args = t.args || t.arguments || (t.function && t.function.arguments);
+        parts.push(toolRow(name, (t.is_error || m.is_error) ? "error" : "ok",
+                           args ? JSON.stringify(args).slice(0, 200) : null));
+        if (t.content !== undefined) parts.push(h("details", {}, h("summary", {}, "Tool result"),
+          h("pre", {class:"code"}, typeof t.content === "string" ? t.content : JSON.stringify(t.content, null, 2))));
+      });
+      return bubble(m.role, fmtTime(m.created_at), h("div", { class: "text" }, ...parts));
+    };
+    /* A delegated run's rows are that delegation's contents (brief.md §5.1
+       item 2), so they nest, shut, under one line -- not 51 `user` bubbles in
+       the parent's conversation. */
+    const runRows = runsRes.error ? [] : (runsRes.rows || []);
     const body = msgs.error ? [gap("messages_api", msgs.error.message, "schema")]
       : ((msgs.rows || []).length
-          ? (msgs.rows || []).flatMap((m) => {
-              const content = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
-              const parts = [markdown(content)];
-              (m.tool_calls || []).forEach((t) => {
-                const name = t.name || t.tool_name || (t.function && t.function.name) || "tool";
-                const args = t.args || t.arguments || (t.function && t.function.arguments);
-                parts.push(toolRow(name, (t.is_error || m.is_error) ? "error" : "ok",
-                                   args ? JSON.stringify(args).slice(0, 200) : null));
-                if (t.content !== undefined) parts.push(h("details", {}, h("summary", {}, "Tool result"),
-                  h("pre", {class:"code"}, typeof t.content === "string" ? t.content : JSON.stringify(t.content, null, 2))));
-              });
-              return [bubble(m.role, fmtTime(m.created_at),
-                             h("div", { class: "text" }, ...parts))];
-            })
+          ? threadOf(msgs.rows, runRows).map((item) => item.kind === "message"
+              ? messageBubble(item.message)
+              : delegationBlock("delegated run " + short(item.run.id), item.run.status,
+                  item.messages.length + " message" + (item.messages.length === 1 ? "" : "s"),
+                  item.messages.map(messageBubble),
+                  item.run.state?.error))
           : [h("div", { class: "empty" }, "No messages. Nothing has run in this session.")]);
-    for (const run of runsRes.rows || []) {
+    for (const run of rootRuns(runRows)) {
       if (run.status === "failed") body.push(h("div", {class:"note rose"}, run.state?.error || "An agent run failed."));
     }
     convo.replaceChildren(...body);
     title.textContent = s.title || "(untitled)";
     stick(true);
+
+    /* The rail's counts were read once, when the page loaded -- so a session
+       created and then talked to said `0 messages` for as long as the page
+       stayed open. These reads are the same rows, so they correct it. */
+    if (!msgs.error && !runsRes.error) {
+      s.message_count = (msgs.rows || []).length;
+      s.run_count = runRows.length;
+      s.last_message_at = (msgs.rows || []).reduce((a, m) => (m.created_at > (a || "") ? m.created_at : a),
+                                                   s.last_message_at || null);
+      node.querySelector(".meta")?.replaceWith(threadMeta(s));
+    }
 
     aside.replaceChildren(
       h("dl", { class: "kv" },
@@ -475,11 +522,20 @@ export async function chat() {
    * TOOL_CALL_START/END drive rows in it, TEXT_MESSAGE_CONTENT deltas stream
    * into a bubble that is re-rendered as markdown, RUN_FINISHED closes it. The
    * events are the runtime's contract (agentic/contracts/protocol.py), not a
-   * shape invented here -- which is why the progress block can show a delegated
-   * sub-agent: a TOOL_CALL_START carrying child_run_id IS the delegation. */
+   * shape invented here.
+   *
+   * One session channel carries the parent AND every delegated run (brief.md
+   * §4), so `chat-stream.js` decides which run and message each event belongs
+   * to. A child is recognised by RUN_STARTED's `parent_run_id` -- nothing sets
+   * TOOL_CALL_START's `child_run_id` -- and its whole turn renders inside a
+   * shut block under the parent's steps (§5.1 item 2). Only the root run's
+   * RUN_FINISHED ends the turn. */
   function turnRenderer() {
+    const model = turnModel();
     const rows = new Map();
-    let agent = "agent";
+    const children = new Map();
+    const texts = new Map();
+    let agent = "agent", rootSteps = 0;
     const started = Date.now();
     const status = h("span", { class: "chip running" }, h("i", { class: "spin" }), "starting");
     const elapsed = h("span", { class: "mono elapsed" }, "0.0s");
@@ -491,12 +547,13 @@ export async function chat() {
       elapsed.textContent = ((Date.now() - started) / 1000).toFixed(1) + "s";
     }, 100);
 
-    let bubbleEl = null, text = "", pending = false;
-    const paint = () => {
-      pending = false;
-      if (!bubbleEl) return;
+    const pending = new Set();
+    const paint = (key) => {
+      pending.delete(key);
+      const el = texts.get(key);
+      if (!el) return;
       const was = atBottom();
-      bubbleEl.replaceChildren(markdown(text));
+      el.replaceChildren(markdown(model.text(key)));
       stick(was);
     };
 
@@ -505,47 +562,66 @@ export async function chat() {
       status.replaceChildren(h("i", { class: spin ? "spin" : "dot" }), label);
     };
 
+    /* A delegated run's block, nested under its parent's block when the parent
+       is itself delegated. Opened lazily: an event from a run whose
+       RUN_STARTED never arrived still has somewhere to go. */
+    const child = (e) => {
+      if (children.has(e.run_id)) return children.get(e.run_id);
+      const parent = e.parent_run_id && children.get(e.parent_run_id);
+      const made = delegationBlock(e.agent_name || "delegated run " + short(e.run_id), "running", null, []);
+      children.set(e.run_id, made);
+      (parent ? parent.body : steps).append(made);
+      return made;
+    };
+
     return {
       block,
-      failed: false,
+      get failed() { return model.failed; },
       handle(type, data) {
         const was = atBottom();
+        const e = model.apply(type, data);
+        const inChild = e.scope === "child";
         if (type === "RUN_STARTED") {
-          agent = data.agent_name || "agent";
-          setStatus("running", agent, true);
+          if (inChild) { child(e); setStatus("running", agent + " · delegating", true); }
+          else { agent = data.agent_name || "agent"; setStatus("running", agent, true); }
         } else if (type === "TOOL_CALL_START") {
-          const label = data.tool_name || "tool";
-          const row = toolRow(label, "running", null, { delegated: !!data.child_run_id });
+          const row = toolRow(data.tool_name || "tool", "running", null, { delegated: !!data.child_run_id });
           rows.set(data.tool_call_id, row);
-          steps.append(row);
-          // The header counts; the rows name. Repeating the running tool in both
-          // put the same word twice on one screen and told a reader nothing the
-          // second time.
-          setStatus("running", agent + " · step " + rows.size, true);
+          if (inChild) child(e).body.append(row);
+          else {
+            steps.append(row);
+            // The header counts; the rows name. Repeating the running tool in both
+            // put the same word twice on one screen and told a reader nothing the
+            // second time.
+            setStatus("running", agent + " · step " + (++rootSteps), true);
+          }
         } else if (type === "TOOL_CALL_END") {
           const row = rows.get(data.tool_call_id);
           if (row) row.setState(data.is_error ? "error" : "ok", data.error_kind || null);
-        } else if (type === "TEXT_MESSAGE_START") {
-          bubbleEl = h("div", { class: "text" });
-          text = "";
-          convo.append(bubble("assistant", "now", bubbleEl));
-          setStatus("running", agent + " · writing", true);
-        } else if (type === "TEXT_MESSAGE_CONTENT") {
-          text += data.delta || "";
+        } else if (type.startsWith("TEXT_MESSAGE_")) {
+          if (!texts.has(e.key)) {
+            const el = h("div", { class: "text" });
+            texts.set(e.key, el);
+            if (inChild) child(e).body.append(el);
+            else {
+              convo.append(bubble("assistant", "now", el));
+              setStatus("running", agent + " · writing", true);
+            }
+          }
+          if (type === "TEXT_MESSAGE_END") paint(e.key);
           // One repaint per frame: a token-rate re-render of a markdown tree is
           // the one place this UI could actually be slow.
-          if (!pending) { pending = true; requestAnimationFrame(paint); }
-        } else if (type === "TEXT_MESSAGE_END") {
-          paint();
-        } else if (type === "RUN_FINISHED") {
-          clearInterval(tick);
-          this.failed ||= !!data.status && data.status !== "succeeded";
-          setStatus(this.failed ? "failed" : "succeeded", data.status || "done", false);
-        } else if (type === "RUN_ERROR") {
-          this.failed = true;
-          clearInterval(tick);
-          setStatus("failed", "failed", false);
-          steps.append(h("div", { class: "note rose" }, data.message || "the run failed"));
+          else if (!pending.has(e.key)) { pending.add(e.key); requestAnimationFrame(() => paint(e.key)); }
+        } else if (type === "RUN_FINISHED" || type === "RUN_ERROR") {
+          if (inChild) {
+            const made = child(e);
+            made.setState(e.status);
+            if (type === "RUN_ERROR") made.body.append(h("div", { class: "note rose" }, data.message || "the run failed"));
+          } else {
+            clearInterval(tick);
+            setStatus(model.failed ? "failed" : "succeeded", type === "RUN_ERROR" ? "failed" : (data.status || "done"), false);
+            if (type === "RUN_ERROR") steps.append(h("div", { class: "note rose" }, data.message || "the run failed"));
+          }
         }
         stick(was);
       },
@@ -594,12 +670,7 @@ export async function chat() {
                  session created last week and answered an hour ago is not a
                  week old. */
               const node = h("div", { class: "thread-item" },
-                h("strong", {}, sess.title || "(untitled)"),
-                h("div", { class: "meta" },
-                  h("span", {}, fmtTime(sess.last_message_at || sess.created_at)),
-                  h("span", {}, (sess.message_count ?? 0) + " message" + (sess.message_count === 1 ? "" : "s")
-                    + (sess.run_count ? " · " + sess.run_count + " run" + (sess.run_count === 1 ? "" : "s") : "")),
-                  h("span", { class: "mono" }, short(sess.id))));
+                h("strong", {}, sess.title || "(untitled)"), threadMeta(sess));
               node.addEventListener("click", () => openSession(sess, node));
               return node;
             })
@@ -689,34 +760,26 @@ export async function chat() {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
-        buf += dec.decode(value, { stream: true });
-        let cut;
-        while ((cut = buf.indexOf("\n\n")) !== -1) {
-          const frame = buf.slice(0, cut);
-          buf = buf.slice(cut + 2);
-          let type = "message", data = {};
-          for (const line of frame.split("\n")) {
-            if (line.startsWith("event:")) type = line.slice(6).trim();
-            else if (line.startsWith("data:")) {
-              try { data = JSON.parse(line.slice(5).trim()); } catch (e) { data = {}; }
-            }
-          }
-          turn.handle(type, data);
-        }
+        const taken = takeFrames(buf + dec.decode(value, { stream: true }));
+        buf = taken.rest;
+        for (const frame of taken.frames) turn.handle(frame.type, frame.data);
       }
 
       /* Re-read the turn as rows -- but only swap if the rows are actually
          there. The runtime persists during the turn, so normally they are; if
          they are not, replacing the transcript would delete the answer the user
          just watched arrive, which is the worst thing this screen could do.
-         Found by streaming against dev/agui_stub.py, which writes nothing. */
+         Found by streaming against dev/agui_stub.py, which writes nothing.
+         A FAILED turn is re-read too: its runs and messages are rows like any
+         other, and skipping it left the panel at `RUNS 0` over 52 runs. */
       const after = await tryRead(() => read(READS.messageSeqs,
         "session_id=eq." + current.id, { count: true }), () => ({ total: null }));
       const node = list && list.querySelector('.thread-item[aria-current]');
-      if (node && !turn.failed && after.total !== null && after.total > before) {
+      const next = afterTurn({ before, after: after.total, failed: turn.failed });
+      if (node && next === "reread") {
         sending = false;
         await openSession(current, node);
-      } else if (!turn.failed) {
+      } else if (next === "unpersisted") {
         turn.note("Streamed, and not written to agentic.messages -- messages_api still " +
                   "reports " + (after.total === null ? "unknown" : after.total) + " rows for this " +
                   "session. What you can see above is this page's copy; reload and it is gone.");

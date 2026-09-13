@@ -162,10 +162,10 @@ export const READS = {
   chatSessions: { screen: "Chat", schema: "agentic", view: "sessions_api",
     q: "select=id,title,created_at,message_count,run_count,last_message_at&order=created_at.desc" },
   messages: { screen: "Chat", schema: "agentic", view: "messages_api",
-    q: "select=role,content,tool_calls,is_error,seq,created_at&order=seq" },
+    q: "select=run_id,role,content,tool_calls,is_error,seq,created_at&order=seq" },
   messageSeqs: { screen: "Chat", schema: "agentic", view: "messages_api", q: "select=seq" },
   sessionRuns: { screen: "Chat", schema: "agentic", view: "runs_api",
-    q: "select=id,agent_id,status,state,trigger_kind,depth,created_at&order=created_at.desc" },
+    q: "select=id,parent_run_id,agent_id,status,state,trigger_kind,depth,created_at&order=created_at.desc" },
 };
 
 /* Objects no screen READS, kept in the audit as what they are.

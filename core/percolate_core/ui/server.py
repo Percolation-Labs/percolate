@@ -39,7 +39,7 @@ from .. import __version__
 # so `tests/test_ui_reads.py` asserts that every module the UI imports is here
 # rather than leaving it to whoever adds the next one to remember.
 ASSETS = ("index.html", "api.js", "ui.js", "workspace.js", "md.js", "reads.js", "views.js",
-          "access.js", "cron.js", "schedule-assist.js", "agent-authoring.js",
+          "access.js", "chat-stream.js", "cron.js", "schedule-assist.js", "agent-authoring.js",
           "agent-assist.js", "agent-editor.js", "workbench.js", "drafts.js", "query-assist.js", "workflow-authoring.js", "workflow-plan.js", "workflow-assist.js", "workflow-composer.js", "help.md", "files.js", "sources.js", "source-authoring.js", "source-assist.js", "api-sources.js", "api-source-authoring.js", "api-source-assist.js", "theme.css")
 
 
