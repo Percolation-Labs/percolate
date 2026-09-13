@@ -9,9 +9,11 @@ that returns a prepared response cannot fail them.
 """
 import asyncio
 import json
+import os
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
 
 from percolate_core.content.probe import ProbeFailed, detect_wire, probe
 
@@ -56,10 +58,15 @@ class APIProbeTest(unittest.TestCase):
   cls.server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
   threading.Thread(target=cls.server.serve_forever,daemon=True).start()
   cls.base='http://127.0.0.1:%d'%cls.server.server_address[1]
+  # The listener is on loopback, which a probe refuses (test_egress_everywhere.py).
+  # Sanctioned the way an operator names an internal endpoint, so every test here
+  # also proves the override reaches exactly that origin and still works.
+  cls.env=patch.dict(os.environ,{'P8_TEMPLATE_ENV':'PROBE_TEST_URL','PROBE_TEST_URL':cls.base})
+  cls.env.start()
 
  @classmethod
  def tearDownClass(cls):
-  cls.server.shutdown();cls.server.server_close()
+  cls.env.stop();cls.server.shutdown();cls.server.server_close()
 
  def run_probe(self,path,**kw):return asyncio.run(probe(self.base+path,**kw))
 

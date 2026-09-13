@@ -21,21 +21,13 @@ from typing import Any
 # Re-exported: TerminalError moved to core so core.credentials can raise one.
 from ..core.config import TerminalError
 from ..core.credentials import bound_names
+from ..core.egress import TEMPLATE_ENV
 
 TEMPLATE = re.compile(r"\{\{\s*([a-zA-Z0-9_.\[\]]+)\s*\}\}")
 
-TEMPLATE_ENV = ("P8_AGENT_URL", "LLM_URL")
-"""The environment variables a template may read before ``P8_TEMPLATE_ENV``
-adds to them: the two the compiler and the specs' own examples emit.
-
-AN ALLOW-LIST, because {{env.X}} read ANY variable and could put it anywhere in
-a request: `body: {k: "{{env.P8_S3_SECRET}}"}` beside a `url` on the author's
-own host sent the storage secret there, and no origin binding could see it,
-because it never went through a credential_ref. A secret is sent by
-`credential_ref`, which `core.credentials.credential_for` binds to an origin; a
-template says where to send, not what to send. A deployment that templates
-another endpoint lists it in `P8_TEMPLATE_ENV` (comma-separated).
-"""
+# TEMPLATE_ENV is defined in core.egress, which reads the same list as the
+# endpoints an operator sanctions; its docstring there says why it is an
+# allow-list.
 
 
 def _template_env(name: str) -> str | None:

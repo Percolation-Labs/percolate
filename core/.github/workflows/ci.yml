@@ -167,6 +167,18 @@ jobs:
       - name: The worker cannot be pointed back at its own network
         run: python -m unittest discover -s tests -p test_worker_egress.py
 
+      # The same guard at the other two places a caller's URL is fetched. The
+      # worker's check lived in worker/http.py and was called from one line, so
+      # POST /probe -- any signed-in caller, redirects followed, the response
+      # returned -- and an API source's url reached the metadata endpoint and
+      # the compose network. test_api_probe.py rides along because nothing ran
+      # it, and it now exercises the operator override for its loopback server.
+      - name: No caller can point a fetch back at this network
+        run: |
+          for t in test_egress_everywhere.py test_api_probe.py; do
+            python -m unittest discover -s tests -p "$t" || exit 1
+          done
+
       # REM-110. A turn holds one connection for its whole life and takes a
       # second for every query inside it, so a pool of N serves N/2 turns --
       # P8_POOL_MAX at 8 read like eight turns and was four, and the eighth
