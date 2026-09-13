@@ -15,23 +15,133 @@ satisfy is not a safeguard; it is a sentence people learn to step over.
 ## 0.1.12 (unreleased)
 
 **Not published.** `pyproject.toml` says `0.1.12` and there is no `v0.1.12`
-tag. This entry describes `main` at `b6d42f3`; nothing in it can be installed
+tag. This entry describes `main` at `f2920b9`; nothing in it can be installed
 yet, and the heading loses its "(unreleased)" when the tag exists.
 
-**Pairing: extension 0.2.0.** Every live check behind this release (#41, #46,
-#48, #49) ran against `percolate-postgres:19-0.2.0`, and none of it needs an
-extension change. `wait_ms` is a key in the step's input, and on 0.2.0 both
-`define_yaml` and a JSON insert keep it; the extension's exported `http_call`
-contract does not list it yet and still describes `mode: async` as parking.
-What the runtime asks of the database at startup is what 0.1.9 asked:
-`core/identity.verify_can_open_a_session` writes the claims and then switches
-to `authenticated`, in that order, in a transaction it throws away, and the
-runtime refuses to start if the database says no. 0.1.9 remains the minimum
-runtime for a 0.2.0 database, and 0.1.11 the minimum for `percolate sample
-load` against one.
+**Pairing: extension 0.2.0, with one degraded heartbeat that extension 0.2.1
+repairs.** Nothing in 0.1.12 needs an object 0.2.0 lacks. Each of these was run
+on `percolate-postgres:19-0.2.0`, as the role 0.1.12 uses, and answered:
 
-Twenty commits since `v0.1.11`, twelve of them not merges. The first group is
-first because each item in it changes who can read what.
+- at startup, what 0.1.9 asked: `core/identity.verify_can_open_a_session`
+  writes the claims and then switches to `authenticated`, in that order, in a
+  transaction it throws away, and the runtime refuses to start if the database
+  says no;
+- for `/internal/run`, `workflow.tasks_api` read as `authenticated`, and
+  `workflow.complete_task` and `workflow.fail_task` called as `worker`, a login
+  every install creates;
+- for `percolate query mcp`, `aiq.query('SCHEMA "p8ql"')` as `authenticated`;
+- for the startup warning about summaries, `workflow.definitions_api` and
+  `agentic.agents_api` read as `authenticated` with no claims.
+
+**The degraded part is the dispatching worker, not the runtime.** On 0.2.0
+`worker` cannot call `workflow.queue_stale_timeout` (`permission denied for
+function stale_timeout_default`), so a worker holding an async step heartbeats
+every 40 seconds whatever its queue configures, and a queue whose
+`stale_timeout` is under about 80 seconds has held tasks reaped. Extension
+0.2.1 makes that function `security definer` (p8-subsystems `d888a57`); it is
+not published. The live checks for #41, #46, #48, #49, #53 and #55 ran on
+0.2.0. Those for #51, #52, #54, #56 and #57, and get-percolate's rehearsal of
+#54, ran on 0.2.0 upgraded in place to 0.2.1, so a task completed on
+`P8_WORKER_DSN` has not been run live on 0.2.0 itself.
+
+`wait_ms` is a key in the step's input, and on 0.2.0 both `define_yaml` and a
+JSON insert keep it; 0.2.0's exported `http_call` contract does not list it and
+still describes `mode: async` as parking. 0.1.9 remains the minimum runtime for
+a 0.2.0 database, and 0.1.11 the minimum for `percolate sample load` against
+one.
+
+Thirty-nine commits since `v0.1.11`, twenty-three of them not merges. The first
+group is first because an operator has to change a deployment for it.
+
+### The agent service serves scheduled runs and delegation
+
+- **Give `agent serve` `P8_WORKER_DSN`, or no scheduled run can report back.**
+  A scheduled run completes or fails the task that dispatched it, and
+  `complete_task` and `fail_task` are granted to `worker` only. The runtime
+  switched its own `authenticator` login to `worker`, and no install permits
+  that (`permission denied to set role "worker"`), so a scheduled run never
+  told its task and the step waited out `wait_ms`. `P8_WORKER_DSN` names the
+  workers' own login, used for those two calls and nothing else. **Without it,
+  `/internal/run` answers 503** before accepting the run. Unset, the runtime
+  switches its own login as before, which works only where that login is a
+  member of `worker`. get-percolate#40 sets it on the agent service in the
+  compose file and the chart, and merges once 0.1.12 is published. (#54)
+- **`agent serve` answers `POST /internal/run`.** Only `agent gateway` served
+  it. A scheduled step posts to `{{env.P8_AGENT_URL}}`, every shipped
+  deployment points that at `agent serve`, and the worker sends the run owner's
+  token to that origin only. On get-percolate's compose file and chart every
+  scheduled run was a 404. (#54)
+- **The route checks a call before it answers 202**: a body naming a task and
+  an agent (400), a verified caller (401), a task the caller can see through
+  `workflow.tasks_api` (404), and a runtime able to complete tasks (503). On
+  0.1.11 a request with no token was refused inside the background turn, which
+  then failed the named task terminally. So anyone who could reach the gateway
+  could fail any task whose id they knew. (#54)
+- **`agent serve` answers MCP at `/mcp`.** get-percolate's agents page
+  registers delegation at `http://agent:8080/mcp`, but only `agent gateway`
+  served MCP, and neither the compose file nor the chart runs it, so that
+  registration answered 404 and nothing could delegate. It is the gateway's
+  route, stateless, as one route rather than a mount: a mount answers `/mcp`
+  with a redirect that the MCP client does not follow. The delegating
+  service's origin must be in `P8_TOOL_AUTH_ORIGINS` (`http://agent:8080` on
+  compose), or the runtime sends no token and the call is refused with `a
+  verified caller is required`. (#56)
+- **So `agent gateway` is optional.** It is unchanged and still serves both
+  routes, for a deployment that puts delegation on replicas of its own.
+
+### The sample's agent can read the sample
+
+- **`percolate query mcp` is a query tool server in the image.** Asked which
+  vessels in the harbour sample have open deficiencies, `harbourmaster`
+  answered that it had no access to live databases: the sample registers no
+  tool server, because no install ran one. `percolate query mcp --port 8090
+  --postgrest http://postgrest:3000` (or `P8_POSTGREST_URL`) serves one tool,
+  `query`. It forwards the p8ql string to `aiq.query` unchanged, builds the
+  tool's description from `SCHEMA "p8ql"`, and sends the MCP request's
+  `Authorization` to PostgREST as it came, or none. Standard library only, so
+  it needs no extra. (#52)
+- **`percolate sample load` syncs the catalogue of every tool server its
+  plugin registers**, through `POST /tools/{name}/sync` on the runtime (new
+  `--agent-url`, default `http://localhost:8080`). A server with no catalogue
+  fails the bound agent's first turn with `has no discovered tools`. If the
+  runtime is not up, the load still succeeds and prints the `curl` that
+  finishes the sync. (#52)
+
+### A tool call that failed reaches the model as a failure
+
+- **A refused or failed tool call is an error to the model.** The toolset
+  returned a tool result's content whatever its `is_error` said, so the model
+  saw a success. A delegation the gateway refused was called 54 times in one
+  turn, until `request_limit` (50) stopped it. It now raises pydantic-ai's
+  `ToolFailed`: the model gets the text as a failed result, no retry budget is
+  spent, and `TOOL_CALL_END` carries `is_error`. Measured on the same refusal:
+  1 call, and the parent run `succeeded`. (#51)
+- **`run_delegated` no longer returns a failed child's empty answer.** It
+  returned the child's last assistant text without reading the child run's
+  status, so a failed child reached the parent as a successful `None`; one
+  workbench send made 42 failing children in a turn. It now raises, naming the
+  child's status and recorded cause, and MCP returns that as `isError`. The
+  same failure measured after: 1 child, `failed`, and the parent `succeeded`.
+  (#51)
+
+### A summary that cannot be dispatched no longer fails the turn
+
+- **On a stock install, every turn in a session past
+  `summarize_after_messages` was marked `failed` after it had answered.** The
+  summary was dispatched inside the turn's `try`, after the answer was stored
+  and streamed, and `summarize_session_window` is seeded only in
+  `dev/seed.sql`: neither the extension nor get-percolate installs it, or the
+  default `summarizer` agent. The dispatch raised, the run was marked `failed`,
+  a `RUN_ERROR` followed the answer, and a scheduled turn failed its task. A
+  failed dispatch now leaves the turn `succeeded`: it records
+  `summarize_session_window not dispatched: <cause>` on the trace and logs a
+  warning. Past the threshold the window still drops the oldest messages, and
+  the summary slot stays empty. (#57)
+- **`agent serve` warns at startup that sessions will not be summarized**,
+  naming what no caller can see: the workflow definition, the agent
+  `P8_DEFAULT_SUMMARIZER` names, or both. It checks both with no claims, so a
+  row visible to one org counts as missing, and it warns rather than refusing
+  to start. (#57)
 
 ### Who can hear a session, and what may be fetched
 
@@ -155,6 +265,28 @@ are unchanged. The holding worker learns the task ended at its next heartbeat.
   installs on every connection. Outside it: the NOTIFY listener and the CLI's
   own connections, which the test names so a third fails it, and `json` (not
   `jsonb`) parameters. (#48)
+
+### The workbench
+
+- **A delegating turn keeps each run's text apart.** One session channel
+  carries the parent and every delegated child, and the chat appended every
+  token to the last bubble it opened, so a delegating turn merged two runs'
+  text into one. Any run's end also set the turn's verdict, so a failed child
+  marked the turn failed while the parent was still running. Text is now kept
+  per run and message, only the root run ends the turn, and a child run renders
+  as a closed block under the parent's steps, live and in the stored
+  transcript. (#53)
+- **The session panel counts runs after a turn that failed.** The re-read after
+  a turn was skipped when the turn had failed, and a child's failure counted,
+  so a session with 52 runs showed `RUNS 0`. A turn that wrote rows is re-read
+  either way, and the rail's message and run counts update with it. (#53)
+- **Three screens lead with words on a stock install.** Queues & pools, Load &
+  limits, and Keys & sessions led with `42P01` tiles, spec paths and
+  placeholder wording. Queues & pools reads the missing pool schema from the
+  database and says worker pools are not installed; Load & limits leads with
+  tasks and workflow runs by status; Keys & sessions says keys are listed and
+  revoked here, not created. The SQLSTATEs, files and notes are behind an
+  "Operator detail" toggle, not deleted. (#55)
 
 ### CI
 
