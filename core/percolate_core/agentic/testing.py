@@ -60,6 +60,7 @@ class MemoryRepository:
         self.workflows: list[tuple[str, dict[str, Any]]] = []
         self.completed_tasks: list[tuple[UUID, dict[str, Any]]] = []
         self.failed_tasks: list[tuple[UUID, dict[str, Any], bool]] = []
+        self.hidden_tasks: set[UUID] = set()
         self.quota_allowed = True
 
     # -- config plane ------------------------------------------------------
@@ -192,6 +193,9 @@ class MemoryRepository:
 
     async def fail_task(self, task_id: UUID, error: dict[str, Any], terminal: bool) -> None:
         self.failed_tasks.append((task_id, error, terminal))
+
+    async def can_see_task(self, task_id: UUID) -> bool:
+        return task_id not in self.hidden_tasks
 
 
 class FakeProvider:

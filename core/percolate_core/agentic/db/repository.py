@@ -80,6 +80,7 @@ class Repository(Protocol):
     ) -> UUID: ...
     async def complete_task(self, task_id: UUID, output: dict[str, Any]) -> None: ...
     async def fail_task(self, task_id: UUID, error: dict[str, Any], terminal: bool) -> None: ...
+    async def can_see_task(self, task_id: UUID) -> bool: ...
 
 
 SESSION_COLUMNS = ("id", "owner_id", "agui_thread_id", "title", "created_at")
@@ -515,6 +516,18 @@ class PgRepository:
         async with identity.as_task_worker() as conn:
             await conn.execute(
                 "select workflow.fail_task($1, $2::jsonb, $3)", task_id, error, terminal)
+
+    async def can_see_task(self, task_id: UUID) -> bool:
+        """Whether this caller can see the task, through ``workflow.tasks_api``.
+
+        The view is filtered by row-level security to the runs the caller may
+        access, so "no" covers both a task that does not exist and one that
+        belongs to someone else. ``/internal/run`` asks this before it accepts a
+        run that will complete the task.
+        """
+        async with self.client.as_user(self.claims) as conn:
+            return bool(await conn.fetchval(
+                "select exists (select 1 from workflow.tasks_api where id = $1)", task_id))
 
     async def call_chained_action(self, target: str, payload: dict[str, Any]) -> Any:
         """``select <target>($1::jsonb)`` for ``kind = 'pg_function'`` (``brief.md`` §8).

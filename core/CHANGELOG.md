@@ -61,8 +61,18 @@ first because each item in it changes who can read what.
   is resolved and then connected to without pinning the address), tool server
   rows, and chained-action webhooks, which a write permission gates instead.
 
-### A scheduled run reports back to its task
+### A scheduled run reaches the agent service, and reports back
 
+- **`agent serve` answers `POST /internal/run`.** Only `agent gateway` served
+  it. A scheduled step posts to `{{env.P8_AGENT_URL}}`, every shipped
+  deployment points that at `agent serve`, and the worker sends the run owner's
+  token to that origin only. On get-percolate's compose file and chart every
+  scheduled run was a 404.
+- **The route checks a call before it answers 202**: a verified caller (401), a
+  task the caller can see through `workflow.tasks_api` (404), and a runtime
+  able to complete tasks (503). On 0.1.11 a request with no token was refused
+  inside the background turn, which then failed the named task terminally. So
+  anyone who could reach the gateway could fail any task whose id they knew.
 - **Completing and failing a task runs on `P8_WORKER_DSN`.** The runtime switched its
   `authenticator` login to `worker` to call `complete_task` and `fail_task`,
   and no install permits that (`permission denied to set role "worker"`). A
