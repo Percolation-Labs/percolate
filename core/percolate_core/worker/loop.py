@@ -129,6 +129,88 @@ async def _heartbeat_until_done(task_id: str, worker_id: str, period: float) -> 
             return
 
 
+async def _hold_until_released(task_id: str, worker_id: str, period: float,
+                               wait_seconds: float) -> None:
+    """Hold an async step's lease until its callee completes or fails the task.
+
+    WHY A HOLD. An async http_call's callee -- the agent runtime, for a
+    scheduled turn -- completes the task itself when the work is done
+    (agentic/brief.md §3). Returning without a heartbeat left the task
+    `running` and silent, so the reaper took it after `stale_timeout` (two
+    minutes by default) and a second worker dispatched the same turn again,
+    while turns take minutes. Parking it in `waiting_external`, as
+    workflow-engine/spec.md §14 describes, is not possible on extension 0.2.0:
+    no function granted to `worker` parks an http_call task, and the lease
+    fence refuses `complete_task` on a claimed task that is no longer `running`
+    ("the lease was revoked -- task is waiting_external after 1 attempt(s)").
+    So the worker keeps the lease the way any long handler does -- heartbeats,
+    paced from the queue -- and writes nothing. (On extension 0.2.0 the pace is
+    not the queue's: `queue_stale_timeout` fails for `worker` with "permission
+    denied for function stale_timeout_default", run_once falls back to 40s,
+    and a queue whose stale_timeout is under about 80s is reaped mid-hold.)
+
+    WHAT IT COSTS: one worker slot for the length of the external work.
+    `percolate worker` runs one task at a time, so while a scheduled turn runs
+    that worker process claims nothing else. Parking would free the slot, and
+    that is the reason to build it in the engine.
+
+    WHEN IT STOPS. `heartbeat_task` returns false once the task is not
+    `running` under this worker: the callee completed or failed it, the reaper
+    took the lease, or the run was cancelled. Every one of those gets the same
+    answer -- write nothing and return -- so they are not told apart, and no
+    function `worker` may call could tell them apart: heartbeat_task, task_owner
+    and get_task_context each report only "not held by you". The engine
+    records the false return as a `lease_violation` task event (op
+    `heartbeat`), so a dispatch the callee completed leaves one such row.
+
+    WHEN IT GIVES UP. Past `wait_seconds` (the step's `wait_ms`) with the lease
+    still held, the task is failed TERMINALLY -- a retry would dispatch a turn
+    the callee may still be running, which is the duplicate this exists to
+    prevent -- and with this worker's id, so the fence refuses the write if the
+    lease moved after the last beat.
+
+    Never raises (short of cancellation): the caller's generic handler would
+    otherwise fail the task as retryable and without the worker id.
+    """
+    clock = asyncio.get_running_loop()
+    deadline = clock.time() + wait_seconds
+    while True:
+        await asyncio.sleep(max(0.0, min(period, deadline - clock.time())))
+        try:
+            async with as_service() as conn:
+                alive = await conn.fetchval(
+                    "select workflow.heartbeat_task($1, $2)", task_id, worker_id)
+        except asyncio.CancelledError:
+            raise
+        except asyncpg.UndefinedFunctionError:
+            print(f"[{worker_id}] no workflow.heartbeat_task in this database; cannot "
+                  f"hold the lease, so the task is left to the callee", flush=True)
+            return
+        except Exception as e:  # noqa: BLE001 -- a blip is not a release
+            print(f"[{worker_id}] heartbeat failed ({type(e).__name__}: {e}); "
+                  f"still holding", flush=True)
+            alive = True
+        if not alive:
+            print(f"[{worker_id}]   released -- the task is no longer running "
+                  f"under this worker", flush=True)
+            return
+        if clock.time() >= deadline:
+            reason = (f"the callee did not complete or fail this task within "
+                      f"{wait_seconds:g}s of a successful dispatch (wait_ms)")
+            print(f"[{worker_id}]   terminal: {reason}", flush=True)
+            try:
+                async with as_service() as conn:
+                    await conn.execute(
+                        "select workflow.fail_task($1, $2::jsonb, true, $3)",
+                        task_id, {"error": reason, "terminal": True}, worker_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 -- see the docstring
+                print(f"[{worker_id}] could not fail the held task "
+                      f"({type(e).__name__}: {e})", flush=True)
+            return
+
+
 def handler(kind: str) -> Callable[[Handler], Handler]:
     """Register a handler for a step kind. This is the whole extension API."""
     def deco(fn: Handler) -> Handler:
@@ -232,10 +314,14 @@ async def run_once(queue: str, worker_id: str) -> bool:
                 pass
         if isinstance(out, Dispatched):
             # An async http_call was accepted by its callee, which completes
-            # or fails this task itself (see Dispatched in http.py). Completing
-            # it here is what made every scheduled run finish before it began.
-            print(f"[{worker_id}]   dispatched (HTTP {out['status']}) -- "
-                  f"the callee completes this task", flush=True)
+            # or fails this task itself. Completing it here is what made every
+            # scheduled run finish before it began; returning without a
+            # heartbeat let the reaper hand it to a second dispatch. So this
+            # worker HOLDS it -- and is occupied for the length of the external
+            # work, which is the cost; see _hold_until_released.
+            print(f"[{worker_id}]   dispatched (HTTP {out['status']}) -- holding "
+                  f"until the callee completes it, at most {out.wait_seconds:g}s", flush=True)
+            await _hold_until_released(task_id, worker_id, period, out.wait_seconds)
             return True
         async with as_service() as conn:
             # Between the handler and complete_task, so it covers every step

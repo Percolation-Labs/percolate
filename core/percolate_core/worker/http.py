@@ -80,17 +80,49 @@ def build_request(spec: dict, ctx: dict) -> tuple[dict, dict]:
     }, spec
 
 
+DEFAULT_WAIT_MS = 15 * 60 * 1000
+"""How long the worker holds an async step for its callee, absent `wait_ms`.
+
+Fifteen minutes. A scheduled agent turn takes minutes -- REM-146 measured turns
+of 23, 75 and 224 seconds -- so this is four times the longest one measured. It
+is not longer because the hold occupies the worker (see `_hold_until_released`
+in loop.py): `percolate worker` runs one task at a time, so a runtime that dies
+without answering stalls that worker for this long. It is also how long a turn
+that fails inside the sequencer takes to fail its task: that path records the
+run as `failed` and neither completes nor fails the task, and
+`gateway._dispatch` fails it only when `run_scheduled` raises.
+"""
+
+
 class Dispatched(dict):
     """An async step's request was accepted; the callee completes the task.
 
     A dict, so it reads like any other output in a log, and its own type, so
-    the loop can tell "do not complete this" from a step whose result merely
-    happens to look like a receipt.
+    the loop can tell "hold this, do not complete it" from a step whose result
+    merely happens to look like a receipt.
     """
+
+    def __init__(self, *, status: int, result: Any, wait_seconds: float) -> None:
+        super().__init__(status=status, result=result)
+        self.wait_seconds = wait_seconds
+
+
+def _wait_seconds(spec: dict) -> float:
+    """The step's `wait_ms` as seconds, refused before anything is sent.
+
+    Checked before the request rather than after it, because a bad value found
+    after dispatch would fail a task whose callee is already running.
+    """
+    value = spec.get("wait_ms", DEFAULT_WAIT_MS)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise TerminalError(
+            f"http_call wait_ms must be a positive whole number of milliseconds, got {value!r}")
+    return value / 1000
 
 
 async def http_call(spec: dict, ctx: dict) -> Any:
     req, spec = build_request(spec, ctx)
+    wait_seconds = _wait_seconds(spec) if spec.get("mode") == "async" else None
 
     async with httpx.AsyncClient() as client:
         try:
@@ -115,18 +147,10 @@ async def http_call(spec: dict, ctx: dict) -> Any:
         # scheduled agent run completed without /internal/run ever being
         # called, and the seeded summarize_session_window did nothing at all.
         #
-        # The spec says the task is then parked in `waiting_external`. It is
-        # not parked, because the engine as shipped (percolate 0.2.0) cannot
-        # do it and then finish: no function granted to `worker` parks an
-        # http_call task (start_child_workflow parks only a sub-workflow's
-        # parent), and the lease fence (§23) refuses `complete_task` on a task
-        # that has been claimed and is no longer `running` -- measured, "the
-        # lease was revoked -- task is waiting_external after 1 attempt(s)",
-        # with the run left `running`. A task left `running` is the one the
-        # runtime's own complete_task and fail_task are accepted on. What that
-        # costs: the reaper cannot tell a dispatched task from a dead worker,
-        # so a run outlasting the queue's stale_timeout is dispatched again.
-        return Dispatched(status=r.status_code, result=parsed)
+        # The loop then HOLDS the task until the callee moves it, rather than
+        # completing it or parking it in `waiting_external` -- why, and what
+        # the hold costs, is on `_hold_until_released` in loop.py.
+        return Dispatched(status=r.status_code, result=parsed, wait_seconds=wait_seconds)
 
     # Optional extraction, so a step hands the NEXT step a clean value instead
     # of a provider envelope whose shape the next template must know.
