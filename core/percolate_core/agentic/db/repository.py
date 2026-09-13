@@ -79,6 +79,7 @@ class Repository(Protocol):
         self, name: str, payload: dict[str, Any], trace_id: str | None = None
     ) -> UUID: ...
     async def complete_task(self, task_id: UUID, output: dict[str, Any]) -> None: ...
+    async def fail_task(self, task_id: UUID, error: dict[str, Any], terminal: bool) -> None: ...
 
 
 SESSION_COLUMNS = ("id", "owner_id", "agui_thread_id", "title", "created_at")
@@ -505,6 +506,14 @@ class PgRepository:
         """
         async with self.client.as_user(self.claims, role="worker") as conn:
             await conn.execute("select workflow.complete_task($1, $2::jsonb)", task_id, output)
+
+    async def fail_task(self, task_id: UUID, error: dict[str, Any], terminal: bool) -> None:
+        """``select workflow.fail_task($1, $2::jsonb, $3)``, as ``worker``, like
+        ``complete_task`` and for the same reason. ``terminal`` is the engine's
+        "do not retry"; `task_outcome.failure_is_terminal` decides it."""
+        async with self.client.as_user(self.claims, role="worker") as conn:
+            await conn.execute(
+                "select workflow.fail_task($1, $2::jsonb, $3)", task_id, error, terminal)
 
     async def call_chained_action(self, target: str, payload: dict[str, Any]) -> Any:
         """``select <target>($1::jsonb)`` for ``kind = 'pg_function'`` (``brief.md`` §8).

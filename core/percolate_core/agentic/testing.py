@@ -59,6 +59,7 @@ class MemoryRepository:
         self.chained_calls: list[tuple[str, dict[str, Any]]] = []
         self.workflows: list[tuple[str, dict[str, Any]]] = []
         self.completed_tasks: list[tuple[UUID, dict[str, Any]]] = []
+        self.failed_tasks: list[tuple[UUID, dict[str, Any], bool]] = []
         self.quota_allowed = True
 
     # -- config plane ------------------------------------------------------
@@ -188,6 +189,9 @@ class MemoryRepository:
 
     async def complete_task(self, task_id: UUID, output: dict[str, Any]) -> None:
         self.completed_tasks.append((task_id, output))
+
+    async def fail_task(self, task_id: UUID, error: dict[str, Any], terminal: bool) -> None:
+        self.failed_tasks.append((task_id, error, terminal))
 
 
 class FakeProvider:
