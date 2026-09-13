@@ -276,6 +276,12 @@ jobs:
       - name: A structured answer reaches a streaming client
         run: python -m unittest discover -s tests -p test_structured_stream.py
 
+      # A refused tool call reached the model as a successful result, so the
+      # model called it again 54 times until request_limit stopped the run,
+      # and TOOL_CALL_END said is_error: false while the rows said true.
+      - name: A refused tool call reaches the model and the stream as a failure
+        run: python -m unittest discover -s tests -p test_a_refused_tool_call_is_an_error.py
+
       - name: Prose has one wrapping default and one measure
         run: python -m unittest discover -s tests -p test_ui_theme.py
 

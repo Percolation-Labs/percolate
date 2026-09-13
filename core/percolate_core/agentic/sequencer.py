@@ -529,7 +529,8 @@ class TurnSequencer:
                 )
             elif kind == "tool_end":
                 await self.sink.emit(
-                    ToolCallEnd(tool_call_id=mapped["tool_call_id"], **common)
+                    ToolCallEnd(tool_call_id=mapped["tool_call_id"],
+                                is_error=mapped.get("is_error", False), **common)
                 )
 
         return emit
