@@ -81,7 +81,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # reads and starts the runs `workflow` executes -- and `agentic` runs last: it
 # binds the others rather than adding a concern of its own, so a failure there
 # is worth reading only once they are green.
-SURFACES=("${@:-rbac query workflow content agentic}")
+SURFACES=("${@:-rbac query workflow content agentic research}")
 
 # DSN is the ONE path that needs a psql on the host; the other two borrow the
 # container's. Checked once, here, because the alternative is what it did

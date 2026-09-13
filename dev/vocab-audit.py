@@ -167,6 +167,10 @@ def owning_table(text: str, pos: int) -> str | None:
 def sql_vocabs() -> list[Vocab]:
     out: list[Vocab] = []
     for path in sorted((ROOT / "specs").rglob("*.sql")):
+        # The writing hub's draft market schema is the hub's vocabulary, not core's,
+        # and build-sql.py does not ship it (NOT_SHIPPED).
+        if "percolate-application" in path.parts:
+            continue
         rel = path.relative_to(ROOT).as_posix()
         raw = path.read_text()
         text = strip_comments(raw)

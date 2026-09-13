@@ -240,6 +240,7 @@ ORDER = [
     ("world-model-ingestion/api-sources.sql",   "incremental API sources, records and durable checkpoints"),
     ("world-model-ingestion/polling.sql",       "the reader for channels.poll_interval: an enabled channel with a cadence gets a workflow.schedules row. After api-sources (it reads config.ingest_workflow, which save_api_source writes) and after workflow-engine, whose schedule_workflow and unschedule_workflow it calls"),
     ("world-model-ingestion/lake.sql",          "the lake: resolving, registering and landing what a DuckDB refine step read and wrote. After api-sources and the rest of the content plane, and after workflow-engine's integration-rbac, because every function here starts from workflow.task_owner()"),
+    ("research-platform/schema.sql",             "the research platform: one access decision over rbac, plans and usage, research revisions, engagement and the trust read (specs/research-platform/architecture.md). After the content plane and workflow-engine, whose tables it references, and before contract/schema.sql, so percolate.enums() reads its vocabularies"),
     ("contract/schema.sql",                     "the published contract: percolate.enums() reads what every schema above enforces, so it goes after all of them"),
     ("packages/schema.sql",                     "percolate.apply_package(): a domain installed as one document. AFTER agentic (it delegates the servers/skills/agents half to agentic.apply_plugin), after world-model-ingestion (it inserts channels) and after workflow-engine (it defines and schedules workflows) -- it names all three and a `language plpgsql` body is not checked at create time, so the ordering is about the RUNTIME dependency rather than the parse"),
     ("identity/declarations.sql",               "what each table IS and what each nullable column's NULL MEANS -- statements about every schema above, so they can only be made after those tables exist. The mechanism they use ships first; see identity/schema.sql"),
@@ -300,6 +301,10 @@ NOT_SHIPPED = {
         "with the trigger that would promote each, in workflow-engine/roadmap.md "
         "\u00a75; they get built there or deleted there. Shipping the schema now "
         "would put tables in the product ahead of that decision.",
+    "percolate-application/data-model.sql":
+        "the writing hub's market schema, a draft from the table review. The hub owns it; research-platform/schema.sql is the core half. Kept as the reviewed fixture until the hub migrates.",
+    "percolate-application/data-model-test.sql":
+        "the tests for that draft, run by hand against a disposable database, not an extension schema.",
     "world-model-ingestion/tradecraft.sql":
         "grading and corroboration over evidence classes. Core-eligible under "
         "SKILL.md \u00a75's transcribed-standard rule (Admiralty, ICD 203, Bellingcat "

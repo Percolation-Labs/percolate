@@ -78,7 +78,12 @@ declare
         -- specs/contract/types and granted to web_anon by design: a client
         -- learns what it would have to send before it has credentials. This
         -- file could not see it while its schema list lacked `percolate`.
-        'percolate.types'
+        'percolate.types',
+        -- Plans, resource kinds, plan limits, application declarations and
+        -- scope aliases (research-platform/schema.sql §1-2): installation
+        -- vocabulary with no tenant column, readable so a caller can see what
+        -- a plan allows. Who holds which plan is plan_assignments, which is policied.
+        'rbac.plans', 'rbac.resource_kinds', 'rbac.plan_limits', 'rbac.applications', 'rbac.scope_aliases'
     ];
 begin
     select string_agg(n.nspname || '.' || c.relname, E'\n       ' order by 1)
