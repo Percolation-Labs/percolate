@@ -323,15 +323,32 @@ async def apply_graph(conn: Any, doc: dict[str, Any]) -> list[str]:
         return found
 
     for e in doc.get("edges") or []:
+        # THE COLUMN IS OMITTED WHEN THE DOCUMENT OMITS IT, for the reason the
+        # channels insert above spells out and this one did not follow: the
+        # shared tier is `rbac.shared_org_id()` since identity/spec.md §4, the
+        # column is NOT NULL with that as its DEFAULT, and AN EXPLICITLY PASSED
+        # NULL IS NOT DEFAULTED -- it is refused.
+        #
+        #   null value in column "org_id" of relation "edges"
+        #   violates not-null constraint
+        #
+        # `samples/harbour/graph.yaml` declares no `org:` on any edge, so
+        # `sample load` died here against extension 0.2.0 -- after the channel
+        # fix one commit earlier had got it this far. Two instances of one class
+        # in one file, and the first one's comment described the second
+        # precisely enough to have found it (REM-147).
+        cols = ["src_id", "dst_id", "relation", "weight", "provenance"]
+        args = [await node_id(e["src"]), await node_id(e["dst"]), e["relation"],
+                float(e.get("weight", 1.0)), json.dumps(e.get("provenance") or {})]
+        if e.get("org") is not None:
+            cols.append("org_id")
+            args.append(e["org"])
         await conn.execute(
-            "insert into aiq.edges (src_id, dst_id, relation, weight, provenance, org_id)"
-            " values ($1,$2,$3,$4,$5,$6)"
+            f"insert into aiq.edges ({', '.join(cols)})"
+            f" values ({', '.join(f'${i}' for i in range(1, len(args) + 1))})"
             " on conflict (src_id, dst_id, relation) do update"
             "   set weight = excluded.weight, provenance = excluded.provenance",
-            await node_id(e["src"]), await node_id(e["dst"]), e["relation"],
-            float(e.get("weight", 1.0)),
-            json.dumps(e.get("provenance") or {}),
-            e.get("org"),
+            *args,
         )
         done.append(f"edge {e['src']} -{e['relation']}-> {e['dst']}")
 

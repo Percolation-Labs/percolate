@@ -32,6 +32,7 @@ silently.
 | 0.1.7 | `v0.1.7` | `939a5be` | yes |
 | 0.1.8 | `v0.1.8` → `8c03d2a` | **`91ef61b`** | yes |
 | 0.1.9 | `v0.1.9` | `014b75e` | yes |
+| 0.1.10 | `v0.1.10` | `3612268` | yes |
 
 0.1.0–0.1.3 went to PyPI before releasing was a workflow. There is nothing to
 recover: the wheels are on PyPI and no tag was ever pushed, and no Release page
@@ -43,6 +44,34 @@ published as a **retry** — the tree carried `0.1.9` with no tag, which
 `release.yml` reads as a release that did not finish, so it published that
 rather than bumping past it. The run said so itself: *"0.1.9 is in the tree and
 untagged -- publishing THAT rather than bumping."*
+
+0.1.10 carries three defects that were in 0.1.9 and reachable by a reader, which
+is why it was cut the same evening rather than waiting:
+
+* **A NUL byte anywhere in a turn's rows or a document's chunks aborted the
+  write.** Postgres `text` cannot hold U+0000 and both writes hand Postgres a
+  jsonb argument the SQL side reads back with `->>`. A live third-party tool
+  result took a turn to `failed` after the model and the tools had already run;
+  one NUL in a 777-byte upload took the ingest task terminal, cancelled the three
+  tasks after it and wrote zero chunks. `core.text.without_nul` (REM-146).
+* **The caller's ambient context went to every tool destination.** A registered
+  third party echoed back a live `X-P8-User-Id` and `X-P8-Session-Id` while the
+  same request was correctly being refused the caller's token. `X-P8-*` now
+  crosses only to an origin in `P8_TOOL_AUTH_ORIGINS` (REM-148).
+* **`percolate sample load` wrote a channel nobody could read.** Owner and
+  visibility were left to the column defaults -- null and `private` -- and
+  extension 0.2.0, published two hours earlier, is the version that added
+  `channels_readable_by_somebody` to refuse that row. So step three of
+  `install.md` died on a check constraint (REM-147).
+
+It published as a **retry**, like 0.1.9: the tree carried 0.1.10 with no tag
+from `795459a`'s *"0.1.10 opens, because 0.1.9 is spent"*, and `release.yml`
+reads that as a release that did not finish. The run said so itself -- *"0.1.10
+is in the tree and untagged -- publishing THAT rather than bumping"* -- which is
+what a `bump: patch` dispatch was relying on and was confirmed by a
+`publish: false` run first rather than assumed.
+
+`v0.1.10` names `3612268`, whose `pyproject.toml` says `0.1.10`.
 
 0.1.4 and 0.1.5 were tagged correctly and had no Release page; both were created
 on 2026-09-12 and say so in their own text, so nobody reads a 2026-09-12
