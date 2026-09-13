@@ -28760,6 +28760,9 @@ create table if not exists rbac.plan_limits (
     mode          text not null check (mode in ('unlimited', 'finite')),
     amount        bigint check (amount is null or amount >= 0),
     period        interval not null default interval '1 month',
+    -- true on the rows this file ships, so a dump carries only the deployment's
+    -- (contract/schema.sql §4, the seeded tables).
+    shipped       boolean not null default false,
     primary key (plan, resource_kind),
     constraint plan_limits_finite_has_amount check ((mode = 'finite') = (amount is not null))
 );
@@ -28794,9 +28797,9 @@ on conflict (name) do nothing;
 insert into rbac.resource_kinds (name, description, required) values
     ('llm_tokens', 'Model tokens a run spends through the agent runtime', true)
 on conflict (name) do nothing;
-insert into rbac.plan_limits (plan, resource_kind, mode) values
-    ('default', 'llm_tokens', 'unlimited')
-on conflict (plan, resource_kind) do nothing;
+insert into rbac.plan_limits (plan, resource_kind, mode, shipped) values
+    ('default', 'llm_tokens', 'unlimited', true)
+on conflict (plan, resource_kind) do update set shipped = true;
 
 create or replace function rbac.plan_of(p_user uuid) returns text
 language sql stable security definer set search_path = pg_catalog, public as $$
@@ -29250,9 +29253,11 @@ create table if not exists engagement.saves (
 
 create table if not exists engagement.follows (
     user_id    uuid not null references rbac.users(id) on delete cascade,
-    org_id     uuid not null references rbac.orgs(id) on delete cascade,
-    created_at timestamptz not null default now(),
-    primary key (user_id, org_id)
+    -- The org being followed, not a scope column: named apart from org_id so
+    -- the shared-tier default (identity/spec.md §4) is not implied.
+    target_org_id uuid not null references rbac.orgs(id) on delete cascade,
+    created_at    timestamptz not null default now(),
+    primary key (user_id, target_org_id)
 );
 
 create table if not exists engagement.votes (
@@ -29330,9 +29335,9 @@ begin
         raise no_data_found using message = 'Org not found';
     end if;
     if p_following then
-        insert into engagement.follows (user_id, org_id) values (v_user, p_org) on conflict do nothing;
+        insert into engagement.follows (user_id, target_org_id) values (v_user, p_org) on conflict do nothing;
     else
-        delete from engagement.follows where user_id = v_user and org_id = p_org;
+        delete from engagement.follows where user_id = v_user and target_org_id = p_org;
     end if;
     return p_following;
 end;
@@ -30143,6 +30148,7 @@ declare
     -- of them changes nothing here. See each table's `shipped` column and the
     -- generated script's `percolate.seeding` flag for how a row gets marked.
     seeded_tables text[] := array[
+        'rbac.plan_limits',  -- research-platform: the default plan's limit is shipped, the rest the deployment's
         'aiq.entity_registry',
         'aiq.graph_vocabulary',
         'aiq.lexical_sources',
@@ -30160,6 +30166,14 @@ declare
     -- verified empty on a from-zero install -- plus the seven above, which are
     -- not empty there and are registered with a condition instead.
     deployment_tables text[] := array[
+        'rbac.plan_limits',  -- research-platform: the default plan's limit is shipped, the rest the deployment's
+        -- The research platform (research-platform/schema.sql): every row is the
+        -- deployment's -- grants, plan assignments, usage, research and engagement.
+        'engagement.comment_likes', 'engagement.comment_versions', 'engagement.comments',
+        'engagement.follows', 'engagement.saves', 'engagement.valuations', 'engagement.votes',
+        'rbac.applications', 'rbac.grants', 'rbac.plan_assignments', 'rbac.usage_ledger',
+        'research.argument_edges', 'research.citations', 'research.claims', 'research.endorsements',
+        'research.heads', 'research.operations', 'research.revisions', 'research.sources', 'research.works',
         'agentic.agents',
         'agentic.messages',
         'agentic.plugins',
@@ -30767,7 +30781,11 @@ on conflict (schema_name, table_name) do update
 -- row references it, and its key cannot change because it is not its own.
 insert into percolate.table_kinds (schema_name, table_name, kind, why) values
  ('content','source_state','natural',
-  'a sidecar keyed by content.channels(id); same shape as the aiq.emb_* tables')
+  'a sidecar keyed by content.channels(id); same shape as the aiq.emb_* tables'),
+ ('research','heads','natural',
+  'a sidecar keyed by research.works(id): which revision is current for each work'),
+ ('rbac','plan_assignments','natural',
+  'a sidecar keyed by rbac.users(id): the plan one account is on')
 -- `do update`, same reason as the statement above, and here it names one row.
 on conflict (schema_name, table_name) do update
     set kind = excluded.kind, why = excluded.why;

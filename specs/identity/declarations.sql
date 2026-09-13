@@ -109,7 +109,11 @@ on conflict (schema_name, table_name) do update
 -- row references it, and its key cannot change because it is not its own.
 insert into percolate.table_kinds (schema_name, table_name, kind, why) values
  ('content','source_state','natural',
-  'a sidecar keyed by content.channels(id); same shape as the aiq.emb_* tables')
+  'a sidecar keyed by content.channels(id); same shape as the aiq.emb_* tables'),
+ ('research','heads','natural',
+  'a sidecar keyed by research.works(id): which revision is current for each work'),
+ ('rbac','plan_assignments','natural',
+  'a sidecar keyed by rbac.users(id): the plan one account is on')
 -- `do update`, same reason as the statement above, and here it names one row.
 on conflict (schema_name, table_name) do update
     set kind = excluded.kind, why = excluded.why;

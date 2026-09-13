@@ -483,6 +483,7 @@ declare
     -- of them changes nothing here. See each table's `shipped` column and the
     -- generated script's `percolate.seeding` flag for how a row gets marked.
     seeded_tables text[] := array[
+        'rbac.plan_limits',  -- research-platform: the default plan's limit is shipped, the rest the deployment's
         'aiq.entity_registry',
         'aiq.graph_vocabulary',
         'aiq.lexical_sources',
@@ -500,6 +501,14 @@ declare
     -- verified empty on a from-zero install -- plus the seven above, which are
     -- not empty there and are registered with a condition instead.
     deployment_tables text[] := array[
+        'rbac.plan_limits',  -- research-platform: the default plan's limit is shipped, the rest the deployment's
+        -- The research platform (research-platform/schema.sql): every row is the
+        -- deployment's -- grants, plan assignments, usage, research and engagement.
+        'engagement.comment_likes', 'engagement.comment_versions', 'engagement.comments',
+        'engagement.follows', 'engagement.saves', 'engagement.valuations', 'engagement.votes',
+        'rbac.applications', 'rbac.grants', 'rbac.plan_assignments', 'rbac.usage_ledger',
+        'research.argument_edges', 'research.citations', 'research.claims', 'research.endorsements',
+        'research.heads', 'research.operations', 'research.revisions', 'research.sources', 'research.works',
         'agentic.agents',
         'agentic.messages',
         'agentic.plugins',

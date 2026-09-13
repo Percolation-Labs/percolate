@@ -251,6 +251,9 @@ create table if not exists rbac.plan_limits (
     mode          text not null check (mode in ('unlimited', 'finite')),
     amount        bigint check (amount is null or amount >= 0),
     period        interval not null default interval '1 month',
+    -- true on the rows this file ships, so a dump carries only the deployment's
+    -- (contract/schema.sql §4, the seeded tables).
+    shipped       boolean not null default false,
     primary key (plan, resource_kind),
     constraint plan_limits_finite_has_amount check ((mode = 'finite') = (amount is not null))
 );
@@ -285,9 +288,9 @@ on conflict (name) do nothing;
 insert into rbac.resource_kinds (name, description, required) values
     ('llm_tokens', 'Model tokens a run spends through the agent runtime', true)
 on conflict (name) do nothing;
-insert into rbac.plan_limits (plan, resource_kind, mode) values
-    ('default', 'llm_tokens', 'unlimited')
-on conflict (plan, resource_kind) do nothing;
+insert into rbac.plan_limits (plan, resource_kind, mode, shipped) values
+    ('default', 'llm_tokens', 'unlimited', true)
+on conflict (plan, resource_kind) do update set shipped = true;
 
 create or replace function rbac.plan_of(p_user uuid) returns text
 language sql stable security definer set search_path = pg_catalog, public as $$
@@ -741,9 +744,11 @@ create table if not exists engagement.saves (
 
 create table if not exists engagement.follows (
     user_id    uuid not null references rbac.users(id) on delete cascade,
-    org_id     uuid not null references rbac.orgs(id) on delete cascade,
-    created_at timestamptz not null default now(),
-    primary key (user_id, org_id)
+    -- The org being followed, not a scope column: named apart from org_id so
+    -- the shared-tier default (identity/spec.md §4) is not implied.
+    target_org_id uuid not null references rbac.orgs(id) on delete cascade,
+    created_at    timestamptz not null default now(),
+    primary key (user_id, target_org_id)
 );
 
 create table if not exists engagement.votes (
@@ -821,9 +826,9 @@ begin
         raise no_data_found using message = 'Org not found';
     end if;
     if p_following then
-        insert into engagement.follows (user_id, org_id) values (v_user, p_org) on conflict do nothing;
+        insert into engagement.follows (user_id, target_org_id) values (v_user, p_org) on conflict do nothing;
     else
-        delete from engagement.follows where user_id = v_user and org_id = p_org;
+        delete from engagement.follows where user_id = v_user and target_org_id = p_org;
     end if;
     return p_following;
 end;

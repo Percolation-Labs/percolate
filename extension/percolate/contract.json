@@ -599,6 +599,30 @@
     },
     {
       "admits": [
+        "installation",
+        "operator",
+        "invitation",
+        "recommendation",
+        "contribution"
+      ],
+      "column": "basis",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "rbac",
+      "table": "grants",
+      "vocabulary": null
+    },
+    {
+      "admits": null,
+      "column": "role",
+      "enforced_by": "reference",
+      "members": "deployment",
+      "schema": "rbac",
+      "table": "grants",
+      "vocabulary": "rbac.roles"
+    },
+    {
+      "admits": [
         "member",
         "admin"
       ],
@@ -610,6 +634,51 @@
       "vocabulary": null
     },
     {
+      "admits": [
+        "default"
+      ],
+      "column": "plan",
+      "enforced_by": "reference",
+      "members": "shipped",
+      "schema": "rbac",
+      "table": "plan_assignments",
+      "vocabulary": "rbac.plans"
+    },
+    {
+      "admits": [
+        "unlimited",
+        "finite"
+      ],
+      "column": "mode",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "rbac",
+      "table": "plan_limits",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "default"
+      ],
+      "column": "plan",
+      "enforced_by": "reference",
+      "members": "shipped",
+      "schema": "rbac",
+      "table": "plan_limits",
+      "vocabulary": "rbac.plans"
+    },
+    {
+      "admits": [
+        "llm_tokens"
+      ],
+      "column": "resource_kind",
+      "enforced_by": "reference",
+      "members": "shipped",
+      "schema": "rbac",
+      "table": "plan_limits",
+      "vocabulary": "rbac.resource_kinds"
+    },
+    {
       "admits": null,
       "column": "role",
       "enforced_by": "reference",
@@ -617,6 +686,43 @@
       "schema": "rbac",
       "table": "role_permissions",
       "vocabulary": "rbac.roles"
+    },
+    {
+      "admits": [
+        "person",
+        "agent",
+        "platform"
+      ],
+      "column": "actor",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "rbac",
+      "table": "usage_ledger",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "llm_tokens"
+      ],
+      "column": "resource_kind",
+      "enforced_by": "reference",
+      "members": "shipped",
+      "schema": "rbac",
+      "table": "usage_ledger",
+      "vocabulary": "rbac.resource_kinds"
+    },
+    {
+      "admits": [
+        "reserved",
+        "consumed",
+        "released"
+      ],
+      "column": "state",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "rbac",
+      "table": "usage_ledger",
+      "vocabulary": null
     },
     {
       "admits": null,
@@ -639,6 +745,48 @@
       "schema": "rbac",
       "table": "users",
       "vocabulary": null
+    },
+    {
+      "admits": [
+        "supports",
+        "challenges",
+        "motivates",
+        "qualifies",
+        "limits",
+        "compares with"
+      ],
+      "column": "relation",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "research",
+      "table": "argument_edges",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "person",
+        "agent",
+        "platform"
+      ],
+      "column": "actor_kind",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "research",
+      "table": "revisions",
+      "vocabulary": null
+    },
+    {
+      "admits": [
+        "org",
+        "private",
+        "public"
+      ],
+      "column": "visibility",
+      "enforced_by": "reference",
+      "members": "shipped",
+      "schema": "research",
+      "table": "works",
+      "vocabulary": "rbac.visibilities"
     },
     {
       "admits": [
