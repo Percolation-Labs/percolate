@@ -150,7 +150,7 @@ class WorkerHttpTest(Env, unittest.IsolatedAsyncioTestCase):
                                         "credential_ref": "LLM_API_KEY"},
              {"run_input": {"callback": ATTACKER + "/hook"}}),
             ("a secret nobody bound", {"url": "http://minio:9000/", "credential_ref": "P8_S3_SECRET"}, {}),
-            ("async mode sends later, so refuses now", {"url": ATTACKER, "mode": "async",
+            ("async mode sends too, so refuses the same way", {"url": ATTACKER, "mode": "async",
                                                        "credential_ref": "LLM_API_KEY"}, {}),
         ):
             with self.subTest(label):

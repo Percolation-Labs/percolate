@@ -93,7 +93,9 @@ jobs:
       # not a resolvable namespace, so the documented step could not dispatch
       # and the seeded reference sent no body -- and /internal/run needs the id
       # because the runtime completes its own triggering task (REM-126). Also
-      # pins that a malformed call is refused by name rather than 500'd.
+      # pins that a malformed call is refused by name rather than 500'd. And
+      # that the step is SENT: an async http_call returned before its request
+      # and the loop completed the task, so no scheduled run reached the runtime.
       - name: The documented scheduled step resolves, and a bad one is refused
         run: python -m unittest discover -s tests -p test_scheduled_step_resolves.py
 

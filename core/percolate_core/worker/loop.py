@@ -34,7 +34,7 @@ import asyncpg
 
 from ..core import as_service
 from .artifacts import offload
-from .http import http_call
+from .http import Dispatched, http_call
 from .agent_auth import uses_run_identity
 from .templates import TerminalError, resolve_task
 
@@ -230,6 +230,13 @@ async def run_once(queue: str, worker_id: str) -> bool:
                 await beat
             except asyncio.CancelledError:
                 pass
+        if isinstance(out, Dispatched):
+            # An async http_call was accepted by its callee, which completes
+            # or fails this task itself (see Dispatched in http.py). Completing
+            # it here is what made every scheduled run finish before it began.
+            print(f"[{worker_id}]   dispatched (HTTP {out['status']}) -- "
+                  f"the callee completes this task", flush=True)
+            return True
         async with as_service() as conn:
             # Between the handler and complete_task, so it covers every step
             # kind rather than only http_call. An oversized output used to be a

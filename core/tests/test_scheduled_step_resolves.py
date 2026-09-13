@@ -16,8 +16,15 @@ What is asserted here is the resolution and the refusal. The end-to-end -- a
 scheduled run completing its own task exactly once -- needs a live runtime and a
 harness axis that does not exist yet (REM-10).
 """
+import json
 import unittest
+from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock, patch
 
+import httpx
+
+from percolate_core.worker.http import Dispatched, http_call
+from percolate_core.worker.loop import run_once
 from percolate_core.worker.templates import TerminalError, resolve
 
 TASK_ID = "11111111-1111-1111-1111-111111111111"
@@ -118,6 +125,89 @@ class MalformedInternalRunIsRefused(unittest.TestCase):
         """`{{task.id}}` resolving to "" must not look like a valid id."""
         body = {"workflow_task_id": "", "input": {"agent": "a"}}
         self.assertIn("workflow_task_id", self._missing(body))
+
+
+class TheDocumentedStepIsSent(unittest.IsolatedAsyncioTestCase):
+    """An async http_call sends its request, and leaves the task to the callee.
+
+    `http_call` returned `{"dispatched": true}` BEFORE making the request, and
+    the loop completed the task with that -- so the documented step above
+    resolved and was then never sent, and every scheduled agent run, the seeded
+    `summarize_session_window` included, finished without reaching
+    `/internal/run`. Resolution was fixed by REM-126 and was not the last
+    defect on the path.
+    """
+
+    CTX = {"_task_id": TASK_ID, "_worker_id": "w1",
+           "run_input": {"agent": "summarizer", "prompt": "what changed"}, "context": {}}
+
+    async def dispatch(self, status=202):
+        sent = []
+
+        def answer(request):
+            sent.append(request)
+            return httpx.Response(status, json={"accepted": True, "workflow_task_id": TASK_ID})
+
+        real = httpx.AsyncClient
+        # The step's own url is loopback, which the worker refuses unless the
+        # operator named it -- which is what P8_AGENT_URL is for.
+        with patch.dict("os.environ", {"P8_AGENT_URL": "http://127.0.0.1:8765"}), \
+             patch("percolate_core.worker.http.httpx.AsyncClient",
+                   side_effect=lambda *a, **kw: real(*a, transport=httpx.MockTransport(answer), **kw)):
+            return await http_call(DOCUMENTED_STEP, dict(self.CTX)), sent
+
+    async def test_the_request_reaches_the_runtime_carrying_the_task_id(self):
+        out, sent = await self.dispatch()
+        self.assertEqual(len(sent), 1, "the async step made no request")
+        self.assertEqual(str(sent[0].url), "http://127.0.0.1:8765/internal/run")
+        self.assertEqual(json.loads(sent[0].content)["workflow_task_id"], TASK_ID)
+        self.assertIsInstance(out, Dispatched)
+        self.assertEqual(out["status"], 202)
+
+    async def test_a_dispatch_the_runtime_refuses_fails_as_a_sync_call_does(self):
+        with self.assertRaises(TerminalError):
+            await self.dispatch(status=400)
+        with self.assertRaises(RuntimeError):
+            await self.dispatch(status=503)
+
+    async def run_step(self, returned):
+        """Drive run_once with a handler returning `returned`; list the SQL."""
+        conn = AsyncMock()
+
+        async def fetchval(sql, *args):
+            if "claim_task" in sql:
+                return TASK_ID
+            if "get_task_context" in sql:
+                return json.dumps({"kind": "http_call", "step_key": "dispatch",
+                                   "task_input": {"mode": "async"}})
+            if "queue_stale_timeout" in sql:
+                return 120
+            if "pg_column_size" in sql:
+                return 64
+            return None
+
+        conn.fetchval.side_effect = fetchval
+
+        @asynccontextmanager
+        async def service():
+            yield conn
+
+        with patch("percolate_core.worker.loop.as_service", service), \
+             patch.dict("percolate_core.worker.loop.HANDLERS",
+                        {"http_call": AsyncMock(return_value=returned)}):
+            await run_once("http", "w1")
+        return [c.args[0] for c in conn.execute.await_args_list]
+
+    async def test_the_loop_does_not_complete_a_dispatched_task(self):
+        """The runtime completes it when the run is done (brief.md §3); a
+        completion here lands first, and the lease fence then refuses the
+        runtime's -- measured on percolate 0.2.0."""
+        statements = await self.run_step(Dispatched(status=202, result={"accepted": True}))
+        self.assertEqual([s for s in statements if "complete_task" in s or "fail_task" in s], [])
+
+    async def test_a_sync_step_is_still_completed_by_the_loop(self):
+        statements = await self.run_step({"status": 200, "result": {"ok": True}})
+        self.assertEqual(statements, ["select workflow.complete_task($1, $2::jsonb)"])
 
 
 if __name__ == "__main__":

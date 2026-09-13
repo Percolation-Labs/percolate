@@ -80,14 +80,17 @@ def build_request(spec: dict, ctx: dict) -> tuple[dict, dict]:
     }, spec
 
 
+class Dispatched(dict):
+    """An async step's request was accepted; the callee completes the task.
+
+    A dict, so it reads like any other output in a log, and its own type, so
+    the loop can tell "do not complete this" from a step whose result merely
+    happens to look like a receipt.
+    """
+
+
 async def http_call(spec: dict, ctx: dict) -> Any:
     req, spec = build_request(spec, ctx)
-
-    if spec.get("mode") == "async":
-        # Fire and park: the task stays in waiting_external until something
-        # calls signal_task. Reuses that status rather than inventing an
-        # "in flight externally" one -- the semantics are identical.
-        return {"dispatched": True, "mode": "async"}
 
     async with httpx.AsyncClient() as client:
         try:
@@ -104,6 +107,26 @@ async def http_call(spec: dict, ctx: dict) -> Any:
         parsed = r.json()
     except Exception:
         parsed = r.text
+
+    if spec.get("mode") == "async":
+        # DISPATCH, THEN LEAVE THE TASK TO THE CALLEE (workflow-engine/spec.md
+        # §14, agentic/brief.md §3). This returned before the request above
+        # was made, and the loop completed the task with the receipt -- so a
+        # scheduled agent run completed without /internal/run ever being
+        # called, and the seeded summarize_session_window did nothing at all.
+        #
+        # The spec says the task is then parked in `waiting_external`. It is
+        # not parked, because the engine as shipped (percolate 0.2.0) cannot
+        # do it and then finish: no function granted to `worker` parks an
+        # http_call task (start_child_workflow parks only a sub-workflow's
+        # parent), and the lease fence (§23) refuses `complete_task` on a task
+        # that has been claimed and is no longer `running` -- measured, "the
+        # lease was revoked -- task is waiting_external after 1 attempt(s)",
+        # with the run left `running`. A task left `running` is the one the
+        # runtime's own complete_task and fail_task are accepted on. What that
+        # costs: the reaper cannot tell a dispatched task from a dead worker,
+        # so a run outlasting the queue's stale_timeout is dispatched again.
+        return Dispatched(status=r.status_code, result=parsed)
 
     # Optional extraction, so a step hands the NEXT step a clean value instead
     # of a provider envelope whose shape the next template must know.
