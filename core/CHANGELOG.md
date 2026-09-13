@@ -106,6 +106,18 @@ group is first because an operator has to change a deployment for it.
   fails the bound agent's first turn with `has no discovered tools`. If the
   runtime is not up, the load still succeeds and prints the `curl` that
   finishes the sync. (#52)
+- **`percolate query mcp` runs SQL mode, and every failure is an error.**
+  Asked the same question over REST, `harbourmaster` called `query` more than
+  50 times and hit `request_limit`, twice in two runs. `aiq.query` does not
+  execute SQL mode: it returns the statement and a note to run it through the
+  passthrough, which is what the tool's description says happens. The server
+  returned that note as a success, so the model asked again. It now runs the
+  statement through `aiq.sql_passthrough` with the caller's `Authorization`,
+  and returns the rows. An `error` field that `aiq.query` returns at HTTP 200
+  (GRAPH on a key that matches no node, or several) is now `isError`, with the
+  envelope's `did_you_mean` or `candidates`. A refusal from the passthrough is
+  an error with the database's message. Extension 0.2.0 already grants
+  `authenticated` EXECUTE on `aiq.sql_passthrough`.
 
 ### A tool call that failed reaches the model as a failure
 

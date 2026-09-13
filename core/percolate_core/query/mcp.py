@@ -17,7 +17,14 @@ and MCP is where the grammar can be the tool's description.
 Three properties the port keeps, and ``tests/test_query_mcp.py`` checks each:
 
 1.  **No tool logic.** It forwards to ``aiq.query`` and returns what came back.
-    Retrieval, ranking and query building live in SQL.
+    Retrieval, ranking and query building live in SQL. One documented hop is
+    the exception: ``aiq.query`` does not execute SQL mode, it returns the
+    statement with a note to run it through ``aiq.sql_passthrough``, and the
+    description the model reads says SQL is "executed read-only through the
+    SECURITY INVOKER passthrough". So that hop is made here, with the same
+    header, and nothing else is. The port shipped without it: the note came
+    back to the model as a success, and the sample agent asked again until
+    pydantic-ai's request limit stopped it, fifty calls in.
 
 2.  **The description is fetched, not written.** ``tools/list`` builds it from
     ``SCHEMA "p8ql"``, the dialect facet the parser emits, so a deployment with
@@ -131,6 +138,16 @@ def describe_query_tool(up: Upstream, authorization: str | None) -> dict[str, An
     }
 
 
+def _is_unexecuted_sql(doc: Any) -> bool:
+    """``aiq.query``'s SQL-mode answer: the statement, handed back to run elsewhere.
+
+    Recognised by shape (mode SQL, a statement, no rows), so an ``aiq.query``
+    that one day executes SQL itself returns rows and is passed through as is.
+    """
+    return (isinstance(doc, dict) and doc.get("mode") == "SQL"
+            and isinstance(doc.get("statement"), str) and "rows" not in doc)
+
+
 class Handler(BaseHTTPRequestHandler):
     """JSON-RPC over the POST half of streamable HTTP, one response per request."""
 
@@ -205,6 +222,22 @@ class Handler(BaseHTTPRequestHandler):
                     "content": [{"type": "text", "text": "query must be a non-empty string"}]})
 
             doc, err = up.rpc("query", {"p_query": q}, auth)
+            if err is None and _is_unexecuted_sql(doc):
+                # The statement the parser recognised, not the raw string, and
+                # the caller's header: RLS, the read-only transaction and the
+                # break-out guard all apply, and a refusal from any of them is
+                # an HTTP error that falls through to the branch below.
+                rows, err = up.rpc("sql_passthrough", {"p_statement": doc["statement"]}, auth)
+                if err is None:
+                    doc = {"mode": "SQL", "statement": doc["statement"], "rows": rows}
+            if err is None and isinstance(doc, dict) and doc.get("error"):
+                # aiq.query reports some failures at HTTP 200, as an `error`
+                # field beside `rows: []` (GRAPH on a key that resolves to
+                # nothing, or to several nodes). Returned as a success that
+                # reads as "nothing is related", and the model cannot tell it
+                # asked the wrong question. The whole envelope goes back, so
+                # `did_you_mean` and `candidates` reach the model with it.
+                err = {"kind": "tool_error", "body": doc}
             if err:
                 return self._result(rid, {
                     "isError": True,
