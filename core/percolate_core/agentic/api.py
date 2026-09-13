@@ -274,8 +274,23 @@ def router() -> APIRouter:
         if claims is None:
             raise HTTPException(401, "a verified bearer token is required")
         repo = PgRepository(client, claims)
-        if await repo.session_messages(session_id) is None:  # pragma: no cover
-            raise HTTPException(404, "no such session")
+        # The ONLY authorization this route has. `relay` LISTENs on a connection
+        # opened as the login role, where RLS does not apply and LISTEN checks
+        # nothing, so whoever passes this line hears every event of the session.
+        #
+        # It asked `session_messages(...) is None`, and that method returns a
+        # list: RLS turns someone else's session into `[]`, never `None`, so the
+        # 404 could not fire and any signed-in caller could listen to any
+        # session whose id they had. The test stubbed the method to return
+        # `None`, which is the one value the real one never does.
+        #
+        # `get_session` is the same question `_resume_or_open` asks before a
+        # turn -- one row of `agentic.sessions_api`, as the caller -- so "may
+        # continue this session" and "may watch it" cannot drift apart. It also
+        # answers for a session that has no messages yet, which a message read
+        # could not.
+        if await repo.get_session(session_id) is None:
+            raise HTTPException(404, f"no session {session_id} — it does not exist, or is not yours")
 
         async def _observe() -> AsyncIterator[str]:
             async for payload in relay(client, session_id):

@@ -17,12 +17,13 @@ import time
 import unittest
 from contextlib import asynccontextmanager
 from unittest.mock import patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from percolate_core.agentic.api import router
+from percolate_core.agentic.contracts import Session
 from percolate_core.agentic.db import PgClient, PgRepository
 from percolate_core.agentic.gateway import caller_claims, run_delegated, run_scheduled
 from percolate_core.agentic.settings import Settings
@@ -195,10 +196,18 @@ class RuntimeHttpIdentityTest(unittest.TestCase):
         test = self
 
         class Repository:
+            """Returns what the real repository returns for a session the
+            caller cannot see. This stub used to answer `session_messages` with
+            `None`, a value `PgRepository` never returns, and that was what
+            made the events route look guarded."""
+
             def __init__(self, client, claims):
                 test.seen.append(claims)
 
             async def session_messages(self, session_id):
+                return []  # RLS-empty: a list, never None
+
+            async def get_session(self, session_id):
                 return None  # the endpoint's 404, reached only past identity
 
         patcher = patch("percolate_core.agentic.api.PgRepository", Repository)
@@ -261,6 +270,83 @@ class RuntimeHttpIdentityTest(unittest.TestCase):
         with patch.dict("os.environ", {}, clear=True):
             with self.assertRaises(RuntimeError):
                 caller_claims({"X-P8-User-Id": ALICE})
+
+
+BOB = "22222222-2222-2222-2222-222222222222"
+
+
+class OnlyAnOwnerHearsASessionTest(unittest.TestCase):
+    """`GET /sessions/{id}/events` relays to a caller who may see the session.
+
+    The relay LISTENs on a connection opened as the login role, where RLS does
+    not apply and LISTEN checks nothing, so the route's own check is the only
+    one there is. It asked whether `session_messages` returned `None`, and the
+    real method returns a list. RLS makes another user's session `[]`, so the
+    404 never fired and any signed-in caller could hear any session's events.
+
+    The repository here returns what `PgRepository` returns, as RLS shapes it:
+    `session_messages` a list, possibly empty, and `get_session` `None` for a
+    session the caller does not own. Checked against a live 0.2.0 database, where
+    Bob's `session_messages` on Alice's session was `[]` and `get_session` was
+    `None`.
+    """
+
+    def setUp(self):
+        env = patch.dict("os.environ", {"P8_JWT_SECRET": SECRET})
+        env.start()
+        self.addCleanup(env.stop)
+        self.alices = uuid4()
+        self.relayed = []
+        sessions = {self.alices: ALICE}
+        test = self
+
+        class RlsRepository:
+            def __init__(self, client, claims):
+                self.sub = claims["sub"]
+
+            async def session_messages(self, session_id):
+                return []  # a new session, or RLS hiding somebody else's
+
+            async def get_session(self, session_id):
+                if sessions.get(session_id) != self.sub:
+                    return None
+                return Session(id=session_id, owner_id=UUID(self.sub))
+
+        async def relay(client, session_id):
+            test.relayed.append(session_id)
+            yield {"type": "RUN_STARTED", "thread_id": str(session_id)}
+
+        for target, value in (("PgRepository", RlsRepository), ("relay", relay)):
+            patcher = patch(f"percolate_core.agentic.api.{target}", value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        app = FastAPI()
+        app.include_router(router())
+        app.state.percolate_agent_client = object()
+        app.state.percolate_agent_settings = Settings()
+        self.client = TestClient(app)
+        self.addCleanup(self.client.close)
+
+    def events(self, sub, session_id):
+        headers = bearer(mint_jwt(sub, SECRET))
+        return self.client.get(f"/sessions/{session_id}/events", headers=headers)
+
+    def test_another_users_session_is_not_relayed(self):
+        response = self.events(BOB, self.alices)
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(self.relayed, [])
+
+    def test_an_unknown_session_is_not_relayed(self):
+        self.assertEqual(self.events(ALICE, uuid4()).status_code, 404)
+        self.assertEqual(self.relayed, [])
+
+    def test_the_owner_hears_a_session_that_has_no_messages_yet(self):
+        # The control. A client opens the stream before the first message is
+        # persisted, so a check that asks for messages would refuse the owner.
+        response = self.events(ALICE, self.alices)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("RUN_STARTED", response.text)
+        self.assertEqual(self.relayed, [self.alices])
 
 
 if __name__ == "__main__":
