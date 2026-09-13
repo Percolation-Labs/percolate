@@ -47,6 +47,13 @@ jobs:
       - name: Install with every extra it claims to ship
         run: pip install --quiet ".[all]"
 
+      # This job names every file it runs, so the step names say what each one
+      # protects -- and a file nobody named was never run. Eleven were not,
+      # among them the tests REM-62 and REM-69 were closed on. First, because
+      # it is the cheapest step here and its answer does not depend on the rest.
+      - name: Every test file is run, or says why it is not
+        run: dev/check-tests-run.sh
+
       - name: The stated guarantees still hold
         run: python tests/smoke.py
 
@@ -238,6 +245,37 @@ jobs:
 
       - name: A runtime refuses a database it cannot serve
         run: python -m unittest discover -s tests -p test_startup_refuses_a_database_it_cannot_serve.py
+
+      # P8_DSN and P8_DATABASE_URL name one database, and a process holding
+      # both used to open two (REM-69). The S3 settings are shared too, while
+      # the Content Server and the lake keep their different answers to absence.
+      - name: One database and one object store, whoever is asking
+        run: python -m unittest discover -s tests -p test_one_config.py
+
+      # An agent with a structured_output_schema answers through an output
+      # tool, and the stream mapper carried only text parts, so `stream: true`
+      # finished with no answer in it.
+      - name: A structured answer reaches a streaming client
+        run: python -m unittest discover -s tests -p test_structured_stream.py
+
+      - name: Prose has one wrapping default and one measure
+        run: python -m unittest discover -s tests -p test_ui_theme.py
+
+      # These drive the browser modules under node, and every one of them
+      # passes when node is missing: four files skip, two error on every case.
+      # A skip reads as green, so the step asks for node by name before it
+      # runs anything. The runner image ships node; if that changes, this step
+      # goes red instead of passing on skips.
+      - name: The browser's assistants keep one suggestion contract (REM-62)
+        run: |
+          node --version
+          for t in test_suggestion_contract.py test_query_assist.py test_api_source_assist.py \
+                   test_data_sources.py test_workflow_composition.py test_ui_controls.py; do
+            python -m unittest discover -s tests -p "$t" || exit 1
+          done
+
+      # not run here: test_pool_render.py -- it compares the render against k8s/examples in p8-subsystems, a private repository this job cannot check out; it passes locally against p8-subsystems origin/main 6491ffc with P8_K8S_EXAMPLES set, and no workflow in either repository runs it
+      # not run here: test_api_probe.py -- PR #42 adds its step together with the egress guard it now exercises; when #42 merges, this check goes red until this line is deleted
 
       - name: A released version number may not be reused
         run: dev/check-version.sh
