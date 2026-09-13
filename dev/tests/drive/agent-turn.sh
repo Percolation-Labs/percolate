@@ -187,6 +187,12 @@ have_dsn=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$AGENT
 # is exact: a rebuilt database has a new id, and that is the whole of the case.
 want_ns="container:$(docker inspect -f '{{.Id}}' "$CONTAINER" 2>/dev/null || echo none)"
 have_ns=$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$AGENT" 2>/dev/null || echo none)
+# NO PROVIDER KEY GOES INTO THIS ENVIRONMENT, and that is recorded rather than
+# inferred. The `docker run` below passes P8_DSN and P8_JWT_SECRET and nothing
+# else, and a reused container passed the checks above, so it was started by
+# this same line. 06-a-turn.sql permits a RUN_ERROR only on this fact; it used
+# to guess it from the error's wording. Pass a key here and set this to true.
+PROVIDER_KEY_SUPPLIED=false
 if [ "$have_dsn" != "$want_dsn" ] || [ "$have_ns" != "$want_ns" ] || \
    [ "$(docker inspect -f '{{.State.Running}}' "$AGENT" 2>/dev/null || echo false)" != "true" ]; then
     docker rm -f "$AGENT" >/dev/null 2>&1 || true
@@ -222,7 +228,8 @@ done
 # `-i`, and it is load-bearing: `docker exec` without it gives the command no
 # stdin, so `python -` reads nothing, exits 0, and prints nothing. The insert
 # below then failed on an empty jsonb rather than on anything about the turn.
-OUT=$(docker exec -i -e SECRET="$SECRET" -e SUB="$SUB" -e AGENT_NAME="$AGENT_NAME" "$AGENT" python - <<'PY'
+OUT=$(docker exec -i -e SECRET="$SECRET" -e SUB="$SUB" -e AGENT_NAME="$AGENT_NAME" \
+          -e PROVIDER_KEY_SUPPLIED="$PROVIDER_KEY_SUPPLIED" "$AGENT" python - <<'PY'
 import base64, hashlib, hmac, json, os, time, urllib.error, urllib.request
 
 def b64(b): return base64.urlsafe_b64encode(b).rstrip(b"=")
@@ -248,7 +255,8 @@ req = urllib.request.Request("http://127.0.0.1:8080/chat", data=body, headers={
 # session as this caller, resolving the agent row, writing the run -- is the
 # schema and the build order under test.
 result = {"sub": os.environ["SUB"], "status": None, "detail": None,
-          "events": [], "session": None}
+          "events": [], "session": None,
+          "provider_key_supplied": os.environ["PROVIDER_KEY_SUPPLIED"] == "true"}
 try:
     resp = urllib.request.urlopen(req, timeout=90)
     result["status"] = resp.status
