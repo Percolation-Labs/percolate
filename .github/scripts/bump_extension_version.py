@@ -47,6 +47,14 @@ K8S_MANIFEST = ROOT / "k8s/kind/manifests/postgres.yaml"
 # disagrees with its manifest in every commit in between. Only the crate's own
 # entry moves; every dependency pin stays exactly as locked.
 CARGO_LOCK = ROOT / "extension/percolate_parser/Cargo.lock"
+# The SEVENTH: the published contract records the extension version it was
+# exported from, and dev/contract-export.py --check compares that field with
+# the live database. The 0.2.0 bump (a82d06d) was done by hand and moved it in
+# the same commit; this script never did, so a bump it made would land on main
+# with CI's database job red on "The published contract is current" over one
+# number. Only the field moves -- every enum and type is still checked against
+# a real database, so moving it cannot hide a contract change.
+CONTRACT = ROOT / "extension/percolate/contract.json"
 SQL_DIR = ROOT / "extension/percolate/sql"
 
 
@@ -104,6 +112,7 @@ def main() -> None:
     sub_once(CARGO, r'^version = ".*"', f'version = "{new}"')
     sub_once(CARGO_LOCK, r'^(name = "percolate_parser"\nversion = )"[^"]*"',
              rf'\g<1>"{new}"')
+    sub_once(CONTRACT, r'^  "extension": "[^"]*",$', f'  "extension": "{new}",')
     # THE MOUNT LINES ONLY, and the anchor is the whole correctness of this.
     #
     # Two occurrences are meant to move -- `mountPath:` and `subPath:` -- so
