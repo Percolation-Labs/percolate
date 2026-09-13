@@ -12,12 +12,18 @@
 # guarantee. This runs those, plus the version guard, and nothing else.
 name: ci
 
+# NO `paths-ignore: ['**.md']`, which this trigger carried until 2026-09-13.
+# Markdown is an input here, not decoration: `dev/check-releases.sh` below reads
+# RELEASES.md and fails when a published tag is missing from it. So a PR that
+# changed only RELEASES.md was the one PR that could break that check, and it was
+# also the one PR that did not run it. This job has no database or image, and
+# runs in about a minute and a half, so a docs PR can afford the whole of it.
+# Carving out a markdown-only job would mean a second list of which steps read
+# markdown, and that list would drift.
 on:
   push:
     branches: [main]
-    paths-ignore: ['**.md']
   pull_request:
-    paths-ignore: ['**.md']
   workflow_dispatch:
 
 jobs:
