@@ -139,15 +139,25 @@ async def open_pool(dsn: str | None = None, **kwargs: Any) -> asyncpg.Pool:
     """
     global _POOL, _REFS
     if _POOL is None:
-        _POOL = await asyncpg.create_pool(
-            dsn or config_dsn(),
-            min_size=kwargs.pop("min_size", 1),
-            max_size=kwargs.pop("max_size", 10),
-            init=kwargs.pop("init", _init_connection),
-            **kwargs,
-        )
+        _POOL = await _new_pool(dsn or config_dsn(), **kwargs)
     _REFS += 1
     return _POOL
+
+
+async def _new_pool(dsn: str, **kwargs: Any) -> asyncpg.Pool:
+    """Every pool this package opens, with the jsonb encoder on its connections.
+
+    One call site for both the process pool and ``as_task_worker``'s pool, so
+    no connection this package opens escapes ``_init_connection``
+    (``tests/test_nul_at_the_boundary.py`` counts the call sites).
+    """
+    return await asyncpg.create_pool(
+        dsn,
+        min_size=kwargs.pop("min_size", 1),
+        max_size=kwargs.pop("max_size", 10),
+        init=kwargs.pop("init", _init_connection),
+        **kwargs,
+    )
 
 
 def set_pool(existing: asyncpg.Pool | None) -> None:
@@ -370,8 +380,7 @@ async def as_task_worker(role: str = SERVICE_ROLE):
     if worker_dsn:
         global _TASK_WORKER_POOL
         if _TASK_WORKER_POOL is None:
-            _TASK_WORKER_POOL = await asyncpg.create_pool(
-                worker_dsn, min_size=0, max_size=2, init=_init_connection)
+            _TASK_WORKER_POOL = await _new_pool(worker_dsn, min_size=0, max_size=2)
         p = _TASK_WORKER_POOL
     else:
         p = await pool()
