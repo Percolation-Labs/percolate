@@ -275,7 +275,6 @@ jobs:
           done
 
       # not run here: test_pool_render.py -- it compares the render against k8s/examples in p8-subsystems, a private repository this job cannot check out; it passes locally against p8-subsystems origin/main 6491ffc with P8_K8S_EXAMPLES set, and no workflow in either repository runs it
-      # not run here: test_api_probe.py -- PR #42 adds its step together with the egress guard it now exercises; when #42 merges, this check goes red until this line is deleted
 
       - name: A released version number may not be reused
         run: dev/check-version.sh
