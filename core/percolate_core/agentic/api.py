@@ -83,10 +83,56 @@ async def lifespan(app: FastAPI, settings: Settings | None = None) -> AsyncItera
     # events inside the stream. Failing here costs one connection once and
     # turns a per-turn mystery into a startup message (REM-136).
     await identity.verify_can_open_a_session()
+    await warn_if_sessions_cannot_be_summarized(resolved)
     try:
         yield
     finally:
         await app.state.percolate_agent_client.close()
+
+
+async def warn_if_sessions_cannot_be_summarized(settings: Settings) -> list[str]:
+    """Say at startup that sessions will not be summarized, and what is missing.
+
+    A WARNING, NOT A REFUSAL, unlike `verify_can_open_a_session` above. That
+    probe refuses because a runtime that cannot open a session serves nothing.
+    A runtime with no summary workflow serves every turn: past the threshold
+    the window drops the oldest messages and nothing fills the summary slot
+    (brief.md §3). Refusing to boot would stop every stock install, which has
+    no `summarize_session_window` (it is seeded only in `dev/seed.sql`).
+
+    Asked as the caller with no claims, so it sees what every caller can see:
+    a definition or agent visible only to one org is reported missing. Returns
+    what it found missing so a test does not have to parse the log.
+    """
+    from .sequencer import SUMMARY_WORKFLOW
+
+    log = logging.getLogger(__name__)
+    try:
+        async with identity.as_caller(None) as conn:
+            has_workflow, has_summarizer = await conn.fetchrow(
+                "select exists (select 1 from workflow.definitions_api where name = $1),"
+                "       exists (select 1 from agentic.agents_api where name = $2)",
+                SUMMARY_WORKFLOW,
+                settings.default_summarizer,
+            )
+    except Exception as exc:  # noqa: BLE001 - a warning must not stop startup
+        log.warning("could not check whether sessions can be summarized: %s: %s",
+                    type(exc).__name__, exc)
+        return []
+    missing = []
+    if not has_workflow:
+        missing.append(f"workflow definition {SUMMARY_WORKFLOW!r}")
+    if not has_summarizer:
+        missing.append(f"agent {settings.default_summarizer!r} (P8_DEFAULT_SUMMARIZER)")
+    if missing:
+        log.warning(
+            "sessions will not be summarized: no %s is visible to every caller. "
+            "Turns still succeed; past the threshold the oldest messages leave "
+            "the window unsummarized. An agent with its own summarizer_agent_id "
+            "needs only the workflow.",
+            " and no ".join(missing),
+        )
+    return missing
 
 
 def _state(request: Request) -> tuple[PgClient, Settings]:

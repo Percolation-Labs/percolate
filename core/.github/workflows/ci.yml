@@ -336,6 +336,12 @@ jobs:
       - name: A failed scheduled turn fails its task, terminal or not by cause
         run: python -m unittest discover -s tests -p test_a_failed_turn_fails_its_task.py
 
+      # Summarizing is a side effect of a turn that has already answered. A
+      # dispatch that raised used to fail the answered turn, and on a stock
+      # install it always raised: the workflow is seeded only in dev/seed.sql.
+      - name: A summary that cannot be dispatched never fails an answered turn
+        run: python -m unittest discover -s tests -p test_summary_never_fails_an_answered_turn.py
+
       - name: A released version number may not be reused
         run: dev/check-version.sh
 

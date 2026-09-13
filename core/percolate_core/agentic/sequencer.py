@@ -17,6 +17,7 @@ started duplicating a component.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any
@@ -56,6 +57,13 @@ from .settings import Settings
 from .task_outcome import failure_is_terminal
 from .tools import ResolvedToolset, resolve_toolset
 from .tools.auth import caller_credentials
+
+
+log = logging.getLogger(__name__)
+
+# brief.md §3's reference background workflow. A name, not a code path: the
+# definition is a `workflow.definitions` row an install may not have.
+SUMMARY_WORKFLOW = "summarize_session_window"
 
 
 @dataclass(slots=True)
@@ -635,28 +643,44 @@ class TurnSequencer:
         synchronously, inside a request" (``brief.md`` §3). What this issues is an
         ordinary ``start_workflow`` call, and the run it eventually produces is an
         ordinary scheduled agent run.
+
+        NEVER RAISES. This runs after the answer is persisted and streamed, and
+        it ran inside the turn's `try`, so a dispatch that raised marked an
+        answered turn `failed`, sent a RUN_ERROR after the answer, and failed a
+        scheduled turn's task. On a stock install it always raised: the
+        definition is seeded only in `dev/seed.sql`, and every run in a session
+        past the threshold failed, delegated children included. A session that
+        cannot be summarized keeps its window and loses only the summary slot
+        (brief.md §3), so the verdict is "not summarized", recorded on the
+        trace and logged with the reason, and the turn keeps its status.
         """
         if session is None:
             return
-        used = execution.context_window_used if execution else None
-        if not await self.persistence.needs_summarization(session.id, agent, used):
-            self._record("maybe_summarize", "brief §3", "below threshold")
-            return
+        try:
+            used = execution.context_window_used if execution else None
+            if not await self.persistence.needs_summarization(session.id, agent, used):
+                self._record("maybe_summarize", "brief §3", "below threshold")
+                return
 
-        summarizer = (
-            await self.repo.get_agent_by_id(agent.summarizer_agent_id)
-            if agent.summarizer_agent_id
-            else None
-        )
-        run_id = await self.repo.start_workflow(
-            "summarize_session_window",
-            {
-                "session_id": str(session.id),
-                "agent": (summarizer.name if summarizer else self.settings.default_summarizer),
-                "for_agent": agent.name,
-            },
-            trace_id=self.trace_id,
-        )
+            summarizer = (
+                await self.repo.get_agent_by_id(agent.summarizer_agent_id)
+                if agent.summarizer_agent_id
+                else None
+            )
+            run_id = await self.repo.start_workflow(
+                SUMMARY_WORKFLOW,
+                {
+                    "session_id": str(session.id),
+                    "agent": (summarizer.name if summarizer else self.settings.default_summarizer),
+                    "for_agent": agent.name,
+                },
+                trace_id=self.trace_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - a side effect of an answered turn
+            detail = f"{SUMMARY_WORKFLOW} not dispatched: {type(exc).__name__}: {exc}"
+            log.warning("session %s is not summarized: %s", session.id, detail)
+            self._record("maybe_summarize", "brief §3", detail)
+            return
         self._record("maybe_summarize", "brief §3", f"dispatched workflow run {run_id}")
 
     async def finish(self, run: Run, session: Session | None, *, status: str) -> TurnResult:
