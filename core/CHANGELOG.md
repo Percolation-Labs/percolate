@@ -53,6 +53,21 @@ one.
 Thirty-nine commits since `v0.1.11`, twenty-three of them not merges. The first
 group is first because an operator has to change a deployment for it.
 
+### The quota gate asks core
+
+- **A model call checks core's quota policy, and a broken install refuses
+  instead of spending.** `check_quota` runs before every model call. It used to
+  return True whenever `rbac.has_quota_remaining(uuid, text)` was missing. Now
+  it reads the catalogue:
+  - **the function exists** (extension 0.2.1 with `specs/research-platform`):
+    core's answer stands, with one budget per person shared by their agents
+  - **neither the function nor `rbac.plan_limits` exists** (0.2.0 and
+    earlier): the call is allowed as before, since that database has no quota
+    policy
+  - **`rbac.plan_limits` exists without the function:** the call ends
+    `quota_exceeded`, and an error names the missing function
+  Pairs with 0.2.0 unchanged. `tests/test_quota_gate.py`; p8-subsystems REM-174.
+
 ### The agent service serves scheduled runs and delegation
 
 - **Give `agent serve` `P8_WORKER_DSN`, or no scheduled run can report back.**

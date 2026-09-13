@@ -21,6 +21,7 @@ something — file it as a spec gap, don't add a side channel.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Mapping
 from typing import Any, Protocol, runtime_checkable
@@ -30,8 +31,9 @@ from ...core import agent_document, identity
 from ..contracts import AgentSpec, Message, Run, RunStatus, Session, ToolServer
 from .client import PgClient
 
-_QUALIFIED_NAME = re.compile(r"[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*", re.IGNORECASE)
+logger = logging.getLogger(__name__)
 
+_QUALIFIED_NAME = re.compile(r"[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*", re.IGNORECASE)
 
 
 @runtime_checkable
@@ -456,23 +458,35 @@ class PgRepository:
     # --- neighbouring systems --------------------------------------------
 
     async def has_quota_remaining(self, user_id: UUID | None, resource_kind: str) -> bool:
-        """``rbac.has_quota_remaining()`` — ``user-rbac/spec.md`` §7.
+        """``rbac.has_quota_remaining()`` -- p8-subsystems ``specs/research-platform`` §3 (REM-174).
 
-        GAP, unchanged: that function is described in the spec's prose and does
-        not exist in its ``schema.sql``. Until it does, this returns True rather
-        than defining a local copy — a second quota mechanism living here is
-        exactly the duplication ``spec-driven-development`` §5 forbids, and a
-        silent local implementation would make the gap invisible.
+        Core decides: unset, unlimited or finite, shared by a person and their
+        agents. This asks the catalogue, not a version number, which is how
+        ``core/identity.py`` checks what a database can do:
+
+        - the function exists: its answer stands.
+        - neither it nor ``rbac.plan_limits`` exists: the extension predates quota
+          policy (0.2.0 and earlier), so there is no budget to enforce and the
+          call is allowed, as it always was on those databases.
+        - ``rbac.plan_limits`` exists and the function does not: the install is
+          broken, and a model call is refused rather than allowed without a check.
         """
         async with self.client.as_user(self.claims) as conn:
-            exists = await conn.fetchval(
-                "select to_regprocedure('rbac.has_quota_remaining(uuid, text)') is not null"
+            catalogue = await conn.fetchrow(
+                "select to_regprocedure('rbac.has_quota_remaining(uuid, text)') is not null as decides,"
+                "       to_regclass('rbac.plan_limits') is not null as has_policy"
             )
-            if not exists:
-                return True
-            return await conn.fetchval(
-                "select rbac.has_quota_remaining($1, $2)", user_id, resource_kind
-            )
+            if catalogue["decides"]:
+                return bool(await conn.fetchval(
+                    "select rbac.has_quota_remaining($1, $2)", user_id, resource_kind
+                ))
+            if catalogue["has_policy"]:
+                logger.error(
+                    "rbac.plan_limits exists but rbac.has_quota_remaining(uuid, text) does not: "
+                    "refusing %s rather than calling a model with no quota check", resource_kind
+                )
+                return False
+            return True
 
     async def start_workflow(
         self, name: str, payload: dict[str, Any], trace_id: str | None = None
