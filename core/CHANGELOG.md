@@ -12,6 +12,210 @@ on "the `percolate-core` release notes" — a precondition that had never been
 met and could not be, so the bump happened without it. A condition nobody can
 satisfy is not a safeguard; it is a sentence people learn to step over.
 
+## 0.1.12 (unreleased)
+
+**Not published.** `pyproject.toml` says `0.1.12` and there is no `v0.1.12`
+tag. This entry describes `main` at `b6d42f3`; nothing in it can be installed
+yet, and the heading loses its "(unreleased)" when the tag exists.
+
+**Pairing: extension 0.2.0.** Every live check behind this release (#41, #46,
+#48, #49) ran against `percolate-postgres:19-0.2.0`, and none of it needs an
+extension change. `wait_ms` is a key in the step's input, and on 0.2.0 both
+`define_yaml` and a JSON insert keep it; the extension's exported `http_call`
+contract does not list it yet and still describes `mode: async` as parking.
+What the runtime asks of the database at startup is what 0.1.9 asked:
+`core/identity.verify_can_open_a_session` writes the claims and then switches
+to `authenticated`, in that order, in a transaction it throws away, and the
+runtime refuses to start if the database says no. 0.1.9 remains the minimum
+runtime for a 0.2.0 database, and 0.1.11 the minimum for `percolate sample
+load` against one.
+
+Twenty commits since `v0.1.11`, twelve of them not merges. The first group is
+first because each item in it changes who can read what.
+
+### Who can hear a session, and what may be fetched
+
+- **`GET /sessions/{id}/events` answers 404 to a caller who cannot see the
+  session.** The route checked `session_messages(id) is None`, which never
+  fires: that method returns a list, and RLS turns another user's session into
+  `[]`. `relay` then LISTENed on a connection opened as the login role, where
+  RLS does not apply, so any signed-in caller holding a session id heard every
+  event of that session. The route now reads the session as the caller, the
+  check a turn already makes before resuming one, so a session the caller owns
+  with no messages in it stays observable. (#41)
+- **The egress guard covers `POST /probe` and the API source puller, not only
+  the worker.** Both fetched any address a caller chose, from the compose
+  network beside Postgres, MinIO and PostgREST. The guard moved to
+  `core/egress.py` and all three call it. An address that is private,
+  loopback, link-local, a cloud metadata service, on the compose network, or
+  otherwise not global is refused. The probe checks every redirect hop before
+  requesting it, and a hop to another origin carries only `Accept` and
+  `User-Agent`: on 0.1.11 an `auth_type: header` credential followed the
+  redirect. The puller checks every page's URL. A refusal no longer quotes the
+  address the name resolved to. (#42)
+- **`P8_TEMPLATE_ENV` is how an operator sanctions an internal endpoint, for
+  all three.** The origins of `P8_AGENT_URL`, `LLM_URL` and each variable
+  `P8_TEMPLATE_ENV` names (comma-separated) are let through. **An API source on
+  an internal address that 0.1.11 fetched is refused by 0.1.12** until the
+  variable holding its URL is named there. Not covered: DNS rebinding (the name
+  is resolved and then connected to without pinning the address), tool server
+  rows, and chained-action webhooks, which a write permission gates instead.
+
+### An async `http_call` sends, then holds its task
+
+- **On 0.1.11 an async step returned before sending**, and the worker completed
+  the task with `{"dispatched": true}`. No scheduled agent run reached
+  `/internal/run`, the seeded `summarize_session_window` included.
+- **0.1.12 sends the request and holds the task** until the callee completes or
+  fails it. The worker heartbeats while it holds, and writes nothing when the
+  task is released. A new step key, **`wait_ms`**, bounds the hold; the default
+  is 15 minutes. Past it the worker fails the task **terminally**, carrying its
+  worker id so the lease fence refuses the write if the lease has moved; not
+  retryable, because a retry would dispatch a turn that may still be running. A
+  `wait_ms` that is not a positive whole number is refused before anything is
+  sent. (#46)
+- **The hold occupies the worker.** `percolate worker` runs one task at a time,
+  so a worker holding an async step claims nothing else until the callee
+  answers or `wait_ms` passes. Size the `http` queue's workers for the async
+  steps you expect in flight at once.
+- **Found and not fixed, on extension 0.2.0:** `worker` cannot call
+  `workflow.queue_stale_timeout`, so every worker heartbeats every 40 seconds
+  whatever the queue configures, and a queue whose `stale_timeout` is under
+  about 80 seconds has held tasks reaped. Each completed dispatch also leaves one
+  `lease_violation` row (op `heartbeat`, "task is already succeeded") in
+  `v_lease_violations`: the holding worker's heartbeat after the callee
+  finished, not a fault.
+
+### A failed scheduled turn fails its task
+
+A scheduled run completes its own triggering task. Every other ending was wrong
+for the task, and with the hold above, a turn that said nothing cost the whole
+`wait_ms`. (#49)
+
+| how the turn ended | 0.1.11 | 0.1.12 |
+|---|---|---|
+| an exception inside the turn | task neither completed nor failed | failed, verdict by cause |
+| a quota cutoff | task **completed**, so the next step ran on nothing | failed, terminal |
+| a failed chained action | left for the reaper | failed, retryable |
+| before the turn: no such agent, `start_run` refused, no verified caller | failed retryable whatever the cause | failed, verdict by cause |
+| the background dispatch cancelled | nothing | failed, retryable; the cancellation is re-raised |
+
+**Terminal:** the worker's permanent database errors (42501, integrity, data),
+a model HTTP error `core.provider_errors.classify` calls terminal, a spent usage
+limit, `TerminalError`, no agent by that name the caller can see, no verified
+caller, and a quota cutoff. **Retryable:** a provider 5xx or plain 429, a
+dropped connection, a failed chained action, a cancelled turn, and a `KeyError`
+or `IndexError` from a bug inside the turn. Delegated runs carry no task and
+are unchanged. The holding worker learns the task ended at its next heartbeat.
+
+### Status codes from the agent runtime
+
+- **An unknown agent, or one RLS hides, is 404** on both the streamed and the
+  buffered path, with one sentence for both. It was a 500 buffered, and a 200
+  carrying `RUN_ERROR` streamed.
+- **A database refusal after the turn started is 403**, with the database's
+  message and hint. It was a 502 blaming the thing the runtime called.
+  Mid-stream it stays a `RUN_ERROR` event.
+- **A quota cutoff is 429 with `error.code = insufficient_quota`.** It was a
+  502. Streamed, it is `RUN_FINISHED`'s status.
+- **What this does to a workflow:** the worker classifies a 404 as terminal, so
+  an `agent:` step naming an agent that does not exist now fails on its first
+  attempt; the 500 was retried to `max_attempts`. A 429 carrying
+  `insufficient_quota` is terminal by the same rules, so an `agent:` step stops
+  on the first quota cutoff. `/internal/run` is unchanged. (#47)
+
+### U+0000 in a jsonb write
+
+- **A NUL in any jsonb parameter bound through the runtime's pool is written as
+  U+FFFD.** 0.1.10 did this at two call sites, and three more writes carried the
+  byte: an `http_call` response into `complete_task`, an API source page into
+  `content.commit_api_page`, and a tool server's catalogue into
+  `agentic.upsert_tool_server`. On 0.1.11 a sync `http_call` whose response held
+  a NUL failed its task terminally. The rule is now the jsonb encoder the pool
+  installs on every connection. Outside it: the NOTIFY listener and the CLI's
+  own connections, which the test names so a third fails it, and `json` (not
+  `jsonb`) parameters. (#48)
+
+### CI
+
+- **Every test file runs, or says why not.** Eleven of thirty-nine were named in
+  no CI step and never ran, including the tests two closed issues rested on.
+  `dev/check-tests-run.sh` refuses a `tests/test_*.py` that no step runs and no
+  `# not run here:` line declares. One is declared: `test_pool_render.py` needs
+  a private repository, and no workflow in either repository runs it. (#45)
+- **A markdown-only change runs CI.** `paths-ignore: ['**.md']` skipped
+  `dev/check-releases.sh` on the one kind of change that can break it. (#40)
+
+## 0.1.11
+
+`v0.1.11` names `4d583e8`. One commit since `v0.1.10`.
+
+**0.1.10 did not make `percolate sample load` work against extension 0.2.0,
+and that is why 0.1.11 exists.** The command makes two inserts that 0.2.0's
+tightened columns refuse. 0.1.10 fixed the first, the channel, and was verified
+by probing that constraint with two SQL statements rather than by running the
+command, so the second was still there.
+
+- **An edge omits `org_id` instead of passing NULL.** `apply_graph` passed
+  `e.get("org")` into the column, and the sample's `graph.yaml` declares no
+  `org:` on any edge. On 0.2.0 the column is NOT NULL with the shared tier as
+  its default, and an explicit NULL is refused rather than defaulted:
+  `null value in column "org_id" of relation "edges" violates not-null
+  constraint`. The column is now left out when the document leaves it out, as
+  the channel branch already did. (#39)
+
+Verified by running `ci/coldstart.sh`'s own invocation, `percolate sample load
+samples/harbour --as-email … --skip-documents`, against a fresh
+`percolate-postgres:19-0.2.0`, and reading the rows back through the database:
+one `harbourmaster` agent, nine edges, `harbour-reports` public with no owner.
+
+**Pairing: 0.1.11 is the minimum `percolate-core` for `percolate sample load`
+against extension 0.2.0**, which is the command get-percolate's install guide
+has a reader run. As a runtime it serves 0.2.0 as 0.1.9 did.
+
+## 0.1.10
+
+`v0.1.10` names `3612268`. Six commits since `v0.1.9`, cut the evening extension
+0.2.0 published. It published as a **retry**, like 0.1.9.
+
+**Against extension 0.2.0, `percolate sample load` still fails on this
+version.** 0.1.10 fixed the channel insert and not the edge insert behind it;
+0.1.11 is the fix.
+
+- **`percolate sample load` writes a channel somebody can read.** The insert
+  left owner and visibility to the column defaults, null and `private`, and
+  0.2.0's `channels_readable_by_somebody` CHECK refuses that row, so step three
+  of the install guide died on the constraint. The loader now asks the database
+  for both, `rbac.current_user_id()` and `rbac.default_visibility()`: on the
+  admin DSN that is `public` with no owner, and a signed-in installer gets
+  `private` against their own id. An extension without those functions gets
+  the old insert. (#38)
+- **A NUL byte no longer aborts a turn's rows or a document's chunks.** Postgres
+  `text` cannot hold U+0000, and both writes hand Postgres a jsonb argument read
+  back as text. A live tool result took a turn that had already run to `failed`;
+  one NUL in a 777-byte upload took the ingest task terminal, cancelled the
+  three tasks after it and wrote no chunks. Both writes now carry U+FFFD, in
+  keys as well as values, so a chunk still lines up with its `start_offset`.
+  `core.text.without_nul`. (#36; every pool write in 0.1.12)
+- **`X-P8-*` headers go only to an origin in `P8_TOOL_AUTH_ORIGINS`.** A tool
+  server left out of that list received the caller's `X-P8-User-Id` and
+  `X-P8-Session-Id` while being refused the caller's token. The context now
+  goes where the token goes, and not across a redirect; `traceparent` still goes
+  everywhere. **A tool server that read those headers without its origin in the
+  list receives none of them.** (#37)
+- **A scheduled run is authenticated as whoever scheduled it.** The worker
+  minted a run-owner token only for `{{env.P8_AGENT_URL}}/v1/chat/completions`,
+  so the documented `/internal/run` step went out with the shared `P8_API_KEY`
+  and ran with that one identity's scope. Both runtime paths now mint. A step
+  whose resolved origin is not the configured runtime raises instead of falling
+  back to the shared key, and a run with no verified owner is refused. It takes
+  effect with get-percolate#25, which mounts the key. (#30)
+- **A failed connection reset keeps the reason the turn failed.** Terminating an
+  already-released connection raised, and that exception replaced the one the
+  handler was re-raising. (#35)
+- **`dev/check-version.sh` refuses a percolate-core image pin that is not the
+  latest tag.** The README's compose block pinned a yanked version. (#32)
+
 ## 0.1.9
 
 `pyproject.toml` said `0.1.9` with no `v0.1.9` tag, so the release workflow ran
