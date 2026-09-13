@@ -282,6 +282,9 @@ create table if not exists rbac.plan_limits (
     constraint plan_limits_finite_has_amount check ((mode = 'finite') = (amount is not null))
 );
 
+-- Earlier 0.2.1 development installs already have this table.
+alter table rbac.plan_limits add column if not exists shipped boolean not null default false;
+
 create table if not exists rbac.plan_assignments (
     user_id     uuid primary key references rbac.users(id) on delete cascade,
     plan        text not null references rbac.plans(name),
@@ -778,6 +781,15 @@ create table if not exists engagement.follows (
     created_at    timestamptz not null default now(),
     primary key (user_id, target_org_id)
 );
+
+-- Preserve follows when applying this schema over the original platform slice.
+do $$
+begin
+    if exists (select 1 from information_schema.columns
+                where table_schema = 'engagement' and table_name = 'follows' and column_name = 'org_id') then
+        alter table engagement.follows rename column org_id to target_org_id;
+    end if;
+end $$;
 
 create table if not exists engagement.votes (
     id           uuid primary key default uuidv7(),

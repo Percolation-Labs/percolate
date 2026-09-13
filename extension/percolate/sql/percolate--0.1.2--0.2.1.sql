@@ -28688,6 +28688,7 @@ insert into rbac.permission_kinds (resource, action, checked_by, human_only, eve
     ('research',   'insert',   'function research.submit_package',       false, true),
     ('research',   'list',     'function research.submit_package',       false, false),
     ('research',   'endorse',  'function research.endorse',              true,  true),
+    ('engagement', 'select',   'policy saves_self',                      false, true),
     ('engagement', 'insert',   'function engagement.add_comment',        true,  true),
     ('engagement', 'moderate', 'function engagement.moderate_comment',   true,  false)
 on conflict (resource, action) do update
@@ -28778,6 +28779,8 @@ begin
         when v_user is null then 'anonymous'
         when not exists (select 1 from rbac.users where id = v_user and status = 'active') then 'inactive'
         when v_kind.human_only and rbac.current_actor() <> 'person' then 'human_only'
+        when rbac.request_claims() ? 'api_key_id' and v_key is null then 'credential_invalid'
+        when rbac.current_actor() = 'agent' and v_key is null then 'credential_required'
     end;
     if v_reason is null and v_key is not null then
         select scopes into v_scopes from rbac.api_keys
@@ -28790,7 +28793,25 @@ begin
             v_reason := 'scope_missing';
         end if;
     end if;
-    if v_reason is null and not (v_kind.every_person or rbac.has_permission(v_user, p_resource, p_action)) then
+    if v_reason is null and not (v_kind.every_person or exists (
+        select 1 from rbac.user_roles ur join rbac.role_permissions rp on rp.role = ur.role
+         where ur.user_id = v_user and rp.resource = p_resource and rp.action = p_action
+           and (
+               -- Pre-ledger core roles keep their existing meaning. Once this
+               -- role has a ledger entry, only an active, matching grant counts.
+               not exists (select 1 from rbac.grants g where g.user_id = v_user and g.role = ur.role)
+               or exists (
+                   select 1 from rbac.grants g
+                    where g.user_id = v_user and g.role = ur.role and g.revoked_at is null
+                      and (g.application = 'percolate'
+                           or g.application = rbac.request_claims()->>'application'
+                           or (position('.' in p_resource) > 0 and g.application = split_part(p_resource, '.', 1)))
+                      and (g.org_id = rbac.shared_org_id()
+                           or (g.org_id::text = rbac.request_claims()->>'org_id'
+                               and g.org_id in (select rbac.current_org_ids())))
+               )
+           )
+    )) then
         v_reason := 'no_grant';
     end if;
     return jsonb_build_object('resource', p_resource, 'action', p_action,
@@ -28822,11 +28843,11 @@ create or replace function rbac.grant_with_basis(
 returns uuid language plpgsql security definer set search_path = pg_catalog, public as $$
 declare v_id uuid; v_by uuid := rbac.current_user_id();
 begin
-    if not (rbac.is_operator() or rbac.has_permission(v_by, 'users', 'admin')) then
-        raise insufficient_privilege using message = 'Granting a role needs users:admin';
-    end if;
-    if not rbac.is_operator() and rbac.current_actor() <> 'person' then
-        raise insufficient_privilege using message = 'Only a person grants a role';
+    if not rbac.is_operator() then
+        if rbac.current_actor() <> 'person' then
+            raise insufficient_privilege using message = 'Only a person grants a role';
+        end if;
+        perform rbac.require('users', 'admin');
     end if;
     insert into rbac.grants (user_id, role, application, org_id, granted_by, basis, evidence_ref)
     values (p_user, p_role, p_application, coalesce(p_org, rbac.shared_org_id()), v_by, p_basis, p_evidence)
@@ -28845,8 +28866,11 @@ begin
     if coalesce(p_reason, '') = '' then
         raise invalid_parameter_value using message = 'A revocation says why';
     end if;
-    if not (rbac.is_operator() or rbac.has_permission(v_by, 'users', 'admin')) then
-        raise insufficient_privilege using message = 'Revoking a role needs users:admin';
+    if not rbac.is_operator() then
+        if rbac.current_actor() <> 'person' then
+            raise insufficient_privilege using message = 'Only a person revokes a role';
+        end if;
+        perform rbac.require('users', 'admin');
     end if;
     update rbac.grants set revoked_at = now(), revoked_by = v_by, revoke_reason = p_reason
      where id = p_grant and revoked_at is null
@@ -28917,6 +28941,9 @@ create table if not exists rbac.plan_limits (
     primary key (plan, resource_kind),
     constraint plan_limits_finite_has_amount check ((mode = 'finite') = (amount is not null))
 );
+
+-- Earlier 0.2.1 development installs already have this table.
+alter table rbac.plan_limits add column if not exists shipped boolean not null default false;
 
 create table if not exists rbac.plan_assignments (
     user_id     uuid primary key references rbac.users(id) on delete cascade,
@@ -29191,7 +29218,9 @@ create unique index if not exists endorsements_one_active
 
 create or replace function research.readable(p_work uuid) returns boolean
 language sql stable security definer set search_path = pg_catalog, public as $$
-    select coalesce((select rbac.may_read(owner_id, org_id, visibility) from research.works where id = p_work), false);
+    select coalesce((select rbac.may_read(owner_id, org_id, visibility)
+                            and (rbac.current_user_id() is null or rbac.may('research', 'select'))
+                       from research.works where id = p_work), false);
 $$;
 
 create or replace function research.revision_readable(p_revision uuid) returns boolean
@@ -29311,11 +29340,12 @@ begin
     if h.label <> p_expected_revision then
         raise exception using errcode = 'PT409', message = 'This package has a newer revision', detail = h.label;
     end if;
+    -- A private-writing key must not rewrite already-public work either.
+    if v_listed or w.visibility = 'public' then
+        perform rbac.require('research', 'list');
+    end if;
     if h.content_hash = v_hash then
         return research.receipt(h.id, false);
-    end if;
-    if v_listed and w.visibility <> 'public' then
-        perform rbac.require('research', 'list');
     end if;
     insert into research.revisions (work_id, number, label, schema_version, document, content_hash,
                                     predecessor_id, actor_id, actor_kind, credential_id)
@@ -29343,7 +29373,7 @@ language sql stable security definer set search_path = pg_catalog, public as $$
       join research.revisions r on r.work_id = w.id
                                and (case when p_revision is null then r.id = hd.revision_id else r.label = p_revision end)
      where w.public_id = p_public_id
-       and rbac.may_read(w.owner_id, w.org_id, w.visibility);
+       and research.readable(w.id);
 $$;
 
 create or replace function research.list_packages(p_owned_only boolean default false) returns setof jsonb
@@ -29355,7 +29385,7 @@ language sql stable security definer set search_path = pg_catalog, public as $$
       from research.works w
       join research.heads hd on hd.work_id = w.id
       join research.revisions r on r.id = hd.revision_id
-     where rbac.may_read(w.owner_id, w.org_id, w.visibility)
+     where research.readable(w.id)
        and (not p_owned_only or w.owner_id = rbac.current_user_id())
      order by hd.updated_at desc, w.public_id;
 $$;
@@ -29377,6 +29407,7 @@ $$;
 create or replace function research.withdraw_endorsement(p_endorsement uuid, p_reason text) returns void
 language plpgsql security definer set search_path = pg_catalog, public as $$
 begin
+    perform rbac.require('research', 'endorse');
     update research.endorsements set withdrawn_at = now(), withdraw_reason = p_reason
      where id = p_endorsement and endorser_id = rbac.current_user_id() and withdrawn_at is null;
     if not found then
@@ -29410,6 +29441,15 @@ create table if not exists engagement.follows (
     created_at    timestamptz not null default now(),
     primary key (user_id, target_org_id)
 );
+
+-- Preserve follows when applying this schema over the original platform slice.
+do $$
+begin
+    if exists (select 1 from information_schema.columns
+                where table_schema = 'engagement' and table_name = 'follows' and column_name = 'org_id') then
+        alter table engagement.follows rename column org_id to target_org_id;
+    end if;
+end $$;
 
 create table if not exists engagement.votes (
     id           uuid primary key default uuidv7(),
@@ -29707,6 +29747,11 @@ create policy usage_ledger_self on rbac.usage_ledger for select using (user_id =
 -- scope columns, so the tenancy rule has one home.
 drop policy if exists works_readable on research.works;
 select rbac.add_scope_policy('research.works');
+-- Visibility is necessary but cannot override a revoked key or inactive owner.
+-- A restrictive policy intersects with the generated tenancy policy above.
+drop policy if exists works_access on research.works;
+create policy works_access on research.works as restrictive for select
+    using (rbac.current_user_id() is null or rbac.may('research', 'select'));
 -- The same guard rbac.add_scope_columns() attaches: 'org' visibility needs a
 -- real org, whichever definer writes the row (rbac/02).
 create or replace trigger trg_works_visibility before insert or update on research.works
@@ -29722,7 +29767,8 @@ create policy heads_readable on research.heads for select using (research.readab
 
 alter table research.operations enable row level security;
 drop policy if exists operations_owner on research.operations;
-create policy operations_owner on research.operations for select using (owner_id = rbac.current_user_id());
+create policy operations_owner on research.operations for select
+    using (owner_id = rbac.current_user_id() and rbac.may('research', 'select'));
 
 alter table research.claims enable row level security;
 drop policy if exists claims_readable on research.claims;
@@ -29746,19 +29792,23 @@ create policy endorsements_readable on research.endorsements for select using (r
 
 alter table engagement.saves enable row level security;
 drop policy if exists saves_self on engagement.saves;
-create policy saves_self on engagement.saves for select using (user_id = rbac.current_user_id());
+create policy saves_self on engagement.saves for select
+    using (user_id = rbac.current_user_id() and rbac.may('engagement', 'select'));
 
 alter table engagement.follows enable row level security;
 drop policy if exists follows_self on engagement.follows;
-create policy follows_self on engagement.follows for select using (user_id = rbac.current_user_id());
+create policy follows_self on engagement.follows for select
+    using (user_id = rbac.current_user_id() and rbac.may('engagement', 'select'));
 
 alter table engagement.votes enable row level security;
 drop policy if exists votes_self on engagement.votes;
-create policy votes_self on engagement.votes for select using (user_id = rbac.current_user_id());
+create policy votes_self on engagement.votes for select
+    using (user_id = rbac.current_user_id() and rbac.may('engagement', 'select'));
 
 alter table engagement.valuations enable row level security;
 drop policy if exists valuations_self on engagement.valuations;
-create policy valuations_self on engagement.valuations for select using (user_id = rbac.current_user_id());
+create policy valuations_self on engagement.valuations for select
+    using (user_id = rbac.current_user_id() and rbac.may('engagement', 'select'));
 
 alter table engagement.comments enable row level security;
 drop policy if exists comments_readable on engagement.comments;
@@ -29768,11 +29818,13 @@ create policy comments_readable on engagement.comments for select
 alter table engagement.comment_versions enable row level security;
 drop policy if exists comment_versions_author on engagement.comment_versions;
 create policy comment_versions_author on engagement.comment_versions for select
-    using (exists (select 1 from engagement.comments c where c.id = comment_id and c.author_id = rbac.current_user_id()));
+    using (rbac.may('engagement', 'select')
+           and exists (select 1 from engagement.comments c where c.id = comment_id and c.author_id = rbac.current_user_id()));
 
 alter table engagement.comment_likes enable row level security;
 drop policy if exists comment_likes_self on engagement.comment_likes;
-create policy comment_likes_self on engagement.comment_likes for select using (user_id = rbac.current_user_id());
+create policy comment_likes_self on engagement.comment_likes for select
+    using (user_id = rbac.current_user_id() and rbac.may('engagement', 'select'));
 
 -- Signed-in callers only. No definer here is granted to web_anon (rbac/04);
 -- an anonymous reader reaches listed research through an application.
