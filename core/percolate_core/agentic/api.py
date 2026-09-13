@@ -347,15 +347,19 @@ def build_app(settings: Settings | None = None) -> FastAPI:
     exists when this subsystem runs alone.
     """
     resolved = settings or Settings.from_env()
+    gateway = mount_gateway_server(resolved)
 
     @asynccontextmanager
     async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-        async with lifespan(app, resolved):
+        # The gateway's session manager owns a task group for as long as the
+        # app is up, and a mounted MCP route answers nothing without it.
+        async with lifespan(app, resolved), gateway.session_manager.run():
             yield
 
     from .. import __version__
 
     app = FastAPI(title="percolate-agent", version=__version__, lifespan=_lifespan)
+    app.state.percolate_agent_gateway = gateway
     # Standalone deployment policy. A host mounting router()/lifespan() owns
     # its own policy. No cookies and no wildcard; bearer verification and RLS
     # still run in the existing handler, including on cross-origin requests.
@@ -371,7 +375,45 @@ def build_app(settings: Settings | None = None) -> FastAPI:
             allow_credentials=False,
         )
     app.include_router(router())
+    app.router.routes.append(gateway.percolate_mcp_route)
     return app
+
+
+GATEWAY_PATH = "/mcp"
+"""Where ``agent serve`` answers MCP: the agent gateway, this runtime's agents as tools."""
+
+
+def mount_gateway_server(settings: Settings) -> Any:
+    """The agent gateway, built to be served by this app at ``GATEWAY_PATH``.
+
+    ``brief.md`` §5.1 item 3: "The gateway is the same deployed runtime, so this
+    is not a second service." Only ``percolate agent gateway`` served it, on
+    8765, and neither get-percolate's compose file nor its chart runs that
+    command. So the delegation its agents page registers,
+    ``http://agent:8080/mcp``, answered 404, and nothing on a stock install
+    could delegate. ``agent gateway`` still exists for a deployment that wants
+    delegation on its own replicas (§10.1), and serves the same server.
+
+    ONE ROUTE, NOT A MOUNT. A Starlette ``Mount("/mcp")`` answers ``/mcp`` with
+    a redirect to ``/mcp/``, and the MCP provider does not follow redirects
+    (``tools/mcp.py``, on purpose: a redirect is where a token leaves for
+    another origin). The route the MCP SDK builds for its own app is taken as it
+    is, so the transport is the SDK's and not a copy of it; its ``/_build`` and
+    ``/internal/run`` routes are left behind, because this app has its own.
+
+    ``host="0.0.0.0"`` for the reason ``agent gateway`` binds it: the SDK turns
+    on DNS-rebinding protection for a loopback host, which refuses every
+    ``Host: agent:8080`` a container network sends. Stateless, as that command
+    defaults, because a delegated call is a complete request.
+    """
+    from .gateway import build_server
+
+    gateway = build_server(settings)
+    sdk_app = gateway.streamable_http_app(
+        streamable_http_path=GATEWAY_PATH, stateless_http=True, host="0.0.0.0")
+    [route] = [r for r in sdk_app.routes if getattr(r, "path", None) == GATEWAY_PATH]
+    gateway.percolate_mcp_route = route
+    return gateway
 
 
 async def _resume_or_open(

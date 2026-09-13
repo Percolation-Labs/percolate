@@ -282,6 +282,12 @@ jobs:
       - name: A refused tool call reaches the model and the stream as a failure
         run: python -m unittest discover -s tests -p test_a_refused_tool_call_is_an_error.py
 
+      # brief.md §5.1: the agent gateway is the same deployed runtime. Only
+      # `agent gateway` served MCP, no shipped deployment runs it, and the
+      # documented http://agent:8080/mcp answered 404.
+      - name: agent serve answers MCP at /mcp, as the agent gateway
+        run: python -m unittest discover -s tests -p test_gateway_on_agent_serve.py
+
       - name: Prose has one wrapping default and one measure
         run: python -m unittest discover -s tests -p test_ui_theme.py
 
