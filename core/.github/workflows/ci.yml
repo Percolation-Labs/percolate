@@ -282,6 +282,14 @@ jobs:
 
       # not run here: test_pool_render.py -- it compares the render against k8s/examples in p8-subsystems, a private repository this job cannot check out; it passes locally against p8-subsystems origin/main 6491ffc with P8_K8S_EXAMPLES set, and no workflow in either repository runs it
 
+      # A scheduled turn that fails, fails its workflow task, with the verdict
+      # its cause carries: provider_errors for the model, the worker's permanent
+      # database errors, terminal for a quota cutoff and an unknown agent,
+      # retryable for a failed chained action and a cancelled turn. They used to
+      # say nothing, or complete it (quota), or fail everything retryable.
+      - name: A failed scheduled turn fails its task, terminal or not by cause
+        run: python -m unittest discover -s tests -p test_a_failed_turn_fails_its_task.py
+
       - name: A released version number may not be reused
         run: dev/check-version.sh
 

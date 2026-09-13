@@ -35,6 +35,7 @@ from .runtime import EventSink, inbound_delegation
 from .runtime.budget import Budget
 from .runtime.delegation import TOOL_PREFIX
 from .settings import Settings
+from .task_outcome import failure_is_terminal
 
 
 def caller_claims(headers: dict[str, str]) -> dict[str, Any] | None:
@@ -259,25 +260,40 @@ and a workflow task that waits forever.
 async def _dispatch(settings: Settings, **kwargs: Any) -> None:
     """Run a scheduled turn in the background, failing its task if it raises.
 
-    A run that dies must not leave the task in `waiting_external` forever: the
-    task is failed, which is what hands it back to workflow-engine's retry
-    (`max_attempts`, backoff) instead of inventing a retry policy here.
+    A run that dies must not leave its task unanswered: the workflow waits for
+    this runtime's completion. The sequencer fails the task for what it catches
+    (an exception inside the turn, a quota cutoff, a failed chained action);
+    this covers what escapes it -- an unknown agent, a refused `start_run`, no
+    verified caller, a database that is down -- and the turn being cancelled.
+
+    Every one of these was failed RETRYABLE, whatever the cause, so an agent
+    name nobody registered was dispatched `max_attempts` times.
+    `task_outcome.failure_is_terminal` decides now.
     """
     try:
         await run_scheduled(settings, **kwargs)
+    except asyncio.CancelledError:
+        # The runtime is stopping with the turn unfinished. Nothing about the
+        # turn is wrong, so it goes back for another attempt -- and it is said
+        # now, because nobody else will say it.
+        await _fail_task(settings, kwargs["task_id"],
+                         "CancelledError: the runtime stopped before the turn finished",
+                         terminal=False)
+        raise
     except Exception as exc:  # noqa: BLE001 - any failure must reach the task
         import traceback
 
         traceback.print_exc()
-        async with (
-            connected(settings, None) as repo,
-            repo.client.as_user(None, role="worker") as conn,
-        ):
-            await conn.execute(
-                "select workflow.fail_task($1, $2::jsonb)",
-                kwargs["task_id"],
-                {"error": f"{type(exc).__name__}: {exc}"},
-            )
+        await _fail_task(settings, kwargs["task_id"], f"{type(exc).__name__}: {exc}",
+                         terminal=failure_is_terminal(exc))
+
+
+async def _fail_task(settings: Settings, task_id: UUID, message: str, *, terminal: bool) -> None:
+    error: dict[str, Any] = {"error": message}
+    if terminal:
+        error["terminal"] = True
+    async with connected(settings, None) as repo:
+        await repo.fail_task(task_id, error, terminal)
 
 
 async def run_scheduled(

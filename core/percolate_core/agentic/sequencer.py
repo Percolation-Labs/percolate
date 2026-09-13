@@ -53,6 +53,7 @@ from .runtime import (
 from .runtime.budget import Budget
 from .runtime.delegation import DELEGATED_BY_HEADER
 from .settings import Settings
+from .task_outcome import failure_is_terminal
 from .tools import ResolvedToolset, resolve_toolset
 from .tools.auth import caller_credentials
 
@@ -241,6 +242,10 @@ class TurnSequencer:
                 message = message.replace(self._caller_authorization.split(" ", 1)[-1], "[redacted]")
             run = await self.repo.update_run(run.id, status="failed", state={**run.state, "error": message})
             await self.sink.emit(RunError(thread_id=run.session_id, run_id=run.id, message=message))
+            # A scheduled run's task hears about it too. This path recorded the
+            # run as failed and returned, so the task was neither completed nor
+            # failed and the workflow waited out whatever bound came first.
+            await self.fail_workflow_task(run, message, terminal=failure_is_terminal(exc))
             self._record("finish", "brief §5.1", "failed")
             return TurnResult(run=run, session=session, trace=list(self.trace), error=exc)
 
@@ -666,11 +671,19 @@ class TurnSequencer:
         if self.workflow_task_id is not None:
             # brief.md §3: the runtime completes its own triggering task, once
             # the run AND any chained action have finished — which is why this
-            # is here and not in maybe_chain. A failed chained action means the
-            # task is not done, so it is left for workflow-engine's retry rather
-            # than marked complete with a broken result.
-            if self.chained_action_failed:
-                self._record("finish", "brief §3", "chained action failed — task left incomplete")
+            # is here and not in maybe_chain.
+            if status == "quota_exceeded":
+                # COMPLETED, which it was: a step whose run did no work reported
+                # success, and the next step ran on nothing. Terminal, because a
+                # retry inside the engine's backoff asks the same quota gate --
+                # the verdict core/provider_errors gives an account out of credit.
+                await self.fail_workflow_task(
+                    run, "quota_exceeded: no quota remaining for this caller", terminal=True)
+            elif self.chained_action_failed:
+                # The task is not done. It used to be LEFT for the engine's retry,
+                # which only the reaper delivered; failing it retryable delivers
+                # the same retry without waiting for a lease to go stale.
+                await self.fail_workflow_task(run, "the chained action failed", terminal=False)
             else:
                 await self.repo.complete_task(
                     self.workflow_task_id,
@@ -679,3 +692,19 @@ class TurnSequencer:
                 self._record("finish", "brief §3", f"completed task {self.workflow_task_id}")
         self._record("finish", "brief §5.1", status)
         return TurnResult(run=run, session=session, trace=list(self.trace))
+
+    async def fail_workflow_task(self, run: Run, message: str, *, terminal: bool) -> None:
+        """Fail a scheduled run's triggering task; nothing for any other run.
+
+        `terminal` comes from `task_outcome.failure_is_terminal` or from the
+        exit path's own rule, never from a default: a retryable failure is
+        re-dispatched by the engine, and a terminal one fails the workflow run.
+        """
+        if self.workflow_task_id is None:
+            return
+        error: dict[str, Any] = {"error": message, "run_id": str(run.id), "status": run.status}
+        if terminal:
+            error["terminal"] = True
+        await self.repo.fail_task(self.workflow_task_id, error, terminal)
+        self._record("finish", "brief §3",
+                     f"failed task {self.workflow_task_id} ({'terminal' if terminal else 'retryable'})")
