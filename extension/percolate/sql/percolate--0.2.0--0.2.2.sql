@@ -1,5 +1,5 @@
 -- ============================================================
--- percolate 0.2.1 -- the whole schema, as one extension script.
+-- percolate 0.2.2 -- the whole schema, as one extension script.
 --
 -- GENERATED from specs/ by extension/percolate/build-sql.py. Do not edit.
 --
@@ -29628,6 +29628,137 @@ grant execute on function
     engagement.withdraw_comment(uuid, text), engagement.moderate_comment(uuid, text),
     engagement.set_like(uuid, boolean)
 to authenticated;
+
+
+-- ------------------------------------------------------------
+-- 7. Application provisioning: the app_provisioner role
+-- ------------------------------------------------------------
+-- An application gives its people, their credentials and its own grants a
+-- core identity through the four functions below and rbac.declare_application,
+-- over a login role that is a member of app_provisioner (dev/image-init/
+-- 00-superuser.sql creates it). They run as their owner, so the role holds no
+-- table grants and needs no write policies: it can create exactly these rows
+-- and read none of them. A superuser passes too, for tests and hand repair.
+
+create or replace function rbac.is_app_provisioner() returns boolean
+language sql stable set search_path = pg_catalog, public as $$
+    select coalesce((select rolsuper from pg_roles where rolname = session_user), false)
+        or case when exists (select 1 from pg_roles where rolname = 'app_provisioner')
+                then pg_has_role(session_user, 'app_provisioner', 'member')
+                else false end;
+$$;
+
+create or replace function rbac.require_app_provisioner() returns void
+language plpgsql stable set search_path = pg_catalog, public as $$
+begin
+    if not rbac.is_app_provisioner() then
+        raise insufficient_privilege using message = 'Only the application provisioner does this';
+    end if;
+end;
+$$;
+
+create or replace function rbac.provision_application_user(p_user uuid) returns void
+language plpgsql security definer set search_path = pg_catalog, public as $$
+begin
+    perform rbac.require_app_provisioner();
+    insert into rbac.users (id, email, status)
+    values (p_user, p_user::text || '@users.percolate.invalid', 'active')
+    on conflict (id) do nothing;
+end;
+$$;
+
+-- The application verified the secret; core keeps the credential so it can
+-- apply its scopes and see its revocation. The hash names it as provisioned.
+create or replace function rbac.provision_application_credential(p_key uuid, p_user uuid, p_label text, p_scopes text[])
+returns void language plpgsql security definer set search_path = pg_catalog, public as $$
+begin
+    perform rbac.require_app_provisioner();
+    if not exists (select 1 from rbac.users where id = p_user) then
+        raise foreign_key_violation using message = 'Provision the user before their credential';
+    end if;
+    insert into rbac.api_keys (id, user_id, label, key_hash, scopes)
+    values (p_key, p_user, coalesce(nullif(p_label, ''), 'application credential'),
+            'application:' || p_key::text, coalesce(p_scopes, '{}'))
+    on conflict (id) do nothing;
+end;
+$$;
+
+-- Only a credential an application provisioned: never a key a person made in core.
+create or replace function rbac.revoke_application_credential(p_key uuid) returns void
+language plpgsql security definer set search_path = pg_catalog, public as $$
+begin
+    perform rbac.require_app_provisioner();
+    update rbac.api_keys set revoked_at = now()
+     where id = p_key and revoked_at is null
+       and key_hash in ('application:' || p_key::text, 'app-token:' || p_key::text);
+end;
+$$;
+
+-- A role an application may hand out carries only application-qualified
+-- capabilities (hub.*) or the two platform ones an application decides:
+-- listing research and moderating comments. Anything else -- users:admin, a
+-- grants_all role -- is refused, so the provisioner cannot mint an administrator.
+create or replace function rbac.grant_application_role(p_user uuid, p_role text, p_resource text, p_action text,
+                                                       p_basis text, p_evidence text, p_application text, p_org uuid)
+returns uuid language plpgsql security definer set search_path = pg_catalog, public as $$
+declare v_id uuid; v_org uuid := coalesce(p_org, rbac.shared_org_id());
+begin
+    perform rbac.require_app_provisioner();
+    if coalesce(p_application, '') !~ '^[a-z][a-z0-9_-]{1,40}$' then
+        raise invalid_parameter_value using message = 'A grant names its application';
+    end if;
+    if p_role !~ '^[a-z][a-z0-9_-]{1,60}$' then
+        raise invalid_parameter_value using message = 'A role name is a lower-case word';
+    end if;
+    if not (p_resource like '%.%' or (p_resource, p_action) in (('research', 'list'), ('engagement', 'moderate'))) then
+        raise insufficient_privilege using message = 'An application grants only its own capabilities, research:list or engagement:moderate';
+    end if;
+    if exists (select 1 from rbac.roles where name = p_role and grants_all)
+       or exists (select 1 from rbac.role_permissions where role = p_role
+                   and not (resource like '%.%' or (resource, action) in (('research', 'list'), ('engagement', 'moderate')))) then
+        raise insufficient_privilege using message = 'That role carries capabilities an application cannot grant';
+    end if;
+    perform pg_advisory_xact_lock(hashtextextended(p_user::text || '/' || p_role || '/' || p_application || '/' || v_org::text, 0));
+    insert into rbac.roles (name, description) values (p_role, 'granted by an application') on conflict do nothing;
+    insert into rbac.role_permissions (role, resource, action) values (p_role, p_resource, p_action) on conflict do nothing;
+    -- Provisioning is not a regrant. A revoked historical entry remains the
+    -- result of this operation, including after an application restart.
+    select id into v_id from rbac.grants
+     where user_id = p_user and role = p_role and application in (p_application, 'percolate') and org_id = v_org
+     order by created_at, id limit 1;
+    if v_id is null then
+        insert into rbac.grants (user_id, role, basis, evidence_ref, application, org_id)
+        values (p_user, p_role, p_basis, p_evidence, p_application, v_org)
+        returning id into v_id;
+        insert into rbac.user_roles (user_id, role) values (p_user, p_role) on conflict do nothing;
+    end if;
+    return v_id;
+end;
+$$;
+
+-- Keep existing six-argument clients compatible; new clients name their scope.
+create or replace function rbac.grant_application_role(p_user uuid, p_role text, p_resource text, p_action text,
+                                                       p_basis text, p_evidence text default null)
+returns uuid language sql security invoker set search_path = pg_catalog, public as $$
+    select rbac.grant_application_role(p_user, p_role, p_resource, p_action, p_basis, p_evidence, 'percolate', null);
+$$;
+
+-- Granted only where the role exists: a from-zero install without it still
+-- installs, and ALTER EXTENSION after the role is created picks these up.
+do $$
+begin
+    if exists (select 1 from pg_roles where rolname = 'app_provisioner') then
+        grant usage on schema rbac to app_provisioner;
+        grant execute on function
+            rbac.provision_application_user(uuid),
+            rbac.provision_application_credential(uuid, uuid, text, text[]),
+            rbac.revoke_application_credential(uuid),
+            rbac.grant_application_role(uuid, text, text, text, text, text),
+            rbac.grant_application_role(uuid, text, text, text, text, text, text, uuid),
+            rbac.declare_application(text, text, jsonb)
+        to app_provisioner;
+    end if;
+end $$;
 
 
 -- ============================================================
