@@ -139,6 +139,8 @@ services:
       # its own source. Test-only; never reuse them anywhere reachable.
       P8_AUTHENTICATOR_PASSWORD: authpass
       P8_WORKER_PASSWORD: workerpass
+      # The dev stack sets one, so app_provisioner exists here; a real install sets it only with an application.
+      P8_APP_PROVISIONER_PASSWORD: provisionerpass
     ports:
       - "${P8_PG_PORT:-5610}:5432"
     volumes:

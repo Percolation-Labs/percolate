@@ -58,6 +58,10 @@ set client_min_messages = warning;
 \else
     \getenv worker_pw P8_WORKER_PASSWORD
 \endif
+\if :{?app_provisioner_pw}
+\else
+    \getenv app_provisioner_pw P8_APP_PROVISIONER_PASSWORD
+\endif
 \if :{?auth_pw}
 \else
     \set auth_pw ''
@@ -66,13 +70,18 @@ set client_min_messages = warning;
 \else
     \set worker_pw ''
 \endif
+\if :{?app_provisioner_pw}
+\else
+    \set app_provisioner_pw ''
+\endif
 
 -- Through set_config because psql does not substitute :variables inside a
 -- dollar-quoted block; transaction-local, so the passwords do not outlive the
 -- loop. \gset rather than a bare select, which would print them.
 begin;
 select set_config('bootstrap.auth_pw',   :'auth_pw',   true) as _auth_pw,
-       set_config('bootstrap.worker_pw', :'worker_pw', true) as _worker_pw \gset
+       set_config('bootstrap.worker_pw', :'worker_pw', true) as _worker_pw,
+       set_config('bootstrap.app_provisioner_pw', :'app_provisioner_pw', true) as _app_provisioner_pw \gset
 
 do $$
 declare
@@ -97,10 +106,18 @@ begin
             -- the job's user, and a NOLOGIN scheduler means "cron job N
             -- connection failed" once a minute with the job still active. No
             -- password: the connection is loopback, which pg_hba trusts.
-            ('scheduler',     'login',           null,                  null)
+            ('scheduler',     'login',           null,                  null),
+            -- An application provisions its people and their credentials over
+            -- this login (research-platform/schema.sql §7). It holds no table
+            -- grants, only EXECUTE on the provisioning functions. No printed
+            -- default: most installs have no application, so the role exists
+            -- only when P8_APP_PROVISIONER_PASSWORD (or -v app_provisioner_pw) is set.
+            ('app_provisioner', 'login',         'bootstrap.app_provisioner_pw', null)
         ) as t(name, attrs, pw_setting, printed_pw)
     loop
         continue when exists (select 1 from pg_roles where rolname = r.name);
+        continue when r.printed_pw is null and r.pw_setting is not null
+                  and nullif(current_setting(r.pw_setting), '') is null;
         execute format('create role %I %s', r.name, r.attrs);
         if r.pw_setting is not null then
             pw := nullif(current_setting(r.pw_setting), '');
@@ -148,8 +165,8 @@ grant authenticated to api_viewer;
 --        show statement_timeout;              -->  11s
 --        set role t_target; show statement_timeout;  -->  11s, not 5s
 --
---    Exactly three roles in this cluster can log in -- authenticator, worker,
---    scheduler. app_owner, api_viewer, authenticated and web_anon are all
+--    Three roles in this cluster always log in -- authenticator, worker,
+--    scheduler -- and a fourth, app_provisioner, when an application is set up. app_owner, api_viewer, authenticated and web_anon are all
 --    NOLOGIN and are only ever reached by SET ROLE, so a timeout written on
 --    them would be a setting that reads correctly in \drds and never applies to
 --    anything. That is the shape this collection keeps finding, so it is
@@ -185,7 +202,10 @@ begin
             -- timers are all short by construction; a minute is generous and
             -- still well inside the one-minute schedule, so a stuck job cannot
             -- pile a second copy on top of the first.
-            ('scheduler',     '60s',  '120s', '30s', '10s')
+            ('scheduler',     '60s',  '120s', '30s', '10s'),
+            -- A handful of idempotent inserts per first request from a person;
+            -- anything longer is a lock it should not be waiting on.
+            ('app_provisioner', '10s', '20s', '10s', '5s')
         ) as t(role, stmt, txn, idle, lock)
     loop
         continue when not exists (select 1 from pg_roles where rolname = r.role);
