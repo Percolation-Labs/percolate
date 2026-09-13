@@ -139,15 +139,25 @@ async def open_pool(dsn: str | None = None, **kwargs: Any) -> asyncpg.Pool:
     """
     global _POOL, _REFS
     if _POOL is None:
-        _POOL = await asyncpg.create_pool(
-            dsn or config_dsn(),
-            min_size=kwargs.pop("min_size", 1),
-            max_size=kwargs.pop("max_size", 10),
-            init=kwargs.pop("init", _init_connection),
-            **kwargs,
-        )
+        _POOL = await _new_pool(dsn or config_dsn(), **kwargs)
     _REFS += 1
     return _POOL
+
+
+async def _new_pool(dsn: str, **kwargs: Any) -> asyncpg.Pool:
+    """Every pool this package opens, with the jsonb encoder on its connections.
+
+    One call site for both the process pool and ``as_task_worker``'s pool, so
+    no connection this package opens escapes ``_init_connection``
+    (``tests/test_nul_at_the_boundary.py`` counts the call sites).
+    """
+    return await asyncpg.create_pool(
+        dsn,
+        min_size=kwargs.pop("min_size", 1),
+        max_size=kwargs.pop("max_size", 10),
+        init=kwargs.pop("init", _init_connection),
+        **kwargs,
+    )
 
 
 def set_pool(existing: asyncpg.Pool | None) -> None:
@@ -182,6 +192,7 @@ async def close_pool() -> None:
     if _POOL is not None and _REFS == 0:
         await _POOL.close()
         _POOL = None
+        await _close_task_worker_pool()
 
 
 @asynccontextmanager
@@ -309,6 +320,92 @@ async def as_service(role: str = SERVICE_ROLE):
     async with acquired(p) as conn, conn.transaction():
         await conn.execute(f"set local role {role}")
         yield conn
+
+
+WORKER_DSN_VAR = "P8_WORKER_DSN"
+"""The login a process that is NOT a worker uses to complete or fail a task."""
+
+_TASK_WORKER_POOL: asyncpg.Pool | None = None
+
+CANNOT_ACT_AS_WORKER = (
+    "this process cannot complete or fail a workflow task: its login cannot "
+    "become `{role}`, so a scheduled run it accepts would never report back and "
+    "its step would wait out the whole `wait_ms`. Postgres said: {err}\n"
+    "  * Set " + WORKER_DSN_VAR + " to a DSN whose login is a member of `{role}` "
+    "-- the `worker` login the workers already use. It is used for "
+    "complete_task and fail_task and nothing else.\n"
+    "  * Do not grant `{role}` to `authenticator`: every PostgREST request "
+    "arrives on that login, and each could then become a worker."
+)
+
+
+async def _close_task_worker_pool() -> None:
+    global _TASK_WORKER_POOL
+    if _TASK_WORKER_POOL is not None:
+        await _TASK_WORKER_POOL.close()
+        _TASK_WORKER_POOL = None
+
+
+@asynccontextmanager
+async def as_task_worker(role: str = SERVICE_ROLE):
+    """A transaction as ``worker``, for completing or failing a workflow task.
+
+    For the agent runtime, whose connection logs in as ``authenticator``. A
+    scheduled run completes the task that dispatched it (``agentic/brief.md``
+    §3), and ``complete_task``/``fail_task`` are granted to ``worker``, not to
+    ``authenticated``. The runtime used to ``set local role worker`` on its own
+    connection. ``authenticator`` is not a member of ``worker`` in any install
+    (the image's ``00-superuser.sql``, get-percolate's ``bootstrap.sql``), so
+    that statement failed with ``permission denied to set role "worker"``. The
+    run ended ``failed``, the task was never told, and the dispatching worker
+    held it for the step's whole ``wait_ms``.
+
+    SO THE LOGIN IS A SECOND DSN, NOT A SECOND GRANT. ``P8_WORKER_DSN`` names a
+    login that is a member of ``worker``, which in every install is the
+    ``worker`` login the workers already use: it holds no table privileges, only
+    EXECUTE on the task functions. The alternative, ``grant worker to
+    authenticator``, lets every PostgREST request's login become a worker. That
+    is the separation ``open_pool``'s one-DSN rule protects, and a pool that only
+    ever runs task functions as ``worker`` does not weaken it.
+
+    No caller claims: completing a task is the service's own act, as in
+    ``as_service``, and the task functions are SECURITY DEFINER.
+
+    Unset, this switches the process's own login to ``worker``. That is right for
+    a process whose login is already a member of ``worker``, such as a worker, or a
+    development stack connected as the schema's superuser. Where the switch is refused,
+    the error names the variable rather than the role.
+    """
+    worker_dsn = os.getenv(WORKER_DSN_VAR)
+    if worker_dsn:
+        global _TASK_WORKER_POOL
+        if _TASK_WORKER_POOL is None:
+            _TASK_WORKER_POOL = await _new_pool(worker_dsn, min_size=0, max_size=2)
+        p = _TASK_WORKER_POOL
+    else:
+        p = await pool()
+    async with acquired(p) as conn, conn.transaction():
+        try:
+            await conn.execute(f"set local role {role}")
+        except asyncpg.InsufficientPrivilegeError as exc:
+            raise PermissionError(CANNOT_ACT_AS_WORKER.format(role=role, err=exc)) from exc
+        yield conn
+
+
+async def task_worker_problem(role: str = SERVICE_ROLE) -> str | None:
+    """Why this process could not complete a task, or None if it could.
+
+    Asked before a scheduled run is ACCEPTED, because the answer cannot be given
+    afterwards: a runtime that cannot call ``fail_task`` cannot report that it
+    cannot call ``fail_task`` either. It runs the statement ``as_task_worker``
+    runs, in a transaction it throws away.
+    """
+    try:
+        async with as_task_worker(role):
+            pass
+    except PermissionError as exc:
+        return str(exc)
+    return None
 
 
 def mint_jwt(

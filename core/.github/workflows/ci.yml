@@ -111,6 +111,21 @@ jobs:
       - name: The documented scheduled step resolves, and a bad one is refused
         run: python -m unittest discover -s tests -p test_scheduled_step_resolves.py
 
+      # The runtime completed a scheduled run's task by switching its
+      # authenticator login to `worker`, which no install allows, so the run
+      # never reported back and its step waited out wait_ms. Pins that
+      # complete_task and fail_task go through P8_WORKER_DSN, and that a refused
+      # switch names the variable.
+      - name: A scheduled run can complete the task that dispatched it
+        run: python -m unittest discover -s tests -p test_task_completion_uses_the_worker_login.py
+
+      # The documented scheduled step posts to {{env.P8_AGENT_URL}}/internal/run,
+      # and only `agent gateway` served it, which no shipped deployment runs, so
+      # every scheduled run was a 404. Pins the route on `agent serve` and what
+      # is refused before a 202.
+      - name: A scheduled run reaches the agent service
+        run: python -m unittest discover -s tests -p test_internal_run_on_the_agent_service.py
+
       # workflow.heartbeat_task shipped, was granted to `worker`, and was called
       # by nothing -- so a task running longer than the queue's stale_timeout was
       # reaped and re-run with the first copy still in flight (REM-109). These

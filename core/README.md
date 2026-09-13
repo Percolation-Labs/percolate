@@ -246,6 +246,7 @@ send, and a secret goes by `credential_ref`.
 | `P8_S3_ENDPOINT`, `P8_S3_KEY`, `P8_S3_SECRET`, `P8_BUCKET` | content |
 | `P8_CREDENTIAL_ORIGINS` | worker, ingest, lake: JSON map, credential name to origin(s). `P8_INGEST_CREDENTIAL_ORIGINS` (same shape) is still read and merged |
 | `P8_TEMPLATE_ENV` | worker: comma-separated extra variables `{{env.X}}` may read |
+| `P8_WORKER_DSN` | agent runtime and gateway: a login that is a member of `worker` (the workers' own), used only to complete or fail the task a scheduled run was dispatched by. Required where `P8_DSN` logs in as `authenticator`, which cannot become `worker`; without it `/internal/run` answers 503 |
 
 ### Tracing — OpenTelemetry, off unless pointed somewhere
 
@@ -323,6 +324,12 @@ worker:  { image: percolationlabs/percolate-core:0.1.11, command: ["worker","--q
 
 The agent gateway is its own entrypoint because delegation is an MCP call into
 it: an agent that delegates references it as an ordinary `tool_servers` row.
+
+Scheduled runs do not need the gateway. `agent serve` also answers `POST
+/internal/run`, because a scheduled step posts to `{{env.P8_AGENT_URL}}` and the
+worker sends the run owner's token to that origin only. Give it
+`P8_WORKER_DSN` as well as `P8_DSN`, so it can complete the task it was
+dispatched by.
 
 For the packaging decision record see
 [PACKAGING.md](https://github.com/Percolation-Labs/p8-subsystems/blob/main/PACKAGING.md);

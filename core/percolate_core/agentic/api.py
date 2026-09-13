@@ -44,7 +44,7 @@ from ..core import identity
 from ..core.refusal import STATUS as REFUSED_STATUS, refusal
 from .contracts import ChatRequest, RequestContext, RunError, Session, to_sse
 from .db import PgClient, PgRepository
-from .gateway import caller_claims, user_id_of
+from .gateway import accept_run, caller_claims, user_id_of
 from .runtime import EventSink, channel, relay
 from .sequencer import AgentNotFound, TurnSequencer
 from .settings import Settings
@@ -190,6 +190,22 @@ def router() -> APIRouter:
         claims = caller_claims(headers)
         context = RequestContext.from_headers(headers)
         return claims, context.model_copy(update={"user_id": user_id_of(claims)})
+
+    @api.post("/internal/run")
+    async def internal_run(request: Request) -> Response:
+        """The scheduled-run trigger, on this service as well as the gateway.
+
+        A scheduled step posts to ``{{env.P8_AGENT_URL}}/internal/run``
+        (``specs/workflow-engine/README.md``), and ``P8_AGENT_URL`` is this
+        service in every shipped deployment. The worker also refuses to send
+        the run owner's token to any other origin. Only ``percolate agent
+        gateway`` served the route, and neither get-percolate's compose file
+        nor its chart runs a gateway, so every scheduled agent run was a 404.
+        What is checked before a run is accepted is on ``gateway.accept_run``.
+        """
+        _, settings = _state(request)
+        status, payload = await accept_run(settings, dict(request.headers), await request.json())
+        return JSONResponse(payload, status_code=status)
 
     @api.post("/tools/{name}/sync")
     async def sync_tools(name: str, request: Request) -> dict:

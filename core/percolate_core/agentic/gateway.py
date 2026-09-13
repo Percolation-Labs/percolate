@@ -28,6 +28,7 @@ import os
 from typing import Any
 from uuid import UUID
 
+from ..core import identity
 from ..core.identity import claims_from_jwt
 from .contracts import ChatRequest, InboundMessage, RequestContext
 from .db import connected
@@ -183,69 +184,111 @@ def build_server(settings: Settings | None = None) -> Any:
 
     @server.custom_route("/internal/run", methods=["POST"])
     async def _trigger(request: Any) -> Any:
-        """The scheduled-run trigger endpoint (``brief.md`` §3).
-
-        "A ``mode: async`` ``http_call`` task dispatched at the runtime's
-        internal trigger endpoint — **not the public AG-UI surface** — carrying
-        the triggering task's id. The runtime creates the ``runs`` row
-        (``workflow_task_id`` = that task's id), executes, and calls
-        ``complete_task(task_id, output)`` itself once the run and any
-        ``chained_action`` it fires finish."
-
-        Separate from the MCP surface for exactly the reason the brief gives:
-        this is machine-to-machine plumbing between two subsystems, not
-        something a conversation client should be able to reach.
-        """
+        """The scheduled-run trigger endpoint (``brief.md`` §3). See ``accept_run``."""
         from starlette.responses import JSONResponse
 
-        body = await request.json()
-
-        # WHAT A MALFORMED CALL IS TOLD, which this endpoint predates REM-67
-        # and did not do. `body["workflow_task_id"]` and `body["input"]["agent"]`
-        # were read unconditionally, so a caller that omitted either got a
-        # KeyError and a 500 -- the shape REM-67 exists to end, since a 500
-        # says the server is broken when the request was. The seeded reference
-        # definition sent no body at all (REM-126), so 500 was the answer the
-        # documented path actually produced.
-        #
-        # Named individually rather than as "invalid body", because the whole
-        # defect was that nobody could tell WHICH field was missing.
-        missing = [
-            name for name, present in (
-                ("workflow_task_id", bool(body.get("workflow_task_id"))),
-                ("input", isinstance(body.get("input"), dict)),
-                ("input.agent", isinstance(body.get("input"), dict)
-                                and bool(body["input"].get("agent"))),
-            ) if not present
-        ]
-        if missing:
-            return JSONResponse(
-                {"error": "missing required field(s): " + ", ".join(missing),
-                 "hint": "a scheduled step sends {\"workflow_task_id\": "
-                         "\"{{task.id}}\", \"input\": {\"agent\": ...}} -- see "
-                         "specs/workflow-engine/README.md, scheduled runs"},
-                400)
-
-        # `mode: "async"` means dispatch-and-return (workflow-engine/spec.md
-        # §14): the executor's job is only to hand the work over, and this
-        # runtime completes the task itself when the run is genuinely done.
-        # Awaiting the run here instead looks harmless and is not -- the
-        # executor then parks the task in `waiting_external` *after* the
-        # runtime already completed it, overwriting `done`. Found by running it.
-        task = asyncio.create_task(_dispatch(
-            resolved,
-            task_id=UUID(body["workflow_task_id"]),
-            agent_name=body["input"]["agent"],
-            session_id=UUID(body["input"]["session_id"]) if body["input"].get("session_id") else None,
-            prompt=body["input"].get("prompt", ""),
-            for_agent=body["input"].get("for_agent"),
-            headers=dict(request.headers),
-        ))
-        _in_flight.add(task)
-        task.add_done_callback(_in_flight.discard)
-        return JSONResponse({"accepted": True, "workflow_task_id": body["workflow_task_id"]}, 202)
+        status, payload = await accept_run(resolved, dict(request.headers), await request.json())
+        return JSONResponse(payload, status)
 
     return server
+
+
+async def accept_run(
+    settings: Settings, headers: dict[str, str], body: Any
+) -> tuple[int, dict[str, Any]]:
+    """The scheduled-run trigger (``brief.md`` §3): check the call, then hand it over.
+
+    "A ``mode: async`` ``http_call`` task dispatched at the runtime's internal
+    trigger endpoint — not the public AG-UI surface — carrying the triggering
+    task's id. The runtime creates the ``runs`` row (``workflow_task_id`` = that
+    task's id), executes, and calls ``complete_task(task_id, output)`` itself
+    once the run and any ``chained_action`` it fires finish."
+
+    ONE IMPLEMENTATION, SERVED TWICE: by ``percolate agent gateway`` and by
+    ``percolate agent serve``. The worker sends a run owner's token only to
+    ``P8_AGENT_URL``'s origin, for ``/v1/chat/completions`` and ``/internal/run``
+    alike (``worker/agent_auth.py``, ``AGENT_PATHS``). So one origin has to serve
+    both, and the one every deployment points ``P8_AGENT_URL`` at is the agent
+    service. get-percolate's compose file and chart ran no gateway, so every
+    scheduled run got a 404.
+
+    WHAT IS CHECKED BEFORE THE 202, because afterwards nothing can be refused:
+
+    * the body names a task and an agent (400);
+    * a verified caller (401). This used to be checked inside the background
+      turn, which then failed the named task *terminally*. So a request with no
+      token at all could fail any task whose id it knew;
+    * the caller can see that task through ``workflow.tasks_api`` (404, the same
+      answer for "no such task" and "not yours"). Otherwise any signed-in caller
+      could have a turn complete somebody else's task with their own output.
+      The worker's token names the run's owner, who can see it;
+    * this process can complete and fail tasks at all (503). If it cannot, a
+      202 means the step waits out its whole ``wait_ms``, and the runtime
+      could not even report why (``identity.task_worker_problem``).
+
+    Returns ``(status, body)`` so each server wraps it in its own response type.
+    """
+    body = body if isinstance(body, dict) else {}
+
+    # WHAT A MALFORMED CALL IS TOLD, which this endpoint predates REM-67
+    # and did not do. `body["workflow_task_id"]` and `body["input"]["agent"]`
+    # were read unconditionally, so a caller that omitted either got a
+    # KeyError and a 500 -- the shape REM-67 exists to end, since a 500
+    # says the server is broken when the request was. The seeded reference
+    # definition sent no body at all (REM-126), so 500 was the answer the
+    # documented path actually produced.
+    #
+    # Named individually rather than as "invalid body", because the whole
+    # defect was that nobody could tell WHICH field was missing.
+    missing = [
+        name for name, present in (
+            ("workflow_task_id", bool(body.get("workflow_task_id"))),
+            ("input", isinstance(body.get("input"), dict)),
+            ("input.agent", isinstance(body.get("input"), dict)
+                            and bool(body["input"].get("agent"))),
+        ) if not present
+    ]
+    if missing:
+        return 400, {"error": "missing required field(s): " + ", ".join(missing),
+                     "hint": "a scheduled step sends {\"workflow_task_id\": "
+                             "\"{{task.id}}\", \"input\": {\"agent\": ...}} -- see "
+                             "specs/workflow-engine/README.md, scheduled runs"}
+    run_input = body["input"]
+    try:
+        task_id = UUID(str(body["workflow_task_id"]))
+        session_id = UUID(str(run_input["session_id"])) if run_input.get("session_id") else None
+    except ValueError as exc:
+        return 400, {"error": f"workflow_task_id and input.session_id must be uuids: {exc}"}
+
+    claims = caller_claims(headers)
+    if claims is None:
+        return 401, {"error": "a verified bearer token is required"}
+    async with connected(settings, claims) as repo:
+        visible = await repo.can_see_task(task_id)
+    if not visible:
+        return 404, {"error": f"no task {task_id} -- it does not exist, or is not yours"}
+    problem = await identity.task_worker_problem()
+    if problem:
+        return 503, {"error": problem}
+
+    # `mode: "async"` means dispatch-and-return (workflow-engine/spec.md
+    # §14): the executor's job is only to hand the work over, and this
+    # runtime completes the task itself when the run is genuinely done.
+    # Awaiting the run here instead looks harmless and is not -- the
+    # executor then parks the task in `waiting_external` *after* the
+    # runtime already completed it, overwriting `done`. Found by running it.
+    task = asyncio.create_task(_dispatch(
+        settings,
+        task_id=task_id,
+        agent_name=run_input["agent"],
+        session_id=session_id,
+        prompt=run_input.get("prompt", ""),
+        for_agent=run_input.get("for_agent"),
+        headers=headers,
+    ))
+    _in_flight.add(task)
+    task.add_done_callback(_in_flight.discard)
+    return 202, {"accepted": True, "workflow_task_id": str(task_id)}
 
 
 _in_flight: set[Any] = set()
