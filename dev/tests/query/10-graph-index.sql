@@ -323,6 +323,98 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
+-- 10b. A MERGE COMBINES CURRENCY AND WEIGHT BY THE UPSERT'S RULES.
+--
+-- The candidate and the target carry the same (dst, relation). The TARGET's
+-- copy was retracted; the CANDIDATE's still holds. The fact held on one side,
+-- so it holds after the merge -- and at the best weight either side asserted,
+-- which is what aiq.upsert_graph's `greatest` says weight is. The merge used
+-- to keep the target's row as it was (still retracted), take `least` of the
+-- weights, and delete the candidate's current row: the one current copy of a
+-- fact deleted by the operation that exists to preserve edges.
+-- ---------------------------------------------------------------------
+do $$
+declare v_cand uuid; v_cand_node uuid; v_target uuid; v_dst uuid; v_row record;
+begin
+    perform aiq.upsert_graph($g${
+      "nodes": [{"k":"ttype_org","n":"Kestrel Couriers"},
+                {"k":"ttype_org","n":"Northgate Freight"}],
+      "edges": [{"s":0,"t":1,"r":"supplies"}]}$g$::jsonb,
+      '{"agent":"t","resource_id":"33330000-0000-0000-0000-0000000000b1"}'::jsonb);
+    select s.id, n.id into v_cand, v_cand_node
+      from aiq.soft_nodes s join aiq.nodes n on n.entity_id = s.id and n.entity_type='soft'
+     where s.claimed_kind='ttype_org' and s.key='kestrel couriers';
+    select node_id into v_target from aiq.node_keys where key='ambi ltd (south)'  and kind='canonical';
+    select node_id into v_dst    from aiq.node_keys where key='northgate freight' and kind='canonical';
+    update aiq.edges set weight = 0.9
+     where src_id = v_cand_node and dst_id = v_dst and relation = 'supplies';
+
+    insert into aiq.edges (src_id, dst_id, relation, weight, valid_from, valid_to, provenance)
+    values (v_target, v_dst, 'supplies', 0.3, now() - interval '2 days', now() - interval '1 day',
+            '{"sources":[{"resource_id":"33330000-0000-0000-0000-0000000000b0"}]}'::jsonb)
+    on conflict (src_id, dst_id, relation) do update
+       set weight = excluded.weight, valid_from = excluded.valid_from,
+           valid_to = excluded.valid_to, provenance = excluded.provenance;
+
+    perform aiq.promote_soft_node(v_cand, v_target);
+
+    select weight, jsonb_array_length(provenance->'sources') as srcs into v_row
+      from aiq.edges_current
+     where src_id = v_target and dst_id = v_dst and relation = 'supplies';
+    if not found then
+        raise exception 'promotion deleted the only current copy of a fact: the candidate''s '
+                        'edge held, the target''s was retracted, and nothing holds now';
+    end if;
+    if abs(v_row.weight - 0.9) > 1e-6 then
+        raise exception 'the merged edge carries weight %, not 0.9 -- weight is the best tier '
+                        'that asserted the edge, on either side of the merge', v_row.weight;
+    end if;
+    if v_row.srcs <> 2 then
+        raise exception 'the merged edge has % sources, expected both sides''', v_row.srcs;
+    end if;
+end $$;
+
+-- An AUTHORED target edge has no `sources` key. jsonb_set over a NULL path
+-- value is NULL, so the merge's provenance write was the total erase
+-- graph-index.md §11.3 records for the upsert -- here refused by NOT NULL,
+-- which turns a promotion into an outage.
+do $$
+declare v_cand uuid; v_target uuid; v_dst uuid; v_row record;
+begin
+    perform aiq.upsert_graph($g${
+      "nodes": [{"k":"ttype_org","n":"Osprey Carriers"},
+                {"k":"ttype_org","n":"Northgate Freight"}],
+      "edges": [{"s":0,"t":1,"r":"owns"}]}$g$::jsonb,
+      '{"agent":"t","resource_id":"33330000-0000-0000-0000-0000000000b2"}'::jsonb);
+    select id into v_cand from aiq.soft_nodes
+     where claimed_kind='ttype_org' and key='osprey carriers';
+    select node_id into v_target from aiq.node_keys where key='ambi ltd (south)'  and kind='canonical';
+    select node_id into v_dst    from aiq.node_keys where key='northgate freight' and kind='canonical';
+
+    insert into aiq.edges (src_id, dst_id, relation, weight, provenance)
+    values (v_target, v_dst, 'owns', 1.0, '{"tier":"authored"}'::jsonb)
+    on conflict (src_id, dst_id, relation) do update
+       set weight = excluded.weight, valid_to = null, provenance = excluded.provenance;
+
+    perform aiq.promote_soft_node(v_cand, v_target);
+
+    select weight, provenance into v_row
+      from aiq.edges_current
+     where src_id = v_target and dst_id = v_dst and relation = 'owns';
+    if not found then
+        raise exception 'the authored edge does not hold after the promotion';
+    end if;
+    if v_row.weight <> 1.0 or v_row.provenance->>'tier' is distinct from 'authored' then
+        raise exception 'the merge rewrote the authored edge: weight %, provenance %',
+            v_row.weight, v_row.provenance;
+    end if;
+    if coalesce(jsonb_array_length(v_row.provenance->'sources'), 0) <> 1 then
+        raise exception 'the candidate''s source was not appended to the authored edge: %',
+            v_row.provenance;
+    end if;
+end $$;
+
+-- ---------------------------------------------------------------------
 -- 11. A MACHINE RE-ASSERTION MUST NOT DEMOTE AN AUTHORED EDGE, AND MUST NOT
 --     ERASE ITS PROVENANCE. weight is read by graph_walk (product along the
 --     path), so this is behaviour, not storage. Both halves were bugs the
