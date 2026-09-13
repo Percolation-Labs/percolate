@@ -27,7 +27,6 @@ from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
 from ...core import agent_document
-from ...core.text import without_nul
 from ..contracts import AgentSpec, Message, Run, RunStatus, Session, ToolServer
 from .client import PgClient
 
@@ -348,11 +347,13 @@ class PgRepository:
         ``seq`` reflects conversation order rather than however Postgres felt
         like evaluating the set.
         """
+        # A tool result is a string this runtime did not compose, and may carry
+        # U+0000 (REM-146); the pool's jsonb encoder replaces it on the way in.
         payload = [
-            without_nul(m.model_dump(mode="json", include={
+            m.model_dump(mode="json", include={
                 "id", "run_id", "session_id", "role", "content", "tool_calls",
                 "tool_call_id", "is_error", "error_kind", "citations",
-            }))
+            })
             for m in messages
         ]
         async with self.client.as_user(self.claims) as conn:

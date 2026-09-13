@@ -123,8 +123,10 @@ jobs:
       # writes hand Postgres a jsonb argument the SQL side reads back with
       # `->>`, so one byte took a tool-calling turn to `failed` after
       # twenty-three seconds of model work and took a 777-byte upload's whole
-      # ingest run down with it. The file also asserts that BOTH seams call the
-      # helper, because the rule is "at the boundary" and there are two of them.
+      # ingest run down with it. The rule lives in the pool's jsonb encoder, and
+      # the file asserts that every connection and codec-bypassing cast is on it:
+      # two call sites had it and three more writes (an http_call response, an
+      # API source page, a tool catalogue) did not.
       - name: A hostile byte does not abort a write
         run: python -m unittest discover -s tests -p test_nul_at_the_boundary.py
 
