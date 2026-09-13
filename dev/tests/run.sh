@@ -352,6 +352,39 @@ parser_at_least() {
     [ "$(printf '%s\n%s\n' "$1" "$PARSER_VER" | sort -V | head -1)" = "$1" ]
 }
 
+# A CORE DEFERRAL IS LEGAL ONLY BELOW A DECLARED VERSION (REM-86), the way a
+# parser deferral is legal only while the halves disagree. A file that emits
+# `CORE-DEFERRED:` must carry `-- requires-core: <version>`, the first
+# percolate-core its assertion holds against, and the runtime that ran must be
+# older than that. The runtime's version is the image tag the driver recorded in
+# public.p8_test_agent_turn, which is the image the turn actually ran on, not a
+# copy of the pin read from somewhere else.
+#
+# Until 2026-09-13 run.sh counted these and never checked them, so a
+# CORE-DEFERRED stayed green whatever core was pinned; 06-a-turn.sql's only
+# condition was a line in the runtime's log. Prints why and returns 0 when the
+# deferral is refused; returns 1 when it is legal.
+core_deferral_refused() {   # core_deferral_refused <file>
+    local f="$1" want have
+    want=$(sed -n 's/^-- requires-core:[[:space:]]*//p' "$f" | head -1)
+    if [ -z "$want" ]; then
+        echo "emits CORE-DEFERRED and declares no \`-- requires-core:\`, so no version bounds it."
+        return 0
+    fi
+    have=$(db_query "select substring(image from ':([0-9]+[.][0-9]+[.][0-9]+)$')
+                       from public.p8_test_agent_turn order by driven_at desc limit 1")
+    if [ -z "$have" ]; then
+        echo "declares \`-- requires-core: $want\` and no driven runtime recorded its version, so the deferral cannot be bounded."
+        return 0
+    fi
+    if [ "$(printf '%s\n%s\n' "$want" "$have" | sort -V | head -1)" = "$want" ]; then
+        echo "declares \`-- requires-core: $want\` and the runtime that ran is percolate-core $have. That is"
+        echo "      not older than the core this waits for, so there is nothing to defer to."
+        return 0
+    fi
+    return 1
+}
+
 failed=0
 skipped=0
 skipped_names=""
@@ -458,6 +491,13 @@ for surface in ${SURFACES[@]}; do
             # parser that has caught up clear a core deferral it says nothing
             # about. Named in the summary either way.
             n_core=$(printf '%s\n' "$out" | grep -c '^NOTICE:  CORE-DEFERRED:' || true)
+            if [ "${n_core:-0}" -gt 0 ] && why=$(core_deferral_refused "$f"); then
+                echo "FAILED"
+                printf '%s\n' "$out" | grep '^NOTICE:  CORE-DEFERRED:' | cut -c1-150 | sed 's/^NOTICE:  /      /'
+                echo "      $why"
+                failed=1
+                continue
+            fi
             if [ "${n_core:-0}" -gt 0 ]; then
                 core_deferred=$((core_deferred + n_core))
                 core_names="$core_names $surface/$(basename "$f")"

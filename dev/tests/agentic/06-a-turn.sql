@@ -2,6 +2,7 @@
 --
 -- requires-service: agent
 -- drives: agent-turn
+-- requires-core: 0.1.9
 --
 -- WHAT THIS IS FOR, and it is the only file in this suite that leaves the
 -- database to find out. Every other agentic file asserts about rows: the
@@ -42,9 +43,11 @@ begin;
 
 do $$
 declare
-    v     public.p8_test_agent_turn;
-    v_st  int;
-    v_err record;
+    v      public.p8_test_agent_turn;
+    v_st   int;
+    v_nerr int;
+    v_last text;
+    v_msg  text;
 begin
     select * into v from public.p8_test_agent_turn
      order by driven_at desc limit 1;
@@ -120,12 +123,14 @@ begin
     -- database built from this tree answers `f`, so this is a break that
     -- arrives WITH extension 0.2.0 rather than one that is already shipping.
     --
-    -- IT EXPIRES BY ITSELF, which is the property that matters and the same
-    -- one `-- requires-parser:` has. The exemption is conditional on the log
-    -- naming set_config: the day the pin moves to a core that orders it
-    -- correctly, this turn either opens a session and the branch is not
-    -- reached, or it fails for some other reason and this raises. Nobody has
-    -- to remember to delete anything.
+    -- IT EXPIRES ON A VERSION, NOT ON A LOG LINE (REM-86). The notice below
+    -- is legal only while the runtime that drove the turn is older than this
+    -- file's `requires-core` header, 0.1.9, the first core that writes the
+    -- claims before the role. dev/tests/run.sh reads the image the driver
+    -- recorded and FAILS a CORE-DEFERRED from a runtime at or past it. Until
+    -- 2026-09-13 the only condition was the log naming set_config, with no
+    -- version at all, so a 0.1.9 or later runtime refused at set_config for a
+    -- new reason would have been reported as the old one.
     -- ---------------------------------------------------------------
     if v_st >= 500 then
         if v.agent_log like '%permission denied for function set_config%' then
@@ -190,7 +195,7 @@ begin
     end if;
 
     -- ---------------------------------------------------------------
-    -- 5. THE ONLY RUN_ERROR THIS GATE MAY SEE IS A MISSING PROVIDER KEY.
+    -- 5. WITHOUT A PROVIDER KEY, THE TURN MAY STOP ONCE, AT THE PROVIDER.
     --
     -- THIS IS WHAT REPLACES "SKIP WHEN THERE IS NO MODEL KEY", and it is a
     -- stronger check than the skip would have been. A skip stands the whole
@@ -203,22 +208,46 @@ begin
     -- this repository's: the token, the session, the agent row, the run, the
     -- persisted message. So the honest claim is "the turn got as far as the
     -- provider", and the way to assert it is to permit exactly that one error
-    -- and no other. With a key set the turn goes further and there is no
-    -- RUN_ERROR at all, and this says nothing -- so the file is right in both
-    -- environments without being told which it is in.
+    -- and no other.
+    --
+    -- DECIDED ON A FACT THE DRIVER HAS, NOT ON THE ERROR'S WORDING. This used
+    -- to excuse any RUN_ERROR whose message matched
+    -- `(_API_KEY|api_key|credential|LLM_API_KEY)` -- which also excuses a
+    -- tool server's missing credential, a credential_ref that stopped
+    -- resolving, or any failure whose text happens to name one. The driver
+    -- knows whether it put a provider key into the runtime's environment and
+    -- records it as `provider_key_supplied`. Without a key, the turn must stop
+    -- at the provider: exactly one RUN_ERROR, and it is the last event, after
+    -- the RUN_STARTED and MESSAGE_PERSISTED asserted above. With a key, or
+    -- with the fact missing, no RUN_ERROR is permitted at all.
+    --
+    -- WHAT IT CANNOT SEE: with no key, a lone final RUN_ERROR raised by
+    -- something other than the provider call is excused too. Nothing
+    -- structured tells them apart. percolate-core's RunError carries only
+    -- `status` and `message`, and sequencer._run_turn emits the same event
+    -- for any exception from bind_tools, invoke_model, persist or
+    -- maybe_chain; agentic.runs keeps only that text in state.error. The
+    -- probe agent binds no tools, which removes the likeliest other cause.
+    -- Closing it needs core to name the failing step on the event, and then
+    -- this should assert that field.
     -- ---------------------------------------------------------------
-    for v_err in
-        select e->>'message' as m
-          from jsonb_array_elements(coalesce(v.result->'events','[]'::jsonb)) e
-         where e->>'type' = 'RUN_ERROR'
-    loop
-        if v_err.m !~ '(_API_KEY|api_key|credential|LLM_API_KEY)' then
-            raise exception E'the turn failed inside the stream, and not for a missing provider key:\n  %\n--- the runtime said ---\n%',
-                v_err.m, v.agent_log;
+    select count(*) filter (where e->>'type' = 'RUN_ERROR'),
+           (array_agg(e->>'type' order by n desc))[1],
+           (array_agg(e->>'message' order by n desc) filter (where e->>'type' = 'RUN_ERROR'))[1]
+      into v_nerr, v_last, v_msg
+      from jsonb_array_elements(coalesce(v.result->'events','[]'::jsonb)) with ordinality as t(e, n);
+    if v_nerr > 0 then
+        if coalesce((v.result->>'provider_key_supplied')::boolean, true) then
+            raise exception E'the turn failed inside the stream, and the driver supplied a provider key (or did not record whether it did):\n  %\n--- the runtime said ---\n%',
+                v_msg, v.agent_log;
         end if;
-        raise notice 'the turn reached the provider and stopped there (no key): %',
-            left(v_err.m, 90);
-    end loop;
+        if v_nerr > 1 or v_last <> 'RUN_ERROR' then
+            raise exception E'with no provider key the turn may stop once, at the provider, as its last event; it emitted % RUN_ERROR(s) and ended with %.\n--- events ---\n%',
+                v_nerr, v_last, jsonb_pretty(coalesce(v.result->'events','[]'::jsonb));
+        end if;
+        raise notice 'the turn reached the provider and stopped there (the driver supplied no key): %',
+            left(v_msg, 90);
+    end if;
 
     -- ---------------------------------------------------------------
     -- 6. AND THE ROWS ARE THERE, READ AS THE CALLER RATHER THAN AS THE OWNER.
