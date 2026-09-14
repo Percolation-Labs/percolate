@@ -2166,6 +2166,7 @@ grant execute on function
     rbac.request_claims(), rbac.current_credential_id(), rbac.current_actor(),
     rbac.decide(text, text), rbac.may(text, text), rbac.require(text, text),
     rbac.decide_in_org(text, text, uuid), rbac.may_in_org(text, text, uuid),
+    rbac.delegate(uuid, text, text, uuid), rbac.revoke_delegation(uuid, text),
     rbac.plan_of(uuid), rbac.limit_state(uuid, text), rbac.has_quota_remaining(uuid, text),
     rbac.access_snapshot(text),
     research.readable(uuid), research.work_readable_in_full(uuid), research.revision_readable(uuid),

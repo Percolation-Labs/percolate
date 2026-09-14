@@ -506,7 +506,7 @@ declare
         -- deployment's -- grants, plan assignments, usage, research and engagement.
         'engagement.comment_likes', 'engagement.comment_versions', 'engagement.comments',
         'engagement.follows', 'engagement.saves', 'engagement.valuations', 'engagement.votes',
-        'rbac.applications', 'rbac.grants', 'rbac.plan_assignments', 'rbac.usage_ledger',
+        'rbac.applications', 'rbac.delegations', 'rbac.grants', 'rbac.plan_assignments', 'rbac.usage_ledger',
         'research.argument_edges', 'research.citations', 'research.claims', 'research.endorsements',
         'research.exposures', 'research.heads', 'research.operations', 'research.revisions', 'research.sources', 'research.works',
         -- Publication exposures (REM-252): which exact revisions their owners added to a publication.
