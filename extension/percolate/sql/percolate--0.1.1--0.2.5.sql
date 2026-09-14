@@ -30964,6 +30964,48 @@ begin
 end;
 $$;
 
+-- REVOKING WHAT AN APPLICATION GRANTED (REM-248). grant_application_role lets
+-- the provisioner issue a grant, but only an operator or a person with
+-- users:admin could end one, so an admission decided inside the application
+-- could not be withdrawn there. This ends only a grant issued under
+-- p_application, for a role carrying nothing but capabilities an application
+-- may grant, and always with a reason. The grant stays, as history.
+-- p_decided_by is the person whose decision it was, which the application has
+-- already checked; it is recorded as revoked_by. Revoking a revoked grant
+-- changes nothing and answers false.
+create or replace function rbac.revoke_application_role(p_grant uuid, p_reason text, p_application text,
+                                                        p_decided_by uuid default null)
+returns boolean language plpgsql security definer set search_path = pg_catalog, public as $$
+declare g rbac.grants;
+begin
+    perform rbac.require_app_provisioner();
+    if coalesce(btrim(p_reason), '') = '' then
+        raise invalid_parameter_value using message = 'A revocation says why';
+    end if;
+    select * into g from rbac.grants where id = p_grant for update;
+    if not found or g.application is distinct from p_application then
+        raise no_data_found using message = 'Grant not found';
+    end if;
+    if exists (select 1 from rbac.roles where name = g.role and grants_all)
+       or exists (select 1 from rbac.role_permissions where role = g.role
+                   and not (resource like '%.%' or (resource, action) in (('research', 'list'), ('research', 'publish'), ('engagement', 'moderate')))) then
+        raise insufficient_privilege using message = 'That grant carries capabilities an application cannot revoke';
+    end if;
+    if p_decided_by is not null and not exists (select 1 from rbac.users where id = p_decided_by) then
+        raise invalid_parameter_value using message = 'The deciding person is not a user';
+    end if;
+    if g.revoked_at is not null then
+        return false;
+    end if;
+    update rbac.grants set revoked_at = now(), revoked_by = p_decided_by, revoke_reason = btrim(p_reason)
+     where id = g.id;
+    if not exists (select 1 from rbac.grants where user_id = g.user_id and role = g.role and revoked_at is null) then
+        delete from rbac.user_roles where user_id = g.user_id and role = g.role;
+    end if;
+    return true;
+end;
+$$;
+
 -- Keep existing six-argument clients compatible; new clients name their scope.
 create or replace function rbac.grant_application_role(p_user uuid, p_role text, p_resource text, p_action text,
                                                        p_basis text, p_evidence text default null)
@@ -30983,6 +31025,7 @@ begin
             rbac.revoke_application_credential(uuid),
             rbac.grant_application_role(uuid, text, text, text, text, text),
             rbac.grant_application_role(uuid, text, text, text, text, text, text, uuid),
+            rbac.revoke_application_role(uuid, text, text, uuid),
             rbac.declare_application(text, text, jsonb)
         to app_provisioner;
     end if;
