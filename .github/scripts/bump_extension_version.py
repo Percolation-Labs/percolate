@@ -27,7 +27,9 @@ import re
 import subprocess
 import sys
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+# PERCOLATE_BUMP_ROOT points the bump at another tree: test_bump_extension_version.py runs it against a
+# throwaway repository. Unset, it is this checkout.
+ROOT = pathlib.Path(os.environ.get("PERCOLATE_BUMP_ROOT") or pathlib.Path(__file__).resolve().parents[2])
 CONTROL = ROOT / "extension/percolate/percolate.control"
 PARSER_CONTROL = ROOT / "extension/percolate_parser/percolate_parser.control"
 CARGO = ROOT / "extension/percolate_parser/Cargo.toml"
@@ -63,12 +65,70 @@ def fail(msg: str) -> None:
     raise SystemExit(1)
 
 
-def sub_once(path: pathlib.Path, pattern: str, repl: str) -> None:
-    text = path.read_text()
+def sub_once(text: str, path: pathlib.Path, pattern: str, repl: str) -> str:
     new, n = re.subn(pattern, repl, text, count=1, flags=re.M)
     if n != 1:
         fail(f"{path.relative_to(ROOT)}: expected one match for {pattern!r}, found {n}")
-    path.write_text(new)
+    return new
+
+
+# PATHS INTO THE EXTENSION'S SQL DIRECTORY that a page or a script uses, found with
+# the same pattern and the same two exclusions as dev/references.sh check 1. So what
+# this moves is exactly what that gate refuses to find stale. The 0.2.4 and 0.2.5
+# bumps both left `core-below-market-above.html` naming the deleted script, and a
+# person renumbered it by hand each time (REM-254). The sql directory itself is the
+# artifact, not a reference to it.
+REFERENCE_EXCLUDES = (":(exclude)research-notes/results",
+                      ":(exclude)applications/percolate-self-model/history.jsonl",
+                      ":(exclude)extension/percolate/sql")
+# Run inside a pre-push hook, GIT_DIR names the pushing repository and would win over cwd.
+GIT_ENV = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+PARSER_SQL_DIR = ROOT / "extension/percolate_parser/sql"
+
+
+def path_references(current: str) -> list[pathlib.Path]:
+    needle = f"extension/percolate/sql/percolate--{current}.sql"
+    found = subprocess.run(["git", "grep", "-l", "-F", needle, "--", ".", *REFERENCE_EXCLUDES],
+                           cwd=ROOT, env=GIT_ENV, capture_output=True, text=True)
+    if found.returncode not in (0, 1):
+        fail(f"git grep for {needle} failed: {found.stderr.strip()}")
+    return [ROOT / line for line in found.stdout.splitlines() if line]
+
+
+def builder() -> str:
+    """The interpreter the generators run under, asked of dev/lib/python.sh and checked before any write.
+
+    This script used to run build-sql.py under its own interpreter. On a Mac
+    that is often one without PyYAML, so a bump rewrote six version fields, died
+    in build-sql.py and left the tree half renumbered for a person to finish
+    (REM-239). The gates already agree on one answer to "which Python", so the
+    bump asks the same helper -- and then asks the answer to import yaml, because
+    the helper returns $PY unchecked when it is set.
+    """
+    found = subprocess.run(["bash", "-c", ". dev/lib/python.sh && percolate_python"],
+                           cwd=ROOT, env=GIT_ENV, capture_output=True, text=True)
+    py = found.stdout.strip()
+    if found.returncode != 0 or not py:
+        fail("no interpreter for build-sql.py from dev/lib/python.sh, so nothing was changed: "
+             + found.stderr.strip())
+    try:
+        usable = subprocess.run([py, "-c", "import yaml"], capture_output=True, env=GIT_ENV).returncode == 0
+    except OSError:
+        usable = False
+    if not usable:
+        fail(f"{py} cannot import yaml, which build-sql.py needs, so nothing was changed")
+    return py
+
+
+def restore(before: dict[pathlib.Path, bytes], dirs) -> None:
+    """Put back exactly what was there: each file as it was, and nothing the failed run added."""
+    for d in dirs:
+        for p in d.glob("*.sql"):
+            if p not in before:
+                p.unlink()
+    for p, data in before.items():
+        if not p.is_file() or p.read_bytes() != data:
+            p.write_bytes(data)
 
 
 def main() -> None:
@@ -107,12 +167,21 @@ def main() -> None:
             "Put them in step by hand before releasing -- a bump would paper over it."
         )
 
-    sub_once(CONTROL, r"^default_version = '.*'", f"default_version = '{new}'")
-    sub_once(PARSER_CONTROL, r"^default_version = '.*'", f"default_version = '{new}'")
-    sub_once(CARGO, r'^version = ".*"', f'version = "{new}"')
-    sub_once(CARGO_LOCK, r'^(name = "percolate_parser"\nversion = )"[^"]*"',
-             rf'\g<1>"{new}"')
-    sub_once(CONTRACT, r'^  "extension": "[^"]*",$', f'  "extension": "{new}",')
+    py = builder()
+
+    # EVERY EDIT IS PLANNED BEFORE ONE IS MADE (REM-254). Each rule below either
+    # matches or refuses, and all of them are asked first, so a refusal leaves
+    # the tree exactly as it was rather than half renumbered.
+    planned: dict[pathlib.Path, str] = {}
+
+    def plan(path: pathlib.Path, pattern: str, repl: str) -> None:
+        planned[path] = sub_once(planned.get(path) or path.read_text(), path, pattern, repl)
+
+    plan(CONTROL, r"^default_version = '.*'", f"default_version = '{new}'")
+    plan(PARSER_CONTROL, r"^default_version = '.*'", f"default_version = '{new}'")
+    plan(CARGO, r'^version = ".*"', f'version = "{new}"')
+    plan(CARGO_LOCK, r'^(name = "percolate_parser"\nversion = )"[^"]*"', rf'\g<1>"{new}"')
+    plan(CONTRACT, r'^  "extension": "[^"]*",$', f'  "extension": "{new}",')
     # THE MOUNT LINES ONLY, and the anchor is the whole correctness of this.
     #
     # Two occurrences are meant to move -- `mountPath:` and `subPath:` -- so
@@ -128,60 +197,71 @@ def main() -> None:
     # about which references are live: the ones used as paths. Matching
     # `^\s*(mountPath|subPath):` is the same predicate references.sh greps for,
     # which is what keeps the writer and the checker from drifting apart.
-    txt = K8S_MANIFEST.read_text()
-    swapped, n = re.subn(
+    swapped, mounts = re.subn(
         r"^(\s*(?:mountPath|subPath):.*?)percolate--[0-9]+\.[0-9]+\.[0-9]+\.sql",
-        lambda m: f"{m.group(1)}percolate--{new}.sql", txt, flags=re.M)
-    if n == 0:
+        lambda m: f"{m.group(1)}percolate--{new}.sql", K8S_MANIFEST.read_text(), flags=re.M)
+    if mounts == 0:
         fail(f"{K8S_MANIFEST.relative_to(ROOT)}: no mountPath/subPath naming "
              "percolate--<version>.sql -- the manifest changed shape and this bump "
              "would leave it stale")
-    K8S_MANIFEST.write_text(swapped)
-    print(f"  {K8S_MANIFEST.relative_to(ROOT)}: {n} mount reference(s) -> {new}")
+    planned[K8S_MANIFEST] = swapped
+    old_ref = f"extension/percolate/sql/percolate--{current}.sql"
+    new_ref = f"extension/percolate/sql/percolate--{new}.sql"
+    references = path_references(current)
+    for path in references:
+        planned[path] = (planned.get(path) or path.read_text()).replace(old_ref, new_ref)
 
-    # Regenerate under the new name, then drop the old artifact. In that order:
-    # if the build fails the tree still holds a valid, installable extension.
-    old_sql = SQL_DIR / f"percolate--{current}.sql"
-    subprocess.run(
-        [sys.executable, str(ROOT / "extension/percolate/build-sql.py")],
-        check=True, cwd=ROOT,
-    )
-    new_sql = SQL_DIR / f"percolate--{new}.sql"
-    if not new_sql.exists():
-        fail(f"build-sql.py did not write {new_sql.name} -- it read a different version")
-    if old_sql.exists():
-        old_sql.unlink()
+    # WHAT A FAILURE PUTS BACK: every file about to be edited, and every script in
+    # both sql directories, which the generators and the pruning below rewrite
+    # and delete. A few megabytes held for the length of one command.
+    sql_dirs = (SQL_DIR, PARSER_SQL_DIR)
+    before = {p: p.read_bytes() for p in [*planned, *(q for d in sql_dirs for q in d.glob("*.sql"))]
+              if p.is_file()}
+    try:
+        for path, text in planned.items():
+            path.write_text(text)
+        print(f"  {K8S_MANIFEST.relative_to(ROOT)}: {mounts} mount reference(s) -> {new}")
+        for path in references:
+            print(f"  {path.relative_to(ROOT)}: {old_ref} -> {new_ref}")
 
-    # AND THE UPGRADE SCRIPTS THAT NOW LEAD NOWHERE, which is the same argument
-    # as the line above and was missed because it is a different filename shape.
-    #
-    # Postgres reads the sharedir to answer "what can this extension become".
-    # `percolate--0.1.1--0.1.2.sql` declares an update PATH to 0.1.2, and the
-    # bump has just deleted `percolate--0.1.2.sql`, the base script for the
-    # version that path arrives at. Left behind, the release ships an installed
-    # extension one `ALTER EXTENSION percolate UPDATE TO '0.1.2'` away from a
-    # version nobody meant to offer -- which is precisely this file's own
-    # argument for deleting the old base script, one filename shape along.
-    #
-    # build-sql.py has just written a direct path from every version that is
-    # STILL PUBLISHED (it reads the tags), so nothing that a real database can
-    # be sitting at loses its route. Anything targeting a version other than
-    # the one being published is by construction a leftover.
-    stale = sorted(
-        p for p in SQL_DIR.glob("percolate--*--*.sql")
-        if not p.name.endswith(f"--{new}.sql")
-    )
-    for p in stale:
-        p.unlink()
-        print(f"  removed {p.name}: an upgrade path to a version this tree no longer ships")
+        # Regenerate under the new name, then drop the old artifact. In that order:
+        # if the build fails, the restore below puts the old artifact's name back.
+        old_sql = SQL_DIR / f"percolate--{current}.sql"
+        subprocess.run([py, str(ROOT / "extension/percolate/build-sql.py")], check=True, cwd=ROOT)
+        new_sql = SQL_DIR / f"percolate--{new}.sql"
+        if not new_sql.exists():
+            fail(f"build-sql.py did not write {new_sql.name} -- it read a different version")
+        if old_sql.exists():
+            old_sql.unlink()
 
-    # AND THE PARSER'S, which moves by the same rule and was never written at all until REM-192:
-    # percolate_parser--<old>--<new>.sql for every published version, from the recorded surface.
-    # The generator removes its own leftovers, as build-sql.py does.
-    subprocess.run(
-        [sys.executable, str(ROOT / "extension/percolate_parser/write-upgrades.py")],
-        check=True, cwd=ROOT,
-    )
+        # AND THE UPGRADE SCRIPTS THAT NOW LEAD NOWHERE, which is the same argument
+        # as the line above and was missed because it is a different filename shape.
+        #
+        # Postgres reads the sharedir to answer "what can this extension become".
+        # `percolate--0.1.1--0.1.2.sql` declares an update PATH to 0.1.2, and the
+        # bump has just deleted `percolate--0.1.2.sql`, the base script for the
+        # version that path arrives at. Left behind, the release ships an installed
+        # extension one `ALTER EXTENSION percolate UPDATE TO '0.1.2'` away from a
+        # version nobody meant to offer -- which is precisely this file's own
+        # argument for deleting the old base script, one filename shape along.
+        #
+        # build-sql.py has just written a direct path from every version that is
+        # STILL PUBLISHED (it reads the tags), so nothing that a real database can
+        # be sitting at loses its route. Anything targeting a version other than
+        # the one being published is by construction a leftover.
+        for p in sorted(q for q in SQL_DIR.glob("percolate--*--*.sql") if not q.name.endswith(f"--{new}.sql")):
+            p.unlink()
+            print(f"  removed {p.name}: an upgrade path to a version this tree no longer ships")
+
+        # AND THE PARSER'S, which moves by the same rule and was never written at all until REM-192:
+        # percolate_parser--<old>--<new>.sql for every published version, from the recorded surface.
+        # The generator removes its own leftovers, as build-sql.py does.
+        subprocess.run([py, str(ROOT / "extension/percolate_parser/write-upgrades.py")], check=True, cwd=ROOT)
+    except BaseException:
+        restore(before, sql_dirs)
+        print("::error::the bump failed after it began writing; every file it touched is back as it was",
+              file=sys.stderr)
+        raise
 
     print(f"{current} -> {new}")
     if out := os.environ.get("GITHUB_OUTPUT"):
