@@ -509,6 +509,8 @@ declare
         'rbac.applications', 'rbac.grants', 'rbac.plan_assignments', 'rbac.usage_ledger',
         'research.argument_edges', 'research.citations', 'research.claims', 'research.endorsements',
         'research.exposures', 'research.heads', 'research.operations', 'research.revisions', 'research.sources', 'research.works',
+        -- Pinned evidence (REM-153): captures and the artifact links to them are the deployment's.
+        'content.resource_snapshots', 'research.revision_files',
         'agentic.agents',
         'agentic.messages',
         'agentic.plugins',

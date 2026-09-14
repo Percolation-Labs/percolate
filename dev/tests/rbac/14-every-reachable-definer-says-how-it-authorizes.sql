@@ -111,6 +111,8 @@ insert into t14_declared (fn, mechanism, why) values
 -- ---------- content ----------------------------------------------------------
 ('content.assert_org_write(uuid,text)', 'rbac.may_access_org',
  'is itself the org check other definers call: raises unless the caller may act inside that org'),
+('content.capture_snapshot(uuid)', 'rbac.may_read',
+ 'the resource''s own read rule on the locked row, after rbac.require(research, insert); the file and hash come from that row, never from the caller (REM-153)'),
 ('content.chunks_to_embed(uuid)', 'rbac.may_read',
  'the resource''s own read rule; the claimless arm is the worker''s embed fan-out, and no request over PostgREST is claimless'),
 ('content.may_upload(uuid)', 'rbac.has_permission',
@@ -125,6 +127,8 @@ insert into t14_declared (fn, mechanism, why) values
  'only the source''s author, who must also hold workflows:update'),
 ('content.resolve_file(uuid)', 'rbac.may_read',
  'the resource''s own read rule (75abb1d)'),
+('content.resolve_snapshot(uuid)', 'rbac.may_read',
+ 'the pinned resource''s own read rule, as resolve_file; nothing once the bytes are removed (REM-153)'),
 ('content.save_api_source(uuid,text,jsonb,text,timestamp with time zone)', 'workflow.may_define',
  'refused without workflows:update, and an existing source only by its owner'),
 ('content.save_source(uuid,text,jsonb,jsonb,timestamp with time zone)', 'workflow.may_define',
