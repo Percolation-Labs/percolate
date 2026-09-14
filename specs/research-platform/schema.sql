@@ -520,6 +520,26 @@ create table if not exists research.revisions (
     unique (work_id, label)
 );
 
+-- WHAT A REVISION'S HASH WAS COMPUTED OVER, kept on the row (REM-151, specs/tables/schema.md §3). The
+-- digest is sha256 over the jsonb text Postgres prints for the document. A later canonical form is a new
+-- hash_format_version, never a silent change to what an old content_hash meant.
+alter table research.revisions add column if not exists hash_algorithm text not null default 'sha256';
+alter table research.revisions add column if not exists hash_format_version text not null default 'pg-jsonb-text-1';
+
+-- A PREDECESSOR IS A REVISION OF THE SAME WORK, by key rather than by each definer's care: the composite
+-- foreign key refuses a row whose predecessor belongs to another work, whoever writes it.
+alter table research.revisions drop constraint if exists revisions_predecessor_same_work;
+alter table research.revisions drop constraint if exists revisions_work_id_id_key;
+alter table research.revisions add constraint revisions_work_id_id_key unique (work_id, id);
+alter table research.revisions add constraint revisions_predecessor_same_work
+    foreign key (work_id, predecessor_id) references research.revisions (work_id, id);
+
+-- A DERIVATIVE WORK names its parent, and each of its revisions names the exact parent revision it answers
+-- (schema.md §3). Core stores the relationship; which document types may nest is the product validator's.
+-- trg_revisions_row proves a base belongs to the parent.
+alter table research.works add column if not exists parent_work_id uuid references research.works(id);
+alter table research.revisions add column if not exists base_revision_id uuid references research.revisions(id);
+
 create table if not exists research.heads (
     work_id     uuid primary key references research.works(id) on delete cascade,
     revision_id uuid not null references research.revisions(id),
@@ -666,6 +686,8 @@ language sql stable security definer set search_path = pg_catalog, public as $$
     select jsonb_build_object(
         'package_id', w.public_id, 'work_id', w.id, 'revision_id', r.id, 'revision', r.label,
         'content_hash', r.content_hash, 'hash_format', 'pg-jsonb-sha256',
+        'schema_version', r.schema_version, 'hash_algorithm', r.hash_algorithm,
+        'hash_format_version', r.hash_format_version,
         'visibility', case when w.visibility = 'public' then 'listed' else 'private' end,
         'exposed', exists (select 1 from research.exposures e where e.revision_id = r.id),
         'created', p_created, 'created_at', r.created_at)
@@ -1245,6 +1267,42 @@ create policy works_access on research.works as restrictive for select
 -- real org, whichever definer writes the row (rbac/02).
 create or replace trigger trg_works_visibility before insert or update on research.works
     for each row execute function rbac.enforce_visibility();
+
+-- EVERY REVISION'S LINEAGE AND PROVENANCE, checked on the row (REM-151, specs/tables/schema.md §3). The
+-- definers derive both from trusted claims; this makes one that gets it wrong fail instead of recording it.
+--   * A derivative work's revision names a base revision of its parent work; any other revision names none.
+--   * An agent's revision carries its credential and only an agent's does, and the credential is the actor's.
+--   * With a caller in the request, the actor is that caller: nobody records a revision as somebody else.
+create or replace function research.enforce_revision_row() returns trigger
+language plpgsql set search_path = pg_catalog, public as $$
+declare
+    v_parent uuid;
+    v_caller uuid := rbac.current_user_id();
+begin
+    select parent_work_id into v_parent from research.works where id = new.work_id;
+    if new.base_revision_id is null then
+        if v_parent is not null then
+            raise foreign_key_violation using message = 'A revision of a derivative work names the parent revision it answers';
+        end if;
+    elsif v_parent is null or not exists (select 1 from research.revisions b
+                                           where b.id = new.base_revision_id and b.work_id = v_parent) then
+        raise foreign_key_violation using message = 'A base revision belongs to the parent work';
+    end if;
+    if (new.actor_kind = 'agent') <> (new.credential_id is not null) then
+        raise check_violation using message = 'An agent''s revision carries its credential, and only an agent''s does';
+    end if;
+    if new.credential_id is not null and not exists (select 1 from rbac.api_keys k
+                                                      where k.id = new.credential_id and k.user_id = new.actor_id) then
+        raise check_violation using message = 'A revision''s credential belongs to its actor';
+    end if;
+    if v_caller is not null and new.actor_id <> v_caller then
+        raise check_violation using message = 'A revision is recorded as the caller who made it';
+    end if;
+    return new;
+end;
+$$;
+create or replace trigger trg_revisions_row before insert on research.revisions
+    for each row execute function research.enforce_revision_row();
 
 alter table research.revisions enable row level security;
 drop policy if exists revisions_readable on research.revisions;
