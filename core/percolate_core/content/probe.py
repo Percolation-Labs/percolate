@@ -131,8 +131,13 @@ async def _refuse_internal(url: str) -> None:
         raise ProbeFailed(str(exc)) from None
 
 
-async def _fetch(url: str, headers: dict[str, str]) -> tuple[httpx.Response, bytes, bool]:
+async def _fetch(url: str, headers: dict[str, str],
+                 limit: int = MAX_BYTES) -> tuple[httpx.Response, bytes, bool]:
     """One GET, capped in bytes and time, following at most MAX_REDIRECTS hops.
+
+    `limit` is the byte cap, and the third value says it was reached. The probe
+    keeps what it read; `evidence.py` passes one byte more than it will keep, so
+    reaching the cap means the page was larger and it refuses the copy.
 
     BY HAND, NOT `follow_redirects=True`. httpx re-checked nothing on a hop: the
     origin rule ran on the final URL after the request had already been made,
@@ -164,8 +169,8 @@ async def _fetch(url: str, headers: dict[str, str]) -> tuple[httpx.Response, byt
                 body = bytearray()
                 async for chunk in response.aiter_bytes():
                     body.extend(chunk)
-                    if len(body) >= MAX_BYTES:
-                        return response, bytes(body[:MAX_BYTES]), True
+                    if len(body) >= limit:
+                        return response, bytes(body[:limit]), True
                 return response, bytes(body), False
     raise AssertionError("unreachable: the loop returns or raises")  # pragma: no cover
 

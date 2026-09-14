@@ -219,9 +219,10 @@ jobs:
       # returned -- and an API source's url reached the metadata endpoint and
       # the compose network. test_api_probe.py rides along because nothing ran
       # it, and it now exercises the operator override for its loopback server.
+      # test_evidence.py is the third caller-chosen fetch, POST /evidence (REM-239).
       - name: No caller can point a fetch back at this network
         run: |
-          for t in test_egress_everywhere.py test_api_probe.py; do
+          for t in test_egress_everywhere.py test_api_probe.py test_evidence.py; do
             python -m unittest discover -s tests -p "$t" || exit 1
           done
 

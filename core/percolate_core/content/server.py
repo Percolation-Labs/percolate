@@ -17,6 +17,7 @@ acceptable because it is stateless and scales horizontally.
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 from uuid import UUID
@@ -189,6 +190,62 @@ async def probe_source(request: Request, claims: dict | None = Depends(caller)):
         # shows it to the operator and declines to invent paths, which is the
         # whole point of asking.
         raise HTTPException(400, str(e)) from None
+
+
+@routes.post("/evidence", status_code=201)
+async def save_evidence(request: Request, claims: dict | None = Depends(caller)):
+    """Keep a copy of a public page as the caller's research evidence (REM-239).
+
+    The same outbound request `/probe` makes, for the reason given there, and
+    the bytes stored the way `/files` stores them -- then registered through
+    `content.register_evidence`, which holds the policy: anybody who may write
+    research, limited by the `evidence_bytes` budget (REM-242). A person's
+    application calls this with that person's token.
+
+    A PAGE THAT IS NOT KEPT IS AN ANSWER, NOT AN ERROR. Unreachable, refused by
+    the egress guard, too large or empty comes back 422 with `saved: false` and
+    the reason, so the caller can leave the source unverified and say why.
+
+    THE BUDGET IS ASKED BEFORE THE BYTES ARE STORED, so a refused page leaves no
+    object behind in the common case. The database asks again when it registers,
+    and that answer is the one that counts; the window between the two can only
+    leave an unreferenced content-addressed object, which storage may prune.
+    """
+    if not claims:
+        raise HTTPException(401, "Sign in before saving evidence")
+    body = await request.json() if await request.body() else {}
+    if not isinstance(body, dict) or not isinstance(body.get("url"), str):
+        raise HTTPException(400, "send {\"url\": \"https://...\"}")
+    title = body.get("title") if isinstance(body.get("title"), str) else None
+    from .evidence import EvidenceRefused, fetch
+
+    try:
+        data, content_type = await fetch(body["url"])
+    except EvidenceRefused as e:
+        return JSONResponse({"saved": False, "reason": str(e)}, status_code=422)
+
+    try:
+        async with as_caller(claims) as conn:
+            state = await conn.fetchval(
+                "select rbac.limit_state(rbac.current_user_id(), 'evidence_bytes')")
+        state = state if isinstance(state, dict) else json.loads(state or "{}")
+        if state.get("status") in ("finite", "exhausted") and int(state.get("remaining") or 0) < len(data):
+            return JSONResponse({"saved": False, "reason": "Your allowance for saving evidence is used up for now.",
+                                 "limit": state}, status_code=REFUSED_STATUS)
+
+        checksum, key = storage.put(data, content_type)
+        async with as_caller(claims) as conn:
+            resource_id = await conn.fetchval(
+                "select content.register_evidence($1,$2,$3,$4,$5,$6,$7)",
+                body["url"], checksum, storage.bucket(), key, len(data), content_type, title)
+    except Exception as e:
+        refused = refusal(e)
+        if refused is not None:
+            return JSONResponse(refused.body(), status_code=REFUSED_STATUS)
+        raise HTTPException(400, str(e).split("\n")[0])
+
+    return {"saved": True, "resource_id": str(resource_id), "checksum": checksum,
+            "bytes": len(data), "content_type": content_type}
 
 
 @routes.get("/health")

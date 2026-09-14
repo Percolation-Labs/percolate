@@ -17,6 +17,17 @@ satisfy is not a safeguard; it is a sentence people learn to step over.
 **Not published.** Changes on `main` since `v0.1.12`. Nothing here is in
 the 0.1.12 wheel or image.
 
+### A cited page can be kept as evidence
+
+- **`POST /evidence {url}` on the Content Server keeps a copy of a public page as the caller's research evidence**
+  (REM-239). It makes one GET with the probe's hop-by-hop egress checks and no credentials, and refuses a page over
+  10 MB rather than truncating it. It stores the bytes content-addressed, then registers them through
+  `content.register_evidence` as the caller.
+- **Who may, and how much, is the database's decision.** It needs p8-subsystems with `register_evidence`:
+  `research:insert` and the `evidence_bytes` budget (REM-242). The budget is asked before storing. A page that is
+  not kept answers 422 with `saved: false` and the reason; a spent allowance answers 403.
+- `probe._fetch` takes a byte `limit`. The probe keeps its 2 MB.
+
 ### Pinned skills reach the prompt
 
 - **An agent's pinned skills are now part of its system prompt.** The agent
