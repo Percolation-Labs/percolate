@@ -86,7 +86,19 @@ def uses_run_identity(spec: dict) -> bool:
     )
 
 
-def agent_authorization(original: dict, resolved: dict, caller: str | None) -> str | None:
+def agent_authorization(original: dict, resolved: dict, caller: str | None,
+                        starter: dict | None = None) -> str | None:
+    """The Authorization header for a compiled agent step: the run owner, and the agent that started the run.
+
+    STARTER, NOT ONLY OWNER (REM-247). ``workflow.task_principal`` returns the
+    run's starter beside its owner, from the columns REM-171 records. A run a
+    person's agent started mints ``actor`` and ``api_key_id`` too, so the
+    runtime's ``rbac.decide`` refuses a human-only capability, a scope the key
+    lacks and a key revoked since the run began. It minted ``{sub, role}``
+    alone before, which let such a step call the runtime as the person. A
+    person's run, and a run from before the starter was recorded, keep the
+    owner-only token.
+    """
     if not uses_run_identity(original):
         return None
     origin = _configured_origin()
@@ -109,4 +121,12 @@ def agent_authorization(original: dict, resolved: dict, caller: str | None) -> s
         raise TerminalError("The agent signing key file cannot be read; check the worker's secret mount") from None
     if not secret:
         raise TerminalError("The agent signing key file is empty")
-    return "Bearer " + mint_jwt(owner, secret, role="authenticated", ttl_seconds=300)
+    extra = {}
+    if starter and starter.get("actor") == "agent":
+        extra["actor"] = "agent"
+        if starter.get("credential_id") is not None:
+            try:
+                extra["api_key_id"] = str(UUID(str(starter["credential_id"])))
+            except ValueError:
+                raise TerminalError("Agent task's starting credential is not a key id") from None
+    return "Bearer " + mint_jwt(owner, secret, role="authenticated", ttl_seconds=300, extra=extra or None)

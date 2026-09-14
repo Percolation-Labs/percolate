@@ -100,16 +100,19 @@ class WorkerAgentAuthTest(unittest.IsolatedAsyncioTestCase):
                 build_request(self.spec(), self.context())
 
     async def test_worker_uses_claimed_owner_rpc_and_keeps_identity_out_of_output(self):
+        # A database from before workflow.task_principal (REM-247): the owner alone, as it always was.
         task = uuid4()
         context = {"kind":"http_call", "step_key":"brief", "task_input":self.spec(),
                    "run_input":{"question":"Prepare a brief", "owner_id":BOB, "_agent_caller":BOB}}
         conn = AsyncMock()
-        conn.fetchval.side_effect = [task, json.dumps(context), ALICE]
+        conn.fetchval.side_effect = [task, json.dumps(context), False, ALICE]
         @asynccontextmanager
         async def service():
             yield conn
         async def execute(spec, ctx):
-            self.assertEqual(self.decode(build_request(spec, ctx)[0])["sub"], ALICE)
+            claims = self.decode(build_request(spec, ctx)[0])
+            self.assertEqual(claims["sub"], ALICE)
+            self.assertNotIn("actor", claims)
             return {"result":"brief"}
         with patch("percolate_core.worker.loop.as_service", service), \
              patch.dict("percolate_core.worker.loop.HANDLERS", {"http_call":execute}), \
@@ -122,7 +125,7 @@ class WorkerAgentAuthTest(unittest.IsolatedAsyncioTestCase):
         for error in (asyncpg.InsufficientPrivilegeError("agent execution requires a run owner"), asyncpg.UndefinedFunctionError("missing task_owner")):
             task = uuid4()
             conn = AsyncMock()
-            conn.fetchval.side_effect = [task, json.dumps({"kind":"http_call", "task_input":self.spec()}), error]
+            conn.fetchval.side_effect = [task, json.dumps({"kind":"http_call", "task_input":self.spec()}), False, error]
             @asynccontextmanager
             async def service():
                 yield conn
@@ -133,6 +136,42 @@ class WorkerAgentAuthTest(unittest.IsolatedAsyncioTestCase):
             execute.assert_not_awaited()
             self.assertEqual(conn.execute.await_args.args[0], "select workflow.fail_task($1, $2::jsonb, true)")
             self.assertTrue(conn.execute.await_args.args[2]["terminal"])
+
+    async def test_an_agent_started_run_carries_its_starter_into_the_step_token(self):
+        task, key = uuid4(), uuid4()
+        context = {"kind":"http_call", "step_key":"brief", "task_input":self.spec(), "run_input":{"question":"Q"}}
+        conn = AsyncMock()
+        conn.fetchval.side_effect = [task, json.dumps(context), True]
+        conn.fetchrow.return_value = {"owner_id": ALICE, "started_actor": "agent", "started_credential_id": key}
+        seen = {}
+        @asynccontextmanager
+        async def service():
+            yield conn
+        async def execute(spec, ctx):
+            seen.update(self.decode(build_request(spec, ctx)[0]))
+            return {"result":"brief"}
+        with patch("percolate_core.worker.loop.as_service", service), \
+             patch.dict("percolate_core.worker.loop.HANDLERS", {"http_call":execute}), \
+             patch("percolate_core.worker.loop.offload", AsyncMock(side_effect=lambda conn, task, out: out)):
+            self.assertTrue(await run_once("briefs", "brief-worker"))
+        self.assertIn("workflow.task_principal", conn.fetchrow.await_args.args[0])
+        self.assertEqual((seen["sub"], seen["actor"], seen["api_key_id"]), (ALICE, "agent", str(key)))
+
+    def test_the_starter_decides_which_claims_are_minted(self):
+        key = str(uuid4())
+        for starter, expected in (
+                (None, {}),
+                ({"actor": "person", "credential_id": None}, {}),
+                ({"actor": None, "credential_id": None}, {}),
+                ({"actor": "agent", "credential_id": None}, {"actor": "agent"}),
+                ({"actor": "agent", "credential_id": key}, {"actor": "agent", "api_key_id": key})):
+            with self.subTest(starter=starter):
+                request, _ = build_request(self.spec(), {**self.context(), "_agent_starter": starter})
+                claims = self.decode(request)
+                self.assertEqual(claims["sub"], ALICE)
+                self.assertEqual({k: claims[k] for k in ("actor", "api_key_id") if k in claims}, expected)
+        with self.assertRaisesRegex(TerminalError, "starting credential"):
+            build_request(self.spec(), {**self.context(), "_agent_starter": {"actor": "agent", "credential_id": "not-a-key"}})
 
     async def test_redirect_does_not_forward_the_run_token(self):
         requests = []
