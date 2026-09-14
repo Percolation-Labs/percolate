@@ -244,14 +244,26 @@ async def run_once(queue: str, worker_id: str) -> bool:
 
         spec = ctx.get("task_input") or {}
         if kind == "http_call" and uses_run_identity(spec):
+            # THE RUN'S STARTER TRAVELS WITH ITS OWNER (REM-247): workflow.task_principal where the database has it,
+            # asked for by name first because this is one transaction and a failed call would abort it. A database
+            # from before it answers task_owner alone, and the step's token stays owner-only, as it always was.
+            starter = None
             try:
                 async with as_service() as conn:
-                    owner = await conn.fetchval("select workflow.task_owner($1, $2)", task_id, worker_id)
+                    if await conn.fetchval("select to_regprocedure('workflow.task_principal(uuid,text)') is not null"):
+                        row = await conn.fetchrow(
+                            "select owner_id, started_actor, started_credential_id"
+                            "  from workflow.task_principal($1, $2)", task_id, worker_id)
+                        owner = row["owner_id"]
+                        starter = {"actor": row["started_actor"], "credential_id": row["started_credential_id"]}
+                    else:
+                        owner = await conn.fetchval("select workflow.task_owner($1, $2)", task_id, worker_id)
             except asyncpg.InsufficientPrivilegeError as e:
                 raise TerminalError(str(e)) from None
             except asyncpg.UndefinedFunctionError:
                 raise TerminalError("The database needs workflow.task_owner; apply the workflow-engine RBAC integration before running agent steps") from None
             ctx["_agent_caller"] = str(owner)
+            ctx["_agent_starter"] = starter
         # `work` steps get their templates resolved HERE, and http_call ones do
         # not, and the asymmetry is deliberate rather than left over.
         #
