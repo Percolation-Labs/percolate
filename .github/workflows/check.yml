@@ -220,18 +220,6 @@ jobs:
       # remember, so dev/check.sh asserts it -- if either key or either build
       # command drifts, the tree gate fails and names both files.
       #
-      # AND Cargo.toml IS IN THE HASH, because the pgrx pin moved into it. The
-      # toolchain image is a function of the Dockerfile AND the version passed
-      # into it; keyed on the Dockerfile alone, bumping pgrx in the crate would
-      # be a cache HIT on an image carrying the previous cargo-pgrx -- which
-      # compiles, and produces a .so the crate does not match.
-      - name: Cache the pgrx toolchain image
-        id: toolchain
-        uses: actions/cache@v6
-        with:
-          path: /tmp/pgrx-builder.tar
-          key: pgrx-builder-image-${{ hashFiles('dev/Dockerfile.pgrx-builder', 'extension/percolate_parser/Cargo.toml') }}-${{ steps.base.outputs.digest }}
-
       # BOTH NUMBERS FROM THE CRATE THAT DECLARES THEM, once, so no step below
       # spells either. `Cargo.toml` says which pgrx this builds against and
       # which pg feature is default; every other line here used to restate one
@@ -251,6 +239,21 @@ jobs:
           echo "pg=$M"   >> "$GITHUB_OUTPUT"
           echo "pgrx=$X" >> "$GITHUB_OUTPUT"
           echo "pg$M, pgrx $X"
+
+      # AND THE PGRX PIN IS IN THE KEY, read above, rather than a hash of all of
+      # Cargo.toml. The toolchain image is a function of the Dockerfile AND the
+      # version passed into it; keyed on the Dockerfile alone, bumping pgrx in
+      # the crate would be a cache HIT on an image carrying the previous
+      # cargo-pgrx. It used to hash the whole file, which also moved on every
+      # extension version bump -- a miss, a two-gigabyte rebuild and save on
+      # every release PR, and parser-tests.yml ran out of disk doing it on
+      # p8-subsystems#184 (REM-235). The pin is the only line the image depends on.
+      - name: Cache the pgrx toolchain image
+        id: toolchain
+        uses: actions/cache@v6
+        with:
+          path: /tmp/pgrx-builder.tar
+          key: pgrx-builder-image-${{ hashFiles('dev/Dockerfile.pgrx-builder') }}-pgrx${{ steps.pins.outputs.pgrx }}-${{ steps.base.outputs.digest }}
 
       # THE COLD PATH IS THE TIGHT ONE, and the first version of this fix missed
       # it. p8#132's own run took a cache MISS and died in the step below,
