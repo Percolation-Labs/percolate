@@ -12,6 +12,16 @@ this is the account that is written on purpose.
 Docker Hub first and tags last, so a failed run leaves a bumped, untagged tree
 that the next run finishes. The tag is the commit point.
 
+It also writes the tail, which through 0.1.11 was done by hand and left every
+PR red until somebody did (REM-150). After the tag, `after_release.py` moves
+the README's image pins, drops the changelog's "(unreleased)", adds this file's
+row and opens the next patch. Then it runs `dev/check-version.sh` and
+`dev/check-releases.sh` before pushing. **The paragraph saying why a version
+exists is still written by a person**; the run summary says when it is owed.
+Because main now sits one patch past the latest tag, the number a release
+publishes counts from that tag (`bump_version.py release`). To retry a release
+that did not finish, dispatch the same bump again.
+
 ## The invariant
 
 **`v<x>` names the commit whose `pyproject.toml` says `<x>`.** The `tag` job
@@ -34,6 +44,7 @@ silently.
 | 0.1.9 | `v0.1.9` | `014b75e` | yes |
 | 0.1.10 | `v0.1.10` | `3612268` | yes |
 | 0.1.11 | `v0.1.11` | `4d583e8` | yes |
+| 0.1.12 | `v0.1.12` | `c8e6878` | yes |
 
 0.1.0–0.1.3 went to PyPI before releasing was a workflow. There is nothing to
 recover: the wheels are on PyPI and no tag was ever pushed, and no Release page
@@ -89,6 +100,17 @@ it"*.
 `v0.1.11` names `4d583e8`, whose `pyproject.toml` says `0.1.11`. Both releases were
 dispatched `publish: false` first, so the retry-vs-bump decision was read off the
 run's own annotation before anything was published rather than assumed.
+
+0.1.12 is what a stock install needed to run a scheduled agent at all. No
+shipped deployment served `/internal/run`, the runtime's login could not become
+`worker` to complete a task, `agent serve` never mounted the delegation gateway,
+and the sample's own agent had no query tool server to read the sample with.
+Behind those came the refusals that made the fixes visible: a refused tool call
+reached the model as a success, a failed delegated run came back as an empty
+answer, and the quota gate asks core. `CHANGELOG.md` has the operator-facing
+list, one section per fix. `v0.1.12` names `c8e6878`, whose `pyproject.toml`
+says `0.1.12`. It was the last release whose tail was written by hand. That
+happened in REM-150's own PR, by running the script the workflow now runs.
 
 0.1.4 and 0.1.5 were tagged correctly and had no Release page; both were created
 on 2026-09-12 and say so in their own text, so nobody reads a 2026-09-12

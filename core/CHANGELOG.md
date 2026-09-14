@@ -12,11 +12,7 @@ on "the `percolate-core` release notes" — a precondition that had never been
 met and could not be, so the bump happened without it. A condition nobody can
 satisfy is not a safeguard; it is a sentence people learn to step over.
 
-## 0.1.12 (unreleased)
-
-**Not published.** `pyproject.toml` says `0.1.12` and there is no `v0.1.12`
-tag. This entry describes `main` at `f2920b9`; nothing in it can be installed
-yet, and the heading loses its "(unreleased)" when the tag exists.
+## 0.1.12
 
 **Pairing: extension 0.2.0, with one degraded heartbeat that extension 0.2.1
 repairs.** Nothing in 0.1.12 needs an object 0.2.0 lacks. Each of these was run

@@ -1962,7 +1962,7 @@ wheels = [
 
 [[package]]
 name = "percolate-core"
-version = "0.1.9"
+version = "0.1.13"
 source = { editable = "." }
 dependencies = [
     { name = "asyncpg" },
