@@ -193,6 +193,11 @@ if [ -n "${PARSER_DIST:-}" ]; then
         'rm -f /usr/share/postgresql/19/extension/percolate_parser--*.sql'
     docker cp "$PARSER_DIST/percolate_parser--$PV.sql" \
               "$CONTAINER:/usr/share/postgresql/19/extension/" >/dev/null
+    # And the upgrade paths to it, committed rather than built (write-upgrades.py, REM-192), so the
+    # image under test offers what a released one will.
+    for up in extension/percolate_parser/sql/percolate_parser--*--"$PV".sql; do
+        [ -e "$up" ] && docker cp "$up" "$CONTAINER:/usr/share/postgresql/19/extension/" >/dev/null
+    done
     docker cp "$PARSER_DIST/percolate_parser.control" \
               "$CONTAINER:/usr/share/postgresql/19/extension/" >/dev/null
     POFFERED=$(docker exec "$CONTAINER" psql -U p8 -d postgres -tAc \

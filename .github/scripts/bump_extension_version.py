@@ -175,6 +175,14 @@ def main() -> None:
         p.unlink()
         print(f"  removed {p.name}: an upgrade path to a version this tree no longer ships")
 
+    # AND THE PARSER'S, which moves by the same rule and was never written at all until REM-192:
+    # percolate_parser--<old>--<new>.sql for every published version, from the recorded surface.
+    # The generator removes its own leftovers, as build-sql.py does.
+    subprocess.run(
+        [sys.executable, str(ROOT / "extension/percolate_parser/write-upgrades.py")],
+        check=True, cwd=ROOT,
+    )
+
     print(f"{current} -> {new}")
     if out := os.environ.get("GITHUB_OUTPUT"):
         with open(out, "a") as fh:

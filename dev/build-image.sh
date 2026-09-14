@@ -194,6 +194,14 @@ for up in "$ROOT"/extension/percolate/sql/percolate--*--"$VERSION".sql; do
   cp "$up" dist/
   echo "    upgrade script: $(basename "$up")"
 done
+# The parser's too, by the same argument, or `percolate` moves and `percolate_parser` stays at the
+# version that installed it over this image's .so (REM-192). The Dockerfile's
+# dist/percolate_parser--*.sql glob ships them; the rm above the pgrx copy clears old ones.
+for up in "$ROOT"/extension/percolate_parser/sql/percolate_parser--*--"$VERSION".sql; do
+  [ -e "$up" ] || continue
+  cp "$up" dist/
+  echo "    upgrade script: $(basename "$up")"
+done
 
 echo "==> building $TAG"
 docker build -f Dockerfile.pg19 -t "$TAG" .

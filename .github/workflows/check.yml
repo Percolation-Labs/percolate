@@ -379,6 +379,14 @@ jobs:
           ls -l parser-dist
           grep default_version parser-dist/percolate_parser.control
 
+      # The SQL pgrx just produced is the surface the committed upgrade scripts were made from, or
+      # this fails here, in the job that ran pgrx, naming the one command that regenerates them
+      # (REM-192). A Rust change that adds, removes or retypes a function lands with its scripts.
+      - name: The parser's SQL surface is the recorded one
+        run: |
+          PV=$(sed -n "s/^default_version = '\(.*\)'/\1/p" parser-dist/percolate_parser.control)
+          python3 extension/percolate_parser/write-upgrades.py --check-surface "parser-dist/percolate_parser--$PV.sql"
+
       - uses: actions/upload-artifact@v7
         with:
           name: parser-dist
@@ -419,7 +427,9 @@ jobs:
           path: parser-dist
 
       - run: PARSER_DIST="$GITHUB_WORKSPACE/parser-dist" dev/ci-database.sh
-      - run: dev/check.sh
+      # PARSER_DIST again, for dev/parser-upgrade.sh: it updates a release's parser to the .so this
+      # run compiled, not to the release's own.
+      - run: PARSER_DIST="$GITHUB_WORKSPACE/parser-dist" dev/check.sh
 
       # THE DEFERRALS GATE USED TO BE A STEP HERE, and it was the only gate in
       # this file. `dev/check.sh` above opens with "THERE IS NO SECOND LIST" and
