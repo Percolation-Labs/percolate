@@ -508,7 +508,7 @@ declare
         'engagement.follows', 'engagement.saves', 'engagement.valuations', 'engagement.votes',
         'rbac.applications', 'rbac.grants', 'rbac.plan_assignments', 'rbac.usage_ledger',
         'research.argument_edges', 'research.citations', 'research.claims', 'research.endorsements',
-        'research.heads', 'research.operations', 'research.revisions', 'research.sources', 'research.works',
+        'research.exposures', 'research.heads', 'research.operations', 'research.revisions', 'research.sources', 'research.works',
         'agentic.agents',
         'agentic.messages',
         'agentic.plugins',

@@ -112,6 +112,8 @@ insert into percolate.table_kinds (schema_name, table_name, kind, why) values
   'a sidecar keyed by content.channels(id); same shape as the aiq.emb_* tables'),
  ('research','heads','natural',
   'a sidecar keyed by research.works(id): which revision is current for each work'),
+ ('research','exposures','natural',
+  'a sidecar keyed by research.revisions(id): which exact revisions anybody who may read the work may read'),
  ('rbac','plan_assignments','natural',
   'a sidecar keyed by rbac.users(id): the plan one account is on')
 -- `do update`, same reason as the statement above, and here it names one row.
