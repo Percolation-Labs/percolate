@@ -2273,12 +2273,12 @@ begin
     if p_role !~ '^[a-z][a-z0-9_-]{1,60}$' then
         raise invalid_parameter_value using message = 'A role name is a lower-case word';
     end if;
-    if not (p_resource like '%.%' or (p_resource, p_action) in (('research', 'list'), ('research', 'publish'), ('engagement', 'moderate'))) then
+    if not rbac.application_may_hold(p_resource, p_action) then
         raise insufficient_privilege using message = 'An application grants only its own capabilities, research:list, research:publish or engagement:moderate';
     end if;
     if exists (select 1 from rbac.roles where name = p_role and grants_all)
        or exists (select 1 from rbac.role_permissions where role = p_role
-                   and not (resource like '%.%' or (resource, action) in (('research', 'list'), ('research', 'publish'), ('engagement', 'moderate')))) then
+                   and not rbac.application_may_hold(resource, action)) then
         raise insufficient_privilege using message = 'That role carries capabilities an application cannot grant';
     end if;
     perform pg_advisory_xact_lock(hashtextextended(p_user::text || '/' || p_role || '/' || p_application || '/' || v_org::text, 0));
@@ -2323,7 +2323,7 @@ begin
     end if;
     if exists (select 1 from rbac.roles where name = g.role and grants_all)
        or exists (select 1 from rbac.role_permissions where role = g.role
-                   and not (resource like '%.%' or (resource, action) in (('research', 'list'), ('research', 'publish'), ('engagement', 'moderate')))) then
+                   and not rbac.application_may_hold(resource, action)) then
         raise insufficient_privilege using message = 'That grant carries capabilities an application cannot revoke';
     end if;
     if p_decided_by is not null and not exists (select 1 from rbac.users where id = p_decided_by) then

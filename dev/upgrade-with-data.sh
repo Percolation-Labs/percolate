@@ -84,6 +84,12 @@ on conflict do nothing;
 insert into rbac.role_permissions (role, resource, action) values
     ('ci-lister', 'research', 'list'), ('ci-lister', 'agents', 'invoke'), ('ci-lister', 'resources', 'create')
 on conflict do nothing;
+-- A PUBLICATION ROLE AS AN APPLICATION PROVISIONS IT (REM-311). research:publish is a capability an application
+-- may grant (REM-252), and the replayed REM-193 repair deleted it on the 0.2.7 upgrade, so every publisher on
+-- production answered no_grant. The upgrade must keep it.
+insert into rbac.roles (name, description) values ('ci-publisher', 'granted by an application') on conflict do nothing;
+insert into rbac.role_permissions (role, resource, action) values ('ci-publisher', 'research', 'publish')
+on conflict do nothing;
 
 -- A PUBLIC WORK WITH TWO REVISIONS, from before exposures existed (REM-185).
 -- Every revision of a public work was readable then, so the upgrade must
@@ -244,6 +250,9 @@ do \$\$ begin
     then raise exception 'an application role still carries capabilities its grant rule refuses after the upgrade'; end if;
   if not exists (select 1 from rbac.role_permissions where role = 'ci-lister' and resource = 'research' and action = 'list')
     then raise exception 'the upgrade removed research:list, which an application may grant'; end if;
+  -- A PUBLICATION ROLE KEEPS research:publish (REM-311).
+  if not exists (select 1 from rbac.role_permissions where role = 'ci-publisher' and resource = 'research' and action = 'publish')
+    then raise exception 'the upgrade removed research:publish from an application''s publication role, which an application may grant (REM-311)'; end if;
   if not exists (select 1 from rbac.role_permissions where role = 'ci-member' and resource = 'agents' and action = 'invoke')
     then raise exception 'the backfill no longer reaches an ordinary role'; end if;
   perform rbac.grant_application_role((select id from rbac.users where email = 'upgrade@ci'), 'ci-lister',

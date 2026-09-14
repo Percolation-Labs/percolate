@@ -1,5 +1,85 @@
+-- from specs/migrations/0.1.6--0.2.0.sql: the part of the 0.1.6 -> 0.2.0 hop
+-- that a replay cannot express.
+-- 0.1.6 -> 0.2.0: the graph learns to forget on purpose.
+--
+-- The part of this upgrade a REPLAY CANNOT EXPRESS. Everything else is the
+-- schema re-applied, which converges because every statement in it runs twice.
+-- `create table if not exists` cannot narrow a column that already exists: an
+-- existing database's `aiq.edges.valid_from` is nullable with no default and
+-- full of nulls, and nothing in the replayed schema will change that.
+--
+-- WHY IT HAS TO CHANGE. `aiq.edges` has been bitemporal since it was written --
+-- `valid_from` and `valid_to` are both in the original CREATE -- and neither
+-- was ever populated. Across 9,502 edges in the dogfood instance the retraction
+-- rate was exactly 0.00% and every single `valid_from` was null. The pair was
+-- decorative.
+--
+-- That is the regime `research-notes/build-knit-dream-theory.pdf` §10 calls
+-- running the model in its known-broken state: an append-only knowledge graph
+-- has no depression term, and retraction is the balance condition the capacity
+-- result depends on. §14 turns it into a test -- if the retraction rate is
+-- zero, the condition is violated -- and ours was zero for the most banal
+-- possible reason, which is that the derivation DELETEd what it could no longer
+-- derive. A graph that forgets by deletion does not forget slowly; it forgets
+-- completely, leaving nothing to audit and nothing downstream able to tell
+-- that a relationship was once asserted.
+--
+-- ORDER MATTERS:
+--
+--   1. Backfill from `created_at`. It is when the row was first written, which
+--      is exactly when the edge was first asserted, and it is already correct
+--      for every historical row. Using now() here instead produces edges
+--      asserted after they were retracted -- measured, on the first attempt.
+--   2. Then the default, so every future writer dates itself.
+--   3. Then NOT NULL, which can only be added once no nulls remain.
+--
+-- Idempotent: the UPDATE matches nothing on a second run, and both ALTERs are
+-- no-ops once applied.
+--
+-- NO `set role` HERE, and the omission is deliberate rather than an oversight.
+-- This file is PREPENDED to the upgrade script, which loads as app_owner and
+-- refuses to load as a superuser at all. A `set role app_owner; ... reset role;`
+-- pair looks harmless and is not: `reset role` drops the session back to the
+-- superuser it started as, and every statement in the 10,000 lines that follow
+-- then runs as one -- which the schema's own guard catches and refuses, having
+-- been written for exactly that mistake. Neither existing migration sets a
+-- role; this one inherits the caller's, like they do.
+
+update aiq.edges set valid_from = created_at where valid_from is null;
+alter table aiq.edges alter column valid_from set default now();
+alter table aiq.edges alter column valid_from set not null;
+
+-- THE RECALL COUNTERS, for the same reason as valid_from above: `create table
+-- if not exists` cannot add a column to a table that already exists, and an
+-- upgraded database would carry the schema without them.
+--
+-- `aiq.edges_current` does not need repairing here because it is new in 0.2.0:
+-- an upgrade creates it fresh from the replayed schema, with the full column
+-- list. A database that already had it would need a DROP, since a view cannot
+-- be widened by `create or replace`.
+alter table aiq.edges add column if not exists recall_count     bigint not null default 0;
+alter table aiq.edges add column if not exists probe_count      bigint not null default 0;
+alter table aiq.edges add column if not exists last_recalled_at timestamptz;
+
+-- content.resolve_file AND workflow.v_artifacts, both reshaped in 0.2.0
+-- (2d54769): resolve_file gained a trailing `checksum` column, and a changed
+-- return type cannot be `create or replace`d; v_artifacts changed its query
+-- shape and now reads resolve_file. The drops are needed only by a database
+-- still carrying the 0.1.x shapes, so they live HERE and not in the replayed
+-- body -- where they were until the first bump past 0.2.0 replayed them onto
+-- a database whose v_artifacts already depends on resolve_file, and
+-- `cannot drop function content.resolve_file(uuid) because other objects
+-- depend on it` stopped the upgrade. dev/upgrade-converges.sh FROM=self is the
+-- gate that refuses the next one.
+--
+-- The view first: on a 0.1.x database nothing depends on either, and on any
+-- database where the view already reads the function this order is the one
+-- that works. The body recreates both, owned and granted as it says.
+drop view if exists workflow.v_artifacts;
+drop function if exists content.resolve_file(uuid);
+
 -- ============================================================
--- percolate 0.2.7 -- the whole schema, as one extension script.
+-- percolate 0.2.8 -- the whole schema, as one extension script.
 --
 -- GENERATED from specs/ by extension/percolate/build-sql.py. Do not edit.
 --
@@ -9596,18 +9676,28 @@ select r.name, k.resource, k.action
  where r.description is distinct from 'granted by an application'
 on conflict do nothing;
 
+-- WHAT AN APPLICATION'S ROLE MAY HOLD: its own dotted capabilities, research:list, research:publish and
+-- engagement:moderate. ONE COPY. It was four -- this repair and three checks in research-platform's
+-- grant_application_role and revoke_application_role -- and REM-252 added research:publish to three of them.
+-- The fourth, this repair, runs on every upgrade, so the 0.2.7 upgrade deleted every publication role's
+-- research:publish and production publishing answered no_grant (REM-311). Internal: the definers and this
+-- file's replay are its only callers.
+create or replace function rbac.application_may_hold(p_resource text, p_action text) returns boolean
+language sql immutable set search_path = pg_catalog, public as $$
+    select p_resource like '%.%'
+        or (p_resource, p_action) in (('research', 'list'), ('research', 'publish'), ('engagement', 'moderate'));
+$$;
+revoke execute on function rbac.application_may_hold(text, text) from public;
+
 -- And the repair, for every database the backfill already reached: an
--- application role keeps only what an application may grant -- its own dotted
--- capabilities, research:list and engagement:moderate, the rule
--- grant_application_role enforces. Idempotent, and a fresh install has no such
--- rows. Only rows that rule would refuse are removed, so nothing an
--- application could have granted is lost.
+-- application role keeps only what an application may hold. Idempotent, and a
+-- fresh install has no such rows. Only rows that rule would refuse are removed,
+-- so nothing an application could have granted is lost.
 delete from rbac.role_permissions rp
  using rbac.roles r
  where r.name = rp.role
    and r.description = 'granted by an application'
-   and not (rp.resource like '%.%'
-            or (rp.resource, rp.action) in (('research', 'list'), ('engagement', 'moderate')));
+   and not rbac.application_may_hold(rp.resource, rp.action);
 
 -- One function every module's RLS policy calls. Add a new module
 -- (resource search, agentic tools) by inserting rows here, not by
@@ -30837,12 +30927,12 @@ begin
     if p_role !~ '^[a-z][a-z0-9_-]{1,60}$' then
         raise invalid_parameter_value using message = 'A role name is a lower-case word';
     end if;
-    if not (p_resource like '%.%' or (p_resource, p_action) in (('research', 'list'), ('research', 'publish'), ('engagement', 'moderate'))) then
+    if not rbac.application_may_hold(p_resource, p_action) then
         raise insufficient_privilege using message = 'An application grants only its own capabilities, research:list, research:publish or engagement:moderate';
     end if;
     if exists (select 1 from rbac.roles where name = p_role and grants_all)
        or exists (select 1 from rbac.role_permissions where role = p_role
-                   and not (resource like '%.%' or (resource, action) in (('research', 'list'), ('research', 'publish'), ('engagement', 'moderate')))) then
+                   and not rbac.application_may_hold(resource, action)) then
         raise insufficient_privilege using message = 'That role carries capabilities an application cannot grant';
     end if;
     perform pg_advisory_xact_lock(hashtextextended(p_user::text || '/' || p_role || '/' || p_application || '/' || v_org::text, 0));
@@ -30887,7 +30977,7 @@ begin
     end if;
     if exists (select 1 from rbac.roles where name = g.role and grants_all)
        or exists (select 1 from rbac.role_permissions where role = g.role
-                   and not (resource like '%.%' or (resource, action) in (('research', 'list'), ('research', 'publish'), ('engagement', 'moderate')))) then
+                   and not rbac.application_may_hold(resource, action)) then
         raise insufficient_privilege using message = 'That grant carries capabilities an application cannot revoke';
     end if;
     if p_decided_by is not null and not exists (select 1 from rbac.users where id = p_decided_by) then

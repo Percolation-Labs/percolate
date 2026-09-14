@@ -1,37 +1,3 @@
--- from specs/migrations/0.1.2--0.1.3.sql: the part of the 0.1.2 -> 0.1.3 hop
--- that a replay cannot express.
--- 0.1.2 -> 0.1.3: three words for finishing became one.
---
--- The part of this upgrade a REPLAY CANNOT EXPRESS. Everything else in
--- percolate--0.1.2--0.1.3.sql is the schema re-applied, which converges because
--- every statement in it can run twice. Rewriting rows cannot: the schema
--- describes the shape a table should have, never the values already in it.
---
--- `workflow.tasks` said 'done', `workflow.runs` said 'completed' and
--- `agentic.runs` said 'succeeded' -- one idea under three words, and because
--- both status constraints are named the same thing, the wrong vocabulary read
--- as right. 0.1.3 puts the words in one place (workflow.lifecycle_states) with
--- a foreign key from every status column into it.
---
--- ORDER MATTERS AND IS THE WHOLE FILE:
---
---   1. Drop the old CHECKs. They still say 'completed'/'done', so the UPDATE
---      below would violate the very constraint it exists to move past.
---   2. Rewrite the rows.
---   3. Let the replayed schema add the new CHECKs and the FKs into
---      lifecycle_states. Adding that FK to a table still holding a 'completed'
---      row fails, which would abort the upgrade rather than corrupt it -- loud,
---      but a database nobody can upgrade is still a database nobody can
---      upgrade.
---
--- Idempotent, like everything else here: the UPDATEs match nothing on a second
--- run, and the drops are `if exists`.
-alter table workflow.runs  drop constraint if exists runs_status_check;
-alter table workflow.tasks drop constraint if exists tasks_status_check;
-
-update workflow.runs  set status = 'succeeded' where status = 'completed';
-update workflow.tasks set status = 'succeeded' where status = 'done';
-
 -- from specs/migrations/0.1.3--0.1.4.sql: the part of the 0.1.3 -> 0.1.4 hop
 -- that a replay cannot express.
 -- 0.1.3 -> 0.1.4: scope, and the one thing a replay cannot express.
@@ -230,7 +196,7 @@ drop view if exists workflow.v_artifacts;
 drop function if exists content.resolve_file(uuid);
 
 -- ============================================================
--- percolate 0.2.7 -- the whole schema, as one extension script.
+-- percolate 0.2.8 -- the whole schema, as one extension script.
 --
 -- GENERATED from specs/ by extension/percolate/build-sql.py. Do not edit.
 --
@@ -9827,18 +9793,28 @@ select r.name, k.resource, k.action
  where r.description is distinct from 'granted by an application'
 on conflict do nothing;
 
+-- WHAT AN APPLICATION'S ROLE MAY HOLD: its own dotted capabilities, research:list, research:publish and
+-- engagement:moderate. ONE COPY. It was four -- this repair and three checks in research-platform's
+-- grant_application_role and revoke_application_role -- and REM-252 added research:publish to three of them.
+-- The fourth, this repair, runs on every upgrade, so the 0.2.7 upgrade deleted every publication role's
+-- research:publish and production publishing answered no_grant (REM-311). Internal: the definers and this
+-- file's replay are its only callers.
+create or replace function rbac.application_may_hold(p_resource text, p_action text) returns boolean
+language sql immutable set search_path = pg_catalog, public as $$
+    select p_resource like '%.%'
+        or (p_resource, p_action) in (('research', 'list'), ('research', 'publish'), ('engagement', 'moderate'));
+$$;
+revoke execute on function rbac.application_may_hold(text, text) from public;
+
 -- And the repair, for every database the backfill already reached: an
--- application role keeps only what an application may grant -- its own dotted
--- capabilities, research:list and engagement:moderate, the rule
--- grant_application_role enforces. Idempotent, and a fresh install has no such
--- rows. Only rows that rule would refuse are removed, so nothing an
--- application could have granted is lost.
+-- application role keeps only what an application may hold. Idempotent, and a
+-- fresh install has no such rows. Only rows that rule would refuse are removed,
+-- so nothing an application could have granted is lost.
 delete from rbac.role_permissions rp
  using rbac.roles r
  where r.name = rp.role
    and r.description = 'granted by an application'
-   and not (rp.resource like '%.%'
-            or (rp.resource, rp.action) in (('research', 'list'), ('engagement', 'moderate')));
+   and not rbac.application_may_hold(rp.resource, rp.action);
 
 -- One function every module's RLS policy calls. Add a new module
 -- (resource search, agentic tools) by inserting rows here, not by
@@ -31068,12 +31044,12 @@ begin
     if p_role !~ '^[a-z][a-z0-9_-]{1,60}$' then
         raise invalid_parameter_value using message = 'A role name is a lower-case word';
     end if;
-    if not (p_resource like '%.%' or (p_resource, p_action) in (('research', 'list'), ('research', 'publish'), ('engagement', 'moderate'))) then
+    if not rbac.application_may_hold(p_resource, p_action) then
         raise insufficient_privilege using message = 'An application grants only its own capabilities, research:list, research:publish or engagement:moderate';
     end if;
     if exists (select 1 from rbac.roles where name = p_role and grants_all)
        or exists (select 1 from rbac.role_permissions where role = p_role
-                   and not (resource like '%.%' or (resource, action) in (('research', 'list'), ('research', 'publish'), ('engagement', 'moderate')))) then
+                   and not rbac.application_may_hold(resource, action)) then
         raise insufficient_privilege using message = 'That role carries capabilities an application cannot grant';
     end if;
     perform pg_advisory_xact_lock(hashtextextended(p_user::text || '/' || p_role || '/' || p_application || '/' || v_org::text, 0));
@@ -31118,7 +31094,7 @@ begin
     end if;
     if exists (select 1 from rbac.roles where name = g.role and grants_all)
        or exists (select 1 from rbac.role_permissions where role = g.role
-                   and not (resource like '%.%' or (resource, action) in (('research', 'list'), ('research', 'publish'), ('engagement', 'moderate')))) then
+                   and not rbac.application_may_hold(resource, action)) then
         raise insufficient_privilege using message = 'That grant carries capabilities an application cannot revoke';
     end if;
     if p_decided_by is not null and not exists (select 1 from rbac.users where id = p_decided_by) then

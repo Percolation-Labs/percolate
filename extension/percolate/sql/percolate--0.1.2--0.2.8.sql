@@ -230,7 +230,7 @@ drop view if exists workflow.v_artifacts;
 drop function if exists content.resolve_file(uuid);
 
 -- ============================================================
--- percolate 0.2.7 -- the whole schema, as one extension script.
+-- percolate 0.2.8 -- the whole schema, as one extension script.
 --
 -- GENERATED from specs/ by extension/percolate/build-sql.py. Do not edit.
 --
@@ -9827,18 +9827,28 @@ select r.name, k.resource, k.action
  where r.description is distinct from 'granted by an application'
 on conflict do nothing;
 
+-- WHAT AN APPLICATION'S ROLE MAY HOLD: its own dotted capabilities, research:list, research:publish and
+-- engagement:moderate. ONE COPY. It was four -- this repair and three checks in research-platform's
+-- grant_application_role and revoke_application_role -- and REM-252 added research:publish to three of them.
+-- The fourth, this repair, runs on every upgrade, so the 0.2.7 upgrade deleted every publication role's
+-- research:publish and production publishing answered no_grant (REM-311). Internal: the definers and this
+-- file's replay are its only callers.
+create or replace function rbac.application_may_hold(p_resource text, p_action text) returns boolean
+language sql immutable set search_path = pg_catalog, public as $$
+    select p_resource like '%.%'
+        or (p_resource, p_action) in (('research', 'list'), ('research', 'publish'), ('engagement', 'moderate'));
+$$;
+revoke execute on function rbac.application_may_hold(text, text) from public;
+
 -- And the repair, for every database the backfill already reached: an
--- application role keeps only what an application may grant -- its own dotted
--- capabilities, research:list and engagement:moderate, the rule
--- grant_application_role enforces. Idempotent, and a fresh install has no such
--- rows. Only rows that rule would refuse are removed, so nothing an
--- application could have granted is lost.
+-- application role keeps only what an application may hold. Idempotent, and a
+-- fresh install has no such rows. Only rows that rule would refuse are removed,
+-- so nothing an application could have granted is lost.
 delete from rbac.role_permissions rp
  using rbac.roles r
  where r.name = rp.role
    and r.description = 'granted by an application'
-   and not (rp.resource like '%.%'
-            or (rp.resource, rp.action) in (('research', 'list'), ('engagement', 'moderate')));
+   and not rbac.application_may_hold(rp.resource, rp.action);
 
 -- One function every module's RLS policy calls. Add a new module
 -- (resource search, agentic tools) by inserting rows here, not by
@@ -31068,12 +31078,12 @@ begin
     if p_role !~ '^[a-z][a-z0-9_-]{1,60}$' then
         raise invalid_parameter_value using message = 'A role name is a lower-case word';
     end if;
-    if not (p_resource like '%.%' or (p_resource, p_action) in (('research', 'list'), ('research', 'publish'), ('engagement', 'moderate'))) then
+    if not rbac.application_may_hold(p_resource, p_action) then
         raise insufficient_privilege using message = 'An application grants only its own capabilities, research:list, research:publish or engagement:moderate';
     end if;
     if exists (select 1 from rbac.roles where name = p_role and grants_all)
        or exists (select 1 from rbac.role_permissions where role = p_role
-                   and not (resource like '%.%' or (resource, action) in (('research', 'list'), ('research', 'publish'), ('engagement', 'moderate')))) then
+                   and not rbac.application_may_hold(resource, action)) then
         raise insufficient_privilege using message = 'That role carries capabilities an application cannot grant';
     end if;
     perform pg_advisory_xact_lock(hashtextextended(p_user::text || '/' || p_role || '/' || p_application || '/' || v_org::text, 0));
@@ -31118,7 +31128,7 @@ begin
     end if;
     if exists (select 1 from rbac.roles where name = g.role and grants_all)
        or exists (select 1 from rbac.role_permissions where role = g.role
-                   and not (resource like '%.%' or (resource, action) in (('research', 'list'), ('research', 'publish'), ('engagement', 'moderate')))) then
+                   and not rbac.application_may_hold(resource, action)) then
         raise insufficient_privilege using message = 'That grant carries capabilities an application cannot revoke';
     end if;
     if p_decided_by is not null and not exists (select 1 from rbac.users where id = p_decided_by) then
