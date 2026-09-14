@@ -84,6 +84,21 @@ on conflict do nothing;
 insert into rbac.role_permissions (role, resource, action) values
     ('ci-lister', 'research', 'list'), ('ci-lister', 'agents', 'invoke'), ('ci-lister', 'resources', 'create')
 on conflict do nothing;
+
+-- A PUBLIC WORK WITH TWO REVISIONS, from before exposures existed (REM-185).
+-- Every revision of a public work was readable then, so the upgrade must
+-- expose both, or a link or blog entry pinned to the first stops resolving.
+with u as (select id from rbac.users where email = 'upgrade@ci'),
+     w as (insert into research.works (public_id, owner_id, visibility, listed_at)
+           select 'ci-public-work', u.id, 'public', now() from u returning id, owner_id),
+     r1 as (insert into research.revisions (work_id, number, label, schema_version, document, content_hash,
+                                            actor_id, actor_kind)
+            select w.id, 1, 'r1', '0.1', '{}'::jsonb, 'ci-hash-1', w.owner_id, 'person' from w returning id, work_id),
+     r2 as (insert into research.revisions (work_id, number, label, schema_version, document, content_hash,
+                                            predecessor_id, actor_id, actor_kind)
+            select r1.work_id, 2, 'r2', '0.1', '{}'::jsonb, 'ci-hash-2', r1.id, w.owner_id, 'person'
+              from r1 join w on w.id = r1.work_id returning id, work_id)
+insert into research.heads (work_id, revision_id) select work_id, id from r2;
 SQL
 
 for f in "percolate--$V.sql" "percolate--$PREV--$V.sql"; do
@@ -233,6 +248,11 @@ do \$\$ begin
     then raise exception 'the backfill no longer reaches an ordinary role'; end if;
   perform rbac.grant_application_role((select id from rbac.users where email = 'upgrade@ci'), 'ci-lister',
                                       'research', 'list', 'operator', 'upgrade gate', 'hub', null);
+
+  -- A PUBLIC WORK KEEPS EVERY REVISION IT EXPOSED (REM-185).
+  if (select count(*) from research.exposures e join research.works w on w.id = e.work_id
+       where w.public_id = 'ci-public-work') <> 2
+    then raise exception 'the upgrade did not expose both revisions of a work that was public before exposures existed'; end if;
 
   if exists (select 1 from pg_class c join pg_namespace n on n.oid=c.relnamespace
              join pg_roles r on r.oid=c.relowner
