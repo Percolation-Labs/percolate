@@ -1425,6 +1425,33 @@ $$ language plpgsql stable security definer set search_path = pg_catalog, public
 revoke all on function workflow.task_owner(uuid, text) from public;
 grant execute on function workflow.task_owner(uuid, text) to worker;
 
+-- WHO STARTED THE RUN, FOR THE TOKEN AN AGENT STEP CARRIES (REM-247). task_owner answers "whose run is this", and
+-- the worker minted `{"sub": owner}` from that alone, so an agent step in a run a person's agent started called the
+-- runtime as the person: a human-only capability passed, the key's scopes did not narrow, and revoking the key
+-- stopped nothing. REM-171 records the starter's actor and credential on the run for SQL steps; this returns them
+-- beside the owner, under task_owner's guards, so the worker mints `actor` and `api_key_id` too and the runtime's
+-- rbac.decide narrows the step exactly as it narrowed whoever started the run. task_owner stays, for a worker that
+-- predates this function. A run from before REM-171 has no starter, and its token stays owner-only.
+create or replace function workflow.task_principal(p_task_id uuid, p_worker_id text)
+returns table (owner_id uuid, started_actor text, started_credential_id uuid) as $$
+declare v_run workflow.runs;
+begin
+    select r.* into v_run
+      from workflow.tasks t join workflow.runs r on r.id = t.run_id
+     where t.id = p_task_id and t.status = 'running'
+       and t.claimed_by = p_worker_id;
+    if not found then
+        raise exception 'task is not currently held by this worker' using errcode = '42501';
+    end if;
+    if v_run.owner_id is null then
+        raise exception 'agent execution requires a run owner' using errcode = '42501';
+    end if;
+    return query select v_run.owner_id, v_run.started_actor, v_run.started_credential_id;
+end;
+$$ language plpgsql stable security definer set search_path = pg_catalog, public;
+revoke all on function workflow.task_principal(uuid, text) from public;
+grant execute on function workflow.task_principal(uuid, text) to worker;
+
 -- ============================================================
 -- (h) READING A PLAN'S PROGRESS, FOR THE ROLE IT IS GRANTED TO
 -- ============================================================
