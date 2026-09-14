@@ -71,6 +71,19 @@ steps:
     sql: {function: p8ql, args: ['SELECT now()']}
 $$);
 select workflow.start_workflow('ci_upgrade','{}'::jsonb);
+
+-- AN APPLICATION'S ROLE AS EARLIER UPGRADES LEFT IT (REM-193). The 0.1.10
+-- backfill in user-rbac/schema.sql gave agents:invoke and resources:create to
+-- every role on every replay, including the roles grant_application_role
+-- creates -- which that function then refuses to grant again. On Hetzner the
+-- listing token went 403 after the 0.2.2 update. An ordinary role beside it
+-- shows the backfill still reaches the roles it is for.
+insert into rbac.roles (name, description) values
+    ('ci-lister', 'granted by an application'), ('ci-member', null)
+on conflict do nothing;
+insert into rbac.role_permissions (role, resource, action) values
+    ('ci-lister', 'research', 'list'), ('ci-lister', 'agents', 'invoke'), ('ci-lister', 'resources', 'create')
+on conflict do nothing;
 SQL
 
 for f in "percolate--$V.sql" "percolate--$PREV--$V.sql"; do
@@ -209,6 +222,17 @@ do \$\$ begin
           and not exists (select 1 from pg_policy p
                            where p.polname = split_part(k.checked_by, ' ', 2)));
   end if;
+
+  -- AN APPLICATION ROLE IS GRANTABLE AGAIN (REM-193), and nothing else moved.
+  if exists (select 1 from rbac.role_permissions where role = 'ci-lister'
+              and (resource, action) in (('agents', 'invoke'), ('resources', 'create')))
+    then raise exception 'an application role still carries capabilities its grant rule refuses after the upgrade'; end if;
+  if not exists (select 1 from rbac.role_permissions where role = 'ci-lister' and resource = 'research' and action = 'list')
+    then raise exception 'the upgrade removed research:list, which an application may grant'; end if;
+  if not exists (select 1 from rbac.role_permissions where role = 'ci-member' and resource = 'agents' and action = 'invoke')
+    then raise exception 'the backfill no longer reaches an ordinary role'; end if;
+  perform rbac.grant_application_role((select id from rbac.users where email = 'upgrade@ci'), 'ci-lister',
+                                      'research', 'list', 'operator', 'upgrade gate', 'hub', null);
 
   if exists (select 1 from pg_class c join pg_namespace n on n.oid=c.relnamespace
              join pg_roles r on r.oid=c.relowner

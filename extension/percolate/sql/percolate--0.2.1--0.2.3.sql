@@ -9577,11 +9577,33 @@ on conflict do nothing;
 -- On a fresh install this matches nothing (no roles exist yet) and
 -- bootstrap_admin() grants every pair to the first administrator, so a new
 -- deployment starts closed to everyone else and opens by grant.
+--
+-- NOT APPLICATION ROLES (REM-193). This statement runs on every upgrade,
+-- because the upgrade replays the whole schema, so it gave both pairs back to
+-- every role an application had provisioned -- and research-platform's
+-- grant_application_role refuses a role carrying them. On Hetzner, 2026-09-13,
+-- that turned the listing token into a 403 on every request until the two rows
+-- were deleted by hand. An application's roles are the ones
+-- grant_application_role created, which it marks 'granted by an application'.
 insert into rbac.role_permissions (role, resource, action)
 select r.name, k.resource, k.action
   from rbac.roles r
   cross join (values ('agents', 'invoke'), ('resources', 'create')) as k(resource, action)
+ where r.description is distinct from 'granted by an application'
 on conflict do nothing;
+
+-- And the repair, for every database the backfill already reached: an
+-- application role keeps only what an application may grant -- its own dotted
+-- capabilities, research:list and engagement:moderate, the rule
+-- grant_application_role enforces. Idempotent, and a fresh install has no such
+-- rows. Only rows that rule would refuse are removed, so nothing an
+-- application could have granted is lost.
+delete from rbac.role_permissions rp
+ using rbac.roles r
+ where r.name = rp.role
+   and r.description = 'granted by an application'
+   and not (rp.resource like '%.%'
+            or (rp.resource, rp.action) in (('research', 'list'), ('engagement', 'moderate')));
 
 -- One function every module's RLS policy calls. Add a new module
 -- (resource search, agentic tools) by inserting rows here, not by
