@@ -29253,6 +29253,34 @@ create table if not exists research.endorsements (
 create unique index if not exists endorsements_one_active
     on research.endorsements (revision_id, endorser_id) where withdrawn_at is null;
 
+-- An exposure says one exact revision may be read by anybody who may read the
+-- work's public projection (authoring-and-publication.md §4, REM-185). A
+-- listed work no longer exposes every revision it has: an owner's private
+-- working successor, a draft from before it was listed, and their claims,
+-- sources, citations, edges, endorsements and comments stay the owner's.
+-- Exposures are kept after a correction, so a link or a blog entry pinned to
+-- an earlier public revision still resolves; unlisting the work hides them all.
+create table if not exists research.exposures (
+    revision_id uuid primary key references research.revisions(id) on delete cascade,
+    work_id     uuid not null references research.works(id) on delete cascade,
+    exposed_by  uuid references rbac.users(id),
+    exposed_at  timestamptz not null default now()
+);
+create index if not exists exposures_by_work on research.exposures (work_id);
+
+-- Before exposures existed, every revision of a public work was readable, so an
+-- upgrade exposes exactly those and changes nothing anybody could read. Only
+-- for a public work with no exposure at all: this file is replayed on every
+-- upgrade, and a replay must never expose a private working revision written
+-- after the first one.
+insert into research.exposures (revision_id, work_id, exposed_by, exposed_at)
+select r.id, r.work_id, r.actor_id, coalesce(w.listed_at, r.created_at)
+  from research.revisions r
+  join research.works w on w.id = r.work_id
+ where w.visibility = 'public'
+   and not exists (select 1 from research.exposures e where e.work_id = w.id)
+on conflict (revision_id) do nothing;
+
 create or replace function research.readable(p_work uuid) returns boolean
 language sql stable security definer set search_path = pg_catalog, public as $$
     select coalesce((select rbac.may_read(owner_id, org_id, visibility)
@@ -29260,9 +29288,37 @@ language sql stable security definer set search_path = pg_catalog, public as $$
                        from research.works where id = p_work), false);
 $$;
 
+-- Everything in the work: its owner, or its org when the work is org-scoped.
+-- Public visibility adds nothing here, because it exposes exact revisions only.
+create or replace function research.work_readable_in_full(p_work uuid) returns boolean
+language sql stable security definer set search_path = pg_catalog, public as $$
+    select coalesce((select rbac.may_read(owner_id, org_id, case when visibility = 'public' then 'private' else visibility end)
+                            and (rbac.current_user_id() is null or rbac.may('research', 'select'))
+                       from research.works where id = p_work), false);
+$$;
+
+-- A revision is readable in full, or when its work is readable and this exact
+-- revision was exposed. Every nested read -- claims, sources, citations, edges,
+-- endorsements, comments, votes -- asks this, so it narrows with it.
 create or replace function research.revision_readable(p_revision uuid) returns boolean
 language sql stable security definer set search_path = pg_catalog, public as $$
-    select coalesce((select research.readable(work_id) from research.revisions where id = p_revision), false);
+    select coalesce((select research.work_readable_in_full(r.work_id)
+                            or (research.readable(r.work_id)
+                                and exists (select 1 from research.exposures e where e.revision_id = r.id))
+                       from research.revisions r where r.id = p_revision), false);
+$$;
+
+-- The revision a caller is shown for a work: the head to a caller with full
+-- access, otherwise the latest exposed revision. Null when neither applies, so
+-- a caller who may not read the work learns nothing, not even that a head moved.
+create or replace function research.visible_head(p_work uuid) returns uuid
+language sql stable security definer set search_path = pg_catalog, public as $$
+    select case
+        when research.work_readable_in_full(p_work) then (select revision_id from research.heads where work_id = p_work)
+        when research.readable(p_work) then (select e.revision_id from research.exposures e
+                                               join research.revisions r on r.id = e.revision_id
+                                              where e.work_id = p_work order by r.number desc limit 1)
+    end;
 $$;
 
 create or replace function research.receipt(p_revision uuid, p_created boolean) returns jsonb
@@ -29271,10 +29327,11 @@ language sql stable security definer set search_path = pg_catalog, public as $$
         'package_id', w.public_id, 'work_id', w.id, 'revision_id', r.id, 'revision', r.label,
         'content_hash', r.content_hash, 'hash_format', 'pg-jsonb-sha256',
         'visibility', case when w.visibility = 'public' then 'listed' else 'private' end,
+        'exposed', exists (select 1 from research.exposures e where e.revision_id = r.id),
         'created', p_created, 'created_at', r.created_at)
       from research.revisions r join research.works w on w.id = r.work_id
      where r.id = p_revision
-       and research.readable(w.id);
+       and research.revision_readable(r.id);
 $$;
 
 -- Claims, sources, citations and edges, projected from the revision's own
@@ -29348,6 +29405,9 @@ begin
     returning id into v_rev;
     perform research.project(v_rev, p_document);
     insert into research.heads (work_id, revision_id) values (v_work, v_rev);
+    if v_listed then
+        insert into research.exposures (revision_id, work_id, exposed_by) values (v_rev, v_work, v_user);
+    end if;
     if p_idempotency_key is not null then
         insert into research.operations (owner_id, key, body_hash, work_id, revision_id)
         values (v_user, p_idempotency_key, v_hash, v_work, v_rev);
@@ -29395,6 +29455,49 @@ begin
        set visibility = case when v_listed then 'public' else 'private' end,
            listed_at = case when v_listed then coalesce(listed_at, now()) end
      where id = w.id;
+    if v_listed then
+        insert into research.exposures (revision_id, work_id, exposed_by) values (v_rev, w.id, v_user);
+    end if;
+    return research.receipt(v_rev, true);
+end;
+$$;
+
+-- A private working revision (authoring-and-publication.md §4, REM-185). The
+-- owner appends from the head they last read, whether or not the work is
+-- listed, and a stale head conflicts exactly as revise_package's does. It
+-- exposes nothing and leaves the work's listing alone, so it needs no listing
+-- authority: anybody else keeps reading the revision that was exposed. Listing
+-- a correction, or unlisting, is still revise_package.
+create or replace function research.revise_working(p_public_id text, p_document jsonb, p_expected_revision text)
+returns jsonb language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_user   uuid := rbac.require('research', 'insert');
+    v_hash   text := encode(digest(p_document::text, 'sha256'), 'hex');
+    w        research.works;
+    h        research.revisions;
+    v_rev    uuid;
+begin
+    if jsonb_typeof(p_document) <> 'object' or p_document->>'schema_version' is distinct from '0.1' then
+        raise check_violation using message = 'A package is a JSON object with schema_version 0.1';
+    end if;
+    select * into w from research.works where public_id = p_public_id for update;
+    if not found or w.owner_id <> v_user then
+        raise no_data_found using message = 'Research package not found';
+    end if;
+    select r.* into h from research.heads hd join research.revisions r on r.id = hd.revision_id where hd.work_id = w.id;
+    if h.label <> p_expected_revision then
+        raise exception using errcode = 'PT409', message = 'This package has a newer revision', detail = h.label;
+    end if;
+    if h.content_hash = v_hash then
+        return research.receipt(h.id, false);
+    end if;
+    insert into research.revisions (work_id, number, label, schema_version, document, content_hash,
+                                    predecessor_id, actor_id, actor_kind, credential_id)
+    values (w.id, h.number + 1, 'draft-' || (h.number + 1), '0.1', p_document, v_hash,
+            h.id, v_user, rbac.current_actor(), rbac.current_credential_id())
+    returning id into v_rev;
+    perform research.project(v_rev, p_document);
+    update research.heads set revision_id = v_rev, updated_at = now() where work_id = w.id;
     return research.receipt(v_rev, true);
 end;
 $$;
@@ -29404,13 +29507,13 @@ language sql stable security definer set search_path = pg_catalog, public as $$
     select r.document || jsonb_build_object(
                'id', w.public_id, 'revision', r.label, 'owner_id', w.owner_id,
                'visibility', case when w.visibility = 'public' then 'listed' else 'private' end,
-               'is_head', hd.revision_id = r.id, 'receipt', research.receipt(r.id, false))
+               'is_head', r.id = v.head, 'receipt', research.receipt(r.id, false))
       from research.works w
-      join research.heads hd on hd.work_id = w.id
+      cross join lateral (select research.visible_head(w.id) as head) v
       join research.revisions r on r.work_id = w.id
-                               and (case when p_revision is null then r.id = hd.revision_id else r.label = p_revision end)
+                               and (case when p_revision is null then r.id = v.head else r.label = p_revision end)
      where w.public_id = p_public_id
-       and research.readable(w.id);
+       and research.revision_readable(r.id);
 $$;
 
 create or replace function research.list_packages(p_owned_only boolean default false) returns setof jsonb
@@ -29418,13 +29521,18 @@ language sql stable security definer set search_path = pg_catalog, public as $$
     select jsonb_build_object(
                'id', w.public_id, 'title', r.document->>'title', 'summary', r.document->>'summary',
                'revision', r.label, 'visibility', case when w.visibility = 'public' then 'listed' else 'private' end,
-               'owned', w.owner_id = rbac.current_user_id(), 'updated_at', hd.updated_at)
+               'owned', w.owner_id = rbac.current_user_id(), 'updated_at', u.updated_at)
       from research.works w
-      join research.heads hd on hd.work_id = w.id
-      join research.revisions r on r.id = hd.revision_id
-     where research.readable(w.id)
-       and (not p_owned_only or w.owner_id = rbac.current_user_id())
-     order by hd.updated_at desc, w.public_id;
+      cross join lateral (select research.visible_head(w.id) as head) v
+      join research.revisions r on r.id = v.head
+      -- To anybody without full access, the time of the exposure, not of the
+      -- latest private edit.
+      cross join lateral (select case when research.work_readable_in_full(w.id)
+                                      then (select hd.updated_at from research.heads hd where hd.work_id = w.id)
+                                      else (select e.exposed_at from research.exposures e where e.revision_id = r.id)
+                                 end as updated_at) u
+     where not p_owned_only or w.owner_id = rbac.current_user_id()
+     order by u.updated_at desc, w.public_id;
 $$;
 
 create or replace function research.endorse(p_revision uuid, p_scope text, p_checked text) returns uuid
@@ -29712,14 +29820,15 @@ $$;
 
 create or replace function research.trust(p_revision uuid) returns jsonb
 language plpgsql stable security definer set search_path = pg_catalog, public as $$
-declare r research.revisions; w research.works; v_head uuid;
+declare r research.revisions; w research.works; v_head uuid; v_full boolean;
 begin
     select * into r from research.revisions where id = p_revision;
     if not found or not research.revision_readable(p_revision) then
         return null;
     end if;
     select * into w from research.works where id = r.work_id;
-    select revision_id into v_head from research.heads where work_id = w.id;
+    v_full := research.work_readable_in_full(w.id);
+    v_head := research.visible_head(w.id);
     return jsonb_build_object(
         'revision', jsonb_build_object('id', r.id, 'package_id', w.public_id, 'revision', r.label,
                                        'content_hash', r.content_hash, 'created_at', r.created_at,
@@ -29754,9 +29863,12 @@ begin
                    order by e.created_at)
               from research.endorsements e where e.revision_id = r.id), '[]'::jsonb),
         'corrections', jsonb_build_object(
-            'supersedes', (select label from research.revisions where id = r.predecessor_id),
-            'superseded_by', coalesce((select jsonb_agg(label order by number) from research.revisions
-                                        where work_id = w.id and number > r.number), '[]'::jsonb)),
+            'supersedes', (select p.label from research.revisions p
+                            where p.id = r.predecessor_id and research.revision_readable(p.id)),
+            'superseded_by', coalesce((select jsonb_agg(s.label order by s.number) from research.revisions s
+                                        where s.work_id = w.id and s.number > r.number
+                                          and (v_full or exists (select 1 from research.exposures e where e.revision_id = s.id))),
+                                      '[]'::jsonb)),
         'engagement', engagement.revision_signals(r.id),
         'interpretations', jsonb_build_object('status', 'unavailable', 'reason', 'no analysis provider is configured'));
 end;
@@ -29796,11 +29908,18 @@ create or replace trigger trg_works_visibility before insert or update on resear
 
 alter table research.revisions enable row level security;
 drop policy if exists revisions_readable on research.revisions;
-create policy revisions_readable on research.revisions for select using (research.readable(work_id));
+create policy revisions_readable on research.revisions for select using (research.revision_readable(id));
 
+-- A head pointing at a private working revision is the owner's to see.
 alter table research.heads enable row level security;
 drop policy if exists heads_readable on research.heads;
-create policy heads_readable on research.heads for select using (research.readable(work_id));
+create policy heads_readable on research.heads for select
+    using (research.work_readable_in_full(work_id)
+           or (research.readable(work_id) and exists (select 1 from research.exposures e where e.revision_id = heads.revision_id)));
+
+alter table research.exposures enable row level security;
+drop policy if exists exposures_readable on research.exposures;
+create policy exposures_readable on research.exposures for select using (research.readable(work_id));
 
 alter table research.operations enable row level security;
 drop policy if exists operations_owner on research.operations;
@@ -29868,7 +29987,7 @@ create policy comment_likes_self on engagement.comment_likes for select
 grant usage on schema research, engagement to authenticated;
 grant select on rbac.grants, rbac.applications, rbac.scope_aliases, rbac.plans, rbac.resource_kinds,
                 rbac.plan_limits, rbac.plan_assignments, rbac.usage_ledger to authenticated;
-grant select on research.works, research.revisions, research.heads, research.claims, research.sources,
+grant select on research.works, research.revisions, research.heads, research.exposures, research.claims, research.sources,
                 research.citations, research.argument_edges, research.endorsements to authenticated;
 grant select on research.operations to authenticated;
 grant select on engagement.saves, engagement.follows, engagement.votes, engagement.valuations, engagement.comments,
@@ -29879,7 +29998,8 @@ grant execute on function
     rbac.decide(text, text), rbac.may(text, text), rbac.require(text, text),
     rbac.plan_of(uuid), rbac.limit_state(uuid, text), rbac.has_quota_remaining(uuid, text),
     rbac.access_snapshot(text),
-    research.readable(uuid), research.revision_readable(uuid), research.receipt(uuid, boolean),
+    research.readable(uuid), research.work_readable_in_full(uuid), research.revision_readable(uuid),
+    research.visible_head(uuid), research.receipt(uuid, boolean),
     research.get_package(text, text), research.list_packages(boolean), research.trust(uuid),
     engagement.revision_signals(uuid)
 to authenticated;
@@ -29889,6 +30009,7 @@ grant execute on function
     rbac.reserve_usage(text, bigint, text, interval), rbac.consume_usage(text, text, bigint),
     rbac.release_usage(text, text),
     research.submit_package(jsonb, text, text), research.revise_package(text, jsonb, text),
+    research.revise_working(text, jsonb, text),
     research.endorse(uuid, text, text), research.withdraw_endorsement(uuid, text),
     engagement.set_saved(uuid, boolean), engagement.set_following(uuid, boolean),
     engagement.set_useful(uuid, boolean), engagement.set_valuation(uuid, bigint, text),
@@ -30544,7 +30665,7 @@ declare
         'engagement.follows', 'engagement.saves', 'engagement.valuations', 'engagement.votes',
         'rbac.applications', 'rbac.grants', 'rbac.plan_assignments', 'rbac.usage_ledger',
         'research.argument_edges', 'research.citations', 'research.claims', 'research.endorsements',
-        'research.heads', 'research.operations', 'research.revisions', 'research.sources', 'research.works',
+        'research.exposures', 'research.heads', 'research.operations', 'research.revisions', 'research.sources', 'research.works',
         'agentic.agents',
         'agentic.messages',
         'agentic.plugins',
@@ -31155,6 +31276,8 @@ insert into percolate.table_kinds (schema_name, table_name, kind, why) values
   'a sidecar keyed by content.channels(id); same shape as the aiq.emb_* tables'),
  ('research','heads','natural',
   'a sidecar keyed by research.works(id): which revision is current for each work'),
+ ('research','exposures','natural',
+  'a sidecar keyed by research.revisions(id): which exact revisions anybody who may read the work may read'),
  ('rbac','plan_assignments','natural',
   'a sidecar keyed by rbac.users(id): the plan one account is on')
 -- `do update`, same reason as the statement above, and here it names one row.
