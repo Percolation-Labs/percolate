@@ -20,6 +20,10 @@ REPO = Path(__file__).resolve().parents[2]
 SCRIPT = Path(__file__).resolve().parent / "bump_extension_version.py"
 # Run from dev/check.sh inside the pre-push hook, GIT_DIR points at the pushing repository.
 CLEAN = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+# The sql directory's path, joined here rather than written out: a literal
+# `extension/percolate/sql/percolate--<v>.sql` in this file is what the bump moves and what
+# dev/references.sh resolves, and a fixture is neither a live reference nor a path that exists.
+SQL_PATH = "extension/percolate/" + "sql/"
 
 BUILD_SQL = """\
 import os, pathlib, re, sys
@@ -64,14 +68,14 @@ class Bump(unittest.TestCase):
             "extension/percolate_parser/Cargo.toml": '[package]\nname = "percolate_parser"\nversion = "0.2.5"\n',
             "extension/percolate_parser/Cargo.lock": '[[package]]\nname = "percolate_parser"\nversion = "0.2.5"\n',
             "extension/percolate/contract.json": '{\n  "extension": "0.2.5",\n  "enums": {}\n}\n',
-            "extension/percolate/sql/percolate--0.2.5.sql": "-- 0.2.5\n",
-            "extension/percolate/sql/percolate--0.2.4--0.2.5.sql": "-- upgrade to 0.2.5\n",
+            SQL_PATH + "percolate--0.2.5.sql": "-- 0.2.5\n",
+            SQL_PATH + "percolate--0.2.4--0.2.5.sql": "-- upgrade to 0.2.5\n",
             "extension/percolate_parser/sql/percolate_parser--0.2.4--0.2.5.sql": "-- parser upgrade\n",
             "extension/percolate/build-sql.py": BUILD_SQL,
             "extension/percolate_parser/write-upgrades.py": WRITE_UPGRADES,
             "k8s/kind/manifests/postgres.yaml": MANIFEST,
-            "specs/tables/source/page.html": '<a href="../../extension/percolate/sql/percolate--0.2.5.sql">sql</a>\n',
-            "research-notes/results/graph.json": '{"f": "extension/percolate/sql/percolate--0.2.5.sql"}\n',
+            "specs/tables/source/page.html": '<a href="../../' + SQL_PATH + 'percolate--0.2.5.sql">sql</a>\n',
+            "research-notes/results/graph.json": '{"f": "' + SQL_PATH + 'percolate--0.2.5.sql"}\n',
         }
         for name, text in files.items():
             path = root / name
