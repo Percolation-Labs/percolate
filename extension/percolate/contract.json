@@ -682,6 +682,7 @@
     },
     {
       "admits": [
+        "evidence_bytes",
         "llm_tokens"
       ],
       "column": "resource_kind",
@@ -715,6 +716,7 @@
     },
     {
       "admits": [
+        "evidence_bytes",
         "llm_tokens"
       ],
       "column": "resource_kind",
