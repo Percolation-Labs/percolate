@@ -91,7 +91,14 @@ echo "==> $DB has rows in ${#TABLES[@]} registered table(s); dumping"
 
 # --data-only, and the schema comes from a real install rather than the dump:
 # that IS the documented procedure, for the reason in the header.
-docker exec "$CONTAINER" bash -c "pg_dump -U $SU -d $DB --data-only -f /tmp/restore-check.sql"
+#
+# --disable-triggers (REM-292), because a restore must put back the rows that were saved and nothing a trigger
+# adds while they load. trg_permission_kinds_grant_all grants every newly inserted kind to each grants_all role,
+# so loading the application kinds wrote role_permissions rows the dump was about to COPY, and the duplicate key
+# aborted the whole table; trg_record_role_grant on user_roles would mint grants the same way. The dump wraps
+# each COPY in DISABLE/ENABLE TRIGGER ALL, which the superuser restore below may run. Foreign keys are not
+# checked during the load either, so the check after it looks for the declared role permission explicitly.
+docker exec "$CONTAINER" bash -c "pg_dump -U $SU -d $DB --data-only --disable-triggers -f /tmp/restore-check.sql"
 
 docker exec -i "$CONTAINER" psql -U "$SU" -d postgres -q \
     -c "drop database if exists $INTO (force);" -c "create database $INTO;" >/dev/null 2>&1
