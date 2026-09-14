@@ -203,6 +203,55 @@ begin
 end $$;
 reset role;
 
+-- 5b. An expired reservation (REM-189): its retry and its settlement take only capacity that is still
+--     there, keep the operation's one row, and a settled or returned operation holds nothing.
+--     Budget so far: op-1 consumed 30, op-3 reserved 60, so 10 remain of 100.
+set local request.jwt.claims = '{"sub": "00000000-0000-4000-8000-00000000a001"}';
+set local role authenticated;
+do $$
+declare me uuid := rbac.current_user_id();
+begin
+    begin
+        perform rbac.reserve_usage('rp-hosted-research', 1, 'op-no-ttl', interval '0 seconds');
+        raise exception 'a zero time to live was accepted';
+    exception when invalid_parameter_value then null;
+    end;
+    assert (rbac.reserve_usage('rp-hosted-research', 10, 'op-expiring')->>'reserved')::boolean, 'the last 10 are reserved';
+    assert (rbac.limit_state(me, 'rp-hosted-research')->>'used')::int = 100, 'the budget is full';
+end $$;
+reset role;
+update rbac.usage_ledger set expires_at = now() - interval '1 second' where operation_id = 'op-expiring';
+
+set local request.jwt.claims = '{"sub": "00000000-0000-4000-8000-00000000a001", "actor": "agent"}';
+set local role authenticated;
+do $$
+declare me uuid := rbac.current_user_id(); r jsonb;
+begin
+    assert (rbac.limit_state(me, 'rp-hosted-research')->>'used')::int = 90, 'an expired reservation holds nothing';
+    assert (rbac.reserve_usage('rp-hosted-research', 10, 'op-other')->>'reserved')::boolean, 'another operation takes the freed 10';
+    r := rbac.reserve_usage('rp-hosted-research', 10, 'op-expiring');
+    assert not (r->>'reserved')::boolean and r->>'reason' = 'expired' and (r->>'retry')::boolean,
+        'the expired retry is refused once its capacity has gone';
+    assert (rbac.limit_state(me, 'rp-hosted-research')->>'used')::int = 100, 'the refused retry charged nothing';
+    r := rbac.consume_usage('rp-hosted-research', 'op-expiring', 10);
+    assert not (r->>'consumed')::boolean and r->>'reason' = 'expired', 'a late settlement cannot spend the budget twice';
+    perform rbac.release_usage('rp-hosted-research', 'op-other');
+    r := rbac.reserve_usage('rp-hosted-research', 10, 'op-other');
+    assert not (r->>'reserved')::boolean and r->>'reason' = 'released', 'a returned operation holds nothing on retry';
+    r := rbac.reserve_usage('rp-hosted-research', 10, 'op-expiring');
+    assert (r->>'reserved')::boolean and (r->>'reacquired')::boolean, 'the expired retry reacquires capacity that is there';
+    assert (rbac.limit_state(me, 'rp-hosted-research')->>'used')::int = 100, 'reacquiring charged it once';
+    r := rbac.consume_usage('rp-hosted-research', 'op-expiring', 10);
+    assert (r->>'consumed')::boolean and r->>'state' = 'consumed', 'the reacquired reservation settles';
+    r := rbac.consume_usage('rp-hosted-research', 'op-expiring', 10);
+    assert (r->>'consumed')::boolean and (r->>'retry')::boolean, 'a settlement retry returns the receipt';
+    assert (rbac.limit_state(me, 'rp-hosted-research')->>'used')::int = 100, 'the settlement retry charged nothing';
+    r := rbac.reserve_usage('rp-hosted-research', 10, 'op-expiring');
+    assert not (r->>'reserved')::boolean and r->>'reason' = 'consumed', 'a settled operation must not run again';
+    assert (select count(*) from rbac.usage_ledger where operation_id = 'op-expiring') = 1, 'one operation, one row';
+end $$;
+reset role;
+
 
 -- 6. Engagement: one active vote, withdrawals kept, no self-votes or
 --    self-likes, versioned edits, no agent comments, hidden with the target.
