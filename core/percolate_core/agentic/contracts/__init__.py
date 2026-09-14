@@ -10,6 +10,7 @@ from .agents import (
     ChainedAction,
     ChainedActionKind,
     ContextPolicy,
+    PinnedSkill,
     ToolRef,
     ToolServer,
 )
@@ -63,6 +64,7 @@ __all__ = [
     "InvocationTarget",
     "Message",
     "NodeCitation",
+    "PinnedSkill",
     "RequestContext",
     "Role",
     "Run",

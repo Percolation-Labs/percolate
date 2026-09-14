@@ -115,6 +115,20 @@ class ContextPolicy(BaseModel):
     summarize_after_messages: int | None = None
 
 
+class PinnedSkill(BaseModel):
+    """A skill an agent pins, as the runtime composes it into the prompt.
+
+    Read, not authored: ``agents.skills`` names the rows and ``skills_api``
+    supplies the body, through the caller's RLS, at the moment the turn runs.
+    ``version`` travels with the text so a prompt can say which revision of a
+    procedure it was given (``plugins.md`` §5: provenance is a column).
+    """
+
+    name: str
+    version: int
+    content: str
+
+
 class AgentSpec(BaseModel):
     """An ``agents`` row (``brief.md`` §7, ``ontology.md``).
 
@@ -144,5 +158,17 @@ class AgentSpec(BaseModel):
         ),
     )
     context_policy: ContextPolicy = Field(default_factory=ContextPolicy)
+    skills: list[str] = Field(
+        default_factory=list,
+        description="Pinned skill names (agents.skills). Their bodies are composed into the prompt.",
+    )
+    pinned_skills: list[PinnedSkill] = Field(
+        default_factory=list,
+        exclude=True,
+        description=(
+            "The pinned skills as resolved for this turn. Excluded from dumps: it is "
+            "read state, and upsert_agent must never receive it as an authored key."
+        ),
+    )
     created_at: datetime | None = None
     updated_at: datetime | None = None

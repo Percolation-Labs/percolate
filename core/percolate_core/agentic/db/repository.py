@@ -28,7 +28,7 @@ from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
 from ...core import agent_document, identity
-from ..contracts import AgentSpec, Message, Run, RunStatus, Session, ToolServer
+from ..contracts import AgentSpec, Message, PinnedSkill, Run, RunStatus, Session, ToolServer
 from .client import PgClient
 
 logger = logging.getLogger(__name__)
@@ -132,13 +132,13 @@ class PgRepository:
             row = await conn.fetchrow(
                 "select * from agentic.agents_api where name = $1", name
             )
-        return _agent(row)
+            return await _with_pinned_skills(conn, _agent(row))
 
     async def get_agent_by_id(self, agent_id: UUID) -> AgentSpec | None:
         """Used to resolve ``summarizer_agent_id`` (``brief.md`` §3)."""
         async with self.client.as_user(self.claims) as conn:
             row = await conn.fetchrow("select * from agentic.agents_api where id = $1", agent_id)
-        return _agent(row)
+            return await _with_pinned_skills(conn, _agent(row))
 
     async def list_agents(self) -> list[AgentSpec]:
         async with self.client.as_user(self.claims) as conn:
@@ -590,8 +590,37 @@ def _agent(row: Any) -> AgentSpec | None:
         chained_action=row["chained_action"],
         summarizer_agent_id=row["summarizer_agent_id"],
         context_policy=row["context_policy"] or {},
+        skills=list(row["skills"] or []),
         created_at=row["created_at"],
     )
+
+
+async def _with_pinned_skills(conn: Any, agent: AgentSpec | None) -> AgentSpec | None:
+    """Resolve an agent's pinned skills to their bodies, AS THE CALLER.
+
+    ``skills_api`` carries RLS like every other view, so a skill the person
+    talking to this agent cannot read is not composed into the prompt they are
+    served -- the same decision that decides which rows their query tool sees.
+
+    A pinned name that does not resolve is dropped here rather than raised.
+    ``agentic.upsert_agent`` refuses to pin a name no skill row has, and
+    ``apply_plugin`` refuses to remove a skill another agent pins; neither is a
+    foreign key (``agents.skills`` is a list of names), so a miss is a row this
+    caller cannot see, or a pin that outlived its row by some other path.
+
+    This is the "composed" path of ``plugins.md`` §5 and nothing more: pinned
+    skills are always carried. Matched and fetched expansion stay unbuilt.
+    """
+    if agent is None or not agent.skills:
+        return agent
+    rows = await conn.fetch(
+        "select name, version, content from agentic.skills_api"
+        " where name = any($1::text[]) order by array_position($1::text[], name)",
+        agent.skills,
+    )
+    agent.pinned_skills = [PinnedSkill(name=r["name"], version=r["version"], content=r["content"])
+                           for r in rows]
+    return agent
 
 
 def _tool_server(row: Any) -> ToolServer | None:

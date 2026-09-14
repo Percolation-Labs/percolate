@@ -58,18 +58,33 @@ def _one_line(value: object) -> str:
             .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
 
+def render_skills_block(agent: AgentSpec) -> str:
+    """The agent's pinned skills, each headed by its name and version.
+
+    Authored text, not runtime text: every word inside this block came from a
+    ``skills`` row, which is what keeps this compatible with the rule below
+    that the runtime writes no instructions of its own. It is not escaped the
+    way ``_one_line`` escapes context values, because a skill body is an
+    instruction by design and whoever can write one holds ``skills:update``.
+    """
+    parts = [f"## skill: {s.name} (v{s.version})\n{s.content.strip()}" for s in agent.pinned_skills]
+    return "<skills>\n" + "\n\n".join(parts) + "\n</skills>"
+
+
 def build_instructions(agent: AgentSpec, context: RequestContext) -> str:
-    """The system prompt actually sent: the agent's own prompt plus context.
+    """The system prompt actually sent: the agent's own prompt, its pinned
+    skills, then context.
 
     Note what is *not* here: any runtime-authored instruction about tools, output
     format, or delegation. pydantic-ai already generates those from the tool
     definitions and the output schema; adding our own would be the runtime
     growing behaviour that agents cannot override with data (``brief.md`` §5.2).
     """
-    block = render_context_block(context)
-    if not agent.system_prompt:
-        return f"<context>\n{block}\n</context>"
-    return f"{agent.system_prompt}\n\n<context>\n{block}\n</context>"
+    sections = [agent.system_prompt] if agent.system_prompt else []
+    if agent.pinned_skills:
+        sections.append(render_skills_block(agent))
+    sections.append(f"<context>\n{render_context_block(context)}\n</context>")
+    return "\n\n".join(sections)
 
 
 def build_deps(agent: AgentSpec, context: RequestContext, session_id=None, run_id=None) -> AgentDeps:
