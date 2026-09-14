@@ -148,23 +148,6 @@ jobs:
           echo "::notice::toolchain base $TAG is $DIGEST"
           echo "digest=${DIGEST#sha256:}" >> "$GITHUB_OUTPUT"
 
-      # KEYED ON THE DOCKERFILE AND THE RESOLVED BASE, and deliberately with NO
-      # restore-keys. The crate cache above wants a near miss; this one must
-      # never have one. An image restored under a changed Dockerfile -- or under
-      # a base that has moved -- is the wrong toolchain, and it would surface as
-      # a red test rather than as a cache miss.
-      - name: Cache the pgrx toolchain image
-        id: toolchain
-        uses: actions/cache@v6
-        with:
-          path: /tmp/pgrx-builder.tar
-          # Cargo.toml IS IN THE KEY because the pgrx pin lives there now and
-          # is passed into the build: keyed on the Dockerfile alone, bumping
-          # pgrx in the crate would restore an image carrying the previous
-          # cargo-pgrx, which is the same "cache hit on the wrong toolchain"
-          # this file's header is already about.
-          key: pgrx-builder-image-${{ hashFiles('dev/Dockerfile.pgrx-builder', 'extension/percolate_parser/Cargo.toml') }}-${{ steps.base.outputs.digest }}
-
       # THE TWO NUMBERS, READ FROM THE CRATE THAT DECLARES THEM. `Cargo.toml`
       # says which pgrx this builds against and which pg feature is default;
       # this file restated the second twice in `cargo pgrx init --pg19` and
@@ -184,6 +167,35 @@ jobs:
           echo "pgrx=$X" >> "$GITHUB_OUTPUT"
           echo "pg$M, pgrx $X"
 
+      # KEYED ON THE DOCKERFILE, THE PGRX PIN AND THE RESOLVED BASE, and
+      # deliberately with NO restore-keys. The crate cache above wants a near
+      # miss; this one must never have one. An image restored under a changed
+      # Dockerfile, pgrx or base is the wrong toolchain, and it would surface as
+      # a red test rather than as a cache miss.
+      #
+      # The pin, not a hash of all of Cargo.toml: the whole file also moves on
+      # every extension version bump, which made every release PR rebuild and
+      # save the image -- and this job ran out of disk doing it on
+      # p8-subsystems#184 (REM-235). Identical to check.yml's key, on purpose.
+      - name: Cache the pgrx toolchain image
+        id: toolchain
+        uses: actions/cache@v6
+        with:
+          path: /tmp/pgrx-builder.tar
+          key: pgrx-builder-image-${{ hashFiles('dev/Dockerfile.pgrx-builder') }}-pgrx${{ steps.pins.outputs.pgrx }}-${{ steps.base.outputs.digest }}
+
+      # THE SAME RECLAIM AS check.yml's parser job, which this job went without
+      # and paid for: p8-subsystems#184's cargo-test died with `no space left on
+      # device` once while saving a rebuilt image and again while LOADING a
+      # cached one (REM-235). This job needs a Rust toolchain inside a container
+      # and nothing else from the host.
+      - name: Free what this job does not use
+        run: |
+          df -h / | tail -1 | sed 's/^/before reclaim: /'
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+                      /opt/hostedtoolcache/CodeQL || true
+          df -h / | tail -1 | sed 's/^/after reclaim:  /'
+
       - name: Build the pgrx toolchain image
         if: steps.toolchain.outputs.cache-hit != 'true'
         working-directory: dev
@@ -192,12 +204,20 @@ jobs:
             --build-arg PGRX_VERSION=${{ steps.pins.outputs.pgrx }} \
             -t pgrx-builder .
           # Saved UNCOMPRESSED on purpose: actions/cache zstds it on the way up,
-          # and compressing twice spends a minute to save nothing.
+          # and compressing twice spends a minute to save nothing. A stale
+          # tarball goes first, for check.yml's REM-140 reason.
+          rm -f /tmp/pgrx-builder.tar
           docker save pgrx-builder -o /tmp/pgrx-builder.tar
+          df -h / | tail -1 | sed 's/^/after save:     /'
 
-      - name: Load the pgrx toolchain image
+      # The tarball goes once loaded: on a cache hit actions/cache skips its
+      # post-job save, so it is two gigabytes this job no longer needs.
+      - name: Load the pgrx toolchain image, then drop the tarball
         if: steps.toolchain.outputs.cache-hit == 'true'
-        run: docker load -i /tmp/pgrx-builder.tar
+        run: |
+          docker load -i /tmp/pgrx-builder.tar
+          rm -f /tmp/pgrx-builder.tar
+          df -h / | tail -1 | sed 's/^/after load:     /'
 
       - name: cargo pgrx test
         run: |
