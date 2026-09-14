@@ -511,6 +511,8 @@ declare
         'research.exposures', 'research.heads', 'research.operations', 'research.revisions', 'research.sources', 'research.works',
         -- Pinned evidence (REM-153): captures and the artifact links to them are the deployment's.
         'content.resource_snapshots', 'research.revision_files',
+        -- Checked claims and withdrawal events (REM-154).
+        'research.endorsement_claims', 'research.endorsement_withdrawals',
         'agentic.agents',
         'agentic.messages',
         'agentic.plugins',

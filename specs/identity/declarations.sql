@@ -114,6 +114,8 @@ insert into percolate.table_kinds (schema_name, table_name, kind, why) values
   'a sidecar keyed by research.works(id): which revision is current for each work'),
  ('research','exposures','natural',
   'a sidecar keyed by research.revisions(id): which exact revisions anybody who may read the work may read'),
+ ('research','endorsement_withdrawals','natural',
+  'a sidecar keyed by research.endorsements(id): the one withdrawal event of an endorsement (REM-154)'),
  ('rbac','plan_assignments','natural',
   'a sidecar keyed by rbac.users(id): the plan one account is on')
 -- `do update`, same reason as the statement above, and here it names one row.

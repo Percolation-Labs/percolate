@@ -777,6 +777,18 @@
     },
     {
       "admits": [
+        "document",
+        "claims"
+      ],
+      "column": "kind",
+      "enforced_by": "check",
+      "members": "shipped",
+      "schema": "research",
+      "table": "endorsements",
+      "vocabulary": null
+    },
+    {
+      "admits": [
         "person",
         "agent",
         "platform"
