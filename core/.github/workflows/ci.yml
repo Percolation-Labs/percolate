@@ -358,6 +358,13 @@ jobs:
       - name: Every published tag is accounted for
         run: dev/check-releases.sh
 
+      # What keeps the two gates above from going red after every release:
+      # release.yml writes the tail (after_release.py) and counts the next
+      # number from the latest tag (bump_version.py release). Proved against the
+      # gates themselves -- red without the tail, green with it (REM-150).
+      - name: A release leaves the version gates green
+        run: python -m unittest discover -s tests -p test_a_release_leaves_the_tree_green.py
+
       # The CLI is what the documentation tells people to run, and it is the
       # part that broke when `auth bootstrap` moved into the extension. Checking
       # the subcommands exist is not a deep test; it is the one that would have

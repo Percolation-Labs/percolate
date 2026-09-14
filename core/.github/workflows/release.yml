@@ -64,9 +64,9 @@ jobs:
     permissions:
       contents: write        # commit the bump and push the tag
     outputs:
-      version: ${{ steps.bump.outputs.version || steps.pre.outputs.version }}
+      version: ${{ steps.bump.outputs.version }}
       previous: ${{ steps.bump.outputs.previous }}
-      tag: v${{ steps.bump.outputs.version || steps.pre.outputs.version }}
+      tag: v${{ steps.bump.outputs.version }}
       # The COMMIT to build, because there is no tag yet -- it is created at the
       # end now, and `build` and `image` used to check out the tag. Moving the
       # tag without moving what they check out is what made the first real run
@@ -80,40 +80,31 @@ jobs:
       - uses: actions/setup-python@v7
         with: {python-version: "3.12"}
 
-      # An unreleased version in the tree is a release that did not finish, not
-      # a reason to burn another number. 0.1.7 sat here untagged while three
-      # documentation pages named it; bumping past it would have published 0.1.8
-      # and left every one of those pages pointing at a version that never
-      # existed. Same preflight p8-subsystems' release.yml uses, reading the
-      # same fact -- a version with a tag is spent.
-      - name: Retry an unfinished version, or bump
-        id: pre
-        run: |
-          CUR=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
-          if git rev-parse -q --verify "refs/tags/v$CUR" >/dev/null; then
-            echo "mode=bump" >> "$GITHUB_OUTPUT"
-            echo "v$CUR is published; this run will bump ${{ inputs.bump }}"
-          else
-            echo "mode=retry" >> "$GITHUB_OUTPUT"
-            echo "version=$CUR" >> "$GITHUB_OUTPUT"
-            echo "::notice::$CUR is in the tree and untagged -- publishing THAT rather than bumping"
-          fi
-
-      - name: Bump the version
+      # WHICH NUMBER, counted from the latest tag rather than from the tree.
+      #
+      # This used to read the tree: an untagged version there was a release that
+      # did not finish, so it was published as-is instead of burning another
+      # number (0.1.7 sat untagged while three pages named it). That stopped
+      # being a safe reading once `after` below started leaving the tree one
+      # patch past every release -- a `minor` dispatch would have published the
+      # patch. So `bump <part>` from v<latest> decides, and the tree's number is
+      # kept only when it is already that far or further: which is still how an
+      # unfinished release is retried -- dispatch the same bump again. Bumping
+      # past an untagged number that is already on PyPI is refused.
+      #
+      # Two files move, not one. pyproject.toml is what PyPI publishes and
+      # percolate_core/__init__.py is what `percolate --version` and both
+      # FastAPI titles report -- they drifted once already (0.1.3 shipped
+      # reporting 0.1.2).
+      - name: Decide the version
         id: bump
-        if: steps.pre.outputs.mode == 'bump' 
-        # Two files, not one. pyproject.toml is what PyPI publishes and
-        # percolate_core/__init__.py is what `percolate --version` and both
-        # FastAPI titles report -- they drifted once already (0.1.3 shipped
-        # reporting 0.1.2), which is precisely the kind of thing a human doing
-        # this by hand forgets and a workflow cannot.
-        run: python .github/scripts/bump_version.py "${{ inputs.bump }}"
+        run: python .github/scripts/bump_version.py release "${{ inputs.bump }}"
 
       - name: Refuse to re-release a version that already exists
         # Cheap, and the alternative is finding out from PyPI's rejection after
         # the image has already been pushed -- half a release, unwound by hand.
         run: |
-          v="${{ steps.bump.outputs.version || steps.pre.outputs.version }}"
+          v="${{ steps.bump.outputs.version }}"
           if git rev-parse -q --verify "refs/tags/v$v" >/dev/null; then
             echo "::error::tag v$v already exists" >&2; exit 1
           fi
@@ -124,14 +115,14 @@ jobs:
       # THE BUMP LANDS UNTAGGED. The tag is created by `tag` below, after PyPI
       # and the image exist -- it used to happen here, so a failed publish left
       # v<version> on origin naming a wheel nobody could install, and the
-      # duplicate check above then blocked the retry. Skipped entirely in retry
-      # mode, where the bump did not run and there is nothing to commit.
+      # duplicate check above then blocked the retry. Skipped when the tree's
+      # number was kept, where nothing moved and there is nothing to commit.
       - name: Commit the bump
-        if: inputs.publish && steps.bump.outcome == 'success'
+        if: inputs.publish && steps.bump.outputs.mode == 'bumped'
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git diff --quiet || git commit -am "${{ steps.bump.outputs.version || steps.pre.outputs.version }}: bump"
+          git diff --quiet || git commit -am "${{ steps.bump.outputs.version }}: bump"
           git push origin HEAD:"${{ github.ref_name }}"
 
       - name: The commit being built
@@ -140,7 +131,7 @@ jobs:
 
       - name: Summary
         run: |
-          echo "### percolate-core ${{ steps.bump.outputs.version || steps.pre.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "### percolate-core ${{ steps.bump.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
           [ "${{ inputs.publish }}" = "true" ] || \
             echo "_dry run: nothing committed, nothing published_" >> "$GITHUB_STEP_SUMMARY"
 
@@ -443,3 +434,83 @@ jobs:
           git tag -a "v$V" -m "percolate-core $V"
           git push origin "v$V"
           echo "::notice::v$V tagged -- the wheel and image it names are already published"
+
+  # -------------------------------------------------------------------------
+  # 7. The tail, which used to be three hand edits.
+  #
+  # Until this job, every release left main red on every PR in the repository
+  # until somebody noticed: the README pins named the previous image, the tree
+  # still carried the number just spent, and RELEASES.md had no row for the new
+  # tag. 0.1.9, 0.1.10 and 0.1.11 each needed it by hand, and 0.1.11's was found
+  # by a peer whose own PRs went red on it (REM-150) -- after "the remedy is not
+  # remember" had already been written down.
+  #
+  # So the workflow writes it (after_release.py), and runs the two gates the
+  # edits exist to satisfy BEFORE pushing. A tail that would leave either red
+  # fails here, in the release run, instead of in somebody's PR.
+  #
+  # What stays human is the paragraph in RELEASES.md saying WHY the version
+  # exists. The row is derived from git and the reason is not, so the run
+  # summary says it is owed rather than inventing one.
+  # -------------------------------------------------------------------------
+  after:
+    needs: [version, tag]
+    if: inputs.publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # main as it is NOW, not the commit that was built: PRs may have
+          # landed during the release, and the tail goes on top of them.
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with: {python-version: "3.12"}
+      - name: Pins, changelog heading, RELEASES.md row, and the next number
+        run: python .github/scripts/after_release.py "${{ needs.version.outputs.version }}"
+      - name: The gates the tail exists for, before anything is pushed
+        run: |
+          dev/check-version.sh
+          dev/check-releases.sh
+      - name: Push the tail
+        run: |
+          V=${{ needs.version.outputs.version }}
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git diff --quiet && { echo "the tail of $V is already in the tree"; exit 0; }
+          git commit -qam "$V: the tail -- image pins, changelog, RELEASES.md row, next version"
+          for _ in 1 2 3; do
+            git pull --rebase --quiet origin "${{ github.ref_name }}" \
+              && git push origin HEAD:"${{ github.ref_name }}" && exit 0
+          done
+          echo "::error::v$V is published and its tail could not be pushed after three rebases -- run after_release.py $V on main by hand" >&2
+          exit 1
+
+  # The same tail on a dry run, against a tag that exists only in this runner.
+  # Without it a rehearsal would say nothing about the part of a release that
+  # has failed three times in a row.
+  rehearse_after:
+    needs: version
+    if: inputs.publish != true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with: {fetch-depth: 0}
+      - uses: actions/setup-python@v7
+        with: {python-version: "3.12"}
+      - name: Bump, tag locally, write the tail, run the gates
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          python .github/scripts/bump_version.py release "${{ inputs.bump }}"
+          V=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
+          git diff --quiet || git commit -qam "rehearsal: $V"
+          git tag -a "v$V" -m "rehearsal, never pushed"
+          python .github/scripts/after_release.py "$V"
+          git diff --quiet || git commit -qam "rehearsal: the tail of $V"
+          dev/check-version.sh
+          dev/check-releases.sh
+          git --no-pager diff --stat "v$V" HEAD
+          echo "::notice::dry run -- the diff above is the tail a real release of $V would push; nothing was"
