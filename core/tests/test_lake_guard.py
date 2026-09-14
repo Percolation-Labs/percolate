@@ -95,5 +95,18 @@ class SealTest(unittest.TestCase):
             self.engine.seal(con, ["s3://lake/lake/org-a/x/../../org-b/"])
 
 
+class ExtensionOrderTest(unittest.TestCase):
+    """connect() disables autoinstall, so iceberg's own dependency must be listed.
+
+    A fresh DuckDB home without avro fails every refine at `load iceberg`.
+    No duckdb needed: this reads the tuple `lake doctor --install` installs.
+    """
+
+    def test_avro_is_listed_before_iceberg(self):
+        from percolate_core.lake.engine import EXTENSIONS
+        self.assertIn("avro", EXTENSIONS)
+        self.assertLess(EXTENSIONS.index("avro"), EXTENSIONS.index("iceberg"))
+
+
 if __name__ == "__main__":
     unittest.main()

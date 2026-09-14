@@ -12,6 +12,35 @@ on "the `percolate-core` release notes" — a precondition that had never been
 met and could not be, so the bump happened without it. A condition nobody can
 satisfy is not a safeguard; it is a sentence people learn to step over.
 
+## Unreleased, after 0.1.12
+
+**Not published.** Changes on `main` since `v0.1.12`. Nothing here is in
+the 0.1.12 wheel or image.
+
+### Pinned skills reach the prompt
+
+- **An agent's pinned skills are now part of its system prompt.** The agent
+  editor tells an author a skill "is a named fragment concatenated into the
+  system prompt", and the runtime never read `agents.skills`: an agent ran on
+  its `system_prompt` alone. `get_agent` and `get_agent_by_id` now read each
+  pinned body from `agentic.skills_api` on the caller's connection, so a skill
+  the caller's RLS hides is left out rather than raised. `build_instructions`
+  puts them between the system prompt and `<context>`, in pin order, each
+  headed `## skill: <name> (v<version>)`. Context values are escaped as
+  before. Needs `agents_api.skills` and `skills_api.version`/`content`, which
+  extension 0.2.0 has. `tests/test_pinned_skills.py`. (#60)
+
+### The lake loads iceberg on a fresh image
+
+- **`avro` is installed and loaded before `iceberg`.** DuckDB 1.5's iceberg
+  extension loads avro while it initialises, and the lake turns off DuckDB's
+  autoinstall and autoload. So a DuckDB home holding every extension the lake
+  listed failed every refine at `load iceberg`, parquet steps included. The
+  image installs exactly that list (`lake doctor --install`), so an image
+  built from 0.1.12's Dockerfile has no avro. Measured on duckdb 1.5.5 with a
+  fresh home: `load iceberg` failed before, and all six extensions load
+  after. (#60)
+
 ## 0.1.12
 
 **Pairing: extension 0.2.0, with one degraded heartbeat that extension 0.2.1

@@ -179,6 +179,14 @@ jobs:
       # demoting everything.
       - name: Derived text carries no authority it did not arrive with
         run: python -m unittest discover -s tests -p test_summary_authority.py
+
+      # The agent editor tells authors a pinned skill is concatenated into the
+      # system prompt, and the runtime never read agents.skills. Pins that the
+      # bodies land between the prompt and <context>, in pin order, that a
+      # skill the caller's RLS hides is not composed, and that the resolved
+      # bodies never travel back to upsert_agent as authored keys.
+      - name: Pinned skills reach the prompt they were pinned to
+        run: python -m unittest discover -s tests -p test_pinned_skills.py
       # REM-91 items 4, 5 and 8, from the 2026-09-12 security audit. Three
       # unrelated mechanisms with one shape -- a value from outside used
       # somewhere that decides authority rather than content. A missing

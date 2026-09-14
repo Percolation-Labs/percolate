@@ -40,7 +40,16 @@ __all__ = ["Lake", "MissingLake", "attach_catalog", "catalog_table", "connect",
 # What a refine step may assume. spatial and iceberg are not optional here:
 # lake.md takes geometry and Iceberg as given, so a worker missing either is a
 # worker that cannot run the steps written for it, and `lake doctor` says so.
-EXTENSIONS = ("httpfs", "parquet", "iceberg", "spatial", "vss")
+#
+# avro is here because iceberg needs it and cannot fetch it: DuckDB 1.5's
+# iceberg extension loads avro during its own initialisation, and connect()
+# turns off autoinstall and autoload -- the hardening that keeps a step from
+# downloading code. So a DuckDB home holding every other extension failed
+# EVERY refine, parquet ones included, with "An error occurred while trying to
+# automatically install the required extension 'avro'". Measured on duckdb
+# 1.5.5 with a fresh home. Listed BEFORE iceberg, since _load goes in order
+# and `lake doctor --install` -- which the Dockerfile runs -- reads this tuple.
+EXTENSIONS = ("httpfs", "parquet", "avro", "iceberg", "spatial", "vss")
 
 _DOT_SEGMENT = re.compile(r"(^|/)\.\.?(/|$)")
 
