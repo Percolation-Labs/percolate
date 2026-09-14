@@ -29076,6 +29076,18 @@ insert into rbac.plan_limits (plan, resource_kind, mode, shipped) values
     ('default', 'llm_tokens', 'unlimited', true)
 on conflict (plan, resource_kind) do update set shipped = true;
 
+-- SAVED EVIDENCE IS LIMITED BY BYTES, AND ONLY BY BYTES (REM-242). Optional rather than required, so a plan that
+-- says nothing about it allows saving; the default plan ships a finite daily cap, because unlike model tokens
+-- this is spent on a deployment's own storage by anybody who may write research. 100 MB a day is a hundred
+-- long articles or a dozen papers: generous for a person, and a ceiling on a script. A deployment changes it
+-- with its own plan_limits row.
+insert into rbac.resource_kinds (name, description, required) values
+    ('evidence_bytes', 'Bytes of public pages a person keeps as research evidence (content.register_evidence)', false)
+on conflict (name) do nothing;
+insert into rbac.plan_limits (plan, resource_kind, mode, amount, period, shipped) values
+    ('default', 'evidence_bytes', 'finite', 104857600, interval '1 day', true)
+on conflict (plan, resource_kind) do update set shipped = true;
+
 create or replace function rbac.plan_of(p_user uuid) returns text
 language sql stable security definer set search_path = pg_catalog, public as $$
     select coalesce((select plan from rbac.plan_assignments where user_id = p_user), 'default');
@@ -29740,6 +29752,95 @@ language sql stable security definer set search_path = pg_catalog, public as $$
       join content.files f on f.id = s.file_id
      where s.id = p_snapshot and s.removed_at is null
        and rbac.may_read(r.owner_id, r.org_id, r.visibility);
+$$;
+
+-- THE CHANNEL SAVED EVIDENCE LANDS IN. Shipped and public, as `uploads` is and for its reason
+-- (world-model-ingestion/ingestion.sql): a channel must be readable to be found, while every resource in it keeps
+-- its own visibility, which register_evidence sets private. No ingest_workflow, so nothing is chunked or
+-- embedded. WHERE NOT EXISTS then a marking UPDATE, the pattern `uploads` uses, so a replayed upgrade converges.
+insert into content.channels (name, kind, config, visibility)
+select 'research_evidence', 'manual',
+       jsonb_build_object('description', 'public pages kept as research evidence by content.register_evidence'),
+       'public'
+where not exists (select 1 from content.channels
+                   where name = 'research_evidence' and org_id = rbac.shared_org_id());
+update content.channels
+   set shipped = true, visibility = 'public'
+ where name = 'research_evidence' and org_id = rbac.shared_org_id()
+   and (not shipped or visibility is distinct from 'public');
+
+-- KEEP A PUBLIC PAGE AS SOMEBODY'S EVIDENCE (REM-239). capture_snapshot pins only bytes that are already stored,
+-- and register_upload stores bytes only for a caller holding resources:create, which no person an application
+-- provisions holds or can be given (REM-193). So a cited link could never become captured evidence.
+--
+-- THE POLICY IS AN INTERIM ONE, SET BY A PERSON (REM-242, 2026-09-14): anybody who may write research may keep a
+-- copy of a public page, limited only by bytes, until the policy is reviewed (REM-245). Hence research:insert
+-- rather than resources:create, the evidence_bytes budget as the only limit, and a channel with no
+-- ingest_workflow: a saved page is `stored`, not chunked or embedded, so saving one costs storage and nothing else.
+--
+-- The Content Server fetches the page and stores the bytes content-addressed; this records them. The copy is
+-- private to its saver. The same page and bytes saved again is the same resource and the same charge (the
+-- operation id is the external id), and the same bytes read from another address are that address's evidence.
+-- A refusal by the budget is 42501, so both HTTP surfaces answer it 403 with the reason.
+create or replace function content.register_evidence(
+    p_uri          text,
+    p_checksum     text,
+    p_bucket       text,
+    p_object_key   text,
+    p_size_bytes   bigint,
+    p_content_type text default null,
+    p_title        text default null
+) returns uuid
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+    v_user    uuid := rbac.require('research', 'insert');
+    v_key     text;
+    v_budget  jsonb;
+    v_channel uuid;
+    v_file    uuid;
+    v_res     uuid;
+begin
+    if coalesce(p_uri, '') !~* '^https?://[^/[:space:]]+' then
+        raise check_violation using message = 'Evidence is saved from an http or https address';
+    end if;
+    if coalesce(p_checksum, '') = '' or coalesce(p_bucket, '') = '' or coalesce(p_object_key, '') = '' then
+        raise invalid_parameter_value using message = 'Saved evidence needs its stored object and hash';
+    end if;
+    if p_size_bytes is null or p_size_bytes <= 0 then
+        raise check_violation using message = 'The page was empty, so there is nothing to keep';
+    end if;
+
+    v_key := v_user::text || ':' || p_checksum || ':' || md5(p_uri);
+    v_budget := rbac.reserve_usage('evidence_bytes', p_size_bytes, 'evidence:' || v_key);
+    if coalesce((v_budget->>'reserved')::boolean, false) then
+        perform rbac.consume_usage('evidence_bytes', 'evidence:' || v_key);
+    elsif v_budget->>'state' is distinct from 'consumed' then
+        -- Consumed means this page was saved and paid for already: the insert below returns that resource.
+        raise insufficient_privilege
+            using message = 'Your allowance for saving evidence is used up for now',
+                  hint = 'needs evidence_bytes',
+                  detail = coalesce(v_budget->'limit', '{}'::jsonb)::text;
+    end if;
+
+    select id into v_channel from content.channels
+     where name = 'research_evidence' and org_id = rbac.shared_org_id();
+    if v_channel is null then
+        raise no_data_found using message = 'The research_evidence channel is missing from this installation';
+    end if;
+
+    insert into content.files (checksum, bucket, object_key, size_bytes, content_type)
+    values (p_checksum, p_bucket, p_object_key, p_size_bytes, p_content_type)
+    on conflict (checksum) do update set checksum = excluded.checksum
+    returning id into v_file;
+
+    insert into content.resources (channel_id, file_id, external_id, uri, title, status, org_id, owner_id,
+                                   visibility, metadata)
+    values (v_channel, v_file, v_key, p_uri, p_title, 'stored', rbac.shared_org_id(), v_user, 'private',
+            jsonb_build_object('saved_as', 'research evidence', 'content_type', p_content_type))
+    on conflict (channel_id, external_id) do update set updated_at = now()
+    returning id into v_res;
+    return v_res;
+end;
 $$;
 
 -- REMOVE PINNED BYTES, AUTHORIZED AND EXPLICIT (REM-153, schema.md §4). Operator-only: nothing grants it. The
@@ -30519,6 +30620,7 @@ grant execute on function
     rbac.release_usage(text, text),
     research.submit_package(jsonb, text, text), research.revise_package(text, jsonb, text),
     research.revise_working(text, jsonb, text), content.capture_snapshot(uuid),
+    content.register_evidence(text, text, text, text, bigint, text, text),
     research.endorse(uuid, text, text, text[]), research.withdraw_endorsement(uuid, text),
     engagement.set_saved(uuid, boolean), engagement.set_following(uuid, boolean),
     engagement.set_useful(uuid, boolean), engagement.set_valuation(uuid, bigint, text),
