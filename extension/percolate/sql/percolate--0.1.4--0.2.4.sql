@@ -29065,6 +29065,13 @@ create table if not exists research.revisions (
 alter table research.revisions add column if not exists hash_algorithm text not null default 'sha256';
 alter table research.revisions add column if not exists hash_format_version text not null default 'pg-jsonb-text-1';
 
+-- THE WORKFLOW RUN A REVISION WAS WRITTEN IN (REM-237, specs/tables/schema.md §3: run provenance "derived from
+-- trusted request context and checked for consistency"). Filled from workflow.current_run_id, which only the
+-- engine's step executor publishes -- a person's role may not call set_config (REM-44) -- and checked by
+-- trg_revisions_row. Null when no step was executing. `on delete set null`, so pruning old runs never takes a
+-- revision with it; the revision keeps everything else it says about who wrote it.
+alter table research.revisions add column if not exists run_id uuid references workflow.runs(id) on delete set null;
+
 -- A PREDECESSOR IS A REVISION OF THE SAME WORK, by key rather than by each definer's care: the composite
 -- foreign key refuses a row whose predecessor belongs to another work, whoever writes it.
 alter table research.revisions drop constraint if exists revisions_predecessor_same_work;
@@ -29567,8 +29574,9 @@ begin
             case when v_listed then 'public' else 'private' end, case when v_listed then now() end)
     returning id into v_work;
     insert into research.revisions (work_id, number, label, schema_version, document, content_hash,
-                                    actor_id, actor_kind, credential_id)
-    values (v_work, 1, 'draft-1', '0.1', p_document, v_hash, v_user, rbac.current_actor(), rbac.current_credential_id())
+                                    actor_id, actor_kind, credential_id, run_id)
+    values (v_work, 1, 'draft-1', '0.1', p_document, v_hash, v_user, rbac.current_actor(), rbac.current_credential_id(),
+            nullif(current_setting('workflow.current_run_id', true), '')::uuid)
     returning id into v_rev;
     perform research.project(v_rev, p_document);
     insert into research.heads (work_id, revision_id) values (v_work, v_rev);
@@ -29612,9 +29620,10 @@ begin
         return research.receipt(h.id, false);
     end if;
     insert into research.revisions (work_id, number, label, schema_version, document, content_hash,
-                                    predecessor_id, actor_id, actor_kind, credential_id)
+                                    predecessor_id, actor_id, actor_kind, credential_id, run_id)
     values (w.id, h.number + 1, 'draft-' || (h.number + 1), '0.1', p_document, v_hash,
-            h.id, v_user, rbac.current_actor(), rbac.current_credential_id())
+            h.id, v_user, rbac.current_actor(), rbac.current_credential_id(),
+            nullif(current_setting('workflow.current_run_id', true), '')::uuid)
     returning id into v_rev;
     perform research.project(v_rev, p_document);
     update research.heads set revision_id = v_rev, updated_at = now() where work_id = w.id;
@@ -29659,9 +29668,10 @@ begin
         return research.receipt(h.id, false);
     end if;
     insert into research.revisions (work_id, number, label, schema_version, document, content_hash,
-                                    predecessor_id, actor_id, actor_kind, credential_id)
+                                    predecessor_id, actor_id, actor_kind, credential_id, run_id)
     values (w.id, h.number + 1, 'draft-' || (h.number + 1), '0.1', p_document, v_hash,
-            h.id, v_user, rbac.current_actor(), rbac.current_credential_id())
+            h.id, v_user, rbac.current_actor(), rbac.current_credential_id(),
+            nullif(current_setting('workflow.current_run_id', true), '')::uuid)
     returning id into v_rev;
     perform research.project(v_rev, p_document);
     update research.heads set revision_id = v_rev, updated_at = now() where work_id = w.id;
@@ -30121,11 +30131,13 @@ create or replace trigger trg_works_visibility before insert or update on resear
 --   * A derivative work's revision names a base revision of its parent work; any other revision names none.
 --   * An agent's revision carries its credential and only an agent's does, and the credential is the actor's.
 --   * With a caller in the request, the actor is that caller: nobody records a revision as somebody else.
+--   * The run is the workflow run the engine is executing, or none; and that run is the actor's own (REM-237).
 create or replace function research.enforce_revision_row() returns trigger
 language plpgsql set search_path = pg_catalog, public as $$
 declare
     v_parent uuid;
     v_caller uuid := rbac.current_user_id();
+    v_run    uuid := nullif(current_setting('workflow.current_run_id', true), '')::uuid;
 begin
     select parent_work_id into v_parent from research.works where id = new.work_id;
     if new.base_revision_id is null then
@@ -30145,6 +30157,16 @@ begin
     end if;
     if v_caller is not null and new.actor_id <> v_caller then
         raise check_violation using message = 'A revision is recorded as the caller who made it';
+    end if;
+    -- The run cannot be named, only inherited: whatever a writer puts in run_id must be the run the engine is
+    -- executing right now, so a row claiming a run with no step running, or a different run, is a forgery.
+    if new.run_id is distinct from v_run then
+        raise check_violation using message = 'A revision records only the workflow run it is written in';
+    end if;
+    -- And a run carries its owner's authority, not anybody's: a revision written inside somebody else's run,
+    -- or inside a system run with no owner, is refused rather than recorded as provenance it does not have.
+    if new.run_id is not null and workflow.run_owner_of(new.run_id) is distinct from new.actor_id then
+        raise check_violation using message = 'A revision''s workflow run belongs to its actor';
     end if;
     return new;
 end;
